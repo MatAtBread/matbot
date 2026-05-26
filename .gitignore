@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Local env files — never commit
+.env
+.env.*
+!.env.example
+.data
+matbot.yaml*

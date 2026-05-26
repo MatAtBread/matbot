@@ -1,0 +1,17 @@
+{
+  "name": "matbot",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0",
+    "pnpm": ">=9.0.0"
+  },
+  "scripts": {
+    "typecheck": "pnpm -r run typecheck",
+    "cli":       "pnpm --filter @matbot/cli start",
+    "server":    "pnpm --filter @matbot/cli run server"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.0"
+  }
+}

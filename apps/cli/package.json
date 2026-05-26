@@ -1,0 +1,24 @@
+{
+  "name": "@matbot/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start":     "node --import ./register.js src/index.ts",
+    "server":    "node --import ./register.js src/index.ts server",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@matbot/config":              "workspace:*",
+    "@matbot/core":                "workspace:*",
+    "@matbot/provider-anthropic":  "workspace:*",
+    "@matbot/provider-openai-compat": "workspace:*",
+    "@matbot/security":            "workspace:*",
+    "@matbot/storage-filesystem":  "workspace:*",
+    "@matbot/tool-plugin":          "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "typescript":  "catalog:"
+  }
+}

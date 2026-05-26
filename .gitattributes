@@ -1,0 +1,4 @@
+* text=auto eol=lf
+*.ts linguist-language=TypeScript
+*.yaml text eol=lf
+*.json text eol=lf
