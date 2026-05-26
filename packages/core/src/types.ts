@@ -16,7 +16,7 @@ export type PipelineEvent =
   | { type: 'tool:stderr';  callId: string; chunk: string;  traceId: string }
   | { type: 'tool:end';     callId: string; result: unknown; traceId: string }
   | { type: 'file';         handle: FileHandle;     traceId: string }
-  | { type: 'usage';        inputTokens: number; outputTokens: number; costUsd?: number; traceId: string }
+  | { type: 'usage';        inputTokens: number; outputTokens: number; costUsd?: number; cacheReadTokens?: number; cacheCreationTokens?: number; traceId: string }
   | { type: 'done';         session: Session;       traceId: string }
   | { type: 'aborted';      reason: string; session: Session; traceId: string }
   | { type: 'robo-user';    content: MessageContent[]; traceId: string }

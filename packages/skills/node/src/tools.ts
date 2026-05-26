@@ -61,7 +61,23 @@ export function createSkillTools(
     },
   };
 
+  const listExecutor: ToolExecutor = {
+    async *execute(_input: unknown, _ctx: ToolContext): AsyncIterable<ToolEvent> {
+      const skills = getSkills().map(s => ({
+        name:        s.name,
+        ...(s.toolBinding !== undefined ? { toolBinding: s.toolBinding } : {}),
+      }));
+      yield { type: 'result', value: { skills } };
+    },
+  };
+
   return [
+    {
+      name:        'skill_list',
+      description: 'List all available skills by name.',
+      inputSchema: { type: 'object', properties: {} },
+      executor:    listExecutor,
+    },
     {
       name:        'skill_load',
       description: 'Load the full markdown content of a named skill.',

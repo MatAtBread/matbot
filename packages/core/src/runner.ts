@@ -113,7 +113,9 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
             break;
           case 'usage':
             yield { type: 'usage', inputTokens: ev.inputTokens, outputTokens: ev.outputTokens, traceId,
-              ...(ev.costUsd !== undefined ? { costUsd: ev.costUsd } : {}) };
+              ...(ev.costUsd              !== undefined ? { costUsd:              ev.costUsd              } : {}),
+              ...(ev.cacheReadTokens     !== undefined ? { cacheReadTokens:     ev.cacheReadTokens     } : {}),
+              ...(ev.cacheCreationTokens !== undefined ? { cacheCreationTokens: ev.cacheCreationTokens } : {}) };
             break;
           case 'done':
             break;

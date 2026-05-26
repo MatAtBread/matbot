@@ -41,7 +41,7 @@ export const plugin: MatbotPlugin = {
 
     await new Promise<void>((resolve, reject) => {
       server!.once('error', reject);
-      server!.listen(port, () => {
+      server!.listen(port, '0.0.0.0', () => {
         process.stderr.write(`[frontend-web] http://localhost:${port}\n`);
         resolve();
       });

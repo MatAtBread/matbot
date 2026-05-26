@@ -84,10 +84,11 @@ export const html = `<!DOCTYPE html>
       cursor: pointer;
       padding: 2px 4px;
       border-radius: 3px;
-      color: #9ca3af;
-      font-size: 11px;
+      font-size: 14px;
       line-height: 1;
     }
+    .session-action-btn[title="Rename"] { color: #6b7280; }
+    .session-action-btn[title="Hide"] { color: #ef4444; }
     .session-action-btn:hover { background: #d1d5db; color: #374151; }
 
     /* ── Main ──────────────────────────────────────────────────── */
@@ -308,7 +309,7 @@ export const html = `<!DOCTYPE html>
       font-size: 11.5px;
       white-space: pre-wrap;
       word-break: break-word;
-      max-height: 220px;
+      max-height: 16vw;
       overflow-y: auto;
     }
 
@@ -557,9 +558,54 @@ export const html = `<!DOCTYPE html>
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 3px; }
     ::-webkit-scrollbar-thumb:hover { background: #9ca3af; }
+
+    /* ── Burger button (hidden on desktop) ─────────────────────── */
+    #burger {
+      display: none;
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 2px 6px;
+      font-size: 20px;
+      line-height: 1;
+      color: #374151;
+      flex-shrink: 0;
+      margin-right: 6px;
+    }
+    #sidebar-overlay { display: none; }
+
+    /* ── Mobile layout ─────────────────────────────────────────── */
+    @media (max-width: 640px) {
+      #sidebar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        height: 100%;
+        z-index: 200;
+        transform: translateX(-100%);
+        transition: transform 0.2s ease;
+      }
+      body.sidebar-open #sidebar {
+        transform: translateX(0);
+        box-shadow: 4px 0 20px rgba(0,0,0,0.15);
+      }
+      #sidebar-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 199;
+        background: rgba(0,0,0,0.3);
+      }
+      body.sidebar-open #sidebar-overlay { display: block; }
+      #burger { display: block; }
+      #chat-header { padding-left: 12px; }
+      #messages    { padding-left: 16px; padding-right: 16px; }
+      #input-area  { padding-left: 16px; padding-right: 16px; }
+      .session-actions { display: flex; }
+    }
   </style>
 </head>
 <body>
+  <div id="sidebar-overlay"></div>
   <nav id="sidebar">
     <h1>matbot</h1>
     <button id="new-btn">+ New conversation</button>
@@ -567,7 +613,7 @@ export const html = `<!DOCTYPE html>
   </nav>
 
   <main id="main">
-    <div id="chat-header"></div>
+    <div id="chat-header"><button id="burger" aria-label="Open menu">&#9776;</button><span id="chat-title"></span></div>
     <div id="messages"></div>
     <div id="input-area">
       <div id="input-meta">
@@ -594,13 +640,20 @@ let sending = false;
 
 // ── Elements ──────────────────────────────────────────────────────────────────
 
-const messagesEl    = document.getElementById('messages');
-const sessionListEl = document.getElementById('session-list');
-const chatHeaderEl  = document.getElementById('chat-header');
-const inputEl       = document.getElementById('input');
-const sendBtn       = document.getElementById('send-btn');
-const newBtn        = document.getElementById('new-btn');
-const providerSel   = document.getElementById('provider-select');
+const messagesEl     = document.getElementById('messages');
+const sessionListEl  = document.getElementById('session-list');
+const chatHeaderEl   = document.getElementById('chat-header');
+const chatTitleEl    = document.getElementById('chat-title');
+const inputEl        = document.getElementById('input');
+const sendBtn        = document.getElementById('send-btn');
+const newBtn         = document.getElementById('new-btn');
+const providerSel    = document.getElementById('provider-select');
+const burgerBtn      = document.getElementById('burger');
+const sidebarOverlay = document.getElementById('sidebar-overlay');
+
+function closeSidebar() { document.body.classList.remove('sidebar-open'); }
+if (burgerBtn)      burgerBtn.onclick      = () => document.body.classList.toggle('sidebar-open');
+if (sidebarOverlay) sidebarOverlay.onclick = closeSidebar;
 
 // ── Principal ─────────────────────────────────────────────────────────────────
 
@@ -699,7 +752,7 @@ function watchUntilDone(id) {
           const s = await apiGetSession(id);
           if (s) {
             renderSession(s);
-            if (chatHeaderEl) chatHeaderEl.textContent = s.title || '';
+            if (chatHeaderEl) chatTitleEl.textContent = s.title || '';
           }
         }
         apiListSessions().then(renderSessions);
@@ -714,7 +767,7 @@ async function renameSession(id, current) {
   if (!title || !title.trim()) return;
   try {
     await callTool('session_rename', { sessionId: id, title: title.trim() });
-    if (id === currentSessionId && chatHeaderEl) chatHeaderEl.textContent = title.trim();
+    if (id === currentSessionId && chatHeaderEl) chatTitleEl.textContent = title.trim();
     apiListSessions().then(renderSessions);
   } catch (e) { alert('Rename failed: ' + e.message); }
 }
@@ -727,7 +780,7 @@ async function hideSession(id) {
       currentSessionId = sessions[0]?.id ?? null;
       if (currentSessionId) { await openSession(currentSessionId); return; }
       showEmpty();
-      if (chatHeaderEl) chatHeaderEl.textContent = '';
+      if (chatHeaderEl) chatTitleEl.textContent = '';
     }
     renderSessions(sessions);
   } catch (e) { alert('Hide failed: ' + e.message); }
@@ -821,7 +874,7 @@ function makeToolResultBlock(result, isError) {
   return wrap;
 }
 
-function makeTokenStatsBlock(inputTokens, outputTokens, costUsd) {
+function makeTokenStatsBlock(inputTokens, outputTokens, costUsd, cacheReadTokens, cacheCreationTokens) {
   const det = document.createElement('details');
   det.className = 'token-stats';
   const sum = document.createElement('summary');
@@ -829,8 +882,11 @@ function makeTokenStatsBlock(inputTokens, outputTokens, costUsd) {
   const body = document.createElement('div');
   body.className = 'token-stats-body';
   const s = (t) => { const el = document.createElement('span'); el.textContent = t; return el; };
-  body.appendChild(s('\\u2191 ' + inputTokens.toLocaleString() + ' in'));
+  let inLabel = '\\u2191 ' + inputTokens.toLocaleString() + ' in';
+  if (cacheReadTokens > 0) inLabel += ' (' + cacheReadTokens.toLocaleString() + ' cached)';
+  body.appendChild(s(inLabel));
   body.appendChild(s('\\u2193 ' + outputTokens.toLocaleString() + ' out'));
+  if (cacheCreationTokens > 0) body.appendChild(s('\\u2601 ' + cacheCreationTokens.toLocaleString() + ' written'));
   if (costUsd > 0) body.appendChild(s('\\u2248 $' + costUsd.toFixed(4)));
   det.appendChild(sum);
   det.appendChild(body);
@@ -866,7 +922,7 @@ function renderSessions(sessions) {
 
     const renameBtn = document.createElement('button');
     renameBtn.className = 'session-action-btn';
-    renameBtn.textContent = '\\u270f';
+    renameBtn.textContent = '\\u2710';
     renameBtn.title = 'Rename';
     renameBtn.onclick = e => { e.stopPropagation(); renameSession(s.id, s.title || ''); };
 
@@ -1034,13 +1090,14 @@ function renderSession(session) {
 // ── Actions ───────────────────────────────────────────────────────────────────
 
 async function openSession(id) {
+  closeSidebar();
   currentSessionId = id;
   location.hash = id;
   const [sessions, session] = await Promise.all([apiListSessions(), apiGetSession(id)]);
   renderSessions(sessions);
   if (session) {
     renderSession(session);
-    if (chatHeaderEl) chatHeaderEl.textContent = session.title ?? '';
+    if (chatHeaderEl) chatTitleEl.textContent = session.title ?? '';
     apiIsSessionBusy(id).then(({ busy }) => { if (busy) watchUntilDone(id); });
   }
   inputEl.focus();
@@ -1051,7 +1108,7 @@ newBtn.onclick = async () => {
   currentSessionId = id;
   location.hash = id;
   showEmpty();
-  if (chatHeaderEl) chatHeaderEl.textContent = '';
+  if (chatHeaderEl) chatTitleEl.textContent = '';
   const sessions = await apiListSessions();
   renderSessions(sessions);
   inputEl.focus();
@@ -1071,7 +1128,7 @@ async function submitFormResponse(sessionId, values) {
   function removeLoading() { loadingEl.remove(); }
 
   let textEl = null, textAccum = '', thinkingContent = null, thinkingAccum = '', currentTool = null;
-  let turnIn = 0, turnOut = 0, turnCost = 0;
+  let turnIn = 0, turnOut = 0, turnCost = 0, turnCacheRead = 0, turnCacheCreate = 0;
   function getOrMakeTextEl() {
     if (!textEl) { textEl = document.createElement('div'); textEl.className = 'msg-text md-body'; turnWrap.appendChild(textEl); }
     return textEl;
@@ -1114,14 +1171,16 @@ async function submitFormResponse(sessionId, values) {
         }
         case 'tool:end': currentTool = null; break;
         case 'usage':
-          turnIn  += ev.inputTokens;
-          turnOut += ev.outputTokens;
-          if (ev.costUsd !== undefined) turnCost += ev.costUsd;
+          turnIn         += ev.inputTokens;
+          turnOut        += ev.outputTokens;
+          if (ev.costUsd              !== undefined) turnCost        += ev.costUsd;
+          if (ev.cacheReadTokens     !== undefined) turnCacheRead   += ev.cacheReadTokens;
+          if (ev.cacheCreationTokens !== undefined) turnCacheCreate += ev.cacheCreationTokens;
           break;
         case 'done':
           if (thinkingContent) { const det = thinkingContent.closest('details'); if (det) det.open = false; }
-          if (ev.session?.title && chatHeaderEl) chatHeaderEl.textContent = ev.session.title;
-          if (turnIn > 0 || turnOut > 0) turnWrap.appendChild(makeTokenStatsBlock(turnIn, turnOut, turnCost));
+          if (ev.session?.title && chatHeaderEl) chatTitleEl.textContent = ev.session.title;
+          if (turnIn > 0 || turnOut > 0) turnWrap.appendChild(makeTokenStatsBlock(turnIn, turnOut, turnCost, turnCacheRead, turnCacheCreate));
           break;
         case 'error': {
           removeLoading();
@@ -1182,6 +1241,8 @@ async function sendMessage() {
   let turnIn          = 0;
   let turnOut         = 0;
   let turnCost        = 0;
+  let turnCacheRead   = 0;
+  let turnCacheCreate = 0;
 
   function getOrMakeTextEl() {
     if (!textEl) {
@@ -1243,7 +1304,9 @@ async function sendMessage() {
         case 'usage':
           turnIn  += ev.inputTokens;
           turnOut += ev.outputTokens;
-          if (ev.costUsd !== undefined) turnCost += ev.costUsd;
+          if (ev.costUsd              !== undefined) turnCost        += ev.costUsd;
+          if (ev.cacheReadTokens     !== undefined) turnCacheRead   += ev.cacheReadTokens;
+          if (ev.cacheCreationTokens !== undefined) turnCacheCreate += ev.cacheCreationTokens;
           break;
 
         case 'prompt': {
@@ -1336,8 +1399,8 @@ async function sendMessage() {
             const det = thinkingContent.closest('details');
             if (det) det.open = false;
           }
-          if (ev.session?.title && chatHeaderEl) chatHeaderEl.textContent = ev.session.title;
-          if (turnIn > 0 || turnOut > 0) turnWrap.appendChild(makeTokenStatsBlock(turnIn, turnOut, turnCost));
+          if (ev.session?.title && chatHeaderEl) chatTitleEl.textContent = ev.session.title;
+          if (turnIn > 0 || turnOut > 0) turnWrap.appendChild(makeTokenStatsBlock(turnIn, turnOut, turnCost, turnCacheRead, turnCacheCreate));
           break;
 
         case 'error': {
@@ -1379,6 +1442,7 @@ function setSending(val) {
   sending = val;
   sendBtn.disabled = val;
   inputEl.disabled = val;
+  if (!val) inputEl.focus();
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────

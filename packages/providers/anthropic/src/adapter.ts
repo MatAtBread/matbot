@@ -82,10 +82,14 @@ export class AnthropicAdapter implements ProviderAdapter {
 
       switch (ev['type']) {
         case 'message_start': {
-          const usage = (ev['message'] as { usage?: { input_tokens?: number } } | undefined)?.usage;
+          const usage = (ev['message'] as { usage?: { input_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } } | undefined)?.usage;
           if (usage?.input_tokens) {
             inputTokens = usage.input_tokens;
-            yield { type: 'usage', inputTokens, outputTokens: 0 };
+            yield {
+              type: 'usage', inputTokens, outputTokens: 0,
+              ...(usage.cache_read_input_tokens     ? { cacheReadTokens:     usage.cache_read_input_tokens     } : {}),
+              ...(usage.cache_creation_input_tokens ? { cacheCreationTokens: usage.cache_creation_input_tokens } : {}),
+            };
           }
           break;
         }

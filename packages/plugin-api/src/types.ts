@@ -59,7 +59,7 @@ export type CompletionEvent =
   | { type: 'redacted-thinking';   data: string }
   | { type: 'reasoning-block';     reasoning: string }
   | { type: 'refusal';             text: string }
-  | { type: 'usage';               inputTokens: number; outputTokens: number; costUsd?: number }
+  | { type: 'usage';               inputTokens: number; outputTokens: number; costUsd?: number; cacheReadTokens?: number; cacheCreationTokens?: number }
   | { type: 'done' };
 
 export interface ProviderAdapter {
