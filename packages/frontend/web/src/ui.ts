@@ -1,4 +1,4 @@
-export const html = `<!DOCTYPE html>
+export const html = () => `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
@@ -427,13 +427,13 @@ export const html = `<!DOCTYPE html>
     #input:focus    { border-color: #9ca3af; }
     #input:disabled { background: #f9fafb; }
     #send-btn {
-      padding: 10px 18px;
+      padding: 1px 6px;
       background: #111;
       color: #fff;
       border: none;
       border-radius: 8px;
       cursor: pointer;
-      font-size: 14px;
+      font-size: 30px;
       font-weight: 500;
       flex-shrink: 0;
       transition: background 0.1s;
@@ -635,8 +635,8 @@ export const html = `<!DOCTYPE html>
         <select id="provider-select"></select>
       </div>
       <div id="input-row">
-        <textarea id="input" rows="1" placeholder="Message… (Enter to send, Shift+Enter for newline)"></textarea>
-        <button id="send-btn">Send</button>
+        <textarea id="input" rows="1" placeholder="Message… (Shift+Enter to send, Enter for newline)"></textarea>
+        <button id="send-btn">⮞</button>
       </div>
     </div>
   </main>
@@ -645,7 +645,7 @@ export const html = `<!DOCTYPE html>
 </body>
 </html>`;
 
-export const js = `'use strict';
+export const js = () => `'use strict';
 
 // crypto.randomUUID requires HTTPS; patch it for plain-HTTP local access
 if (crypto && typeof crypto.randomUUID !== 'function') {
@@ -662,6 +662,7 @@ if (crypto && typeof crypto.randomUUID !== 'function') {
 
 let currentSessionId = null;
 let sending = false;
+let sendingForSession = null; // session ID that owns the current sending = true state
 
 // ── Elements ──────────────────────────────────────────────────────────────────
 
@@ -772,10 +773,10 @@ async function callTool(toolName, input) {
 
 // Poll until the server finishes an active turn, then re-render.
 function watchUntilDone(id) {
-  setSending(true);
+  setSending(true, id);
   const deadline = Date.now() + 300_000;
   const poll = setInterval(async () => {
-    if (Date.now() > deadline) { clearInterval(poll); setSending(false); return; }
+    if (Date.now() > deadline) { clearInterval(poll); setSending(false, id); return; }
     try {
       const { busy } = await apiIsSessionBusy(id);
       if (!busy) {
@@ -788,9 +789,9 @@ function watchUntilDone(id) {
           }
         }
         apiListSessions().then(renderSessions);
-        setSending(false);
+        setSending(false, id);
       }
-    } catch { clearInterval(poll); setSending(false); }
+    } catch { clearInterval(poll); setSending(false, id); }
   }, 1500);
 }
 
@@ -1125,6 +1126,8 @@ async function openSession(id) {
   closeSidebar();
   currentSessionId = id;
   location.hash = id;
+  // Reset button state for the incoming session; watchUntilDone will re-lock if it's busy.
+  setSending(false, id);
   const [sessions, session] = await Promise.all([apiListSessions(), apiGetSession(id)]);
   renderSessions(sessions);
   if (session) {
@@ -1156,7 +1159,7 @@ newBtn.onclick = async () => {
 async function submitFormResponse(sessionId, values) {
   const provider = providerSel.value;
   if (sending || !provider || !sessionId) return;
-  setSending(true);
+  setSending(true, sessionId);
 
   const turnWrap = createAssistantWrap('assistant');
   const loadingEl = document.createElement('div');
@@ -1238,7 +1241,7 @@ async function submitFormResponse(sessionId, values) {
     turnWrap.appendChild(errDiv);
   } finally {
     removeLoading();
-    setSending(false);
+    setSending(false, sessionId);
     apiListSessions().then(renderSessions);
   }
 }
@@ -1255,9 +1258,10 @@ async function sendMessage() {
     currentSessionId = id;
   }
 
+  const submittingFor = currentSessionId;
   inputEl.value = '';
   inputEl.style.height = 'auto';
-  setSending(true);
+  setSending(true, submittingFor);
 
   appendUserBubble(content);
   const turnWrap = createAssistantWrap('assistant');
@@ -1291,7 +1295,7 @@ async function sendMessage() {
   }
 
   try {
-    for await (const ev of streamSubmit(currentSessionId, content, provider)) {
+    for await (const ev of streamSubmit(submittingFor, content, provider)) {
       switch (ev.type) {
         case 'text-delta':
           removeLoading();
@@ -1407,7 +1411,7 @@ async function sendMessage() {
               inp.focus();
             }
           });
-          await fetch('/sessions/' + currentSessionId + '/prompt', {
+          await fetch('/sessions/' + submittingFor + '/prompt', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ answer }),
@@ -1459,7 +1463,7 @@ async function sendMessage() {
     turnWrap.appendChild(errDiv);
   } finally {
     removeLoading();
-    setSending(false);
+    setSending(false, submittingFor);
     apiListSessions().then(renderSessions);
   }
 }
@@ -1467,7 +1471,7 @@ async function sendMessage() {
 sendBtn.onclick = sendMessage;
 
 inputEl.addEventListener('keydown', e => {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+  if (e.key === 'Enter' && e.shiftKey) { e.preventDefault(); sendMessage(); }
 });
 
 inputEl.addEventListener('input', () => {
@@ -1475,11 +1479,23 @@ inputEl.addEventListener('input', () => {
   inputEl.style.height = Math.min(inputEl.scrollHeight, 180) + 'px';
 });
 
-function setSending(val) {
-  sending = val;
-  sendBtn.disabled = val;
-  inputEl.disabled = val;
-  if (!val) inputEl.focus();
+function setSending(val, sessionId) {
+  const sid = sessionId ?? currentSessionId;
+  if (val) {
+    sending = true;
+    sendingForSession = sid;
+  } else {
+    // Only clear if the session that set it is still the current one,
+    // or if the caller is the current session (prevents session A's completion
+    // from clearing session B's in-flight request).
+    if (sendingForSession === sid || sid === currentSessionId) {
+      sending = false;
+      sendingForSession = null;
+    }
+  }
+  sendBtn.disabled = sending;
+  inputEl.disabled = sending;
+  // if (!sending) inputEl.focus();
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
