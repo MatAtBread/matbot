@@ -141,9 +141,17 @@ export const html = () => `<!DOCTYPE html>
       padding: 10px 14px;
       border-radius: 12px 12px 2px 12px;
       line-height: 1.65;
-      white-space: pre-wrap;
       word-break: break-word;
     }
+    .message.user .md-body { color: #fff; }
+    .message.user .md-body code { background: rgba(255,255,255,0.15); border-color: rgba(255,255,255,0.2); color: #fff; }
+    .message.user .md-body pre { background: rgba(0,0,0,0.3); border-color: rgba(255,255,255,0.15); }
+    .message.user .md-body pre code { background: none; border: none; }
+    .message.user .md-body a { color: #93c5fd; }
+    .message.user .md-body blockquote { border-left-color: rgba(255,255,255,0.3); color: rgba(255,255,255,0.7); }
+    .message.user .md-body th { background: rgba(0,0,0,0.2); }
+    .message.user .md-body th, .message.user .md-body td { border-color: rgba(255,255,255,0.2); }
+    .message.user .md-body hr { border-top-color: rgba(255,255,255,0.2); }
 
     /* Assistant: left-aligned, no background */
     .message.assistant { align-self: flex-start; }
@@ -1080,7 +1088,10 @@ function appendUserBubble(text) {
   messagesEl.querySelector('.empty-state')?.remove();
   const div = document.createElement('div');
   div.className = 'message user';
-  div.textContent = text;
+  const inner = document.createElement('div');
+  inner.className = 'md-body';
+  inner.innerHTML = md(text);
+  div.appendChild(inner);
   messagesEl.appendChild(div);
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
