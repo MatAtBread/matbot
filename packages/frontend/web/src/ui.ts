@@ -2,7 +2,7 @@ export const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
   <title>matbot</title>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <style>
@@ -12,6 +12,7 @@ export const html = `<!DOCTYPE html>
     body {
       display: flex;
       height: 100vh;
+      height: 100dvh;
       font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
       font-size: 14px;
       background: #fff;
@@ -581,9 +582,11 @@ export const html = `<!DOCTYPE html>
         top: 0;
         left: 0;
         height: 100%;
+        height: 100dvh;
         z-index: 200;
         transform: translateX(-100%);
         transition: transform 0.2s ease;
+        padding-top: env(safe-area-inset-top, 0px);
       }
       body.sidebar-open #sidebar {
         transform: translateX(0);
@@ -596,10 +599,21 @@ export const html = `<!DOCTYPE html>
         background: rgba(0,0,0,0.3);
       }
       body.sidebar-open #sidebar-overlay { display: block; }
+      body {
+        position: fixed;
+        width: 100%;
+      }
       #burger { display: block; }
-      #chat-header { padding-left: 12px; }
+      #chat-header {
+        padding-left: 12px;
+        padding-top: max(10px, env(safe-area-inset-top, 0px));
+      }
       #messages    { padding-left: 16px; padding-right: 16px; }
-      #input-area  { padding-left: 16px; padding-right: 16px; }
+      #input-area  {
+        padding-left: 16px;
+        padding-right: 16px;
+        padding-bottom: max(20px, env(safe-area-inset-bottom, 0px));
+      }
       .session-actions { display: flex; }
     }
   </style>
@@ -633,6 +647,17 @@ export const html = `<!DOCTYPE html>
 
 export const js = `'use strict';
 
+// crypto.randomUUID requires HTTPS; patch it for plain-HTTP local access
+if (crypto && typeof crypto.randomUUID !== 'function') {
+  crypto.randomUUID = function() {
+    const b = crypto.getRandomValues(new Uint8Array(16));
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    const h = Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
+    return h.slice(0,8)+'-'+h.slice(8,12)+'-'+h.slice(12,16)+'-'+h.slice(16,20)+'-'+h.slice(20);
+  };
+}
+
 // ── State ─────────────────────────────────────────────────────────────────────
 
 let currentSessionId = null;
@@ -659,7 +684,14 @@ if (sidebarOverlay) sidebarOverlay.onclick = closeSidebar;
 
 function userId() {
   let id = localStorage.getItem('matbot-uid');
-  if (!id) { id = crypto.randomUUID(); localStorage.setItem('matbot-uid', id); }
+  if (!id) {
+    const b = crypto.getRandomValues(new Uint8Array(16));
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    const h = Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
+    id = h.slice(0,8)+'-'+h.slice(8,12)+'-'+h.slice(12,16)+'-'+h.slice(16,20)+'-'+h.slice(20);
+    localStorage.setItem('matbot-uid', id);
+  }
   return id;
 }
 
@@ -1104,14 +1136,19 @@ async function openSession(id) {
 }
 
 newBtn.onclick = async () => {
-  const { id } = await apiNewSession();
-  currentSessionId = id;
-  location.hash = id;
-  showEmpty();
-  if (chatHeaderEl) chatTitleEl.textContent = '';
-  const sessions = await apiListSessions();
-  renderSessions(sessions);
-  inputEl.focus();
+  closeSidebar();
+  try {
+    const { id } = await apiNewSession();
+    currentSessionId = id;
+    location.hash = id;
+    showEmpty();
+    if (chatHeaderEl) chatTitleEl.textContent = '';
+    const sessions = await apiListSessions();
+    renderSessions(sessions);
+    inputEl.focus();
+  } catch (e) {
+    alert('New session failed: ' + e.message);
+  }
 };
 
 // ── Form submission ───────────────────────────────────────────────────────────
