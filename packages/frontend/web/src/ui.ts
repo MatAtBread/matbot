@@ -257,7 +257,7 @@ export const html = () => `<!DOCTYPE html>
       white-space: pre-wrap;
       word-break: break-word;
       border-top: 1px solid #c7d2fe;
-      max-height: 16vw;
+      max-height: 10vh;
       overflow-y: scroll;
     }
     .thinking-redacted {
@@ -310,7 +310,7 @@ export const html = () => `<!DOCTYPE html>
       font-size: 11.5px;
       white-space: pre-wrap;
       word-break: break-word;
-      max-height: 16vw;
+      max-height: 10vh;
       overflow-y: auto;
     }
 
@@ -427,7 +427,6 @@ export const html = () => `<!DOCTYPE html>
     #input:focus    { border-color: #9ca3af; }
     #input:disabled { background: #f9fafb; }
     #send-btn {
-      padding: 1px 6px;
       background: #111;
       color: #fff;
       border: none;
@@ -437,9 +436,14 @@ export const html = () => `<!DOCTYPE html>
       font-weight: 500;
       flex-shrink: 0;
       transition: background 0.1s;
+      height: 1.5em;
+      width: 1.5em;
     }
-    #send-btn:hover    { background: #374151; }
-    #send-btn:disabled { background: #d1d5db; cursor: not-allowed; }
+    #send-btn:hover              { background: #374151; }
+    #send-btn:disabled           { background: #d1d5db; cursor: not-allowed; }
+    #send-btn.stop-mode          { background: #dc2626; }
+    #send-btn.stop-mode:hover    { background: #b91c1c; }
+    #send-btn.stop-mode:disabled { background: #fca5a5; cursor: not-allowed; }
 
     /* ── Form blocks ──────────────────────────────────────────── */
 
@@ -636,7 +640,7 @@ export const html = () => `<!DOCTYPE html>
       </div>
       <div id="input-row">
         <textarea id="input" rows="1" placeholder="Message… (Shift+Enter to send, Enter for newline)"></textarea>
-        <button id="send-btn">⮞</button>
+        <button id="send-btn">▶</button>
       </div>
     </div>
   </main>
@@ -663,6 +667,7 @@ if (crypto && typeof crypto.randomUUID !== 'function') {
 let currentSessionId = null;
 let sending = false;
 let sendingForSession = null; // session ID that owns the current sending = true state
+let stopRequested = false;   // true once the user has clicked stop for the current turn
 
 // ── Elements ──────────────────────────────────────────────────────────────────
 
@@ -743,9 +748,9 @@ function parseSSEChunk(text) {
 
 // ── API ───────────────────────────────────────────────────────────────────────
 
-async function apiListSessions()  { const r = await fetch('/sessions');     return r.ok ? r.json() : []; }
-async function apiGetSession(id)  { const r = await fetch('/sessions/'+id); return r.ok ? r.json() : null; }
-async function apiListProviders() { const r = await fetch('/providers');    return r.ok ? r.json() : []; }
+async function apiListSessions()  { const r = await fetch('/sessions');        return r.ok ? r.json() : []; }
+async function apiGetSession(id)  { const r = await fetch('/sessions/'+id);    return r.ok ? r.json() : null; }
+async function apiListProviders() { const r = await fetch('/providers');        return r.ok ? r.json() : []; }
 
 // ── Tool API ──────────────────────────────────────────────────────────────────
 
@@ -771,28 +776,128 @@ async function callTool(toolName, input) {
   throw new Error('No result from tool');
 }
 
-// Poll until the server finishes an active turn, then re-render.
-function watchUntilDone(id) {
+// Join an in-progress server run for sessionId. renderedCount is the number of
+// non-system messages already in the DOM so incremental appends start from there.
+async function joinSessionStream(id, renderedCount) {
+  let streamRes;
+  try { streamRes = await fetch('/sessions/' + id + '/stream'); }
+  catch { return; }
+
+  if (!streamRes.ok || !streamRes.body) {
+    // Run already finished — append any messages not yet rendered.
+    if (id === currentSessionId) {
+      const s = await apiGetSession(id);
+      if (s) {
+        renderSession(s, renderedCount);
+        if (chatHeaderEl) chatTitleEl.textContent = s.title || '';
+        apiListSessions().then(renderSessions);
+      }
+    }
+    return;
+  }
+
+  // Active stream — join it and render events incrementally.
   setSending(true, id);
-  const deadline = Date.now() + 300_000;
-  const poll = setInterval(async () => {
-    if (Date.now() > deadline) { clearInterval(poll); setSending(false, id); return; }
-    try {
-      const { busy } = await apiIsSessionBusy(id);
-      if (!busy) {
-        clearInterval(poll);
-        if (id === currentSessionId) {
-          const s = await apiGetSession(id);
-          if (s) {
-            renderSession(s);
-            if (chatHeaderEl) chatTitleEl.textContent = s.title || '';
+  const turnWrap = createAssistantWrap('assistant');
+  const loadingEl = document.createElement('div');
+  loadingEl.className = 'msg-loading';
+  turnWrap.appendChild(loadingEl);
+  function removeLoading() { loadingEl.remove(); }
+
+  let textEl = null, textAccum = '', thinkingContent = null, thinkingAccum = '', currentTool = null;
+  let turnIn = 0, turnOut = 0, turnCost = 0, turnCacheRead = 0, turnCacheCreate = 0;
+  function getOrMakeTextEl() {
+    if (!textEl) { textEl = document.createElement('div'); textEl.className = 'msg-text md-body'; turnWrap.appendChild(textEl); }
+    return textEl;
+  }
+
+  try {
+    const reader = streamRes.body.getReader();
+    const dec    = new TextDecoder();
+    let   buf    = '';
+    outer: while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (id !== currentSessionId) { reader.cancel(); break; }
+      buf += dec.decode(value, { stream: true });
+      const { events, remaining } = parseSSEChunk(buf);
+      buf = remaining;
+      for (const ev of events) {
+        switch (ev.type) {
+          case 'text-delta':
+            removeLoading();
+            textAccum += ev.delta;
+            getOrMakeTextEl().innerHTML = md(textAccum);
+            break;
+          case 'thinking': {
+            removeLoading();
+            if (!thinkingContent) {
+              const { details, content: c } = makeThinkingBlock('\\ud83d\\udcad Thinking', true);
+              turnWrap.insertBefore(details, textEl);
+              thinkingContent = c;
+            }
+            thinkingAccum += ev.delta;
+            thinkingContent.textContent = thinkingAccum;
+            break;
+          }
+          case 'tool:start': {
+            removeLoading();
+            currentTool = makeToolBlock(ev.name, ev.input);
+            turnWrap.appendChild(currentTool);
+            break;
+          }
+          case 'tool:stdout':
+          case 'tool:stderr': {
+            if (currentTool) {
+              let outEl = currentTool.querySelector('.tool-output');
+              if (!outEl) { outEl = document.createElement('pre'); outEl.className = 'tool-output'; currentTool.appendChild(outEl); }
+              outEl.textContent += ev.chunk;
+              outEl.scrollTop = outEl.scrollHeight;
+            }
+            break;
+          }
+          case 'tool:end': currentTool = null; break;
+          case 'usage':
+            turnIn  += ev.inputTokens; turnOut += ev.outputTokens;
+            if (ev.costUsd              !== undefined) turnCost      += ev.costUsd;
+            if (ev.cacheReadTokens     !== undefined) turnCacheRead  += ev.cacheReadTokens;
+            if (ev.cacheCreationTokens !== undefined) turnCacheCreate += ev.cacheCreationTokens;
+            break;
+          case 'done':
+            if (thinkingContent) { const det = thinkingContent.closest('details'); if (det) det.open = false; }
+            if (ev.session?.title && chatHeaderEl) chatTitleEl.textContent = ev.session.title;
+            if (turnIn > 0 || turnOut > 0) turnWrap.appendChild(makeTokenStatsBlock(turnIn, turnOut, turnCost, turnCacheRead, turnCacheCreate));
+            break outer;
+          case 'aborted':
+            removeLoading();
+            if (ev.reason !== 'user-abort') {
+              turnWrap.remove();
+              if (ev.session && id === currentSessionId) renderSession(ev.session);
+            }
+            break outer;
+          case 'error': {
+            removeLoading();
+            const errDiv = document.createElement('div');
+            errDiv.className = 'msg-error';
+            errDiv.textContent = '[error: ' + (ev.error ?? ev.message ?? 'unknown') + ']';
+            turnWrap.appendChild(errDiv);
+            break outer;
           }
         }
-        apiListSessions().then(renderSessions);
-        setSending(false, id);
+        messagesEl.scrollTop = messagesEl.scrollHeight;
       }
-    } catch { clearInterval(poll); setSending(false, id); }
-  }, 1500);
+    }
+  } catch (e) {
+    removeLoading();
+    const errDiv = document.createElement('div');
+    errDiv.className = 'msg-error';
+    errDiv.textContent = '[error: ' + e.message + ']';
+    turnWrap.appendChild(errDiv);
+  } finally {
+    removeLoading();
+    setSending(false, id);
+    apiListSessions().then(renderSessions);
+  }
 }
 
 async function renameSession(id, current) {
@@ -818,8 +923,6 @@ async function hideSession(id) {
     renderSessions(sessions);
   } catch (e) { alert('Hide failed: ' + e.message); }
 }
-
-async function apiIsSessionBusy(id) { const r = await fetch('/sessions/'+id+'/busy'); return r.ok ? r.json() : { busy: false }; }
 
 async function apiNewSession() {
   const r = await fetch('/sessions', {
@@ -1099,11 +1202,14 @@ function renderContentParts(wrap, content) {
   }
 }
 
-function renderSession(session) {
+// startIdx > 0 appends only messages from that index — used for incremental updates.
+function renderSession(session, startIdx) {
   const msgs = session.messages.filter(m => m.role !== 'system');
-  if (!msgs.length) { showEmpty(); return; }
-  messagesEl.innerHTML = '';
-  for (const msg of msgs) {
+  if (!startIdx) {
+    if (!msgs.length) { showEmpty(); return; }
+    messagesEl.innerHTML = '';
+  }
+  for (const msg of msgs.slice(startIdx ?? 0)) {
     if (msg.role === 'user') {
       const text = msg.content.filter(c => c.type === 'text').map(c => c.text).join('\\n');
       if (text) appendUserBubble(text);
@@ -1133,7 +1239,10 @@ async function openSession(id) {
   if (session) {
     renderSession(session);
     if (chatHeaderEl) chatTitleEl.textContent = session.title ?? '';
-    apiIsSessionBusy(id).then(({ busy }) => { if (busy) watchUntilDone(id); });
+    if (session.busy) {
+      const renderedCount = session.messages.filter(m => m.role !== 'system').length;
+      joinSessionStream(id, renderedCount);
+    }
   }
   inputEl.focus();
 }
@@ -1430,8 +1539,12 @@ async function sendMessage() {
 
         case 'aborted': {
           removeLoading();
-          turnWrap.remove();
-          if (ev.session) renderSession(ev.session);
+          if (ev.reason === 'user-abort') {
+            // Partial content already in DOM and saved to store — nothing to re-render.
+          } else {
+            turnWrap.remove();
+            if (ev.session) renderSession(ev.session);
+          }
           break;
         }
 
@@ -1468,7 +1581,7 @@ async function sendMessage() {
   }
 }
 
-sendBtn.onclick = sendMessage;
+sendBtn.onclick = () => { if (sending) requestStop(); else sendMessage(); };
 
 inputEl.addEventListener('keydown', e => {
   if (e.key === 'Enter' && e.shiftKey) { e.preventDefault(); sendMessage(); }
@@ -1484,6 +1597,11 @@ function setSending(val, sessionId) {
   if (val) {
     sending = true;
     sendingForSession = sid;
+    stopRequested = false;
+    sendBtn.textContent = '\\u25a0';   // ■ stop square
+    sendBtn.classList.add('stop-mode');
+    sendBtn.disabled = false;
+    inputEl.disabled = true;
   } else {
     // Only clear if the session that set it is still the current one,
     // or if the caller is the current session (prevents session A's completion
@@ -1491,11 +1609,21 @@ function setSending(val, sessionId) {
     if (sendingForSession === sid || sid === currentSessionId) {
       sending = false;
       sendingForSession = null;
+      stopRequested = false;
+      sendBtn.textContent = '\\u25b6'; // ▶ send arrow
+      sendBtn.classList.remove('stop-mode');
+      sendBtn.disabled = false;
+      inputEl.disabled = false;
+      inputEl.focus();
     }
   }
-  sendBtn.disabled = sending;
-  inputEl.disabled = sending;
-  // if (!sending) inputEl.focus();
+}
+
+function requestStop() {
+  if (!sending || stopRequested || !sendingForSession) return;
+  stopRequested = true;
+  sendBtn.disabled = true;
+  fetch('/sessions/' + sendingForSession + '/abort', { method: 'POST' }).catch(() => {});
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
@@ -1513,6 +1641,15 @@ async function init() {
     opt.value = opt.textContent = p;
     providerSel.appendChild(opt);
   }
+
+  const savedProvider = localStorage.getItem('matbot:provider');
+  if (savedProvider && providers.includes(savedProvider)) {
+    providerSel.value = savedProvider;
+  }
+
+  providerSel.addEventListener('change', () => {
+    localStorage.setItem('matbot:provider', providerSel.value);
+  });
 
   renderSessions(sessions);
   const fragmentId = location.hash.slice(1);

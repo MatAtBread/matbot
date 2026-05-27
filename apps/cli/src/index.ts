@@ -165,9 +165,30 @@ async function runTurn(
   promptFn:       (question: string, defaultValue?: string) => Promise<string>,
   loadPluginFn:   (specifier: string) => Promise<void>,
 ): Promise<Session> {
+  const traceId  = crypto.randomUUID();
   const ac       = new AbortController();
   const onSigint = (): void => { ac.abort(); };
   process.once('SIGINT', onSigint);
+
+  // Normalise content, construct and pre-persist the user message so the
+  // session is readable mid-run if resumed from another client.
+  const contentArr: MessageContent[] = typeof content === 'string'
+    ? [{ type: 'text', text: content }]
+    : content;
+  const userMsg = createMessage({ role: 'user', content: contentArr, traceId });
+
+  if (!session.title && !session.messages.some(m => m.role === 'user')) {
+    const text = contentArr
+      .filter((c): c is Extract<MessageContent, { type: 'text' }> => c.type === 'text')
+      .map(c => c.text).join(' ').trim();
+    if (text) {
+      const words = text.split(/\s+/).slice(0, 8).join(' ');
+      session = { ...session, title: words.length > 60 ? `${words.slice(0, 60)}…` : words };
+    }
+  }
+
+  session = appendMessage(session, userMsg);
+  await store.set(session.id, session);
 
   let updated       = session;
   let totalIn       = 0;
@@ -181,9 +202,8 @@ async function runTurn(
 
   try {
     for await (const ev of runSession({
-      inbound:        { id: crypto.randomUUID(), content },
       session,
-      config:         { principal, provider: providerConfig.name },
+      config:         { principal, provider: providerConfig.name, traceId },
       provider:       adapter,
       providerConfig,
       tools,

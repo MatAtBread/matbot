@@ -1,5 +1,5 @@
 import type {
-  Session, MessageContent, InboundMessage,
+  Session, MessageContent,
   PipelineEvent, RunConfig, ProviderAdapter, ProviderConfig,
   Tool, ToolContext, Store,
 } from './types.js';
@@ -7,7 +7,6 @@ import { HookRegistry } from './hooks.js';
 import { appendMessage, createMessage } from './session.js';
 
 export interface RunSessionOpts {
-  inbound:        InboundMessage;
   session:        Session;
   config:         RunConfig;
   provider:       ProviderAdapter;
@@ -23,7 +22,7 @@ export interface RunSessionOpts {
 }
 
 export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineEvent> {
-  const { inbound, config, provider, providerConfig, store, signal } = opts;
+  const { config, provider, providerConfig, store, signal } = opts;
   const tools   = opts.tools   ?? new Map<string, Tool>();
   const hookReg = opts.hooks   ?? new HookRegistry();
   const promptFn = opts.prompt ?? ((q: string, def?: string) => {
@@ -32,35 +31,9 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
   });
   const traceId = config.traceId ?? crypto.randomUUID();
 
-  // ── 1. Append inbound user message ─────────────────────────────────────────
+  // ── 1. before:submit hooks ─────────────────────────────────────────────────
 
-  const contentArr: MessageContent[] = Array.isArray(inbound.content)
-    ? inbound.content
-    : [{ type: 'text', text: inbound.content }];
-
-  const userMsg = createMessage({
-    role:    'user',
-    content: contentArr,
-    traceId,
-  });
-
-  let session = appendMessage(opts.session, userMsg);
-
-  // Auto-title the session from the first user message if not already named
-  if (!opts.session.title && !opts.session.messages.some(m => m.role === 'user')) {
-    const text = Array.isArray(inbound.content)
-      ? contentArr.filter((c): c is Extract<MessageContent, { type: 'text' }> => c.type === 'text')
-          .map(c => c.text).join(' ').trim()
-      : inbound.content.trim();
-    if (text) {
-      const words = text.split(/\s+/).slice(0, 8).join(' ');
-      session = { ...session, title: words.length > 60 ? `${words.slice(0, 60)}…` : words };
-    }
-  }
-
-  yield { type: 'submit:start', message: userMsg, traceId };
-
-  // ── 2. before:submit hooks ─────────────────────────────────────────────────
+  let session = opts.session;
 
   let ctx = await hookReg.run('before:submit', {
     session, principal: config.principal, config, signal,
@@ -79,11 +52,18 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
     yield { type: 'robo-user', content: ctx.inject, traceId };
   }
 
-  // ── 3. Agentic loop ────────────────────────────────────────────────────────
+  // ── 2. Agentic loop ────────────────────────────────────────────────────────
 
   const toolList = [...tools.values()];
 
   for (;;) {
+    // Respect an abort that arrived between turns (e.g. during tool execution).
+    if (signal.aborted) {
+      await store.set(session.id, session);
+      yield { type: 'aborted', reason: 'user-abort', session, traceId };
+      return;
+    }
+
     const pendingCalls: Array<{ id: string; name: string; input: unknown }> = [];
     const assistantParts: MessageContent[] = [];
     let textAcc = '';
@@ -105,6 +85,9 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
           case 'redacted-thinking':
             assistantParts.push({ type: 'redacted-thinking', data: ev.data });
             break;
+          case 'unknown-block':
+            assistantParts.push({ type: 'unknown-content', blockType: ev.blockType, raw: ev.raw });
+            break;
           case 'reasoning-block':
             assistantParts.push({ type: 'reasoning', reasoning: ev.reasoning });
             break;
@@ -122,6 +105,18 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
         }
       }
     } catch (e) {
+      if (signal.aborted) {
+        // Save whatever the LLM streamed before the abort hit.
+        if (textAcc) assistantParts.push({ type: 'text', text: textAcc });
+        if (assistantParts.length > 0) {
+          session = appendMessage(session, createMessage({
+            role: 'assistant', content: assistantParts, traceId, providerName: config.provider,
+          }));
+        }
+        await store.set(session.id, session);
+        yield { type: 'aborted', reason: 'user-abort', session, traceId };
+        return;
+      }
       yield { type: 'error', error: String(e), traceId };
       return;
     }
@@ -158,7 +153,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
     // No tool calls → done
     if (pendingCalls.length === 0) break;
 
-    // ── 4. Execute tool calls ────────────────────────────────────────────────
+    // ── 3. Execute tool calls ────────────────────────────────────────────────
 
     const toolResults: MessageContent[] = [];
 
@@ -243,7 +238,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
     session = ctx.session as Session;
   }
 
-  // ── 5. Persist and finish ──────────────────────────────────────────────────
+  // ── 4. Persist and finish ──────────────────────────────────────────────────
 
   await store.set(session.id, session);
 

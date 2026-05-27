@@ -63,10 +63,10 @@ export function toAnthropicMessages(messages: Message[]): AnthropicMessage[] {
           return [{ type: 'text', text: `[Document: ${c.name ?? c.mimeType}]` }];
         case 'audio':
           return [{ type: 'text', text: `[Audio: ${c.mimeType}]` }];
-        case 'redacted-thinking':
         case 'refusal':
         case 'form':
         case 'form-response':
+        case 'unknown-content':
           return [];
       }
     });

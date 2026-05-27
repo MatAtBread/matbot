@@ -3,12 +3,11 @@ export type * from '@matbot/plugin-api';
 // ── Internal types (not part of the plugin API) ───────────────────────────────
 
 import type {
-  Session, Message, MessageContent, FileHandle, MimeType, JSONSchema,
+  Session, MessageContent, FileHandle, MimeType, JSONSchema,
   HookPoint, ProviderAdapter, FilterExpr, ISODate,
 } from '@matbot/plugin-api';
 
 export type PipelineEvent =
-  | { type: 'submit:start'; message: Message;      traceId: string }
   | { type: 'text-delta';   delta: string;          traceId: string }
   | { type: 'thinking';     delta: string;          traceId: string }
   | { type: 'tool:start';   callId: string; name: string; input: unknown; traceId: string }

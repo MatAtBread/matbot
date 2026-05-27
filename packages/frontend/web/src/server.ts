@@ -3,7 +3,7 @@ import type {
   HookRegistry, Principal, ProviderAdapter, ProviderConfig,
   Session, Store, ToolContext, ToolRegistry, Vault,
 } from '@matbot/core';
-import { createSession, runSession } from '@matbot/core';
+import { appendMessage, createMessage, createSession, runSession } from '@matbot/core';
 import { sseComment, sseEvent } from '@matbot/frontend-base';
 import { html, js } from './ui.js';
 
@@ -72,8 +72,10 @@ function sessionPreview(session: Session): string {
 }
 
 export function createWebServer(deps: WebServerDeps) {
-  const origin         = deps.cors ?? '*';
-  const activeSessions = new Set<string>(); // session IDs with an active SSE stream
+  const origin = deps.cors ?? '*';
+
+  // Fan-out: each active submit gets a subscriber set, replay buffer, and its AbortController.
+  const activeSessions = new Map<string, { subs: Set<ServerResponse>; buffer: string[]; ac: AbortController }>();
   const pendingPrompts = new Map<string, (answer: string) => void>(); // session ID → resolver
 
   const server = createServer(async (req, res) => {
@@ -123,7 +125,7 @@ export function createWebServer(deps: WebServerDeps) {
     if (method === 'GET' && sessionGetMatch) {
       const session = await deps.store.get(sessionGetMatch[1]!);
       if (!session) { json(res, 404, { error: 'Session not found' }); return; }
-      json(res, 200, session);
+      json(res, 200, { ...session, busy: activeSessions.has(session.id) });
       return;
     }
 
@@ -169,15 +171,33 @@ export function createWebServer(deps: WebServerDeps) {
       const provider = deps.providers.get(resolvedConfig.type);
       if (!provider) { json(res, 400, { error: `No adapter for type "${resolvedConfig.type}"` }); return; }
 
-      const inbound = {
-        id:      crypto.randomUUID(),
-        content: typeof body.content === 'string' ? body.content : [body.content],
-      };
+      const traceId = body.traceId ?? crypto.randomUUID();
+
+      // Normalise content and construct the user message, then persist it so that
+      // re-joining this session mid-run shows the in-flight prompt immediately.
+      const contentArr = typeof body.content === 'string'
+        ? [{ type: 'text' as const, text: body.content }]
+        : [body.content];
+      const userMsg = createMessage({ role: 'user', content: contentArr, traceId });
+
+      // Auto-title from the first user message
+      if (!session.title && !session.messages.some(m => m.role === 'user')) {
+        const text = contentArr
+          .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
+          .map(c => c.text).join(' ').trim();
+        if (text) {
+          const words = text.split(/\s+/).slice(0, 8).join(' ');
+          session = { ...session, title: words.length > 60 ? `${words.slice(0, 60)}…` : words };
+        }
+      }
+
+      session = appendMessage(session, userMsg);
+      await deps.store.set(session.id, session);
 
       const runConfig = {
-        principal:  body.principal,
-        provider:   body.provider,
-        ...(body.traceId ? { traceId: body.traceId } : {}),
+        principal: body.principal,
+        provider:  body.provider,
+        traceId,
       };
 
       const ac = new AbortController();
@@ -187,19 +207,25 @@ export function createWebServer(deps: WebServerDeps) {
         if (resolver) { pendingPrompts.delete(targetId); resolver(''); }
       });
 
+      const active = { subs: new Set<ServerResponse>([res]), buffer: [] as string[], ac };
+      activeSessions.set(targetId, active);
+
+      const broadcast = (s: string): void => {
+        active.buffer.push(s);
+        for (const sub of active.subs) { if (sub.writable) sub.write(s); }
+      };
+
       const promptFn = (question: string, defaultValue?: string): Promise<string> =>
         new Promise(resolve => {
           pendingPrompts.set(targetId, answer => {
             pendingPrompts.delete(targetId);
             resolve(answer || defaultValue || '');
           });
-          if (res.writable) {
-            res.write(sseEvent('prompt', {
-              type: 'prompt',
-              question,
-              ...(defaultValue !== undefined ? { defaultValue } : {}),
-            }));
-          }
+          broadcast(sseEvent('prompt', {
+            type: 'prompt',
+            question,
+            ...(defaultValue !== undefined ? { defaultValue } : {}),
+          }));
         });
 
       // Switch to SSE
@@ -210,10 +236,8 @@ export function createWebServer(deps: WebServerDeps) {
       });
       res.write(sseComment('stream open'));
 
-      activeSessions.add(targetId);
       try {
         for await (const event of runSession({
-          inbound,
           session,
           config:         runConfig,
           provider,
@@ -226,29 +250,43 @@ export function createWebServer(deps: WebServerDeps) {
           prompt:         promptFn,
           loadPlugin:     deps.loadPlugin,
         })) {
-          if (!res.writable) break;
-          res.write(sseEvent(event.type, event));
-
-          // Persist the updated session when we receive the 'done' event
-          if (event.type === 'done') {
-            await deps.store.set(event.session.id, event.session);
-          }
+          broadcast(sseEvent(event.type, event));
         }
       } catch (e) {
-        if (res.writable) {
-          res.write(sseEvent('error', { type: 'error', error: String(e) }));
-        }
+        broadcast(sseEvent('error', { type: 'error', error: String(e) }));
       } finally {
         activeSessions.delete(targetId);
-        res.end();
+        for (const sub of active.subs) { sub.end(); }
       }
       return;
     }
 
-    // --- GET /sessions/:id/busy ---
-    const busyMatch = /^\/sessions\/([^/]+)\/busy$/.exec(url);
-    if (method === 'GET' && busyMatch) {
-      json(res, 200, { busy: activeSessions.has(busyMatch[1]!) });
+    // --- GET /sessions/:id/stream ---
+    // Lets a second client join an in-progress run with full event replay.
+    const streamMatch2 = /^\/sessions\/([^/]+)\/stream$/.exec(url);
+    if (method === 'GET' && streamMatch2) {
+      const sId    = streamMatch2[1]!;
+      const active = activeSessions.get(sId);
+      if (!active) { json(res, 404, { error: 'No active stream' }); return; }
+      res.writeHead(200, {
+        'content-type':  'text/event-stream',
+        'cache-control': 'no-cache',
+        'connection':    'keep-alive',
+      });
+      for (const s of active.buffer) { if (res.writable) res.write(s); }
+      active.subs.add(res);
+      req.on('close', () => active.subs.delete(res));
+      return;
+    }
+
+    // --- POST /sessions/:id/abort ---
+    const abortMatch = /^\/sessions\/([^/]+)\/abort$/.exec(url);
+    if (method === 'POST' && abortMatch) {
+      const sId    = abortMatch[1]!;
+      const active = activeSessions.get(sId);
+      if (!active) { json(res, 404, { error: 'No active session' }); return; }
+      active.ac.abort();
+      json(res, 200, { ok: true });
       return;
     }
 

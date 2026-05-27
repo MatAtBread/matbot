@@ -61,11 +61,23 @@ export function toOAIMessages(messages: Message[]): OAIMessage[] {
     const parts     = msg.content.filter(c => c.type !== 'tool-call');
 
     const contentParts: OAIContentPart[] = parts.flatMap((c): OAIContentPart[] => {
-      if (c.type === 'text')      return [{ type: 'text', text: c.text }];
-      if (c.type === 'image')     return [{ type: 'image_url', image_url: { url: `data:${c.mimeType};base64,${c.data}` } }];
-      if (c.type === 'image-url') return [{ type: 'image_url', image_url: { url: c.url, ...(c.detail !== undefined ? { detail: c.detail } : {}) } }];
-      if (c.type === 'file-ref')  return [{ type: 'text', text: `[Attached file: ${c.name}]` }];
-      return [];
+      switch (c.type) {
+        case 'text':      return [{ type: 'text', text: c.text }];
+        case 'image':     return [{ type: 'image_url', image_url: { url: `data:${c.mimeType};base64,${c.data}` } }];
+        case 'image-url': return [{ type: 'image_url', image_url: { url: c.url, ...(c.detail !== undefined ? { detail: c.detail } : {}) } }];
+        case 'file-ref':  return [{ type: 'text', text: `[Attached file: ${c.name}]` }];
+        case 'document':  return [{ type: 'text', text: `[Document: ${c.name ?? c.mimeType}]` }];
+        case 'audio':     return [{ type: 'text', text: `[Audio: ${c.mimeType}]` }];
+        case 'thinking':
+        case 'redacted-thinking':
+        case 'reasoning':
+        case 'tool-result':    // only in role === 'tool' messages, handled above
+        case 'refusal':
+        case 'form':
+        case 'form-response':
+        case 'unknown-content':
+          return [];
+      }
     });
 
     let content: string | OAIContentPart[] | null = null;

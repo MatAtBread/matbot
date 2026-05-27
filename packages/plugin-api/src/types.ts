@@ -59,6 +59,7 @@ export type CompletionEvent =
   | { type: 'redacted-thinking';   data: string }
   | { type: 'reasoning-block';     reasoning: string }
   | { type: 'refusal';             text: string }
+  | { type: 'unknown-block';       blockType: string; raw: unknown }
   | { type: 'usage';               inputTokens: number; outputTokens: number; costUsd?: number; cacheReadTokens?: number; cacheCreationTokens?: number }
   | { type: 'done' };
 
@@ -91,7 +92,8 @@ export type MessageContent =
   | { type: 'refusal';           text: string }
   | { type: 'file-ref';          fileId: string; name: string; mimeType: MimeType }
   | { type: 'form';              fields: FormField[]; submitLabel?: string }
-  | { type: 'form-response';     values: Record<string, string> };
+  | { type: 'form-response';     values: Record<string, string> }
+  | { type: 'unknown-content';   blockType: string; raw: unknown };
 
 export interface FormField {
   name:      string;

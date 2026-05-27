@@ -74,6 +74,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     const toolInputs      = new Map<number, { id: string; name: string; json: string }>();
     const thinkingBlocks  = new Map<number, { thinking: string; signature: string }>();
     const redactedBlocks  = new Map<number, { data: string }>();
+    const unknownBlocks   = new Map<number, { blockType: string; raw: unknown }>();
     let inputTokens = 0;
 
     for await (const line of parseSSE(res.body)) {
@@ -103,6 +104,8 @@ export class AnthropicAdapter implements ProviderAdapter {
             thinkingBlocks.set(idx, { thinking: '', signature: '' });
           } else if (block.type === 'redacted_thinking') {
             redactedBlocks.set(idx, { data: block.data ?? '' });
+          } else if (block.type !== 'text') {
+            unknownBlocks.set(idx, { blockType: block.type, raw: ev['content_block'] });
           }
           break;
         }
@@ -144,6 +147,11 @@ export class AnthropicAdapter implements ProviderAdapter {
           if (rb) {
             yield { type: 'redacted-thinking', data: rb.data };
             redactedBlocks.delete(idx);
+          }
+          const ub = unknownBlocks.get(idx);
+          if (ub) {
+            yield { type: 'unknown-block', blockType: ub.blockType, raw: ub.raw };
+            unknownBlocks.delete(idx);
           }
           break;
         }

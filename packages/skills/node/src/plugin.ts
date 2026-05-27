@@ -16,9 +16,13 @@ export interface SkillsPluginConfig {
 export function createSkillsPlugin(config: SkillsPluginConfig): MatbotPlugin {
   const skills = new Map<string, SkillEntry>();
   const getSkills = (): SkillEntry[] => [...skills.values()];
+  const registerSkill = (entry: SkillEntry): void => {
+    const ref = entry.contentRef;
+    if (ref.kind === 'file') skills.set(ref.path, entry);
+  };
   let abortController: AbortController | undefined;
 
-  const tools = createSkillTools(config.skillsDir, getSkills);
+  const tools = createSkillTools(config.skillsDir, getSkills, registerSkill);
 
   return {
     name:       'skills',
@@ -48,7 +52,7 @@ export function createSkillsPlugin(config: SkillsPluginConfig): MatbotPlugin {
 
       const pluginSettings = services.settings('skills');
       services.hooks.register(createClassifierSetupHook(pluginSettings, services.providers, getSkills));
-      services.hooks.register(createSkillIndexHook(getSkills));
+      // services.hooks.register(createSkillIndexHook(getSkills));
       services.hooks.register(createSkillClassifierHook(getSkills, readSkillContent, pluginSettings, req => services.complete(req)));
     },
 

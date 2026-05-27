@@ -1,6 +1,7 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import type { Tool, ToolExecutor, ToolContext, ToolEvent } from '@matbot/plugin-api';
+import { makeSkillEntry } from '@matbot/skills-base';
 import type { SkillEntry } from '@matbot/skills-base';
 
 interface SkillLoadInput {
@@ -17,8 +18,9 @@ function skillNameToFilename(name: string): string {
 }
 
 export function createSkillTools(
-  skillsDir: string,
-  getSkills: () => SkillEntry[],
+  skillsDir:    string,
+  getSkills:    () => SkillEntry[],
+  registerSkill: (entry: SkillEntry) => void,
 ): readonly Tool[] {
   const loadExecutor: ToolExecutor = {
     async *execute(input: unknown, _ctx: ToolContext): AsyncIterable<ToolEvent> {
@@ -54,6 +56,7 @@ export function createSkillTools(
       try {
         await mkdir(skillsDir, { recursive: true });
         await writeFile(filePath, content, 'utf8');
+        registerSkill(makeSkillEntry(filePath, name));
         yield { type: 'result', value: { name, path: filePath } };
       } catch (e) {
         yield { type: 'error', message: `Failed to save skill "${name}": ${String(e)}` };
