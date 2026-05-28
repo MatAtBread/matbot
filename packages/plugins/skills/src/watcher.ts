@@ -1,7 +1,7 @@
 import { watch, readdir } from 'node:fs/promises';
 import path from 'node:path';
-import { makeSkillEntry } from '@matbot/skills-base';
-import type { SkillEntry } from '@matbot/skills-base';
+import { makeSkillEntry } from './types.js';
+import type { SkillEntry } from './types.js';
 
 function mdNameToSkillName(filename: string): string {
   return path.basename(filename, '.md')

@@ -1,4 +1,4 @@
-import type { Vault } from '@matbot/core';
+import type { Vault } from '@matatbread/matbot-core';
 
 const REF_RE = /\$\{secret:([^}]+)\}/g;
 

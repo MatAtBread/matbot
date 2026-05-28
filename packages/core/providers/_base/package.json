@@ -1,5 +1,5 @@
 {
-  "name": "@matbot/providers-base",
+  "name": "@matatbread/matbot-providers-base",
   "version": "0.1.0",
   "private": true,
   "type": "module",

@@ -1,7 +1,7 @@
 import { readFile, writeFile, readdir, mkdir, stat } from 'node:fs/promises';
 import { join, relative, resolve, dirname } from 'node:path';
-import type { Tool, ToolEvent, ToolContext, MatbotPlugin } from '@matbot/plugin-api';
-import { PLUGIN_API_VERSION } from '@matbot/plugin-api';
+import type { Tool, ToolEvent, ToolContext, MatbotPlugin } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 
 // Returns the resolved absolute path if it is within workdir, null if it escapes.
 function safePath(workdir: string, input: string): string | null {

@@ -4,9 +4,9 @@ import { join, relative, resolve, extname } from 'node:path';
 import type {
   HookRegistry, Principal, ProviderAdapter, ProviderConfig,
   Session, Store, ToolContext, ToolRegistry, Vault,
-} from '@matbot/core';
-import { appendMessage, createMessage, createSession, runSession } from '@matbot/core';
-import { sseComment, sseEvent } from '@matbot/frontend-base';
+} from '@matatbread/matbot-core';
+import { appendMessage, createMessage, createSession, runSession } from '@matatbread/matbot-core';
+import { sseComment, sseEvent } from './sse-writer.js';
 import { html, js } from './ui.js';
 
 export interface WebServerDeps {

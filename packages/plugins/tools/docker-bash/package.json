@@ -1,5 +1,5 @@
 {
-  "name": "@matbot/tool-docker-bash",
+  "name": "@matatbread/matbot-tool-docker-bash",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -10,10 +10,11 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@matbot/plugin-api": "workspace:*",
-    "@matbot/tool-bash":  "workspace:*"
+    "@matatbread/matbot-plugin-api": "workspace:*",
+    "@matatbread/matbot-tool-bash":  "workspace:*"
   },
   "devDependencies": {
-    "typescript": "catalog:"
+    "@types/node": "catalog:",
+    "typescript":  "catalog:"
   }
 }

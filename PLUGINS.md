@@ -10,11 +10,11 @@ sub-programmatically, and persist scoped settings.
 ## The contract
 
 Every plugin module must export a named `plugin` constant satisfying `MatbotPlugin`
-(from `@matbot/plugin-api`):
+(from `@matatbread/matbot-plugin-api`):
 
 ```ts
-import type { MatbotPlugin } from '@matbot/plugin-api';
-import { PLUGIN_API_VERSION } from '@matbot/plugin-api';
+import type { MatbotPlugin } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 
 export const plugin: MatbotPlugin = {
   name:       'my-plugin',
@@ -34,7 +34,7 @@ preferred.
 
 ```yaml
 plugins:
-  - @matbot/tool-bash          # npm package (must be installed)
+  - @matatbread/matbot-tool-bash          # npm package (must be installed)
   - ./my-plugin/src/index.ts   # local file path
 ```
 
@@ -47,8 +47,8 @@ The built-in `plugin` tool lets the model manage plugins without editing the con
 
 ```
 plugin({ action: 'list' })
-plugin({ action: 'add', specifier: '@matbot/tool-bash' })
-plugin({ action: 'remove', specifier: '@matbot/tool-bash' })
+plugin({ action: 'add', specifier: '@matatbread/matbot-tool-bash' })
+plugin({ action: 'remove', specifier: '@matatbread/matbot-tool-bash' })
 ```
 
 Plugins are hot-loaded immediately after install — no restart needed.
@@ -60,7 +60,7 @@ Plugins are hot-loaded immediately after install — no restart needed.
 | Field        | Type                                           | Purpose |
 |--------------|------------------------------------------------|---------|
 | `name`       | `string`                                       | Unique identifier |
-| `apiVersion` | `string`                                       | Must equal `PLUGIN_API_VERSION` from `@matbot/plugin-api` |
+| `apiVersion` | `string`                                       | Must equal `PLUGIN_API_VERSION` from `@matatbread/matbot-plugin-api` |
 | `manifest`   | `PluginManifest`                               | Human-readable metadata, required env vars, config keys |
 | `tools`      | `readonly Tool[]`                              | Tool implementations to register |
 | `providers`  | `Record<string, ProviderAdapterFactory>`       | LLM adapter factories keyed by `type` string |
@@ -154,7 +154,7 @@ A `Tool` has a name, description, JSON Schema input, optional `requires` capabil
 list, and an async generator executor:
 
 ```ts
-import type { Tool, ToolEvent, ToolContext } from '@matbot/plugin-api';
+import type { Tool, ToolEvent, ToolContext } from '@matatbread/matbot-plugin-api';
 
 const myTool: Tool = {
   name:        'search',
@@ -231,7 +231,7 @@ sparingly — only for irreversible actions.
 Provider plugins register LLM adapter factories keyed by `type`:
 
 ```ts
-import type { MatbotPlugin, ProviderAdapter, ProviderConfig, CompletionEvent } from '@matbot/plugin-api';
+import type { MatbotPlugin, ProviderAdapter, ProviderConfig, CompletionEvent } from '@matatbread/matbot-plugin-api';
 
 const myAdapter: ProviderAdapter = {
   name: 'my-provider',
@@ -247,7 +247,7 @@ const myAdapter: ProviderAdapter = {
 };
 
 export const plugin: MatbotPlugin = {
-  name:       '@matbot/provider-my-provider',
+  name:       '@matatbread/matbot-provider-my-provider',
   apiVersion: PLUGIN_API_VERSION,
   providers: {
     'my-provider': (_config: ProviderConfig) => myAdapter,
@@ -256,8 +256,8 @@ export const plugin: MatbotPlugin = {
 ```
 
 The `type` field in `matbot.yaml` selects the adapter: `type: my-provider` routes to
-this factory. The existing adapters (`@matbot/provider-anthropic` and
-`@matbot/provider-openai-compat`) are themselves plugins loaded implicitly when their
+this factory. The existing adapters (`@matatbread/matbot-provider-anthropic` and
+`@matatbread/matbot-provider-openai-compat`) are themselves plugins loaded implicitly when their
 `type` is referenced.
 
 ### `CompletionEvent` variants
@@ -457,15 +457,15 @@ from auto-cleanup.
 
 | Package | Name | Kind | Description |
 |---------|------|------|-------------|
-| `@matbot/tool-plugin` | `plugin` | tool | Manage plugins: list, add, remove. **Always loaded.** |
-| `@matbot/tool-bash` | `bash` | tool | Run bash scripts, stream stdout/stderr |
-| `@matbot/tool-docker-bash` | `docker-bash` | tool | Drop-in replacement for bash that runs scripts inside a Docker container |
-| `@matbot/tool-http` | `http` | tool | Make HTTP requests |
-| `@matbot/tool-schedule` | `schedule` | tool | Wait a specified duration |
-| `@matbot/skills-node` | `skills` | tool+hooks | File-backed skill injection via skill router classifier |
-| `@matbot/frontend-web` | `frontend-web` | frontend+hooks | Web UI with session management |
-| `@matbot/provider-anthropic` | — | provider | Anthropic Messages API adapter (also used for DeepSeek Anthropic-compat) |
-| `@matbot/provider-openai-compat` | — | provider | OpenAI-compatible chat completions adapter |
+| `@matatbread/matbot-tool-plugin` | `plugin` | tool | Manage plugins: list, add, remove. **Always loaded.** |
+| `@matatbread/matbot-tool-bash` | `bash` | tool | Run bash scripts, stream stdout/stderr |
+| `@matatbread/matbot-tool-docker-bash` | `docker-bash` | tool | Drop-in replacement for bash that runs scripts inside a Docker container |
+| `@matatbread/matbot-tool-http` | `http` | tool | Make HTTP requests |
+| `@matatbread/matbot-tool-schedule` | `schedule` | tool | Wait a specified duration |
+| `@matatbread/matbot-skills-node` | `skills` | tool+hooks | File-backed skill injection via skill router classifier |
+| `@matatbread/matbot-frontend-web` | `frontend-web` | frontend+hooks | Web UI with session management |
+| `@matatbread/matbot-provider-anthropic` | — | provider | Anthropic Messages API adapter (also used for DeepSeek Anthropic-compat) |
+| `@matatbread/matbot-provider-openai-compat` | — | provider | OpenAI-compatible chat completions adapter |
 
 The provider plugins are loaded automatically when a `type` references them — they don't
 need to be listed in `plugins:` unless you want to pin a version.
@@ -482,4 +482,4 @@ my-plugin/
     index.ts         # export const plugin: MatbotPlugin
 ```
 
-Keep `@matbot/plugin-api` as a `dependencies` entry (not `devDependencies`).
+Keep `@matatbread/matbot-plugin-api` as a `dependencies` entry (not `devDependencies`).

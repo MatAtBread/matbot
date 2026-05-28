@@ -1,6 +1,6 @@
-import type { MatbotPlugin, MatbotServices } from '@matbot/plugin-api';
-import { PLUGIN_API_VERSION }                from '@matbot/plugin-api';
-import { resolveProviderFactory }            from '@matbot/core';
+import type { MatbotPlugin, MatbotServices } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION }                from '@matatbread/matbot-plugin-api';
+import { resolveProviderFactory }            from '@matatbread/matbot-core';
 import { createWebServer }                   from './server.js';
 import { makeSessionTools }                  from './tools/session.js';
 import type { Server }                       from 'node:http';

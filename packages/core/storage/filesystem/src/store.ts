@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
-import type { Store, StoreQuery, QueryResult, CASResult } from '@matbot/core';
-import { matchFilter, applySort, cosineSimilarity, getNestedField } from '@matbot/storage-base';
+import type { Store, StoreQuery, QueryResult, CASResult } from '@matatbread/matbot-core';
+import { matchFilter, applySort, cosineSimilarity, getNestedField } from '@matatbread/matbot-storage-base';
 
 export class FilesystemStore<T extends { id: string; version: string }> implements Store<T> {
   private initPromise: Promise<void> | undefined;

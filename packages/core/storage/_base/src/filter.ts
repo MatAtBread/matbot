@@ -1,4 +1,4 @@
-import type { FilterExpr, Scalar } from '@matbot/core';
+import type { FilterExpr, Scalar } from '@matatbread/matbot-core';
 
 export function getNestedField(doc: unknown, fieldPath: string): unknown {
   let current: unknown = doc;

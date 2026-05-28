@@ -1,4 +1,4 @@
-import type { Tool, ToolEvent, Session, Store } from '@matbot/plugin-api';
+import type { Tool, ToolEvent, Session, Store } from '@matatbread/matbot-plugin-api';
 
 export function makeSessionTools(store: Store<Session>): readonly Tool[] {
   return [makeRenameTool(store), makeHideTool(store)];

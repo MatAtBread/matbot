@@ -1,8 +1,8 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
-import type { Tool, ToolExecutor, ToolContext, ToolEvent } from '@matbot/plugin-api';
-import { makeSkillEntry } from '@matbot/skills-base';
-import type { SkillEntry } from '@matbot/skills-base';
+import type { Tool, ToolExecutor, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
+import { makeSkillEntry } from './types.js';
+import type { SkillEntry } from './types.js';
 
 interface SkillLoadInput {
   name: string;

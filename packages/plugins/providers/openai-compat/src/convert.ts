@@ -1,4 +1,4 @@
-import type { Message, Tool, JSONSchema } from '@matbot/plugin-api';
+import type { Message, Tool, JSONSchema } from '@matatbread/matbot-plugin-api';
 
 // ── Internal OpenAI API types ─────────────────────────────────────────────────
 

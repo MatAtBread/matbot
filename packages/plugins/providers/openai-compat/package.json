@@ -1,5 +1,5 @@
 {
-  "name": "@matbot/provider-openai-compat",
+  "name": "@matatbread/matbot-provider-openai-compat",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -10,8 +10,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@matbot/plugin-api": "workspace:*",
-    "@matbot/providers-base": "workspace:*"
+    "@matatbread/matbot-plugin-api": "workspace:*",
+    "@matatbread/matbot-providers-base": "workspace:*"
   },
   "devDependencies": {
     "typescript": "catalog:"

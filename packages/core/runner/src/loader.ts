@@ -38,6 +38,7 @@ export async function loadPlugins(
         continue;
       }
       // Node.js: throw so callers (including the plugin tool) see the actual error.
+      console.error(`[matbot] Failed to load plugin "${spec}":`, result.reason);
       throw new Error(`Could not load plugin "${spec}": ${reason}`);
     }
 
@@ -53,5 +54,6 @@ export async function loadPlugins(
 
     registerPlugin(plugin);
     await setupPlugin(plugin, services);
+    console.log(`[matbot] Loaded plugin "${plugin.name}"`);
   }
 }

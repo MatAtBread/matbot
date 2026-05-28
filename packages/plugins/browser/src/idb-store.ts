@@ -1,6 +1,6 @@
-import type { CASResult, QueryResult, Store, StoreQuery } from '@matbot/core';
-import { matchFilter } from '@matbot/storage-base';
-import { applySort }   from '@matbot/storage-base';
+import type { CASResult, QueryResult, Store, StoreQuery } from '@matatbread/matbot-core';
+import { matchFilter } from '@matatbread/matbot-storage-base';
+import { applySort }   from '@matatbread/matbot-storage-base';
 
 /** Promisify an IDBRequest. */
 function idbPromise<T>(req: IDBRequest<T>): Promise<T> {

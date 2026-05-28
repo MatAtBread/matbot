@@ -1,5 +1,4 @@
-import { readFile } from 'node:fs/promises';
-import type { ModelParameters, ProviderConfig } from '@matbot/plugin-api';
+import type { ModelParameters, ProviderConfig } from '@matatbread/matbot-plugin-api';
 import { parseYaml, type YamlMap, type YamlValue } from './yaml.js';
 
 export interface MatbotConfig {
@@ -41,6 +40,9 @@ function toProviderConfig(name: string, raw: YamlMap): ProviderConfig {
 
   const config: ProviderConfig = { name, type, model, credentials };
 
+  if (raw['module'] !== undefined) {
+    config.module = asString(raw['module'], `providers.${name}.module`);
+  }
   if (raw['endpoint'] !== undefined) {
     config.endpoint = asString(raw['endpoint'], `providers.${name}.endpoint`);
   }
@@ -83,13 +85,4 @@ export function parseConfig(
   }
 
   return { plugins, providers };
-}
-
-/** Load and parse a YAML config file, substituting ${env:VAR} from process.env. */
-export async function loadConfig(
-  path: string,
-  env: Record<string, string | undefined> = {},
-): Promise<MatbotConfig> {
-  const text = await readFile(path, 'utf8');
-  return parseConfig(text, env);
 }

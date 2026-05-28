@@ -1,22 +1,20 @@
 #!/usr/bin/env node
-import { loadConfig, loadDotEnv }           from '@matbot/config';
+import { loadConfig, loadDotEnv }           from './config.js';
 import { installPlugin }                    from './install.js';
 import type { Principal, ProviderAdapter,
               ProviderConfig, Session,
-              Store, Tool, MessageContent } from '@matbot/core';
+              Store, Tool, MessageContent } from '@matatbread/matbot-core';
 import { appendMessage, createMessage,
          createSession, runSession,
          HookRegistry,
          loadPlugins,
          registerPlugin,
          resolveProviderFactory,
-         teardownPlugins }                 from '@matbot/core';
-import type { MatbotServices, PluginSettings, ToolRegistry, Vault } from '@matbot/core';
-import { plugin as anthropicPlugin }       from '@matbot/provider-anthropic';
-import { plugin as openaiCompatPlugin }    from '@matbot/provider-openai-compat';
-import { systemPrincipal, VaultImpl }      from '@matbot/security';
-import { FilesystemStore }                 from '@matbot/storage-filesystem';
-import { createBuiltinTools }              from '@matbot/tool-plugin';
+         teardownPlugins }                 from '@matatbread/matbot-core';
+import type { MatbotServices, PluginSettings, ToolRegistry, Vault } from '@matatbread/matbot-core';
+import { systemPrincipal, VaultImpl }      from '@matatbread/matbot-security';
+import { FilesystemStore }                 from '@matatbread/matbot-storage-filesystem';
+import { createBuiltinTools }              from '@matatbread/matbot-tool-plugin';
 import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createInterface }                 from 'node:readline/promises';
 import { createRequire }                   from 'node:module';
@@ -466,9 +464,6 @@ async function main(): Promise<void> {
   // hookReg is shared: plugins register hooks via services, runSession fires them
   const hookReg = new HookRegistry();
 
-  registerPlugin(anthropicPlugin);
-  registerPlugin(openaiCompatPlugin);
-
   const pluginSettingsCache = new Map<string, PluginSettings>();
 
   const services: MatbotServices = {
@@ -524,7 +519,24 @@ async function main(): Promise<void> {
     configPath,
   };
 
-  await loadPlugins(await resolvePluginSpecifiers(matbotConfig.plugins, path.dirname(configPath)), services);
+  // Collect provider plugin modules (unique, preserving first-seen order) and
+  // prepend them to the user's plugin list so they're registered before any
+  // user plugin whose setup() might call services.complete().
+  const providerModules: string[] = [];
+  const seenProviderModules = new Set<string>();
+  for (const cfg of matbotConfig.providers.values()) {
+    const mod = cfg.module ?? `@matatbread/matbot-provider-${cfg.type}`;
+    if (!seenProviderModules.has(mod)) {
+      seenProviderModules.add(mod);
+      providerModules.push(mod);
+    }
+  }
+
+  const allSpecifiers = [
+    ...await resolvePluginSpecifiers(providerModules,        path.dirname(configPath)),
+    ...await resolvePluginSpecifiers(matbotConfig.plugins,   path.dirname(configPath)),
+  ];
+  await loadPlugins(allSpecifiers, services);
 
   // ── Server mode ───────────────────────────────────────────────────────────────
 

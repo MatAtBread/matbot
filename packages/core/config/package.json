@@ -1,5 +1,5 @@
 {
-  "name": "@matbot/config",
+  "name": "@matatbread/matbot-config",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -10,10 +10,9 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@matbot/plugin-api": "workspace:*"
+    "@matatbread/matbot-plugin-api": "workspace:*"
   },
   "devDependencies": {
-    "@types/node": "catalog:",
-    "typescript":  "catalog:"
+    "typescript": "catalog:"
   }
 }

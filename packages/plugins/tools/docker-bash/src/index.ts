@@ -1,12 +1,12 @@
-import type { MatbotPlugin } from '@matbot/plugin-api';
-import { PLUGIN_API_VERSION } from '@matbot/plugin-api';
-import { createBashTool }    from '@matbot/tool-bash';
+import type { MatbotPlugin } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
+import { createBashTool }    from '@matatbread/matbot-tool-bash';
 
 /**
  * Replaces the `bash` tool with a Docker-backed implementation.
  *
  * Because this plugin registers a tool with the same name (`bash`) as
- * @matbot/tool-bash, loading it after the base bash plugin silently swaps the
+ * @matatbread/matbot-tool-bash, loading it after the base bash plugin silently swaps the
  * executor. The LLM sees an identical tool schema and description — it cannot
  * tell whether its scripts run locally or inside a container.
  *

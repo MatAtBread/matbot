@@ -3,7 +3,7 @@ import { spawn }                        from 'node:child_process';
 import { createInterface }              from 'node:readline/promises';
 import path                             from 'node:path';
 import process                          from 'node:process';
-import type { MatbotPlugin }            from '@matbot/core';
+import type { MatbotPlugin }            from '@matatbread/matbot-core';
 
 // ── Package manager detection ───────────────────────��─────────────────────────
 

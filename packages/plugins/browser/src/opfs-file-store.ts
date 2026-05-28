@@ -1,4 +1,4 @@
-import type { FileFilter, FileHandle, FileStore, MimeType } from '@matbot/core';
+import type { FileFilter, FileHandle, FileStore, MimeType } from '@matatbread/matbot-core';
 
 interface OPFSMeta {
   id:         string;

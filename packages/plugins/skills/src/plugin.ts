@@ -1,9 +1,9 @@
-import { PLUGIN_API_VERSION } from '@matbot/plugin-api';
-import type { MatbotPlugin } from '@matbot/plugin-api';
+import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
+import type { MatbotPlugin } from '@matatbread/matbot-plugin-api';
 import path from 'node:path';
 import process from 'node:process';
-import { createSkillIndexHook, createClassifierSetupHook, createSkillClassifierHook } from '@matbot/skills-base';
-import type { SkillEntry } from '@matbot/skills-base';
+import { createSkillIndexHook, createClassifierSetupHook, createSkillClassifierHook } from './hooks.js';
+import type { SkillEntry } from './types.js';
 import { watchSkillDir } from './watcher.js';
 import { readSkillContent } from './reader.js';
 import { createSkillTools } from './tools.js';

@@ -43,6 +43,8 @@ export interface ModelParameters {
 export interface ProviderConfig {
   name:         string;
   type:         string;
+  /** Plugin module specifier that provides this type's adapter (npm name or file URL). */
+  module?:      string;
   endpoint?:    string;
   credentials:  Record<string, string>;
   model:        string;

@@ -1,1 +1,1 @@
-export { HookRegistry } from '@matbot/plugin-api';
+export { HookRegistry } from '@matatbread/matbot-plugin-api';

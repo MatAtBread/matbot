@@ -5,3 +5,4 @@ export * from './runner.js';
 export * from './plugin.js';
 export * from './registry.js';
 export * from './loader.js';
+export * from './tool-registry.js';

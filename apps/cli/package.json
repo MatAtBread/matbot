@@ -1,5 +1,5 @@
 {
-  "name": "@matbot/cli",
+  "name": "@matatbread/matbot-cli",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -9,13 +9,11 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@matbot/config":              "workspace:*",
-    "@matbot/core":                "workspace:*",
-    "@matbot/provider-anthropic":  "workspace:*",
-    "@matbot/provider-openai-compat": "workspace:*",
-    "@matbot/security":            "workspace:*",
-    "@matbot/storage-filesystem":  "workspace:*",
-    "@matbot/tool-plugin":          "workspace:*"
+    "@matatbread/matbot-config":              "workspace:*",
+    "@matatbread/matbot-core":                "workspace:*",
+    "@matatbread/matbot-security":            "workspace:*",
+    "@matatbread/matbot-storage-filesystem":  "workspace:*",
+    "@matatbread/matbot-tool-plugin":          "workspace:*"
   },
   "devDependencies": {
     "@types/node": "catalog:",

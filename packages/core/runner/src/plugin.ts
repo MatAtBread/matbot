@@ -1,1 +1,1 @@
-export * from '@matbot/plugin-api';
+export * from '@matatbread/matbot-plugin-api';

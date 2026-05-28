@@ -1,5 +1,5 @@
-import type { Tool, ToolEvent, ToolContext, MatbotPlugin } from '@matbot/plugin-api';
-import { getRegisteredPlugins }              from '@matbot/core';
+import type { Tool, ToolEvent, ToolContext, MatbotPlugin } from '@matatbread/matbot-plugin-api';
+import { getRegisteredPlugins }              from '@matatbread/matbot-core';
 import { readFile, writeFile, access }       from 'node:fs/promises';
 import { spawn }                             from 'node:child_process';
 import path                                  from 'node:path';

@@ -1,4 +1,4 @@
-import type { SortSpec } from '@matbot/core';
+import type { SortSpec } from '@matatbread/matbot-core';
 import { getNestedField } from './filter.js';
 
 export function applySort<T>(docs: T[], sort: SortSpec<T>[]): T[] {

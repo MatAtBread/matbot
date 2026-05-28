@@ -1,4 +1,4 @@
-import type { Job, JobQueue, MemoryEntry, MemoryManager, Session, Store } from '@matbot/core';
+import type { Job, JobQueue, MemoryEntry, MemoryManager, Session, Store } from '@matatbread/matbot-core';
 
 export interface ExtractionPayload {
   ownerPrincipalId: string;

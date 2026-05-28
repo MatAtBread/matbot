@@ -45,13 +45,13 @@ ANTHROPIC_API_KEY=sk-ant-...
 
 ```sh
 # Interactive REPL — pick a session or start a new one
-pnpm --filter @matbot/cli start
+pnpm --filter @matatbread/matbot-cli start
 
 # Single turn
-pnpm --filter @matbot/cli start "What is the capital of France?"
+pnpm --filter @matatbread/matbot-cli start "What is the capital of France?"
 
 # Pick a specific provider
-pnpm --filter @matbot/cli start --provider claude "Summarise the last 10 git commits"
+pnpm --filter @matatbread/matbot-cli start --provider claude "Summarise the last 10 git commits"
 ```
 
 The REPL shows an arrow-key session picker on startup when previous sessions exist. Press
@@ -81,10 +81,10 @@ When consuming the packages from npm, use their package names instead:
 
 ```yaml
 plugins:
-  - @matbot/tool-bash
-  - @matbot/tool-http
-  - @matbot/tool-schedule
-  - @matbot/frontend-web
+  - @matatbread/matbot-tool-bash
+  - @matatbread/matbot-tool-http
+  - @matatbread/matbot-tool-schedule
+  - @matatbread/matbot-frontend-web
 ```
 
 Full config:
@@ -109,7 +109,7 @@ providers:
 ### Run
 
 ```sh
-pnpm --filter @matbot/cli start
+pnpm --filter @matatbread/matbot-cli start
 ```
 
 The model now has three tools available:
@@ -183,8 +183,8 @@ Quick start:
 
 ```ts
 // my-plugin/src/index.ts
-import type { MatbotPlugin, Tool, ToolEvent, ToolContext } from '@matbot/plugin-api';
-import { PLUGIN_API_VERSION } from '@matbot/plugin-api';
+import type { MatbotPlugin, Tool, ToolEvent, ToolContext } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 
 const myTool: Tool = {
   name:        'hello',

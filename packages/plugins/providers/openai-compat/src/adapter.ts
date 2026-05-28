@@ -1,5 +1,5 @@
-import type { ProviderAdapter, ProviderConfig, Message, Tool, CompletionEvent, HealthStatus } from '@matbot/plugin-api';
-import { parseSSE } from '@matbot/providers-base';
+import type { ProviderAdapter, ProviderConfig, Message, Tool, CompletionEvent, HealthStatus } from '@matatbread/matbot-plugin-api';
+import { parseSSE } from '@matatbread/matbot-providers-base';
 import { toOAIMessages, toOAITools } from './convert.js';
 
 const DEFAULT_ENDPOINT   = 'https://api.openai.com';

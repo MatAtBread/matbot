@@ -1,5 +1,5 @@
 {
-  "name": "@matbot/storage-base",
+  "name": "@matatbread/matbot-storage-base",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -10,7 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@matbot/core": "workspace:*"
+    "@matatbread/matbot-core": "workspace:*"
   },
   "devDependencies": {
     "typescript": "catalog:"

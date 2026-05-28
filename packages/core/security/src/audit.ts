@@ -1,4 +1,4 @@
-import type { AuditEvent, AuditLog, FilterExpr, Store } from '@matbot/core';
+import type { AuditEvent, AuditLog, FilterExpr, Store } from '@matatbread/matbot-core';
 
 export class AuditLogImpl implements AuditLog {
   private readonly store: Store<AuditEvent>;

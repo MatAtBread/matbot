@@ -1,7 +1,7 @@
 import { mkdir, open, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import path from 'node:path';
-import type { FileFilter, FileHandle, FileStore, MimeType } from '@matbot/core';
+import type { FileFilter, FileHandle, FileStore, MimeType } from '@matatbread/matbot-core';
 
 interface FileMeta {
   id:         string;

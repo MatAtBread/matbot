@@ -1,11 +1,11 @@
-export type * from '@matbot/plugin-api';
+export type * from '@matatbread/matbot-plugin-api';
 
 // ── Internal types (not part of the plugin API) ───────────────────────────────
 
 import type {
   Session, MessageContent, FileHandle, MimeType, JSONSchema,
   HookPoint, ProviderAdapter, FilterExpr, ISODate,
-} from '@matbot/plugin-api';
+} from '@matatbread/matbot-plugin-api';
 
 export type PipelineEvent =
   | { type: 'text-delta';   delta: string;          traceId: string }

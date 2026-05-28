@@ -1,4 +1,4 @@
-import type { Hook, HookContext, Vault } from '@matbot/core';
+import type { Hook, HookContext, Vault } from '@matatbread/matbot-core';
 
 export function createPiiScrubHook(vault: Vault, priority = 10): Hook {
   return {

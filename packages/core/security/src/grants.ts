@@ -1,4 +1,4 @@
-import type { CapabilityGrant, CapabilityKind, Principal } from '@matbot/core';
+import type { CapabilityGrant, CapabilityKind, Principal } from '@matatbread/matbot-core';
 
 /**
  * Returns true when `principal` holds a grant for every capability in
