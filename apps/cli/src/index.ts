@@ -164,6 +164,7 @@ async function runTurn(
   hooks:          HookRegistry,
   promptFn:       (question: string, defaultValue?: string) => Promise<string>,
   loadPluginFn:   (specifier: string) => Promise<void>,
+  configPath:     string,
 ): Promise<Session> {
   const traceId  = crypto.randomUUID();
   const ac       = new AbortController();
@@ -211,6 +212,7 @@ async function runTurn(
       hooks,
       signal:         ac.signal,
       workdir,
+      configPath,
       prompt:     promptFn,
       loadPlugin: loadPluginFn,
     })) {
@@ -264,7 +266,7 @@ async function runTurn(
               updated = await runTurn(
                 ev.session, [{ type: 'form-response', values }],
                 providerConfig, adapter, tools, store, principal, workdir,
-                hooks, promptFn, loadPluginFn,
+                hooks, promptFn, loadPluginFn, configPath,
               );
               return updated;
             }
@@ -518,7 +520,8 @@ async function main(): Promise<void> {
     vault,
     hooks:     hookReg,
     tools:     toolReg,
-    workdir:   workDir,
+    workdir:    workDir,
+    configPath,
   };
 
   await loadPlugins(await resolvePluginSpecifiers(matbotConfig.plugins, path.dirname(configPath)), services);
@@ -595,7 +598,7 @@ async function main(): Promise<void> {
 
   // ── Single-turn ──────────────────────────────────────────────────────────────
   if (argPrompt !== undefined) {
-    await runTurn(session, argPrompt, providerConfig, adapter, toolMap, store, principal, workDir, hookReg, stdinPrompt, services.loadPlugin.bind(services));
+    await runTurn(session, argPrompt, providerConfig, adapter, toolMap, store, principal, workDir, hookReg, stdinPrompt, services.loadPlugin.bind(services), configPath);
     rl.close();
     return;
   }
@@ -616,7 +619,7 @@ async function main(): Promise<void> {
     }
     if (!line.trim()) continue;
     process.stderr.write('assistant: ');
-    session = await runTurn(session, line, providerConfig, adapter, toolMap, store, principal, workDir, hookReg, stdinPrompt, services.loadPlugin.bind(services));
+    session = await runTurn(session, line, providerConfig, adapter, toolMap, store, principal, workDir, hookReg, stdinPrompt, services.loadPlugin.bind(services), configPath);
   }
 
   rl.close();

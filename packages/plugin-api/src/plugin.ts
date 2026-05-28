@@ -52,6 +52,8 @@ export interface MatbotServices {
   readonly tools:       ToolRegistry;
   /** Default working directory for tool execution. Plugins that create servers should forward this to tool contexts. */
   readonly workdir?:    string;
+  /** Absolute path to the loaded config file. Plugins that create servers should forward this to tool contexts. */
+  readonly configPath?: string;
 }
 
 // ── Factory types ─────────────────────────────────────────────────────────────

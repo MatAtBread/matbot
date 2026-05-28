@@ -7,17 +7,6 @@ import process                               from 'node:process';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-async function findMatbotYaml(start: string): Promise<string | null> {
-  let dir = path.resolve(start);
-  while (true) {
-    const candidate = path.join(dir, 'matbot.yaml');
-    try { await access(candidate); return candidate; } catch { /* not here */ }
-    const parent = path.dirname(dir);
-    if (parent === dir) return null;
-    dir = parent;
-  }
-}
-
 async function readPluginsList(configPath: string): Promise<string[]> {
   const text  = await readFile(configPath, 'utf8');
   const match = text.match(/^plugins:\s*\n((?:[ \t]+-[^\n]*\n)*)/m);
@@ -101,11 +90,10 @@ type PluginInput =
 const executor = {
   async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
     const { action } = input as PluginInput;
-    const startDir   = ctx.workdir ?? process.cwd();
 
-    const configPath = await findMatbotYaml(startDir);
+    const configPath = ctx.configPath;
     if (!configPath) {
-      yield { type: 'error', message: 'Could not find matbot.yaml — run from your project directory.' };
+      yield { type: 'error', message: 'No config path in tool context — cannot manage plugins.' };
       return;
     }
     const projectDir = path.dirname(configPath);

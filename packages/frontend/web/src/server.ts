@@ -1,4 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { readFile } from 'node:fs/promises';
+import { join, relative, resolve, extname } from 'node:path';
 import type {
   HookRegistry, Principal, ProviderAdapter, ProviderConfig,
   Session, Store, ToolContext, ToolRegistry, Vault,
@@ -16,7 +18,8 @@ export interface WebServerDeps {
   tools?:      ToolRegistry;
   hooks?:      HookRegistry;
   cors?:       string;  // Access-Control-Allow-Origin value, default '*'
-  workdir?:    string;  // default working directory for tool execution
+  workdir?:    string;
+  configPath?: string;
 }
 
 interface SubmitBody {
@@ -57,6 +60,25 @@ function corsHeaders(origin: string): Record<string, string> {
     'access-control-allow-methods': 'GET, POST, OPTIONS',
   };
 }
+
+const WORKSPACE_MIME: Record<string, string> = {
+  '.txt':  'text/plain; charset=utf-8',
+  '.md':   'text/markdown; charset=utf-8',
+  '.html': 'text/html; charset=utf-8',
+  '.css':  'text/css; charset=utf-8',
+  '.js':   'application/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.csv':  'text/csv; charset=utf-8',
+  '.xml':  'application/xml; charset=utf-8',
+  '.svg':  'image/svg+xml',
+  '.png':  'image/png',
+  '.jpg':  'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif':  'image/gif',
+  '.webp': 'image/webp',
+  '.pdf':  'application/pdf',
+  '.zip':  'application/zip',
+};
 
 function static200(res: ServerResponse, contentType: string, body: string): void {
   res.writeHead(200, { 'content-type': contentType, 'content-length': Buffer.byteLength(body) });
@@ -245,7 +267,8 @@ export function createWebServer(deps: WebServerDeps) {
           ...(deps.tools    ? { tools: new Map(deps.tools.list().map(t => [t.name, t])) } : {}),
           store:          deps.store,
           ...(deps.hooks    ? { hooks: deps.hooks }       : {}),
-          ...(deps.workdir  ? { workdir: deps.workdir }   : {}),
+          ...(deps.workdir     ? { workdir:     deps.workdir     } : {}),
+          ...(deps.configPath  ? { configPath:  deps.configPath  } : {}),
           signal:         ac.signal,
           prompt:         promptFn,
           loadPlugin:     deps.loadPlugin,
@@ -366,6 +389,38 @@ export function createWebServer(deps: WebServerDeps) {
       if (!resolver) { json(res, 409, { error: 'No pending prompt for this session' }); return; }
       resolver(body.answer ?? '');
       json(res, 200, { ok: true });
+      return;
+    }
+
+    // --- GET /workspace/:path --- (read-only static access to the session workspace)
+    const workspaceMatch = /^\/workspace\/(.+)$/.exec(url);
+    if (method === 'GET' && workspaceMatch && deps.workdir) {
+      let reqPath: string;
+      try { reqPath = decodeURIComponent(workspaceMatch[1]!); }
+      catch { json(res, 400, { error: 'Invalid path encoding' }); return; }
+
+      const workdir = resolve(deps.workdir);
+      const full    = resolve(join(workdir, reqPath));
+      const rel     = relative(workdir, full);
+      if (rel.startsWith('..')) { json(res, 400, { error: 'Invalid path' }); return; }
+
+      let data: Buffer;
+      try {
+        data = await readFile(full);
+      } catch (e) {
+        const code = (e as NodeJS.ErrnoException).code;
+        json(res, code === 'ENOENT' ? 404 : 500, { error: String(e) });
+        return;
+      }
+
+      const mime = WORKSPACE_MIME[extname(full).toLowerCase()] ?? 'application/octet-stream';
+      res.writeHead(200, {
+        'content-type':   mime,
+        'content-length': data.byteLength,
+        'cache-control':  'no-cache',
+        ...corsHeaders(origin),
+      });
+      res.end(data);
       return;
     }
 
