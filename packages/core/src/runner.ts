@@ -16,6 +16,7 @@ export interface RunSessionOpts {
   hooks?:         HookRegistry;
   signal:         AbortSignal;
   workdir?:       string;
+  configPath?:    string;
   /** Supply a prompt implementation to allow tools to ask interactive questions. */
   prompt?:        (question: string, defaultValue?: string) => Promise<string>;
   loadPlugin:     (specifier: string) => Promise<void>;
@@ -192,7 +193,8 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
         callId: tc.id, session, principal: config.principal, signal,
         prompt: promptFn,
         loadPlugin: opts.loadPlugin,
-        ...(opts.workdir !== undefined ? { workdir: opts.workdir } : {}),
+        ...(opts.workdir     !== undefined ? { workdir:     opts.workdir     } : {}),
+        ...(opts.configPath  !== undefined ? { configPath:  opts.configPath  } : {}),
       };
 
       try {

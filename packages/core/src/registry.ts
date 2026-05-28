@@ -132,10 +132,18 @@ export function getFrontendFactory(): FrontendFactory | undefined {
 
 /** Run setup() for a single plugin. Called by loadPlugins immediately after registration. */
 export async function setupPlugin(plugin: MatbotPlugin, services: MatbotServices): Promise<void> {
+  const scopedServices: MatbotServices = {
+    ...services,
+    tools: {
+      register(tool: Tool) { services.tools.register({ ...tool, pluginName: plugin.name }); },
+      resolve: (name: string) => services.tools.resolve(name),
+      list:    ()             => services.tools.list(),
+    },
+  };
   for (const tool of plugin.tools ?? []) {
-    services.tools.register(tool);
+    scopedServices.tools.register(tool);
   }
-  await plugin.setup?.(services);
+  await plugin.setup?.(scopedServices);
 }
 
 /** Run each plugin's teardown() in reverse-registration order. Errors are logged, not thrown. */

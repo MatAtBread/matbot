@@ -309,11 +309,12 @@ export type ToolEvent =
   | { type: 'error';    message: string; code?: number; stdout?: string; stderr?: string };
 
 export interface ToolContext {
-  callId:    string;
-  session:   Session;
-  principal: Principal;
-  signal:    AbortSignal;
-  workdir?:  string;
+  callId:      string;
+  session:     Session;
+  principal:   Principal;
+  signal:      AbortSignal;
+  workdir?:    string;
+  configPath?: string;
   /** Prompt the user for input. The host provides a readline or form implementation. */
   prompt(question: string, defaultValue?: string): Promise<string>;
   /** Hot-load a plugin by specifier without restarting the process. */
@@ -330,6 +331,7 @@ export interface Tool {
   inputSchema:  JSONSchema;
   requires?:    CapabilityKind[];
   executor:     ToolExecutor;
+  pluginName?:  string;
 }
 
 // ── Files ─────────────────────────────────────────────────────────────────────

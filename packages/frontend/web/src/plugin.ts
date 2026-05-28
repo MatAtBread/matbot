@@ -36,7 +36,8 @@ export const plugin: MatbotPlugin = {
       loadPlugin: services.loadPlugin.bind(services),
       tools:      services.tools,
       hooks:      services.hooks,
-      ...(services.workdir !== undefined ? { workdir: services.workdir } : {}),
+      ...(services.workdir     !== undefined ? { workdir:     services.workdir     } : {}),
+      ...(services.configPath  !== undefined ? { configPath:  services.configPath  } : {}),
     });
 
     await new Promise<void>((resolve, reject) => {
