@@ -9,7 +9,7 @@
   "scripts": {
     "typecheck": "pnpm -r run typecheck",
     "cli":       "pnpm --filter @matatbread/matbot-cli start",
-    "serve":     "pnpm --filter @matatbread/matbot-cli serve"
+    "start":     "pnpm --filter @matatbread/matbot-cli start"
   },
   "devDependencies": {
     "typescript": "^5.8.0"

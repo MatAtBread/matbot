@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "start":     "node --import ./register.js src/index.ts",
-    "server":    "node --import ./register.js src/index.ts server",
+    "start":     "node --import ./register.js src/index.ts start",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

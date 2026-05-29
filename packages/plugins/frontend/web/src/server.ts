@@ -106,7 +106,18 @@ export function createWebServer(deps: WebServerDeps) {
 
   // Fan-out: each active submit gets a subscriber set, replay buffer, and its AbortController.
   const activeSessions = new Map<string, { subs: Set<ServerResponse>; buffer: string[]; ac: AbortController }>();
-  const pendingPrompts = new Map<string, (answer: string) => void>(); // session ID → resolver
+  const pendingPrompts  = new Map<string, (answer: string) => void>(); // session ID → resolver
+
+  // Clients subscribed to server-sent session status events (busy/idle).
+  const statusListeners = new Set<ServerResponse>();
+
+  function broadcastStatus(sessionId: string, busy: boolean): void {
+    const msg = sseEvent('session-busy', { sessionId, busy });
+    for (const res of statusListeners) {
+      if (res.writable) res.write(msg);
+      else statusListeners.delete(res);
+    }
+  }
 
   const server = createServer(async (req, res) => {
     const method = req.method ?? 'GET';
@@ -162,6 +173,23 @@ export function createWebServer(deps: WebServerDeps) {
     // --- GET /health ---
     if (method === 'GET' && url === '/health') {
       json(res, 200, { status: 'ok' }); return;
+    }
+
+    // --- GET /sessions/events --- (SSE stream for session busy/idle status changes)
+    if (method === 'GET' && url === '/sessions/events') {
+      res.writeHead(200, {
+        'content-type':  'text/event-stream',
+        'cache-control': 'no-cache',
+        'connection':    'keep-alive',
+      });
+      res.write(sseComment('status stream open'));
+      // Send current busy state so the client is up-to-date immediately.
+      for (const sessionId of activeSessions.keys()) {
+        res.write(sseEvent('session-busy', { sessionId, busy: true }));
+      }
+      statusListeners.add(res);
+      req.on('close', () => { statusListeners.delete(res); });
+      return; // keep connection open
     }
 
     // --- GET /providers ---
@@ -251,6 +279,7 @@ export function createWebServer(deps: WebServerDeps) {
 
       const active = { subs: new Set<ServerResponse>([res]), buffer: [] as string[], ac };
       activeSessions.set(targetId, active);
+      broadcastStatus(targetId, true);
 
       const broadcast = (s: string): void => {
         active.buffer.push(s);
@@ -302,6 +331,7 @@ export function createWebServer(deps: WebServerDeps) {
         broadcast(sseEvent('error', { type: 'error', error: String(e) }));
       } finally {
         activeSessions.delete(targetId);
+        broadcastStatus(targetId, false);
         for (const sub of active.subs) { sub.end(); }
       }
       return;
@@ -465,6 +495,10 @@ export function createWebServer(deps: WebServerDeps) {
       for (const sub of active.subs) sub.end();
     }
     activeSessions.clear();
+
+    // Close all status stream connections.
+    for (const res of statusListeners) res.end();
+    statusListeners.clear();
 
     // Resolve all pending prompts so callers don't hang.
     for (const resolver of pendingPrompts.values()) resolver('');

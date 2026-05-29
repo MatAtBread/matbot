@@ -20,6 +20,8 @@ let currentSessionId = null;
 let sending = false;
 let sendingForSession = null; // session ID that owns the current sending = true state
 let stopRequested = false;   // true once the user has clicked stop for the current turn
+const busySessions   = new Set();
+const unreadSessions = new Set();
 
 // ── Elements ──────────────────────────────────────────────────────────────────
 
@@ -484,7 +486,10 @@ function renderSessions(sessions) {
   for (const s of sessions) {
     const label = (s.title || s.preview || s.id.slice(0, 8)).slice(0, 44);
     const el = document.createElement('div');
-    el.className = 'session-item' + (s.id === currentSessionId ? ' active' : '');
+    el.className = 'session-item' +
+      (s.id === currentSessionId ? ' active' : '') +
+      (busySessions.has(s.id) ? ' busy' : '') +
+      (!busySessions.has(s.id) && s.id !== currentSessionId && unreadSessions.has(s.id) ? ' unread' : '');
     el.dataset.sid = s.id;
 
     const labelEl = document.createElement('span');
@@ -674,6 +679,8 @@ function renderSession(session, startIdx) {
 async function openSession(id) {
   closeSidebar();
   currentSessionId = id;
+  unreadSessions.delete(id);
+  sessionListEl.querySelector('[data-sid="' + id + '"]')?.classList.remove('unread');
   location.hash = id;
   // Reset button state for the incoming session; watchUntilDone will re-lock if it's busy.
   setSending(false, id);
@@ -1124,6 +1131,29 @@ async function init() {
   providerSel.addEventListener('change', () => {
     localStorage.setItem(LS_PROVIDER, providerSel.value);
   });
+
+  // Subscribe to server-pushed session busy/idle events.
+  (function connectStatusStream() {
+    const es = new EventSource('/sessions/events');
+    es.addEventListener('session-busy', e => {
+      const { sessionId, busy } = JSON.parse(e.data);
+      const item = sessionListEl.querySelector('[data-sid="' + sessionId + '"]');
+      if (busy) {
+        busySessions.add(sessionId);
+        unreadSessions.delete(sessionId);
+        if (item) { item.classList.add('busy'); item.classList.remove('unread'); }
+      } else {
+        busySessions.delete(sessionId);
+        if (sessionId !== currentSessionId) {
+          unreadSessions.add(sessionId);
+          if (item) { item.classList.remove('busy'); item.classList.add('unread'); }
+        } else {
+          if (item) item.classList.remove('busy');
+        }
+      }
+    });
+    es.onerror = () => { es.close(); setTimeout(connectStatusStream, 3000); };
+  })();
 
   renderSessions(sessions);
   const fragmentId = location.hash.slice(1);

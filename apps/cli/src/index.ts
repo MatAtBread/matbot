@@ -299,76 +299,6 @@ async function runTurn(
   return updated;
 }
 
-// ── Session picker ─────────────────────────────────────────────────────────────
-
-async function pickSession(store: Store<Session>): Promise<Session | null> {
-  if (!process.stdin.isTTY) return null;
-
-  const { items } = await store.query({});
-  if (items.length === 0) return null;
-
-  const sessions = items
-    .map(i => i.doc)
-    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-
-  const label = (s: Session): string => {
-    const when   = new Date(s.updatedAt).toLocaleString();
-    const hidden = s.status === 'archived' ? '[hidden] ' : '';
-    if (s.title) return `${when}  ${hidden}${s.title}`;
-    const first    = s.messages.find(m => m.role === 'user');
-    const textPart = first?.content.find((c): c is { type: 'text'; text: string } => c.type === 'text');
-    const preview  = textPart?.text ?? s.id;
-    return `${when}  ${hidden}${preview.length > 55 ? preview.slice(0, 55) + '…' : preview}`;
-  };
-
-  const options = ['New conversation', ...sessions.map(label)];
-  let cursor    = 0;
-
-  const render = (first: boolean): void => {
-    if (!first) process.stderr.write(`\x1b[${options.length}A`);
-    for (let i = 0; i < options.length; i++) {
-      const archived = i > 0 && sessions[i - 1]?.status === 'archived';
-      const pre  = archived ? '\x1b[2m' : '';
-      const post = archived ? '\x1b[0m' : '';
-      process.stderr.write(`\x1b[2K${i === cursor ? '> ' : '  '}${pre}${options[i]!}${post}\n`);
-    }
-  };
-
-  process.stdin.setRawMode(true);
-  process.stdin.resume();
-  render(true);
-
-  return new Promise<Session | null>(resolve => {
-    const cleanup = (): void => {
-      process.stdin.off('data', onData);
-      process.stdin.setRawMode(false);
-      process.stdin.pause();
-    };
-
-    const onData = (data: Buffer): void => {
-      const key = data.toString();
-      if (key === '\x1b[A') {
-        cursor = Math.max(0, cursor - 1);
-        render(false);
-      } else if (key === '\x1b[B') {
-        cursor = Math.min(options.length - 1, cursor + 1);
-        render(false);
-      } else if (key === '\r' || key === '\n') {
-        cleanup();
-        process.stderr.write(`\x1b[${options.length}A\x1b[J`);
-        process.stderr.write(`  ${options[cursor]!}\n\n`);
-        resolve(cursor === 0 ? null : (sessions[cursor - 1] ?? null));
-      } else if (key === '\x03') {
-        cleanup();
-        process.stderr.write('\n');
-        process.exit(0);
-      }
-    };
-
-    process.stdin.on('data', onData);
-  });
-}
-
 // ── Main ───────────────────────────────────────────────────────────────────────
 
 function makePluginSettings(settingsDir: string, pluginName: string): PluginSettings {
@@ -407,7 +337,7 @@ function makePluginSettings(settingsDir: string, pluginName: string): PluginSett
 }
 
 async function main(): Promise<void> {
-  const serverMode = process.argv[2] === 'serve';
+  const serverMode = process.argv[2] === 'start';
 
   // ── install subcommand ────────────────────────────────────────────────────
   if (process.argv[2] === 'install') {
@@ -620,9 +550,8 @@ async function main(): Promise<void> {
     }
     session = existing;
   } else {
-    const picked = argPrompt === undefined ? await pickSession(store) : null;
-    session = picked ?? createSession({ ownerPrincipal: principal });
-    if (!picked && opts.system) {
+    session = createSession({ ownerPrincipal: principal });
+    if (opts.system) {
       session = appendMessage(session, createMessage({
         role:    'system',
         content: [{ type: 'text', text: opts.system }],
