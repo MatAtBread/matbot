@@ -24,6 +24,7 @@ let stopRequested = false;   // true once the user has clicked stop for the curr
 // ── Elements ──────────────────────────────────────────────────────────────────
 
 const messagesEl     = document.getElementById('messages');
+const sessionsBanner = document.getElementById('sessions-banner');
 const sessionListEl  = document.getElementById('session-list');
 const chatHeaderEl   = document.getElementById('chat-header');
 const chatTitleEl    = document.getElementById('chat-title');
@@ -107,8 +108,18 @@ function parseSSEChunk(text) {
 
 // ── API ───────────────────────────────────────────────────────────────────────
 
-async function apiListSessions()  { const r = await fetch('/sessions');        return r.ok ? r.json() : []; }
-async function apiGetSession(id)  { const r = await fetch('/sessions/'+id);    return r.ok ? r.json() : null; }
+async function apiListSessions() {
+  try {
+    const sessions = await callTool('session_list', {});
+    sessionsBanner.style.display = 'none';
+    return sessions;
+  } catch {
+    sessionsBanner.style.display = 'flex';
+    return [];
+  }
+}
+async function apiGetSession(id)  { try { return await callTool('session_get', { sessionId: id }); } catch { return null; } }
+async function apiSessionBusy(id) { try { const r = await fetch('/sessions/' + id); return r.ok ? (await r.json()).busy : false; } catch { return false; } }
 async function apiListProviders() { const r = await fetch('/providers');        return r.ok ? r.json() : []; }
 
 // ── Tool API ──────────────────────────────────────────────────────────────────
@@ -340,8 +351,25 @@ async function loadFiles() {
     const files = Array.isArray(data) ? data : (data?.files ?? []);
     renderFiles(files);
   } catch (e) {
-    console.error('loadFiles failed:', e);
-    renderFiles([]);
+    const msg = String(e);
+    if (msg.includes('not found') || msg.includes('404')) {
+      const el = document.getElementById('file-list');
+      if (el) {
+        el.innerHTML = '';
+        const btn = document.createElement('button');
+        btn.style.cssText = 'display:block;margin:6px 10px;padding:4px 12px;font-size:0.86em;color:#fff;background:#d97706;border:none;border-radius:5px;cursor:pointer;font-family:inherit;font-weight:500;';
+        btn.textContent = 'Enable workspace';
+        btn.onmouseover = () => { btn.style.background = '#b45309'; };
+        btn.onmouseout  = () => { btn.style.background = '#d97706'; };
+        btn.onclick = () => {
+          inputEl.value = 'Please discover local plugins and add the workspace plugin to enable file management.';
+          sendMessage();
+        };
+        el.appendChild(btn);
+      }
+    } else {
+      renderFiles([]);
+    }
   }
 }
 
@@ -649,12 +677,12 @@ async function openSession(id) {
   location.hash = id;
   // Reset button state for the incoming session; watchUntilDone will re-lock if it's busy.
   setSending(false, id);
-  const [sessions, session] = await Promise.all([apiListSessions(), apiGetSession(id)]);
+  const [sessions, session, busy] = await Promise.all([apiListSessions(), apiGetSession(id), apiSessionBusy(id)]);
   renderSessions(sessions);
   if (session) {
     renderSession(session);
     if (chatHeaderEl) chatTitleEl.textContent = session.title ?? '';
-    if (session.busy) {
+    if (busy) {
       const renderedCount = session.messages.filter(m => m.role !== 'system').length;
       joinSessionStream(id, renderedCount);
     }
@@ -1011,6 +1039,11 @@ async function sendMessage() {
 }
 
 sendBtn.onclick = () => { if (sending) requestStop(); else sendMessage(); };
+
+document.getElementById('sessions-enable-btn').onclick = () => {
+  inputEl.value = 'Discover the local plugins and add the sessions plugin to enable persistent conversations.';
+  sendMessage();
+};
 
 inputEl.addEventListener('keydown', e => {
   if (e.key === 'Enter' && e.shiftKey) { e.preventDefault(); sendMessage(); }

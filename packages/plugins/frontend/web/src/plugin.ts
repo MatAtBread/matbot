@@ -2,7 +2,6 @@ import type { MatbotPlugin, MatbotServices } from '@matatbread/matbot-plugin-api
 import { PLUGIN_API_VERSION }                from '@matatbread/matbot-plugin-api';
 import { resolveProviderFactory }            from '@matatbread/matbot-core';
 import { createWebServer }                   from './server.js';
-import { makeSessionTools }                  from './tools/session.js';
 import process                               from 'node:process';
 
 let webServer: Awaited<ReturnType<typeof createWebServer>> | undefined;
@@ -16,10 +15,6 @@ export const plugin: MatbotPlugin = {
 
     const sessions = services.sessions;
     if (!sessions) throw new Error('frontend-web requires services.sessions');
-
-    for (const tool of makeSessionTools(sessions)) {
-      services.tools.register(tool);
-    }
 
     const providers = new Map(
       [...services.providers.values()]

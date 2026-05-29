@@ -1,7 +1,68 @@
 import type { Tool, ToolEvent, Session, Store } from '@matatbread/matbot-plugin-api';
 
+function sessionPreview(session: Session): string {
+  const first = session.messages.find(m => m.role === 'user');
+  const text  = first?.content.find(
+    (c): c is { type: 'text'; text: string } => c.type === 'text',
+  )?.text ?? '';
+  return text.length > 60 ? `${text.slice(0, 60)}…` : text;
+}
+
 export function makeSessionTools(store: Store<Session>): readonly Tool[] {
-  return [makeRenameTool(store), makeHideTool(store)];
+  return [makeListTool(store), makeGetTool(store), makeRenameTool(store), makeHideTool(store)];
+}
+
+function makeListTool(store: Store<Session>): Tool {
+  return {
+    name:        'session_list',
+    description: 'List conversation sessions.',
+    inputSchema: {
+      type:       'object',
+      properties: {
+        includeArchived: { type: 'boolean', description: 'Include archived sessions. Default false.' },
+      },
+    },
+    executor: {
+      async *execute(input: unknown): AsyncIterable<ToolEvent> {
+        const { includeArchived } = (input ?? {}) as { includeArchived?: boolean };
+        const { items } = await store.query(
+          includeArchived ? {} : { filter: { field: 'status', op: 'neq', value: 'archived' } },
+        );
+        const sorted = items.slice().sort((a, b) => b.doc.updatedAt.localeCompare(a.doc.updatedAt));
+        yield {
+          type:  'result',
+          value: sorted.map(({ doc: s }) => ({
+            id:        s.id,
+            title:     s.title,
+            preview:   sessionPreview(s),
+            updatedAt: s.updatedAt,
+          })),
+        };
+      },
+    },
+  };
+}
+
+function makeGetTool(store: Store<Session>): Tool {
+  return {
+    name:        'session_get',
+    description: 'Get a conversation session by ID.',
+    inputSchema: {
+      type:       'object',
+      required:   ['sessionId'],
+      properties: {
+        sessionId: { type: 'string', description: 'ID of the session to retrieve.' },
+      },
+    },
+    executor: {
+      async *execute(input: unknown): AsyncIterable<ToolEvent> {
+        const { sessionId } = input as { sessionId: string };
+        const session = await store.get(sessionId);
+        if (!session) { yield { type: 'error', message: `Session "${sessionId}" not found.` }; return; }
+        yield { type: 'result', value: session };
+      },
+    },
+  };
 }
 
 function makeRenameTool(store: Store<Session>): Tool {

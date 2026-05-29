@@ -299,6 +299,16 @@ importers:
         specifier: 'catalog:'
         version: 5.9.3
 
+  packages/plugins/sessions:
+    dependencies:
+      '@matatbread/matbot-plugin-api':
+        specifier: workspace:*
+        version: link:../../core/plugin-api
+    devDependencies:
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
+
   packages/plugins/skills:
     dependencies:
       '@matatbread/matbot-memory-types':

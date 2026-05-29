@@ -101,14 +101,6 @@ function static200(res: ServerResponse, contentType: string, body: string): void
   res.end(body);
 }
 
-function sessionPreview(session: Session): string {
-  const first = session.messages.find(m => m.role === 'user');
-  const text  = first?.content.find(
-    (c): c is { type: 'text'; text: string } => c.type === 'text',
-  )?.text ?? '';
-  return text.length > 60 ? `${text.slice(0, 60)}…` : text;
-}
-
 export function createWebServer(deps: WebServerDeps) {
   const origin = deps.cors ?? '*';
 
@@ -177,30 +169,10 @@ export function createWebServer(deps: WebServerDeps) {
       json(res, 200, [...deps.configs.keys()]); return;
     }
 
-    // --- GET /sessions ---
-    if (method === 'GET' && url === '/sessions') {
-      const { items } = await deps.store.query({
-        filter: { field: 'status', op: 'neq', value: 'archived' },
-      });
-      const sorted = items
-        .slice()
-        .sort((a, b) => b.doc.updatedAt.localeCompare(a.doc.updatedAt));
-      json(res, 200, sorted.map(({ doc: s }) => ({
-        id:        s.id,
-        title:     s.title,
-        preview:   sessionPreview(s),
-        updatedAt: s.updatedAt,
-      })));
-      return;
-    }
-
-    // --- GET /sessions/:id ---
-    const sessionGetMatch = /^\/sessions\/([^/]+)$/.exec(url);
-    if (method === 'GET' && sessionGetMatch) {
-      const session = await deps.store.get(sessionGetMatch[1]!);
-      if (!session) { json(res, 404, { error: 'Session not found' }); return; }
-      json(res, 200, { ...session, busy: activeSessions.has(session.id) });
-      return;
+    // --- GET /sessions/:id --- (status only — busy is server-internal state, not session data)
+    const sessionStatusMatch = /^\/sessions\/([^/]+)$/.exec(url);
+    if (method === 'GET' && sessionStatusMatch) {
+      json(res, 200, { busy: activeSessions.has(sessionStatusMatch[1]!) }); return;
     }
 
     // --- POST /sessions ---
