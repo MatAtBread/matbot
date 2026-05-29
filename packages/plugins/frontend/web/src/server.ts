@@ -14,7 +14,8 @@ export interface WebServerDeps {
   providers:   Map<string, ProviderAdapter>;    // adapter name → adapter
   configs:     ReadonlyMap<string, ProviderConfig>;     // provider config name → config
   vault:       Vault;
-  loadPlugin:  (specifier: string) => Promise<void>;
+  loadPlugin:   (specifier: string) => Promise<void>;
+  unloadPlugin: (specifier: string) => Promise<void>;
   tools?:          ToolRegistry;
   hooks?:          HookRegistry;
   systemContext?:  SystemContextRegistry;
@@ -147,7 +148,8 @@ export function createWebServer(deps: WebServerDeps) {
       session:    stubSession,
       principal:  DEFAULT_PRINCIPAL,
       signal:     ac.signal,
-      loadPlugin: deps.loadPlugin,
+      loadPlugin:   deps.loadPlugin,
+      unloadPlugin: deps.unloadPlugin,
       prompt:     (q: string, def?: string) => def !== undefined
         ? Promise.resolve(def)
         : Promise.reject(new Error(`Non-interactive context: "${q}"`)),
@@ -320,6 +322,7 @@ export function createWebServer(deps: WebServerDeps) {
           signal:         ac.signal,
           prompt:         promptFn,
           loadPlugin:     deps.loadPlugin,
+          unloadPlugin:   deps.unloadPlugin,
         })) {
           broadcast(sseEvent(event.type, event));
         }
@@ -483,5 +486,22 @@ export function createWebServer(deps: WebServerDeps) {
     json(res, 404, { error: 'Not found' });
   }
 
-  return server;
+  async function close(): Promise<void> {
+    // Abort and drain all active streaming sessions.
+    for (const active of activeSessions.values()) {
+      active.ac.abort();
+      for (const sub of active.subs) sub.end();
+    }
+    activeSessions.clear();
+
+    // Resolve all pending prompts so callers don't hang.
+    for (const resolver of pendingPrompts.values()) resolver('');
+    pendingPrompts.clear();
+
+    await new Promise<void>((resolve, reject) =>
+      server.close(err => (err ? reject(err) : resolve())),
+    );
+  }
+
+  return { server, close };
 }

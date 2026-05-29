@@ -1,14 +1,25 @@
 import type { Session, Principal, SystemContextContributor, SystemContextRegistry } from './types.js';
 
-export class SystemContextRegistryImpl implements SystemContextRegistry {
-  private readonly _contributors: SystemContextContributor[] = [];
+interface TaggedContributor {
+  fn:          SystemContextContributor;
+  pluginName?: string;
+}
 
-  register(contributor: SystemContextContributor): void {
-    this._contributors.push(contributor);
+export class SystemContextRegistryImpl implements SystemContextRegistry {
+  private readonly _contributors: TaggedContributor[] = [];
+
+  register(contributor: SystemContextContributor, pluginName?: string): void {
+    this._contributors.push({ fn: contributor, ...(pluginName !== undefined ? { pluginName } : {}) });
+  }
+
+  removeByPlugin(pluginName: string): void {
+    for (let i = this._contributors.length - 1; i >= 0; i--) {
+      if (this._contributors[i]?.pluginName === pluginName) this._contributors.splice(i, 1);
+    }
   }
 
   async build(ctx: { session: Session; principal: Principal; signal: AbortSignal }): Promise<string | null> {
-    const parts = (await Promise.all(this._contributors.map(c => c(ctx))))
+    const parts = (await Promise.all(this._contributors.map(c => c.fn(ctx))))
       .filter((s): s is string => typeof s === 'string' && s.length > 0);
     return parts.length > 0 ? parts.join('\n\n') : null;
   }

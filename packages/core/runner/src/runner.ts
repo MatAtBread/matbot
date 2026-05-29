@@ -22,6 +22,7 @@ export interface RunSessionOpts {
   /** Supply a prompt implementation to allow tools to ask interactive questions. */
   prompt?:        (question: string, defaultValue?: string) => Promise<string>;
   loadPlugin:     (specifier: string) => Promise<void>;
+  unloadPlugin:   (specifier: string) => Promise<void>;
 }
 
 export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineEvent> {
@@ -203,8 +204,9 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
 
       const toolCtx: ToolContext = {
         callId: tc.id, session, principal: config.principal, signal,
-        prompt: promptFn,
-        loadPlugin: opts.loadPlugin,
+        prompt:       promptFn,
+        loadPlugin:   opts.loadPlugin,
+        unloadPlugin: opts.unloadPlugin,
         ...(opts.workdir     !== undefined ? { workdir:     opts.workdir     } : {}),
         ...(opts.configPath  !== undefined ? { configPath:  opts.configPath  } : {}),
         ...(opts.files       !== undefined ? { files:       opts.files       } : {}),

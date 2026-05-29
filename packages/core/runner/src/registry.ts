@@ -1,9 +1,10 @@
-import type { Tool, ToolRegistry } from './types.js';
+import type { Tool, ToolRegistry, Hook, HookPoint, HookContext } from './types.js';
 import type {
   MatbotPlugin, MatbotServices,
   ProviderAdapterFactory, StoreFactory, FrontendFactory,
 } from './plugin.js';
 import { PLUGIN_API_VERSION } from './plugin.js';
+import { HookRegistry } from './hooks.js';
 
 // ── Internal state ────────────────────────────────────────────────────────────
 
@@ -15,6 +16,8 @@ const state = {
   toolRegistry:    undefined as ToolRegistry | undefined,
   frontend:        undefined as FrontendFactory | undefined,
   frontendPlugin:  undefined as string | undefined,
+  serviceKeys:     new Map<string, string[]>(),  // pluginName → ServiceMap keys it registered
+  specifierToName: new Map<string, string>(),    // resolved specifier → plugin name
 };
 
 // ── Version check ─────────────────────────────────────────────────────────────
@@ -40,7 +43,7 @@ function checkApiVersion(plugin: MatbotPlugin): void {
 
 // ── Registration ──────────────────────────────────────────────────────────────
 
-export function registerPlugin(plugin: MatbotPlugin): void {
+export function registerPlugin(plugin: MatbotPlugin, specifier?: string): void {
   checkApiVersion(plugin);
 
   if (state.plugins.some(p => p.name === plugin.name)) {
@@ -86,6 +89,9 @@ export function registerPlugin(plugin: MatbotPlugin): void {
   if (plugin.frontend !== undefined) {
     state.frontend = plugin.frontend;
   }
+  if (specifier !== undefined) {
+    state.specifierToName.set(specifier, plugin.name);
+  }
 }
 
 // ── Resolution ────────────────────────────────────────────────────────────────
@@ -126,11 +132,16 @@ export function getFrontendFactory(): FrontendFactory | undefined {
   return state.frontend;
 }
 
-// ── Lifecycle ─────────────────────────────────────────────────────────────────
-
 export function getRegisteredFrontendPlugin(): string | undefined {
   return state.frontendPlugin;
 }
+
+/** Resolve a loaded plugin's name from the specifier used to load it. */
+export function getPluginNameForSpecifier(specifier: string): string | undefined {
+  return state.specifierToName.get(specifier);
+}
+
+// ── Lifecycle ─────────────────────────────────────────────────────────────────
 
 /** Run setup() for a single plugin. Called by loadPlugins immediately after registration. */
 export async function setupPlugin(plugin: MatbotPlugin, services: MatbotServices): Promise<void> {
@@ -139,8 +150,25 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotServices
     ...services,
     tools: {
       register(tool: Tool) { services.tools.register({ ...tool, pluginName: plugin.name }); },
-      resolve: (name: string) => services.tools.resolve(name),
-      list:    ()             => services.tools.list(),
+      resolve:       (name: string) => services.tools.resolve(name),
+      list:          ()             => services.tools.list(),
+      removeByPlugin:(name: string) => services.tools.removeByPlugin(name),
+    },
+    hooks: {
+      register(hook: Hook) { services.hooks.register({ ...hook, pluginName: plugin.name }); },
+      removeByPlugin: (name: string)                      => services.hooks.removeByPlugin(name),
+      run:            (point: HookPoint, ctx: HookContext) => services.hooks.run(point, ctx),
+    } as unknown as HookRegistry,
+    systemContext: {
+      register(contributor) { services.systemContext.register(contributor, plugin.name); },
+      removeByPlugin: (name: string) => services.systemContext.removeByPlugin(name),
+      build:          (ctx)          => services.systemContext.build(ctx),
+    },
+    register(key, svc) {
+      const keys = state.serviceKeys.get(plugin.name) ?? [];
+      keys.push(key as string);
+      state.serviceKeys.set(plugin.name, keys);
+      services.register(key, svc);
     },
     registerFrontend() { state.frontendPlugin = plugin.name; },
   };
@@ -148,6 +176,44 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotServices
     scopedServices.tools.register(tool);
   }
   await plugin.setup?.(scopedServices);
+}
+
+/** Tear down and fully unload a single plugin, removing all its registered contributions. */
+export async function unloadPlugin(pluginName: string, services: MatbotServices): Promise<void> {
+  const idx = state.plugins.findIndex(p => p.name === pluginName);
+  if (idx === -1) return;
+
+  const plugin = state.plugins[idx]!;
+
+  try {
+    await plugin.teardown?.();
+  } catch (e) {
+    console.error(`[matbot] teardown error in plugin "${pluginName}":`, e);
+  }
+
+  services.tools.removeByPlugin(pluginName);
+  services.hooks.removeByPlugin(pluginName);
+  services.systemContext.removeByPlugin(pluginName);
+
+  for (const key of state.serviceKeys.get(pluginName) ?? []) {
+    services.unregisterService?.(key);
+  }
+  state.serviceKeys.delete(pluginName);
+
+  for (const type of Object.keys(plugin.providers ?? {})) state.providers.delete(type);
+  for (const type of Object.keys(plugin.storage   ?? {})) state.storage.delete(type);
+
+  if (state.frontendPlugin === pluginName) {
+    state.frontend      = undefined;
+    state.frontendPlugin = undefined;
+  }
+
+  for (const [spec, name] of state.specifierToName) {
+    if (name === pluginName) state.specifierToName.delete(spec);
+  }
+
+  state.plugins.splice(idx, 1);
+  console.log(`[matbot] Unloaded plugin "${pluginName}"`);
 }
 
 /** Run each plugin's teardown() in reverse-registration order. Errors are logged, not thrown. */
@@ -170,4 +236,6 @@ export function _resetRegistry(): void {
   state.toolRegistry    = undefined;
   state.frontend        = undefined;
   state.frontendPlugin  = undefined;
+  state.serviceKeys.clear();
+  state.specifierToName.clear();
 }

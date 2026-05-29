@@ -11,6 +11,11 @@ if (crypto && typeof crypto.randomUUID !== 'function') {
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
+// localStorage keys
+const LS_FONT_SIZE = 'fontSize';
+const LS_PROVIDER = 'provider';
+const LS_SIDEBAR = 'sidebarSections';
+
 let currentSessionId = null;
 let sending = false;
 let sendingForSession = null; // session ID that owns the current sending = true state
@@ -35,11 +40,10 @@ if (sidebarOverlay) sidebarOverlay.onclick = closeSidebar;
 
 // ── Sidebar section collapse / expand ──────────────────────────────────────────
 
-const SIDEBAR_KEY = 'matbot:sidebar-sections';
 
 function loadSidebarState() {
   try {
-    const raw = localStorage.getItem(SIDEBAR_KEY);
+    const raw = localStorage[LS_SIDEBAR];
     if (!raw) return;
     const state = JSON.parse(raw);
     for (const [name, collapsed] of Object.entries(state)) {
@@ -54,7 +58,7 @@ function saveSidebarState() {
   for (const el of document.querySelectorAll('.sidebar-section[data-section]')) {
     state[el.dataset.section] = el.classList.contains('collapsed');
   }
-  localStorage.setItem(SIDEBAR_KEY, JSON.stringify(state));
+  localStorage.setItem(LS_SIDEBAR, JSON.stringify(state));
 }
 
 document.getElementById('sidebar').addEventListener('click', (e) => {
@@ -1059,6 +1063,18 @@ async function init() {
     marked.use({ breaks: true, gfm: true });
   }
 
+  {
+    const MIN = 10, MAX = 22;
+    function adjust(delta) {
+      const cur = parseFloat(getComputedStyle(document.body).fontSize);
+      const next = Math.min(MAX, Math.max(MIN, Math.round(cur) + delta));
+      document.documentElement.style.setProperty('--fs', next + 'px');
+      localStorage.setItem(LS_FONT_SIZE, next);
+    }
+    document.getElementById('fs-down').addEventListener('click', () => adjust(-1));
+    document.getElementById('fs-up').addEventListener('click',   () => adjust(+1));
+  };
+
   const [sessions, providers] = await Promise.all([apiListSessions(), apiListProviders()]);
 
   for (const p of providers) {
@@ -1067,13 +1083,13 @@ async function init() {
     providerSel.appendChild(opt);
   }
 
-  const savedProvider = localStorage.getItem('matbot:provider');
+  const savedProvider = localStorage[LS_PROVIDER];
   if (savedProvider && providers.includes(savedProvider)) {
     providerSel.value = savedProvider;
   }
 
   providerSel.addEventListener('change', () => {
-    localStorage.setItem('matbot:provider', providerSel.value);
+    localStorage.setItem(LS_PROVIDER, providerSel.value);
   });
 
   renderSessions(sessions);

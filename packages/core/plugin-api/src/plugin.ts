@@ -58,11 +58,17 @@ export interface MatbotServices {
   /** Hot-load a plugin by specifier into the running process. */
   loadPlugin(specifier: string): Promise<void>;
 
+  /** Hot-unload a plugin by specifier, removing its tools, hooks, and system context contributions. */
+  unloadPlugin(specifier: string): Promise<void>;
+
   /** Look up a service registered by a plugin. Key is the plugin's types package name. */
   get<K extends keyof ServiceMap>(key: K): ServiceMap[K] | undefined;
 
   /** Register a service implementation. Called by a plugin's setup() to advertise itself. */
   register<K extends keyof ServiceMap>(key: K, service: ServiceMap[K]): void;
+
+  /** Remove a service entry previously registered by a plugin. */
+  unregisterService?(key: string): void;
 
   /** Declare that this plugin provides a frontend. The runtime records the plugin name implicitly. */
   registerFrontend?(): void;

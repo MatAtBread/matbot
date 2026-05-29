@@ -3,10 +3,9 @@ import { PLUGIN_API_VERSION }                from '@matatbread/matbot-plugin-api
 import { resolveProviderFactory }            from '@matatbread/matbot-core';
 import { createWebServer }                   from './server.js';
 import { makeSessionTools }                  from './tools/session.js';
-import type { Server }                       from 'node:http';
 import process                               from 'node:process';
 
-let server: Server | undefined;
+let webServer: Awaited<ReturnType<typeof createWebServer>> | undefined;
 
 export const plugin: MatbotPlugin = {
   name:       'frontend-web',
@@ -41,12 +40,13 @@ export const plugin: MatbotPlugin = {
       );
     });
 
-    server = createWebServer({
+    webServer = createWebServer({
       store:         sessions,
       providers,
       configs:       /*new Map(*/services.providers/*)*/,
       vault:         services.vault,
       loadPlugin:    services.loadPlugin.bind(services),
+      unloadPlugin:  services.unloadPlugin.bind(services),
       tools:         services.tools,
       hooks:         services.hooks,
       systemContext: services.systemContext,
@@ -58,8 +58,8 @@ export const plugin: MatbotPlugin = {
     const port = Number(process.env['MATBOT_WEB_PORT'] ?? 19778); // 19778 is "MB" in hex, a cute easter egg :)
 
     await new Promise<void>((resolve, reject) => {
-      server!.once('error', reject);
-      server!.listen(port, '0.0.0.0', () => {
+      webServer!.server.once('error', reject);
+      webServer!.server.listen(port, '0.0.0.0', () => {
         process.stderr.write(`[frontend-web] http://localhost:${port}\n`);
         resolve();
       });
@@ -67,9 +67,6 @@ export const plugin: MatbotPlugin = {
   },
 
   async teardown() {
-    await new Promise<void>((resolve, reject) => {
-      if (!server) { resolve(); return; }
-      server.close(err => (err ? reject(err) : resolve()));
-    });
+    if (webServer) await webServer.close();
   },
 };

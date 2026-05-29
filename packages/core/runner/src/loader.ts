@@ -16,14 +16,25 @@ import { registerPlugin, setupPlugin } from './registry.js';
  * Each module must export either:
  *   export const plugin: MatbotPlugin  (named export, preferred)
  *   export default { plugin: MatbotPlugin }  (default export)
+ *
+ * @param bustCache When true, each specifier is resolved to a file URL and
+ *   a unique query parameter is appended before importing. This forces the
+ *   JS engine to bypass its module cache and re-evaluate the module from
+ *   disk — necessary when reloading a plugin whose code may have changed
+ *   since the process started. Has no effect if import.meta.resolve is
+ *   unavailable (older engines / import maps); falls back to the original
+ *   specifier.
  */
 export async function loadPlugins(
   specifiers: readonly string[],
   services:   MatbotServices,
+  bustCache = false,
 ): Promise<void> {
+  const importSpecs = bustCache ? specifiers.map(toFreshUrl) : specifiers;
+
   // Imports run in parallel; registration remains sequential to preserve order.
   const results = await Promise.allSettled(
-    specifiers.map(spec => import(/* @vite-ignore */ spec) as Promise<Record<string, unknown>>),
+    importSpecs.map(spec => import(/* @vite-ignore */ spec) as Promise<Record<string, unknown>>),
   );
 
   for (let i = 0; i < specifiers.length; i++) {
@@ -52,8 +63,19 @@ export async function loadPlugins(
       );
     }
 
-    registerPlugin(plugin);
+    registerPlugin(plugin, spec);
     await setupPlugin(plugin, services);
     console.log(`[matbot] Loaded plugin "${plugin.name}"`);
+  }
+}
+
+/** Append a unique version stamp to force a fresh module evaluation. */
+function toFreshUrl(spec: string): string {
+  try {
+    return `${import.meta.resolve(spec)}?v=${Date.now()}`;
+  } catch {
+    // import.meta.resolve unavailable or spec not yet resolvable — caller will
+    // get the cached module or an import error, same as without busting.
+    return spec;
   }
 }

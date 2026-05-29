@@ -7,6 +7,12 @@ export class ToolRegistryImpl implements ToolRegistry {
     this.tools.set(tool.name, tool);
   }
 
+  removeByPlugin(pluginName: string): void {
+    for (const [name, tool] of this.tools) {
+      if (tool.pluginName === pluginName) this.tools.delete(name);
+    }
+  }
+
   resolve(name: string): Tool | null {
     return this.tools.get(name) ?? null;
   }

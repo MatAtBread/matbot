@@ -129,6 +129,7 @@ type PluginInput =
   | { action: 'list' }
   | { action: 'add';            specifier: string }
   | { action: 'remove';         specifier: string }
+  | { action: 'reload';         specifier: string }
   | { action: 'discover_local' };
 
 // ── Executor ──────────────────────────────────────────────────────────────────
@@ -263,6 +264,13 @@ const executor = {
         return;
       }
 
+      yield { type: 'stdout', chunk: `Deactivating "${specifier}"...\n` };
+      try {
+        await ctx.unloadPlugin(specifier);
+      } catch (e) {
+        yield { type: 'stderr', chunk: `Deactivation failed: ${String(e)}\n` };
+      }
+
       const uninstall = await ctx.prompt(`Also uninstall the npm package? [y/N]`, 'N');
       if (/^y(es)?$/i.test(uninstall.trim())) {
         const pm = await detectPackageManager(projectDir);
@@ -274,7 +282,25 @@ const executor = {
         }
       }
 
-      yield { type: 'result', value: { message: `"${specifier}" removed from config.` } };
+      yield { type: 'result', value: { message: `"${specifier}" removed and deactivated.` } };
+    }
+
+    // ── reload ────────────────────────────────────────────────────────────────
+    if (action === 'reload') {
+      yield { type: 'stdout', chunk: `Reloading "${specifier}"...\n` };
+
+      try {
+        await ctx.unloadPlugin(specifier);
+      } catch (e) {
+        yield { type: 'stderr', chunk: `Unload phase failed: ${String(e)}\n` };
+      }
+
+      try {
+        await ctx.loadPlugin(specifier);
+        yield { type: 'result', value: { message: `"${specifier}" reloaded successfully.` } };
+      } catch (e) {
+        yield { type: 'error', message: `Reload failed during load phase: ${String(e)}` };
+      }
     }
   },
 };
@@ -283,7 +309,7 @@ const executor = {
 
 export const pluginTool: Tool = {
   name:        'plugin',
-  description: 'Manage matbot plugins: list configured plugins, add a new one, remove an existing one, or discover available local plugins.',
+  description: 'Manage matbot plugins: list configured plugins, add a new one, remove an existing one, reload one from disk, or discover available local plugins.',
   requires:    ['filesystem', 'spawn'],
   inputSchema: {
     type:       'object',
@@ -291,8 +317,8 @@ export const pluginTool: Tool = {
     properties: {
       action: {
         type:        'string',
-        enum:        ['list', 'add', 'remove', 'discover_local'],
-        description: 'list: show configured plugins. add: install and register a plugin. remove: deregister and optionally uninstall. discover_local: scan packages/plugins for available local plugins.',
+        enum:        ['list', 'add', 'remove', 'reload', 'discover_local'],
+        description: 'list: show configured plugins. add: install and register a plugin. remove: deregister and optionally uninstall. reload: unload and re-import from disk (picks up code changes without restarting). discover_local: scan packages/plugins for available local plugins.',
       },
       specifier: {
         type:        'string',

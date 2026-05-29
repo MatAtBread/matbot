@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
   <title>matbot</title>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-  <script>(function(){const s=localStorage.getItem('matbot-fs');if(s)document.documentElement.style.setProperty('--fs',s+'px');}());</script>
+  <script>(function(){const s=localStorage.getItem('fontSize');if(s)document.documentElement.style.setProperty('--fs',s+'px');}());</script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     html, body { height: 100%; }
@@ -756,25 +756,12 @@
         <select id="provider-select"></select>
       </div>
       <div id="input-row">
-        <textarea id="input" rows="1" placeholder="Message… (Shift+Enter to send, Enter for newline)"></textarea>
+        <textarea id="input" rows="1" placeholder="Shift+Enter to send, Enter for newline"></textarea>
         <button id="send-btn">▶</button>
       </div>
     </div>
   </main>
 
   <script src="/app.js"></script>
-  <script>
-    (function () {
-      const MIN = 10, MAX = 22, KEY = 'matbot-fs';
-      function adjust(delta) {
-        const cur = parseFloat(getComputedStyle(document.body).fontSize);
-        const next = Math.min(MAX, Math.max(MIN, Math.round(cur) + delta));
-        document.documentElement.style.setProperty('--fs', next + 'px');
-        localStorage.setItem(KEY, next);
-      }
-      document.getElementById('fs-down').addEventListener('click', () => adjust(-1));
-      document.getElementById('fs-up').addEventListener('click',   () => adjust(+1));
-    }());
-  </script>
 </body>
 </html>

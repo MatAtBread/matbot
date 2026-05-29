@@ -167,7 +167,8 @@ export type SystemContextContributor = (ctx: {
 }) => string | null | Promise<string | null>;
 
 export interface SystemContextRegistry {
-  register(contributor: SystemContextContributor): void;
+  register(contributor: SystemContextContributor, pluginName?: string): void;
+  removeByPlugin(pluginName: string): void;
   /** Calls all contributors and joins non-null, non-empty results with double newlines. */
   build(ctx: { session: Session; principal: Principal; signal: AbortSignal }): Promise<string | null>;
 }
@@ -202,8 +203,9 @@ export interface HookContext {
 }
 
 export interface Hook<C extends HookContext = HookContext> {
-  point:     HookPoint;
-  priority?: number;
+  point:       HookPoint;
+  priority?:   number;
+  pluginName?: string;
   handler(ctx: C): Promise<C | void>;
 }
 
@@ -283,6 +285,8 @@ export interface ToolContext {
   prompt(question: string, defaultValue?: string): Promise<string>;
   /** Hot-load a plugin by specifier without restarting the process. */
   loadPlugin(specifier: string): Promise<void>;
+  /** Hot-unload a plugin by specifier, removing its tools, hooks, and system context contributions. */
+  unloadPlugin(specifier: string): Promise<void>;
 }
 
 export interface ToolExecutor {
@@ -376,4 +380,5 @@ export interface ToolRegistry {
   register(tool: Tool): void;
   resolve(name: string): Tool | null;
   list(): readonly Tool[];
+  removeByPlugin(pluginName: string): void;
 }
