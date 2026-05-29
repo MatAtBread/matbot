@@ -469,9 +469,8 @@ export function createWebServer(deps: WebServerDeps) {
       if (!handle) { json(res, 404, { error: 'Not found' }); return; }
 
       res.writeHead(200, {
-        'content-type':   handle.mimeType,
-        'content-length': handle.size,
-        'cache-control':  'no-cache',
+        'content-type':  handle.mimeType,
+        'cache-control': 'no-cache',
         ...corsHeaders(origin),
       });
       for await (const chunk of handle.stream()) {

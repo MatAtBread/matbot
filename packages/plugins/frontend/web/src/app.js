@@ -33,12 +33,46 @@ function closeSidebar() { document.body.classList.remove('sidebar-open'); }
 if (burgerBtn)      burgerBtn.onclick      = () => document.body.classList.toggle('sidebar-open');
 if (sidebarOverlay) sidebarOverlay.onclick = closeSidebar;
 
+// ── Sidebar section collapse / expand ──────────────────────────────────────────
+
+const SIDEBAR_KEY = 'matbot:sidebar-sections';
+
+function loadSidebarState() {
+  try {
+    const raw = localStorage.getItem(SIDEBAR_KEY);
+    if (!raw) return;
+    const state = JSON.parse(raw);
+    for (const [name, collapsed] of Object.entries(state)) {
+      const section = document.querySelector('.sidebar-section[data-section="' + name + '"]');
+      if (section && collapsed) section.classList.add('collapsed');
+    }
+  } catch { /* ignore */ }
+}
+
+function saveSidebarState() {
+  const state = {};
+  for (const el of document.querySelectorAll('.sidebar-section[data-section]')) {
+    state[el.dataset.section] = el.classList.contains('collapsed');
+  }
+  localStorage.setItem(SIDEBAR_KEY, JSON.stringify(state));
+}
+
+document.getElementById('sidebar').addEventListener('click', (e) => {
+  const heading = e.target.closest('.sidebar-heading');
+  if (!heading) return;
+  const section = heading.closest('.sidebar-section');
+  if (!section) return;
+  section.classList.toggle('collapsed');
+  saveSidebarState();
+});
+
+loadSidebarState();
 
 // ── Markdown ──────────────────────────────────────────────────────────────────
 
 function escHtml(s) {
-  return String(s).replace(/[&<>"']/g, c =>
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] ?? c));
+  return String(s).replace(/[&<>\"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', "'": '&#39;' }[c] ?? c));
 }
 
 function md(text) {
@@ -46,7 +80,7 @@ function md(text) {
   if (typeof marked === 'undefined') return '<p>' + escHtml(text) + '</p>';
   const result = marked.parse(text);
   // Open all links in new tab
-  return result.replace(/<a /g, '<a target="_blank" rel="noopener noreferrer" ');
+  return result.replace(/<a /g, '<a target=\"_blank\" rel=\"noopener noreferrer\" ');
 }
 
 // ── SSE parser ────────────────────────────────────────────────────────────────
@@ -177,6 +211,7 @@ async function joinSessionStream(id, renderedCount) {
             if (thinkingContent) { const det = thinkingContent.closest('details'); if (det) det.open = false; }
             if (ev.session?.title && chatHeaderEl) chatTitleEl.textContent = ev.session.title;
             if (turnIn > 0 || turnOut > 0) turnWrap.appendChild(makeTokenStatsBlock(turnIn, turnOut, turnCost, turnCacheRead, turnCacheCreate));
+            loadFiles();
             break outer;
           case 'aborted':
             removeLoading();
@@ -207,6 +242,7 @@ async function joinSessionStream(id, renderedCount) {
     removeLoading();
     setSending(false, id);
     apiListSessions().then(renderSessions);
+    loadFiles();
   }
 }
 
@@ -237,6 +273,72 @@ async function hideSession(id) {
 async function apiNewSession() {
   const r = await fetch('/sessions', { method: 'POST' });
   return r.json();
+}
+
+// ── Workspace files ───────────────────────────────────────────────────────────
+
+function formatSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+function renderFiles(files) {
+  const el = document.getElementById('file-list');
+  if (!el) return;
+  el.innerHTML = '';
+  if (!files || !files.length) {
+    const empty = document.createElement('div');
+    empty.style.cssText = 'color:#9ca3af;font-size:12px;padding:4px 10px;';
+    empty.textContent = '(empty)';
+    el.appendChild(empty);
+    return;
+  }
+  for (const f of files) {
+    const div = document.createElement('div');
+    div.className = 'file-item';
+    div.title = f.path + (f.size !== undefined ? ' (' + formatSize(f.size) + ')' : '');
+    div.onclick = () => { window.open('/workspace/' + f.path, '_blank'); };
+    const nameEl = document.createElement('span');
+    nameEl.className = 'file-name';
+    nameEl.textContent = f.path;
+    div.appendChild(nameEl);
+    if (f.size !== undefined) {
+      const sizeEl = document.createElement('span');
+      sizeEl.className = 'file-size';
+      sizeEl.textContent = formatSize(f.size);
+      div.appendChild(sizeEl);
+    }
+    const actions = document.createElement('div');
+    actions.className = 'file-actions';
+    const delBtn = document.createElement('button');
+    delBtn.className = 'file-action-btn';
+    delBtn.textContent = '\u00d7';
+    delBtn.title = 'Delete';
+    delBtn.onclick = async (e) => {
+      e.stopPropagation();
+      try {
+        await callTool('workspace_delete', { path: f.path });
+        loadFiles();
+      } catch (err) {
+        alert('Delete failed: ' + err.message);
+      }
+    };
+    actions.appendChild(delBtn);
+    div.appendChild(actions);
+    el.appendChild(div);
+  }
+}
+
+async function loadFiles() {
+  try {
+    const data = await callTool('workspace_list', {});
+    const files = Array.isArray(data) ? data : (data?.files ?? []);
+    renderFiles(files);
+  } catch (e) {
+    console.error('loadFiles failed:', e);
+    renderFiles([]);
+  }
 }
 
 async function* streamSubmit(sessionId, content, provider) {
@@ -339,7 +441,7 @@ function makeTokenStatsBlock(inputTokens, outputTokens, costUsd, cacheReadTokens
 
 function showEmpty() {
   messagesEl.innerHTML =
-    '<div class="empty-state">' +
+    '<div class=\"empty-state\">' +
     '<strong>Start a conversation</strong>' +
     '<span>Type a message below to begin.</span>' +
     '</div>';
@@ -553,10 +655,12 @@ async function openSession(id) {
       joinSessionStream(id, renderedCount);
     }
   }
+  loadFiles();
   inputEl.focus();
 }
 
-newBtn.onclick = async () => {
+// Shared: create a new session and navigate to it (used by click + hash).
+async function handleNewSession() {
   closeSidebar();
   try {
     const { id } = await apiNewSession();
@@ -570,7 +674,15 @@ newBtn.onclick = async () => {
   } catch (e) {
     alert('New session failed: ' + e.message);
   }
-};
+}
+
+// Left-click creates a new session in the current tab.
+// Right-click / middle-click on the <a href="#new"> opens in a new tab naturally.
+newBtn.addEventListener('click', async (e) => {
+  if (e.button !== 0) return; // let right-click / middle-click open in new tab
+  e.preventDefault();
+  await handleNewSession();
+});
 
 // ── Form submission ───────────────────────────────────────────────────────────
 
@@ -639,6 +751,7 @@ async function submitFormResponse(sessionId, values) {
           if (thinkingContent) { const det = thinkingContent.closest('details'); if (det) det.open = false; }
           if (ev.session?.title && chatHeaderEl) chatTitleEl.textContent = ev.session.title;
           if (turnIn > 0 || turnOut > 0) turnWrap.appendChild(makeTokenStatsBlock(turnIn, turnOut, turnCost, turnCacheRead, turnCacheCreate));
+          loadFiles();
           break;
         case 'error': {
           removeLoading();
@@ -661,6 +774,7 @@ async function submitFormResponse(sessionId, values) {
     removeLoading();
     setSending(false, sessionId);
     apiListSessions().then(renderSessions);
+    loadFiles();
   }
 }
 
@@ -771,7 +885,7 @@ async function sendMessage() {
         case 'prompt': {
           removeLoading();
           const rawQ       = ev.question ?? '';
-          const choiceMatch = /\[([^/\]]+)\/([^/\]]+)\]\s*$/.exec(rawQ);
+          const choiceMatch = /\[([^\/\]]+)\/([^\/\]]+)\]\s*$/.exec(rawQ);
           const answer = await new Promise(resolve => {
             const block = document.createElement('div');
             block.className = 'prompt-block';
@@ -864,6 +978,7 @@ async function sendMessage() {
           }
           if (ev.session?.title && chatHeaderEl) chatTitleEl.textContent = ev.session.title;
           if (turnIn > 0 || turnOut > 0) turnWrap.appendChild(makeTokenStatsBlock(turnIn, turnOut, turnCost, turnCacheRead, turnCacheCreate));
+          loadFiles();
           break;
 
         case 'error': {
@@ -887,6 +1002,7 @@ async function sendMessage() {
     removeLoading();
     setSending(false, submittingFor);
     apiListSessions().then(renderSessions);
+    loadFiles();
   }
 }
 
@@ -964,16 +1080,23 @@ async function init() {
   const fragmentId = location.hash.slice(1);
   const startId = (fragmentId && sessions.some(s => s.id === fragmentId))
     ? fragmentId : sessions[0]?.id;
-  if (startId) {
+  if (startId === 'new') {
+    await handleNewSession();
+  } else if (startId) {
     await openSession(startId);
   } else {
     showEmpty();
   }
+  loadFiles();
 }
 
-window.addEventListener('hashchange', () => {
+window.addEventListener('hashchange', async () => {
   const id = location.hash.slice(1);
-  if (id && id !== currentSessionId) openSession(id).catch(console.error);
+  if (id === 'new') {
+    await handleNewSession();
+  } else if (id && id !== currentSessionId) {
+    openSession(id).catch(console.error);
+  }
 });
 
 init().catch(console.error);

@@ -50,11 +50,56 @@
       font-weight: 500;
       text-align: left;
       flex-shrink: 0;
+      text-decoration: none;
+      display: block;
     }
     #new-btn:hover { background: #374151; }
-    #session-list {
+    .sidebar-section {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      min-height: 0;
+      border-top: 1px solid #e5e7eb;
+    }
+    .sidebar-section:first-of-type { border-top: none; }
+    .sidebar-section.collapsed {
+      flex: 0 0 auto;
+    }
+    .sidebar-section.collapsed .sidebar-list {
+      display: none;
+    }
+    .sidebar-heading {
+      padding: 8px 14px 2px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: #9ca3af;
+      flex-shrink: 0;
+      cursor: pointer;
+      user-select: none;
+    }
+    .sidebar-heading::before {
+      content: '\25bc';
+      font-size: 8px;
+      margin-right: 5px;
+      display: inline-block;
+      transition: transform 0.15s;
+    }
+    .sidebar-section.collapsed .sidebar-heading::before {
+      transform: rotate(-90deg);
+    }
+    .sidebar-heading:hover { color: #6b7280; }
+    .sidebar-list {
       flex: 1;
       overflow-y: auto;
+      min-height: 0;
+    }
+    #session-list {
+      padding: 4px 8px 8px;
+    }
+    #file-list {
       padding: 4px 8px 8px;
     }
     .session-item {
@@ -91,6 +136,44 @@
     .session-action-btn[title="Rename"] { color: #6b7280; }
     .session-action-btn[title="Hide"] { color: #ef4444; }
     .session-action-btn:hover { background: #d1d5db; color: #374151; }
+
+    .file-item {
+      padding: 4px 10px;
+      font-size: 12px;
+      color: #555;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .file-item:hover { background: #f0f0f2; }
+    .file-name {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .file-size {
+      font-size: 11px;
+      color: #9ca3af;
+      flex-shrink: 0;
+      font-family: 'SF Mono', 'Cascadia Code', ui-monospace, monospace;
+    }
+
+    .file-actions { display: none; flex-shrink: 0; }
+    .file-item:hover .file-actions { display: flex; }
+    .file-action-btn {
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 2px 4px;
+      border-radius: 3px;
+      font-size: 14px;
+      line-height: 1;
+      color: #ef4444;
+    }
+    .file-action-btn:hover { background: #fecaca; }
 
     /* ── Main ──────────────────────────────────────────────────── */
 
@@ -634,8 +717,15 @@
   <div id="sidebar-overlay"></div>
   <nav id="sidebar">
     <h1>matbot</h1>
-    <button id="new-btn">+ New conversation</button>
-    <div id="session-list"></div>
+    <a id="new-btn" href="#new">+ New conversation</a>
+    <div class="sidebar-section" data-section="conversations">
+      <div class="sidebar-heading">Conversations</div>
+      <div id="session-list" class="sidebar-list"></div>
+    </div>
+    <div class="sidebar-section" data-section="files">
+      <div class="sidebar-heading">Files</div>
+      <div id="file-list" class="sidebar-list"></div>
+    </div>
   </nav>
 
   <main id="main">

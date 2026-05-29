@@ -59,9 +59,10 @@ async function collectStream(stream: AsyncIterable<Uint8Array>): Promise<Uint8Ar
   return out;
 }
 
-interface ReadInput  { path: string; encoding?: 'utf8' | 'base64' }
-interface WriteInput { path: string; content: string; encoding?: 'utf8' | 'base64' }
-interface ListInput  { path?: string; recursive?: boolean }
+interface ReadInput   { path: string; encoding?: 'utf8' | 'base64' }
+interface WriteInput  { path: string; content: string; encoding?: 'utf8' | 'base64' }
+interface ListInput   { path?: string; recursive?: boolean }
+interface DeleteInput { path: string }
 
 const workspaceReadTool: Tool = {
   name: 'workspace_read',
@@ -189,6 +190,34 @@ const workspaceListTool: Tool = {
   },
 };
 
+const workspaceDeleteTool: Tool = {
+  name: 'workspace_delete',
+  description: 'Delete a file from the session workspace.',
+  requires:    ['filesystem'],
+  inputSchema: {
+    type:       'object',
+    required:   ['path'],
+    properties: {
+      path: { type: 'string', description: 'Path of the file to delete, relative to the workspace root.' },
+    },
+  },
+  executor: {
+    async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
+      const { path: inputPath } = input as DeleteInput;
+      if (!ctx.files) { yield { type: 'error', message: 'No file store is configured for this session.' }; return; }
+
+      const safe = safePath(inputPath);
+      if (!safe) { yield { type: 'error', message: 'Path escapes the workspace directory.' }; return; }
+
+      const handle = await ctx.files.getByName(safe, WORKSPACE_NS);
+      if (!handle) { yield { type: 'error', message: `File not found: "${safe}"` }; return; }
+
+      await ctx.files.delete(handle.id);
+      yield { type: 'result', value: { path: safe } };
+    },
+  },
+};
+
 export const plugin: MatbotPlugin = {
   name:       'workspace',
   apiVersion: PLUGIN_API_VERSION,
@@ -199,5 +228,5 @@ export const plugin: MatbotPlugin = {
       'read-only downloads at /workspace/<path> on the HTTP server, so you can give the user ' +
       'a direct link to any file you write there.',
   },
-  tools: [workspaceReadTool, workspaceWriteTool, workspaceListTool],
+  tools: [workspaceReadTool, workspaceWriteTool, workspaceListTool, workspaceDeleteTool],
 };
