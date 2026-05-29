@@ -205,6 +205,12 @@ export function createSkillClassifierHook(
 
       if (!verdict.trim().toLowerCase().startsWith('yes')) return;
 
+      const alreadyInjected = ctx.session.messages.some(m =>
+        m.role === 'system' &&
+        m.content.some(c => c.type === 'text' && c.text.startsWith('Injected skill context:')),
+      );
+      if (alreadyInjected) return;
+
       const sessionContexts = ctx.session.contexts.length > 0 ? ctx.session.contexts : ['global'];
       const relevant = getSkills().filter(s => contextsOverlap(s.contexts, sessionContexts));
       if (relevant.length === 0) return;
