@@ -8,8 +8,8 @@
   },
   "scripts": {
     "typecheck": "pnpm -r run typecheck",
-    "cli":       "pnpm --filter @matbot/cli start",
-    "server":    "pnpm --filter @matbot/cli run server"
+    "cli":       "pnpm --filter @matatbread/matbot-cli start",
+    "server":    "pnpm --filter @matatbread/matbot-cli run server"
   },
   "devDependencies": {
     "typescript": "^5.8.0"

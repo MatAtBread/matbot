@@ -17,7 +17,7 @@ memory, and frontends. It is not a product; it is infrastructure.
 ### No provider SDKs
 All LLM communication is plain HTTP using the web-platform `fetch` API.
 Never import `@anthropic-ai/sdk`, `openai`, or any other provider SDK.
-Use the HTTP endpoints directly; stream via SSE parsed with `parseSSE` from `@matbot/providers-base`.
+Use the HTTP endpoints directly; stream via SSE parsed with `parseSSE` from `@matatbread/matbot-providers-base`.
 
 ### No Node-specific primitives in shared packages
 Packages under `packages/` (except those explicitly suffixed `/node`) must run in both Node and
@@ -61,10 +61,10 @@ packages/
     node/        — MemoryExtractorWorker, watchSkillDir
   tools/
     _base/       — tool registry helpers
-    plugin/      — plugin management tool (@matbot/tool-plugin)
-    exec/        — bash tool (@matbot/tool-bash)
-    http/        — http tool (@matbot/tool-http)
-    schedule/    — schedule tool (@matbot/tool-schedule)
+    plugin/      — plugin management tool (@matatbread/matbot-tool-plugin)
+    exec/        — bash tool (@matatbread/matbot-tool-bash)
+    http/        — http tool (@matatbread/matbot-tool-http)
+    schedule/    — schedule tool (@matatbread/matbot-tool-schedule)
   browser/       — OPFS store, WebCrypto vault (browser-only)
 
 apps/
@@ -72,9 +72,9 @@ apps/
 ```
 
 ### Package naming
-- `@matbot/foo` for packages with a single implementation
-- `@matbot/foo-base` for the shared interface/logic layer
-- `@matbot/foo-node` / `@matbot/foo-browser` for platform-specific implementations
+- `@matatbread/matbot-foo` for packages with a single implementation
+- `@matatbread/matbot-foo-base` for the shared interface/logic layer
+- `@matatbread/matbot-foo-node` / `@matatbread/matbot-foo-browser` for platform-specific implementations
 
 ### Dependency direction
 `apps` → `packages/*/node` or `packages/*/browser` → `packages/*/_base` → `packages/core`  
