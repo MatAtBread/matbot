@@ -158,6 +158,20 @@ export interface OutboundMessage {
   metadata?:  Record<string, unknown>;
 }
 
+// ── System context ────────────────────────────────────────────────────────────
+
+export type SystemContextContributor = (ctx: {
+  session:   Session;
+  principal: Principal;
+  signal:    AbortSignal;
+}) => string | null | Promise<string | null>;
+
+export interface SystemContextRegistry {
+  register(contributor: SystemContextContributor): void;
+  /** Calls all contributors and joins non-null, non-empty results with double newlines. */
+  build(ctx: { session: Session; principal: Principal; signal: AbortSignal }): Promise<string | null>;
+}
+
 // ── Pipeline hooks ────────────────────────────────────────────────────────────
 
 export type HookPoint =

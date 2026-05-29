@@ -1,6 +1,6 @@
 import type { Tool, ToolEvent, ToolContext, MatbotPlugin } from '@matatbread/matbot-plugin-api';
-import { getRegisteredPlugins }              from '@matatbread/matbot-core';
-import { readFile, writeFile, access }       from 'node:fs/promises';
+import { getRegisteredPlugins, getRegisteredTools, getRegisteredFrontendPlugin } from '@matatbread/matbot-core';
+import { readFile, writeFile, access, readdir } from 'node:fs/promises';
 import { spawn }                             from 'node:child_process';
 import path                                  from 'node:path';
 import process                               from 'node:process';
@@ -46,6 +46,51 @@ function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// TODO: This is a convenience shim for end users in monorepo setups and is
+// intentionally narrow. It should eventually be replaced with a proper
+// discovery interface — registry lookup, repo scanning, or a plugin marketplace.
+async function discoverLocalPlugins(
+  projectDir: string,
+): Promise<Array<{ specifier: string; name: string; description: string }>> {
+  const pluginsDir = path.join(projectDir, 'packages', 'plugins');
+  try { await access(pluginsDir); } catch { return []; }
+
+  const results: Array<{ specifier: string; name: string; description: string }> = [];
+
+  const scan = async (dir: string, depth: number): Promise<void> => {
+    let entries;
+    try { entries = await readdir(dir, { withFileTypes: true }); } catch { return; }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const sub = path.join(dir, entry.name);
+      try {
+        const pkg = JSON.parse(await readFile(path.join(sub, 'package.json'), 'utf8')) as {
+          name?: string;
+          description?: string;
+          dependencies?: Record<string, string>;
+        };
+        if (pkg.dependencies?.['@matatbread/matbot-plugin-api'] !== undefined) {
+          results.push({
+            specifier:   `./${path.relative(projectDir, sub).replace(/\\/g, '/')}`,
+            name:        pkg.name        ?? entry.name,
+            description: pkg.description ?? '',
+          });
+        }
+      } catch { /* no package.json or unreadable */ }
+      if (depth < 2) await scan(sub, depth + 1);
+    }
+  };
+
+  await scan(pluginsDir, 1);
+  return results;
+}
+
+async function readProviderModules(configPath: string): Promise<string[]> {
+  const text = await readFile(configPath, 'utf8');
+  return [...text.matchAll(/^\s+module:\s+(\S+)/gm)].map(m => m[1] ?? '').filter(Boolean);
+}
+
 async function detectPackageManager(dir: string): Promise<string> {
   for (const [pm, lockfile] of [['pnpm', 'pnpm-lock.yaml'], ['yarn', 'yarn.lock'], ['bun', 'bun.lockb']] as const) {
     try { await access(path.join(dir, lockfile)); return pm; } catch { /* not present */ }
@@ -68,13 +113,13 @@ function runCommand(cmd: string, args: string[], cwd: string): Promise<string> {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function pluginTypes(p: MatbotPlugin): string[] {
+function pluginTypes(p: MatbotPlugin, registeredToolPlugins: Set<string>): string[] {
   const t: string[] = [];
-  if (p.tools?.length)                            t.push('tools');
-  if (Object.keys(p.providers ?? {}).length)      t.push('provider');
-  if (Object.keys(p.storage   ?? {}).length)      t.push('storage');
-  if (p.frontend !== undefined)                   t.push('frontend');
-  if (!t.length)                                  t.push('extension');
+  if (p.tools?.length || registeredToolPlugins.has(p.name))                 t.push('tools');
+  if (Object.keys(p.providers ?? {}).length)                                t.push('provider');
+  if (Object.keys(p.storage   ?? {}).length)                                t.push('storage');
+  if (p.frontend !== undefined || getRegisteredFrontendPlugin() === p.name) t.push('frontend');
+  if (!t.length)                                                            t.push('extension');
   return t;
 }
 
@@ -82,8 +127,9 @@ function pluginTypes(p: MatbotPlugin): string[] {
 
 type PluginInput =
   | { action: 'list' }
-  | { action: 'add';    specifier: string }
-  | { action: 'remove'; specifier: string };
+  | { action: 'add';            specifier: string }
+  | { action: 'remove';         specifier: string }
+  | { action: 'discover_local' };
 
 // ── Executor ──────────────────────────────────────────────────────────────────
 
@@ -101,14 +147,52 @@ const executor = {
     // ── list ─────────────────────────────────────────────────────────────────
     if (action === 'list') {
       const configured = await readPluginsList(configPath);
-      const loaded     = getRegisteredPlugins().map(p => ({
+      const allTools   = getRegisteredTools();
+
+      // Group tool names by owning plugin (undefined = built-in / unattributed)
+      const toolsByPlugin = new Map<string | undefined, string[]>();
+      for (const t of allTools) {
+        const key  = t.pluginName;
+        const list = toolsByPlugin.get(key) ?? [];
+        list.push(t.name);
+        toolsByPlugin.set(key, list);
+      }
+
+      const pluginToolNames = new Set(
+        [...toolsByPlugin.keys()].filter((k): k is string => k !== undefined),
+      );
+
+      const loaded = getRegisteredPlugins().map(p => ({
         name:       p.name,
         apiVersion: p.apiVersion,
-        types:      pluginTypes(p),
+        types:      pluginTypes(p, pluginToolNames),
+        tools:      toolsByPlugin.get(p.name) ?? [],
       }));
+
       yield {
         type:  'result',
-        value: { loaded, configured },
+        value: {
+          loaded,
+          configured,
+          ...(toolsByPlugin.has(undefined) ? { builtinTools: toolsByPlugin.get(undefined) } : {}),
+        },
+      };
+      return;
+    }
+
+    // ── discover_local ────────────────────────────────────────────────────────
+    if (action === 'discover_local') {
+      const found           = await discoverLocalPlugins(projectDir);
+      const pluginEntries   = new Set(await readPluginsList(configPath));
+      const providerModules = new Set(await readProviderModules(configPath));
+      yield {
+        type:  'result',
+        value: found.map(p => ({
+          ...p,
+          configuredVia: pluginEntries.has(p.specifier) ? 'plugins'
+                       : providerModules.has(p.specifier) ? 'providers'
+                       : null,
+        })),
       };
       return;
     }
@@ -199,7 +283,7 @@ const executor = {
 
 export const pluginTool: Tool = {
   name:        'plugin',
-  description: 'Manage matbot plugins: list configured plugins, add a new one, or remove an existing one.',
+  description: 'Manage matbot plugins: list configured plugins, add a new one, remove an existing one, or discover available local plugins.',
   requires:    ['filesystem', 'spawn'],
   inputSchema: {
     type:       'object',
@@ -207,8 +291,8 @@ export const pluginTool: Tool = {
     properties: {
       action: {
         type:        'string',
-        enum:        ['list', 'add', 'remove'],
-        description: 'list: show configured plugins. add: install and register a plugin. remove: deregister and optionally uninstall.',
+        enum:        ['list', 'add', 'remove', 'discover_local'],
+        description: 'list: show configured plugins. add: install and register a plugin. remove: deregister and optionally uninstall. discover_local: scan packages/plugins for available local plugins.',
       },
       specifier: {
         type:        'string',

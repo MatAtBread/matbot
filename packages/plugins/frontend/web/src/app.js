@@ -33,32 +33,6 @@ function closeSidebar() { document.body.classList.remove('sidebar-open'); }
 if (burgerBtn)      burgerBtn.onclick      = () => document.body.classList.toggle('sidebar-open');
 if (sidebarOverlay) sidebarOverlay.onclick = closeSidebar;
 
-// ── Principal ─────────────────────────────────────────────────────────────────
-
-function userId() {
-  let id = localStorage.getItem('matbot-uid');
-  if (!id) {
-    const b = crypto.getRandomValues(new Uint8Array(16));
-    b[6] = (b[6] & 0x0f) | 0x40;
-    b[8] = (b[8] & 0x3f) | 0x80;
-    const h = Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
-    id = h.slice(0,8)+'-'+h.slice(8,12)+'-'+h.slice(12,16)+'-'+h.slice(16,20)+'-'+h.slice(20);
-    localStorage.setItem('matbot-uid', id);
-  }
-  return id;
-}
-
-function webPrincipal() {
-  return {
-    id: userId(), type: 'user',
-    grants: [
-      { capability: 'network' },
-      { capability: 'filesystem' },
-      { capability: 'spawn' },
-    ],
-    contexts: ['web'],
-  };
-}
 
 // ── Markdown ──────────────────────────────────────────────────────────────────
 
@@ -105,22 +79,11 @@ async function callTool(toolName, input) {
   const res = await fetch('/tools/' + toolName, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ input, principal: webPrincipal() }),
+    body: JSON.stringify(input),
   });
-  if (!res.ok) throw new Error('HTTP ' + res.status);
-  const text = await res.text();
-  for (const block of text.split('\n\n')) {
-    for (const line of block.split('\n')) {
-      if (line.startsWith('data: ')) {
-        try {
-          const ev = JSON.parse(line.slice(6));
-          if (ev.type === 'result') return ev.value;
-          if (ev.type === 'error')  throw new Error(ev.message ?? ev.error ?? 'Tool error');
-        } catch (e) { if (e instanceof SyntaxError) continue; throw e; }
-      }
-    }
-  }
-  throw new Error('No result from tool');
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error ?? 'HTTP ' + res.status);
+  return data;
 }
 
 // Join an in-progress server run for sessionId. renderedCount is the number of
@@ -272,11 +235,7 @@ async function hideSession(id) {
 }
 
 async function apiNewSession() {
-  const r = await fetch('/sessions', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ principal: webPrincipal() }),
-  });
+  const r = await fetch('/sessions', { method: 'POST' });
   return r.json();
 }
 
@@ -284,7 +243,7 @@ async function* streamSubmit(sessionId, content, provider) {
   const res = await fetch('/sessions/' + sessionId + '/submit', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ content, provider, principal: webPrincipal() }),
+    body: JSON.stringify({ content, provider }),
   });
   if (!res.ok || !res.body) throw new Error('HTTP ' + res.status);
   const reader = res.body.getReader();

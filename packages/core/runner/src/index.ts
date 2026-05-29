@@ -6,3 +6,4 @@ export * from './plugin.js';
 export * from './registry.js';
 export * from './loader.js';
 export * from './tool-registry.js';
+export * from './system-context.js';

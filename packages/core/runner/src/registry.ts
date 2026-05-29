@@ -1,4 +1,4 @@
-import type { Tool } from './types.js';
+import type { Tool, ToolRegistry } from './types.js';
 import type {
   MatbotPlugin, MatbotServices,
   ProviderAdapterFactory, StoreFactory, FrontendFactory,
@@ -9,11 +9,12 @@ import { PLUGIN_API_VERSION } from './plugin.js';
 
 // Mutable arrays/maps held in a single object to make _resetRegistry() simple.
 const state = {
-  plugins:   [] as MatbotPlugin[],
-  providers: new Map<string, ProviderAdapterFactory>(),
-  storage:   new Map<string, StoreFactory>(),
-  tools:     [] as Tool[],
-  frontend:  undefined as FrontendFactory | undefined,
+  plugins:         [] as MatbotPlugin[],
+  providers:       new Map<string, ProviderAdapterFactory>(),
+  storage:         new Map<string, StoreFactory>(),
+  toolRegistry:    undefined as ToolRegistry | undefined,
+  frontend:        undefined as FrontendFactory | undefined,
+  frontendPlugin:  undefined as string | undefined,
 };
 
 // ── Version check ─────────────────────────────────────────────────────────────
@@ -82,9 +83,6 @@ export function registerPlugin(plugin: MatbotPlugin): void {
   for (const [type, factory] of Object.entries(plugin.storage ?? {})) {
     state.storage.set(type, factory);
   }
-  if (plugin.tools) {
-    state.tools.push(...plugin.tools);
-  }
   if (plugin.frontend !== undefined) {
     state.frontend = plugin.frontend;
   }
@@ -117,7 +115,7 @@ export function resolveStorageFactory(type: string): StoreFactory {
 }
 
 export function getRegisteredTools(): readonly Tool[] {
-  return state.tools;
+  return state.toolRegistry?.list() ?? [];
 }
 
 export function getRegisteredPlugins(): readonly MatbotPlugin[] {
@@ -130,8 +128,13 @@ export function getFrontendFactory(): FrontendFactory | undefined {
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
 
+export function getRegisteredFrontendPlugin(): string | undefined {
+  return state.frontendPlugin;
+}
+
 /** Run setup() for a single plugin. Called by loadPlugins immediately after registration. */
 export async function setupPlugin(plugin: MatbotPlugin, services: MatbotServices): Promise<void> {
+  state.toolRegistry ??= services.tools;
   const scopedServices: MatbotServices = {
     ...services,
     tools: {
@@ -139,6 +142,7 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotServices
       resolve: (name: string) => services.tools.resolve(name),
       list:    ()             => services.tools.list(),
     },
+    registerFrontend() { state.frontendPlugin = plugin.name; },
   };
   for (const tool of plugin.tools ?? []) {
     scopedServices.tools.register(tool);
@@ -163,6 +167,7 @@ export function _resetRegistry(): void {
   state.plugins.length = 0;
   state.providers.clear();
   state.storage.clear();
-  state.tools.length = 0;
-  state.frontend = undefined;
+  state.toolRegistry    = undefined;
+  state.frontend        = undefined;
+  state.frontendPlugin  = undefined;
 }

@@ -6,7 +6,7 @@ import type { Principal, ProviderAdapter,
               Store, Tool, MessageContent, FileStore } from '@matatbread/matbot-core';
 import { appendMessage, createMessage,
          createSession, runSession,
-         HookRegistry,
+         HookRegistry, SystemContextRegistryImpl,
          loadPlugins,
          registerPlugin,
          resolveProviderFactory,
@@ -162,6 +162,7 @@ async function runTurn(
   workdir:        string,
   files:          FileStore,
   hooks:          HookRegistry,
+  systemContext:  SystemContextRegistryImpl,
   promptFn:       (question: string, defaultValue?: string) => Promise<string>,
   loadPluginFn:   (specifier: string) => Promise<void>,
   configPath:     string,
@@ -210,6 +211,7 @@ async function runTurn(
       tools,
       store,
       hooks,
+      systemContext,
       signal:         ac.signal,
       workdir,
       files,
@@ -267,7 +269,7 @@ async function runTurn(
               updated = await runTurn(
                 ev.session, [{ type: 'form-response', values }],
                 providerConfig, adapter, tools, store, principal, workdir, files,
-                hooks, promptFn, loadPluginFn, configPath,
+                hooks, systemContext, promptFn, loadPluginFn, configPath,
               );
               return updated;
             }
@@ -468,6 +470,7 @@ async function main(): Promise<void> {
 
   // hookReg is shared: plugins register hooks via services, runSession fires them
   const hookReg = new HookRegistry();
+  const systemContextReg = new SystemContextRegistryImpl();
 
   const pluginSettingsCache = new Map<string, PluginSettings>();
   const serviceRegistry     = new Map<string, unknown>();
@@ -523,8 +526,9 @@ async function main(): Promise<void> {
     sessions:  store,
     files:     fileStore,
     vault,
-    hooks:     hookReg,
-    tools:     toolReg,
+    hooks:          hookReg,
+    tools:          toolReg,
+    systemContext:  systemContextReg,
     workdir:    workDir,
     configPath,
   };
@@ -620,7 +624,7 @@ async function main(): Promise<void> {
 
   // ── Single-turn ──────────────────────────────────────────────────────────────
   if (argPrompt !== undefined) {
-    await runTurn(session, argPrompt, providerConfig, adapter, toolMap, store, principal, workDir, fileStore, hookReg, stdinPrompt, services.loadPlugin.bind(services), configPath);
+    await runTurn(session, argPrompt, providerConfig, adapter, toolMap, store, principal, workDir, fileStore, hookReg, systemContextReg, stdinPrompt, services.loadPlugin.bind(services), configPath);
     rl.close();
     return;
   }
@@ -641,7 +645,7 @@ async function main(): Promise<void> {
     }
     if (!line.trim()) continue;
     process.stderr.write('assistant: ');
-    session = await runTurn(session, line, providerConfig, adapter, toolMap, store, principal, workDir, fileStore, hookReg, stdinPrompt, services.loadPlugin.bind(services), configPath);
+    session = await runTurn(session, line, providerConfig, adapter, toolMap, store, principal, workDir, fileStore, hookReg, systemContextReg, stdinPrompt, services.loadPlugin.bind(services), configPath);
   }
 
   rl.close();

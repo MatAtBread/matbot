@@ -13,6 +13,8 @@ export const plugin: MatbotPlugin = {
   apiVersion: PLUGIN_API_VERSION,
 
   async setup(services: MatbotServices) {
+    services.registerFrontend?.();
+
     const sessions = services.sessions;
     if (!sessions) throw new Error('frontend-web requires services.sessions');
 
@@ -26,20 +28,34 @@ export const plugin: MatbotPlugin = {
         .map(cfg => [cfg.type, resolveProviderFactory(cfg.type)(cfg)]),
     );
 
-    const port  = Number(process.env['MATBOT_WEB_PORT'] ?? 19778); // 19778 is "MB" in hex, a cute easter egg :)
+    services.systemContext.register(() => {
+      const tools = services.tools.list();
+      if (tools.length === 0) return null;
+      const lines = tools.map(t => `- \`${t.name}\`: ${t.description}`).join('\n');
+      return (
+        `Tools are available via HTTP from the current host.n\n` +
+        `POST /tools/<name>\n` +
+        `Request body: the tool's JSON input directly (matches the tool's inputSchema).\n` +
+        `Response: the tool's result as JSON on success (200), or { error, stdout?, stderr? } on failure (500).\n\n` +
+        `Available tools:\n${lines}`
+      );
+    });
 
     server = createWebServer({
-      store:      sessions,
+      store:         sessions,
       providers,
-      configs:    /*new Map(*/services.providers/*)*/,
-      vault:      services.vault,
-      loadPlugin: services.loadPlugin.bind(services),
-      tools:      services.tools,
-      hooks:      services.hooks,
+      configs:       /*new Map(*/services.providers/*)*/,
+      vault:         services.vault,
+      loadPlugin:    services.loadPlugin.bind(services),
+      tools:         services.tools,
+      hooks:         services.hooks,
+      systemContext: services.systemContext,
       ...(services.workdir    !== undefined ? { workdir:    services.workdir    } : {}),
       ...(services.files      !== undefined ? { files:      services.files      } : {}),
       ...(services.configPath !== undefined ? { configPath: services.configPath } : {}),
     });
+
+    const port = Number(process.env['MATBOT_WEB_PORT'] ?? 19778); // 19778 is "MB" in hex, a cute easter egg :)
 
     await new Promise<void>((resolve, reject) => {
       server!.once('error', reject);

@@ -1,7 +1,7 @@
 import type {
   Session, MessageContent,
   PipelineEvent, RunConfig, ProviderAdapter, ProviderConfig,
-  Tool, ToolContext, Store, FileStore,
+  Tool, ToolContext, Store, FileStore, SystemContextRegistry,
 } from './types.js';
 import { HookRegistry } from './hooks.js';
 import { appendMessage, createMessage } from './session.js';
@@ -14,6 +14,7 @@ export interface RunSessionOpts {
   tools?:         ReadonlyMap<string, Tool>;
   store:          Store<Session>;
   hooks?:         HookRegistry;
+  systemContext?: SystemContextRegistry;
   signal:         AbortSignal;
   workdir?:       string;
   configPath?:    string;
@@ -54,7 +55,17 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
     yield { type: 'robo-user', content: ctx.inject, traceId };
   }
 
-  // ── 2. Agentic loop ────────────────────────────────────────────────────────
+  // ── 2. System context (built once per submit, never persisted) ─────────────
+
+  const systemText = opts.systemContext
+    ? await opts.systemContext.build({ session, principal: config.principal, signal })
+    : null;
+
+  const systemMsg = systemText !== null
+    ? [createMessage({ role: 'system', content: [{ type: 'text', text: systemText }], traceId: '' })]
+    : [];
+
+  // ── 3. Agentic loop ────────────────────────────────────────────────────────
 
   const toolList = [...tools.values()];
 
@@ -70,9 +81,9 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
     const assistantParts: MessageContent[] = [];
     let textAcc = '';
 
-    // One provider call
+    // One provider call — system context prepended here, never written back to session
     try {
-      for await (const ev of provider.complete(session.messages, providerConfig, toolList, signal)) {
+      for await (const ev of provider.complete([...systemMsg, ...session.messages], providerConfig, toolList, signal)) {
         switch (ev.type) {
           case 'text-delta':
             textAcc += ev.delta;

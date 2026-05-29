@@ -1,7 +1,7 @@
 import type {
   FileStore, Vault, Message, ModelParameters,
   ProviderAdapter, ProviderConfig, Tool, ToolRegistry, FrontendAdapter,
-  Store, Session,
+  Store, Session, SystemContextRegistry,
 } from './types.js';
 import type { HookRegistry } from './hooks.js';
 
@@ -64,13 +64,17 @@ export interface MatbotServices {
   /** Register a service implementation. Called by a plugin's setup() to advertise itself. */
   register<K extends keyof ServiceMap>(key: K, service: ServiceMap[K]): void;
 
+  /** Declare that this plugin provides a frontend. The runtime records the plugin name implicitly. */
+  registerFrontend?(): void;
+
   readonly providers:   ReadonlyMap<string, ProviderConfig>;
   readonly sessions?:   Store<Session>;
   readonly extensions?: Record<string, unknown>;
   readonly files?:      FileStore;
-  readonly vault:       Vault;
-  readonly hooks:       HookRegistry;
-  readonly tools:       ToolRegistry;
+  readonly vault:          Vault;
+  readonly hooks:          HookRegistry;
+  readonly tools:          ToolRegistry;
+  readonly systemContext:  SystemContextRegistry;
   /** Default working directory for tool execution. Plugins that create servers should forward this to tool contexts. */
   readonly workdir?:    string;
   /** Absolute path to the loaded config file. Plugins that create servers should forward this to tool contexts. */

@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { join, relative, resolve, extname } from 'node:path';
 import type {
   HookRegistry, Principal, ProviderAdapter, ProviderConfig,
-  Session, Store, ToolContext, ToolRegistry, Vault, FileStore,
+  Session, Store, ToolRegistry, Vault, FileStore, SystemContextRegistry,
 } from '@matatbread/matbot-core';
 import { appendMessage, createMessage, createSession, runSession } from '@matatbread/matbot-core';
 import { sseComment, sseEvent } from './sse-writer.js';
@@ -15,21 +15,35 @@ export interface WebServerDeps {
   configs:     ReadonlyMap<string, ProviderConfig>;     // provider config name → config
   vault:       Vault;
   loadPlugin:  (specifier: string) => Promise<void>;
-  tools?:      ToolRegistry;
-  hooks?:      HookRegistry;
-  cors?:       string;  // Access-Control-Allow-Origin value, default '*'
+  tools?:          ToolRegistry;
+  hooks?:          HookRegistry;
+  systemContext?:  SystemContextRegistry;
+  cors?:           string;  // Access-Control-Allow-Origin value, default '*'
   workdir?:    string;
   files?:      FileStore;
   configPath?: string;
 }
 
 interface SubmitBody {
-  content:     string | { type: 'form-response'; values: Record<string, string> };
-  principal:   Principal;
-  provider:    string;       // key into deps.configs
-  sessionId?:  string;
-  traceId?:    string;
+  content:    string | { type: 'form-response'; values: Record<string, string> };
+  provider:   string;       // key into deps.configs
+  sessionId?: string;
+  traceId?:   string;
 }
+
+// Single server-side principal used for all requests until real auth is added.
+const DEFAULT_PRINCIPAL: Principal = {
+  id:       'web-user',
+  type:     'user',
+  grants:   [
+    { capability: 'network' },
+    { capability: 'filesystem' },
+    { capability: 'spawn' },
+    { capability: 'container' },
+    { capability: 'audit:read' },
+  ],
+  contexts: [],
+};
 
 async function readBody(req: IncomingMessage, maxBytes = 1_048_576): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -112,6 +126,41 @@ export function createWebServer(deps: WebServerDeps) {
 
     if (method === 'OPTIONS') { res.writeHead(204).end(); return; }
 
+    try {
+      await handleRequest(req, res, method, url);
+    } catch (e) {
+      if (!res.headersSent) json(res, 500, { error: String(e) });
+      else if (res.writable)  res.end();
+    }
+  });
+
+  function makeToolCtx(ac: AbortController) {
+    const now = new Date().toISOString();
+    const stubSession: Session = {
+      id: crypto.randomUUID(), version: crypto.randomUUID(),
+      ownerPrincipalId: DEFAULT_PRINCIPAL.id,
+      status: 'active', contexts: [], messages: [],
+      createdAt: now, updatedAt: now,
+    };
+    return {
+      callId:     crypto.randomUUID(),
+      session:    stubSession,
+      principal:  DEFAULT_PRINCIPAL,
+      signal:     ac.signal,
+      loadPlugin: deps.loadPlugin,
+      prompt:     (q: string, def?: string) => def !== undefined
+        ? Promise.resolve(def)
+        : Promise.reject(new Error(`Non-interactive context: "${q}"`)),
+      ...(deps.workdir    !== undefined ? { workdir:    deps.workdir    } : {}),
+      ...(deps.files      !== undefined ? { files:      deps.files      } : {}),
+      ...(deps.configPath !== undefined ? { configPath: deps.configPath } : {}),
+    };
+  }
+
+  async function handleRequest(
+    req: IncomingMessage, res: ServerResponse, method: string, url: string,
+  ): Promise<void> {
+
     // --- Static UI ---
     if (method === 'GET' && url === '/')       { static200(res, 'text/html; charset=utf-8',              await html()); return; }
     if (method === 'GET' && url === '/app.js') { static200(res, 'application/javascript; charset=utf-8', await js());   return; }
@@ -154,11 +203,7 @@ export function createWebServer(deps: WebServerDeps) {
 
     // --- POST /sessions ---
     if (method === 'POST' && url === '/sessions') {
-      let body: { principal: Principal };
-      try { body = JSON.parse(await readBody(req)) as { principal: Principal }; }
-      catch { json(res, 400, { error: 'Invalid JSON' }); return; }
-
-      const session = createSession({ ownerPrincipal: body.principal });
+      const session = createSession({ ownerPrincipal: DEFAULT_PRINCIPAL });
       await deps.store.set(session.id, session);
       json(res, 201, { id: session.id });
       return;
@@ -218,7 +263,7 @@ export function createWebServer(deps: WebServerDeps) {
       await deps.store.set(session.id, session);
 
       const runConfig = {
-        principal: body.principal,
+        principal: DEFAULT_PRINCIPAL,
         provider:  body.provider,
         traceId,
       };
@@ -265,9 +310,10 @@ export function createWebServer(deps: WebServerDeps) {
           config:         runConfig,
           provider,
           providerConfig: resolvedConfig,
-          ...(deps.tools    ? { tools: new Map(deps.tools.list().map(t => [t.name, t])) } : {}),
+          ...(deps.tools         ? { tools: new Map(deps.tools.list().map(t => [t.name, t])) } : {}),
           store:          deps.store,
-          ...(deps.hooks      ? { hooks:      deps.hooks      } : {}),
+          ...(deps.hooks         ? { hooks:         deps.hooks         } : {}),
+          ...(deps.systemContext ? { systemContext: deps.systemContext } : {}),
           ...(deps.workdir    ? { workdir:    deps.workdir    } : {}),
           ...(deps.files      ? { files:      deps.files      } : {}),
           ...(deps.configPath ? { configPath: deps.configPath } : {}),
@@ -315,7 +361,7 @@ export function createWebServer(deps: WebServerDeps) {
       return;
     }
 
-    // --- POST /tools/:name ---
+    // --- POST /tools/:name (buffered JSON response) ---
     const toolCallMatch = /^\/tools\/([^/]+)$/.exec(url);
     if (method === 'POST' && toolCallMatch) {
       const toolName = toolCallMatch[1]!;
@@ -324,19 +370,56 @@ export function createWebServer(deps: WebServerDeps) {
       try { raw = await readBody(req); }
       catch (e) { json(res, 400, { error: String(e) }); return; }
 
-      let body: { input: unknown; principal: Principal };
-      try { body = JSON.parse(raw) as { input: unknown; principal: Principal }; }
+      let input: unknown;
+      try { input = raw ? JSON.parse(raw) : null; }
       catch { json(res, 400, { error: 'Invalid JSON' }); return; }
 
       const tool = deps.tools?.resolve(toolName);
       if (!tool) { json(res, 404, { error: `Tool "${toolName}" not found` }); return; }
 
-      if (tool.requires?.length) {
-        const granted = tool.requires.every(cap =>
-          body.principal.grants.some(g => g.capability === cap),
-        );
-        if (!granted) { json(res, 403, { error: `Capability required: ${tool.requires.join(', ')}` }); return; }
+      const ac = new AbortController();
+      req.on('close', () => ac.abort());
+
+      const toolCtx = makeToolCtx(ac);
+      let stdout = '';
+      let stderr = '';
+      try {
+        for await (const ev of tool.executor.execute(input, toolCtx)) {
+          if (ev.type === 'result') { json(res, 200, ev.value); return; }
+          if (ev.type === 'stdout') { stdout += ev.chunk; }
+          if (ev.type === 'stderr') { stderr += ev.chunk; }
+          if (ev.type === 'error')  {
+            json(res, 500, {
+              error: ev.message,
+              ...(ev.code !== undefined ? { code: ev.code } : {}),
+              ...(stdout               ? { stdout }         : {}),
+              ...(stderr               ? { stderr }         : {}),
+            });
+            return;
+          }
+        }
+        json(res, 500, { error: 'Tool returned no result' });
+      } catch (e) {
+        json(res, 500, { error: String(e), ...(stdout ? { stdout } : {}), ...(stderr ? { stderr } : {}) });
       }
+      return;
+    }
+
+    // --- POST /stream/tools/:name (SSE streaming) ---
+    const streamToolMatch = /^\/stream\/tools\/([^/]+)$/.exec(url);
+    if (method === 'POST' && streamToolMatch) {
+      const toolName = streamToolMatch[1]!;
+
+      let raw: string;
+      try { raw = await readBody(req); }
+      catch (e) { json(res, 400, { error: String(e) }); return; }
+
+      let input: unknown;
+      try { input = raw ? JSON.parse(raw) : null; }
+      catch { json(res, 400, { error: 'Invalid JSON' }); return; }
+
+      const tool = deps.tools?.resolve(toolName);
+      if (!tool) { json(res, 404, { error: `Tool "${toolName}" not found` }); return; }
 
       const ac = new AbortController();
       req.on('close', () => ac.abort());
@@ -348,27 +431,8 @@ export function createWebServer(deps: WebServerDeps) {
       });
       res.write(sseComment('tool stream open'));
 
-      const now         = new Date().toISOString();
-      const stubSession: Session = {
-        id: crypto.randomUUID(), version: crypto.randomUUID(),
-        ownerPrincipalId: body.principal.id,
-        status: 'active', contexts: [], messages: [],
-        createdAt: now, updatedAt: now,
-      };
-
-      const toolCtx: ToolContext = {
-        callId:     crypto.randomUUID(),
-        session:    stubSession,
-        principal:  body.principal,
-        signal:     ac.signal,
-        loadPlugin: deps.loadPlugin,
-        prompt:     (q, def) => def !== undefined
-          ? Promise.resolve(def)
-          : Promise.reject(new Error(`Non-interactive context: "${q}"`)),
-      };
-
       try {
-        for await (const ev of tool.executor.execute(body.input, toolCtx)) {
+        for await (const ev of tool.executor.execute(input, makeToolCtx(ac))) {
           if (!res.writable) break;
           res.write(sseEvent(ev.type, ev));
         }
@@ -418,7 +482,7 @@ export function createWebServer(deps: WebServerDeps) {
     }
 
     json(res, 404, { error: 'Not found' });
-  });
+  }
 
   return server;
 }
