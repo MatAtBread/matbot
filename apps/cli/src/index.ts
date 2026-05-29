@@ -470,6 +470,7 @@ async function main(): Promise<void> {
   const hookReg = new HookRegistry();
 
   const pluginSettingsCache = new Map<string, PluginSettings>();
+  const serviceRegistry     = new Map<string, unknown>();
 
   const services: MatbotServices = {
     settings(pluginName: string): PluginSettings {
@@ -480,6 +481,9 @@ async function main(): Promise<void> {
       }
       return s;
     },
+
+    get(key) { return serviceRegistry.get(key) as never; },
+    register(key, svc) { serviceRegistry.set(key, svc); },
 
     async complete(req) {
       const rawCfg = matbotConfig.providers.get(req.provider);
@@ -516,7 +520,7 @@ async function main(): Promise<void> {
       await loadPlugins(resolved, services);
     },
     providers: matbotConfig.providers,
-    stores:    { sessions: store },
+    sessions:  store,
     files:     fileStore,
     vault,
     hooks:     hookReg,

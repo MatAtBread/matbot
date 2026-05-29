@@ -1,7 +1,5 @@
-import type {
-  MemoryEntry, MemoryManager, RecallQuery, ContextBlock,
-  Session, Store, FilterExpr,
-} from '@matatbread/matbot-core';
+import type { Session, Store, FilterExpr } from '@matatbread/matbot-core';
+import type { MemoryEntry, MemoryManager, RecallQuery, ContextBlock } from '@matatbread/matbot-memory-types';
 
 export class MemoryManagerImpl implements MemoryManager {
   private readonly store: Store<MemoryEntry>;

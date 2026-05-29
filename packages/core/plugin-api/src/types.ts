@@ -12,8 +12,6 @@ export type CapabilityKind =
   | 'filesystem'
   | 'spawn'
   | 'container'
-  | 'memory:read'
-  | 'memory:write'
   | 'audit:read';
 
 export interface CapabilityGrant {
@@ -247,57 +245,6 @@ export interface Store<T extends { id: string; version: string }> {
   cas(id: string, expected: string, next: T): Promise<CASResult<T>>;
   delete(id: string, expectedVersion?: string): Promise<boolean>;
   query(q: StoreQuery<T>): Promise<QueryResult<T>>;
-}
-
-// ── Memory ────────────────────────────────────────────────────────────────────
-
-export interface MemoryEntry {
-  id:                string;
-  version:           string;
-  kind:              'fact' | 'skill' | 'file';
-  ownerPrincipalId:  string;
-  sessionId:         string;
-  messageId:         string;
-  turnIndex:         number;
-  span?:             { start: number; end: number };
-  tags:              string[];
-  embedding?:        number[];
-  confidence:        number;
-  decayRate:         number;
-  recallCount:       number;
-  contexts:          string[];
-  createdAt:         ISODate;
-  lastReinforcedAt:  ISODate;
-}
-
-
-export interface FileMemoryEntry extends MemoryEntry {
-  kind:   'file';
-  fileId: string;
-}
-
-export interface RecallQuery {
-  text?:          string;
-  embedding?:     number[];
-  filter?:        FilterExpr;
-  contexts?:      string[];
-  limit?:         number;
-  minConfidence?: number;
-}
-
-export interface ContextBlock {
-  role:      'system';
-  content:   string;
-  sourceIds: string[];
-}
-
-export interface MemoryManager {
-  recall(query: RecallQuery): Promise<MemoryEntry[]>;
-  remember(entry: Omit<MemoryEntry, 'id' | 'version' | 'createdAt'>): Promise<MemoryEntry>;
-  reinforce(id: string, delta?: number): Promise<void>;
-  forget(id: string): Promise<void>;
-  purge(ownerPrincipalId: string): Promise<number>;
-  buildContext(session: Session, signal: AbortSignal): Promise<ContextBlock[]>;
 }
 
 // ── Tools ─────────────────────────────────────────────────────────────────────

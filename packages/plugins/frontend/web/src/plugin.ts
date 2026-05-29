@@ -13,8 +13,8 @@ export const plugin: MatbotPlugin = {
   apiVersion: PLUGIN_API_VERSION,
 
   async setup(services: MatbotServices) {
-    const sessions = services.stores?.sessions;
-    if (!sessions) throw new Error('frontend-web requires services.stores.sessions');
+    const sessions = services.sessions;
+    if (!sessions) throw new Error('frontend-web requires services.sessions');
 
     for (const tool of makeSessionTools(sessions)) {
       services.tools.register(tool);

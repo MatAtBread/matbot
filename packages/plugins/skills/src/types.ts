@@ -1,4 +1,4 @@
-import type { MemoryEntry } from '@matatbread/matbot-plugin-api';
+import type { MemoryEntry } from '@matatbread/matbot-memory-types';
 
 export interface SkillEntry extends MemoryEntry {
   kind:         'skill';
