@@ -407,7 +407,7 @@ function makePluginSettings(settingsDir: string, pluginName: string): PluginSett
 }
 
 async function main(): Promise<void> {
-  const serverMode = process.argv[2] === 'server';
+  const serverMode = process.argv[2] === 'serve';
 
   // ── install subcommand ────────────────────────────────────────────────────
   if (process.argv[2] === 'install') {
