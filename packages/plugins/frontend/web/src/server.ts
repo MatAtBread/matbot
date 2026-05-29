@@ -12,7 +12,7 @@ import { html, js } from './ui.js';
 export interface WebServerDeps {
   store:       Store<Session>;
   providers:   Map<string, ProviderAdapter>;    // adapter name → adapter
-  configs:     Map<string, ProviderConfig>;     // provider config name → config
+  configs:     ReadonlyMap<string, ProviderConfig>;     // provider config name → config
   vault:       Vault;
   loadPlugin:  (specifier: string) => Promise<void>;
   tools?:      ToolRegistry;
@@ -113,8 +113,8 @@ export function createWebServer(deps: WebServerDeps) {
     if (method === 'OPTIONS') { res.writeHead(204).end(); return; }
 
     // --- Static UI ---
-    if (method === 'GET' && url === '/')       { static200(res, 'text/html; charset=utf-8',              html()); return; }
-    if (method === 'GET' && url === '/app.js') { static200(res, 'application/javascript; charset=utf-8', js());   return; }
+    if (method === 'GET' && url === '/')       { static200(res, 'text/html; charset=utf-8',              await html()); return; }
+    if (method === 'GET' && url === '/app.js') { static200(res, 'application/javascript; charset=utf-8', await js());   return; }
 
     // --- GET /health ---
     if (method === 'GET' && url === '/health') {

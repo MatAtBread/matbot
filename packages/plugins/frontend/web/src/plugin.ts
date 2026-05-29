@@ -31,7 +31,7 @@ export const plugin: MatbotPlugin = {
     server = createWebServer({
       store:      sessions,
       providers,
-      configs:    new Map(services.providers),
+      configs:    /*new Map(*/services.providers/*)*/,
       vault:      services.vault,
       loadPlugin: services.loadPlugin.bind(services),
       tools:      services.tools,
