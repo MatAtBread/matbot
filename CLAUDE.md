@@ -7,8 +7,8 @@ Read it before making any structural decisions.
 
 ## What matbot is
 
-A TypeScript AI harness — a thin, composable runtime that connects language models to tools,
-memory, and frontends. It is not a product; it is infrastructure.
+A TypeScript AI harness — a thin, composable runtime that connects language models to tools
+and frontends. It is not a product; it is infrastructure.
 
 ---
 
@@ -20,11 +20,11 @@ Never import `@anthropic-ai/sdk`, `openai`, or any other provider SDK.
 Use the HTTP endpoints directly; stream via SSE parsed with `parseSSE` from `@matatbread/matbot-providers-base`.
 
 ### No Node-specific primitives in shared packages
-Packages under `packages/` (except those explicitly suffixed `/node`) must run in both Node and
+Packages under `packages/` (except those explicitly suffixed `-node`) must run in both Node and
 the browser. Use web-platform APIs: `fetch`, `crypto.randomUUID()`, `AbortController`,
 `AbortSignal`, `TextDecoder`, `ReadableStream`, `SubtleCrypto`. Never use `require`,
 `Buffer`, `EventEmitter`, `fs`, `path`, `child_process`, or `os` in shared packages.
-Node-only code lives in `packages/*/node/` or `apps/`.
+Node-only code lives in packages named `*-node` or in `apps/`.
 
 ### AsyncIterators, not callbacks
 Streaming events flow through `AsyncIterable<T>`. Never use `EventEmitter` or raw callbacks
@@ -46,38 +46,48 @@ Consequences:
 ### Monorepo layout
 ```
 packages/
-  core/          — types, runner, hooks, session helpers (no I/O)
-  config/        — YAML loading, .env parsing, placeholder resolution
-  security/      — VaultImpl (secret resolution), principal/grants
-  providers/
-    _base/       — SSE parser, shared HTTP helpers
-    anthropic/   — Anthropic HTTP adapter (also used for DeepSeek Anthropic-compat)
-    openai-compat/ — OpenAI-compatible HTTP adapter
-  storage/
-    _base/       — filter/sort engine shared by all store implementations
-    filesystem/  — FilesystemStore<T> (Node, CAS-safe)
-  memory/
-    _base/       — MemoryManagerImpl, JobQueueImpl
-    node/        — MemoryExtractorWorker, watchSkillDir
-  tools/
-    _base/       — tool registry helpers
-    plugin/      — plugin management tool (@matatbread/matbot-tool-plugin)
-    exec/        — bash tool (@matatbread/matbot-tool-bash)
-    http/        — http tool (@matatbread/matbot-tool-http)
-    schedule/    — schedule tool (@matatbread/matbot-tool-schedule)
-  browser/       — OPFS store, WebCrypto vault (browser-only)
+  core/
+    runner/        — agentic loop, hook dispatch, plugin loader (@matatbread/matbot-core)
+    plugin-api/    — MatbotPlugin, MatbotServices, ServiceMap, all shared types (@matatbread/matbot-plugin-api)
+    config/        — YAML loading, .env parsing, placeholder resolution
+    security/      — VaultImpl, principal/grants
+    storage/
+      _base/       — filter/sort engine shared by all Store implementations
+      filesystem/  — FilesystemStore<T> (Node, CAS-safe)
+    providers/
+      _base/       — SSE parser, shared HTTP helpers
+    tool-plugin/   — built-in plugin management tool (@matatbread/matbot-tool-plugin)
+
+  plugins/
+    memory-types/  — MemoryManager interface + ServiceMap augmentation (@matatbread/matbot-memory-types)
+    memory/        — MemoryManagerImpl, JobQueueImpl, MemoryExtractorWorker (@matatbread/matbot-memory-node)
+    skills/        — skill injection via hook-based classifier (@matatbread/matbot-skills-node)
+    files/         — file codec and producer registry
+    browser/       — OPFS store, WebCrypto vault (browser-only)
+    frontend/
+      web/         — HTTP + SSE web UI with session management
+    providers/
+      anthropic/   — Anthropic Messages API adapter (also handles DeepSeek Anthropic-compat)
+      openai-compat/ — OpenAI-compatible chat completions adapter
+    tools/
+      bash/        — exec tool (@matatbread/matbot-tool-bash)
+      docker-bash/ — sandboxed exec inside Docker
+      http/        — HTTP request tool
+      schedule/    — timer/delay tool
+      workspace/   — workspace file tools
 
 apps/
-  cli/           — interactive REPL + single-turn mode
+  cli/             — interactive REPL + single-turn mode
 ```
 
 ### Package naming
 - `@matatbread/matbot-foo` for packages with a single implementation
-- `@matatbread/matbot-foo-base` for the shared interface/logic layer
+- `@matatbread/matbot-foo-types` for interface-only packages (no implementation, used as ServiceMap keys)
 - `@matatbread/matbot-foo-node` / `@matatbread/matbot-foo-browser` for platform-specific implementations
 
 ### Dependency direction
-`apps` → `packages/*/node` or `packages/*/browser` → `packages/*/_base` → `packages/core`  
+`apps` → `packages/plugins/*-node` → `packages/plugins/*-types` → `packages/core/plugin-api`  
+`packages/core/runner` → `packages/core/plugin-api`  
 Nothing in `packages/` may depend on `apps/`.
 
 ---
@@ -113,20 +123,63 @@ All runtime state lives under `.data/` **next to `matbot.yaml`**, never in the s
 .data/
   sessions/    — one JSON file per Session, named by UUID
   workspace/   — default cwd for exec tool; LLM file output goes here
-  jobs/        — job queue persistence (when used)
-  memory/      — MemoryEntry store (when used)
 ```
 
+Plugins may create additional subdirectories (e.g. `files/`, `settings/`) as needed.
 `.data/` is gitignored. Source and data are always separate.
+
+---
+
+## Service registry
+
+`MatbotServices` is the runtime environment passed to every plugin's `setup()`. Its core
+members (hooks, tools, complete, settings, vault, sessions) are always present. Additional
+services — memory, file stores, custom cognitive subsystems — are advertised and consumed
+through a typed open registry:
+
+```ts
+// Consuming a service (in any plugin's setup()):
+const memory = services.get('@matatbread/matbot-memory-types');
+
+// Advertising a service (in a plugin's setup()):
+services.register('@matatbread/matbot-memory-types', new MemoryManagerImpl(store));
+```
+
+The key is the **npm package name of the types package** that defines the interface. This
+guarantees global uniqueness (npm enforces it) and makes the contract self-documenting.
+TypeScript type safety comes from module augmentation of the `ServiceMap` interface in
+`@matatbread/matbot-plugin-api`:
+
+```ts
+// In @matatbread/matbot-memory-types:
+declare module '@matatbread/matbot-plugin-api' {
+  interface ServiceMap {
+    '@matatbread/matbot-memory-types': MemoryManager;
+  }
+}
+```
+
+Any plugin that imports the types package gets a fully-typed `services.get(...)` call at
+compile time. Core never references `MemoryManager` or any other optional service — they
+are negotiated at runtime between plugins.
+
+To introduce a new cognitive subsystem (e.g. `Imagination`):
+1. Create `@matatbread/matbot-imagination-types` — interface only, augments `ServiceMap`
+2. Create one or more implementation packages that depend on the types package
+3. Core is unchanged; other plugins discover the service via `services.get(...)`
 
 ---
 
 ## Memory subsystem
 
+Memory types (`MemoryManager`, `MemoryEntry`, `RecallQuery`, `ContextBlock`) live in
+`@matatbread/matbot-memory-types`. The implementation (`MemoryManagerImpl`, `JobQueueImpl`,
+`MemoryExtractorWorker`) lives in `@matatbread/matbot-memory-node`.
+
 The LLM does **not** have direct memory tools. Memory is a subsystem concern:
 
 - **Live capture** (hooks): `before:submit` / `after:submit` hooks extract high-confidence facts
-  synchronously and store them before the next turn
+  and store them before the next turn
 - **Passive capture** (job queue): `MemoryExtractorWorker` processes sessions out-of-band,
   calling a classifier LLM to assign confidence, tags, and embeddings
 - **Injection**: `MemoryManager.buildContext(session, signal)` returns `ContextBlock[]` (role:
@@ -134,6 +187,13 @@ The LLM does **not** have direct memory tools. Memory is a subsystem concern:
   the provider's prompt cache
 - Memories store **references** back to session messages (`sessionId` + `messageId`), not copies
   of text
+
+A plugin that provides memory calls `services.register('@matatbread/matbot-memory-types', impl)`
+in its `setup()`. A plugin that consumes memory calls `services.get('@matatbread/matbot-memory-types')`.
+
+The storage backend is swappable: `MemoryManagerImpl` depends only on `Store<MemoryEntry>`.
+Any storage plugin (filesystem, SQLite, Elasticsearch) that satisfies that interface can back
+the memory subsystem without touching the cognitive layer.
 
 ---
 
@@ -148,12 +208,12 @@ Never write to a store without a version check when concurrent updates are possi
 ## Hooks
 
 ```
-before:submit  → can mutate session or abort
-after:submit   → observe final session; trigger memory extraction
+before:submit   → can mutate session or abort
+after:submit    → observe final session; trigger memory extraction
 before:response → runs between tool results and next LLM call
 after:response  → (reserved)
-before:tool    → capability check, rate limiting
-after:tool     → audit logging
+before:tool     → capability check, rate limiting
+after:tool      → audit logging
 ```
 
 Hooks receive and return `HookContext`; they may replace `ctx.session` to inject context

@@ -95,10 +95,15 @@ interface MatbotServices {
   /** Hot-load another plugin by specifier. */
   loadPlugin(specifier: string): Promise<void>;
 
+  /** Look up a service registered by another plugin. Key is the service's types package name. */
+  get<K extends keyof ServiceMap>(key: K): ServiceMap[K] | undefined;
+
+  /** Advertise a service implementation to other plugins. */
+  register<K extends keyof ServiceMap>(key: K, service: ServiceMap[K]): void;
+
   readonly providers:   ReadonlyMap<string, ProviderConfig>;
-  readonly stores?:     { readonly sessions?: Store<Session> };
+  readonly sessions?:   Store<Session>;
   readonly extensions?: Record<string, unknown>;
-  readonly memory?:     MemoryManager;
   readonly files?:      FileStore;
   readonly vault:       Vault;
   readonly hooks:       HookRegistry;
@@ -106,6 +111,45 @@ interface MatbotServices {
   readonly workdir?:    string;
 }
 ```
+
+### Plugin-to-plugin services: `ServiceMap`
+
+Optional services — memory, custom cognitive subsystems, etc. — are not listed as typed
+fields on `MatbotServices`. Instead they use an open registry keyed by the npm package
+name of the interface package. This keeps core minimal and allows any plugin to advertise
+novel services without modifying the harness.
+
+**Advertising a service** (in the providing plugin's `setup()`):
+
+```ts
+import type { MemoryManager } from '@matatbread/matbot-memory-types';
+// importing the types package also loads the ServiceMap augmentation
+
+services.register('@matatbread/matbot-memory-types', new MemoryManagerImpl(store));
+```
+
+**Consuming a service** (in any plugin's `setup()`):
+
+```ts
+import type { MemoryManager } from '@matatbread/matbot-memory-types';
+
+const memory = services.get('@matatbread/matbot-memory-types'); // typed as MemoryManager | undefined
+```
+
+The type safety comes from module augmentation in the types package:
+
+```ts
+// In @matatbread/matbot-memory-types:
+declare module '@matatbread/matbot-plugin-api' {
+  interface ServiceMap {
+    '@matatbread/matbot-memory-types': MemoryManager;
+  }
+}
+```
+
+To create a new service contract, publish a `*-types` package containing the interface and
+the augmentation. The types package alone carries no runtime code — it is erased after
+compilation.
 
 ### Sub-runner: `services.complete()`
 
@@ -214,15 +258,13 @@ sparingly — only for irreversible actions.
 
 ### Capability requirements
 
-| Capability      | Meaning |
-|-----------------|---------|
-| `network`       | Makes outbound HTTP requests |
-| `filesystem`    | Reads or writes local files |
-| `spawn`         | Forks child processes |
-| `container`     | Runs containers |
-| `memory:read`   | Reads from the memory subsystem |
-| `memory:write`  | Writes to the memory subsystem |
-| `audit:read`    | Reads audit logs |
+| Capability   | Meaning |
+|--------------|---------|
+| `network`    | Makes outbound HTTP requests |
+| `filesystem` | Reads or writes local files |
+| `spawn`      | Forks child processes |
+| `container`  | Runs containers |
+| `audit:read` | Reads audit logs |
 
 ---
 
@@ -280,16 +322,17 @@ this factory. The existing adapters (`@matatbread/matbot-provider-anthropic` and
 
 ## Writing a storage plugin
 
-Storage plugins provide backends for sessions, memory, or job queues:
+Storage plugins provide `Store<T>` backends. Register a factory keyed by kind string:
 
 ```ts
-type StorageKind = 'sessions' | 'memory' | 'jobs';
-
 type StoreFactory = (
-  kind: StorageKind,
+  kind:    string,
   options: Record<string, unknown>,
 ) => Store<{ id: string; version: string }>;
 ```
+
+The built-in kind is `'sessions'`. Plugins may introduce their own kinds (e.g. a memory
+plugin may provision a `Store<MemoryEntry>` internally without registering a named kind).
 
 ### `Store<T>` interface
 
@@ -426,8 +469,18 @@ interface FileHandle {
 
 ## Memory manager
 
-Available as `services.memory`. The LLM does **not** have direct memory tools — memory
-is a subsystem concern managed by plugins:
+Memory is a plugin-provided service, not a core concern. The interface lives in
+`@matatbread/matbot-memory-types`; the implementation in `@matatbread/matbot-memory-node`.
+
+The LLM does **not** have direct memory tools — memory is managed entirely by plugins via
+hooks and the service registry.
+
+```ts
+import type { MemoryManager } from '@matatbread/matbot-memory-types';
+
+// In setup() of a plugin that needs memory:
+const memory = services.get('@matatbread/matbot-memory-types'); // MemoryManager | undefined
+```
 
 ```ts
 interface MemoryManager {
@@ -439,6 +492,9 @@ interface MemoryManager {
   buildContext(session: Session, signal: AbortSignal): Promise<ContextBlock[]>;
 }
 ```
+
+The memory implementation depends only on `Store<MemoryEntry>`, so the storage backend
+(filesystem, SQLite, Elasticsearch, etc.) is independently swappable.
 
 ---
 
@@ -463,6 +519,8 @@ from auto-cleanup.
 | `@matatbread/matbot-tool-http` | `http` | tool | Make HTTP requests |
 | `@matatbread/matbot-tool-schedule` | `schedule` | tool | Wait a specified duration |
 | `@matatbread/matbot-skills-node` | `skills` | tool+hooks | File-backed skill injection via skill router classifier |
+| `@matatbread/matbot-memory-types` | — | types | `MemoryManager` interface + `ServiceMap` augmentation (no runtime code) |
+| `@matatbread/matbot-memory-node` | — | plugin | `MemoryManagerImpl`, `JobQueueImpl`, `MemoryExtractorWorker` |
 | `@matatbread/matbot-frontend-web` | `frontend-web` | frontend+hooks | Web UI with session management |
 | `@matatbread/matbot-provider-anthropic` | — | provider | Anthropic Messages API adapter (also used for DeepSeek Anthropic-compat) |
 | `@matatbread/matbot-provider-openai-compat` | — | provider | OpenAI-compatible chat completions adapter |

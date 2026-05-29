@@ -171,7 +171,11 @@ All runtime state lives in `.data/` next to `matbot.yaml` and is gitignored:
 .data/
   sessions/    — one JSON file per conversation
   workspace/   — default working directory for the exec tool
+  files/       — uploaded and generated files (when the files plugin is active)
+  settings/    — per-plugin key-value settings
 ```
+
+Plugins may add further subdirectories as needed.
 
 ---
 
