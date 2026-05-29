@@ -1,5 +1,5 @@
 import type {
-  MemoryManager, FileStore, Vault, Message, ModelParameters,
+  FileStore, Vault, Message, ModelParameters,
   ProviderAdapter, ProviderConfig, Tool, ToolRegistry, FrontendAdapter,
   Store, Session,
 } from './types.js';
@@ -31,6 +31,22 @@ export interface PluginSettings {
   delete(key: string): Promise<void>;
 }
 
+// ── Service registry ──────────────────────────────────────────────────────────
+
+/**
+ * Open interface extended by plugin type packages via module augmentation.
+ * Each entry maps a package name (the canonical contract identifier) to the
+ * service interface it defines.
+ *
+ * Example (in @matatbread/matbot-memory-types):
+ *   declare module '@matatbread/matbot-plugin-api' {
+ *     interface ServiceMap {
+ *       '@matatbread/matbot-memory-types': MemoryManager;
+ *     }
+ *   }
+ */
+export interface ServiceMap {}
+
 // ── Services container ────────────────────────────────────────────────────────
 
 export interface MatbotServices {
@@ -42,10 +58,15 @@ export interface MatbotServices {
   /** Hot-load a plugin by specifier into the running process. */
   loadPlugin(specifier: string): Promise<void>;
 
+  /** Look up a service registered by a plugin. Key is the plugin's types package name. */
+  get<K extends keyof ServiceMap>(key: K): ServiceMap[K] | undefined;
+
+  /** Register a service implementation. Called by a plugin's setup() to advertise itself. */
+  register<K extends keyof ServiceMap>(key: K, service: ServiceMap[K]): void;
+
   readonly providers:   ReadonlyMap<string, ProviderConfig>;
-  readonly stores?:      { readonly sessions?: Store<Session> };
-  readonly extensions?:  Record<string, unknown>;
-  readonly memory?:     MemoryManager;
+  readonly sessions?:   Store<Session>;
+  readonly extensions?: Record<string, unknown>;
   readonly files?:      FileStore;
   readonly vault:       Vault;
   readonly hooks:       HookRegistry;
@@ -60,7 +81,7 @@ export interface MatbotServices {
 
 export type ProviderAdapterFactory = (config: ProviderConfig) => ProviderAdapter;
 
-export type StorageKind = 'sessions' | 'memory' | 'jobs';
+export type StorageKind = 'sessions';
 
 export type StoreFactory = (
   kind:    StorageKind,

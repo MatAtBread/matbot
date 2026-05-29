@@ -180,10 +180,23 @@ importers:
       '@matatbread/matbot-core':
         specifier: workspace:*
         version: link:../../core/runner
+      '@matatbread/matbot-memory-types':
+        specifier: workspace:*
+        version: link:../memory-types
     devDependencies:
       '@types/node':
         specifier: 'catalog:'
         version: 22.19.19
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
+
+  packages/plugins/memory-types:
+    dependencies:
+      '@matatbread/matbot-plugin-api':
+        specifier: workspace:*
+        version: link:../../core/plugin-api
+    devDependencies:
       typescript:
         specifier: 'catalog:'
         version: 5.9.3
@@ -226,6 +239,9 @@ importers:
 
   packages/plugins/skills:
     dependencies:
+      '@matatbread/matbot-memory-types':
+        specifier: workspace:*
+        version: link:../memory-types
       '@matatbread/matbot-plugin-api':
         specifier: workspace:*
         version: link:../../core/plugin-api

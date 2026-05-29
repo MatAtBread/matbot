@@ -1,5 +1,5 @@
 {
-  "name": "@matatbread/matbot-memory-node",
+  "name": "@matatbread/matbot-memory-types",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -10,11 +10,9 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@matatbread/matbot-core":         "workspace:*",
-    "@matatbread/matbot-memory-types": "workspace:*"
+    "@matatbread/matbot-plugin-api": "workspace:*"
   },
   "devDependencies": {
-    "@types/node": "catalog:",
-    "typescript":  "catalog:"
+    "typescript": "catalog:"
   }
 }
