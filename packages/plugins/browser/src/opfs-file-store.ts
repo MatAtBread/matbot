@@ -1,22 +1,19 @@
 import type { FileFilter, FileHandle, FileStore, MimeType } from '@matatbread/matbot-core';
 
 interface OPFSMeta {
-  id:         string;
-  version:    string;
-  name:       string;
-  mimeType:   MimeType;
-  size:       number;
-  createdAt:  string;
-  sessionId?: string;
-  messageId?: string;
-}
-
-async function rootDir(): Promise<FileSystemDirectoryHandle> {
-  return navigator.storage.getDirectory();
+  id:          string;
+  version:     string;
+  name:        string;
+  mimeType:    MimeType;
+  size:        number;
+  createdAt:   string;
+  sessionId?:  string;
+  messageId?:  string;
+  namespace?:  string;
 }
 
 async function filesDir(): Promise<FileSystemDirectoryHandle> {
-  const root = await rootDir();
+  const root = await navigator.storage.getDirectory();
   return root.getDirectoryHandle('matbot-files', { create: true });
 }
 
@@ -41,48 +38,77 @@ function makeHandle(meta: OPFSMeta, dir: FileSystemDirectoryHandle): FileHandle 
   };
 }
 
+async function writeMeta(dir: FileSystemDirectoryHandle, meta: OPFSMeta): Promise<void> {
+  const metaFh = await dir.getFileHandle(`${meta.id}.meta.json`, { create: true });
+  const metaW  = await metaFh.createWritable();
+  await metaW.write(JSON.stringify(meta));
+  await metaW.close();
+}
+
+async function writeData(dir: FileSystemDirectoryHandle, id: string, data: AsyncIterable<Uint8Array>): Promise<number> {
+  const dataFh   = await dir.getFileHandle(`${id}.data`, { create: true });
+  const writable = await dataFh.createWritable();
+  let size = 0;
+  for await (const chunk of data) {
+    // Copy into a fresh Uint8Array<ArrayBuffer> — OPFS writable requires ArrayBuffer-backed views
+    const safe = new Uint8Array(chunk.byteLength);
+    safe.set(chunk);
+    await writable.write(safe);
+    size += chunk.byteLength;
+  }
+  await writable.close();
+  return size;
+}
+
 /**
  * `FileStore` backed by the Origin Private File System (OPFS).
  * Requires a browser environment with `navigator.storage.getDirectory()`.
  */
 export class OPFSFileStore implements FileStore {
   async put(
-    name:     string,
+    name:     string | undefined,
     mimeType: MimeType,
     data:     AsyncIterable<Uint8Array>,
-    meta?:    { sessionId?: string; messageId?: string },
+    meta?:    { sessionId?: string; messageId?: string; namespace?: string },
   ): Promise<FileHandle> {
-    const dir  = await filesDir();
-    const id   = crypto.randomUUID();
+    const dir = await filesDir();
 
-    // Write data file
-    const dataFh  = await dir.getFileHandle(`${id}.data`, { create: true });
-    const writable = await dataFh.createWritable();
-    let size = 0;
-    for await (const chunk of data) {
-      // Copy into a fresh Uint8Array<ArrayBuffer> — OPFS writable requires ArrayBuffer-backed views
-      const safe = new Uint8Array(chunk.byteLength);
-      safe.set(chunk);
-      await writable.write(safe);
-      size += chunk.byteLength;
+    // Upsert when name is provided: find existing entry with matching name (+ namespace).
+    if (name !== undefined) {
+      const existing = await this.getByName(name, meta?.namespace);
+      if (existing !== null) {
+        const size = await writeData(dir, existing.id, data);
+        const fileMeta: OPFSMeta = {
+          id:        existing.id,
+          version:   crypto.randomUUID(),
+          name,
+          mimeType,
+          size,
+          createdAt: existing.createdAt,
+          ...(meta?.sessionId !== undefined ? { sessionId: meta.sessionId } : {}),
+          ...(meta?.messageId !== undefined ? { messageId: meta.messageId } : {}),
+          ...(meta?.namespace !== undefined ? { namespace: meta.namespace } : {}),
+        };
+        await writeMeta(dir, fileMeta);
+        return makeHandle(fileMeta, dir);
+      }
     }
-    await writable.close();
 
-    // Write metadata
+    const id   = crypto.randomUUID();
+    const size = await writeData(dir, id, data);
+
     const fileMeta: OPFSMeta = {
       id,
       version:   crypto.randomUUID(),
-      name,
+      name:      name ?? id,
       mimeType,
       size,
       createdAt: new Date().toISOString(),
-      ...(meta?.sessionId ? { sessionId: meta.sessionId } : {}),
-      ...(meta?.messageId ? { messageId: meta.messageId } : {}),
+      ...(meta?.sessionId !== undefined ? { sessionId: meta.sessionId } : {}),
+      ...(meta?.messageId !== undefined ? { messageId: meta.messageId } : {}),
+      ...(meta?.namespace !== undefined ? { namespace: meta.namespace } : {}),
     };
-    const metaFh  = await dir.getFileHandle(`${id}.meta.json`, { create: true });
-    const metaW   = await metaFh.createWritable();
-    await metaW.write(JSON.stringify(fileMeta));
-    await metaW.close();
+    await writeMeta(dir, fileMeta);
 
     return makeHandle(fileMeta, dir);
   }
@@ -97,6 +123,13 @@ export class OPFSFileStore implements FileStore {
     } catch {
       return null;
     }
+  }
+
+  async getByName(name: string, namespace?: string): Promise<FileHandle | null> {
+    for await (const handle of this.list(namespace !== undefined ? { namespace } : {})) {
+      if (handle.name === name) return handle;
+    }
+    return null;
   }
 
   async delete(id: string): Promise<void> {
@@ -118,10 +151,11 @@ export class OPFSFileStore implements FileStore {
       const id  = name.slice(0, -'.meta.json'.length);
       const fh  = await this.get(id);
       if (!fh) continue;
-      if (filter?.sessionId && fh.sessionId !== filter.sessionId) continue;
-      if (filter?.mimeType  && !fh.mimeType.startsWith(filter.mimeType)) continue;
-      if (filter?.createdAfter  && fh.createdAt < filter.createdAfter)  continue;
-      if (filter?.createdBefore && fh.createdAt > filter.createdBefore) continue;
+      if (filter?.namespace    && fh.namespace    !== filter.namespace)          continue;
+      if (filter?.sessionId    && fh.sessionId    !== filter.sessionId)         continue;
+      if (filter?.mimeType     && !fh.mimeType.startsWith(filter.mimeType))     continue;
+      if (filter?.createdAfter  && fh.createdAt < filter.createdAfter)          continue;
+      if (filter?.createdBefore && fh.createdAt > filter.createdBefore)         continue;
       yield fh;
     }
   }

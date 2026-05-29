@@ -29,6 +29,9 @@ importers:
       '@matatbread/matbot-core':
         specifier: workspace:*
         version: link:../../packages/core/runner
+      '@matatbread/matbot-files-node':
+        specifier: workspace:*
+        version: link:../../packages/plugins/files
       '@matatbread/matbot-security':
         specifier: workspace:*
         version: link:../../packages/core/security
@@ -193,6 +196,16 @@ importers:
       '@matatbread/matbot-providers-base':
         specifier: workspace:*
         version: link:../../../core/providers/_base
+    devDependencies:
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
+
+  packages/plugins/providers/customer-services:
+    dependencies:
+      '@matatbread/matbot-plugin-api':
+        specifier: workspace:*
+        version: link:../../../core/plugin-api
     devDependencies:
       typescript:
         specifier: 'catalog:'

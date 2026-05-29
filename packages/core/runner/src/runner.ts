@@ -1,7 +1,7 @@
 import type {
   Session, MessageContent,
   PipelineEvent, RunConfig, ProviderAdapter, ProviderConfig,
-  Tool, ToolContext, Store,
+  Tool, ToolContext, Store, FileStore,
 } from './types.js';
 import { HookRegistry } from './hooks.js';
 import { appendMessage, createMessage } from './session.js';
@@ -17,6 +17,7 @@ export interface RunSessionOpts {
   signal:         AbortSignal;
   workdir?:       string;
   configPath?:    string;
+  files?:         FileStore;
   /** Supply a prompt implementation to allow tools to ask interactive questions. */
   prompt?:        (question: string, defaultValue?: string) => Promise<string>;
   loadPlugin:     (specifier: string) => Promise<void>;
@@ -195,6 +196,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
         loadPlugin: opts.loadPlugin,
         ...(opts.workdir     !== undefined ? { workdir:     opts.workdir     } : {}),
         ...(opts.configPath  !== undefined ? { configPath:  opts.configPath  } : {}),
+        ...(opts.files       !== undefined ? { files:       opts.files       } : {}),
       };
 
       try {

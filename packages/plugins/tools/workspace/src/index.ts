@@ -1,34 +1,62 @@
-import { readFile, writeFile, readdir, mkdir, stat } from 'node:fs/promises';
-import { join, relative, resolve, dirname } from 'node:path';
 import type { Tool, ToolEvent, ToolContext, MatbotPlugin } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 
-// Returns the resolved absolute path if it is within workdir, null if it escapes.
-function safePath(workdir: string, input: string): string | null {
-  const full = resolve(join(workdir, input));
-  const rel  = relative(resolve(workdir), full);
-  return rel.startsWith('..') ? null : full;
+const WORKSPACE_NS = 'workspace';
+
+const MIME_MAP: Record<string, string> = {
+  '.txt':  'text/plain; charset=utf-8',
+  '.md':   'text/markdown; charset=utf-8',
+  '.html': 'text/html; charset=utf-8',
+  '.css':  'text/css; charset=utf-8',
+  '.js':   'application/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.csv':  'text/csv; charset=utf-8',
+  '.xml':  'application/xml; charset=utf-8',
+  '.svg':  'image/svg+xml',
+  '.png':  'image/png',
+  '.jpg':  'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif':  'image/gif',
+  '.webp': 'image/webp',
+  '.pdf':  'application/pdf',
+  '.zip':  'application/zip',
+  '.sh':   'application/x-sh',
+};
+
+// Returns a normalised relative path if safe, null if it contains traversal.
+function safePath(input: string): string | null {
+  const parts = input.replace(/\\/g, '/').split('/').filter(Boolean);
+  if (parts.some(p => p === '..')) return null;
+  return parts.join('/');
 }
 
-async function listDir(
-  dir:       string,
-  base:      string,
-  recursive: boolean,
-): Promise<Array<{ path: string; size: number }>> {
-  const entries = await readdir(dir, { withFileTypes: true });
-  const results: Array<{ path: string; size: number }> = [];
-  for (const entry of entries) {
-    const rel = base ? `${base}/${entry.name}` : entry.name;
-    if (entry.isDirectory()) {
-      if (recursive) {
-        results.push(...await listDir(join(dir, entry.name), rel, true));
-      }
-    } else {
-      const info = await stat(join(dir, entry.name));
-      results.push({ path: rel, size: info.size });
-    }
-  }
-  return results;
+function mimeFromName(name: string): string {
+  const dot = name.lastIndexOf('.');
+  const ext = dot !== -1 ? name.slice(dot).toLowerCase() : '';
+  return MIME_MAP[ext] ?? 'application/octet-stream';
+}
+
+function base64ToUint8(b64: string): Uint8Array {
+  const binary = atob(b64);
+  const bytes  = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+function uint8ToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]!);
+  return btoa(binary);
+}
+
+async function collectStream(stream: AsyncIterable<Uint8Array>): Promise<Uint8Array> {
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for await (const chunk of stream) { chunks.push(chunk); total += chunk.byteLength; }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) { out.set(chunk, offset); offset += chunk.byteLength; }
+  return out;
 }
 
 interface ReadInput  { path: string; encoding?: 'utf8' | 'base64' }
@@ -38,9 +66,9 @@ interface ListInput  { path?: string; recursive?: boolean }
 const workspaceReadTool: Tool = {
   name: 'workspace_read',
   description:
-    'Read a file from the session workspace directory. ' +
+    'Read a file from the session workspace. ' +
     'When the web frontend is running, workspace files are also accessible as static links ' +
-    'at /workspace/<path> on the HTTP server — you can share these URLs directly with the user.',
+    'at /workspace/<path> on the current HTTP host (use a relative URL) — you can share these URLs directly with the user.',
   requires:    ['filesystem'],
   inputSchema: {
     type:       'object',
@@ -53,20 +81,26 @@ const workspaceReadTool: Tool = {
   executor: {
     async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
       const { path: inputPath, encoding = 'utf8' } = input as ReadInput;
-      if (!ctx.workdir) { yield { type: 'error', message: 'No workspace directory is configured for this session.' }; return; }
+      if (!ctx.files) { yield { type: 'error', message: 'No file store is configured for this session.' }; return; }
 
-      const full = safePath(ctx.workdir, inputPath);
-      if (!full) { yield { type: 'error', message: 'Path escapes the workspace directory.' }; return; }
+      const safe = safePath(inputPath);
+      if (!safe) { yield { type: 'error', message: 'Path escapes the workspace directory.' }; return; }
 
-      let data: Buffer;
+      const handle = await ctx.files.getByName(safe, WORKSPACE_NS);
+      if (!handle) { yield { type: 'error', message: `File not found: "${safe}"` }; return; }
+
+      let bytes: Uint8Array;
       try {
-        data = await readFile(full);
+        bytes = await collectStream(handle.stream(ctx.signal));
       } catch (e) {
         yield { type: 'error', message: String(e) };
         return;
       }
 
-      yield { type: 'result', value: encoding === 'base64' ? data.toString('base64') : data.toString('utf8') };
+      yield {
+        type:  'result',
+        value: encoding === 'base64' ? uint8ToBase64(bytes) : new TextDecoder().decode(bytes),
+      };
     },
   },
 };
@@ -74,7 +108,7 @@ const workspaceReadTool: Tool = {
 const workspaceWriteTool: Tool = {
   name: 'workspace_write',
   description:
-    'Write a file to the session workspace directory. ' +
+    'Write a file to the session workspace. ' +
     'Parent directories are created automatically. ' +
     'Once written, the file is immediately accessible as a static link at /workspace/<path> on the HTTP server ' +
     'when the web frontend is running — provide this URL to the user so they can download or view the file.',
@@ -91,24 +125,26 @@ const workspaceWriteTool: Tool = {
   executor: {
     async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
       const { path: inputPath, content, encoding = 'utf8' } = input as WriteInput;
-      if (!ctx.workdir) { yield { type: 'error', message: 'No workspace directory is configured for this session.' }; return; }
+      if (!ctx.files) { yield { type: 'error', message: 'No file store is configured for this session.' }; return; }
 
-      const full = safePath(ctx.workdir, inputPath);
-      if (!full) { yield { type: 'error', message: 'Path escapes the workspace directory.' }; return; }
+      const safe = safePath(inputPath);
+      if (!safe) { yield { type: 'error', message: 'Path escapes the workspace directory.' }; return; }
 
-      const data = encoding === 'base64'
-        ? Buffer.from(content, 'base64')
-        : Buffer.from(content, 'utf8');
+      const bytes = encoding === 'base64'
+        ? base64ToUint8(content)
+        : new TextEncoder().encode(content);
 
+      async function* makeStream(): AsyncIterable<Uint8Array> { yield bytes; }
+
+      let handle;
       try {
-        await mkdir(dirname(full), { recursive: true });
-        await writeFile(full, data);
+        handle = await ctx.files.put(safe, mimeFromName(safe), makeStream(), { namespace: WORKSPACE_NS });
       } catch (e) {
         yield { type: 'error', message: String(e) };
         return;
       }
 
-      yield { type: 'result', value: { path: inputPath, bytes: data.byteLength } };
+      yield { type: 'result', value: { path: safe, bytes: handle.size } };
     },
   },
 };
@@ -116,7 +152,7 @@ const workspaceWriteTool: Tool = {
 const workspaceListTool: Tool = {
   name: 'workspace_list',
   description:
-    'List files in the session workspace directory. ' +
+    'List files in the session workspace. ' +
     'Returns each file\'s relative path and size in bytes. ' +
     'Files are accessible at /workspace/<path> on the HTTP server when the web frontend is running.',
   requires:    ['filesystem'],
@@ -129,15 +165,20 @@ const workspaceListTool: Tool = {
   },
   executor: {
     async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
-      const { path: inputPath = '', recursive = false } = input as ListInput;
-      if (!ctx.workdir) { yield { type: 'error', message: 'No workspace directory is configured for this session.' }; return; }
+      const { path: inputPath, recursive = false } = input as ListInput;
+      if (!ctx.files) { yield { type: 'error', message: 'No file store is configured for this session.' }; return; }
 
-      const full = safePath(ctx.workdir, inputPath);
-      if (!full) { yield { type: 'error', message: 'Path escapes the workspace directory.' }; return; }
+      const prefix = inputPath ? `${safePath(inputPath) ?? ''}/` : '';
 
-      let files: Array<{ path: string; size: number }>;
+      const files: Array<{ path: string; size: number }> = [];
       try {
-        files = await listDir(full, inputPath, recursive);
+        for await (const handle of ctx.files.list({ namespace: WORKSPACE_NS })) {
+          const name = handle.name;
+          if (prefix && !name.startsWith(prefix)) continue;
+          const rel = prefix ? name.slice(prefix.length) : name;
+          if (!recursive && rel.includes('/')) continue;
+          files.push({ path: name, size: handle.size });
+        }
       } catch (e) {
         yield { type: 'error', message: String(e) };
         return;
@@ -153,7 +194,7 @@ export const plugin: MatbotPlugin = {
   apiVersion: PLUGIN_API_VERSION,
   manifest: {
     description:
-      'Read, write, and list files in the session workspace directory. ' +
+      'Read, write, and list files in the session workspace. ' +
       'When the web frontend is running, all workspace files are also served as static ' +
       'read-only downloads at /workspace/<path> on the HTTP server, so you can give the user ' +
       'a direct link to any file you write there.',

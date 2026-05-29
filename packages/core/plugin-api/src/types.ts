@@ -317,6 +317,7 @@ export interface ToolContext {
   signal:      AbortSignal;
   workdir?:    string;
   configPath?: string;
+  files?:      FileStore;
   /** Prompt the user for input. The host provides a readline or form implementation. */
   prompt(question: string, defaultValue?: string): Promise<string>;
   /** Hot-load a plugin by specifier without restarting the process. */
@@ -347,24 +348,28 @@ export interface FileHandle {
   createdAt:   ISODate;
   sessionId?:  string;
   messageId?:  string;
+  namespace?:  string;
   stream(signal?: AbortSignal): AsyncIterable<Uint8Array>;
 }
 
 export interface FileFilter {
   sessionId?:     string;
   mimeType?:      string;
+  namespace?:     string;
   createdAfter?:  ISODate;
   createdBefore?: ISODate;
 }
 
 export interface FileStore {
+  /** Store a file. When `name` is provided, upserts by (name + namespace); otherwise always creates a new entry. */
   put(
-    name:     string,
+    name:     string | undefined,
     mimeType: MimeType,
     data:     AsyncIterable<Uint8Array>,
-    meta?:    { sessionId?: string; messageId?: string }
+    meta?:    { sessionId?: string; messageId?: string; namespace?: string }
   ): Promise<FileHandle>;
   get(id: string): Promise<FileHandle | null>;
+  getByName(name: string, namespace?: string): Promise<FileHandle | null>;
   delete(id: string): Promise<void>;
   list(filter?: FileFilter): AsyncIterable<FileHandle>;
   putTemp(name: string, mimeType: MimeType, data: AsyncIterable<Uint8Array>): Promise<FileHandle>;

@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { join, relative, resolve, extname } from 'node:path';
 import type {
   HookRegistry, Principal, ProviderAdapter, ProviderConfig,
-  Session, Store, ToolContext, ToolRegistry, Vault,
+  Session, Store, ToolContext, ToolRegistry, Vault, FileStore,
 } from '@matatbread/matbot-core';
 import { appendMessage, createMessage, createSession, runSession } from '@matatbread/matbot-core';
 import { sseComment, sseEvent } from './sse-writer.js';
@@ -19,6 +19,7 @@ export interface WebServerDeps {
   hooks?:      HookRegistry;
   cors?:       string;  // Access-Control-Allow-Origin value, default '*'
   workdir?:    string;
+  files?:      FileStore;
   configPath?: string;
 }
 
@@ -266,9 +267,10 @@ export function createWebServer(deps: WebServerDeps) {
           providerConfig: resolvedConfig,
           ...(deps.tools    ? { tools: new Map(deps.tools.list().map(t => [t.name, t])) } : {}),
           store:          deps.store,
-          ...(deps.hooks    ? { hooks: deps.hooks }       : {}),
-          ...(deps.workdir     ? { workdir:     deps.workdir     } : {}),
-          ...(deps.configPath  ? { configPath:  deps.configPath  } : {}),
+          ...(deps.hooks      ? { hooks:      deps.hooks      } : {}),
+          ...(deps.workdir    ? { workdir:    deps.workdir    } : {}),
+          ...(deps.files      ? { files:      deps.files      } : {}),
+          ...(deps.configPath ? { configPath: deps.configPath } : {}),
           signal:         ac.signal,
           prompt:         promptFn,
           loadPlugin:     deps.loadPlugin,
@@ -394,33 +396,24 @@ export function createWebServer(deps: WebServerDeps) {
 
     // --- GET /workspace/:path --- (read-only static access to the session workspace)
     const workspaceMatch = /^\/workspace\/(.+)$/.exec(url);
-    if (method === 'GET' && workspaceMatch && deps.workdir) {
+    if (method === 'GET' && workspaceMatch && deps.files) {
       let reqPath: string;
       try { reqPath = decodeURIComponent(workspaceMatch[1]!); }
       catch { json(res, 400, { error: 'Invalid path encoding' }); return; }
 
-      const workdir = resolve(deps.workdir);
-      const full    = resolve(join(workdir, reqPath));
-      const rel     = relative(workdir, full);
-      if (rel.startsWith('..')) { json(res, 400, { error: 'Invalid path' }); return; }
+      const handle = await deps.files.getByName(reqPath, 'workspace');
+      if (!handle) { json(res, 404, { error: 'Not found' }); return; }
 
-      let data: Buffer;
-      try {
-        data = await readFile(full);
-      } catch (e) {
-        const code = (e as NodeJS.ErrnoException).code;
-        json(res, code === 'ENOENT' ? 404 : 500, { error: String(e) });
-        return;
-      }
-
-      const mime = WORKSPACE_MIME[extname(full).toLowerCase()] ?? 'application/octet-stream';
       res.writeHead(200, {
-        'content-type':   mime,
-        'content-length': data.byteLength,
+        'content-type':   handle.mimeType,
+        'content-length': handle.size,
         'cache-control':  'no-cache',
         ...corsHeaders(origin),
       });
-      res.end(data);
+      for await (const chunk of handle.stream()) {
+        res.write(chunk);
+      }
+      res.end();
       return;
     }
 

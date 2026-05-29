@@ -11,6 +11,7 @@
   "dependencies": {
     "@matatbread/matbot-config":              "workspace:*",
     "@matatbread/matbot-core":                "workspace:*",
+    "@matatbread/matbot-files-node":          "workspace:*",
     "@matatbread/matbot-security":            "workspace:*",
     "@matatbread/matbot-storage-filesystem":  "workspace:*",
     "@matatbread/matbot-tool-plugin":          "workspace:*"

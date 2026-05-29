@@ -4,14 +4,15 @@ import path from 'node:path';
 import type { FileFilter, FileHandle, FileStore, MimeType } from '@matatbread/matbot-core';
 
 interface FileMeta {
-  id:         string;
-  version:    string;
-  name:       string;
-  mimeType:   MimeType;
-  size:       number;
-  createdAt:  string;
-  sessionId?: string;
-  messageId?: string;
+  id:          string;
+  version:     string;
+  name:        string;
+  mimeType:    MimeType;
+  size:        number;
+  createdAt:   string;
+  sessionId?:  string;
+  messageId?:  string;
+  namespace?:  string;
 }
 
 function makeHandle(meta: FileMeta, dataPath: string): FileHandle {
@@ -45,16 +46,8 @@ export class FilesystemFileStore implements FileStore {
     await mkdir(this.dir, { recursive: true });
   }
 
-  async put(
-    name:     string,
-    mimeType: MimeType,
-    data:     AsyncIterable<Uint8Array>,
-    meta?:    { sessionId?: string; messageId?: string },
-  ): Promise<FileHandle> {
-    await this.ensureDir();
-    const id      = crypto.randomUUID();
+  private async writeData(id: string, data: AsyncIterable<Uint8Array>): Promise<number> {
     const tmpPath = `${this.dataPath(id)}.tmp`;
-
     const fh = await open(tmpPath, 'w');
     let size = 0;
     try {
@@ -65,18 +58,52 @@ export class FilesystemFileStore implements FileStore {
     } finally {
       await fh.close();
     }
-
     await rename(tmpPath, this.dataPath(id));
+    return size;
+  }
+
+  async put(
+    name:     string | undefined,
+    mimeType: MimeType,
+    data:     AsyncIterable<Uint8Array>,
+    meta?:    { sessionId?: string; messageId?: string; namespace?: string },
+  ): Promise<FileHandle> {
+    await this.ensureDir();
+
+    // Upsert when name is provided: find existing entry with matching name (+ namespace).
+    if (name !== undefined) {
+      const existing = await this.getByName(name, meta?.namespace);
+      if (existing !== null) {
+        const size = await this.writeData(existing.id, data);
+        const fileMeta: FileMeta = {
+          id:        existing.id,
+          version:   crypto.randomUUID(),
+          name,
+          mimeType,
+          size,
+          createdAt: existing.createdAt,
+          ...(meta?.sessionId !== undefined ? { sessionId: meta.sessionId } : {}),
+          ...(meta?.messageId !== undefined ? { messageId: meta.messageId } : {}),
+          ...(meta?.namespace !== undefined ? { namespace: meta.namespace } : {}),
+        };
+        await writeFile(this.metaPath(existing.id), JSON.stringify(fileMeta), 'utf8');
+        return makeHandle(fileMeta, this.dataPath(existing.id));
+      }
+    }
+
+    const id   = crypto.randomUUID();
+    const size = await this.writeData(id, data);
 
     const fileMeta: FileMeta = {
       id,
       version:   crypto.randomUUID(),
-      name,
+      name:      name ?? id,
       mimeType,
       size,
       createdAt: new Date().toISOString(),
-      ...(meta?.sessionId ? { sessionId: meta.sessionId } : {}),
-      ...(meta?.messageId ? { messageId: meta.messageId } : {}),
+      ...(meta?.sessionId !== undefined ? { sessionId: meta.sessionId } : {}),
+      ...(meta?.messageId !== undefined ? { messageId: meta.messageId } : {}),
+      ...(meta?.namespace !== undefined ? { namespace: meta.namespace } : {}),
     };
     await writeFile(this.metaPath(id), JSON.stringify(fileMeta), 'utf8');
 
@@ -91,6 +118,13 @@ export class FilesystemFileStore implements FileStore {
     } catch {
       return null;
     }
+  }
+
+  async getByName(name: string, namespace?: string): Promise<FileHandle | null> {
+    for await (const handle of this.list(namespace !== undefined ? { namespace } : {})) {
+      if (handle.name === name) return handle;
+    }
+    return null;
   }
 
   async delete(id: string): Promise<void> {
@@ -114,10 +148,11 @@ export class FilesystemFileStore implements FileStore {
       const id  = entry.slice(0, -'.meta.json'.length);
       const fh  = await this.get(id);
       if (!fh) continue;
-      if (filter?.sessionId && fh.sessionId !== filter.sessionId) continue;
-      if (filter?.mimeType  && !fh.mimeType.startsWith(filter.mimeType)) continue;
-      if (filter?.createdAfter  && fh.createdAt < filter.createdAfter)  continue;
-      if (filter?.createdBefore && fh.createdAt > filter.createdBefore) continue;
+      if (filter?.namespace    && fh.namespace    !== filter.namespace)                    continue;
+      if (filter?.sessionId    && fh.sessionId    !== filter.sessionId)                   continue;
+      if (filter?.mimeType     && !fh.mimeType.startsWith(filter.mimeType))               continue;
+      if (filter?.createdAfter  && fh.createdAt < filter.createdAfter)                    continue;
+      if (filter?.createdBefore && fh.createdAt > filter.createdBefore)                   continue;
       yield fh;
     }
   }
