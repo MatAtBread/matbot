@@ -304,14 +304,6 @@
     /* Assistant: left-aligned, no background */
     .message.assistant { align-self: flex-start; }
 
-    /* Tool-result messages: left, subtle left border */
-    .message.tool-turn {
-      align-self: flex-start;
-      padding-left: 10px;
-      border-left: 2px solid #e5e7eb;
-      margin-top: -10px;
-    }
-
     .msg-label {
       font-size: 0.79em;
       font-weight: 600;
@@ -432,46 +424,48 @@
       margin: 4px 0 8px;
       font-family: 'SF Mono', 'Cascadia Code', ui-monospace, monospace;
       font-size: 0.86em;
+      max-width: 100%;
     }
     .tool-header {
       padding: 6px 12px;
       color: #a78bfa;
       font-weight: 600;
-      border-bottom: 1px solid #1e293b;
-    }
-    .tool-args {
-      border-bottom: 1px solid #1e293b;
-    }
-    .tool-args summary {
-      padding: 4px 12px;
-      color: #64748b;
       cursor: pointer;
-      font-size: 0.92em; /* relative to tool-block's 0.86em */
       list-style: none;
       user-select: none;
+      display: flex;
+      align-items: center;
+      gap: 6px;
     }
-    .tool-args summary::-webkit-details-marker { display: none; }
-    .tool-args pre {
+    .tool-header::-webkit-details-marker { display: none; }
+    .tool-header::before { content: '▶'; font-size: 0.75em; opacity: 0.45; flex-shrink: 0; }
+    details.tool-block[open] > .tool-header::before { content: '▼'; }
+    .tool-args {
       margin: 0;
       padding: 6px 12px 8px;
-      color: #94a3b8;
-      font-size: 0.96em; /* relative to tool-block's 0.86em */
+      color: #86efac;
+      font-size: 0.96em;
       white-space: pre-wrap;
       word-break: break-word;
+      border-top: 2px solid #1e3a2f;
+      max-height: 15vh;
+      overflow-y: auto;
     }
     .tool-output {
       margin: 0;
       padding: 7px 12px;
-      color: #94a3b8;
-      font-size: 0.96em; /* relative to tool-block's 0.86em */
+      color: #67e8f9;
+      font-size: 0.96em;
       white-space: pre-wrap;
       word-break: break-word;
-      max-height: 10vh;
+      max-height: 15vh;
       overflow-y: auto;
+      border-top: 2px solid #0e3040;
     }
 
     /* ── Tool results ──────────────────────────────────────────── */
 
+    /* Standalone result (fallback, outside a tool-block) */
     .tool-result {
       display: flex;
       gap: 8px;
@@ -497,7 +491,27 @@
       border-radius: 4px;
       padding: 4px 8px;
       flex: 1;
+      min-width: 0;
       max-height: 180px;
+      overflow-y: auto;
+    }
+
+    /* Result inside a dark tool-block */
+    .tool-block .tool-result {
+      margin: 0;
+      padding: 6px 12px;
+      border-top: 2px solid #0e3040;
+    }
+    .tool-block .tool-result-icon { color: #4ade80; }
+    .tool-block .tool-result-error .tool-result-icon { color: #f87171; }
+    .tool-block .tool-result-text {
+      color: #67e8f9;
+      background: transparent;
+      border: none;
+      border-radius: 0;
+      padding: 0;
+      font-size: 0.96em;
+      max-height: 15vh;
       overflow-y: auto;
     }
 

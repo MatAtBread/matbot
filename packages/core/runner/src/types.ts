@@ -12,7 +12,7 @@ export type PipelineEvent =
   | { type: 'tool:start';   callId: string; name: string; input: unknown; traceId: string }
   | { type: 'tool:stdout';  callId: string; chunk: string;  traceId: string }
   | { type: 'tool:stderr';  callId: string; chunk: string;  traceId: string }
-  | { type: 'tool:end';     callId: string; result: unknown; traceId: string }
+  | { type: 'tool:end';     callId: string; result: unknown; isError: boolean; traceId: string }
   | { type: 'file';         handle: FileHandle;     traceId: string }
   | { type: 'usage';        inputTokens: number; outputTokens: number; costUsd?: number; cacheReadTokens?: number; cacheCreationTokens?: number; traceId: string }
   | { type: 'done';         session: Session;       traceId: string }

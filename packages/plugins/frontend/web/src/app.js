@@ -205,6 +205,7 @@ async function joinSessionStream(id, renderedCount) {
           case 'tool:start': {
             removeLoading();
             currentTool = makeToolBlock(ev.name, ev.input);
+            currentTool.open = true;
             turnWrap.appendChild(currentTool);
             break;
           }
@@ -218,7 +219,14 @@ async function joinSessionStream(id, renderedCount) {
             }
             break;
           }
-          case 'tool:end': currentTool = null; break;
+          case 'tool:end': {
+            if (currentTool) {
+              currentTool.appendChild(makeToolResultBlock(ev.result, ev.isError));
+              currentTool.open = false;
+            }
+            currentTool = null;
+            break;
+          }
           case 'usage':
             turnIn  += ev.inputTokens; turnOut += ev.outputTokens;
             if (ev.costUsd              !== undefined) turnCost      += ev.costUsd;
@@ -437,28 +445,24 @@ function makeThinkingBlock(label, openByDefault) {
   return { details, content };
 }
 
-function makeToolBlock(name, input) {
-  const wrap = document.createElement('div');
-  wrap.className = 'tool-block';
-  const header = document.createElement('div');
-  header.className = 'tool-header';
-  header.textContent = '\u2699 ' + name;
-  wrap.appendChild(header);
+function makeToolBlock(name, input, callId) {
+  const det = document.createElement('details');
+  det.className = 'tool-block';
+  if (callId) det.dataset.callId = callId;
+  const sum = document.createElement('summary');
+  sum.className = 'tool-header';
+  sum.textContent = '\u2699 ' + name;
+  det.appendChild(sum);
   const inputStr = input !== undefined && input !== null
     ? (typeof input === 'string' ? input : JSON.stringify(input, null, 2))
     : '';
   if (inputStr && inputStr !== '{}') {
-    const det = document.createElement('details');
-    det.className = 'tool-args';
-    const sum = document.createElement('summary');
-    sum.textContent = 'input';
     const pre = document.createElement('pre');
+    pre.className = 'tool-args';
     pre.textContent = inputStr;
-    det.appendChild(sum);
     det.appendChild(pre);
-    wrap.appendChild(det);
   }
-  return wrap;
+  return det;
 }
 
 function makeToolResultBlock(result, isError) {
@@ -603,11 +607,17 @@ function renderContentParts(wrap, content) {
         break;
       }
       case 'tool-call':
-        wrap.appendChild(makeToolBlock(part.name, part.input));
+        wrap.appendChild(makeToolBlock(part.name, part.input, part.id));
         break;
-      case 'tool-result':
-        wrap.appendChild(makeToolResultBlock(part.result, part.isError));
+      case 'tool-result': {
+        const toolBlock = part.id ? messagesEl.querySelector('[data-call-id="' + part.id + '"]') : null;
+        if (toolBlock) {
+          toolBlock.appendChild(makeToolResultBlock(part.result, part.isError));
+        } else {
+          wrap.appendChild(makeToolResultBlock(part.result, part.isError));
+        }
         break;
+      }
       case 'refusal': {
         const div = document.createElement('div');
         div.className = 'msg-refusal';
@@ -691,10 +701,9 @@ function renderSession(session, startIdx) {
       const wrap = createAssistantWrap('assistant');
       renderContentParts(wrap, msg.content);
     } else if (msg.role === 'tool') {
-      const wrap = document.createElement('div');
-      wrap.className = 'message tool-turn';
-      renderContentParts(wrap, msg.content);
-      messagesEl.appendChild(wrap);
+      // Results are attached to their matching .tool-block via data-call-id; no wrapper needed.
+      const dummy = document.createDocumentFragment();
+      renderContentParts(dummy, msg.content);
     }
   }
   messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -791,6 +800,7 @@ async function submitFormResponse(sessionId, values) {
         case 'tool:start': {
           removeLoading();
           currentTool = makeToolBlock(ev.name, ev.input);
+          currentTool.open = true;
           turnWrap.appendChild(currentTool);
           break;
         }
@@ -804,7 +814,14 @@ async function submitFormResponse(sessionId, values) {
           }
           break;
         }
-        case 'tool:end': currentTool = null; break;
+        case 'tool:end': {
+          if (currentTool) {
+            currentTool.appendChild(makeToolResultBlock(ev.result, ev.isError));
+            currentTool.open = false;
+          }
+          currentTool = null;
+          break;
+        }
         case 'usage':
           turnIn         += ev.inputTokens;
           turnOut        += ev.outputTokens;
@@ -916,6 +933,7 @@ async function sendMessage() {
         case 'tool:start': {
           removeLoading();
           currentTool = makeToolBlock(ev.name, ev.input);
+          currentTool.open = true;
           turnWrap.appendChild(currentTool);
           break;
         }
@@ -935,9 +953,14 @@ async function sendMessage() {
           break;
         }
 
-        case 'tool:end':
+        case 'tool:end': {
+          if (currentTool) {
+            currentTool.appendChild(makeToolResultBlock(ev.result, ev.isError));
+            currentTool.open = false;
+          }
           currentTool = null;
           break;
+        }
 
         case 'usage':
           turnIn  += ev.inputTokens;

@@ -187,7 +187,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
       if (!tool) {
         const err = { error: `Unknown tool: ${tc.name}` };
         toolResults.push({ type: 'tool-result', id: tc.id, result: err, isError: true });
-        yield { type: 'tool:end', callId: tc.id, result: err, traceId };
+        yield { type: 'tool:end', callId: tc.id, result: err, isError: true, traceId };
         continue;
       }
 
@@ -195,7 +195,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
       if (!checkGrants(tool, config)) {
         const err = { error: `Capability denied for tool "${tc.name}"` };
         toolResults.push({ type: 'tool-result', id: tc.id, result: err, isError: true });
-        yield { type: 'tool:end', callId: tc.id, result: err, traceId };
+        yield { type: 'tool:end', callId: tc.id, result: err, isError: true, traceId };
         continue;
       }
 
@@ -238,7 +238,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
       session = toolCtxPost.session as Session;
 
       toolResults.push({ type: 'tool-result', id: tc.id, result, isError });
-      yield { type: 'tool:end', callId: tc.id, result, traceId };
+      yield { type: 'tool:end', callId: tc.id, result, isError, traceId };
     }
 
     // Add tool results message, run before:response hooks, then loop

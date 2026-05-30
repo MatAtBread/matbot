@@ -38,6 +38,7 @@ for (const level of ['log', 'warn', 'error'] as const) {
       orig(`[${new Date().toISOString()} ${_pid}] ${label}`, ...args);
   };
 }
+const write = isBackground ? (text: string) => {} : (text: string) => process.stderr.write(text);
 
 /**
  * Given a package exports field (or any nested value), return the first
@@ -287,15 +288,15 @@ async function runTurn(
           break;
         case 'thinking':
           thinkingTicks++;
-          process.stderr.write(`\r[thinking… ×${thinkingTicks}]`);
+          write(`\r[thinking… ×${thinkingTicks}]`);
           break;
         case 'tool:start':
           clearThinking();
-          process.stderr.write(`\n⚙  ${ev.name} ${JSON.stringify(ev.input)}\n`);
+          write(`\n⚙  ${ev.name} ${JSON.stringify(ev.input)}\n`);
           break;
-        case 'tool:stdout': process.stderr.write(ev.chunk); break;
-        case 'tool:stderr': process.stderr.write(ev.chunk); break;
-        case 'tool:end':    process.stderr.write(`\n`); break;
+        case 'tool:stdout': write(ev.chunk); break;
+        case 'tool:stderr': write(ev.chunk); break;
+        case 'tool:end':    write(`\n`); break;
         case 'usage':
           totalIn      += ev.inputTokens;
           totalOut     += ev.outputTokens;
@@ -306,7 +307,7 @@ async function runTurn(
           const text = ev.content
             .filter((c): c is Extract<MessageContent, { type: 'text' }> => c.type === 'text')
             .map(c => c.text).join('');
-          if (text) process.stderr.write(`you: ${text}\nassistant: `);
+          if (text) write(`you: ${text}\nassistant: `);
           break;
         }
         case 'aborted': {
@@ -320,7 +321,7 @@ async function runTurn(
               (c): c is Extract<MessageContent, { type: 'form' }> => c.type === 'form',
             );
             if (formPart) {
-              process.stderr.write('\n');
+              write('\n');
               const values: Record<string, string> = {};
               for (const field of formPart.fields) {
                 const hint = field.options ? ` [${field.options.join('/')}]` : '';
@@ -347,10 +348,10 @@ async function runTurn(
     process.removeListener('SIGINT', onSigint);
   }
 
-  process.stdout.write('\n');
+  write('\n');
   if (totalIn > 0 || totalOut > 0) {
     const cost = totalCostUsd > 0 ? ` ≈$${totalCostUsd.toFixed(4)}` : '';
-    process.stderr.write(`[↑${totalIn} ↓${totalOut} tokens${cost}]\n`);
+    write(`[↑${totalIn} ↓${totalOut} tokens${cost}]\n`);
   }
 
   return updated;
@@ -681,7 +682,7 @@ async function main(): Promise<void> {
   // ── Server mode ───────────────────────────────────────────────────────────────
 
   if (serverMode) {
-    process.stderr.write('[matbot] server running — press Ctrl+C to stop\n');
+    process.stderr.write(`[${new Date().toISOString()} ${_pid}] [matbot] server running — press Ctrl+C to stop\n`);
     const shutdown = (): void => {
       process.stderr.write('\n[matbot] shutting down…\n');
       teardownPlugins()
@@ -738,9 +739,9 @@ async function main(): Promise<void> {
   }
 
   if (isEphemeral) {
-    process.stderr.write(`provider: ${providerName}  (ephemeral)\n\n`);
+    process.stderr.write(`[${new Date().toISOString()} ${_pid}] provider: ${providerName}  (ephemeral)\n\n`);
   } else {
-    process.stderr.write(`provider: ${providerName}  session: ${session.id}\n\n`);
+    process.stderr.write(`[${new Date().toISOString()} ${_pid}] provider: ${providerName}  session: ${session.id}\n\n`);
   }
 
   const runStore: Store<Session> = isEphemeral ? new MemoryStore<Session>() : store;
