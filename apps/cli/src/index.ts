@@ -3,7 +3,8 @@ import { loadConfig, loadDotEnv }           from './config.js';
 import { installPlugin }                    from './install.js';
 import type { Principal, ProviderAdapter,
               ProviderConfig, Session,
-              Store, Tool, MessageContent, FileStore } from '@matatbread/matbot-core';
+              Store, StoreQuery, QueryResult, CASResult,
+              Tool, MessageContent, FileStore } from '@matatbread/matbot-core';
 import { appendMessage, createMessage,
          createSession, runSession,
          HookRegistry, SystemContextRegistryImpl,
@@ -103,27 +104,65 @@ async function resolveCredentials(
 // Reused as the no-op signal fallback; never aborted.
 const NEVER_ABORT_SIGNAL = new AbortController().signal;
 
+// ── Ephemeral in-memory store ──────────────────────────────────────────────────
+
+class MemoryStore<T extends { id: string; version: string }> implements Store<T> {
+  private readonly items = new Map<string, T>();
+
+  async get(id: string): Promise<T | null> {
+    return this.items.get(id) ?? null;
+  }
+
+  async set(id: string, value: T): Promise<void> {
+    this.items.set(id, value);
+  }
+
+  async cas(id: string, expected: string, next: T): Promise<CASResult<T>> {
+    const current = this.items.get(id) ?? null;
+    if (current === null || current.version !== expected) return { ok: false, current };
+    this.items.set(id, next);
+    return { ok: true, doc: next };
+  }
+
+  async delete(id: string, expectedVersion?: string): Promise<boolean> {
+    if (expectedVersion !== undefined) {
+      const current = this.items.get(id);
+      if (current === undefined || current.version !== expectedVersion) return false;
+    }
+    return this.items.delete(id);
+  }
+
+  async query(_q: StoreQuery<T>): Promise<QueryResult<T>> {
+    const items = [...this.items.values()].map(doc => ({ doc }));
+    return { items, total: items.length };
+  }
+}
+
 // ── Arg parsing ────────────────────────────────────────────────────────────────
 
 interface CliOpts {
-  provider?: string;
-  session?:  string;
-  system?:   string;
-  config:    string;
+  provider?:   string;
+  session?:    string;
+  system?:     string;
+  config:      string;
+  promptFile?: string;
+  ephemeral:   boolean;
 }
 
 function parseArgs(argv: string[]): { opts: CliOpts; prompt: string | undefined } {
   const args = argv.slice(2);
-  const opts: CliOpts = { config: './matbot.yaml' };
+  const opts: CliOpts = { config: './matbot.yaml', ephemeral: false };
   const positional: string[] = [];
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
     switch (arg) {
-      case '--provider': { const v = args[++i]; if (v !== undefined) opts.provider = v; } break;
-      case '--session':  { const v = args[++i]; if (v !== undefined) opts.session  = v; } break;
-      case '--system':   { const v = args[++i]; if (v !== undefined) opts.system   = v; } break;
-      case '--config':   { const v = args[++i]; if (v !== undefined) opts.config   = v; } break;
+      case '--provider':    { const v = args[++i]; if (v !== undefined) opts.provider   = v; } break;
+      case '--session':     { const v = args[++i]; if (v !== undefined) opts.session    = v; } break;
+      case '--system':      { const v = args[++i]; if (v !== undefined) opts.system     = v; } break;
+      case '--config':      { const v = args[++i]; if (v !== undefined) opts.config     = v; } break;
+      case '--prompt-file': { const v = args[++i]; if (v !== undefined) opts.promptFile = v; } break;
+      case '--ephemeral':   opts.ephemeral = true; break;
       case '--help': printHelp(); process.exit(0);
       default:
         if (!arg.startsWith('-')) positional.push(arg);
@@ -141,13 +180,15 @@ Usage:
   matbot [options] [prompt]
 
 Options:
-  --provider <name>   Provider key from matbot.yaml (default: first in file)
-  --session  <id>     Resume an existing session
-  --system   <text>   System prompt injected at session start
-  --config   <path>   Config file path (default: ./matbot.yaml)
-  --help              Show this help
+  --provider    <name>  Provider key from matbot.yaml (default: first in file)
+  --session     <id>    Resume an existing session
+  --system      <text>  System prompt injected at session start
+  --config      <path>  Config file path (default: ./matbot.yaml)
+  --prompt-file <path>  Read prompt from file; run single turn and exit
+  --ephemeral           Run without persisting the session
+  --help                Show this help
 
-If [prompt] is omitted, starts an interactive REPL.
+If [prompt] and --prompt-file are both omitted, starts an interactive REPL.
 `.trimStart());
 }
 
@@ -355,7 +396,10 @@ async function main(): Promise<void> {
     return;
   }
 
-  const { opts, prompt: argPrompt } = parseArgs(process.argv);
+  const { opts, prompt: parsedPrompt } = parseArgs(process.argv);
+  const argPrompt = opts.promptFile !== undefined
+    ? await readFile(path.resolve(opts.promptFile), 'utf8')
+    : parsedPrompt;
 
   // Resolve config path — walk up if using the default name
   const configPath = opts.config === './matbot.yaml'
@@ -560,7 +604,13 @@ async function main(): Promise<void> {
     }
   }
 
-  process.stderr.write(`provider: ${providerName}  session: ${session.id}\n\n`);
+  if (opts.ephemeral) {
+    process.stderr.write(`provider: ${providerName}  (ephemeral)\n\n`);
+  } else {
+    process.stderr.write(`provider: ${providerName}  session: ${session.id}\n\n`);
+  }
+
+  const runStore: Store<Session> = opts.ephemeral ? new MemoryStore<Session>() : store;
 
   // ── Readline (shared by single-turn and REPL for tool prompts) ──────────────
   const rl = createInterface({ input: process.stdin, output: process.stderr });
@@ -574,18 +624,12 @@ async function main(): Promise<void> {
 
   // ── Single-turn ──────────────────────────────────────────────────────────────
   if (argPrompt !== undefined) {
-    await runTurn(session, argPrompt, providerConfig, adapter, toolMap, store, principal, workDir, fileStore, hookReg, systemContextReg, stdinPrompt, services.loadPlugin.bind(services), services.unloadPlugin.bind(services), configPath);
+    await runTurn(session, argPrompt, providerConfig, adapter, toolMap, runStore, principal, workDir, fileStore, hookReg, systemContextReg, stdinPrompt, services.loadPlugin.bind(services), services.unloadPlugin.bind(services), configPath);
     rl.close();
     return;
   }
 
   // ── Interactive REPL ─────────────────────────────────────────────────────────
-  const printResume = (): void => {
-    process.stderr.write(
-      `\nTo resume: matbot --provider ${providerName} --session ${session.id}\n`
-    );
-  };
-
   for (;;) {
     let line: string;
     try {
@@ -595,11 +639,15 @@ async function main(): Promise<void> {
     }
     if (!line.trim()) continue;
     process.stderr.write('assistant: ');
-    session = await runTurn(session, line, providerConfig, adapter, toolMap, store, principal, workDir, fileStore, hookReg, systemContextReg, stdinPrompt, services.loadPlugin.bind(services), services.unloadPlugin.bind(services), configPath);
+    session = await runTurn(session, line, providerConfig, adapter, toolMap, runStore, principal, workDir, fileStore, hookReg, systemContextReg, stdinPrompt, services.loadPlugin.bind(services), services.unloadPlugin.bind(services), configPath);
   }
 
   rl.close();
-  printResume();
+  if (!opts.ephemeral) {
+    process.stderr.write(
+      `\nTo resume: matbot --provider ${providerName} --session ${session.id}\n`
+    );
+  }
 }
 
 main().catch(e => {

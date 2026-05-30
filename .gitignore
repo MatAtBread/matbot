@@ -9,3 +9,4 @@ dist/
 .data
 .claude
 matbot.yaml
+matbot.*.yaml

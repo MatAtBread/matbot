@@ -65,7 +65,7 @@ export async function loadPlugins(
 
     registerPlugin(plugin, spec);
     await setupPlugin(plugin, services);
-    console.log(`[matbot] Loaded plugin "${plugin.name}"`);
+    process.stderr.write(`[matbot] Loaded plugin "${plugin.name}"\n`);
   }
 }
 
