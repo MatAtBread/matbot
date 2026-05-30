@@ -2,7 +2,6 @@ import type { MatbotPlugin, MatbotServices } from '@matatbread/matbot-plugin-api
 import { PLUGIN_API_VERSION }                from '@matatbread/matbot-plugin-api';
 import { resolveProviderFactory }            from '@matatbread/matbot-core';
 import { createWebServer }                   from './server.js';
-import { makeSessionTools }                  from './tools/session.js';
 import process                               from 'node:process';
 
 let webServer: Awaited<ReturnType<typeof createWebServer>> | undefined;
@@ -12,14 +11,12 @@ export const plugin: MatbotPlugin = {
   apiVersion: PLUGIN_API_VERSION,
 
   async setup(services: MatbotServices) {
+    if (process.env['MATBOT_BACKGROUND'] === '1') return;
+
     services.registerFrontend?.();
 
     const sessions = services.sessions;
     if (!sessions) throw new Error('frontend-web requires services.sessions');
-
-    for (const tool of makeSessionTools(sessions)) {
-      services.tools.register(tool);
-    }
 
     const providers = new Map(
       [...services.providers.values()]
@@ -58,7 +55,16 @@ export const plugin: MatbotPlugin = {
     const port = Number(process.env['MATBOT_WEB_PORT'] ?? 19778); // 19778 is "MB" in hex, a cute easter egg :)
 
     await new Promise<void>((resolve, reject) => {
-      webServer!.server.once('error', reject);
+      webServer!.server.once('error', (ex) => {
+        if ((ex as any).code === 'EADDRINUSE') {
+          console.warn(`[frontend-web] Port ${port} is already in use. Ignoring error and continuing without starting web server.`);
+          webServer?.close();
+          webServer = undefined;
+          resolve();
+        } else {
+          reject(ex);
+        }
+      });
       webServer!.server.listen(port, '0.0.0.0', () => {
         process.stderr.write(`[frontend-web] http://localhost:${port}\n`);
         resolve();

@@ -73,7 +73,6 @@ In the monorepo, reference the packages by relative path (no install step needed
 plugins:
   - ./packages/tools/bash/src/index.ts
   - ./packages/tools/http/src/index.ts
-  - ./packages/tools/schedule/src/index.ts
   - ./packages/frontend/web/src/index.ts
 ```
 
@@ -83,7 +82,6 @@ When consuming the packages from npm, use their package names instead:
 plugins:
   - @matatbread/matbot-tool-bash
   - @matatbread/matbot-tool-http
-  - @matatbread/matbot-tool-schedule
   - @matatbread/matbot-frontend-web
 ```
 
@@ -93,7 +91,6 @@ Full config:
 plugins:
   - ./packages/tools/bash/src/index.ts
   - ./packages/tools/http/src/index.ts
-  - ./packages/tools/schedule/src/index.ts
 
 providers:
   claude:

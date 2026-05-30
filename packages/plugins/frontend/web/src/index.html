@@ -134,6 +134,22 @@
     }
     .session-item:hover  { background: #f0f0f2; color: #111; }
     .session-item.active { background: #e5e7eb; color: #111; font-weight: 500; }
+    .session-item.busy::before,
+    .session-item.unread::before {
+      content: '';
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .session-item.busy::before {
+      background: #f59e0b;
+      animation: session-pulse 1.4s ease-in-out infinite;
+    }
+    .session-item.unread::before { background: #22c55e; }
+    @keyframes session-pulse {
+      0%, 100% { opacity: 1;   transform: scale(1);    }
+      50%       { opacity: 0.3; transform: scale(0.75); }
+    }
     .session-label {
       flex: 1;
       overflow: hidden;
@@ -167,6 +183,13 @@
       cursor: pointer;
     }
     .file-item:hover { background: #f0f0f2; }
+    .file-item.updated::before {
+      content: '';
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      background: #22c55e;
+    }
     .file-name {
       flex: 1;
       overflow: hidden;
@@ -193,6 +216,29 @@
       color: #ef4444;
     }
     .file-action-btn:hover { background: #fecaca; }
+
+    [data-section="files"] .sidebar-heading { display: flex; align-items: center; }
+    #upload-btn {
+      margin-left: auto;
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 0px;
+      color: #9ca3af;
+      font-size: 1.4em;
+      font-weight: 400;
+      text-transform: none;
+      letter-spacing: 0;
+      line-height: 1;
+      flex-shrink: 0;
+    }
+    #upload-btn:hover { color: #374151; background: #e5e7eb; }
+    .drop-over #file-list {
+      outline: 2px dashed #6366f1;
+      outline-offset: -2px;
+      background: #eef2ff;
+      border-radius: 4px;
+    }
 
     /* ── Main ──────────────────────────────────────────────────── */
 
@@ -492,6 +538,33 @@
       font-family: 'SF Mono', 'Cascadia Code', ui-monospace, monospace;
     }
 
+    /* ── Sessions banner ───────────────────────────────────────── */
+
+    #sessions-banner {
+      display: none;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 28px;
+      background: #fffbeb;
+      border-top: 1px solid #fde68a;
+      font-size: 0.86em;
+      color: #92400e;
+    }
+    #sessions-banner span { flex: 1; }
+    #sessions-banner button {
+      padding: 4px 12px;
+      background: #d97706;
+      color: #fff;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 1em;
+      font-weight: 500;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    #sessions-banner button:hover { background: #b45309; }
+
     /* ── Input area ────────────────────────────────────────────── */
 
     #input-area { border-top: 1px solid #e5e7eb; padding: 12px 28px 20px; }
@@ -536,6 +609,7 @@
     }
     #input:focus    { border-color: #9ca3af; }
     #input:disabled { background: #f9fafb; }
+    #input::placeholder { opacity: 1; color: #6b7280; }
     #send-btn {
       background: #111;
       color: #fff;
@@ -742,7 +816,8 @@
       <div id="session-list" class="sidebar-list"></div>
     </div>
     <div class="sidebar-section" data-section="files">
-      <div class="sidebar-heading">Files</div>
+      <div class="sidebar-heading">Files<button id="upload-btn" title="Upload files">+📄</button></div>
+      <input type="file" id="upload-input" multiple style="display:none">
       <div id="file-list" class="sidebar-list"></div>
     </div>
   </nav>
@@ -750,13 +825,17 @@
   <main id="main">
     <div id="chat-header"><button id="burger" aria-label="Open menu">&#9776;</button><span id="chat-title"></span></div>
     <div id="messages"></div>
+    <div id="sessions-banner">
+      <span>Sessions plugin not loaded — conversations won't be saved after reload.</span>
+      <button id="sessions-enable-btn">Enable sessions</button>
+    </div>
     <div id="input-area">
       <div id="input-meta">
         <span>Provider:</span>
         <select id="provider-select"></select>
       </div>
       <div id="input-row">
-        <textarea id="input" rows="1" placeholder="Shift+Enter to send, Enter for newline"></textarea>
+        <textarea id="input" rows="1" placeholder="Shift+⬅️ to send, ⬅️ for newline"></textarea>
         <button id="send-btn">▶</button>
       </div>
     </div>

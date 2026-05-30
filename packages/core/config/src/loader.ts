@@ -3,8 +3,14 @@ import { parseYaml, type YamlMap, type YamlValue } from './yaml.js';
 
 export interface MatbotConfig {
   /** Ordered list of plugin specifiers to load at startup (npm names or URL paths) */
-  plugins:   readonly string[];
-  providers: Map<string, ProviderConfig>;
+  plugins:    readonly string[];
+  providers:  Map<string, ProviderConfig>;
+  /** If set, run this prompt as a single non-interactive turn then exit. */
+  prompt?:           string;
+  /** If true, do not persist the session. */
+  ephemeral?:        boolean;
+  /** Provider key to use when none is specified on the CLI. Falls back to the first provider. */
+  defaultProvider?:  string;
 }
 
 function asString(v: YamlValue | undefined, label: string): string {
@@ -58,9 +64,14 @@ function toProviderConfig(name: string, raw: YamlMap): ProviderConfig {
 
 export function parseConfig(
   text: string,
-  env: Record<string, string | undefined> = {},
+  env:  Record<string, string | undefined> = {},
+  base?: string,
 ): MatbotConfig {
-  const doc = parseYaml(text, env);
+  // Shallow merge: derived keys win over base keys.
+  const derived = parseYaml(text, env);
+  const doc: YamlMap = base !== undefined
+    ? { ...parseYaml(base, env), ...derived }
+    : derived;
 
   // plugins: optional ordered list of specifiers
   const pluginsRaw = doc['plugins'];
@@ -84,5 +95,15 @@ export function parseConfig(
     }
   }
 
-  return { plugins, providers };
+  const prompt           = typeof doc['prompt']            === 'string' ? doc['prompt']            : undefined;
+  const ephemeral        = doc['ephemeral'] === true ? true : undefined;
+  const defaultProvider  = typeof doc['default_provider'] === 'string' ? doc['default_provider']  : undefined;
+
+  return {
+    plugins,
+    providers,
+    ...(prompt           !== undefined ? { prompt           } : {}),
+    ...(ephemeral        !== undefined ? { ephemeral        } : {}),
+    ...(defaultProvider  !== undefined ? { defaultProvider  } : {}),
+  };
 }

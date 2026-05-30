@@ -101,20 +101,46 @@ function static200(res: ServerResponse, contentType: string, body: string): void
   res.end(body);
 }
 
-function sessionPreview(session: Session): string {
-  const first = session.messages.find(m => m.role === 'user');
-  const text  = first?.content.find(
-    (c): c is { type: 'text'; text: string } => c.type === 'text',
-  )?.text ?? '';
-  return text.length > 60 ? `${text.slice(0, 60)}…` : text;
-}
-
 export function createWebServer(deps: WebServerDeps) {
   const origin = deps.cors ?? '*';
 
   // Fan-out: each active submit gets a subscriber set, replay buffer, and its AbortController.
   const activeSessions = new Map<string, { subs: Set<ServerResponse>; buffer: string[]; ac: AbortController }>();
-  const pendingPrompts = new Map<string, (answer: string) => void>(); // session ID → resolver
+  const pendingPrompts  = new Map<string, (answer: string) => void>(); // session ID → resolver
+
+  // Clients subscribed to server-sent session status events (busy/idle).
+  const statusListeners = new Set<ServerResponse>();
+
+  // Clients subscribed to workspace file-change events.
+  const workspaceEventListeners = new Set<ServerResponse>();
+  const fileEventListeners      = new Map<string, Set<ServerResponse>>();
+  const watchAc                 = new AbortController();
+
+  if (deps.files?.watch) {
+    void (async () => {
+      for await (const event of deps.files!.watch!(watchAc.signal)) {
+        if (event.namespace !== 'workspace') continue;
+        const msg = sseEvent('file-changed', event);
+        for (const res of workspaceEventListeners) {
+          if (res.writable) res.write(msg); else workspaceEventListeners.delete(res);
+        }
+        const subs = fileEventListeners.get(event.name);
+        if (subs) {
+          for (const res of subs) {
+            if (res.writable) res.write(msg); else subs.delete(res);
+          }
+        }
+      }
+    })();
+  }
+
+  function broadcastStatus(sessionId: string, busy: boolean): void {
+    const msg = sseEvent('session-busy', { sessionId, busy });
+    for (const res of statusListeners) {
+      if (res.writable) res.write(msg);
+      else statusListeners.delete(res);
+    }
+  }
 
   const server = createServer(async (req, res) => {
     const method = req.method ?? 'GET';
@@ -172,35 +198,32 @@ export function createWebServer(deps: WebServerDeps) {
       json(res, 200, { status: 'ok' }); return;
     }
 
+    // --- GET /sessions/events --- (SSE stream for session busy/idle status changes)
+    if (method === 'GET' && url === '/sessions/events') {
+      res.writeHead(200, {
+        'content-type':  'text/event-stream',
+        'cache-control': 'no-cache',
+        'connection':    'keep-alive',
+      });
+      res.write(sseComment('status stream open'));
+      // Send current busy state so the client is up-to-date immediately.
+      for (const sessionId of activeSessions.keys()) {
+        res.write(sseEvent('session-busy', { sessionId, busy: true }));
+      }
+      statusListeners.add(res);
+      req.on('close', () => { statusListeners.delete(res); });
+      return; // keep connection open
+    }
+
     // --- GET /providers ---
     if (method === 'GET' && url === '/providers') {
       json(res, 200, [...deps.configs.keys()]); return;
     }
 
-    // --- GET /sessions ---
-    if (method === 'GET' && url === '/sessions') {
-      const { items } = await deps.store.query({
-        filter: { field: 'status', op: 'neq', value: 'archived' },
-      });
-      const sorted = items
-        .slice()
-        .sort((a, b) => b.doc.updatedAt.localeCompare(a.doc.updatedAt));
-      json(res, 200, sorted.map(({ doc: s }) => ({
-        id:        s.id,
-        title:     s.title,
-        preview:   sessionPreview(s),
-        updatedAt: s.updatedAt,
-      })));
-      return;
-    }
-
-    // --- GET /sessions/:id ---
-    const sessionGetMatch = /^\/sessions\/([^/]+)$/.exec(url);
-    if (method === 'GET' && sessionGetMatch) {
-      const session = await deps.store.get(sessionGetMatch[1]!);
-      if (!session) { json(res, 404, { error: 'Session not found' }); return; }
-      json(res, 200, { ...session, busy: activeSessions.has(session.id) });
-      return;
+    // --- GET /sessions/:id --- (status only — busy is server-internal state, not session data)
+    const sessionStatusMatch = /^\/sessions\/([^/]+)$/.exec(url);
+    if (method === 'GET' && sessionStatusMatch) {
+      json(res, 200, { busy: activeSessions.has(sessionStatusMatch[1]!) }); return;
     }
 
     // --- POST /sessions ---
@@ -279,6 +302,7 @@ export function createWebServer(deps: WebServerDeps) {
 
       const active = { subs: new Set<ServerResponse>([res]), buffer: [] as string[], ac };
       activeSessions.set(targetId, active);
+      broadcastStatus(targetId, true);
 
       const broadcast = (s: string): void => {
         active.buffer.push(s);
@@ -330,6 +354,7 @@ export function createWebServer(deps: WebServerDeps) {
         broadcast(sseEvent('error', { type: 'error', error: String(e) }));
       } finally {
         activeSessions.delete(targetId);
+        broadcastStatus(targetId, false);
         for (const sub of active.subs) { sub.end(); }
       }
       return;
@@ -461,6 +486,37 @@ export function createWebServer(deps: WebServerDeps) {
       return;
     }
 
+    // --- GET /workspace/events --- (SSE: all workspace file-change events)
+    if (method === 'GET' && url === '/workspace/events') {
+      if (!deps.files?.watch) { json(res, 404, { error: 'File watch not available' }); return; }
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', 'connection': 'keep-alive' });
+      res.write(sseComment('workspace watch stream open'));
+      workspaceEventListeners.add(res);
+      req.on('close', () => workspaceEventListeners.delete(res));
+      return;
+    }
+
+    // --- GET /workspace/events/<path> --- (SSE: single-file watch)
+    const workspaceEventMatch = /^\/workspace\/events\/(.+)$/.exec(url);
+    if (method === 'GET' && workspaceEventMatch) {
+      if (!deps.files?.watch) { json(res, 404, { error: 'File watch not available' }); return; }
+      let watchPath: string;
+      try { watchPath = decodeURIComponent(workspaceEventMatch[1]!); }
+      catch { json(res, 400, { error: 'Invalid path encoding' }); return; }
+
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', 'connection': 'keep-alive' });
+      res.write(sseComment(`watching ${watchPath}`));
+
+      let subs = fileEventListeners.get(watchPath);
+      if (subs === undefined) { subs = new Set(); fileEventListeners.set(watchPath, subs); }
+      subs.add(res);
+      req.on('close', () => {
+        const s = fileEventListeners.get(watchPath);
+        if (s) { s.delete(res); if (s.size === 0) fileEventListeners.delete(watchPath); }
+      });
+      return;
+    }
+
     // --- GET /workspace/:path --- (read-only static access to the session workspace)
     const workspaceMatch = /^\/workspace\/(.+)$/.exec(url);
     if (method === 'GET' && workspaceMatch && deps.files) {
@@ -493,6 +549,17 @@ export function createWebServer(deps: WebServerDeps) {
       for (const sub of active.subs) sub.end();
     }
     activeSessions.clear();
+
+    // Close all status stream connections.
+    for (const res of statusListeners) res.end();
+    statusListeners.clear();
+
+    // Stop file watcher and close all watch SSE connections.
+    watchAc.abort();
+    for (const res of workspaceEventListeners) res.end();
+    workspaceEventListeners.clear();
+    for (const subs of fileEventListeners.values()) for (const res of subs) res.end();
+    fileEventListeners.clear();
 
     // Resolve all pending prompts so callers don't hang.
     for (const resolver of pendingPrompts.values()) resolver('');

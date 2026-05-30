@@ -1,6 +1,7 @@
 import type { Tool, ToolEvent, ToolContext, MatbotPlugin } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import { spawn } from 'node:child_process';
+import { mkdir } from 'node:fs/promises';
 import process from 'node:process';
 
 export interface DockerConfig {
@@ -102,6 +103,7 @@ function createLocalExecutor() {
     async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
       const { script, cwd: cwdInput, env, timeout } = input as BashInput;
       const cwd = cwdInput ?? ctx.workdir;
+      if (cwd !== undefined) await mkdir(cwd, { recursive: true });
 
       const mergedEnv: Record<string, string> = {};
       for (const [k, v] of Object.entries(process.env)) {

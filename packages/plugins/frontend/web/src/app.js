@@ -20,10 +20,14 @@ let currentSessionId = null;
 let sending = false;
 let sendingForSession = null; // session ID that owns the current sending = true state
 let stopRequested = false;   // true once the user has clicked stop for the current turn
+const busySessions   = new Set();
+const unreadSessions = new Set();
+const updatedFiles   = new Set();
 
 // ── Elements ──────────────────────────────────────────────────────────────────
 
 const messagesEl     = document.getElementById('messages');
+const sessionsBanner = document.getElementById('sessions-banner');
 const sessionListEl  = document.getElementById('session-list');
 const chatHeaderEl   = document.getElementById('chat-header');
 const chatTitleEl    = document.getElementById('chat-title');
@@ -107,8 +111,18 @@ function parseSSEChunk(text) {
 
 // ── API ───────────────────────────────────────────────────────────────────────
 
-async function apiListSessions()  { const r = await fetch('/sessions');        return r.ok ? r.json() : []; }
-async function apiGetSession(id)  { const r = await fetch('/sessions/'+id);    return r.ok ? r.json() : null; }
+async function apiListSessions() {
+  try {
+    const sessions = await callTool('session_list', {});
+    sessionsBanner.style.display = 'none';
+    return sessions;
+  } catch (e) {
+    if (String(e).includes('404')) sessionsBanner.style.display = 'flex';
+    return [];
+  }
+}
+async function apiGetSession(id)  { try { return await callTool('session_get', { sessionId: id }); } catch { return null; } }
+async function apiSessionBusy(id) { try { const r = await fetch('/sessions/' + id); return r.ok ? (await r.json()).busy : false; } catch { return false; } }
 async function apiListProviders() { const r = await fetch('/providers');        return r.ok ? r.json() : []; }
 
 // ── Tool API ──────────────────────────────────────────────────────────────────
@@ -300,9 +314,14 @@ function renderFiles(files) {
   }
   for (const f of files) {
     const div = document.createElement('div');
-    div.className = 'file-item';
+    div.className = 'file-item' + (updatedFiles.has(f.path) ? ' updated' : '');
+    div.dataset.path = f.path;
     div.title = f.path + (f.size !== undefined ? ' (' + formatSize(f.size) + ')' : '');
-    div.onclick = () => { window.open('/workspace/' + f.path, '_blank'); };
+    div.onclick = () => {
+      updatedFiles.delete(f.path);
+      div.classList.remove('updated');
+      window.open('/workspace/' + f.path, '_blank');
+    };
     const nameEl = document.createElement('span');
     nameEl.className = 'file-name';
     nameEl.textContent = f.path;
@@ -340,9 +359,44 @@ async function loadFiles() {
     const files = Array.isArray(data) ? data : (data?.files ?? []);
     renderFiles(files);
   } catch (e) {
-    console.error('loadFiles failed:', e);
-    renderFiles([]);
+    const msg = String(e);
+    if (msg.includes('not found') || msg.includes('404')) {
+      const el = document.getElementById('file-list');
+      if (el) {
+        el.innerHTML = '';
+        const btn = document.createElement('button');
+        btn.style.cssText = 'display:block;margin:6px 10px;padding:4px 12px;font-size:0.86em;color:#fff;background:#d97706;border:none;border-radius:5px;cursor:pointer;font-family:inherit;font-weight:500;';
+        btn.textContent = 'Enable workspace';
+        btn.onmouseover = () => { btn.style.background = '#b45309'; };
+        btn.onmouseout  = () => { btn.style.background = '#d97706'; };
+        btn.onclick = () => {
+          inputEl.value = 'Please discover local plugins and add the workspace plugin to enable file management.';
+          sendMessage();
+        };
+        el.appendChild(btn);
+      }
+    } else {
+      renderFiles([]);
+    }
   }
+}
+
+async function uploadFiles(fileList) {
+  const files = Array.from(fileList);
+  if (!files.length) return;
+  for (const file of files) {
+    try {
+      const buffer = await file.arrayBuffer();
+      const bytes = new Uint8Array(buffer);
+      const CHUNK = 0x8000;
+      let bin = '';
+      for (let i = 0; i < bytes.length; i += CHUNK) bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+      await callTool('workspace_write', { path: file.name, content: btoa(bin), encoding: 'base64' });
+    } catch (err) {
+      alert('Upload failed for ' + file.name + ': ' + err.message);
+    }
+  }
+  loadFiles();
 }
 
 async function* streamSubmit(sessionId, content, provider) {
@@ -456,7 +510,10 @@ function renderSessions(sessions) {
   for (const s of sessions) {
     const label = (s.title || s.preview || s.id.slice(0, 8)).slice(0, 44);
     const el = document.createElement('div');
-    el.className = 'session-item' + (s.id === currentSessionId ? ' active' : '');
+    el.className = 'session-item' +
+      (s.id === currentSessionId ? ' active' : '') +
+      (busySessions.has(s.id) ? ' busy' : '') +
+      (!busySessions.has(s.id) && s.id !== currentSessionId && unreadSessions.has(s.id) ? ' unread' : '');
     el.dataset.sid = s.id;
 
     const labelEl = document.createElement('span');
@@ -646,15 +703,17 @@ function renderSession(session, startIdx) {
 async function openSession(id) {
   closeSidebar();
   currentSessionId = id;
+  unreadSessions.delete(id);
+  sessionListEl.querySelector('[data-sid="' + id + '"]')?.classList.remove('unread');
   location.hash = id;
   // Reset button state for the incoming session; watchUntilDone will re-lock if it's busy.
   setSending(false, id);
-  const [sessions, session] = await Promise.all([apiListSessions(), apiGetSession(id)]);
+  const [sessions, session, busy] = await Promise.all([apiListSessions(), apiGetSession(id), apiSessionBusy(id)]);
   renderSessions(sessions);
   if (session) {
     renderSession(session);
     if (chatHeaderEl) chatTitleEl.textContent = session.title ?? '';
-    if (session.busy) {
+    if (busy) {
       const renderedCount = session.messages.filter(m => m.role !== 'system').length;
       joinSessionStream(id, renderedCount);
     }
@@ -1012,6 +1071,11 @@ async function sendMessage() {
 
 sendBtn.onclick = () => { if (sending) requestStop(); else sendMessage(); };
 
+document.getElementById('sessions-enable-btn').onclick = () => {
+  inputEl.value = 'Discover the local plugins and add the sessions plugin to enable persistent conversations.';
+  sendMessage();
+};
+
 inputEl.addEventListener('keydown', e => {
   if (e.key === 'Enter' && e.shiftKey) { e.preventDefault(); sendMessage(); }
 });
@@ -1092,6 +1156,51 @@ async function init() {
     localStorage.setItem(LS_PROVIDER, providerSel.value);
   });
 
+  // Subscribe to server-pushed session busy/idle events.
+  (function connectStatusStream() {
+    const es = new EventSource('/sessions/events');
+    es.addEventListener('session-busy', e => {
+      const { sessionId, busy } = JSON.parse(e.data);
+      const item = sessionListEl.querySelector('[data-sid="' + sessionId + '"]');
+      if (busy) {
+        busySessions.add(sessionId);
+        unreadSessions.delete(sessionId);
+        if (item) { item.classList.add('busy'); item.classList.remove('unread'); }
+      } else {
+        busySessions.delete(sessionId);
+        if (sessionId !== currentSessionId) {
+          unreadSessions.add(sessionId);
+          if (item) { item.classList.remove('busy'); item.classList.add('unread'); }
+        } else {
+          if (item) item.classList.remove('busy');
+        }
+      }
+    });
+    es.onerror = () => { es.close(); setTimeout(connectStatusStream, 3000); };
+  })();
+
+  // Subscribe to workspace file-change events.
+  (function connectFileWatchStream() {
+    const es = new EventSource('/workspace/events');
+    es.addEventListener('file-changed', e => {
+      const event = JSON.parse(e.data);
+      const { name } = event;
+      const el = document.getElementById('file-list');
+      const item = el?.querySelector('[data-path="' + CSS.escape(name) + '"]');
+      if (item) {
+        updatedFiles.add(name);
+        item.classList.add('updated');
+        // Update the size display if present.
+        const sizeEl = item.querySelector('.file-size');
+        if (sizeEl && event.size !== undefined) sizeEl.textContent = formatSize(event.size);
+      } else {
+        // New file — reload the list so it appears.
+        loadFiles();
+      }
+    });
+    es.onerror = () => { es.close(); setTimeout(connectFileWatchStream, 3000); };
+  })();
+
   renderSessions(sessions);
   const fragmentId = location.hash.slice(1);
   const startId = (fragmentId && sessions.some(s => s.id === fragmentId))
@@ -1105,6 +1214,32 @@ async function init() {
   }
   loadFiles();
 }
+
+// ── File drag-drop + upload button ───────────────────────────────────────────
+
+const filesSectionEl = document.querySelector('[data-section="files"]');
+if (filesSectionEl) {
+  filesSectionEl.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    filesSectionEl.classList.add('drop-over');
+  });
+  filesSectionEl.addEventListener('dragleave', (e) => {
+    if (!filesSectionEl.contains(e.relatedTarget)) filesSectionEl.classList.remove('drop-over');
+  });
+  filesSectionEl.addEventListener('drop', (e) => {
+    e.preventDefault();
+    filesSectionEl.classList.remove('drop-over');
+    if (e.dataTransfer?.files.length) uploadFiles(e.dataTransfer.files);
+  });
+}
+
+document.getElementById('upload-btn')?.addEventListener('click', (e) => {
+  e.stopPropagation();
+  document.getElementById('upload-input')?.click();
+});
+document.getElementById('upload-input')?.addEventListener('change', function() {
+  if (this.files?.length) { uploadFiles(this.files); this.value = ''; }
+});
 
 window.addEventListener('hashchange', async () => {
   const id = location.hash.slice(1);

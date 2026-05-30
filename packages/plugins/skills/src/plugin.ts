@@ -1,11 +1,10 @@
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
-import type { MatbotPlugin } from '@matatbread/matbot-plugin-api';
+import type { MatbotPlugin, Store } from '@matatbread/matbot-plugin-api';
 import path from 'node:path';
 import process from 'node:process';
 import { createSkillIndexHook, createClassifierSetupHook, createSkillClassifierHook } from './hooks.js';
-import type { SkillEntry } from './types.js';
-import { watchSkillDir } from './watcher.js';
-import { readSkillContent } from './reader.js';
+import type { SkillDoc } from './types.js';
+import { watchAndImportSkillDir } from './watcher.js';
 import { createSkillTools } from './tools.js';
 
 export interface SkillsPluginConfig {
@@ -14,59 +13,49 @@ export interface SkillsPluginConfig {
 }
 
 export function createSkillsPlugin(config: SkillsPluginConfig): MatbotPlugin {
-  const skills = new Map<string, SkillEntry>();
-  const getSkills = (): SkillEntry[] => [...skills.values()];
-  const registerSkill = (entry: SkillEntry): void => {
-    const ref = entry.contentRef;
-    if (ref.kind === 'file') skills.set(ref.path, entry);
-  };
+  const skills = new Map<string, SkillDoc>();
   let abortController: AbortController | undefined;
-
-  const tools = createSkillTools(config.skillsDir, getSkills, registerSkill);
 
   return {
     name:       'skills',
     apiVersion: PLUGIN_API_VERSION,
     manifest: {
-      description: 'File-backed skill documents injected into sessions on demand.',
+      description: 'Skill documents injected into sessions on demand.',
       config:      ['skillsDir'],
     },
-    tools,
 
     async setup(services) {
+      const store = services.createStore<SkillDoc>('skills') as Store<SkillDoc>;
+
+      // Pre-populate in-memory map from the store.
+      const { items } = await store.query({});
+      for (const { doc } of items) skills.set(doc.name.toLowerCase(), doc);
+
+      // Register tools dynamically (skillsDir not available at module eval time).
+      for (const tool of createSkillTools(store, skills)) {
+        services.tools.register(tool);
+      }
+
+      // Import any .md files from the skills directory into the store.
       abortController = new AbortController();
-      const { signal } = abortController;
+      void watchAndImportSkillDir(config.skillsDir, store, skills, abortController.signal, config.pollMs);
 
-      void (async () => {
-        try {
-          for await (const entry of watchSkillDir(config.skillsDir, signal, config.pollMs)) {
-            const { contentRef } = entry;
-            if (contentRef.kind === 'file') {
-              skills.set(contentRef.path, entry);
-            }
-          }
-        } catch {
-          // Watcher exits on abort — not an error
-        }
-      })();
-
+      const getSkills = (): SkillDoc[] => [...skills.values()];
       const pluginSettings = services.settings('skills');
       services.hooks.register(createClassifierSetupHook(pluginSettings, services.providers, getSkills));
       // services.hooks.register(createSkillIndexHook(getSkills));
-      services.hooks.register(createSkillClassifierHook(getSkills, readSkillContent, pluginSettings, req => services.complete(req)));
+      services.hooks.register(createSkillClassifierHook(getSkills, pluginSettings, req => services.complete(req)));
     },
 
     async teardown() {
       abortController?.abort();
+      skills.clear();
     },
   };
 }
 
 // ── Default plugin export ─────────────────────────────────────────────────────
 
-// Exported as a singleton so the loader can import it without a factory call.
-// skillsDir is resolved in setup() because it depends on services.extensions,
-// which is only available at runtime.
 export const plugin: MatbotPlugin = (() => {
   let inner: MatbotPlugin | undefined;
 
@@ -74,7 +63,7 @@ export const plugin: MatbotPlugin = (() => {
     name:       'skills',
     apiVersion: PLUGIN_API_VERSION,
     manifest: {
-      description: 'File-backed skill documents injected into sessions on demand.',
+      description: 'Skill documents injected into sessions on demand.',
       config:      ['skillsDir'],
     },
 
@@ -86,13 +75,6 @@ export const plugin: MatbotPlugin = (() => {
         : path.join(process.cwd(), '.data', 'skills');
 
       inner = createSkillsPlugin({ skillsDir });
-
-      // Register tools explicitly — they can't be on plugin.tools because
-      // skillsDir isn't known at module evaluation time.
-      for (const tool of inner.tools ?? []) {
-        services.tools.register(tool);
-      }
-
       await inner.setup?.(services);
     },
 

@@ -1,9 +1,10 @@
 #!/usr/bin/env node
-import { loadConfig, loadDotEnv }           from './config.js';
+import { loadConfig, loadConfigFromText, loadDotEnv } from './config.js';
 import { installPlugin }                    from './install.js';
 import type { Principal, ProviderAdapter,
               ProviderConfig, Session,
-              Store, Tool, MessageContent, FileStore } from '@matatbread/matbot-core';
+              Store, StoreQuery, QueryResult, CASResult,
+              Tool, MessageContent, FileStore } from '@matatbread/matbot-core';
 import { appendMessage, createMessage,
          createSession, runSession,
          HookRegistry, SystemContextRegistryImpl,
@@ -18,12 +19,22 @@ import { systemPrincipal, VaultImpl }      from '@matatbread/matbot-security';
 import { FilesystemStore }                 from '@matatbread/matbot-storage-filesystem';
 import { FilesystemFileStore }             from '@matatbread/matbot-files-node';
 import { createBuiltinTools }              from '@matatbread/matbot-tool-plugin';
-import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile } from 'node:fs/promises';
 import { createInterface }                 from 'node:readline/promises';
 import { createRequire }                   from 'node:module';
 import { pathToFileURL }                   from 'node:url';
 import process                             from 'node:process';
 import path                                from 'node:path';
+
+// Prefix all console output with ISO timestamp + PID so parent and spawned
+// background processes are distinguishable in shared terminal output.
+const _pid = process.pid;
+for (const level of ['log', 'warn', 'error'] as const) {
+  const orig = console[level].bind(console) as (...a: unknown[]) => void;
+  console[level] = (...args: unknown[]) => {
+    orig(`[${new Date().toISOString()} ${_pid}]`, ...args);
+  };
+}
 
 /**
  * Given a package exports field (or any nested value), return the first
@@ -103,27 +114,65 @@ async function resolveCredentials(
 // Reused as the no-op signal fallback; never aborted.
 const NEVER_ABORT_SIGNAL = new AbortController().signal;
 
+// ── Ephemeral in-memory store ──────────────────────────────────────────────────
+
+class MemoryStore<T extends { id: string; version: string }> implements Store<T> {
+  private readonly items = new Map<string, T>();
+
+  async get(id: string): Promise<T | null> {
+    return this.items.get(id) ?? null;
+  }
+
+  async set(id: string, value: T): Promise<void> {
+    this.items.set(id, value);
+  }
+
+  async cas(id: string, expected: string, next: T): Promise<CASResult<T>> {
+    const current = this.items.get(id) ?? null;
+    if (current === null || current.version !== expected) return { ok: false, current };
+    this.items.set(id, next);
+    return { ok: true, doc: next };
+  }
+
+  async delete(id: string, expectedVersion?: string): Promise<boolean> {
+    if (expectedVersion !== undefined) {
+      const current = this.items.get(id);
+      if (current === undefined || current.version !== expectedVersion) return false;
+    }
+    return this.items.delete(id);
+  }
+
+  async query(_q: StoreQuery<T>): Promise<QueryResult<T>> {
+    const items = [...this.items.values()].map(doc => ({ doc }));
+    return { items, total: items.length };
+  }
+}
+
 // ── Arg parsing ────────────────────────────────────────────────────────────────
 
 interface CliOpts {
-  provider?: string;
-  session?:  string;
-  system?:   string;
-  config:    string;
+  provider?:   string;
+  session?:    string;
+  system?:     string;
+  config:      string;
+  promptFile?: string;
+  ephemeral:   boolean;
 }
 
 function parseArgs(argv: string[]): { opts: CliOpts; prompt: string | undefined } {
   const args = argv.slice(2);
-  const opts: CliOpts = { config: './matbot.yaml' };
+  const opts: CliOpts = { config: './matbot.yaml', ephemeral: false };
   const positional: string[] = [];
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
     switch (arg) {
-      case '--provider': { const v = args[++i]; if (v !== undefined) opts.provider = v; } break;
-      case '--session':  { const v = args[++i]; if (v !== undefined) opts.session  = v; } break;
-      case '--system':   { const v = args[++i]; if (v !== undefined) opts.system   = v; } break;
-      case '--config':   { const v = args[++i]; if (v !== undefined) opts.config   = v; } break;
+      case '--provider':    { const v = args[++i]; if (v !== undefined) opts.provider   = v; } break;
+      case '--session':     { const v = args[++i]; if (v !== undefined) opts.session    = v; } break;
+      case '--system':      { const v = args[++i]; if (v !== undefined) opts.system     = v; } break;
+      case '--config':      { const v = args[++i]; if (v !== undefined) opts.config     = v; } break;
+      case '--prompt-file': { const v = args[++i]; if (v !== undefined) opts.promptFile = v; } break;
+      case '--ephemeral':   opts.ephemeral = true; break;
       case '--help': printHelp(); process.exit(0);
       default:
         if (!arg.startsWith('-')) positional.push(arg);
@@ -141,13 +190,15 @@ Usage:
   matbot [options] [prompt]
 
 Options:
-  --provider <name>   Provider key from matbot.yaml (default: first in file)
-  --session  <id>     Resume an existing session
-  --system   <text>   System prompt injected at session start
-  --config   <path>   Config file path (default: ./matbot.yaml)
-  --help              Show this help
+  --provider    <name>  Provider key from matbot.yaml (default: first in file)
+  --session     <id>    Resume an existing session
+  --system      <text>  System prompt injected at session start
+  --config      <path>  Config file path (default: ./matbot.yaml)
+  --prompt-file <path>  Read prompt from file; run single turn and exit
+  --ephemeral           Run without persisting the session
+  --help                Show this help
 
-If [prompt] is omitted, starts an interactive REPL.
+If [prompt] and --prompt-file are both omitted, starts an interactive REPL.
 `.trimStart());
 }
 
@@ -299,115 +350,63 @@ async function runTurn(
   return updated;
 }
 
-// ── Session picker ─────────────────────────────────────────────────────────────
-
-async function pickSession(store: Store<Session>): Promise<Session | null> {
-  if (!process.stdin.isTTY) return null;
-
-  const { items } = await store.query({});
-  if (items.length === 0) return null;
-
-  const sessions = items
-    .map(i => i.doc)
-    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-
-  const label = (s: Session): string => {
-    const when   = new Date(s.updatedAt).toLocaleString();
-    const hidden = s.status === 'archived' ? '[hidden] ' : '';
-    if (s.title) return `${when}  ${hidden}${s.title}`;
-    const first    = s.messages.find(m => m.role === 'user');
-    const textPart = first?.content.find((c): c is { type: 'text'; text: string } => c.type === 'text');
-    const preview  = textPart?.text ?? s.id;
-    return `${when}  ${hidden}${preview.length > 55 ? preview.slice(0, 55) + '…' : preview}`;
-  };
-
-  const options = ['New conversation', ...sessions.map(label)];
-  let cursor    = 0;
-
-  const render = (first: boolean): void => {
-    if (!first) process.stderr.write(`\x1b[${options.length}A`);
-    for (let i = 0; i < options.length; i++) {
-      const archived = i > 0 && sessions[i - 1]?.status === 'archived';
-      const pre  = archived ? '\x1b[2m' : '';
-      const post = archived ? '\x1b[0m' : '';
-      process.stderr.write(`\x1b[2K${i === cursor ? '> ' : '  '}${pre}${options[i]!}${post}\n`);
-    }
-  };
-
-  process.stdin.setRawMode(true);
-  process.stdin.resume();
-  render(true);
-
-  return new Promise<Session | null>(resolve => {
-    const cleanup = (): void => {
-      process.stdin.off('data', onData);
-      process.stdin.setRawMode(false);
-      process.stdin.pause();
-    };
-
-    const onData = (data: Buffer): void => {
-      const key = data.toString();
-      if (key === '\x1b[A') {
-        cursor = Math.max(0, cursor - 1);
-        render(false);
-      } else if (key === '\x1b[B') {
-        cursor = Math.min(options.length - 1, cursor + 1);
-        render(false);
-      } else if (key === '\r' || key === '\n') {
-        cleanup();
-        process.stderr.write(`\x1b[${options.length}A\x1b[J`);
-        process.stderr.write(`  ${options[cursor]!}\n\n`);
-        resolve(cursor === 0 ? null : (sessions[cursor - 1] ?? null));
-      } else if (key === '\x03') {
-        cleanup();
-        process.stderr.write('\n');
-        process.exit(0);
-      }
-    };
-
-    process.stdin.on('data', onData);
-  });
-}
-
 // ── Main ───────────────────────────────────────────────────────────────────────
 
-function makePluginSettings(settingsDir: string, pluginName: string): PluginSettings {
-  const file = path.join(settingsDir, `${pluginName}.json`);
-  let cache: Record<string, unknown> | undefined;
+interface SettingsDoc {
+  id:      string;
+  version: string;
+  data:    Record<string, unknown>;
+}
 
-  const load = async (): Promise<Record<string, unknown>> => {
-    if (cache !== undefined) return cache;
-    try {
-      cache = JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>;
-    } catch {
-      cache = {};
-    }
-    return cache;
-  };
+function isSettingsDoc(v: unknown): v is SettingsDoc {
+  return typeof v === 'object' && v !== null &&
+    typeof (v as SettingsDoc).id      === 'string' &&
+    typeof (v as SettingsDoc).version === 'string' &&
+    typeof (v as SettingsDoc).data    === 'object' && (v as SettingsDoc).data !== null;
+}
 
-  const save = async (data: Record<string, unknown>): Promise<void> => {
-    await mkdir(settingsDir, { recursive: true });
-    await writeFile(file, JSON.stringify(data, null, 2), 'utf8');
-    cache = data;
+function makePluginSettings(store: Store<SettingsDoc>, pluginName: string): PluginSettings {
+  // Handles migration from the old flat-object format (pre-Store).
+  const getDoc = async (): Promise<SettingsDoc | null> => {
+    const raw = await store.get(pluginName);
+    if (raw === null) return null;
+    if (isSettingsDoc(raw)) return raw;
+    // Old format: flat { key: value } — wrap it so subsequent writes upgrade the file.
+    return { id: pluginName, version: '0', data: raw as unknown as Record<string, unknown> };
   };
 
   return {
     async get<T>(key: string): Promise<T | undefined> {
-      return (await load())[key] as T | undefined;
+      return (await getDoc())?.data[key] as T | undefined;
     },
     async set<T>(key: string, value: T): Promise<void> {
-      await save({ ...(await load()), [key]: value });
+      for (;;) {
+        const doc  = await getDoc();
+        const data = { ...(doc?.data ?? {}), [key]: value as unknown };
+        const next: SettingsDoc = { id: pluginName, version: Date.now().toString(), data };
+        // version '0' means migrated-but-not-yet-written — use set to upgrade the file.
+        if (doc === null || doc.version === '0') { await store.set(pluginName, next); return; }
+        const r = await store.cas(pluginName, doc.version, next);
+        if (r.ok) return;
+      }
     },
     async delete(key: string): Promise<void> {
-      const data = { ...(await load()) };
-      delete data[key];
-      await save(data);
+      for (;;) {
+        const doc = await getDoc();
+        if (doc === null) return;
+        const data = { ...doc.data };
+        delete data[key];
+        const next: SettingsDoc = { id: pluginName, version: Date.now().toString(), data };
+        if (doc.version === '0') { await store.set(pluginName, next); return; }
+        const r = await store.cas(pluginName, doc.version, next);
+        if (r.ok) return;
+      }
     },
   };
 }
 
 async function main(): Promise<void> {
-  const serverMode = process.argv[2] === 'serve';
+  const serverMode = process.argv[2] === 'start';
 
   // ── install subcommand ────────────────────────────────────────────────────
   if (process.argv[2] === 'install') {
@@ -425,28 +424,57 @@ async function main(): Promise<void> {
     return;
   }
 
-  const { opts, prompt: argPrompt } = parseArgs(process.argv);
+  const { opts, prompt: parsedPrompt } = parseArgs(process.argv);
 
-  // Resolve config path — walk up if using the default name
-  const configPath = opts.config === './matbot.yaml'
-    ? (await findUp('matbot.yaml')) ?? path.resolve('matbot.yaml')
-    : path.resolve(opts.config);
+  // ── Config loading ────────────────────────────────────────────────────────────
 
-  // Chdir to the project root so relative paths and tool defaults resolve correctly
-  // regardless of where the CLI process was launched from (e.g. pnpm changes cwd to apps/cli).
-  process.chdir(path.dirname(configPath));
+  const env = process.env as Record<string, string | undefined>;
+  let matbotConfig: import('./config.js').MatbotConfig;
+  let configPath: string;
 
-  // Load .env from same directory as config before anything reads process.env
-  await loadDotEnv(path.dirname(configPath));
-
-  // Load config
-  const matbotConfig = await loadConfig(
-    configPath,
-    process.env as Record<string, string | undefined>,
-  );
+  if (opts.config === '-') {
+    // Read YAML from stdin; project root anchors to the base config via extends:
+    const text = await new Promise<string>((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      process.stdin.on('data', (c: Buffer) => chunks.push(c));
+      process.stdin.on('end',  () => resolve(Buffer.concat(chunks).toString('utf8')));
+      process.stdin.on('error', reject);
+    });
+    const { config, projectDir } = await loadConfigFromText(text, env, process.cwd());
+    matbotConfig = config;
+    configPath   = path.join(projectDir, 'matbot.yaml'); // virtual — used for plugin resolution
+    process.chdir(projectDir);
+    await loadDotEnv(projectDir);
+  } else {
+    configPath = opts.config === './matbot.yaml'
+      ? (await findUp('matbot.yaml')) ?? path.resolve('matbot.yaml')
+      : path.resolve(opts.config);
+    process.chdir(path.dirname(configPath));
+    await loadDotEnv(path.dirname(configPath));
+    const result = await loadConfig(configPath, env);
+    matbotConfig = result.config;
+    // projectDir from result is the same as dirname(configPath) unless extends crosses dirs
+    if (result.projectDir !== path.dirname(configPath)) {
+      process.chdir(result.projectDir);
+      configPath = path.join(result.projectDir, 'matbot.yaml');
+    }
+  }
 
   if (matbotConfig.providers.size === 0) {
     throw new Error('No providers found in config.');
+  }
+
+  // Merge prompt sources: CLI flag/arg > config file
+  const argPrompt = opts.promptFile !== undefined
+    ? await readFile(path.resolve(opts.promptFile), 'utf8')
+    : (parsedPrompt ?? matbotConfig.prompt);
+
+  // Merge ephemeral: CLI flag or config field
+  const isEphemeral = opts.ephemeral || matbotConfig.ephemeral === true;
+
+  // Guard: stdin config without a prompt would consume stdin then hang on REPL
+  if (opts.config === '-' && argPrompt === undefined) {
+    throw new Error('--config - requires a prompt: field in the config or a positional prompt argument.');
   }
 
   // ── Plugin setup ─────────────────────────────────────────────────────────────
@@ -455,14 +483,26 @@ async function main(): Promise<void> {
 
   // ── Stores (created early so plugins like frontend-web can use them) ──────────
 
-  const dotData     = path.join(path.dirname(configPath), '.data');
-  const dataDir     = path.join(dotData, 'sessions');
-  const workDir     = path.join(dotData, 'workspace');
-  const filesDir    = path.join(dotData, 'files');
-  const settingsDir = path.join(dotData, 'settings');
-  await Promise.all([mkdir(dataDir, { recursive: true }), mkdir(workDir, { recursive: true }), mkdir(filesDir, { recursive: true })]);
+  const dotData  = path.join(path.dirname(configPath), '.data');
+  const dataDir  = path.join(dotData, 'sessions');
+  const workDir  = path.join(dotData, 'bash-cwd');
+  const filesDir = path.join(dotData, 'files');
+  await Promise.all([mkdir(dataDir, { recursive: true }), mkdir(filesDir, { recursive: true })]);
   const store     = new FilesystemStore<Session>(dataDir);
   const fileStore = new FilesystemFileStore(filesDir);
+
+  // Shared typed-store factory: one FilesystemStore per namespace, cached so lock maps are shared.
+  // Each namespace maps directly to .data/<namespace>/ — flat layout, one directory per table.
+  const storeCache = new Map<string, FilesystemStore<{ id: string; version: string }>>();
+  const createStore = <T extends { id: string; version: string }>(namespace: string): Store<T> => {
+    let s = storeCache.get(namespace);
+    if (s === undefined) {
+      s = new FilesystemStore(path.join(dotData, namespace));
+      storeCache.set(namespace, s);
+    }
+    return s as unknown as Store<T>;
+  };
+  const settingsStore = createStore<SettingsDoc>('settings');
 
   // toolMap is shared: plugins register into it via services, runSession reads it
   const toolMap = new Map<string, Tool>(createBuiltinTools().map(t => [t.name, t]));
@@ -488,11 +528,13 @@ async function main(): Promise<void> {
     settings(pluginName: string): PluginSettings {
       let s = pluginSettingsCache.get(pluginName);
       if (s === undefined) {
-        s = makePluginSettings(settingsDir, pluginName);
+        s = makePluginSettings(settingsStore, pluginName);
         pluginSettingsCache.set(pluginName, s);
       }
       return s;
     },
+
+    createStore,
 
     get(key) { return serviceRegistry.get(key) as never; },
     register(key, svc) { serviceRegistry.set(key, svc); },
@@ -588,7 +630,7 @@ async function main(): Promise<void> {
 
   // ── Provider resolution ───────────────────────────────────────────────────────
 
-  const providerName = opts.provider ?? (matbotConfig.providers.keys().next().value as string);
+  const providerName = opts.provider ?? matbotConfig.defaultProvider ?? (matbotConfig.providers.keys().next().value as string);
   const rawConfig    = matbotConfig.providers.get(providerName);
   if (!rawConfig) {
     throw new Error(
@@ -620,9 +662,8 @@ async function main(): Promise<void> {
     }
     session = existing;
   } else {
-    const picked = argPrompt === undefined ? await pickSession(store) : null;
-    session = picked ?? createSession({ ownerPrincipal: principal });
-    if (!picked && opts.system) {
+    session = createSession({ ownerPrincipal: principal });
+    if (opts.system) {
       session = appendMessage(session, createMessage({
         role:    'system',
         content: [{ type: 'text', text: opts.system }],
@@ -631,7 +672,13 @@ async function main(): Promise<void> {
     }
   }
 
-  process.stderr.write(`provider: ${providerName}  session: ${session.id}\n\n`);
+  if (isEphemeral) {
+    process.stderr.write(`provider: ${providerName}  (ephemeral)\n\n`);
+  } else {
+    process.stderr.write(`provider: ${providerName}  session: ${session.id}\n\n`);
+  }
+
+  const runStore: Store<Session> = isEphemeral ? new MemoryStore<Session>() : store;
 
   // ── Readline (shared by single-turn and REPL for tool prompts) ──────────────
   const rl = createInterface({ input: process.stdin, output: process.stderr });
@@ -645,32 +692,38 @@ async function main(): Promise<void> {
 
   // ── Single-turn ──────────────────────────────────────────────────────────────
   if (argPrompt !== undefined) {
-    await runTurn(session, argPrompt, providerConfig, adapter, toolMap, store, principal, workDir, fileStore, hookReg, systemContextReg, stdinPrompt, services.loadPlugin.bind(services), services.unloadPlugin.bind(services), configPath);
-    rl.close();
+    try {
+      await runTurn(session, argPrompt, providerConfig, adapter, toolMap, runStore, principal, workDir, fileStore, hookReg, systemContextReg, stdinPrompt, services.loadPlugin.bind(services), services.unloadPlugin.bind(services), configPath);
+    } finally {
+      rl.close();
+      await teardownPlugins();
+    }
     return;
   }
 
   // ── Interactive REPL ─────────────────────────────────────────────────────────
-  const printResume = (): void => {
+  try {
+    for (;;) {
+      let line: string;
+      try {
+        line = await rl.question('you: ');
+      } catch {
+        break;  // Ctrl+D / EOF
+      }
+      if (!line.trim()) continue;
+      process.stderr.write('assistant: ');
+      session = await runTurn(session, line, providerConfig, adapter, toolMap, runStore, principal, workDir, fileStore, hookReg, systemContextReg, stdinPrompt, services.loadPlugin.bind(services), services.unloadPlugin.bind(services), configPath);
+    }
+  } finally {
+    rl.close();
+    await teardownPlugins();
+  }
+
+  if (!isEphemeral) {
     process.stderr.write(
       `\nTo resume: matbot --provider ${providerName} --session ${session.id}\n`
     );
-  };
-
-  for (;;) {
-    let line: string;
-    try {
-      line = await rl.question('you: ');
-    } catch {
-      break;  // Ctrl+D / EOF
-    }
-    if (!line.trim()) continue;
-    process.stderr.write('assistant: ');
-    session = await runTurn(session, line, providerConfig, adapter, toolMap, store, principal, workDir, fileStore, hookReg, systemContextReg, stdinPrompt, services.loadPlugin.bind(services), services.unloadPlugin.bind(services), configPath);
   }
-
-  rl.close();
-  printResume();
 }
 
 main().catch(e => {

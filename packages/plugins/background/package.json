@@ -1,5 +1,5 @@
 {
-  "name": "@matatbread/matbot-memory-types",
+  "name": "@matatbread/matbot-tool-background",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -13,6 +13,7 @@
     "@matatbread/matbot-plugin-api": "workspace:*"
   },
   "devDependencies": {
-    "typescript": "catalog:"
+    "@types/node": "catalog:",
+    "typescript":  "catalog:"
   }
 }

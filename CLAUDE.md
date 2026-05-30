@@ -121,8 +121,13 @@ All runtime state lives under `.data/` **next to `matbot.yaml`**, never in the s
 
 ```
 .data/
-  sessions/    — one JSON file per Session, named by UUID
-  workspace/   — default cwd for exec tool; LLM file output goes here
+  sessions/    — Store<Session>
+  settings/    — Store<SettingsDoc> (plugin key-value settings)
+  skills/      — Store<SkillDoc>
+  schedules/   — Store<Schedule> (background plugin recurring jobs)
+  bash-cwd/    — default working directory for bash tool execution (created lazily)
+  files/       — FileStore blobs (MIME-typed, served by frontend); the 'workspace' namespace
+               within files/ holds files written by workspace_write
 ```
 
 Plugins may create additional subdirectories (e.g. `files/`, `settings/`) as needed.

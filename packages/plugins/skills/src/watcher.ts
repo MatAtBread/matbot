@@ -1,7 +1,7 @@
-import { watch, readdir } from 'node:fs/promises';
+import { watch, readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { makeSkillEntry } from './types.js';
-import type { SkillEntry } from './types.js';
+import type { Store } from '@matatbread/matbot-plugin-api';
+import type { SkillDoc } from './types.js';
 
 function mdNameToSkillName(filename: string): string {
   return path.basename(filename, '.md')
@@ -9,68 +9,70 @@ function mdNameToSkillName(filename: string): string {
     .replace(/\b\w/g, c => c.toUpperCase());
 }
 
-async function scanSkillDir(dir: string): Promise<SkillEntry[]> {
-  const entries: SkillEntry[] = [];
-  let files: string[];
-  try {
-    files = await readdir(dir);
-  } catch {
-    return entries;
-  }
-  for (const f of files) {
-    if (f.endsWith('.md')) {
-      entries.push(makeSkillEntry(path.join(dir, f), mdNameToSkillName(f)));
-    }
-  }
-  return entries;
-}
+async function importFile(
+  store:  Store<SkillDoc>,
+  skills: Map<string, SkillDoc>,
+  dir:    string,
+  filename: string,
+): Promise<void> {
+  const name = mdNameToSkillName(filename);
+  const key  = name.toLowerCase();
+  // .md files are import-only: once a skill exists in the store, the store owns it.
+  if (skills.has(key)) return;
 
-async function *pollSkillDir(
-  dir:        string,
-  signal:     AbortSignal,
-  intervalMs: number,
-): AsyncIterable<SkillEntry> {
-  const seen = new Set<string>();
+  const content = await readFile(path.join(dir, filename), 'utf8').catch(() => null);
+  if (content === null) return;
 
-  while (!signal.aborted) {
-    const current = await scanSkillDir(dir);
-    for (const entry of current) {
-      const ref = entry.contentRef;
-      if (ref.kind !== 'file') continue;
-      if (!seen.has(ref.path)) {
-        seen.add(ref.path);
-        yield entry;
-      }
-    }
-    await new Promise<void>(resolve => {
-      const t = setTimeout(resolve, intervalMs);
-      signal.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true });
-    });
-  }
+  const now = new Date().toISOString();
+  const doc: SkillDoc = {
+    id:        crypto.randomUUID(),
+    version:   Date.now().toString(),
+    name,
+    content,
+    contexts:  ['global'],
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  await store.set(doc.id, doc);
+  skills.set(key, doc);
 }
 
 /**
- * Yields a SkillEntry for every .md file found in `dir`, and for each
- * subsequently created or modified .md file while the signal is live.
- *
- * Uses fs.promises.watch (Node 22+) and falls back to polling on failure.
+ * Imports all .md files from `dir` into the store, then watches for new or
+ * changed files and imports them on arrival. Falls back to polling if watch
+ * is unavailable.
  */
-export async function *watchSkillDir(
-  dir:     string,
-  signal:  AbortSignal,
+export async function watchAndImportSkillDir(
+  dir:    string,
+  store:  Store<SkillDoc>,
+  skills: Map<string, SkillDoc>,
+  signal: AbortSignal,
   pollMs = 5_000,
-): AsyncIterable<SkillEntry> {
-  for (const entry of await scanSkillDir(dir)) {
-    yield entry;
+): Promise<void> {
+  let files: string[] = [];
+  try { files = await readdir(dir); } catch { return; }
+  for (const f of files) {
+    if (f.endsWith('.md')) await importFile(store, skills, dir, f);
   }
 
   try {
     for await (const event of watch(dir, { signal })) {
       if (!event.filename?.endsWith('.md')) continue;
-      yield makeSkillEntry(path.join(dir, event.filename), mdNameToSkillName(event.filename));
+      await importFile(store, skills, dir, event.filename);
     }
-  } catch (e) {
+  } catch {
     if (signal.aborted) return;
-    yield* pollSkillDir(dir, signal, pollMs);
+    while (!signal.aborted) {
+      await new Promise<void>(resolve => {
+        const t = setTimeout(resolve, pollMs);
+        signal.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true });
+      });
+      let polled: string[] = [];
+      try { polled = await readdir(dir); } catch { return; }
+      for (const f of polled) {
+        if (f.endsWith('.md')) await importFile(store, skills, dir, f);
+      }
+    }
   }
 }
