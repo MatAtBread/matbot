@@ -191,13 +191,16 @@ Usage:
   matbot [options] [prompt]
 
 Options:
-  --provider    <name>  Provider key from matbot.yaml (default: first in file)
-  --session     <id>    Resume an existing session
-  --system      <text>  System prompt injected at session start
-  --config      <path>  Config file path (default: ./matbot.yaml)
-  --prompt-file <path>  Read prompt from file; run single turn and exit
-  --ephemeral           Run without persisting the session
-  --help                Show this help
+  --provider    <name>      Provider key from matbot.yaml (default: first in file)
+  --session     <id>|create Resume an existing session, or "create" to start a new persistent one
+  --system      <text>      System prompt injected at session start
+  --config      <path>      Config file path (default: ./matbot.yaml)
+  --prompt-file <path>      Read prompt from file; run single turn and exit
+  --ephemeral               Force ephemeral even when --session is given
+  --help                    Show this help
+
+Sessions are ephemeral by default (discarded on exit). Use --session create to persist,
+or --session <id> to resume a previously persisted session.
 
 If [prompt] and --prompt-file are both omitted, starts an interactive REPL.
 `.trimStart());
@@ -470,8 +473,9 @@ async function main(): Promise<void> {
     ? await readFile(path.resolve(opts.promptFile), 'utf8')
     : (parsedPrompt ?? matbotConfig.prompt);
 
-  // Merge ephemeral: CLI flag or config field
-  const isEphemeral = opts.ephemeral || matbotConfig.ephemeral === true;
+  // Ephemeral by default; opt into persistence with --session <id|create>.
+  // config ephemeral:true (e.g. background sub-agents) is a hard override.
+  const isEphemeral = opts.ephemeral || matbotConfig.ephemeral === true || opts.session === undefined;
 
   // Guard: stdin config without a prompt would consume stdin then hang on REPL
   if (opts.config === '-' && argPrompt === undefined) {
@@ -520,7 +524,10 @@ async function main(): Promise<void> {
   }
 
   if (activeStorageBackend === undefined) {
-    await Promise.all([mkdir(dataDir, { recursive: true }), mkdir(filesDir, { recursive: true })]);
+    const mkdirs: Promise<unknown>[] = [mkdir(filesDir, { recursive: true })];
+    // Only create the sessions directory when we'll actually write to it.
+    if (!isEphemeral) mkdirs.push(mkdir(dataDir, { recursive: true }));
+    await Promise.all(mkdirs);
   }
 
   // Each Store and FileStore is a forwarding proxy backed by a mutable `current` target.
@@ -648,6 +655,7 @@ async function main(): Promise<void> {
       await unloadPluginFn(name, services);
     },
     providers: matbotConfig.providers,
+    get storageBackend() { return activeStorageBackend; },
     sessions:  store,
     files:     fileStore,
     vault,
@@ -710,7 +718,7 @@ async function main(): Promise<void> {
   const principal = systemPrincipal();
   let session: Session;
 
-  if (opts.session) {
+  if (opts.session && opts.session !== 'create') {
     const existing = await store.get(opts.session);
     if (!existing) {
       throw new Error(`Session "${opts.session}" not found.`);

@@ -89,8 +89,9 @@ export interface MatbotServices {
   /** Declare that this plugin provides a frontend. The runtime records the plugin name implicitly. */
   registerFrontend?(): void;
 
-  readonly providers:   ReadonlyMap<string, ProviderConfig>;
-  readonly sessions?:   Store<Session>;
+  readonly providers:      ReadonlyMap<string, ProviderConfig>;
+  readonly sessions?:      Store<Session>;
+  readonly storageBackend?: StorageBackend | undefined;
   readonly extensions?: Record<string, unknown>;
   readonly files?:      FileStore;
   readonly vault:          Vault;

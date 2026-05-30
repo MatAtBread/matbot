@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "cli":     "node --import ./register.js src/index.ts",
+    "repl":     "node --import ./register.js src/index.ts",
     "start":     "node --import ./register.js src/index.ts start",
     "typecheck": "tsc --noEmit"
   },

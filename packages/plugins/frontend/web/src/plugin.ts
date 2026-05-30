@@ -5,6 +5,8 @@ import { createWebServer }                   from './server.js';
 import process                               from 'node:process';
 
 let webServer: Awaited<ReturnType<typeof createWebServer>> | undefined;
+const port = Number(process.env['MATBOT_WEB_PORT'] ?? 19778); // 19778 is "MB" in hex, a cute easter egg :)
+
 
 export const plugin: MatbotPlugin = {
   name:       'frontend-web',
@@ -29,7 +31,8 @@ export const plugin: MatbotPlugin = {
       if (tools.length === 0) return null;
       const lines = tools.map(t => `- \`${t.name}\`: ${t.description}`).join('\n');
       return (
-        `Tools are available via HTTP from the current host.n\n` +
+        `Tell the user the website is now available at http://localhost:${port}/\n` +
+        `Tools are available via HTTP from the current host:\n` +
         `POST /tools/<name>\n` +
         `Request body: the tool's JSON input directly (matches the tool's inputSchema).\n` +
         `Response: the tool's result as JSON on success (200), or { error, stdout?, stderr? } on failure (500).\n\n` +
@@ -51,8 +54,6 @@ export const plugin: MatbotPlugin = {
       ...(services.files      !== undefined ? { files:      services.files      } : {}),
       ...(services.configPath !== undefined ? { configPath: services.configPath } : {}),
     });
-
-    const port = Number(process.env['MATBOT_WEB_PORT'] ?? 19778); // 19778 is "MB" in hex, a cute easter egg :)
 
     await new Promise<void>((resolve, reject) => {
       webServer!.server.once('error', (ex) => {
