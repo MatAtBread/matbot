@@ -1,4 +1,4 @@
-import { spawn }           from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { execArgv, argv, execPath } from 'node:process';
 import { resolve, dirname } from 'node:path';
 import { existsSync }       from 'node:fs';
@@ -106,9 +106,9 @@ async function* stdoutStream(readable: Readable): AsyncIterable<Uint8Array> {
   for await (const chunk of readable) yield chunk as Uint8Array;
 }
 
-function spawnJob(configPath: string, prompt: string, output?: string, files?: FileStore, provider?: string): void {
+function spawnJob(configPath: string, prompt: string, output?: string, files?: FileStore, provider?: string): ChildProcess | undefined {
   const script = argv[1];
-  if (script === undefined) return;
+  if (script === undefined) return undefined;
 
   const captureOut = output !== undefined && files !== undefined;
   const child = spawn(
@@ -123,7 +123,7 @@ function spawnJob(configPath: string, prompt: string, output?: string, files?: F
     },
   );
 
-  if (!child.stdin) return;
+  if (!child.stdin) return undefined;
   child.stdin.write(buildJobConfig(configPath, prompt, provider));
   child.stdin.end();
 
@@ -132,6 +132,7 @@ function spawnJob(configPath: string, prompt: string, output?: string, files?: F
   }
 
   child.unref();
+  return child;
 }
 
 // ── Scheduler loop ────────────────────────────────────────────────────────────
@@ -162,7 +163,12 @@ function armSchedule(sched: Schedule): void {
     await sleep(startupDelay, ac.signal);
 
     while (!ac.signal.aborted) {
-      spawnJob(activeConfigPath!, sched.prompt, sched.output, activeFiles, sched.provider);
+      const child = spawnJob(activeConfigPath!, sched.prompt, sched.output, activeFiles, sched.provider);
+      if (child !== undefined) {
+        const killChild = () => { child.kill(); };
+        ac.signal.addEventListener('abort', killChild, { once: true });
+        child.once('exit', () => { ac.signal.removeEventListener('abort', killChild); });
+      }
       const now = Date.now();
       sched.lastRun = new Date(now).toISOString();
       sched.nextRun = new Date(now + intervalMs).toISOString();

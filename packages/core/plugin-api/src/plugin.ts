@@ -99,10 +99,8 @@ export interface MatbotServices {
 
 export type ProviderAdapterFactory = (config: ProviderConfig) => ProviderAdapter;
 
-export type StorageKind = string;
-
 export type StoreFactory = (
-  kind:    StorageKind,
+  kind:    string,
   options: Record<string, unknown>,
 ) => Store<{ id: string; version: string }>;
 

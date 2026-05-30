@@ -109,27 +109,12 @@ export function resolveProviderFactory(type: string): ProviderAdapterFactory {
   return factory;
 }
 
-export function resolveStorageFactory(type: string): StoreFactory {
-  const factory = state.storage.get(type);
-  if (factory === undefined) {
-    const available = [...state.storage.keys()].join(', ') || 'none';
-    throw new Error(
-      `No storage backend registered for type "${type}". Available: ${available}.`,
-    );
-  }
-  return factory;
-}
-
 export function getRegisteredTools(): readonly Tool[] {
   return state.toolRegistry?.list() ?? [];
 }
 
 export function getRegisteredPlugins(): readonly MatbotPlugin[] {
   return state.plugins;
-}
-
-export function getFrontendFactory(): FrontendFactory | undefined {
-  return state.frontend;
 }
 
 export function getRegisteredFrontendPlugin(): string | undefined {
@@ -228,14 +213,3 @@ export async function teardownPlugins(): Promise<void> {
   }
 }
 
-/** Reset all registry state. Intended for tests only. */
-export function _resetRegistry(): void {
-  state.plugins.length = 0;
-  state.providers.clear();
-  state.storage.clear();
-  state.toolRegistry    = undefined;
-  state.frontend        = undefined;
-  state.frontendPlugin  = undefined;
-  state.serviceKeys.clear();
-  state.specifierToName.clear();
-}

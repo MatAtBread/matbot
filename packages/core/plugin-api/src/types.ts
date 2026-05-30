@@ -376,11 +376,6 @@ export type HealthStatus =
   | { status: 'degraded'; reason: string; latencyMs?: number }
   | { status: 'down';     reason: string };
 
-export interface Healthcheck {
-  readonly name: string;
-  health(): Promise<HealthStatus>;
-}
-
 // ── Registries ────────────────────────────────────────────────────────────────
 
 export interface ToolRegistry {
