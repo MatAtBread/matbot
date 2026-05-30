@@ -213,7 +213,7 @@ export async function unloadPlugin(pluginName: string, services: MatbotServices)
   }
 
   state.plugins.splice(idx, 1);
-  console.log(`[matbot] Unloaded plugin "${pluginName}"`);
+  console.warn(`[matbot] Unloaded plugin "${pluginName}"`);
 }
 
 /** Run each plugin's teardown() in reverse-registration order. Errors are logged, not thrown. */

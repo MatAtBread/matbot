@@ -381,6 +381,24 @@ async function loadFiles() {
   }
 }
 
+async function uploadFiles(fileList) {
+  const files = Array.from(fileList);
+  if (!files.length) return;
+  for (const file of files) {
+    try {
+      const buffer = await file.arrayBuffer();
+      const bytes = new Uint8Array(buffer);
+      const CHUNK = 0x8000;
+      let bin = '';
+      for (let i = 0; i < bytes.length; i += CHUNK) bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+      await callTool('workspace_write', { path: file.name, content: btoa(bin), encoding: 'base64' });
+    } catch (err) {
+      alert('Upload failed for ' + file.name + ': ' + err.message);
+    }
+  }
+  loadFiles();
+}
+
 async function* streamSubmit(sessionId, content, provider) {
   const res = await fetch('/sessions/' + sessionId + '/submit', {
     method: 'POST',
@@ -1196,6 +1214,32 @@ async function init() {
   }
   loadFiles();
 }
+
+// ── File drag-drop + upload button ───────────────────────────────────────────
+
+const filesSectionEl = document.querySelector('[data-section="files"]');
+if (filesSectionEl) {
+  filesSectionEl.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    filesSectionEl.classList.add('drop-over');
+  });
+  filesSectionEl.addEventListener('dragleave', (e) => {
+    if (!filesSectionEl.contains(e.relatedTarget)) filesSectionEl.classList.remove('drop-over');
+  });
+  filesSectionEl.addEventListener('drop', (e) => {
+    e.preventDefault();
+    filesSectionEl.classList.remove('drop-over');
+    if (e.dataTransfer?.files.length) uploadFiles(e.dataTransfer.files);
+  });
+}
+
+document.getElementById('upload-btn')?.addEventListener('click', (e) => {
+  e.stopPropagation();
+  document.getElementById('upload-input')?.click();
+});
+document.getElementById('upload-input')?.addEventListener('change', function() {
+  if (this.files?.length) { uploadFiles(this.files); this.value = ''; }
+});
 
 window.addEventListener('hashchange', async () => {
   const id = location.hash.slice(1);

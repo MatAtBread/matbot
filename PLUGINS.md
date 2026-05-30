@@ -432,7 +432,7 @@ export const plugin: MatbotPlugin = {
     services.hooks.register({
       point:   'after:tool',
       handler: async (ctx) => {
-        console.log('[audit]', ctx.session.id);
+        console.warn('[audit]', ctx.session.id);
         return ctx;
       },
     });

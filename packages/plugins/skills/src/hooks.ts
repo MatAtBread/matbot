@@ -2,7 +2,7 @@ import type {
   Hook, HookContext, Message, FormField,
   PluginSettings, CompletionRequest, CompletionResponse,
 } from '@matatbread/matbot-plugin-api';
-import type { SkillEntry } from './types.js';
+import type { SkillDoc } from './types.js';
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
@@ -69,7 +69,7 @@ function stripFormTail(messages: readonly Message[]): Message[] {
  * what skills are available and can call `skill:load` for any it needs.
  */
 export function createSkillIndexHook(
-  getSkills: () => SkillEntry[],
+  getSkills: () => SkillDoc[],
   priority   = 30,
 ): Hook {
   return {
@@ -107,7 +107,7 @@ export function createSkillIndexHook(
 export function createClassifierSetupHook(
   settings:  PluginSettings,
   providers: ReadonlyMap<string, unknown>,
-  getSkills: () => SkillEntry[],
+  getSkills: () => SkillDoc[],
   priority   = 5,
 ): Hook {
   // In-memory park: one pending message per session while the form is shown.
@@ -173,11 +173,10 @@ export function createClassifierSetupHook(
  * injects relevant skill content for the next LLM call if so.
  */
 export function createSkillClassifierHook(
-  getSkills:   () => SkillEntry[],
-  readContent: (entry: SkillEntry) => Promise<string>,
-  settings:    PluginSettings,
-  complete:    (req: CompletionRequest) => Promise<CompletionResponse>,
-  priority     = 30,
+  getSkills: () => SkillDoc[],
+  settings:  PluginSettings,
+  complete:  (req: CompletionRequest) => Promise<CompletionResponse>,
+  priority   = 30,
 ): Hook {
   return {
     point: 'after:response',
@@ -215,12 +214,7 @@ export function createSkillClassifierHook(
       const relevant = getSkills().filter(s => contextsOverlap(s.contexts, sessionContexts));
       if (relevant.length === 0) return;
 
-      const blocks = await Promise.all(
-        relevant.map(async s => {
-          const content = await readContent(s);
-          return `### ${s.name}\n\n${content}`;
-        }),
-      );
+      const blocks = relevant.map(s => `### ${s.name}\n\n${s.content}`);
 
       const session = {
         ...ctx.session,

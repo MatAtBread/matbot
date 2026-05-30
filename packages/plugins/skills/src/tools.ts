@@ -1,76 +1,69 @@
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import path from 'node:path';
-import type { Tool, ToolExecutor, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
-import { makeSkillEntry } from './types.js';
-import type { SkillEntry } from './types.js';
-
-interface SkillLoadInput {
-  name: string;
-}
-
-interface SkillSaveInput {
-  name:    string;
-  content: string;
-}
-
-function skillNameToFilename(name: string): string {
-  return `${name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '')}.md`;
-}
+import type { Tool, ToolExecutor, ToolContext, ToolEvent, Store } from '@matatbread/matbot-plugin-api';
+import type { SkillDoc } from './types.js';
 
 export function createSkillTools(
-  skillsDir:    string,
-  getSkills:    () => SkillEntry[],
-  registerSkill: (entry: SkillEntry) => void,
+  store:  Store<SkillDoc>,
+  skills: Map<string, SkillDoc>,
 ): readonly Tool[] {
+  const listExecutor: ToolExecutor = {
+    async *execute(_input: unknown, _ctx: ToolContext): AsyncIterable<ToolEvent> {
+      yield {
+        type:  'result',
+        value: {
+          skills: [...skills.values()].map(s => ({
+            id:   s.id,
+            name: s.name,
+            ...(s.toolBinding !== undefined ? { toolBinding: s.toolBinding } : {}),
+          })),
+        },
+      };
+    },
+  };
+
   const loadExecutor: ToolExecutor = {
     async *execute(input: unknown, _ctx: ToolContext): AsyncIterable<ToolEvent> {
-      const { name } = input as SkillLoadInput;
-      const lower = name.toLowerCase();
-      const match = getSkills().find(s => s.name.toLowerCase() === lower);
-
-      if (!match) {
+      const { name } = input as { name: string };
+      const doc = skills.get(name.toLowerCase());
+      if (!doc) {
         yield { type: 'error', message: `Skill not found: "${name}"` };
         return;
       }
-
-      const { contentRef } = match;
-      if (contentRef.kind !== 'file') {
-        yield { type: 'error', message: `Skill "${name}" has no file content` };
-        return;
-      }
-
-      try {
-        const content = await readFile(contentRef.path, 'utf8');
-        yield { type: 'result', value: { name: match.name, content } };
-      } catch (e) {
-        yield { type: 'error', message: `Failed to read skill "${name}": ${String(e)}` };
-      }
+      yield { type: 'result', value: { name: doc.name, content: doc.content } };
     },
   };
 
   const saveExecutor: ToolExecutor = {
     async *execute(input: unknown, _ctx: ToolContext): AsyncIterable<ToolEvent> {
-      const { name, content } = input as SkillSaveInput;
-      const filePath = path.join(skillsDir, skillNameToFilename(name));
+      const { name, content } = input as { name: string; content: string };
+      const now = new Date().toISOString();
+      const key = name.toLowerCase();
+      let doc = skills.get(key);
 
-      try {
-        await mkdir(skillsDir, { recursive: true });
-        await writeFile(filePath, content, 'utf8');
-        registerSkill(makeSkillEntry(filePath, name));
-        yield { type: 'result', value: { name, path: filePath } };
-      } catch (e) {
-        yield { type: 'error', message: `Failed to save skill "${name}": ${String(e)}` };
+      if (doc === undefined) {
+        const newDoc: SkillDoc = {
+          id:        crypto.randomUUID(),
+          version:   Date.now().toString(),
+          name,
+          content,
+          contexts:  ['global'],
+          createdAt: now,
+          updatedAt: now,
+        };
+        await store.set(newDoc.id, newDoc);
+        skills.set(key, newDoc);
+      } else {
+        for (;;) {
+          const next: SkillDoc = { ...doc, content, updatedAt: now, version: Date.now().toString() };
+          const r = await store.cas(doc.id, doc.version, next);
+          if (r.ok) { skills.set(key, next); break; }
+          const fresh = await store.get(doc.id);
+          // If concurrently deleted, just overwrite.
+          if (fresh === null) { await store.set(doc.id, next); skills.set(key, next); break; }
+          doc = fresh;
+        }
       }
-    },
-  };
 
-  const listExecutor: ToolExecutor = {
-    async *execute(_input: unknown, _ctx: ToolContext): AsyncIterable<ToolEvent> {
-      const skills = getSkills().map(s => ({
-        name:        s.name,
-        ...(s.toolBinding !== undefined ? { toolBinding: s.toolBinding } : {}),
-      }));
-      yield { type: 'result', value: { skills } };
+      yield { type: 'result', value: { name } };
     },
   };
 

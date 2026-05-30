@@ -26,6 +26,16 @@ import { pathToFileURL }                   from 'node:url';
 import process                             from 'node:process';
 import path                                from 'node:path';
 
+// Prefix all console output with ISO timestamp + PID so parent and spawned
+// background processes are distinguishable in shared terminal output.
+const _pid = process.pid;
+for (const level of ['log', 'warn', 'error'] as const) {
+  const orig = console[level].bind(console) as (...a: unknown[]) => void;
+  console[level] = (...args: unknown[]) => {
+    orig(`[${new Date().toISOString()} ${_pid}]`, ...args);
+  };
+}
+
 /**
  * Given a package exports field (or any nested value), return the first
  * string entry point, preferring "import" > "default" > first value.
@@ -475,21 +485,19 @@ async function main(): Promise<void> {
 
   const dotData  = path.join(path.dirname(configPath), '.data');
   const dataDir  = path.join(dotData, 'sessions');
-  const workDir  = path.join(dotData, 'workspace');
+  const workDir  = path.join(dotData, 'bash-cwd');
   const filesDir = path.join(dotData, 'files');
-  const storeDir = path.join(dotData, 'stores');
-  await Promise.all([mkdir(dataDir, { recursive: true }), mkdir(workDir, { recursive: true }), mkdir(filesDir, { recursive: true })]);
+  await Promise.all([mkdir(dataDir, { recursive: true }), mkdir(filesDir, { recursive: true })]);
   const store     = new FilesystemStore<Session>(dataDir);
   const fileStore = new FilesystemFileStore(filesDir);
 
   // Shared typed-store factory: one FilesystemStore per namespace, cached so lock maps are shared.
+  // Each namespace maps directly to .data/<namespace>/ — flat layout, one directory per table.
   const storeCache = new Map<string, FilesystemStore<{ id: string; version: string }>>();
   const createStore = <T extends { id: string; version: string }>(namespace: string): Store<T> => {
     let s = storeCache.get(namespace);
     if (s === undefined) {
-      // Settings use their legacy path so existing data is preserved; all other namespaces go under storeDir.
-      const dir = namespace === 'settings' ? path.join(dotData, 'settings') : path.join(storeDir, namespace);
-      s = new FilesystemStore(dir);
+      s = new FilesystemStore(path.join(dotData, namespace));
       storeCache.set(namespace, s);
     }
     return s as unknown as Store<T>;
