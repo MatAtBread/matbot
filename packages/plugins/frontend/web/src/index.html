@@ -183,6 +183,13 @@
       cursor: pointer;
     }
     .file-item:hover { background: #f0f0f2; }
+    .file-item.updated::before {
+      content: '';
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      background: #22c55e;
+    }
     .file-name {
       flex: 1;
       overflow: hidden;

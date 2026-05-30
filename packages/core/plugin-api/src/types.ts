@@ -304,7 +304,7 @@ export interface Tool {
 
 // ── Files ─────────────────────────────────────────────────────────────────────
 
-export interface FileHandle {
+export interface FileMetaData {
   id:          string;
   version:     string;
   name:        string;
@@ -314,8 +314,13 @@ export interface FileHandle {
   sessionId?:  string;
   messageId?:  string;
   namespace?:  string;
+}
+
+export interface FileHandle extends FileMetaData {
   stream(signal?: AbortSignal): AsyncIterable<Uint8Array>;
 }
+
+export type FileEvent = FileMetaData & { changed: Array<keyof FileMetaData> };
 
 export interface FileFilter {
   sessionId?:     string;
@@ -338,6 +343,8 @@ export interface FileStore {
   delete(id: string): Promise<void>;
   list(filter?: FileFilter): AsyncIterable<FileHandle>;
   putTemp(name: string, mimeType: MimeType, data: AsyncIterable<Uint8Array>): Promise<FileHandle>;
+  /** Observe file changes. Implementations that cannot watch their backing store omit this. */
+  watch?(signal?: AbortSignal): AsyncIterable<FileEvent>;
 }
 
 // ── Frontend ──────────────────────────────────────────────────────────────────

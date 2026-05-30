@@ -22,6 +22,7 @@ let sendingForSession = null; // session ID that owns the current sending = true
 let stopRequested = false;   // true once the user has clicked stop for the current turn
 const busySessions   = new Set();
 const unreadSessions = new Set();
+const updatedFiles   = new Set();
 
 // ── Elements ──────────────────────────────────────────────────────────────────
 
@@ -313,9 +314,14 @@ function renderFiles(files) {
   }
   for (const f of files) {
     const div = document.createElement('div');
-    div.className = 'file-item';
+    div.className = 'file-item' + (updatedFiles.has(f.path) ? ' updated' : '');
+    div.dataset.path = f.path;
     div.title = f.path + (f.size !== undefined ? ' (' + formatSize(f.size) + ')' : '');
-    div.onclick = () => { window.open('/workspace/' + f.path, '_blank'); };
+    div.onclick = () => {
+      updatedFiles.delete(f.path);
+      div.classList.remove('updated');
+      window.open('/workspace/' + f.path, '_blank');
+    };
     const nameEl = document.createElement('span');
     nameEl.className = 'file-name';
     nameEl.textContent = f.path;
@@ -1153,6 +1159,28 @@ async function init() {
       }
     });
     es.onerror = () => { es.close(); setTimeout(connectStatusStream, 3000); };
+  })();
+
+  // Subscribe to workspace file-change events.
+  (function connectFileWatchStream() {
+    const es = new EventSource('/workspace/events');
+    es.addEventListener('file-changed', e => {
+      const event = JSON.parse(e.data);
+      const { name } = event;
+      const el = document.getElementById('file-list');
+      const item = el?.querySelector('[data-path="' + CSS.escape(name) + '"]');
+      if (item) {
+        updatedFiles.add(name);
+        item.classList.add('updated');
+        // Update the size display if present.
+        const sizeEl = item.querySelector('.file-size');
+        if (sizeEl && event.size !== undefined) sizeEl.textContent = formatSize(event.size);
+      } else {
+        // New file — reload the list so it appears.
+        loadFiles();
+      }
+    });
+    es.onerror = () => { es.close(); setTimeout(connectFileWatchStream, 3000); };
   })();
 
   renderSessions(sessions);

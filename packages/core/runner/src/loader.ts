@@ -65,7 +65,8 @@ export async function loadPlugins(
 
     registerPlugin(plugin, spec);
     await setupPlugin(plugin, services);
-    process.stderr.write(`[matbot] Loaded plugin "${plugin.name}"\n`);
+    // .warn, because we're saving stdout for actual stuff, not noise
+    console.warn(`[matbot] Loaded plugin "${plugin.name}"`);
   }
 }
 

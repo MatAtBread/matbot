@@ -53,7 +53,14 @@ export const plugin: MatbotPlugin = {
     const port = Number(process.env['MATBOT_WEB_PORT'] ?? 19778); // 19778 is "MB" in hex, a cute easter egg :)
 
     await new Promise<void>((resolve, reject) => {
-      webServer!.server.once('error', reject);
+      webServer!.server.once('error', (ex) => {
+        if ((ex as any).code === 'EADDRINUSE') {
+          console.warn(`[frontend-web] Port ${port} is already in use. Ignoring error and continuing without starting web server.`);
+          resolve();
+        } else {
+          reject(ex);
+        }
+      });
       webServer!.server.listen(port, '0.0.0.0', () => {
         process.stderr.write(`[frontend-web] http://localhost:${port}\n`);
         resolve();

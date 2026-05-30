@@ -61,6 +61,14 @@ export interface MatbotServices {
   /** Hot-unload a plugin by specifier, removing its tools, hooks, and system context contributions. */
   unloadPlugin(specifier: string): Promise<void>;
 
+  /**
+   * Create (or retrieve a cached) typed store for the given namespace.
+   * The backing implementation is determined by the runtime (filesystem by default;
+   * a storage plugin may substitute a database backend).
+   * Namespaces are isolated: 'schedules' and 'settings' never share documents.
+   */
+  createStore<T extends { id: string; version: string }>(namespace: string): Store<T>;
+
   /** Look up a service registered by a plugin. Key is the plugin's types package name. */
   get<K extends keyof ServiceMap>(key: K): ServiceMap[K] | undefined;
 
@@ -91,7 +99,7 @@ export interface MatbotServices {
 
 export type ProviderAdapterFactory = (config: ProviderConfig) => ProviderAdapter;
 
-export type StorageKind = 'sessions';
+export type StorageKind = string;
 
 export type StoreFactory = (
   kind:    StorageKind,

@@ -9,7 +9,8 @@
  *   - Comments (# ...)
  *   - ${env:VAR_NAME} substitution in string values (expanded from env)
  *
- * Does NOT support anchors, aliases, multi-line scalars, or flow syntax.
+ * Does NOT support anchors, aliases, or flow syntax.
+ * Supports literal block scalars (|) and folded block scalars (>).
  */
 
 type YamlScalar = string | number | boolean | null;
@@ -97,8 +98,22 @@ function parse(tokens: Token[], pos: number, baseIndent: number, env: Record<str
       const key      = tok.raw.slice(0, colonIdx).trim();
       const rest     = tok.raw.slice(colonIdx + 1).trimStart();
 
-      if (rest === '' || rest === '|' || rest === '>') {
-        // Value is the next indented block
+      if (rest === '|' || rest === '>') {
+        // Block scalar: collect indented lines as raw text, don't recurse.
+        const blockIndent = tok.indent + 2;
+        const lines: string[] = [];
+        let j = i + 1;
+        while (j < tokens.length && tokens[j]!.indent >= blockIndent) {
+          const t = tokens[j]!;
+          lines.push(' '.repeat(t.indent - blockIndent) + t.raw);
+          j++;
+        }
+        map[key] = rest === '|'
+          ? lines.join('\n') + (lines.length > 0 ? '\n' : '')
+          : lines.join(' ');
+        i = j;
+      } else if (rest === '') {
+        // Value is the next indented block — recurse as nested YAML.
         const sub = parse(tokens, i + 1, tok.indent + 2, env);
         map[key]  = sub.value;
         i         = sub.next;

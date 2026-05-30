@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { loadConfig, loadDotEnv }           from './config.js';
+import { loadConfig, loadConfigFromText, loadDotEnv } from './config.js';
 import { installPlugin }                    from './install.js';
 import type { Principal, ProviderAdapter,
               ProviderConfig, Session,
@@ -19,7 +19,7 @@ import { systemPrincipal, VaultImpl }      from '@matatbread/matbot-security';
 import { FilesystemStore }                 from '@matatbread/matbot-storage-filesystem';
 import { FilesystemFileStore }             from '@matatbread/matbot-files-node';
 import { createBuiltinTools }              from '@matatbread/matbot-tool-plugin';
-import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile } from 'node:fs/promises';
 import { createInterface }                 from 'node:readline/promises';
 import { createRequire }                   from 'node:module';
 import { pathToFileURL }                   from 'node:url';
@@ -342,37 +342,55 @@ async function runTurn(
 
 // ── Main ───────────────────────────────────────────────────────────────────────
 
-function makePluginSettings(settingsDir: string, pluginName: string): PluginSettings {
-  const file = path.join(settingsDir, `${pluginName}.json`);
-  let cache: Record<string, unknown> | undefined;
+interface SettingsDoc {
+  id:      string;
+  version: string;
+  data:    Record<string, unknown>;
+}
 
-  const load = async (): Promise<Record<string, unknown>> => {
-    if (cache !== undefined) return cache;
-    try {
-      cache = JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>;
-    } catch {
-      cache = {};
-    }
-    return cache;
-  };
+function isSettingsDoc(v: unknown): v is SettingsDoc {
+  return typeof v === 'object' && v !== null &&
+    typeof (v as SettingsDoc).id      === 'string' &&
+    typeof (v as SettingsDoc).version === 'string' &&
+    typeof (v as SettingsDoc).data    === 'object' && (v as SettingsDoc).data !== null;
+}
 
-  const save = async (data: Record<string, unknown>): Promise<void> => {
-    await mkdir(settingsDir, { recursive: true });
-    await writeFile(file, JSON.stringify(data, null, 2), 'utf8');
-    cache = data;
+function makePluginSettings(store: Store<SettingsDoc>, pluginName: string): PluginSettings {
+  // Handles migration from the old flat-object format (pre-Store).
+  const getDoc = async (): Promise<SettingsDoc | null> => {
+    const raw = await store.get(pluginName);
+    if (raw === null) return null;
+    if (isSettingsDoc(raw)) return raw;
+    // Old format: flat { key: value } — wrap it so subsequent writes upgrade the file.
+    return { id: pluginName, version: '0', data: raw as unknown as Record<string, unknown> };
   };
 
   return {
     async get<T>(key: string): Promise<T | undefined> {
-      return (await load())[key] as T | undefined;
+      return (await getDoc())?.data[key] as T | undefined;
     },
     async set<T>(key: string, value: T): Promise<void> {
-      await save({ ...(await load()), [key]: value });
+      for (;;) {
+        const doc  = await getDoc();
+        const data = { ...(doc?.data ?? {}), [key]: value as unknown };
+        const next: SettingsDoc = { id: pluginName, version: Date.now().toString(), data };
+        // version '0' means migrated-but-not-yet-written — use set to upgrade the file.
+        if (doc === null || doc.version === '0') { await store.set(pluginName, next); return; }
+        const r = await store.cas(pluginName, doc.version, next);
+        if (r.ok) return;
+      }
     },
     async delete(key: string): Promise<void> {
-      const data = { ...(await load()) };
-      delete data[key];
-      await save(data);
+      for (;;) {
+        const doc = await getDoc();
+        if (doc === null) return;
+        const data = { ...doc.data };
+        delete data[key];
+        const next: SettingsDoc = { id: pluginName, version: Date.now().toString(), data };
+        if (doc.version === '0') { await store.set(pluginName, next); return; }
+        const r = await store.cas(pluginName, doc.version, next);
+        if (r.ok) return;
+      }
     },
   };
 }
@@ -397,30 +415,56 @@ async function main(): Promise<void> {
   }
 
   const { opts, prompt: parsedPrompt } = parseArgs(process.argv);
-  const argPrompt = opts.promptFile !== undefined
-    ? await readFile(path.resolve(opts.promptFile), 'utf8')
-    : parsedPrompt;
 
-  // Resolve config path — walk up if using the default name
-  const configPath = opts.config === './matbot.yaml'
-    ? (await findUp('matbot.yaml')) ?? path.resolve('matbot.yaml')
-    : path.resolve(opts.config);
+  // ── Config loading ────────────────────────────────────────────────────────────
 
-  // Chdir to the project root so relative paths and tool defaults resolve correctly
-  // regardless of where the CLI process was launched from (e.g. pnpm changes cwd to apps/cli).
-  process.chdir(path.dirname(configPath));
+  const env = process.env as Record<string, string | undefined>;
+  let matbotConfig: import('./config.js').MatbotConfig;
+  let configPath: string;
 
-  // Load .env from same directory as config before anything reads process.env
-  await loadDotEnv(path.dirname(configPath));
-
-  // Load config
-  const matbotConfig = await loadConfig(
-    configPath,
-    process.env as Record<string, string | undefined>,
-  );
+  if (opts.config === '-') {
+    // Read YAML from stdin; project root anchors to the base config via extends:
+    const text = await new Promise<string>((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      process.stdin.on('data', (c: Buffer) => chunks.push(c));
+      process.stdin.on('end',  () => resolve(Buffer.concat(chunks).toString('utf8')));
+      process.stdin.on('error', reject);
+    });
+    const { config, projectDir } = await loadConfigFromText(text, env, process.cwd());
+    matbotConfig = config;
+    configPath   = path.join(projectDir, 'matbot.yaml'); // virtual — used for plugin resolution
+    process.chdir(projectDir);
+    await loadDotEnv(projectDir);
+  } else {
+    configPath = opts.config === './matbot.yaml'
+      ? (await findUp('matbot.yaml')) ?? path.resolve('matbot.yaml')
+      : path.resolve(opts.config);
+    process.chdir(path.dirname(configPath));
+    await loadDotEnv(path.dirname(configPath));
+    const result = await loadConfig(configPath, env);
+    matbotConfig = result.config;
+    // projectDir from result is the same as dirname(configPath) unless extends crosses dirs
+    if (result.projectDir !== path.dirname(configPath)) {
+      process.chdir(result.projectDir);
+      configPath = path.join(result.projectDir, 'matbot.yaml');
+    }
+  }
 
   if (matbotConfig.providers.size === 0) {
     throw new Error('No providers found in config.');
+  }
+
+  // Merge prompt sources: CLI flag/arg > config file
+  const argPrompt = opts.promptFile !== undefined
+    ? await readFile(path.resolve(opts.promptFile), 'utf8')
+    : (parsedPrompt ?? matbotConfig.prompt);
+
+  // Merge ephemeral: CLI flag or config field
+  const isEphemeral = opts.ephemeral || matbotConfig.ephemeral === true;
+
+  // Guard: stdin config without a prompt would consume stdin then hang on REPL
+  if (opts.config === '-' && argPrompt === undefined) {
+    throw new Error('--config - requires a prompt: field in the config or a positional prompt argument.');
   }
 
   // ── Plugin setup ─────────────────────────────────────────────────────────────
@@ -429,14 +473,28 @@ async function main(): Promise<void> {
 
   // ── Stores (created early so plugins like frontend-web can use them) ──────────
 
-  const dotData     = path.join(path.dirname(configPath), '.data');
-  const dataDir     = path.join(dotData, 'sessions');
-  const workDir     = path.join(dotData, 'workspace');
-  const filesDir    = path.join(dotData, 'files');
-  const settingsDir = path.join(dotData, 'settings');
+  const dotData  = path.join(path.dirname(configPath), '.data');
+  const dataDir  = path.join(dotData, 'sessions');
+  const workDir  = path.join(dotData, 'workspace');
+  const filesDir = path.join(dotData, 'files');
+  const storeDir = path.join(dotData, 'stores');
   await Promise.all([mkdir(dataDir, { recursive: true }), mkdir(workDir, { recursive: true }), mkdir(filesDir, { recursive: true })]);
   const store     = new FilesystemStore<Session>(dataDir);
   const fileStore = new FilesystemFileStore(filesDir);
+
+  // Shared typed-store factory: one FilesystemStore per namespace, cached so lock maps are shared.
+  const storeCache = new Map<string, FilesystemStore<{ id: string; version: string }>>();
+  const createStore = <T extends { id: string; version: string }>(namespace: string): Store<T> => {
+    let s = storeCache.get(namespace);
+    if (s === undefined) {
+      // Settings use their legacy path so existing data is preserved; all other namespaces go under storeDir.
+      const dir = namespace === 'settings' ? path.join(dotData, 'settings') : path.join(storeDir, namespace);
+      s = new FilesystemStore(dir);
+      storeCache.set(namespace, s);
+    }
+    return s as unknown as Store<T>;
+  };
+  const settingsStore = createStore<SettingsDoc>('settings');
 
   // toolMap is shared: plugins register into it via services, runSession reads it
   const toolMap = new Map<string, Tool>(createBuiltinTools().map(t => [t.name, t]));
@@ -462,11 +520,13 @@ async function main(): Promise<void> {
     settings(pluginName: string): PluginSettings {
       let s = pluginSettingsCache.get(pluginName);
       if (s === undefined) {
-        s = makePluginSettings(settingsDir, pluginName);
+        s = makePluginSettings(settingsStore, pluginName);
         pluginSettingsCache.set(pluginName, s);
       }
       return s;
     },
+
+    createStore,
 
     get(key) { return serviceRegistry.get(key) as never; },
     register(key, svc) { serviceRegistry.set(key, svc); },
@@ -562,7 +622,7 @@ async function main(): Promise<void> {
 
   // ── Provider resolution ───────────────────────────────────────────────────────
 
-  const providerName = opts.provider ?? (matbotConfig.providers.keys().next().value as string);
+  const providerName = opts.provider ?? matbotConfig.defaultProvider ?? (matbotConfig.providers.keys().next().value as string);
   const rawConfig    = matbotConfig.providers.get(providerName);
   if (!rawConfig) {
     throw new Error(
@@ -604,13 +664,13 @@ async function main(): Promise<void> {
     }
   }
 
-  if (opts.ephemeral) {
+  if (isEphemeral) {
     process.stderr.write(`provider: ${providerName}  (ephemeral)\n\n`);
   } else {
     process.stderr.write(`provider: ${providerName}  session: ${session.id}\n\n`);
   }
 
-  const runStore: Store<Session> = opts.ephemeral ? new MemoryStore<Session>() : store;
+  const runStore: Store<Session> = isEphemeral ? new MemoryStore<Session>() : store;
 
   // ── Readline (shared by single-turn and REPL for tool prompts) ──────────────
   const rl = createInterface({ input: process.stdin, output: process.stderr });
@@ -643,7 +703,7 @@ async function main(): Promise<void> {
   }
 
   rl.close();
-  if (!opts.ephemeral) {
+  if (!isEphemeral) {
     process.stderr.write(
       `\nTo resume: matbot --provider ${providerName} --session ${session.id}\n`
     );
