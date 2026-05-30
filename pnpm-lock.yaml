@@ -299,6 +299,22 @@ importers:
         specifier: 'catalog:'
         version: 5.9.3
 
+  packages/plugins/storage/sqlite:
+    dependencies:
+      '@matatbread/matbot-plugin-api':
+        specifier: workspace:*
+        version: link:../../../core/plugin-api
+      '@matatbread/matbot-storage-base':
+        specifier: workspace:*
+        version: link:../../../core/storage/_base
+    devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 22.19.19
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
+
   packages/plugins/workspace:
     dependencies:
       '@matatbread/matbot-plugin-api':

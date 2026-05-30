@@ -78,6 +78,14 @@ export interface MatbotServices {
   /** Remove a service entry previously registered by a plugin. */
   unregisterService?(key: string): void;
 
+  /**
+   * Replace the active storage backend at runtime. All Store and FileStore references
+   * previously vended by createStore / services.sessions / services.files remain valid —
+   * they are forwarding proxies that will transparently route to the new backend after
+   * this call returns. The old backend is closed if it implements close().
+   */
+  replaceStorageBackend?(next: StorageBackend): Promise<void>;
+
   /** Declare that this plugin provides a frontend. The runtime records the plugin name implicitly. */
   registerFrontend?(): void;
 
@@ -117,6 +125,18 @@ export interface PluginManifest {
   config?: readonly string[];
 }
 
+// ── Storage backend ───────────────────────────────────────────────────────────
+
+/**
+ * A storage backend replaces both the document store factory and the file store.
+ * Registered by a plugin's storageBackend.open() before the services object is built.
+ */
+export interface StorageBackend {
+  createStore<T extends { id: string; version: string }>(namespace: string): Store<T>;
+  readonly fileStore: FileStore;
+  close?(): Promise<void>;
+}
+
 // ── Plugin interface ──────────────────────────────────────────────────────────
 
 export interface MatbotPlugin {
@@ -127,6 +147,14 @@ export interface MatbotPlugin {
   readonly storage?:   Record<string, StoreFactory>;
   readonly tools?:     readonly Tool[];
   readonly frontend?:  FrontendFactory;
+  /**
+   * When present, the runtime calls open(dotData) before creating the services
+   * object and uses the returned backend for all Store and FileStore creation.
+   * The plugin must be listed before any plugin whose setup() calls createStore.
+   */
+  readonly storageBackend?: {
+    open(dotData: string): Promise<StorageBackend>;
+  };
   setup?(services: MatbotServices): Promise<void>;
   teardown?(): Promise<void>;
 }

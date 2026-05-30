@@ -14,7 +14,8 @@ import { appendMessage, createMessage,
          teardownPlugins,
          unloadPlugin as unloadPluginFn,
          getPluginNameForSpecifier }       from '@matatbread/matbot-core';
-import type { MatbotServices, PluginSettings, ToolRegistry, Vault } from '@matatbread/matbot-core';
+import type { MatbotServices, PluginSettings, ToolRegistry, Vault,
+              MatbotPlugin, StorageBackend } from '@matatbread/matbot-core';
 import { systemPrincipal, VaultImpl }      from '@matatbread/matbot-security';
 import { FilesystemStore }                 from '@matatbread/matbot-storage-filesystem';
 import { FilesystemFileStore }             from '@matatbread/matbot-files-node';
@@ -487,21 +488,82 @@ async function main(): Promise<void> {
   const dataDir  = path.join(dotData, 'sessions');
   const workDir  = path.join(dotData, 'bash-cwd');
   const filesDir = path.join(dotData, 'files');
-  await Promise.all([mkdir(dataDir, { recursive: true }), mkdir(filesDir, { recursive: true })]);
-  const store     = new FilesystemStore<Session>(dataDir);
-  const fileStore = new FilesystemFileStore(filesDir);
 
-  // Shared typed-store factory: one FilesystemStore per namespace, cached so lock maps are shared.
-  // Each namespace maps directly to .data/<namespace>/ — flat layout, one directory per table.
-  const storeCache = new Map<string, FilesystemStore<{ id: string; version: string }>>();
-  const createStore = <T extends { id: string; version: string }>(namespace: string): Store<T> => {
-    let s = storeCache.get(namespace);
-    if (s === undefined) {
-      s = new FilesystemStore(path.join(dotData, namespace));
-      storeCache.set(namespace, s);
+  // Resolve plugin specifiers here so we can pre-scan for a storage backend before
+  // creating stores. Node caches the imported modules, so loadPlugins below is free.
+  const providerModules: string[] = [];
+  const seenProviderModules = new Set<string>();
+  for (const cfg of matbotConfig.providers.values()) {
+    const mod = cfg.module ?? `@matatbread/matbot-provider-${cfg.type}`;
+    if (!seenProviderModules.has(mod)) {
+      seenProviderModules.add(mod);
+      providerModules.push(mod);
     }
-    return s as unknown as Store<T>;
+  }
+  const allSpecifiers = [
+    ...await resolvePluginSpecifiers(providerModules,      path.dirname(configPath)),
+    ...await resolvePluginSpecifiers(matbotConfig.plugins, path.dirname(configPath)),
+  ];
+
+  // A plugin with storageBackend replaces the default filesystem stores.
+  // It must be listed before any plugin whose setup() calls createStore.
+  let activeStorageBackend: StorageBackend | undefined;
+  for (const spec of allSpecifiers) {
+    try {
+      const mod  = await import(/* @vite-ignore */ spec) as Record<string, unknown>;
+      const plug = (mod['plugin'] ?? (mod['default'] as Record<string, unknown> | undefined)?.['plugin']) as MatbotPlugin | undefined;
+      if (plug?.storageBackend !== undefined) {
+        activeStorageBackend = await plug.storageBackend.open(dotData);
+        break;
+      }
+    } catch { /* loadPlugins will surface errors */ }
+  }
+
+  if (activeStorageBackend === undefined) {
+    await Promise.all([mkdir(dataDir, { recursive: true }), mkdir(filesDir, { recursive: true })]);
+  }
+
+  // Each Store and FileStore is a forwarding proxy backed by a mutable `current` target.
+  // Callers may freely capture references — all method calls route through the proxy to
+  // whichever backend is current. replaceStorageBackend() calls each proxy's swap fn.
+  type AnyStore = Store<{ id: string; version: string }>;
+  type SwapFn<T extends object> = (next: T) => void;
+
+  // Returns [proxy, swap]. The proxy forwards every property access to `current`.
+  // Binding the method to `current` (not the proxy) ensures `this` is always the real store.
+  function makeSwappable<T extends object>(initial: T): [T, SwapFn<T>] {
+    let current = initial;
+    const proxy = new Proxy({} as T, {
+      get(_, prop) {
+        const val = Reflect.get(current, prop, current);
+        return typeof val === 'function' ? (val as (...a: unknown[]) => unknown).bind(current) : val;
+      },
+      has(_, prop) { return Reflect.has(current, prop); },
+    });
+    return [proxy, (next: T) => { current = next; }];
+  }
+
+  // One proxy per namespace, including 'sessions'. Keyed by namespace string.
+  const storeProxies = new Map<string, [AnyStore, SwapFn<AnyStore>]>();
+
+  const makeStoreForNamespace = (namespace: string): AnyStore =>
+    activeStorageBackend?.createStore(namespace) ??
+    new FilesystemStore(namespace === 'sessions' ? dataDir : path.join(dotData, namespace));
+
+  const createStore = <T extends { id: string; version: string }>(namespace: string): Store<T> => {
+    let entry = storeProxies.get(namespace);
+    if (entry === undefined) {
+      entry = makeSwappable<AnyStore>(makeStoreForNamespace(namespace));
+      storeProxies.set(namespace, entry);
+    }
+    return entry[0] as Store<T>;
   };
+
+  // sessions and fileStore are stable proxy references — safe to capture anywhere.
+  const store     = createStore<Session>('sessions');
+  const [fileStore, swapFiles] = makeSwappable<FileStore>(
+    activeStorageBackend?.fileStore ?? new FilesystemFileStore(filesDir),
+  );
   const settingsStore = createStore<SettingsDoc>('settings');
 
   // toolMap is shared: plugins register into it via services, runSession reads it
@@ -594,25 +656,16 @@ async function main(): Promise<void> {
     systemContext:  systemContextReg,
     workdir:    workDir,
     configPath,
+    async replaceStorageBackend(next: StorageBackend): Promise<void> {
+      // Swap every cached store proxy to the new backend.
+      for (const [ns, [, swap]] of storeProxies) swap(next.createStore(ns));
+      swapFiles(next.fileStore);
+      const old = activeStorageBackend;
+      activeStorageBackend = next;
+      await old?.close?.();
+    },
   };
 
-  // Collect provider plugin modules (unique, preserving first-seen order) and
-  // prepend them to the user's plugin list so they're registered before any
-  // user plugin whose setup() might call services.complete().
-  const providerModules: string[] = [];
-  const seenProviderModules = new Set<string>();
-  for (const cfg of matbotConfig.providers.values()) {
-    const mod = cfg.module ?? `@matatbread/matbot-provider-${cfg.type}`;
-    if (!seenProviderModules.has(mod)) {
-      seenProviderModules.add(mod);
-      providerModules.push(mod);
-    }
-  }
-
-  const allSpecifiers = [
-    ...await resolvePluginSpecifiers(providerModules,        path.dirname(configPath)),
-    ...await resolvePluginSpecifiers(matbotConfig.plugins,   path.dirname(configPath)),
-  ];
   await loadPlugins(allSpecifiers, services);
 
   // ── Server mode ───────────────────────────────────────────────────────────────
@@ -621,7 +674,9 @@ async function main(): Promise<void> {
     process.stderr.write('[matbot] server running — press Ctrl+C to stop\n');
     const shutdown = (): void => {
       process.stderr.write('\n[matbot] shutting down…\n');
-      teardownPlugins().then(() => process.exit(0)).catch(() => process.exit(1));
+      teardownPlugins()
+      .then(async () => { await activeStorageBackend?.close?.(); process.exit(0); })
+      .catch(() => process.exit(1));
     };
     process.once('SIGINT',  shutdown);
     process.once('SIGTERM', shutdown);
@@ -697,6 +752,7 @@ async function main(): Promise<void> {
     } finally {
       rl.close();
       await teardownPlugins();
+      await activeStorageBackend?.close?.();
     }
     return;
   }
@@ -717,6 +773,7 @@ async function main(): Promise<void> {
   } finally {
     rl.close();
     await teardownPlugins();
+    await activeStorageBackend?.close?.();
   }
 
   if (!isEphemeral) {
