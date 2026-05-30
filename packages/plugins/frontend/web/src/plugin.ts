@@ -11,6 +11,8 @@ export const plugin: MatbotPlugin = {
   apiVersion: PLUGIN_API_VERSION,
 
   async setup(services: MatbotServices) {
+    if (process.env['MATBOT_BACKGROUND'] === '1') return;
+
     services.registerFrontend?.();
 
     const sessions = services.sessions;
@@ -56,6 +58,8 @@ export const plugin: MatbotPlugin = {
       webServer!.server.once('error', (ex) => {
         if ((ex as any).code === 'EADDRINUSE') {
           console.warn(`[frontend-web] Port ${port} is already in use. Ignoring error and continuing without starting web server.`);
+          webServer?.close();
+          webServer = undefined;
           resolve();
         } else {
           reject(ex);

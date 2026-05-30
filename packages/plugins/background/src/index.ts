@@ -159,7 +159,7 @@ function armSchedule(sched: Schedule): void {
     const { intervalMs } = sched;
     const startupDelay = intervalMs <= 10_000
       ? intervalMs
-      : 10_000 + Math.floor(Math.random() * (intervalMs - 10_000));
+      : 10_000 + Math.floor(Math.pow(Math.random(), 2) * (intervalMs - 10_000));
     await sleep(startupDelay, ac.signal);
 
     while (!ac.signal.aborted) {
@@ -167,7 +167,10 @@ function armSchedule(sched: Schedule): void {
       if (child !== undefined) {
         const killChild = () => { child.kill(); };
         ac.signal.addEventListener('abort', killChild, { once: true });
-        child.once('exit', () => { ac.signal.removeEventListener('abort', killChild); });
+        await new Promise<void>(r => child.once('exit', () => {
+          ac.signal.removeEventListener('abort', killChild);
+          r();
+        }));
       }
       const now = Date.now();
       sched.lastRun = new Date(now).toISOString();
@@ -227,7 +230,7 @@ const backgroundTool: Tool = {
 const everyTool: Tool = {
   name: 'every',
   description:
-    'Schedule a prompt to run repeatedly at a fixed interval. ' +
+    'Schedule a prompt to run repeatedly, each run separated by the specified interval. ' +
     'Schedules persist across restarts. Returns the schedule ID needed for every_cancel.',
   requires:    ['spawn'],
   inputSchema: {
@@ -240,7 +243,7 @@ const everyTool: Tool = {
       },
       interval: {
         type:        'string',
-        description: 'How often to run, e.g. "30s", "5m", "1h", "24h".',
+        description: 'The gap between each run, e.g. "30s", "5m", "1h", "24h".',
       },
       name: {
         type:        'string',

@@ -692,25 +692,33 @@ async function main(): Promise<void> {
 
   // ── Single-turn ──────────────────────────────────────────────────────────────
   if (argPrompt !== undefined) {
-    await runTurn(session, argPrompt, providerConfig, adapter, toolMap, runStore, principal, workDir, fileStore, hookReg, systemContextReg, stdinPrompt, services.loadPlugin.bind(services), services.unloadPlugin.bind(services), configPath);
-    rl.close();
+    try {
+      await runTurn(session, argPrompt, providerConfig, adapter, toolMap, runStore, principal, workDir, fileStore, hookReg, systemContextReg, stdinPrompt, services.loadPlugin.bind(services), services.unloadPlugin.bind(services), configPath);
+    } finally {
+      rl.close();
+      await teardownPlugins();
+    }
     return;
   }
 
   // ── Interactive REPL ─────────────────────────────────────────────────────────
-  for (;;) {
-    let line: string;
-    try {
-      line = await rl.question('you: ');
-    } catch {
-      break;  // Ctrl+D / EOF
+  try {
+    for (;;) {
+      let line: string;
+      try {
+        line = await rl.question('you: ');
+      } catch {
+        break;  // Ctrl+D / EOF
+      }
+      if (!line.trim()) continue;
+      process.stderr.write('assistant: ');
+      session = await runTurn(session, line, providerConfig, adapter, toolMap, runStore, principal, workDir, fileStore, hookReg, systemContextReg, stdinPrompt, services.loadPlugin.bind(services), services.unloadPlugin.bind(services), configPath);
     }
-    if (!line.trim()) continue;
-    process.stderr.write('assistant: ');
-    session = await runTurn(session, line, providerConfig, adapter, toolMap, runStore, principal, workDir, fileStore, hookReg, systemContextReg, stdinPrompt, services.loadPlugin.bind(services), services.unloadPlugin.bind(services), configPath);
+  } finally {
+    rl.close();
+    await teardownPlugins();
   }
 
-  rl.close();
   if (!isEphemeral) {
     process.stderr.write(
       `\nTo resume: matbot --provider ${providerName} --session ${session.id}\n`

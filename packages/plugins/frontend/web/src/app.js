@@ -116,8 +116,8 @@ async function apiListSessions() {
     const sessions = await callTool('session_list', {});
     sessionsBanner.style.display = 'none';
     return sessions;
-  } catch {
-    sessionsBanner.style.display = 'flex';
+  } catch (e) {
+    if (String(e).includes('404')) sessionsBanner.style.display = 'flex';
     return [];
   }
 }
