@@ -48,29 +48,6 @@ export interface AuditLog {
   query(filter: FilterExpr, limit?: number): AsyncIterable<AuditEvent>;
 }
 
-export interface Job<P = unknown> {
-  id:          string;
-  version:     string;
-  type:        string;
-  payload:     P;
-  status:      'pending' | 'claimed' | 'done' | 'failed';
-  claimedBy?:  string;
-  claimedAt?:  ISODate;
-  attempts:    number;
-  maxAttempts: number;
-  runAfter:    ISODate;
-  failReason?: string;
-  createdAt:   ISODate;
-}
-
-export interface JobQueue {
-  enqueue<P>(type: string, payload: P, runAfter?: Date): Promise<Job<P>>;
-  claim(type: string, workerId: string): Promise<Job | null>;
-  complete(id: string, version: string): Promise<void>;
-  fail(id: string, version: string, error: string): Promise<void>;
-  watch(type: string, signal: AbortSignal): AsyncIterable<Job>;
-}
-
 export interface ProviderRegistry {
   register(adapter: ProviderAdapter): void;
   resolve(name: string): ProviderAdapter;

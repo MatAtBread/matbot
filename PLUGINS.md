@@ -517,10 +517,7 @@ from auto-cleanup.
 | `@matatbread/matbot-tool-bash` | `bash` | tool | Run bash scripts, stream stdout/stderr |
 | `@matatbread/matbot-tool-docker-bash` | `docker-bash` | tool | Drop-in replacement for bash that runs scripts inside a Docker container |
 | `@matatbread/matbot-tool-http` | `http` | tool | Make HTTP requests |
-| `@matatbread/matbot-tool-schedule` | `schedule` | tool | Wait a specified duration |
 | `@matatbread/matbot-skills-node` | `skills` | tool+hooks | File-backed skill injection via skill router classifier |
-| `@matatbread/matbot-memory-types` | — | types | `MemoryManager` interface + `ServiceMap` augmentation (no runtime code) |
-| `@matatbread/matbot-memory-node` | — | plugin | `MemoryManagerImpl`, `JobQueueImpl`, `MemoryExtractorWorker` |
 | `@matatbread/matbot-frontend-web` | `frontend-web` | frontend+hooks | Web UI with session management |
 | `@matatbread/matbot-provider-anthropic` | — | provider | Anthropic Messages API adapter (also used for DeepSeek Anthropic-compat) |
 | `@matatbread/matbot-provider-openai-compat` | — | provider | OpenAI-compatible chat completions adapter |
