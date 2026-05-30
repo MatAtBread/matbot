@@ -58,6 +58,7 @@ interface Schedule {
   intervalMs: number;
   createdAt:  string;
   nextRun:    string;
+  active?:    boolean;
   name?:      string;
   output?:    string;
   lastRun?:   string;
@@ -68,9 +69,15 @@ let scheduleStore:   Store<Schedule> | undefined;
 let activeConfigPath: string | undefined;
 let activeFiles:     FileStore | undefined;
 let pluginAc:        AbortController | undefined;
-const activeLoops = new Map<string, AbortController>();
+const activeLoops    = new Map<string, AbortController>();
+// One entry per schedule while it is sleeping; aborting it wakes the sleep early.
+const sleepControllers = new Map<string, AbortController>();
 
 // ── Spawn helpers ─────────────────────────────────────────────────────────────
+
+// When true, background jobs run in a new process group and survive the parent exiting.
+// When false, they are tied to the parent's process group.
+const DETACH_BACKGROUND_JOBS = false;
 
 // Relative path args (--import, --require, --loader) resolve against the CWD at
 // launch time, which may differ from dirname(argv[1]). Walk up from the script
@@ -115,7 +122,7 @@ function spawnJob(configPath: string, prompt: string, output?: string, files?: F
     execPath,
     [...absoluteExecArgv(script), script, '--config', '-'],
     {
-      detached: true,
+      detached: DETACH_BACKGROUND_JOBS,
       stdio:    ['pipe', captureOut ? 'pipe' : 'ignore', 'inherit'],
       // MATBOT_BACKGROUND prevents the background plugin in the child from
       // arming its own scheduler loop, which would cascade exponentially.
@@ -128,7 +135,10 @@ function spawnJob(configPath: string, prompt: string, output?: string, files?: F
   child.stdin.end();
 
   if (captureOut && child.stdout !== null && output !== undefined && files !== undefined) {
-    void files.put(output, mimeFromName(output), stdoutStream(child.stdout), { namespace: 'workspace' });
+    files.put(output, mimeFromName(output), stdoutStream(child.stdout), { namespace: 'workspace' })
+      .catch((err: unknown) => process.stderr.write(
+        `[background] output capture failed for "${output}": ${err instanceof Error ? err.message : String(err)}\n`,
+      ));
   }
 
   child.unref();
@@ -137,12 +147,21 @@ function spawnJob(configPath: string, prompt: string, output?: string, files?: F
 
 // ── Scheduler loop ────────────────────────────────────────────────────────────
 
-function sleep(ms: number, signal: AbortSignal): Promise<void> {
+// wakeSignal interrupts the sleep without killing the loop (used by suspend/resume).
+// Pass Infinity for ms to sleep until one of the signals fires.
+function sleep(ms: number, signal: AbortSignal, wakeSignal?: AbortSignal): Promise<void> {
   return new Promise(resolve => {
-    if (signal.aborted) { resolve(); return; }
-    const id = setTimeout(resolve, ms);
-    signal.addEventListener('abort', () => { clearTimeout(id); resolve(); }, { once: true });
+    if (signal.aborted || wakeSignal?.aborted) { resolve(); return; }
+    const id = isFinite(ms) ? setTimeout(resolve, ms) : undefined;
+    const cleanup = () => { if (id !== undefined) clearTimeout(id); resolve(); };
+    signal.addEventListener('abort', cleanup, { once: true });
+    wakeSignal?.addEventListener('abort', cleanup, { once: true });
   });
+}
+
+function wakeSchedule(id: string): void {
+  const wakeAc = sleepControllers.get(id);
+  if (wakeAc) { sleepControllers.delete(id); wakeAc.abort(); }
 }
 
 function armSchedule(sched: Schedule): void {
@@ -153,16 +172,36 @@ function armSchedule(sched: Schedule): void {
   pluginAc.signal.addEventListener('abort', () => ac.abort(), { once: true });
   activeLoops.set(sched.id, ac);
 
-  void (async () => {
+  void (async (): Promise<void> => {
     // Stagger startup: random delay in [10s, intervalMs] to avoid a pulse when
     // the process restarts with multiple schedules all due at the same time.
+    // Skip the stagger for suspended schedules — they'll wait indefinitely anyway.
     const { intervalMs } = sched;
-    const startupDelay = intervalMs <= 10_000
-      ? intervalMs
-      : 10_000 + Math.floor(Math.pow(Math.random(), 2) * (intervalMs - 10_000));
-    await sleep(startupDelay, ac.signal);
+    if (sched.active !== false) {
+      const startupDelay = intervalMs <= 10_000
+        ? intervalMs
+        : 10_000 + Math.floor(Math.pow(Math.random(), 2) * (intervalMs - 10_000));
+      const wakeAc = new AbortController();
+      sleepControllers.set(sched.id, wakeAc);
+      await sleep(startupDelay, ac.signal, wakeAc.signal);
+      sleepControllers.delete(sched.id);
+    }
 
     while (!ac.signal.aborted) {
+      // Reload from store so suspend/resume state changes are picked up.
+      const stored = await scheduleStore?.get(sched.id);
+      if (!stored) break;
+      sched = stored;
+
+      if (sched.active === false) {
+        // Suspended: wait indefinitely until woken by every_resume.
+        const wakeAc = new AbortController();
+        sleepControllers.set(sched.id, wakeAc);
+        await sleep(Infinity, ac.signal, wakeAc.signal);
+        sleepControllers.delete(sched.id);
+        continue;
+      }
+
       const child = spawnJob(activeConfigPath!, sched.prompt, sched.output, activeFiles, sched.provider);
       if (child !== undefined) {
         const killChild = () => { child.kill(); };
@@ -177,18 +216,29 @@ function armSchedule(sched: Schedule): void {
       sched.nextRun = new Date(now + intervalMs).toISOString();
       sched.version = now.toString();
       await scheduleStore?.set(sched.id, sched);
-      await sleep(intervalMs, ac.signal);
+
+      const wakeAc = new AbortController();
+      sleepControllers.set(sched.id, wakeAc);
+      await sleep(intervalMs, ac.signal, wakeAc.signal);
+      sleepControllers.delete(sched.id);
     }
 
     activeLoops.delete(sched.id);
-  })();
+    sleepControllers.delete(sched.id);
+  })().catch((err: unknown) => {
+    process.stderr.write(
+      `[background] schedule ${sched.id} loop crashed: ${err instanceof Error ? err.message : String(err)}\n`,
+    );
+    activeLoops.delete(sched.id);
+    sleepControllers.delete(sched.id);
+  });
 }
 
 // ── Tools ─────────────────────────────────────────────────────────────────────
 
 interface BackgroundInput { prompt: string; output?: string; provider?: string; }
 interface EveryInput      { prompt: string; interval: string; name?: string; output?: string; provider?: string; }
-interface CancelInput     { id: string; }
+interface IdInput         { id: string; }
 
 const backgroundTool: Tool = {
   name: 'background',
@@ -231,7 +281,7 @@ const everyTool: Tool = {
   name: 'every',
   description:
     'Schedule a prompt to run repeatedly, each run separated by the specified interval. ' +
-    'Schedules persist across restarts. Returns the schedule ID needed for every_cancel.',
+    'Schedules persist across restarts. Returns the schedule ID needed for every_cancel, every_suspend, and every_resume.',
   requires:    ['spawn'],
   inputSchema: {
     type:       'object',
@@ -273,7 +323,7 @@ const everyTool: Tool = {
       const id  = randomUUID();
       const now = new Date();
       const sched: Schedule = {
-        id, version: now.getTime().toString(), prompt, intervalMs,
+        id, version: now.getTime().toString(), prompt, intervalMs, active: true,
         createdAt: now.toISOString(),
         nextRun:   new Date(now.getTime() + intervalMs).toISOString(),
         ...(name     !== undefined ? { name     } : {}),
@@ -289,7 +339,7 @@ const everyTool: Tool = {
 
 const everyListTool: Tool = {
   name: 'every_list',
-  description: 'List all recurring schedules with their IDs, intervals, and next run times.',
+  description: 'List all recurring schedules with their IDs, intervals, and next run times. The active field indicates whether the schedule is currently active or suspended, and can be modified with the every_suspend and every_resume tools.',
   inputSchema: { type: 'object', properties: {} },
   executor: {
     async *execute(_input: unknown, _ctx: ToolContext): AsyncIterable<ToolEvent> {
@@ -301,7 +351,7 @@ const everyListTool: Tool = {
           id:       s.id,
           interval: formatDuration(s.intervalMs),
           nextRun:  s.nextRun,
-          active:   activeLoops.has(s.id),
+          active:   s.active !== false,
           ...(s.name    !== undefined ? { name:    s.name    } : {}),
           ...(s.lastRun !== undefined ? { lastRun: s.lastRun } : {}),
           ...(s.output  !== undefined ? { output:  s.output  } : {}),
@@ -313,19 +363,117 @@ const everyListTool: Tool = {
 
 const everyCancelTool: Tool = {
   name: 'every_cancel',
-  description: 'Cancel and remove a recurring schedule by its ID.',
+  description: 'Cancel and permanently remove a recurring schedule by its ID. Use every_suspend instead to pause it temporarily.',
   inputSchema: {
     type:       'object',
     required:   ['id'],
-    properties: { id: { type: 'string', description: 'Schedule ID as returned by every.' } },
+    properties: { id: { type: 'string', description: 'Schedule ID as returned by every or every_list.' } },
   },
   executor: {
     async *execute(input: unknown, _ctx: ToolContext): AsyncIterable<ToolEvent> {
-      const { id } = input as CancelInput;
+      const { id } = input as IdInput;
       const ac = activeLoops.get(id);
       if (ac) { ac.abort(); activeLoops.delete(id); }
+      wakeSchedule(id);
       await scheduleStore?.delete(id);
       yield { type: 'result', value: { cancelled: true, id } };
+    },
+  },
+};
+
+const everySuspendTool: Tool = {
+  name: 'every_suspend',
+  description:
+    'Pause a recurring schedule so it stops running until resumed. ' +
+    'The schedule is preserved with all its settings and can be re-enabled with every_resume. ' +
+    'Use this to temporarily disable a schedule without deleting it.',
+  inputSchema: {
+    type:       'object',
+    required:   ['id'],
+    properties: { id: { type: 'string', description: 'Schedule ID as returned by every or every_list.' } },
+  },
+  executor: {
+    async *execute(input: unknown, _ctx: ToolContext): AsyncIterable<ToolEvent> {
+      const { id } = input as IdInput;
+      const stored = await scheduleStore?.get(id);
+      if (!stored) { yield { type: 'error', message: `Schedule ${id} not found.` }; return; }
+      const updated: Schedule = { ...stored, active: false, version: Date.now().toString() };
+      await scheduleStore?.set(id, updated);
+      wakeSchedule(id);
+      yield { type: 'result', value: { suspended: true, id } };
+    },
+  },
+};
+
+const everyResumeTool: Tool = {
+  name: 'every_resume',
+  description:
+    'Resume a suspended recurring schedule. ' +
+    'The schedule will run nearly immediately, then continue on its normal interval. ' +
+    'Has no effect on a schedule that is already active.',
+  inputSchema: {
+    type:       'object',
+    required:   ['id'],
+    properties: { id: { type: 'string', description: 'Schedule ID as returned by every or every_list.' } },
+  },
+  executor: {
+    async *execute(input: unknown, _ctx: ToolContext): AsyncIterable<ToolEvent> {
+      const { id } = input as IdInput;
+      const stored = await scheduleStore?.get(id);
+      if (!stored) { yield { type: 'error', message: `Schedule ${id} not found.` }; return; }
+      const updated: Schedule = { ...stored, active: true, version: Date.now().toString() };
+      await scheduleStore?.set(id, updated);
+      wakeSchedule(id);
+      yield { type: 'result', value: { resumed: true, id } };
+    },
+  },
+};
+
+const everythingSuspendTool: Tool = {
+  name: 'everything_suspend',
+  description:
+    'Pause all recurring schedules at once. ' +
+    'Equivalent to calling every_suspend on each schedule. ' +
+    'Use this to halt all background automation temporarily (e.g. during maintenance or debugging). ' +
+    'Schedules can be re-enabled individually with every_resume or all at once with everything_resume.',
+  inputSchema: { type: 'object', properties: {} },
+  executor: {
+    async *execute(_input: unknown, _ctx: ToolContext): AsyncIterable<ToolEvent> {
+      const result = await scheduleStore?.query({});
+      const ids: string[] = [];
+      for (const { doc } of result?.items ?? []) {
+        if (doc.active !== false) {
+          const updated: Schedule = { ...doc, active: false, version: Date.now().toString() };
+          await scheduleStore?.set(doc.id, updated);
+          wakeSchedule(doc.id);
+          ids.push(doc.id);
+        }
+      }
+      yield { type: 'result', value: { suspended: true, count: ids.length, ids } };
+    },
+  },
+};
+
+const everythingResumeTool: Tool = {
+  name: 'everything_resume',
+  description:
+    'Resume all suspended recurring schedules at once. ' +
+    'Each schedule will run nearly immediately, then continue on its normal interval. ' +
+    'Schedules that are already active are unaffected.',
+  inputSchema: { type: 'object', properties: {} },
+  executor: {
+    async *execute(_input: unknown, _ctx: ToolContext): AsyncIterable<ToolEvent> {
+      const result = await scheduleStore?.query({});
+      const ids: string[] = [];
+      for (const { doc } of result?.items ?? []) {
+        if (doc.active === false) {
+          const updated: Schedule = { ...doc, active: true, version: Date.now().toString() };
+          await scheduleStore?.set(doc.id, updated);
+          wakeSchedule(doc.id);
+          ids.push(doc.id);
+        }
+      }
+      yield { type: 'result', value: { resumed: true, count: ids.length, ids } };
     },
   },
 };
@@ -336,9 +484,9 @@ export const plugin: MatbotPlugin = {
   name:       'background',
   apiVersion: PLUGIN_API_VERSION,
   manifest: {
-    description: 'Run prompts in detached background processes. Schedule recurring prompts with every/every_list/every_cancel.',
+    description: 'Run prompts in detached background processes. Schedule recurring prompts with every/every_list/every_cancel/every_suspend/every_resume/everything_suspend/everything_resume.',
   },
-  tools: [backgroundTool, everyTool, everyListTool, everyCancelTool],
+  tools: [backgroundTool, everyTool, everyListTool, everyCancelTool, everySuspendTool, everyResumeTool, everythingSuspendTool, everythingResumeTool],
 
   async setup(services: MatbotServices) {
     if (!services.configPath) return;

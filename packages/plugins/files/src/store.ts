@@ -1,5 +1,6 @@
 import { mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { createReadStream, watch } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import type { FileEvent, FileFilter, FileHandle, FileMetaData, FileStore, MimeType } from '@matatbread/matbot-core';
 
@@ -71,14 +72,17 @@ export class FilesystemFileStore implements FileStore {
   }
 
   private async writeData(targetPath: string, data: AsyncIterable<Uint8Array>): Promise<void> {
-    const tmpPath = `${targetPath}.tmp`;
+    const tmpPath = `${targetPath}.${randomUUID()}.tmp`;
     const fh = await open(tmpPath, 'w');
     try {
       for await (const chunk of data) {
         await fh.write(chunk);
       }
-    } finally {
       await fh.close();
+    } catch (err) {
+      await fh.close().catch(() => {});
+      await rm(tmpPath, { force: true }).catch(() => {});
+      throw err;
     }
     await rename(tmpPath, targetPath);
   }

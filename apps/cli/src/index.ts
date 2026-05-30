@@ -30,10 +30,12 @@ import path                                from 'node:path';
 // Prefix all console output with ISO timestamp + PID so parent and spawned
 // background processes are distinguishable in shared terminal output.
 const _pid = process.pid;
+const isBackground = process.env.MATBOT_BACKGROUND === '1';
 for (const level of ['log', 'warn', 'error'] as const) {
   const orig = console[level].bind(console) as (...a: unknown[]) => void;
-  console[level] = (...args: unknown[]) => {
-    orig(`[${new Date().toISOString()} ${_pid}]`, ...args);
+  console[level] = (label, ...args: unknown[]) => {
+    if (!isBackground || level === 'error')
+      orig(`[${new Date().toISOString()} ${_pid}] ${label}`, ...args);
   };
 }
 
