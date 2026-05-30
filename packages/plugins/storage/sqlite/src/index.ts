@@ -1,0 +1,20 @@
+import { dirname, join } from 'node:path';
+import type { MatbotPlugin, MatbotServices } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
+import { SQLiteStorageBackend } from './backend.js';
+
+export const plugin: MatbotPlugin = {
+  name:       '@matatbread/matbot-storage-sqlite',
+  apiVersion: PLUGIN_API_VERSION,
+  storageBackend: {
+    open: (dotData: string) => SQLiteStorageBackend.open(dotData),
+  },
+  async setup(services: MatbotServices) {
+    // Pre-scan already opened this backend at startup — nothing to do.
+    if (services.storageBackend instanceof SQLiteStorageBackend) return;
+    // Hot-loaded at runtime: activate now.
+    if (!services.replaceStorageBackend || !services.configPath) return;
+    const dotData = join(dirname(services.configPath), '.data');
+    await services.replaceStorageBackend(await SQLiteStorageBackend.open(dotData));
+  },
+};

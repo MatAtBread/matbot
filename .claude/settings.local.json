@@ -47,7 +47,9 @@
       "Bash(pnpm --filter @matatbread/matbot-skills-node typecheck)",
       "Bash(pnpm --filter @matatbread/matbot-plugin-api typecheck)",
       "Bash(pnpm --filter @matatbread/matbot-memory-node typecheck)",
-      "Bash(pnpm -r typecheck)"
+      "Bash(pnpm -r typecheck)",
+      "Bash(xargs ls -1)",
+      "Bash(xargs ls)"
     ]
   }
 }

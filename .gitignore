@@ -6,7 +6,7 @@ dist/
 .env
 .env.*
 !.env.example
-.data
+.data*
 .claude
 matbot.yaml
 matbot.*.yaml

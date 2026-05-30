@@ -8,7 +8,7 @@
   },
   "scripts": {
     "typecheck": "pnpm -r run typecheck",
-    "cli":       "pnpm --filter @matatbread/matbot-cli cli",
+    "repl":      "pnpm --filter @matatbread/matbot-cli repl",
     "start":     "pnpm --filter @matatbread/matbot-cli start"
   },
   "devDependencies": {

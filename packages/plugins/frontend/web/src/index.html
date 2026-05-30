@@ -540,7 +540,7 @@
 
     /* ── Sessions banner ───────────────────────────────────────── */
 
-    #sessions-banner {
+    .plugin-prompt-banner {
       display: none;
       align-items: center;
       gap: 10px;
@@ -550,8 +550,8 @@
       font-size: 0.86em;
       color: #92400e;
     }
-    #sessions-banner span { flex: 1; }
-    #sessions-banner button {
+    .plugin-prompt-banner span { flex: 1; }
+    .plugin-prompt-banner button {
       padding: 4px 12px;
       background: #d97706;
       color: #fff;
@@ -563,7 +563,7 @@
       white-space: nowrap;
       flex-shrink: 0;
     }
-    #sessions-banner button:hover { background: #b45309; }
+    .plugin-prompt-banner button:hover { background: #b45309; }
 
     /* ── Input area ────────────────────────────────────────────── */
 
@@ -825,7 +825,7 @@
   <main id="main">
     <div id="chat-header"><button id="burger" aria-label="Open menu">&#9776;</button><span id="chat-title"></span></div>
     <div id="messages"></div>
-    <div id="sessions-banner">
+    <div id="sessions-banner" class="plugin-prompt-banner">
       <span>Sessions plugin not loaded — conversations won't be saved after reload.</span>
       <button id="sessions-enable-btn">Enable sessions</button>
     </div>

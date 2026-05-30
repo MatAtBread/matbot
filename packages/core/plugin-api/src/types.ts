@@ -344,7 +344,7 @@ export interface FileStore {
   list(filter?: FileFilter): AsyncIterable<FileHandle>;
   putTemp(name: string, mimeType: MimeType, data: AsyncIterable<Uint8Array>): Promise<FileHandle>;
   /** Observe file changes. Implementations that cannot watch their backing store omit this. */
-  watch?(signal?: AbortSignal): AsyncIterable<FileEvent>;
+  watch(signal?: AbortSignal): AsyncIterable<FileEvent>;
 }
 
 // ── Frontend ──────────────────────────────────────────────────────────────────
