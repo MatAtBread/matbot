@@ -49,7 +49,8 @@
       "Bash(pnpm --filter @matatbread/matbot-memory-node typecheck)",
       "Bash(pnpm -r typecheck)",
       "Bash(xargs ls -1)",
-      "Bash(xargs ls)"
+      "Bash(xargs ls)",
+      "Bash(pnpm --filter @matatbread/matbot-frontend-telegram install)"
     ]
   }
 }

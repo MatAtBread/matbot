@@ -1,7 +1,8 @@
 import type { Tool, ToolEvent, ToolContext, MatbotPlugin } from '@matatbread/matbot-plugin-api';
-import { getRegisteredPlugins, getRegisteredTools, getRegisteredFrontendPlugin } from '@matatbread/matbot-core';
+import { getRegisteredPlugins, getRegisteredTools, getRegisteredFrontendPlugins } from '@matatbread/matbot-core';
 import { readFile, writeFile, access, readdir } from 'node:fs/promises';
 import { spawn }                             from 'node:child_process';
+import { pathToFileURL }                     from 'node:url';
 import path                                  from 'node:path';
 import process                               from 'node:process';
 
@@ -46,6 +47,15 @@ function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function resolveExportsMain(exports: unknown): string | undefined {
+  if (typeof exports === 'string') return exports;
+  if (exports !== null && typeof exports === 'object') {
+    const dot = (exports as Record<string, unknown>)['.'];
+    if (typeof dot === 'string') return dot;
+  }
+  return undefined;
+}
+
 // TODO: This is a convenience shim for end users in monorepo setups and is
 // intentionally narrow. It should eventually be replaced with a proper
 // discovery interface — registry lookup, repo scanning, or a plugin marketplace.
@@ -71,10 +81,25 @@ async function discoverLocalPlugins(
           dependencies?: Record<string, string>;
         };
         if (pkg.dependencies?.['@matatbread/matbot-plugin-api'] !== undefined) {
+          // Prefer manifest.description (runtime source of truth) over package.json description.
+          let description = pkg.description ?? '';
+          // Resolve the explicit entry file from exports["."] so we import the .ts file
+          // directly rather than the directory (directory import requires the loader to
+          // handle exports-field resolution for .ts files, which is unreliable).
+          const exportsMain = resolveExportsMain((pkg as { exports?: unknown }).exports);
+          if (exportsMain) {
+            try {
+              const entryUrl = pathToFileURL(path.join(sub, exportsMain)).href;
+              const mod = await import(entryUrl) as Record<string, unknown>;
+              const p = (mod['plugin'] ?? (mod['default'] as Record<string, unknown> | undefined)?.['plugin']) as MatbotPlugin | undefined;
+              if (p?.manifest?.description) description = p.manifest.description;
+            } catch { /* leave description as-is */ }
+          }
+
           results.push({
             specifier:   `./${path.relative(projectDir, sub).replace(/\\/g, '/')}`,
-            name:        pkg.name        ?? entry.name,
-            description: pkg.description ?? '',
+            name:        pkg.name ?? entry.name,
+            description,
           });
         }
       } catch { /* no package.json or unreadable */ }
@@ -118,7 +143,7 @@ function pluginTypes(p: MatbotPlugin, registeredToolPlugins: Set<string>): strin
   if (p.tools?.length || registeredToolPlugins.has(p.name))                 t.push('tools');
   if (Object.keys(p.providers ?? {}).length)                                t.push('provider');
   if (Object.keys(p.storage   ?? {}).length)                                t.push('storage');
-  if (p.frontend !== undefined || getRegisteredFrontendPlugin() === p.name) t.push('frontend');
+  if (p.frontend !== undefined || getRegisteredFrontendPlugins().has(p.name)) t.push('frontend');
   if (!t.length)                                                            t.push('extension');
   return t;
 }
@@ -164,10 +189,11 @@ const executor = {
       );
 
       const loaded = getRegisteredPlugins().map(p => ({
-        name:       p.name,
-        apiVersion: p.apiVersion,
-        types:      pluginTypes(p, pluginToolNames),
-        tools:      toolsByPlugin.get(p.name) ?? [],
+        name:        p.name,
+        apiVersion:  p.apiVersion,
+        types:       pluginTypes(p, pluginToolNames),
+        tools:       toolsByPlugin.get(p.name) ?? [],
+        ...(p.manifest?.description ? { description: p.manifest.description } : {}),
       }));
 
       yield {

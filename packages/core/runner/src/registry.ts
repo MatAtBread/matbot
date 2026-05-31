@@ -14,8 +14,8 @@ const state = {
   providers:       new Map<string, ProviderAdapterFactory>(),
   storage:         new Map<string, StoreFactory>(),
   toolRegistry:    undefined as ToolRegistry | undefined,
-  frontend:        undefined as FrontendFactory | undefined,
-  frontendPlugin:  undefined as string | undefined,
+  frontend:         undefined as FrontendFactory | undefined,
+  frontendPlugins:  new Set<string>(),
   serviceKeys:     new Map<string, string[]>(),  // pluginName → ServiceMap keys it registered
   specifierToName: new Map<string, string>(),    // resolved specifier → plugin name
 };
@@ -117,8 +117,8 @@ export function getRegisteredPlugins(): readonly MatbotPlugin[] {
   return state.plugins;
 }
 
-export function getRegisteredFrontendPlugin(): string | undefined {
-  return state.frontendPlugin;
+export function getRegisteredFrontendPlugins(): ReadonlySet<string> {
+  return state.frontendPlugins;
 }
 
 /** Resolve a loaded plugin's name from the specifier used to load it. */
@@ -155,7 +155,7 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotServices
       state.serviceKeys.set(plugin.name, keys);
       services.register(key, svc);
     },
-    registerFrontend() { state.frontendPlugin = plugin.name; },
+    registerFrontend() { state.frontendPlugins.add(plugin.name); },
   };
   for (const tool of plugin.tools ?? []) {
     scopedServices.tools.register(tool);
@@ -188,9 +188,9 @@ export async function unloadPlugin(pluginName: string, services: MatbotServices)
   for (const type of Object.keys(plugin.providers ?? {})) state.providers.delete(type);
   for (const type of Object.keys(plugin.storage   ?? {})) state.storage.delete(type);
 
-  if (state.frontendPlugin === pluginName) {
-    state.frontend      = undefined;
-    state.frontendPlugin = undefined;
+  state.frontendPlugins.delete(pluginName);
+  if (state.frontendPlugins.size === 0) {
+    state.frontend = undefined;
   }
 
   for (const [spec, name] of state.specifierToName) {
