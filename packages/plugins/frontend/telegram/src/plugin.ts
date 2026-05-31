@@ -10,6 +10,7 @@ import { getUpdates, sendChatAction, sendMessage } from './bot.js';
 
 const PLUGIN_NAME = 'frontend-telegram';
 const SETTINGS_KEY_PROVIDER = 'provider';
+const SETTINGS_KEY_KNOWN = 'knownChats';
 
 const PRINCIPAL: Principal = {
   id:       'telegram-user',
@@ -32,10 +33,11 @@ interface ActiveProvider {
 
 // Module-level state: readable/writable by the tools regardless of where setup() is in scope.
 let teardownAc:    AbortController | undefined;
-let activeProvider: ActiveProvider | undefined;
+let activeProvider: ActiveProvider;
 let servicesRef:   MatbotServices | undefined;
 let botTokenRef:   string | undefined;
 const knownChats = new Set<number>(); // populated as chats interact with the bot
+let openDoor = 0;
 
 async function buildProvider(name: string, services: MatbotServices): Promise<ActiveProvider> {
   const rawConfig = services.providers.get(name);
@@ -66,6 +68,17 @@ export const plugin: MatbotPlugin = {
       executor: {
         async *execute() {
           yield { type: 'result' as const, value: { provider: activeProvider?.name ?? null } };
+        },
+      },
+    },
+    {
+      name:        'telegram_open_door',
+      description: 'Open the door for new chats to join the bot channel. The door remains open for 30 seconds or until the first message from a new user is received, whichever comes first.',
+      inputSchema: { type: 'object', properties: {} },
+      executor: {
+        async *execute() {
+          openDoor = Date.now();
+          yield { type: 'result' as const, value: { open_until: new Date(openDoor + 30_000).toISOString() } };
         },
       },
     },
@@ -154,6 +167,9 @@ export const plugin: MatbotPlugin = {
     botTokenRef = botToken;
 
     const settings = services.settings(PLUGIN_NAME);
+    for (const id of await settings.get<number[]>(SETTINGS_KEY_KNOWN) ?? []) {
+      knownChats.add(id);
+    }
 
     // Restore a previously persisted provider, or fall back to the first configured one.
     const savedName    = await settings.get<string>(SETTINGS_KEY_PROVIDER);
@@ -167,77 +183,84 @@ export const plugin: MatbotPlugin = {
 
     activeProvider = await buildProvider(initialName, services);
 
-    const busy = new Set<number>();
+    const busy = new Map<number, Promise<void>>();
     const ac   = new AbortController();
     teardownAc = ac;
 
     async function handleMessage(chatId: number, text: string): Promise<void> {
       if (busy.has(chatId)) {
-        await sendMessage(botToken, chatId, 'Please wait — still processing your previous message.');
-        return;
+        await busy.get(chatId);
       }
-      busy.add(chatId);
-      knownChats.add(chatId);
+
+      if (knownChats.size === 0 || (openDoor && (Date.now() - openDoor) < 30_000)) {
+        knownChats.add(chatId);
+        openDoor = 0;
+        settings.set(SETTINGS_KEY_KNOWN, [...knownChats]).catch(() => {});
+      } else if (!knownChats.has(chatId)) {
+        return; // Ignore messages from unknown chats if we've already interacted with at least one chat and openDoor isn't set.
+      }
 
       // Snapshot the active provider so a mid-run switch doesn't affect this call.
       const prov = activeProvider;
-      if (!prov) { busy.delete(chatId); return; }
-
       try {
-        void sendChatAction(botToken, chatId, 'typing');
+        async function processMessage() {
+          sendChatAction(botToken, chatId, 'typing').catch(() => {});
 
-        // Look up or create a persistent session for this chat.
-        const sessionKey = `chat:${chatId}`;
-        const storedId   = await settings.get<string>(sessionKey);
-        let session: Session | null = storedId !== undefined ? await sessions.get(storedId) : null;
-        if (!session) {
-          session = createSession({ ownerPrincipal: PRINCIPAL });
-          await sessions.set(session.id, session);
-          await settings.set(sessionKey, session.id);
-        }
-
-        const traceId = crypto.randomUUID();
-        const userMsg = createMessage({ role: 'user', content: [{ type: 'text', text }], traceId });
-        session = appendMessage(session, userMsg);
-        await sessions.set(session.id, session);
-
-        // Keep the typing indicator alive; Telegram expires it after ~5 s.
-        const typingInterval = setInterval(
-          () => { void sendChatAction(botToken, chatId, 'typing'); },
-          4_000,
-        );
-
-        let responseText = '';
-        try {
-          for await (const event of runSession({
-            session,
-            config:         { principal: PRINCIPAL, provider: prov.name, traceId },
-            provider:       prov.adapter,
-            providerConfig: prov.config,
-            ...(services.tools         ? { tools: new Map(services.tools.list().map(t => [t.name, t])) } : {}),
-            store:          sessions,
-            ...(services.hooks         ? { hooks:         services.hooks         } : {}),
-            ...(services.systemContext ? { systemContext: services.systemContext } : {}),
-            ...(services.workdir       ? { workdir:       services.workdir       } : {}),
-            ...(services.files         ? { files:         services.files         } : {}),
-            ...(services.configPath    ? { configPath:    services.configPath    } : {}),
-            signal:       ac.signal,
-            prompt:       (_q, def) => Promise.resolve(def ?? ''),
-            loadPlugin:   services.loadPlugin.bind(services),
-            unloadPlugin: services.unloadPlugin.bind(services),
-          })) {
-            if (event.type === 'text-delta') {
-              responseText += event.delta;
-            }
-            // Swallow: thinking, usage, tool:start/stdout/stderr/end, robo-user, file, done, aborted
+          // Look up or create a persistent session for this chat.
+          const sessionKey = `chat:${chatId}`;
+          const storedId   = await settings.get<string>(sessionKey);
+          let session: Session | null = storedId !== undefined ? await sessions.get(storedId) : null;
+          if (!session) {
+            session = createSession({ ownerPrincipal: PRINCIPAL });
+            await sessions.set(session.id, session);
+            await settings.set(sessionKey, session.id);
           }
-        } finally {
-          clearInterval(typingInterval);
+
+          const traceId = crypto.randomUUID();
+          const userMsg = createMessage({ role: 'user', content: [{ type: 'text', text }], traceId });
+          session = appendMessage(session, userMsg);
+          await sessions.set(session.id, session);
+
+          // Keep the typing indicator alive; Telegram expires it after ~5 s.
+          const typingInterval = setInterval(
+            () => { void sendChatAction(botToken, chatId, 'typing'); },
+            4_000,
+          );
+
+          let responseText = '';
+          try {
+            for await (const event of runSession({
+              session,
+              config:         { principal: PRINCIPAL, provider: prov.name, traceId },
+              provider:       prov.adapter,
+              providerConfig: prov.config,
+              ...(services.tools         ? { tools: new Map(services.tools.list().map(t => [t.name, t])) } : {}),
+              store:          sessions,
+              ...(services.hooks         ? { hooks:         services.hooks         } : {}),
+              ...(services.systemContext ? { systemContext: services.systemContext } : {}),
+              ...(services.workdir       ? { workdir:       services.workdir       } : {}),
+              ...(services.files         ? { files:         services.files         } : {}),
+              ...(services.configPath    ? { configPath:    services.configPath    } : {}),
+              signal:       ac.signal,
+              prompt:       (_q, def) => Promise.resolve(def ?? ''),
+              loadPlugin:   services.loadPlugin.bind(services),
+              unloadPlugin: services.unloadPlugin.bind(services),
+            })) {
+              if (event.type === 'text-delta') {
+                responseText += event.delta;
+              }
+              // Swallow: thinking, usage, tool:start/stdout/stderr/end, robo-user, file, done, aborted
+            }
+          } finally {
+            clearInterval(typingInterval);
+          }
+
+          if (responseText.trim()) {
+            await sendMessage(botToken, chatId, responseText);
+          }
         }
 
-        if (responseText.trim()) {
-          await sendMessage(botToken, chatId, responseText);
-        }
+        busy.set(chatId, processMessage().finally(() => busy.delete(chatId)).catch(() => {}));
       } catch (e) {
         if (!ac.signal.aborted) {
           console.warn(`[frontend-telegram] Error for chat ${chatId}: ${e}\n`);
@@ -245,8 +268,6 @@ export const plugin: MatbotPlugin = {
             await sendMessage(botToken, chatId, 'An error occurred. Please try again.');
           } catch { /* ignore send failures */ }
         }
-      } finally {
-        busy.delete(chatId);
       }
     }
 
@@ -281,7 +302,6 @@ export const plugin: MatbotPlugin = {
   async teardown() {
     teardownAc?.abort();
     teardownAc     = undefined;
-    activeProvider = undefined;
     servicesRef    = undefined;
     botTokenRef    = undefined;
     knownChats.clear();

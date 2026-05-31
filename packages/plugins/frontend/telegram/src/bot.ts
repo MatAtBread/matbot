@@ -62,11 +62,20 @@ export async function getUpdates(
 }
 
 // Telegram limits messages to 4096 UTF-16 code units.
-function splitText(text: string, max = 4096): string[] {
-  if (text.length <= max) return [text];
-  const chunks: string[] = [];
-  for (let i = 0; i < text.length; i += max) {
-    chunks.push(text.slice(i, i + max));
+function *splitText(text: string, max = 4096): Iterable<string> {
+  if (text.length <= max) {
+    yield text;
+    return;
   }
-  return chunks;
+  let i = 0;
+  while(i < text.length) {
+    const boundaries = [
+      text.lastIndexOf(' ', i + max) + 1,
+      text.lastIndexOf('\n', i + max) + 1,
+      text.lastIndexOf('\t', i + max) + 1
+    ].filter(v => v > 0 && v < max);
+    const end = boundaries.length ? Math.max(...boundaries) : i + max;
+    yield text.slice(i, end);
+    i = end;
+  }
 }
