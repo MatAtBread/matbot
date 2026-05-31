@@ -189,7 +189,7 @@ function armSchedule(sched: Schedule): void {
 
     while (!ac.signal.aborted) {
       // Reload from store so suspend/resume state changes are picked up.
-      const stored = await scheduleStore?.get(sched.id);
+      let stored = await scheduleStore?.get(sched.id);
       if (!stored) break;
       sched = stored;
 
@@ -211,6 +211,12 @@ function armSchedule(sched: Schedule): void {
           r();
         }));
       }
+
+      // We need to get the state again in case it changed while the job was running, e.g. if the user suspended it manually or if another instance of the loop updated the nextRun time after a restart.
+      stored = await scheduleStore?.get(sched.id);
+      if (!stored) break;
+      sched = stored;
+
       const now = Date.now();
       sched.lastRun = new Date(now).toISOString();
       sched.nextRun = new Date(now + intervalMs).toISOString();
