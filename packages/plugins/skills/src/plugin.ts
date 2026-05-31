@@ -68,11 +68,7 @@ export const plugin: MatbotPlugin = (() => {
     },
 
     async setup(services) {
-      const extCfg = (services.extensions?.['skills'] as Record<string, unknown> | undefined) ?? {};
-      const rawDir = extCfg['skillsDir'];
-      const skillsDir = typeof rawDir === 'string'
-        ? rawDir
-        : path.join(process.cwd(), '.data', 'skills');
+      const skillsDir = path.join(process.cwd(), '.data', 'skills');
 
       inner = createSkillsPlugin({ skillsDir });
       await inner.setup?.(services);

@@ -92,7 +92,6 @@ export interface MatbotServices {
   readonly providers:      ReadonlyMap<string, ProviderConfig>;
   readonly sessions?:      Store<Session>;
   readonly storageBackend?: StorageBackend | undefined;
-  readonly extensions?: Record<string, unknown>;
   readonly files?:      FileStore;
   readonly vault:          Vault;
   readonly hooks:          HookRegistry;

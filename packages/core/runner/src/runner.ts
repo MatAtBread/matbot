@@ -68,8 +68,6 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
 
   // ── 3. Agentic loop ────────────────────────────────────────────────────────
 
-  const toolList = [...tools.values()];
-
   for (;;) {
     // Respect an abort that arrived between turns (e.g. during tool execution).
     if (signal.aborted) {
@@ -84,7 +82,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
 
     // One provider call — system context prepended here, never written back to session
     try {
-      for await (const ev of provider.complete([...systemMsg, ...session.messages], providerConfig, toolList, signal)) {
+      for await (const ev of provider.complete([...systemMsg, ...session.messages], providerConfig, [...tools.values()], signal)) {
         switch (ev.type) {
           case 'text-delta':
             textAcc += ev.delta;
