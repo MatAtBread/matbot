@@ -337,6 +337,12 @@ async function joinSessionStream(id, renderedCount) {
             }
             thinkingAccum += ev.delta;
             thinkingContent.textContent = thinkingAccum;
+            // If no text content yet, scroll to show the user processing is happening.
+            if (!turnWrap.querySelector('.msg-text') && !isScrollSuppressed()) {
+              programmaticScrollTo(() => {
+                turnWrap.scrollIntoView({ block: 'end', behavior: 'instant' });
+              });
+            }
             break;
           }
           case 'tool:start': {
@@ -344,6 +350,12 @@ async function joinSessionStream(id, renderedCount) {
             currentTool = makeToolBlock(ev.name, ev.input);
             currentTool.open = true;
             turnWrap.appendChild(currentTool);
+            // If no text content yet, scroll to show the user processing is happening.
+            if (!turnWrap.querySelector('.msg-text') && !isScrollSuppressed()) {
+              programmaticScrollTo(() => {
+                turnWrap.scrollIntoView({ block: 'end', behavior: 'instant' });
+              });
+            }
             break;
           }
           case 'tool:stdout':
@@ -973,6 +985,12 @@ async function submitFormResponse(sessionId, values) {
           }
           thinkingAccum += ev.delta;
           thinkingContent.textContent = thinkingAccum;
+            // If no text content yet, scroll to show the user processing is happening.
+            if (!turnWrap.querySelector('.msg-text') && !isScrollSuppressed()) {
+              programmaticScrollTo(() => {
+                turnWrap.scrollIntoView({ block: 'end', behavior: 'instant' });
+              });
+            }
           break;
         }
         case 'tool:start': {
@@ -980,6 +998,12 @@ async function submitFormResponse(sessionId, values) {
           currentTool = makeToolBlock(ev.name, ev.input);
           currentTool.open = true;
           turnWrap.appendChild(currentTool);
+            // If no text content yet, scroll to show the user processing is happening.
+            if (!turnWrap.querySelector('.msg-text') && !isScrollSuppressed()) {
+              programmaticScrollTo(() => {
+                turnWrap.scrollIntoView({ block: 'end', behavior: 'instant' });
+              });
+            }
           break;
         }
         case 'tool:stdout':
@@ -1131,6 +1155,12 @@ async function sendMessage() {
           }
           thinkingAccum += ev.delta;
           thinkingContent.textContent = thinkingAccum;
+            // If no text content yet, scroll to show the user processing is happening.
+            if (!turnWrap.querySelector('.msg-text') && !isScrollSuppressed()) {
+              programmaticScrollTo(() => {
+                turnWrap.scrollIntoView({ block: 'end', behavior: 'instant' });
+              });
+            }
           break;
         }
 
@@ -1139,6 +1169,12 @@ async function sendMessage() {
           currentTool = makeToolBlock(ev.name, ev.input);
           currentTool.open = true;
           turnWrap.appendChild(currentTool);
+            // If no text content yet, scroll to show the user processing is happening.
+            if (!turnWrap.querySelector('.msg-text') && !isScrollSuppressed()) {
+              programmaticScrollTo(() => {
+                turnWrap.scrollIntoView({ block: 'end', behavior: 'instant' });
+              });
+            }
           break;
         }
 
