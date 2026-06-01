@@ -65,9 +65,13 @@ export async function loadPlugins(
       );
     }
 
-    registerPlugin(plugin, spec);
-    await setupPlugin(plugin, services);
-    loaded.push(plugin);
+    try {
+      registerPlugin(plugin, spec);
+      await setupPlugin(plugin, services);
+      loaded.push(plugin);
+    } catch (err) {
+      console.error(`[matbot] Ignoring plugin "${plugin.name}" from "${spec}" due to an error:`, err instanceof Error ? err.message : err);
+    }
   }
 
   return loaded;
