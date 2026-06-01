@@ -40,11 +40,11 @@ export function createSkillsPlugin(config: SkillsPluginConfig): MatbotPlugin {
       abortController = new AbortController();
       void watchAndImportSkillDir(config.skillsDir, store, skills, abortController.signal, config.pollMs);
 
-      const getSkills = (): SkillDoc[] => [...skills.values()];
-      const pluginSettings = services.settings('skills');
-      services.hooks.register(createUserMessageClassifierHook(pluginSettings, services.providers, getSkills));
+      // const getSkills = (): SkillDoc[] => [...skills.values()];
+      // const pluginSettings = services.settings('skills');
+      // services.hooks.register(createUserMessageClassifierHook(pluginSettings, services.providers, getSkills));
       // services.hooks.register(createSkillIndexHook(getSkills));
-      services.hooks.register(createAgentMessageClassifierHook(getSkills, pluginSettings, req => services.complete(req)));
+      // services.hooks.register(createAgentMessageClassifierHook(getSkills, pluginSettings, req => services.complete(req)));
     },
 
     async teardown() {

@@ -94,9 +94,9 @@ function showScrollDownButton() {
 function scrollToBottomAndReset() {
   messagesEl.scrollTop = messagesEl.scrollHeight;
   // After scrolling to bottom, restore the button's primary function:
-  // ■ (stop) if still generating, ▶ (send) if idle.
+  // ⏹ (stop) if still generating, ▶ (send) if idle.
   if (sending) {
-    sendBtn.textContent = '\u25a0';   // ■
+    sendBtn.textContent = '⏹';
     sendBtn.classList.remove('scroll-down-mode');
     sendBtn.classList.add('stop-mode');
     sendBtn.disabled = false;
@@ -108,7 +108,7 @@ function scrollToBottomAndReset() {
 
 // Restore the send button to its normal ▶ state.
 function resetSendButton() {
-  sendBtn.textContent = '▶';   // ▶
+  sendBtn.textContent = '▶';
   sendBtn.classList.remove('scroll-down-mode', 'stop-mode');
   sendBtn.disabled = false;
   inputEl.disabled = false;
@@ -1508,7 +1508,7 @@ async function sendMessage() {
 //
 // Three modes (priority order):
 //   1. scroll-down-mode (▼) — scroll to bottom + focus input + restore ▶
-//   2. stop-mode (■)        — request abort of in-flight generation
+//   2. stop-mode (⏹)        — request abort of in-flight generation
 //   3. default  (▶)        — send the current message
 
 sendBtn.onclick = () => {
@@ -1539,7 +1539,7 @@ function setSending(val, sessionId) {
     sending = true;
     sendingForSession = sid;
     stopRequested = false;
-    sendBtn.textContent = '\u25a0';   // ■ stop square
+    sendBtn.textContent = '\u25a0';   // ⏹ stop square
     sendBtn.classList.add('stop-mode');
     sendBtn.disabled = false;
     inputEl.disabled = true;

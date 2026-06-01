@@ -12,8 +12,12 @@ export const plugin: MatbotPlugin = {
   name:       'frontend-web',
   apiVersion: PLUGIN_API_VERSION,
 
+  async installationMessage(): Promise<string> {
+    return `Go to http://localhost:${port}/ to access the web interface.`;
+  },
+
   async setup(services: MatbotServices) {
-    if (process.env['MATBOT_BACKGROUND'] === '1') return;
+    if (process.env['IS_SUB_AGENT'] === '1') return;
 
     services.registerFrontend?.();
 
@@ -26,24 +30,23 @@ export const plugin: MatbotPlugin = {
         .map(cfg => [cfg.type, resolveProviderFactory(cfg.type)(cfg)]),
     );
 
-    services.systemContext.register(() => {
-      const tools = services.tools.list();
-      if (tools.length === 0) return null;
-      const lines = tools.map(t => `- \`${t.name}\`: ${t.description}`).join('\n');
-      return (
-        `Tell the user the website is now available at http://localhost:${port}/\n` +
-        `Tools are available via HTTP from the current host:\n` +
-        `POST /tools/<name>\n` +
-        `Request body: the tool's JSON input directly (matches the tool's inputSchema).\n` +
-        `Response: the tool's result as JSON on success (200), or { error, stdout?, stderr? } on failure (500).\n\n` +
-        `Available tools:\n${lines}`
-      );
-    });
+    // services.systemContext.register(() => {
+    //   const tools = services.tools.list();
+    //   if (tools.length === 0) return null;
+    //   const lines = tools.map(t => `- \`${t.name}\`: ${t.description}`).join('\n');
+    //   return (
+    //     `Tools are also available via HTTP from the current host:\n` +
+    //     `POST /tools/<name>\n` +
+    //     `Request body: the tool's JSON input directly (matches the tool's inputSchema).\n` +
+    //     `Response: the tool's result as JSON on success (200), or { error, stdout?, stderr? } on failure (500).\n\n` +
+    //     `Available tools:\n${lines}`
+    //   );
+    // });
 
     webServer = createWebServer({
       store:         sessions,
       providers,
-      configs:       /*new Map(*/services.providers/*)*/,
+      configs:       services.providers,
       vault:         services.vault,
       loadPlugin:    services.loadPlugin.bind(services),
       unloadPlugin:  services.unloadPlugin.bind(services),

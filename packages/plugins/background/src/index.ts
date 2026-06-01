@@ -124,9 +124,9 @@ function spawnJob(configPath: string, prompt: string, output?: string, files?: F
     {
       detached: DETACH_BACKGROUND_JOBS,
       stdio:    ['pipe', captureOut ? 'pipe' : 'ignore', 'inherit'],
-      // MATBOT_BACKGROUND prevents the background plugin in the child from
+      // IS_SUB_AGENT prevents the background plugin in the child from
       // arming its own scheduler loop, which would cascade exponentially.
-      env: { ...process.env, MATBOT_BACKGROUND: '1' },
+      env: { ...process.env, IS_SUB_AGENT: '1' },
     },
   );
 
@@ -497,7 +497,7 @@ export const plugin: MatbotPlugin = {
   async setup(services: MatbotServices) {
     if (!services.configPath) return;
     // A spawned background job must not arm its own scheduler — that would cascade.
-    if (process.env['MATBOT_BACKGROUND'] === '1') return;
+    if (process.env['IS_SUB_AGENT'] === '1') return;
     activeConfigPath = services.configPath;
     activeFiles      = services.files;
     scheduleStore    = services.createStore<Schedule>('schedules');

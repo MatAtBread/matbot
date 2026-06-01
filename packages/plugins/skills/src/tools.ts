@@ -96,7 +96,8 @@ export function createSkillTools(
       isn't a reference to Volvo's in general, it's about the user's specific car which they assume you
       have information about. The clearest markers are words that are clearly novel proper nouns or nouns used in
       an non-standard or domain-specific way, for example "the Xmit system" or "What does Xmit say?".
-      List the terms you need more information about.`,
+      Another clear marker is when the user directly uses the term 'skill' in their query, for example "Use your skill about X to do Y".
+      List the terms you need more information about, together with the phrase or sentence they were mentioned in.`,
       inputSchema: {
         type: 'object',
         required: ['terms'],
@@ -104,8 +105,12 @@ export function createSkillTools(
           terms: {
             type: 'array',
             items: {
-              type: 'string',
-              description: 'A list of unknown concepts, systems, terms, entities or domains.',
+              type: 'object',
+              properties: {
+                term: { type: 'string' },
+                context: { type: 'string' }
+              },
+              description: 'A list of unknown concepts, systems, terms, entities or domains and their immediate context.',
             }
           }
         }

@@ -29,13 +29,15 @@ export async function loadPlugins(
   specifiers: readonly string[],
   services:   MatbotServices,
   bustCache = false,
-): Promise<void> {
+): Promise<MatbotPlugin[]> {
   const importSpecs = bustCache ? specifiers.map(toFreshUrl) : specifiers;
 
   // Imports run in parallel; registration remains sequential to preserve order.
   const results = await Promise.allSettled(
     importSpecs.map(spec => import(/* @vite-ignore */ spec) as Promise<Record<string, unknown>>),
   );
+
+  const loaded: MatbotPlugin[] = [];
 
   for (let i = 0; i < specifiers.length; i++) {
     const spec   = specifiers[i]!;
@@ -65,7 +67,10 @@ export async function loadPlugins(
 
     registerPlugin(plugin, spec);
     await setupPlugin(plugin, services);
+    loaded.push(plugin);
   }
+
+  return loaded;
 }
 
 /** Append a unique version stamp to force a fresh module evaluation. */

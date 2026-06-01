@@ -3,6 +3,7 @@ import type {
   PipelineEvent, RunConfig, ProviderAdapter, ProviderConfig,
   Tool, ToolContext, Store, FileStore, SystemContextRegistry,
 } from './types.js';
+import type { MatbotPlugin } from './plugin.js';
 import { HookRegistry } from './hooks.js';
 import { appendMessage, createMessage } from './session.js';
 
@@ -21,7 +22,7 @@ export interface RunSessionOpts {
   files?:         FileStore;
   /** Supply a prompt implementation to allow tools to ask interactive questions. */
   prompt?:        (question: string, defaultValue?: string) => Promise<string>;
-  loadPlugin:     (specifier: string) => Promise<void>;
+  loadPlugin:     (specifier: string) => Promise<MatbotPlugin>;
   unloadPlugin:   (specifier: string) => Promise<void>;
 }
 
