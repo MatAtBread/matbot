@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { readFile } from 'node:fs/promises';
 import { join, relative, resolve, extname } from 'node:path';
 import type {
-  HookRegistry, Principal, ProviderAdapter, ProviderConfig,
+  HookRegistry, MatbotPlugin, Principal, ProviderAdapter, ProviderConfig,
   Session, Store, ToolRegistry, Vault, FileStore, SystemContextRegistry,
 } from '@matatbread/matbot-core';
 import { appendMessage, createMessage, createSession, runSession } from '@matatbread/matbot-core';
@@ -14,7 +14,7 @@ export interface WebServerDeps {
   providers:   Map<string, ProviderAdapter>;    // adapter name → adapter
   configs:     ReadonlyMap<string, ProviderConfig>;     // provider config name → config
   vault:       Vault;
-  loadPlugin:   (specifier: string) => Promise<void>;
+  loadPlugin:   (specifier: string) => Promise<MatbotPlugin>;
   unloadPlugin: (specifier: string) => Promise<void>;
   tools?:          ToolRegistry;
   hooks?:          HookRegistry;

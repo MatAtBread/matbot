@@ -1,3 +1,5 @@
+import type { MatbotPlugin } from './plugin.js';
+
 // ── Primitives ────────────────────────────────────────────────────────────────
 
 export type Scalar  = string | number | boolean | null;
@@ -283,8 +285,8 @@ export interface ToolContext {
   files?:      FileStore;
   /** Prompt the user for input. The host provides a readline or form implementation. */
   prompt(question: string, defaultValue?: string): Promise<string>;
-  /** Hot-load a plugin by specifier without restarting the process. */
-  loadPlugin(specifier: string): Promise<void>;
+  /** Hot-load a plugin by specifier without restarting the process. Returns the loaded plugin. */
+  loadPlugin(specifier: string): Promise<MatbotPlugin>;
   /** Hot-unload a plugin by specifier, removing its tools, hooks, and system context contributions. */
   unloadPlugin(specifier: string): Promise<void>;
 }

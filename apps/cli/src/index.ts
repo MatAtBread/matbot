@@ -30,7 +30,7 @@ import path                                from 'node:path';
 // Prefix all console output with ISO timestamp + PID so parent and spawned
 // background processes are distinguishable in shared terminal output.
 const _pid = process.pid;
-const isBackground = process.env.MATBOT_BACKGROUND === '1';
+const isBackground = process.env.IS_SUB_AGENT === '1';
 for (const level of ['log', 'warn', 'error'] as const) {
   const orig = console[level].bind(console) as (...a: unknown[]) => void;
   console[level] = (label, ...args: unknown[]) => {
@@ -224,7 +224,7 @@ async function runTurn(
   hooks:          HookRegistry,
   systemContext:  SystemContextRegistryImpl,
   promptFn:       (question: string, defaultValue?: string) => Promise<string>,
-  loadPluginFn:   (specifier: string) => Promise<void>,
+  loadPluginFn:   (specifier: string) => Promise<MatbotPlugin>,
   unloadPluginFn: (specifier: string) => Promise<void>,
   configPath:     string,
 ): Promise<Session> {
@@ -644,7 +644,10 @@ async function main(): Promise<void> {
     },
     async loadPlugin(specifier: string) {
       const resolved = await resolvePluginSpecifiers([specifier], path.dirname(configPath));
-      await loadPlugins(resolved, services, /* bustCache */ true);
+      const plugins  = await loadPlugins(resolved, services, /* bustCache */ true);
+      const plugin   = plugins[0];
+      if (plugin === undefined) throw new Error(`No plugin loaded for specifier "${specifier}"`);
+      return plugin;
     },
     async unloadPlugin(specifier: string) {
       const resolved = await resolvePluginSpecifiers([specifier], path.dirname(configPath));

@@ -5,6 +5,23 @@ export function createSkillTools(
   store:  Store<SkillDoc>,
   skills: Map<string, SkillDoc>,
 ): readonly Tool[] {
+  const unknownExecutor: ToolExecutor = {
+    async *execute(_input: unknown, _ctx: ToolContext): AsyncIterable<ToolEvent> {
+      console.log("unknown_skill",_input);
+      yield { type: 'error', message: 'There is no skill available for the requested operation.' };
+      // yield {
+      //   type:  'result',
+      //   value: {
+      //     skills: [...skills.values()].map(s => ({
+      //       id:   s.id,
+      //       name: s.name,
+      //       ...(s.toolBinding !== undefined ? { toolBinding: s.toolBinding } : {}),
+      //     })),
+      //   },
+      // };
+    },
+  };
+
   const listExecutor: ToolExecutor = {
     async *execute(_input: unknown, _ctx: ToolContext): AsyncIterable<ToolEvent> {
       yield {
@@ -68,6 +85,38 @@ export function createSkillTools(
   };
 
   return [
+    {
+      name: 'unknown_skill',
+      description: `Use when you encounter a concept, system, term, entity or domain you lack specific context about — a named
+      system you haven't been trained on, user-specific preferences or setup, or a specialised topic the user assumes you know.
+      You should use this tool early and as a higher priority than external searches as it is more likely to yield domain specific
+      results than a general search.
+      Markers are sometimes use of definite articles or possessives ("the", "my") can be a hint that
+      the user is referring to a specific known entity, even if the noun is common, for example "my Volvo"
+      isn't a reference to Volvo's in general, it's about the user's specific car which they assume you
+      have information about. The clearest markers are words that are clearly novel proper nouns or nouns used in
+      an non-standard or domain-specific way, for example "the Xmit system" or "What does Xmit say?".
+      Another clear marker is when the user directly uses the term 'skill' in their query, for example "Use your skill about X to do Y".
+      List the terms you need more information about, together with the phrase or sentence they were mentioned in.`,
+      inputSchema: {
+        type: 'object',
+        required: ['terms'],
+        properties: {
+          terms: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                term: { type: 'string' },
+                context: { type: 'string' }
+              },
+              description: 'A list of unknown concepts, systems, terms, entities or domains and their immediate context.',
+            }
+          }
+        }
+      },
+      executor: unknownExecutor,
+    },
     {
       name:        'skill_list',
       description: 'List all available skills by name.',

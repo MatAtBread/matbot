@@ -94,9 +94,9 @@ function showScrollDownButton() {
 function scrollToBottomAndReset() {
   messagesEl.scrollTop = messagesEl.scrollHeight;
   // After scrolling to bottom, restore the button's primary function:
-  // ■ (stop) if still generating, ▶ (send) if idle.
+  // ⏹ (stop) if still generating, ▶ (send) if idle.
   if (sending) {
-    sendBtn.textContent = '\u25a0';   // ■
+    sendBtn.textContent = '⏹';
     sendBtn.classList.remove('scroll-down-mode');
     sendBtn.classList.add('stop-mode');
     sendBtn.disabled = false;
@@ -108,7 +108,7 @@ function scrollToBottomAndReset() {
 
 // Restore the send button to its normal ▶ state.
 function resetSendButton() {
-  sendBtn.textContent = '▶';   // ▶
+  sendBtn.textContent = '▶';
   sendBtn.classList.remove('scroll-down-mode', 'stop-mode');
   sendBtn.disabled = false;
   inputEl.disabled = false;
@@ -705,8 +705,11 @@ function renderSessions(sessions) {
   }
 }
 
-function appendUserBubble(text) {
+function appendUserBubble(text, msgIdx) {
   messagesEl.querySelector('.empty-state')?.remove();
+  if (messagesEl.querySelector('.message')) {
+    messagesEl.appendChild(createMsgDivider(msgIdx));
+  }
   const div = document.createElement('div');
   div.className = 'message user';
   const inner = document.createElement('div');
@@ -721,6 +724,143 @@ function appendUserBubble(text) {
       messagesEl.scrollTop = messagesEl.scrollHeight;
     });
   }
+}
+
+function createMsgDivider(msgIdx) {
+  const div = document.createElement('div');
+  div.className = 'msg-divider';
+  if (msgIdx !== undefined) div.dataset.msgIdx = msgIdx;
+
+  const line = document.createElement('div');
+  line.className = 'msg-divider-line';
+  div.appendChild(line);
+
+  const menu = document.createElement('div');
+  menu.className = 'msg-divider-menu';
+  for (const [label, action, danger] of [
+    ['🔗 Copy link', 'copy-link', false],
+    ['✂ Cut',             'cut',       true],
+    ['⎇ Fork',            'fork',      false],
+    ['🗜 Compact',   'compact',   true],
+  ]) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'msg-divider-btn' + (danger ? ' danger' : '');
+    btn.textContent = label;
+    btn.addEventListener('click', (e) => { e.stopPropagation(); handleDividerAction(div, action); });
+    menu.appendChild(btn);
+  }
+  div.appendChild(menu);
+
+  div.addEventListener('click', (e) => {
+    e.stopPropagation();
+    document.querySelectorAll('.msg-divider.open').forEach(d => { if (d !== div) d.classList.remove('open'); });
+    div.classList.toggle('open');
+  });
+
+  return div;
+}
+
+async function handleDividerAction(divider, action) {
+  divider.classList.remove('open');
+  const msgIdx = divider.dataset.msgIdx !== undefined ? parseInt(divider.dataset.msgIdx) : undefined;
+
+  if (action === 'copy-link') {
+    const hash = currentSessionId + (msgIdx !== undefined ? '~' + JSON.stringify({ msg: msgIdx }) : '');
+    const url = location.origin + location.pathname + '#' + hash;
+    let copied = false;
+    if (navigator.clipboard?.writeText) {
+      try { await navigator.clipboard.writeText(url); copied = true; } catch { /* denied */ }
+    }
+    if (!copied) {
+      // Fallback for plain-HTTP contexts where clipboard API is unavailable.
+      const ta = document.createElement('textarea');
+      ta.value = url;
+      ta.style.cssText = 'position:fixed;opacity:0';
+      document.body.appendChild(ta);
+      ta.select();
+      try { copied = document.execCommand('copy'); } catch { /* */ }
+      ta.remove();
+    }
+    if (copied) {
+      const line = divider.querySelector('.msg-divider-line');
+      if (line) {
+        line.style.cssText = 'background:#6366f1;transition:none';
+        setTimeout(() => { line.style.cssText = ''; }, 600);
+      }
+    } else {
+      prompt('Copy this link:', url);
+    }
+    return;
+  }
+
+  if (!currentSessionId || msgIdx === undefined) return;
+
+  try {
+    if (action === 'fork') {
+      const result = await callTool('edit_session_fork', { sessionId: currentSessionId, msgIndex: msgIdx });
+      if (result?.newSessionId) {
+        await openSession(result.newSessionId);
+        apiListSessions().then(renderSessions);
+      }
+    } else if (action === 'cut') {
+      if (!confirm('Delete all messages from this point forward?')) return;
+      await callTool('edit_session_cut', { sessionId: currentSessionId, msgIndex: msgIdx });
+      const session = await apiGetSession(currentSessionId);
+      if (session) renderSession(session);
+    } else if (action === 'compact') {
+      if (!confirm('Strip thinking blocks and tool calls from messages before this point?')) return;
+      await callTool('edit_session_compact', { sessionId: currentSessionId, msgIndex: msgIdx });
+      const session = await apiGetSession(currentSessionId);
+      if (session) renderSession(session);
+    }
+  } catch (e) {
+    if (String(e).includes('404')) {
+      showEditSessionBanner();
+    } else {
+      alert(action + ' failed: ' + e.message);
+    }
+  }
+}
+
+function showEditSessionBanner() {
+  if (document.getElementById('edit-session-banner')) return;
+  const banner = document.createElement('div');
+  banner.id = 'edit-session-banner';
+  banner.className = 'plugin-prompt-banner';
+  banner.style.display = 'flex';
+  const span = document.createElement('span');
+  span.textContent = 'edit-session plugin not loaded — Cut, Fork, and Compact are unavailable.';
+  banner.appendChild(span);
+  const btn = document.createElement('button');
+  btn.textContent = 'Install edit-session';
+  btn.onclick = () => {
+    inputEl.value = 'Please discover and install the edit-session plugin';
+    banner.remove();
+    sendMessage();
+  };
+  banner.appendChild(btn);
+  const inputArea = document.getElementById('input-area');
+  inputArea?.parentElement?.insertBefore(banner, inputArea);
+}
+
+function flashMessage(el) {
+  if (!el) return;
+  el.classList.remove('msg-nav-flash');
+  void el.offsetWidth; // force reflow to restart animation if already flashing
+  el.classList.add('msg-nav-flash');
+  setTimeout(() => el.classList.remove('msg-nav-flash'), 1200);
+}
+
+function scrollToMsgIdx(msgIdx) {
+  // rAF defers until after the browser has laid out the newly-rendered messages.
+  requestAnimationFrame(() => {
+    const divider = messagesEl.querySelector(`.msg-divider[data-msg-idx="${msgIdx}"]`);
+    const target = divider?.nextElementSibling;
+    if (!target) return;
+    target.scrollIntoView({ block: 'start', behavior: 'instant' });
+    flashMessage(target);
+  });
 }
 
 function createAssistantWrap(labelText) {
@@ -847,16 +987,23 @@ function renderContentParts(wrap, content) {
 }
 
 // startIdx > 0 appends only messages from that index — used for incremental updates.
-function renderSession(session, startIdx) {
-  const msgs = session.messages.filter(m => m.role !== 'system');
+// origIdx (index in session.messages including system) is passed to dividers so
+// the edit-session plugin tools can reference exact positions.
+function renderSession(session, startIdx, scrollTarget) {
+  const allMsgs = session.messages;
   if (!startIdx) {
-    if (!msgs.length) { showEmpty(); return; }
+    if (!allMsgs.some(m => m.role !== 'system')) { showEmpty(); return; }
     messagesEl.innerHTML = '';
   }
-  for (const msg of msgs.slice(startIdx ?? 0)) {
+  let nonSysCount = 0;
+  for (let origIdx = 0; origIdx < allMsgs.length; origIdx++) {
+    const msg = allMsgs[origIdx];
+    if (msg.role === 'system') continue;
+    const fi = nonSysCount++;
+    if (startIdx && fi < startIdx) continue;
     if (msg.role === 'user') {
       const text = msg.content.filter(c => c.type === 'text').map(c => c.text).join('\n');
-      if (text) appendUserBubble(text);
+      if (text) appendUserBubble(text, origIdx);
     } else if (msg.role === 'assistant') {
       const wrap = createAssistantWrap('assistant');
       renderContentParts(wrap, msg.content);
@@ -866,13 +1013,17 @@ function renderSession(session, startIdx) {
       renderContentParts(dummy, msg.content);
     }
   }
-  // Scroll to the most recent output when switching to a session.
+  if (scrollTarget !== undefined) {
+    const divider = messagesEl.querySelector(`.msg-divider[data-msg-idx="${scrollTarget}"]`);
+    const target  = divider?.nextElementSibling;
+    if (target) { target.scrollIntoView({ block: 'start', behavior: 'instant' }); flashMessage(target); return; }
+  }
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
 // ── Actions ───────────────────────────────────────────────────────────────────
 
-async function openSession(id) {
+async function openSession(id, scrollTarget) {
   closeSidebar();
   currentSessionId = id;
   unreadSessions.delete(id);
@@ -883,7 +1034,7 @@ async function openSession(id) {
   const [sessions, session, busy] = await Promise.all([apiListSessions(), apiGetSession(id), apiSessionBusy(id)]);
   renderSessions(sessions);
   if (session) {
-    renderSession(session);
+    renderSession(session, undefined, scrollTarget);
     if (chatHeaderEl) chatTitleEl.textContent = session.title ?? '';
     if (busy) {
       const renderedCount = session.messages.filter(m => m.role !== 'system').length;
@@ -1283,7 +1434,7 @@ async function sendMessage() {
             .filter(c => c.type === 'text')
             .map(c => c.text)
             .join('\n');
-          if (text) appendUserBubble(text);
+          if (text) appendUserBubble(text); // index filled in by 'done' handler below
           break;
         }
 
@@ -1306,6 +1457,22 @@ async function sendMessage() {
           if (ev.session?.title && chatHeaderEl) chatTitleEl.textContent = ev.session.title;
           if (turnIn > 0 || turnOut > 0) turnWrap.appendChild(makeTokenStatsBlock(turnIn, turnOut, turnCost, turnCacheRead, turnCacheCreate));
           loadFiles();
+          // Back-fill origIdx on any dividers added without an index this turn.
+          if (ev.session) {
+            const allDividers = [...messagesEl.querySelectorAll('.msg-divider')];
+            const unindexed   = allDividers.filter(d => d.dataset.msgIdx === undefined);
+            if (unindexed.length > 0) {
+              const indexed  = allDividers.filter(d => d.dataset.msgIdx !== undefined);
+              const lastIdx  = indexed.length > 0 ? parseInt(indexed[indexed.length - 1].dataset.msgIdx) : -1;
+              const newIdxs  = ev.session.messages
+                .map((m, i) => ({ m, i }))
+                .filter(({ m, i }) => m.role === 'user' && i > lastIdx)
+                .map(({ i }) => i);
+              for (let j = 0; j < Math.min(unindexed.length, newIdxs.length); j++) {
+                unindexed[j].dataset.msgIdx = newIdxs[j];
+              }
+            }
+          }
           break;
 
         case 'error': {
@@ -1341,7 +1508,7 @@ async function sendMessage() {
 //
 // Three modes (priority order):
 //   1. scroll-down-mode (▼) — scroll to bottom + focus input + restore ▶
-//   2. stop-mode (■)        — request abort of in-flight generation
+//   2. stop-mode (⏹)        — request abort of in-flight generation
 //   3. default  (▶)        — send the current message
 
 sendBtn.onclick = () => {
@@ -1372,7 +1539,7 @@ function setSending(val, sessionId) {
     sending = true;
     sendingForSession = sid;
     stopRequested = false;
-    sendBtn.textContent = '\u25a0';   // ■ stop square
+    sendBtn.textContent = '\u25a0';   // ⏹ stop square
     sendBtn.classList.add('stop-mode');
     sendBtn.disabled = false;
     inputEl.disabled = true;
@@ -1508,13 +1675,22 @@ async function init() {
   })();
 
   renderSessions(sessions);
-  const fragmentId = location.hash.slice(1);
-  const startId = (fragmentId && sessions.some(s => s.id === fragmentId))
-    ? fragmentId : sessions[0]?.id;
+
+  // Dismiss open divider menus on any background click.
+  document.addEventListener('click', () => {
+    document.querySelectorAll('.msg-divider.open').forEach(d => d.classList.remove('open'));
+  });
+
+  const rawFragment = decodeURIComponent(location.hash.slice(1));
+  const tildeIdx    = rawFragment.indexOf('~');
+  const fragmentSid = tildeIdx >= 0 ? rawFragment.slice(0, tildeIdx) : rawFragment;
+  const fragmentNav = tildeIdx >= 0 ? (() => { try { return JSON.parse(rawFragment.slice(tildeIdx + 1)); } catch { return null; } })() : null;
+  const startId     = (fragmentSid && sessions.some(s => s.id === fragmentSid))
+    ? fragmentSid : sessions[0]?.id;
   if (startId === 'new') {
     await handleNewSession();
   } else if (startId) {
-    await openSession(startId);
+    await openSession(startId, fragmentNav?.msg);
   } else {
     showEmpty();
   }
@@ -1548,11 +1724,17 @@ document.getElementById('upload-input')?.addEventListener('change', function() {
 });
 
 window.addEventListener('hashchange', async () => {
-  const id = location.hash.slice(1);
+  const raw      = location.hash.slice(1);
+  const ti       = raw.indexOf('~');
+  const id       = ti >= 0 ? raw.slice(0, ti) : raw;
+  const nav      = ti >= 0 ? (() => { try { return JSON.parse(raw.slice(ti + 1)); } catch { return null; } })() : null;
   if (id === 'new') {
     await handleNewSession();
   } else if (id && id !== currentSessionId) {
-    openSession(id).catch(console.error);
+    await openSession(id, nav?.msg).catch(console.error);
+  } else if (id === currentSessionId && nav?.msg !== undefined) {
+    history.replaceState(null, '', location.pathname + '#' + id);
+    scrollToMsgIdx(nav.msg);
   }
 });
 

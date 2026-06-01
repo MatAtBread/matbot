@@ -50,7 +50,10 @@
       "Bash(pnpm -r typecheck)",
       "Bash(xargs ls -1)",
       "Bash(xargs ls)",
-      "Bash(pnpm --filter @matatbread/matbot-frontend-telegram install)"
+      "Bash(pnpm --filter @matatbread/matbot-frontend-telegram install)",
+      "Bash(pnpm --filter @matatbread/matbot-plugin-api tsc --noEmit)",
+      "Bash(pnpm --filter @matatbread/matbot-tool-plugin tsc --noEmit)",
+      "Bash(pnpm --filter matbot-cli exec tsc --noEmit)"
     ]
   }
 }

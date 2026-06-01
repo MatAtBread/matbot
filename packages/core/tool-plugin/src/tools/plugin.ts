@@ -261,8 +261,15 @@ const executor = {
 
       yield { type: 'stdout', chunk: `Activating "${specifier}"...\n` };
       try {
-        await ctx.loadPlugin(specifier);
-        yield { type: 'result', value: { message: `"${specifier}" installed and is now active.` } };
+        const loaded  = await ctx.loadPlugin(specifier);
+        const welcome = await loaded.installationMessage?.();
+        yield {
+          type:  'result',
+          value: {
+            message: `"${specifier}" installed and is now active.`,
+            ...(welcome !== undefined ? { installationMessage: welcome } : {}),
+          },
+        };
       } catch (e) {
         yield { type: 'result', value: { message: `"${specifier}" added to config but activation failed: ${String(e)}.` } };
       }

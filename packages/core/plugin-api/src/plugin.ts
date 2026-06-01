@@ -55,8 +55,8 @@ export interface MatbotServices {
   /** Returns a namespaced settings store for the given plugin. Keys are isolated per plugin name. */
   settings(pluginName: string): PluginSettings;
 
-  /** Hot-load a plugin by specifier into the running process. */
-  loadPlugin(specifier: string): Promise<void>;
+  /** Hot-load a plugin by specifier into the running process. Returns the loaded plugin. */
+  loadPlugin(specifier: string): Promise<MatbotPlugin>;
 
   /** Hot-unload a plugin by specifier, removing its tools, hooks, and system context contributions. */
   unloadPlugin(specifier: string): Promise<void>;
@@ -157,4 +157,5 @@ export interface MatbotPlugin {
   };
   setup?(services: MatbotServices): Promise<void>;
   teardown?(): Promise<void>;
+  installationMessage?(): Promise<string>;
 }
