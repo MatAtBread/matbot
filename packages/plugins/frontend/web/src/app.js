@@ -71,15 +71,12 @@ function isMessagesBottomVisible() {
   // True when all content fits in the messages container without scrolling.
   // False when there's overflow — meaning content is hidden off-screen and
   // the user may want the scroll-down button to jump to the bottom.
-  console.log('[▼] isMessagesBottomVisible checking...');
   const textBlock = messagesEl.querySelector('.message.assistant:last-child .msg-text');
   if (!textBlock) { console.log('[▼]   no .msg-text found'); return true; }
   const h = window.innerHeight - (chatHeaderEl?.offsetHeight ?? 0)
            - (document.getElementById('input-area')?.offsetHeight ?? 0);
   const fits = textBlock.offsetHeight <= h;
-  console.log('[▼]   textH=' + textBlock.offsetHeight + ' availH=' + h + ' fits=' + fits + ' btn=' + !!scrollDownBtn);
   const atBottom = messagesEl.scrollTop + messagesEl.clientHeight >= messagesEl.scrollHeight - 2;
-  console.log('[▼]   atBottom=' + atBottom);
   return fits || atBottom;
 }
 
@@ -302,8 +299,6 @@ async function joinSessionStream(id, renderedCount) {
                     - (document.getElementById('input-area')?.offsetHeight ?? 0);
       if (el && el.offsetHeight <= avail) {
         el.scrollIntoView({ block: 'end', behavior: 'instant' });
-      } else if (el) {
-        console.log('[▼] scrollToOutputStart overflow: elH=' + el.offsetHeight + ' avail=' + avail);
       }
       updateScrollDownButton();
     });
@@ -427,7 +422,6 @@ async function joinSessionStream(id, renderedCount) {
 // If the bottom of messages is not visible in the viewport, transform the
 // send button into a ▼ down-arrow that scrolls to bottom on click.
 function maybeShowScrollDown() {
-  console.log('[▼] maybeShowScrollDown called, sending=' + sending);
   if (sending) return;
   updateScrollDownButton();
 }
@@ -960,8 +954,6 @@ async function submitFormResponse(sessionId, values) {
                     - (document.getElementById('input-area')?.offsetHeight ?? 0);
       if (el && el.offsetHeight <= avail) {
         el.scrollIntoView({ block: 'end', behavior: 'instant' });
-      } else if (el) {
-        console.log('[▼] scrollToOutputStart overflow: elH=' + el.offsetHeight + ' avail=' + avail);
       }
       updateScrollDownButton();
     });
@@ -1128,8 +1120,6 @@ async function sendMessage() {
                     - (document.getElementById('input-area')?.offsetHeight ?? 0);
       if (el && el.offsetHeight <= avail) {
         el.scrollIntoView({ block: 'end', behavior: 'instant' });
-      } else if (el) {
-        console.log('[▼] scrollToOutputStart overflow: elH=' + el.offsetHeight + ' avail=' + avail);
       }
       updateScrollDownButton();
     });
