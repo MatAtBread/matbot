@@ -5,20 +5,114 @@ export function createSkillTools(
   store:  Store<SkillDoc>,
   skills: Map<string, SkillDoc>,
 ): readonly Tool[] {
+  function normalizeAlphanum(s: string): string {
+    return s.toLowerCase().replace(/[^a-z0-9]/g, '');
+  }
+
+  function headingWeight(level: number): number {
+    if (level === 1) return 4;
+    if (level === 2) return 2;
+    return 1;
+  }
+
+  function scoreByHeadings(skill: SkillDoc, terms: Array<{ term: string }>): number {
+    let score = 0;
+    for (const line of skill.content.split('\n')) {
+      const m = /^(#{1,3})(?!#)\s+(.+)/.exec(line);
+      if (!m) continue;
+      const level = m[1]!.length;
+      const heading = m[2]!.toLowerCase();
+      for (const { term } of terms) {
+        if (heading.includes(term.toLowerCase())) score += headingWeight(level);
+      }
+    }
+    return score;
+  }
+
   const unknownExecutor: ToolExecutor = {
-    async *execute(_input: unknown, _ctx: ToolContext): AsyncIterable<ToolEvent> {
-      console.log("unknown_skill",_input);
-      yield { type: 'error', message: 'There is no skill available for the requested operation.' };
-      // yield {
-      //   type:  'result',
-      //   value: {
-      //     skills: [...skills.values()].map(s => ({
-      //       id:   s.id,
-      //       name: s.name,
-      //       ...(s.toolBinding !== undefined ? { toolBinding: s.toolBinding } : {}),
-      //     })),
-      //   },
-      // };
+    async *execute(input: unknown, _ctx: ToolContext): AsyncIterable<ToolEvent> {
+      const { terms } = input as { terms: Array<{ term: string; context: string }> };
+
+      const allSkills = [...skills.values()];
+      if (terms.length === 0 || allSkills.length === 0) {
+        yield { type: 'error', message: 'There is no skill available for the requested operation.' };
+        return;
+      }
+
+      // Step 1: alphanum-normalised name match — single hit wins immediately
+      const nameMatches = allSkills.filter(skill => {
+        const normName = normalizeAlphanum(skill.name);
+        return terms.some(({ term }) => {
+          const normTerm = normalizeAlphanum(term);
+          return normName.includes(normTerm) || normTerm.includes(normName);
+        });
+      });
+
+      if (nameMatches.length === 1) {
+        const skill = nameMatches[0]!;
+        yield { type: 'result', value: { name: skill.name, content: skill.content } };
+        return;
+      }
+
+      // Step 2: heading-weighted score (H1=4, H2=2, H3=1)
+      const candidatePool = nameMatches.length > 1 ? nameMatches : allSkills;
+      const scored = candidatePool
+        .map(skill => ({ skill, score: scoreByHeadings(skill, terms) }))
+        .filter(({ score }) => score > 0)
+        .sort((a, b) => b.score - a.score);
+
+      const [first, second] = scored;
+      if (first !== undefined && (second === undefined || first.score >= second.score * 2)) {
+        yield { type: 'result', value: { name: first.skill.name, content: first.skill.content } };
+        return;
+      }
+
+      // Step 3: BGE reranker via Cloudflare Workers AI
+      const apiKey = process.env['SKILL_RANK_API_KEY'];
+      const accountId = process.env['CLOUDFLARE_ACCOUNT_ID'];
+      const rerankPool = scored.length > 0 ? scored.map(s => s.skill) : candidatePool;
+
+      let leadingCandidate: ToolEvent = first
+      ? { type: 'result', value: { name: first.skill.name, content: first.skill.content } }
+      : { type: 'error', message: 'There is no skill available for the requested operation.' }
+      if (!apiKey || !accountId || rerankPool.length === 0) {
+        yield leadingCandidate;
+        return;
+      }
+
+      const query = terms.map(t => t.term).join(', ');
+      const contexts = rerankPool.map(s => ({ text: `${s.name}\n${s.content.slice(0, 1500)}` }));
+
+      const response = await fetch(
+        `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/@cf/baai/bge-reranker-base`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ query, contexts }),
+        },
+      );
+
+      if (!response.ok) {
+        yield leadingCandidate;
+        return;
+      }
+
+      type RerankResult = { success: boolean; errors: Array<unknown>; messages: Array<unknown>; result: { response: Array<{ id: number; score: number }> } };
+      const ranking = (await response.json()) as RerankResult;
+      const best = ranking.success ? ranking.result.response.slice().sort((a, b) => b.score - a.score)[0] : undefined;
+
+      if (best === undefined || best.id >= rerankPool.length) {
+        if (leadingCandidate.type === 'error') {
+          leadingCandidate.stderr = JSON.stringify(ranking.errors);
+        }
+        yield leadingCandidate;
+      } else {
+        const skill = rerankPool[best.id]!;
+        yield { type: 'result', value: { name: skill.name, content: skill.content } };
+      }
     },
   };
 
