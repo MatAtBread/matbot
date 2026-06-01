@@ -24,6 +24,118 @@ const busySessions   = new Set();
 const unreadSessions = new Set();
 const updatedFiles   = new Set();
 
+// ── Scroll control ────────────────────────────────────────────────────────────
+//
+// We want to avoid the "chasing the bottom" scroll behaviour that makes it
+// impossible to read earlier output while the model is still generating.
+//
+// Strategy:
+//   1. On the *first* content token of a turn we scroll so the assistant
+//      wrapper sits at the top of the messages viewport.
+//   2. After that we do NOT auto-scroll — the user can read at their own pace.
+//   3. When the turn finishes, if the bottom of messages is below the fold
+//      we morph the send button into a ▼ down-arrow that scrolls to bottom.
+//   4. Any manual scroll by the user suppresses ALL auto-scrolling for 10 s.
+
+let scrollSuppressUntil = 0;    // epoch ms — suppress auto-scroll until this time
+let programmaticScroll = false; // true while *we* are moving scrollTop (so the
+                                // 'scroll' event handler can ignore it)
+
+function isScrollSuppressed() {
+  return Date.now() < scrollSuppressUntil;
+}
+
+// Call this wrapper before any programmatic scroll so the scroll-listener can
+// distinguish user-initiated scrolls from our own.
+function programmaticScrollTo(fn) {
+  programmaticScroll = true;
+  fn();
+  // Reset the flag asynchronously — the browser fires 'scroll' synchronously
+  // (or at least before the next rAF), so this is safe.
+  requestAnimationFrame(() => { programmaticScroll = false; });
+}
+
+// Listen for user-initiated scrolls on the messages pane.
+// 'wheel' catches mouse wheels and trackpad gestures.
+// 'touchmove' catches finger-drags on touch screens.
+// Together they cover the vast majority of deliberate user scrolls.
+function onUserScroll() {
+  if (!programmaticScroll) {
+    scrollSuppressUntil = Date.now() + 5000;   // 100ms suppression (temp for testing)
+  }
+}
+
+// True when the bottom edge of #messages is at or above the bottom of the
+// viewport (i.e. the user can see the most recent content without scrolling).
+function isMessagesBottomVisible() {
+  // True when all content fits in the messages container without scrolling.
+  // False when there's overflow — meaning content is hidden off-screen and
+  // the user may want the scroll-down button to jump to the bottom.
+  console.log('[▼] isMessagesBottomVisible checking...');
+  const textBlock = messagesEl.querySelector('.message.assistant:last-child .msg-text');
+  if (!textBlock) { console.log('[▼]   no .msg-text found'); return true; }
+  const h = window.innerHeight - (chatHeaderEl?.offsetHeight ?? 0)
+           - (document.getElementById('input-area')?.offsetHeight ?? 0);
+  const fits = textBlock.offsetHeight <= h;
+  console.log('[▼]   textH=' + textBlock.offsetHeight + ' availH=' + h + ' fits=' + fits + ' btn=' + !!scrollDownBtn);
+  const atBottom = messagesEl.scrollTop + messagesEl.clientHeight >= messagesEl.scrollHeight - 2;
+  console.log('[▼]   atBottom=' + atBottom);
+  return fits || atBottom;
+}
+
+// Morph the send button into a ▼ scroll-down button.
+function showScrollDownButton() {
+  sendBtn.textContent = '▼';   // ▼
+  sendBtn.classList.add('scroll-down-mode');
+  sendBtn.classList.remove('stop-mode');
+  sendBtn.disabled = false;
+  inputEl.disabled = false;
+}
+
+// Scroll to the very bottom of the messages pane, restore the normal
+// send button, and place focus in the input so the user can type immediately.
+function scrollToBottomAndReset() {
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  // After scrolling to bottom, restore the button's primary function:
+  // ■ (stop) if still generating, ▶ (send) if idle.
+  if (sending) {
+    sendBtn.textContent = '\u25a0';   // ■
+    sendBtn.classList.remove('scroll-down-mode');
+    sendBtn.classList.add('stop-mode');
+    sendBtn.disabled = false;
+  } else {
+    resetSendButton();
+  }
+  inputEl.focus();
+}
+
+// Restore the send button to its normal ▶ state.
+function resetSendButton() {
+  sendBtn.textContent = '▶';   // ▶
+  sendBtn.classList.remove('scroll-down-mode', 'stop-mode');
+  sendBtn.disabled = false;
+  inputEl.disabled = false;
+}
+
+// ── Floating scroll-down button ─────────────────────────────────
+//
+// A separate ▼ button that appears when the current message text is
+// taller than the visible area, letting the user jump to the bottom
+// without conflating scroll and send/stop actions.
+
+let scrollDownBtn = null; // initialised in init()
+
+function updateScrollDownButton() {
+  if (!scrollDownBtn) return;
+  if (isMessagesBottomVisible()) {
+    scrollDownBtn.style.display = 'none';
+  } else {
+    scrollDownBtn.style.display = 'block';
+  }
+}
+
+
+
 // ── Elements ──────────────────────────────────────────────────────────────────
 
 const messagesEl     = document.getElementById('messages');
@@ -168,9 +280,33 @@ async function joinSessionStream(id, renderedCount) {
 
   let textEl = null, textAccum = '', thinkingContent = null, thinkingAccum = '', currentTool = null;
   let turnIn = 0, turnOut = 0, turnCost = 0, turnCacheRead = 0, turnCacheCreate = 0;
+
+
   function getOrMakeTextEl() {
     if (!textEl) { textEl = document.createElement('div'); textEl.className = 'msg-text md-body'; turnWrap.appendChild(textEl); }
     return textEl;
+  }
+
+  // Scroll the assistant wrapper to the top of the viewport so the user sees
+  // the beginning of the output. Only called once per turn and only when
+  // auto-scrolling is not suppressed by a recent manual user scroll.
+  function scrollToOutputStart() {
+    if (isScrollSuppressed()) return;
+    programmaticScrollTo(() => {
+      // While the text block fits within the viewport, scroll its bottom
+      // into view so the user sees the message filling in from the bottom.
+      // Once the content is taller than the container, stop scrolling so
+      // the user can read from the top without it being pushed away.
+      const el = textEl;
+      const avail = window.innerHeight - (chatHeaderEl?.offsetHeight ?? 0)
+                    - (document.getElementById('input-area')?.offsetHeight ?? 0);
+      if (el && el.offsetHeight <= avail) {
+        el.scrollIntoView({ block: 'end', behavior: 'instant' });
+      } else if (el) {
+        console.log('[▼] scrollToOutputStart overflow: elH=' + el.offsetHeight + ' avail=' + avail);
+      }
+      updateScrollDownButton();
+    });
   }
 
   try {
@@ -190,6 +326,7 @@ async function joinSessionStream(id, renderedCount) {
             removeLoading();
             textAccum += ev.delta;
             getOrMakeTextEl().innerHTML = md(textAccum);
+            scrollToOutputStart();
             break;
           case 'thinking': {
             removeLoading();
@@ -255,7 +392,8 @@ async function joinSessionStream(id, renderedCount) {
             break outer;
           }
         }
-        messagesEl.scrollTop = messagesEl.scrollHeight;
+        // NOTE: NO per-event scroll-to-bottom here.
+        // We scrolled once to the output start; the user reads at their own pace.
       }
     }
   } catch (e) {
@@ -269,7 +407,17 @@ async function joinSessionStream(id, renderedCount) {
     setSending(false, id);
     apiListSessions().then(renderSessions);
     loadFiles();
+    // If the output extends below the fold, show the ▼ scroll-down button.
+    maybeShowScrollDown();
   }
+}
+
+// If the bottom of messages is not visible in the viewport, transform the
+// send button into a ▼ down-arrow that scrolls to bottom on click.
+function maybeShowScrollDown() {
+  console.log('[▼] maybeShowScrollDown called, sending=' + sending);
+  if (sending) return;
+  updateScrollDownButton();
 }
 
 async function renameSession(id, current) {
@@ -560,7 +708,13 @@ function appendUserBubble(text) {
   inner.innerHTML = md(text);
   div.appendChild(inner);
   messagesEl.appendChild(div);
-  messagesEl.scrollTop = messagesEl.scrollHeight;
+  // Scroll the user's own message into view (they just sent it).
+  // Respect the suppression timer in case they scrolled away earlier.
+  if (!isScrollSuppressed()) {
+    programmaticScrollTo(() => {
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    });
+  }
 }
 
 function createAssistantWrap(labelText) {
@@ -706,6 +860,7 @@ function renderSession(session, startIdx) {
       renderContentParts(dummy, msg.content);
     }
   }
+  // Scroll to the most recent output when switching to a session.
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
@@ -773,9 +928,31 @@ async function submitFormResponse(sessionId, values) {
 
   let textEl = null, textAccum = '', thinkingContent = null, thinkingAccum = '', currentTool = null;
   let turnIn = 0, turnOut = 0, turnCost = 0, turnCacheRead = 0, turnCacheCreate = 0;
+
+
   function getOrMakeTextEl() {
     if (!textEl) { textEl = document.createElement('div'); textEl.className = 'msg-text md-body'; turnWrap.appendChild(textEl); }
     return textEl;
+  }
+
+  // Scroll the assistant wrapper to the top of the viewport once, on first content.
+  function scrollToOutputStart() {
+    if (isScrollSuppressed()) return;
+    programmaticScrollTo(() => {
+      // While the text block fits within the viewport, scroll its bottom
+      // into view so the user sees the message filling in from the bottom.
+      // Once the content is taller than the container, stop scrolling so
+      // the user can read from the top without it being pushed away.
+      const el = textEl;
+      const avail = window.innerHeight - (chatHeaderEl?.offsetHeight ?? 0)
+                    - (document.getElementById('input-area')?.offsetHeight ?? 0);
+      if (el && el.offsetHeight <= avail) {
+        el.scrollIntoView({ block: 'end', behavior: 'instant' });
+      } else if (el) {
+        console.log('[▼] scrollToOutputStart overflow: elH=' + el.offsetHeight + ' avail=' + avail);
+      }
+      updateScrollDownButton();
+    });
   }
 
   try {
@@ -785,6 +962,7 @@ async function submitFormResponse(sessionId, values) {
           removeLoading();
           textAccum += ev.delta;
           getOrMakeTextEl().innerHTML = md(textAccum);
+          scrollToOutputStart();
           break;
         case 'thinking': {
           removeLoading();
@@ -844,7 +1022,7 @@ async function submitFormResponse(sessionId, values) {
           break;
         }
       }
-      messagesEl.scrollTop = messagesEl.scrollHeight;
+      // NOTE: NO per-event scroll-to-bottom here.
     }
   } catch (e) {
     removeLoading();
@@ -857,6 +1035,7 @@ async function submitFormResponse(sessionId, values) {
     setSending(false, sessionId);
     apiListSessions().then(renderSessions);
     loadFiles();
+    maybeShowScrollDown();
   }
 }
 
@@ -899,6 +1078,7 @@ async function sendMessage() {
   let turnCacheRead   = 0;
   let turnCacheCreate = 0;
 
+
   function getOrMakeTextEl() {
     if (!textEl) {
       textEl = document.createElement('div');
@@ -908,6 +1088,29 @@ async function sendMessage() {
     return textEl;
   }
 
+  // Called on the first content event of each turn.  Scrolls the
+  // assistant message wrapper to the top of the messages viewport so
+  // the user can read the output from the beginning.  Honours the
+  // 10-second suppression window set by manual user scrolling.
+  function scrollToOutputStart() {
+    if (isScrollSuppressed()) return;
+    programmaticScrollTo(() => {
+      // While the text block fits within the viewport, scroll its bottom
+      // into view so the user sees the message filling in from the bottom.
+      // Once the content is taller than the container, stop scrolling so
+      // the user can read from the top without it being pushed away.
+      const el = textEl;
+      const avail = window.innerHeight - (chatHeaderEl?.offsetHeight ?? 0)
+                    - (document.getElementById('input-area')?.offsetHeight ?? 0);
+      if (el && el.offsetHeight <= avail) {
+        el.scrollIntoView({ block: 'end', behavior: 'instant' });
+      } else if (el) {
+        console.log('[▼] scrollToOutputStart overflow: elH=' + el.offsetHeight + ' avail=' + avail);
+      }
+      updateScrollDownButton();
+    });
+  }
+
   try {
     for await (const ev of streamSubmit(submittingFor, content, provider)) {
       switch (ev.type) {
@@ -915,6 +1118,7 @@ async function sendMessage() {
           removeLoading();
           textAccum += ev.delta;
           getOrMakeTextEl().innerHTML = md(textAccum);
+          scrollToOutputStart();
           break;
 
         case 'thinking': {
@@ -1003,7 +1207,12 @@ async function sendMessage() {
               }
               block.appendChild(row);
               turnWrap.appendChild(block);
-              messagesEl.scrollTop = messagesEl.scrollHeight;
+              // Prompt requires user attention — scroll to show it.
+              if (!isScrollSuppressed()) {
+                programmaticScrollTo(() => {
+                  messagesEl.scrollTop = messagesEl.scrollHeight;
+                });
+              }
               (defaultBtn ?? row.querySelector('button'))?.focus();
             } else {
               const row = document.createElement('div');
@@ -1027,7 +1236,11 @@ async function sendMessage() {
               row.appendChild(btn);
               block.appendChild(row);
               turnWrap.appendChild(block);
-              messagesEl.scrollTop = messagesEl.scrollHeight;
+              if (!isScrollSuppressed()) {
+                programmaticScrollTo(() => {
+                  messagesEl.scrollTop = messagesEl.scrollHeight;
+                });
+              }
               inp.focus();
             }
           });
@@ -1078,7 +1291,8 @@ async function sendMessage() {
           break;
         }
       }
-      messagesEl.scrollTop = messagesEl.scrollHeight;
+      // NOTE: deliberately NO messagesEl.scrollTop = messagesEl.scrollHeight here.
+      // We scrolled once to the output start; continuous bottom-chasing is gone.
     }
   } catch (e) {
     removeLoading();
@@ -1091,10 +1305,26 @@ async function sendMessage() {
     setSending(false, submittingFor);
     apiListSessions().then(renderSessions);
     loadFiles();
+    // If the output extends below the viewport fold, morph the send button
+    // into a ▼ down-arrow so the user can jump to the bottom with one click.
+    maybeShowScrollDown();
   }
 }
 
-sendBtn.onclick = () => { if (sending) requestStop(); else sendMessage(); };
+// ── Send button click handler ─────────────────────────────────────────────────
+//
+// Three modes (priority order):
+//   1. scroll-down-mode (▼) — scroll to bottom + focus input + restore ▶
+//   2. stop-mode (■)        — request abort of in-flight generation
+//   3. default  (▶)        — send the current message
+
+sendBtn.onclick = () => {
+  if (sending) {
+    requestStop();
+  } else {
+    sendMessage();
+  }
+};
 
 document.getElementById('sessions-enable-btn').onclick = () => {
   inputEl.value = 'Discover the local plugins and add the sessions plugin to enable persistent conversations.';
@@ -1128,7 +1358,7 @@ function setSending(val, sessionId) {
       sending = false;
       sendingForSession = null;
       stopRequested = false;
-      sendBtn.textContent = '\u25b6'; // ▶ send arrow
+      sendBtn.textContent = '\u25b6';   // ▶
       sendBtn.classList.remove('stop-mode');
       sendBtn.disabled = false;
       inputEl.disabled = false;
@@ -1163,6 +1393,31 @@ async function init() {
     document.getElementById('fs-down').addEventListener('click', () => adjust(-1));
     document.getElementById('fs-up').addEventListener('click',   () => adjust(+1));
   };
+
+  // ── Attach scroll listeners for user-scroll detection ─────────
+  // 'wheel' catches mouse wheel + trackpad gestures.
+  // 'touchmove' catches finger-drags on touch screens.
+  // The 'scroll' event on #messages catches scrollbar dragging and
+  // keyboard scrolling (PgUp / PgDn / arrows when messagesEl is focused).
+  // We use the programmaticScroll flag to ignore scrolls we triggered.
+  messagesEl.addEventListener('wheel', onUserScroll, { passive: true });
+  messagesEl.addEventListener('touchmove', onUserScroll, { passive: true });
+    messagesEl.addEventListener('scroll', () => {
+    if (!programmaticScroll) {
+      scrollSuppressUntil = Date.now() + 5000;   // 100ms (testing)
+      // Update floating ▼ button visibility.
+      updateScrollDownButton();
+    }
+  });
+
+  // ── Floating scroll-down button ──
+  scrollDownBtn = document.getElementById('scroll-down-btn');
+  if (scrollDownBtn) {
+    scrollDownBtn.onclick = () => {
+      messagesEl.scrollTo({ top: messagesEl.scrollHeight, behavior: 'smooth' });
+      inputEl.focus();
+    };
+  }
 
   const [sessions, providers] = await Promise.all([apiListSessions(), apiListProviders()]);
 

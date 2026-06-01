@@ -626,10 +626,10 @@
     #input:disabled { background: #f9fafb; }
     #input::placeholder { opacity: 1; color: #6b7280; }
     #send-btn {
+      border-radius: 50%;
       background: #111;
       color: #fff;
       border: none;
-      border-radius: 8px;
       cursor: pointer;
       font-size: 2.14em;
       font-weight: 500;
@@ -643,6 +643,10 @@
     #send-btn.stop-mode          { background: #dc2626; }
     #send-btn.stop-mode:hover    { background: #b91c1c; }
     #send-btn.stop-mode:disabled { background: #fca5a5; cursor: not-allowed; }
+
+    /* ── Scroll-down button (appears after generation when output extends below fold) ── */
+    #send-btn.scroll-down-mode          { background: #2563eb; }
+    #send-btn.scroll-down-mode:hover    { background: #1d4ed8; }
 
     /* ── Form blocks ──────────────────────────────────────────── */
 
@@ -758,6 +762,28 @@
     .prompt-choice-btn.primary:hover { background: #374151; border-color: #374151; }
 
     /* ── Scrollbar ─────────────────────────────────────────────── */
+    /* ── Floating scroll-down button ──────────────────────────── */
+    #scroll-down-btn {
+      border-radius: 50%;
+      position: fixed;
+      bottom: 5em;
+      right: 1em;
+      z-index: 50;
+      background: #2563eb;
+      color: #fff;
+      border: none;
+      cursor: pointer;
+      font-size: 1.5em;
+      width: 1.8em;
+      height: 1.8em;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+      line-height: 1;
+      padding: 0;
+      display: none;
+      transition: opacity 0.15s, background 0.1s;
+    }
+    #scroll-down-btn:hover { background: #1d4ed8; }
+
     ::-webkit-scrollbar { width: 5px; height: 5px; }
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 3px; }
@@ -854,6 +880,7 @@
         <button id="send-btn">▶</button>
       </div>
     </div>
+    <button id="scroll-down-btn" style="display:none" title="Scroll to bottom">▼</button>
   </main>
 
   <script src="/app.js"></script>
