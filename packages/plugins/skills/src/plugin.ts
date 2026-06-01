@@ -2,7 +2,7 @@ import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import type { MatbotPlugin, Store } from '@matatbread/matbot-plugin-api';
 import path from 'node:path';
 import process from 'node:process';
-import { createSkillIndexHook, createClassifierSetupHook, createSkillClassifierHook } from './hooks.js';
+import { createSkillIndexHook, createUserMessageClassifierHook, createAgentMessageClassifierHook } from './hooks.js';
 import type { SkillDoc } from './types.js';
 import { watchAndImportSkillDir } from './watcher.js';
 import { createSkillTools } from './tools.js';
@@ -42,9 +42,9 @@ export function createSkillsPlugin(config: SkillsPluginConfig): MatbotPlugin {
 
       const getSkills = (): SkillDoc[] => [...skills.values()];
       const pluginSettings = services.settings('skills');
-      services.hooks.register(createClassifierSetupHook(pluginSettings, services.providers, getSkills));
+      services.hooks.register(createUserMessageClassifierHook(pluginSettings, services.providers, getSkills));
       // services.hooks.register(createSkillIndexHook(getSkills));
-      services.hooks.register(createSkillClassifierHook(getSkills, pluginSettings, req => services.complete(req)));
+      services.hooks.register(createAgentMessageClassifierHook(getSkills, pluginSettings, req => services.complete(req)));
     },
 
     async teardown() {
@@ -56,26 +56,6 @@ export function createSkillsPlugin(config: SkillsPluginConfig): MatbotPlugin {
 
 // ── Default plugin export ─────────────────────────────────────────────────────
 
-export const plugin: MatbotPlugin = (() => {
-  let inner: MatbotPlugin | undefined;
-
-  return {
-    name:       'skills',
-    apiVersion: PLUGIN_API_VERSION,
-    manifest: {
-      description: 'Skill documents injected into sessions on demand.',
-      config:      ['skillsDir'],
-    },
-
-    async setup(services) {
-      const skillsDir = path.join(process.cwd(), '.data', 'skills');
-
-      inner = createSkillsPlugin({ skillsDir });
-      await inner.setup?.(services);
-    },
-
-    async teardown() {
-      await inner?.teardown?.();
-    },
-  };
-})();
+export const plugin: MatbotPlugin = createSkillsPlugin({
+  skillsDir: path.join(process.cwd(), '.data', 'skills'),
+});

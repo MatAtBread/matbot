@@ -93,7 +93,7 @@ export function createSkillIndexHook(
   };
 }
 
-// ── createClassifierSetupHook ─────────────────────────────────────────────────
+// ── createUserMessageClassifierHook ─────────────────────────────────────────────────
 
 /**
  * before:submit — on the first user turn, if no classifier provider is
@@ -104,7 +104,7 @@ export function createSkillIndexHook(
  * Uses ctx.abort + a form message rather than a confirmable input parameter
  * so the flow cannot be bypassed by a prompt injection passing a pre-chosen value.
  */
-export function createClassifierSetupHook(
+export function createUserMessageClassifierHook(
   settings:  PluginSettings,
   providers: ReadonlyMap<string, unknown>,
   getSkills: () => SkillDoc[],
@@ -165,14 +165,14 @@ export function createClassifierSetupHook(
   };
 }
 
-// ── createSkillClassifierHook ─────────────────────────────────────────────────
+// ── createAgentMessageClassifierHook ─────────────────────────────────────────────────
 
 /**
  * after:response — calls the configured classifier LLM to decide whether the
  * assistant's response indicates it needs additional skill context, then
  * injects relevant skill content for the next LLM call if so.
  */
-export function createSkillClassifierHook(
+export function createAgentMessageClassifierHook(
   getSkills: () => SkillDoc[],
   settings:  PluginSettings,
   complete:  (req: CompletionRequest) => Promise<CompletionResponse>,
