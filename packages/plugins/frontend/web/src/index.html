@@ -845,7 +845,139 @@
       }
       .session-actions { display: flex; }
     }
-  </style>
+
+  /* ── Print: unclip everything so the full #messages content prints ── */
+  @media print {
+    html, body {
+      height: auto !important;
+      overflow: visible !important;
+      position: static !important;
+    }
+    body {
+      display: block !important;
+      overflow: visible !important;
+      height: auto !important;
+    }
+
+    /* Hide sidebar and input area — only the messages matter */
+    #sidebar, #input-area, #sessions-banner, #scroll-down-btn, #burger, #sidebar-overlay {
+      display: none !important;
+    }
+
+    #main {
+      overflow: visible !important;
+      display: block !important;
+      height: auto !important;
+    }
+
+    #chat-header {
+      display: none !important;
+    }
+
+    #messages {
+      overflow: visible !important;
+      height: auto !important;
+      max-height: none !important;
+      flex: none !important;
+      display: block !important;
+      padding: 20px 28px !important;
+    }
+
+    /* ── User messages: paper-friendly ── */
+    .message.user {
+      display: block !important;
+      width: fit-content !important;
+      margin-left: auto !important;
+      margin-right: 0 !important;
+      margin-bottom: 16px !important;
+      background: #f3f4f6 !important;
+      color: #111 !important;
+      border: 1.5px solid #9ca3af !important;
+      border-radius: 10px !important;
+      padding: 10px 14px !important;
+      page-break-inside: avoid;
+      print-color-adjust: exact;
+      -webkit-print-color-adjust: exact;
+    }
+
+    .message.user .md-body {
+      color: #111 !important;
+    }
+
+    .message.user .md-body code {
+      background: #e5e7eb !important;
+      border-color: #d1d5db !important;
+      color: #111 !important;
+    }
+
+    /* ── Assistant messages ── */
+    .message.assistant {
+      max-width: none !important;
+      page-break-inside: avoid;
+    }
+
+    /* Un-clip any inner scrollable bits inside messages (tool outputs, thinking blocks) */
+    .thinking-content,
+    .tool-args,
+    .tool-output,
+    .tool-result-text,
+    .tool-block .tool-result-text {
+      max-height: none !important;
+      overflow: visible !important;
+    }
+
+    /* ── Tool blocks: paper-friendly ── */
+    .tool-block {
+      background: #f0f4ff !important;
+      border: 1px solid #c7d2fe !important;
+      border-radius: 6px !important;
+      overflow: visible !important;
+      break-inside: avoid;
+      print-color-adjust: exact;
+      -webkit-print-color-adjust: exact;
+    }
+    .tool-header {
+      color: #4338ca !important;
+      font-weight: 600 !important;
+      padding: 6px 12px !important;
+    }
+    .tool-args {
+      color: #065f46 !important;
+      background: transparent !important;
+      border-top: 1px solid #c7d2fe !important;
+      padding: 6px 12px 8px !important;
+      max-height: none !important;
+      overflow: visible !important;
+    }
+    .tool-output {
+      color: #3730a3 !important;
+      background: transparent !important;
+      border-top: 1px solid #c7d2fe !important;
+      padding: 7px 12px !important;
+      max-height: none !important;
+      overflow: visible !important;
+    }
+    .tool-block .tool-result {
+      border-top: 1px solid #c7d2fe !important;
+      padding: 6px 12px !important;
+    }
+    .tool-block .tool-result-icon {
+      color: #059669 !important;
+    }
+    .tool-block .tool-result-text {
+      color: #3730a3 !important;
+      max-height: none !important;
+      overflow: visible !important;
+    }
+
+    /* Ensure code blocks don't get clipped */
+    .md-body pre {
+      overflow: visible !important;
+      white-space: pre-wrap !important;
+      word-break: break-word !important;
+    }
+  }
+</style>
 </head>
 <body>
   <div id="sidebar-overlay"></div>
