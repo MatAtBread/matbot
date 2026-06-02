@@ -67,6 +67,10 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
     ? [createMessage({ role: 'system', content: [{ type: 'text', text: systemText }], traceId: '' })]
     : [];
 
+  if (systemText !== null) {
+    yield { type: 'system-context', text: systemText, traceId };
+  }
+
   // ── 3. Agentic loop ────────────────────────────────────────────────────────
 
   for (;;) {

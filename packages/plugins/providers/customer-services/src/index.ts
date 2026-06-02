@@ -9,7 +9,5 @@ export const plugin: MatbotPlugin = {
   manifest: {
     description: 'Mock LLM provider for customer services scenarios. Always helpful, never useful.',
   },
-  providers: {
-    'customer-services': (_config) => new CustomerServicesAdapter(),
-  },
+  provider: (_config) => new CustomerServicesAdapter(),
 };

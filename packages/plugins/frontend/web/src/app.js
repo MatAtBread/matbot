@@ -72,7 +72,9 @@ function isMessagesBottomVisible() {
   // False when there's overflow — meaning content is hidden off-screen and
   // the user may want the scroll-down button to jump to the bottom.
   const textBlock = messagesEl.querySelector('.message.assistant:last-child .msg-text');
-  if (!textBlock) { console.log('[▼]   no .msg-text found'); return true; }
+  if (!textBlock) {
+    return true;
+  }
   const h = window.innerHeight - (chatHeaderEl?.offsetHeight ?? 0)
            - (document.getElementById('input-area')?.offsetHeight ?? 0);
   const fits = textBlock.offsetHeight <= h;
@@ -398,6 +400,9 @@ async function joinSessionStream(id, renderedCount) {
             turnWrap.appendChild(errDiv);
             break outer;
           }
+          case 'system-context':
+            console.log('[system-context]', ev.text);
+            break;
         }
         // NOTE: NO per-event scroll-to-bottom here.
         // We scrolled once to the output start; the user reads at their own pace.
@@ -1667,7 +1672,8 @@ async function init() {
         const sizeEl = item.querySelector('.file-size');
         if (sizeEl && event.size !== undefined) sizeEl.textContent = formatSize(event.size);
       } else {
-        // New file — reload the list so it appears.
+        // New file — mark updated before reloading so the dot appears.
+        updatedFiles.add(name);
         loadFiles();
       }
     });

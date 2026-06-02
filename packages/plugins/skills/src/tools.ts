@@ -181,17 +181,27 @@ export function createSkillTools(
   return [
     {
       name: 'unknown_skill',
-      description: `Use when you encounter a concept, system, term, entity or domain you lack specific context about — a named
+      description: `Load a skill by context.
+
+      Examples:
+        - Is my <unkonwn> currently working?
+        - Tell me about <unknown>.
+        - Use your skill about <unknown>.
+        - <unknown> said to <unknown> that <unknown> is broken.
+        - The <unknown> is arriving for <unknown>'s birthday.
+
+      Use when you encounter an "unknown" concept, system, term, entity or domain you lack specific context about — a named
       system you haven't been trained on, user-specific preferences or setup, or a specialised topic the user assumes you know.
+
       You should use this tool early and as a higher priority than external searches as it is more likely to yield domain specific
       results than a general search.
-      Markers are sometimes use of definite articles or possessives ("the", "my") can be a hint that
-      the user is referring to a specific known entity, even if the noun is common, for example "my Volvo"
-      isn't a reference to Volvo's in general, it's about the user's specific car which they assume you
-      have information about. The clearest markers are words that are clearly novel proper nouns or nouns used in
-      an non-standard or domain-specific way, for example "the Xmit system" or "What does Xmit say?".
-      Another clear marker is when the user directly uses the term 'skill' in their query, for example "Use your skill about X to do Y".
-      List the terms you need more information about, together with the phrase or sentence they were mentioned in.`,
+
+      Markers of "unknown" terms are:
+      - use of definite articles or possessives ("the", "my") even if the noun is common, for example "my Volvo" isn't a reference to Volvo's in general, it's about the user's specific car which they assume you have information about.
+      - words that are clearly novel proper nouns or nouns used in an non-standard or domain-specific way, for example "the Xmit system" or "What does Xmit say?".
+      - when the user directly uses the term 'skill' in their query, for example "Use your skill about X to do Y".
+
+      List the unknown terms you need more information about, together with the contextual phrase or sentence they were mentioned in.`,
       inputSchema: {
         type: 'object',
         required: ['terms'],

@@ -141,7 +141,7 @@ function runCommand(cmd: string, args: string[], cwd: string): Promise<string> {
 function pluginTypes(p: MatbotPlugin, registeredToolPlugins: Set<string>): string[] {
   const t: string[] = [];
   if (p.tools?.length || registeredToolPlugins.has(p.name))                 t.push('tools');
-  if (Object.keys(p.providers ?? {}).length)                                t.push('provider');
+  if (p.provider !== undefined)                                              t.push('provider');
   if (Object.keys(p.storage   ?? {}).length)                                t.push('storage');
   if (p.frontend !== undefined || getRegisteredFrontendPlugins().has(p.name)) t.push('frontend');
   if (!t.length)                                                            t.push('extension');

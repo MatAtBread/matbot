@@ -18,7 +18,8 @@ export type PipelineEvent =
   | { type: 'done';         session: Session;       traceId: string }
   | { type: 'aborted';      reason: string; session: Session; traceId: string }
   | { type: 'robo-user';    content: MessageContent[]; traceId: string }
-  | { type: 'error';        error: string;          traceId: string };
+  | { type: 'error';        error: string;          traceId: string }
+  | { type: 'system-context'; text: string;         traceId: string };
 
 export interface ProviderRegistry {
   register(adapter: ProviderAdapter): void;

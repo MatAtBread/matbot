@@ -26,8 +26,7 @@ export const plugin: MatbotPlugin = {
 
     const providers = new Map(
       [...services.providers.values()]
-        .filter((cfg, i, arr) => arr.findIndex(c => c.type === cfg.type) === i)
-        .map(cfg => [cfg.type, resolveProviderFactory(cfg.type)(cfg)]),
+        .map(cfg => [cfg.module, resolveProviderFactory(cfg.module)(cfg)]),
     );
 
     // services.systemContext.register(() => {

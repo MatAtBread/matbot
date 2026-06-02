@@ -48,7 +48,7 @@ async function buildProvider(name: string, services: MatbotServices): Promise<Ac
     resolvedCreds[k] = await services.vault.resolve(v);
   }
   const config: ProviderConfig = { ...rawConfig, credentials: resolvedCreds };
-  const adapter = resolveProviderFactory(config.type)(config);
+  const adapter = resolveProviderFactory(config.module)(config);
   return { name, adapter, config };
 }
 

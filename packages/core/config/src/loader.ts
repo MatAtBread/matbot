@@ -32,8 +32,8 @@ function toModelParameters(raw: YamlMap): ModelParameters {
 }
 
 function toProviderConfig(name: string, raw: YamlMap): ProviderConfig {
-  const type  = asString(raw['type'],  `providers.${name}.type`);
-  const model = asString(raw['model'], `providers.${name}.model`);
+  const module_ = asString(raw['module'], `providers.${name}.module`);
+  const model   = asString(raw['model'],  `providers.${name}.model`);
 
   const credsRaw   = raw['credentials'];
   const credentials: Record<string, string> = {};
@@ -44,11 +44,8 @@ function toProviderConfig(name: string, raw: YamlMap): ProviderConfig {
     }
   }
 
-  const config: ProviderConfig = { name, type, model, credentials };
+  const config: ProviderConfig = { name, module: module_, model, credentials };
 
-  if (raw['module'] !== undefined) {
-    config.module = asString(raw['module'], `providers.${name}.module`);
-  }
   if (raw['endpoint'] !== undefined) {
     config.endpoint = asString(raw['endpoint'], `providers.${name}.endpoint`);
   }

@@ -262,8 +262,8 @@ export function createWebServer(deps: WebServerDeps) {
       }
       const resolvedConfig: ProviderConfig = { ...providerConfig, credentials: resolvedCreds };
 
-      const provider = deps.providers.get(resolvedConfig.type);
-      if (!provider) { json(res, 400, { error: `No adapter for type "${resolvedConfig.type}"` }); return; }
+      const provider = deps.providers.get(resolvedConfig.module);
+      if (!provider) { json(res, 400, { error: `No adapter for module "${resolvedConfig.module}"` }); return; }
 
       const traceId = body.traceId ?? crypto.randomUUID();
 

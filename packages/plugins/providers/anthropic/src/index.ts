@@ -6,7 +6,5 @@ import { AnthropicAdapter }  from './adapter.js';
 export const plugin: MatbotPlugin = {
   name:       '@matatbread/matbot-provider-anthropic',
   apiVersion: '0.1',
-  providers: {
-    anthropic: (_config) => new AnthropicAdapter(),
-  },
+  provider: (_config) => new AnthropicAdapter(),
 };

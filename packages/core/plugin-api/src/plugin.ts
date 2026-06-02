@@ -143,7 +143,7 @@ export interface MatbotPlugin {
   readonly name:       string;
   readonly apiVersion: string;
   readonly manifest?:  PluginManifest;
-  readonly providers?: Record<string, ProviderAdapterFactory>;
+  readonly provider?:  ProviderAdapterFactory;
   readonly storage?:   Record<string, StoreFactory>;
   readonly tools?:     readonly Tool[];
   readonly frontend?:  FrontendFactory;

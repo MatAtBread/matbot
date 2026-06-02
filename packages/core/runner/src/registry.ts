@@ -50,14 +50,8 @@ export function registerPlugin(plugin: MatbotPlugin, specifier?: string): void {
     throw new Error(`Plugin "${plugin.name}" is already registered.`);
   }
 
-  for (const type of Object.keys(plugin.providers ?? {})) {
-    if (state.providers.has(type)) {
-      const owner = state.plugins.find(p => p.providers?.[type] !== undefined)?.name ?? '?';
-      throw new Error(
-        `Provider type "${type}" is already registered by "${owner}". ` +
-        `"${plugin.name}" cannot register it again.`,
-      );
-    }
+  if (plugin.provider !== undefined && state.providers.has(plugin.name)) {
+    throw new Error(`Provider "${plugin.name}" is already registered.`);
   }
 
   for (const type of Object.keys(plugin.storage ?? {})) {
@@ -80,8 +74,8 @@ export function registerPlugin(plugin: MatbotPlugin, specifier?: string): void {
 
   state.plugins.push(plugin);
 
-  for (const [type, factory] of Object.entries(plugin.providers ?? {})) {
-    state.providers.set(type, factory);
+  if (plugin.provider !== undefined) {
+    state.providers.set(plugin.name, plugin.provider);
   }
   for (const [type, factory] of Object.entries(plugin.storage ?? {})) {
     state.storage.set(type, factory);
@@ -96,14 +90,14 @@ export function registerPlugin(plugin: MatbotPlugin, specifier?: string): void {
 
 // ── Resolution ────────────────────────────────────────────────────────────────
 
-export function resolveProviderFactory(type: string): ProviderAdapterFactory {
-  const factory = state.providers.get(type);
+export function resolveProviderFactory(module: string): ProviderAdapterFactory {
+  const factory = state.providers.get(module);
   if (factory === undefined) {
     const available = [...state.providers.keys()].join(', ') || 'none';
     throw new Error(
-      `No provider registered for type "${type}". ` +
+      `No provider registered for module "${module}". ` +
       `Available: ${available}. ` +
-      `Install and load a provider plugin (e.g. matbot-anthropic).`,
+      `Install and load the provider plugin.`,
     );
   }
   return factory;
@@ -185,7 +179,7 @@ export async function unloadPlugin(pluginName: string, services: MatbotServices)
   }
   state.serviceKeys.delete(pluginName);
 
-  for (const type of Object.keys(plugin.providers ?? {})) state.providers.delete(type);
+  if (plugin.provider !== undefined) state.providers.delete(plugin.name);
   for (const type of Object.keys(plugin.storage   ?? {})) state.storage.delete(type);
 
   state.frontendPlugins.delete(pluginName);

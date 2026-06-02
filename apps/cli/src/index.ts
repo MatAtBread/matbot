@@ -20,10 +20,10 @@ import { systemPrincipal, VaultImpl }      from '@matatbread/matbot-security';
 import { FilesystemStore }                 from '@matatbread/matbot-storage-filesystem';
 import { FilesystemFileStore }             from '@matatbread/matbot-files-node';
 import { createBuiltinTools }              from '@matatbread/matbot-tool-plugin';
-import { access, mkdir, readFile } from 'node:fs/promises';
+import { access, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { createInterface }                 from 'node:readline/promises';
 import { createRequire }                   from 'node:module';
-import { pathToFileURL }                   from 'node:url';
+import { fileURLToPath, pathToFileURL }     from 'node:url';
 import process                             from 'node:process';
 import path                                from 'node:path';
 
@@ -412,6 +412,155 @@ function makePluginSettings(store: Store<SettingsDoc>, pluginName: string): Plug
   };
 }
 
+// ── Setup wizard ───────────────────────────────────────────────────────────────
+
+interface ProviderPackage { type: string; name: string; dir: string; }
+
+async function discoverProviders(): Promise<ProviderPackage[]> {
+  const thisDir      = path.dirname(fileURLToPath(import.meta.url));
+  const providersDir = path.resolve(thisDir, '../../../packages/plugins/providers');
+  let entries: string[];
+  try { entries = await readdir(providersDir); } catch { return []; }
+  const results: ProviderPackage[] = [];
+  for (const entry of entries) {
+    const dir = path.join(providersDir, entry);
+    try {
+      const pkg = JSON.parse(await readFile(path.join(dir, 'package.json'), 'utf8')) as Record<string, unknown>;
+      if (typeof pkg['name'] === 'string') results.push({ type: entry, name: pkg['name'] as string, dir });
+    } catch { /* skip entries without a readable package.json */ }
+  }
+  return results;
+}
+
+async function testEndpointReachable(url: string): Promise<boolean> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 5000);
+  try {
+    await fetch(url, { method: 'HEAD', signal: ac.signal });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function runSetupWizard(configPath: string): Promise<import('./config.js').MatbotConfig> {
+  const rl  = createInterface({ input: process.stdin, output: process.stderr });
+  const ask = async (question: string): Promise<string> => {
+    const answer = await rl.question(`${question}: `);
+    return answer.trim();
+  };
+
+  try {
+    process.stderr.write('\nNo providers configured. Let\'s set one up.\n\n');
+
+    const discovered = await discoverProviders();
+    if (discovered.length === 0) {
+      throw new Error('No provider packages found. Cannot continue setup.');
+    }
+
+    process.stderr.write('Available provider types:\n');
+    for (let i = 0; i < discovered.length; i++) {
+      process.stderr.write(`  ${i + 1}. ${discovered[i]!.type}  (${discovered[i]!.name})\n`);
+    }
+    process.stderr.write('\n');
+
+    let chosen!: ProviderPackage;
+    for (;;) {
+      const choice = await ask(`Choose a type [1-${discovered.length}]`);
+      const n = parseInt(choice, 10);
+      if (n >= 1 && n <= discovered.length) { chosen = discovered[n - 1]!; break; }
+      process.stderr.write(`Please enter a number between 1 and ${discovered.length}.\n`);
+    }
+
+    let providerName = '';
+    for (;;) {
+      providerName = await ask(`Provider name (how this LLM key is named in ${configPath} and presented to you)`);
+      if (providerName) break;
+      process.stderr.write('Provider name is required.\n');
+    }
+
+    let model = '';
+    for (;;) {
+      model = await ask('Model name');
+      if (model) break;
+      process.stderr.write('Model name is required.\n');
+    }
+
+    let endpoint = '';
+    for (;;) {
+      endpoint = await ask('Endpoint URL');
+      if (endpoint) break;
+      process.stderr.write('Endpoint URL is required.\n');
+    }
+
+    let apiKey = '';
+    for (;;) {
+      apiKey = await ask('API key');
+      if (apiKey) break;
+      process.stderr.write('API key is required.\n');
+    }
+
+    process.stderr.write(`\nTesting ${endpoint}… `);
+    const reachable = await testEndpointReachable(endpoint);
+    if (reachable) {
+      process.stderr.write('reachable\n');
+    } else {
+      process.stderr.write('not reachable\n');
+      const cont = await ask('Continue with this endpoint anyway? [y/N]');
+      if (cont.toLowerCase() !== 'y') {
+        process.stderr.write('Setup cancelled.\n');
+        process.exit(1);
+      }
+    }
+
+    const configDir  = path.dirname(configPath);
+    const envPath    = path.join(configDir, '.env');
+    const envVarName = `MATBOT_API_KEY_${providerName.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
+
+    let envContent = '';
+    try { envContent = await readFile(envPath, 'utf8'); } catch { /* no existing .env */ }
+    const envLines = envContent
+      ? envContent.split('\n').filter(l => !l.startsWith(`${envVarName}=`) && l !== '')
+      : [];
+    envLines.push(`${envVarName}=${apiKey}`);
+    await writeFile(envPath, envLines.join('\n') + '\n', 'utf8');
+    process.env[envVarName] = apiKey;
+
+    // Write a relative path so the config is self-contained regardless of where matbot is installed.
+    const relDir = path.relative(configDir, chosen.dir).replace(/\\/g, '/');
+    const moduleSpec = relDir.startsWith('.') ? relDir : `./${relDir}`;
+
+    const yaml = [
+      'providers:',
+      `  ${providerName}:`,
+      `    module: ${moduleSpec}`,
+      `    endpoint: ${endpoint}`,
+      `    model: ${model}`,
+      `    credentials:`,
+      `      apiKey: \${env:${envVarName}}`,
+    ].join('\n') + '\n';
+
+    await mkdir(configDir, { recursive: true });
+    await writeFile(configPath, yaml, 'utf8');
+    process.stderr.write(`\nConfiguration written to ${configPath}\n\n`);
+
+    return {
+      plugins:   [],
+      providers: new Map([[providerName, {
+        name:        providerName,
+        module:      moduleSpec,
+        model,
+        credentials: { apiKey },
+        endpoint,
+      }]]),
+    };
+  } finally {
+    rl.close();
+  }
+}
+
 async function main(): Promise<void> {
   const serverMode = process.argv[2] === 'start';
 
@@ -436,7 +585,7 @@ async function main(): Promise<void> {
   // ── Config loading ────────────────────────────────────────────────────────────
 
   const env = process.env as Record<string, string | undefined>;
-  let matbotConfig: import('./config.js').MatbotConfig;
+  let matbotConfig!: import('./config.js').MatbotConfig;
   let configPath: string;
 
   if (opts.config === '-') {
@@ -453,22 +602,32 @@ async function main(): Promise<void> {
     process.chdir(projectDir);
     await loadDotEnv(projectDir);
   } else {
+    // Resolve relative paths against INIT_CWD (set by pnpm/npm to the directory
+    // from which the user ran the package manager) so --config foo.yaml lands
+    // next to the user's project, not inside the CLI package directory.
+    const userCwd = process.env['INIT_CWD'] ?? process.cwd();
     configPath = opts.config === './matbot.yaml'
-      ? (await findUp('matbot.yaml')) ?? path.resolve('matbot.yaml')
-      : path.resolve(opts.config);
+      ? (await findUp('matbot.yaml')) ?? path.resolve(userCwd, 'matbot.yaml')
+      : path.isAbsolute(opts.config) ? opts.config : path.resolve(userCwd, opts.config);
     process.chdir(path.dirname(configPath));
     await loadDotEnv(path.dirname(configPath));
-    const result = await loadConfig(configPath, env);
-    matbotConfig = result.config;
-    // projectDir from result is the same as dirname(configPath) unless extends crosses dirs
-    if (result.projectDir !== path.dirname(configPath)) {
-      process.chdir(result.projectDir);
-      configPath = path.join(result.projectDir, 'matbot.yaml');
+    let loadResult: { config: import('./config.js').MatbotConfig; projectDir: string } | null = null;
+    try {
+      loadResult = await loadConfig(configPath, env);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT') throw err;
     }
-  }
-
-  if (matbotConfig.providers.size === 0) {
-    throw new Error('No providers found in config.');
+    if (loadResult !== null) {
+      matbotConfig = loadResult.config;
+      if (loadResult.projectDir !== path.dirname(configPath)) {
+        process.chdir(loadResult.projectDir);
+        configPath = path.join(loadResult.projectDir, 'matbot.yaml');
+      }
+    }
+    if (loadResult === null || matbotConfig!.providers.size === 0) {
+      matbotConfig = await runSetupWizard(configPath);
+    }
   }
 
   // Merge prompt sources: CLI flag/arg > config file
@@ -501,16 +660,15 @@ async function main(): Promise<void> {
   const providerModules: string[] = [];
   const seenProviderModules = new Set<string>();
   for (const cfg of matbotConfig.providers.values()) {
-    const mod = cfg.module ?? `@matatbread/matbot-provider-${cfg.type}`;
+    const mod = cfg.module;
     if (!seenProviderModules.has(mod)) {
       seenProviderModules.add(mod);
       providerModules.push(mod);
     }
   }
-  const allSpecifiers = [
-    ...await resolvePluginSpecifiers(providerModules,      path.dirname(configPath)),
-    ...await resolvePluginSpecifiers(matbotConfig.plugins, path.dirname(configPath)),
-  ];
+  const resolvedProviderMods = await resolvePluginSpecifiers(providerModules, path.dirname(configPath));
+  const resolvedPluginMods   = await resolvePluginSpecifiers(matbotConfig.plugins, path.dirname(configPath));
+  const allSpecifiers        = [...resolvedProviderMods, ...resolvedPluginMods];
 
   // A plugin with storageBackend replaces the default filesystem stores.
   // It must be listed before any plugin whose setup() calls createStore.
@@ -621,7 +779,7 @@ async function main(): Promise<void> {
         );
       }
       const resolved: ProviderConfig = { ...rawCfg, credentials: await resolveCredentials(rawCfg.credentials, vault) };
-      const adpt = resolveProviderFactory(resolved.type)(resolved);
+      const adpt = resolveProviderFactory(resolved.module)(resolved);
       const msgs = req.system !== undefined
         ? [
             createMessage({
@@ -680,7 +838,23 @@ async function main(): Promise<void> {
     },
   };
 
-  await loadPlugins(allSpecifiers, services);
+  // Load provider plugins first so module names can be canonicalised before any
+  // frontend plugin's setup() calls resolveProviderFactory(cfg.module).
+  await loadPlugins(resolvedProviderMods, services);
+
+  // Canonicalise each provider config's module to the loaded plugin's name so that
+  // resolveProviderFactory() (keyed by plugin.name) finds the factory regardless of
+  // whether the config used an npm name, a relative path, or a file URL.
+  for (const [key, cfg] of matbotConfig.providers) {
+    const idx        = providerModules.indexOf(cfg.module);
+    const resolved   = idx !== -1 ? resolvedProviderMods[idx] : undefined;
+    const pluginName = resolved !== undefined ? getPluginNameForSpecifier(resolved) : undefined;
+    if (pluginName !== undefined && pluginName !== cfg.module) {
+      matbotConfig.providers.set(key, { ...cfg, module: pluginName });
+    }
+  }
+
+  await loadPlugins(resolvedPluginMods, services);
 
   // ── Server mode ───────────────────────────────────────────────────────────────
 
@@ -709,7 +883,7 @@ async function main(): Promise<void> {
 
   const providerConfig: ProviderConfig = {
     name:        rawConfig.name,
-    type:        rawConfig.type,
+    module:      rawConfig.module,
     model:       rawConfig.model,
     credentials: await resolveCredentials(rawConfig.credentials, vault),
     ...(rawConfig.endpoint   !== undefined ? { endpoint:   rawConfig.endpoint   } : {}),
@@ -717,7 +891,7 @@ async function main(): Promise<void> {
     ...(rawConfig.fallback   !== undefined ? { fallback:   rawConfig.fallback   } : {}),
   };
 
-  const adapter: ProviderAdapter = resolveProviderFactory(providerConfig.type)(providerConfig);
+  const adapter: ProviderAdapter = resolveProviderFactory(providerConfig.module)(providerConfig);
 
   // ── Session ───────────────────────────────────────────────────────────────────
 

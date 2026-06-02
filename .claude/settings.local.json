@@ -53,7 +53,11 @@
       "Bash(pnpm --filter @matatbread/matbot-frontend-telegram install)",
       "Bash(pnpm --filter @matatbread/matbot-plugin-api tsc --noEmit)",
       "Bash(pnpm --filter @matatbread/matbot-tool-plugin tsc --noEmit)",
-      "Bash(pnpm --filter matbot-cli exec tsc --noEmit)"
+      "Bash(pnpm --filter matbot-cli exec tsc --noEmit)",
+      "Bash(pnpm -r run typecheck)",
+      "Bash(grep -v \"^npm warn\\\\|^$\")",
+      "Bash(grep -E \"error TS|Done|typecheck\\\\$\")",
+      "Bash(grep -v \"^packages\\\\|^apps\\\\|^$\")"
     ]
   }
 }

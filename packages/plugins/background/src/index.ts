@@ -248,12 +248,11 @@ interface IdInput         { id: string; }
 
 const backgroundTool: Tool = {
   name: 'background',
-  description:
-    'Run a prompt in the background and return immediately. ' +
-    'The background process has access to the same tools and providers. ' +
-    'Optionally name a workspace file to capture any stdout the process emits ' +
-    '— most useful when the prompt instructs the process to print a result rather ' +
-    'than writing it via workspace_write.',
+  description: `Run a prompt in the background and return immediately.
+    The background process has access to the same tools and providers.
+    Optionally name a workspace file to capture any output the process emits. In the absence of an output file, stdout is discarded.
+    You should not wait for the output if the user has asked you to do something in the background - they are expecting to check themselves on the status later,
+    but you should notify the user that the task has started and what the output file, if specified, is named.`,
   requires:    ['spawn'],
   inputSchema: {
     type:       'object',
