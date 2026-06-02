@@ -199,7 +199,7 @@ export function createSkillTools(
       Markers of "unknown" terms are:
       - use of definite articles or possessives ("the", "my") even if the noun is common, for example "my Volvo" isn't a reference to Volvo's in general, it's about the user's specific car which they assume you have information about.
       - words that are clearly novel proper nouns or nouns used in an non-standard or domain-specific way, for example "the Xmit system" or "What does Xmit say?".
-      - when the user directly uses the term 'skill' in their query, for example "Use your skill about X to do Y".
+      - when the user directly uses the term 'skill' in their query, for example "Use your skill about <unknown> to do <unknown>".
 
       List the unknown terms you need more information about, together with the contextual phrase or sentence they were mentioned in.`,
       inputSchema: {
