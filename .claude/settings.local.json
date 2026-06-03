@@ -37,7 +37,11 @@
       "Bash(sed *)",
       "Bash(python3 -)",
       "Bash(sed -n '358,365p' /home/matt/git/matbot/packages/plugins/frontend/web/src/app.js)",
-      "Bash(sed -n '384,392p' /home/matt/git/matbot/packages/plugins/frontend/web/src/app.js)"
+      "Bash(sed -n '384,392p' /home/matt/git/matbot/packages/plugins/frontend/web/src/app.js)",
+      "Bash(git stash *)",
+      "Bash(pnpm --filter @matatbread/matbot-rumsfeld-node exec tsc --noEmit)",
+      "Bash(pnpm --filter @matatbread/matbot-knowledge exec tsc --noEmit)",
+      "Bash(pnpm --filter @matatbread/matbot-persist-ki-bge-node exec tsc --noEmit)"
     ]
   }
 }

@@ -5,7 +5,7 @@ import process from 'node:process';
 import { createSkillIndexHook, createUserMessageClassifierHook, createAgentMessageClassifierHook } from './hooks.js';
 import type { SkillDoc } from './types.js';
 import { watchAndImportSkillDir } from './watcher.js';
-import { createSkillTools } from './tools.js';
+import { createSkillTools, skillToKnowledgeEntry } from './tools.js';
 
 export interface SkillsPluginConfig {
   skillsDir: string;
@@ -27,12 +27,15 @@ export function createSkillsPlugin(config: SkillsPluginConfig): MatbotPlugin {
     async setup(services) {
       const store = services.createStore<SkillDoc>('skills') as Store<SkillDoc>;
 
-      // Pre-populate in-memory map from the store.
+      // Pre-populate in-memory map from the store and index all existing skills.
       const { items } = await store.query({});
-      for (const { doc } of items) skills.set(doc.name.toLowerCase(), doc);
+      for (const { doc } of items) {
+        skills.set(doc.name.toLowerCase(), doc);
+        void services.knowledge.index(skillToKnowledgeEntry(doc));
+      }
 
       // Register tools dynamically (skillsDir not available at module eval time).
-      for (const tool of createSkillTools(store, skills)) {
+      for (const tool of createSkillTools(store, skills, services.knowledge)) {
         services.tools.register(tool);
       }
 
@@ -44,7 +47,7 @@ export function createSkillsPlugin(config: SkillsPluginConfig): MatbotPlugin {
       const pluginSettings = services.settings('skills');
       // services.hooks.register(createUserMessageClassifierHook(pluginSettings, services.providers, getSkills));
       // services.hooks.register(createSkillIndexHook(getSkills));
-      services.hooks.register(createAgentMessageClassifierHook(getSkills, pluginSettings, req => services.complete(req)));
+      // services.hooks.register(createAgentMessageClassifierHook(getSkills, pluginSettings, req => services.complete(req)));
     },
 
     async teardown() {
