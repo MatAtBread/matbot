@@ -279,6 +279,7 @@ export interface ToolContext {
   session:     Session;
   principal:   Principal;
   signal:      AbortSignal;
+  vault:       Vault;
   workdir?:    string;
   configPath?: string;
   files?:      FileStore;
@@ -366,6 +367,9 @@ export interface FrontendAdapter {
 // ── Vault ─────────────────────────────────────────────────────────────────────
 
 export interface Vault {
+  /** Store a named secret and make it immediately available via resolve(). */
+  createSecret(name: string, value: string): Promise<void>;
+  /** Resolve ${env:NAME} placeholders by looking up the named value. */
   resolve(ref: string): Promise<string>;
   scrub(text: string): string;
 }
@@ -381,6 +385,7 @@ export type HealthStatus =
 
 export interface ToolRegistry {
   register(tool: Tool): void;
+  remove(name: string): void;
   resolve(name: string): Tool | null;
   list(): readonly Tool[];
   removeByPlugin(pluginName: string): void;

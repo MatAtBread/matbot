@@ -30,7 +30,7 @@ export function createSkillTools(
   }
 
   const unknownExecutor: ToolExecutor = {
-    async *execute(input: unknown, _ctx: ToolContext): AsyncIterable<ToolEvent> {
+    async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
       const { terms } = input as { terms: Array<{ term: string; context: string }> };
 
       const allSkills = [...skills.values()];
@@ -68,8 +68,8 @@ export function createSkillTools(
       }
 
       // Step 3: BGE reranker via Cloudflare Workers AI
-      const apiKey = process.env['SKILL_RANK_API_KEY'];
-      const accountId = process.env['CLOUDFLARE_ACCOUNT_ID'];
+      const apiKey    = await ctx.vault.resolve('${env:SKILL_RANK_API_KEY}').catch(() => undefined);
+      const accountId = await ctx.vault.resolve('${env:CLOUDFLARE_ACCOUNT_ID}').catch(() => undefined);
       const rerankPool = scored.length > 0 ? scored.map(s => s.skill) : candidatePool;
 
       let leadingCandidate: ToolEvent = first

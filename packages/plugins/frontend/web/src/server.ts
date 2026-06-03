@@ -3,31 +3,31 @@ import { readFile } from 'node:fs/promises';
 import { join, relative, resolve, extname } from 'node:path';
 import type {
   HookRegistry, MatbotPlugin, Principal, ProviderAdapter, ProviderConfig,
-  Session, Store, ToolRegistry, Vault, FileStore, SystemContextRegistry,
+  Session, Store, ToolRegistry, FileStore, SystemContextRegistry, Vault,
 } from '@matatbread/matbot-core';
 import { appendMessage, createMessage, createSession, runSession } from '@matatbread/matbot-core';
 import { sseComment, sseEvent } from './sse-writer.js';
 import { html, js, favicon } from './ui.js';
 
 export interface WebServerDeps {
-  store:       Store<Session>;
-  providers:   Map<string, ProviderAdapter>;    // adapter name → adapter
-  configs:     ReadonlyMap<string, ProviderConfig>;     // provider config name → config
-  vault:       Vault;
-  loadPlugin:   (specifier: string) => Promise<MatbotPlugin>;
-  unloadPlugin: (specifier: string) => Promise<void>;
-  tools?:          ToolRegistry;
-  hooks?:          HookRegistry;
-  systemContext?:  SystemContextRegistry;
-  cors?:           string;  // Access-Control-Allow-Origin value, default '*'
-  workdir?:    string;
-  files?:      FileStore;
-  configPath?: string;
+  store:          Store<Session>;
+  vault:          Vault;
+  /** Resolve a provider name to its adapter and fully-resolved config. Returns null if unknown. */
+  resolveProvider: (name: string) => Promise<{ adapter: ProviderAdapter; config: ProviderConfig } | null>;
+  loadPlugin:     (specifier: string) => Promise<MatbotPlugin>;
+  unloadPlugin:   (specifier: string) => Promise<void>;
+  tools?:         ToolRegistry;
+  hooks?:         HookRegistry;
+  systemContext?: SystemContextRegistry;
+  cors?:          string;  // Access-Control-Allow-Origin value, default '*'
+  workdir?:       string;
+  files?:         FileStore;
+  configPath?:    string;
 }
 
 interface SubmitBody {
   content:    string | { type: 'form-response'; values: Record<string, string> };
-  provider:   string;       // key into deps.configs
+  provider:   string;       // opaque name passed to deps.resolveProvider
   sessionId?: string;
   traceId?:   string;
 }
@@ -174,6 +174,7 @@ export function createWebServer(deps: WebServerDeps) {
       session:    stubSession,
       principal:  DEFAULT_PRINCIPAL,
       signal:     ac.signal,
+      vault:      deps.vault,
       loadPlugin:   deps.loadPlugin,
       unloadPlugin: deps.unloadPlugin,
       prompt:     (q: string, def?: string) => def !== undefined
@@ -216,11 +217,6 @@ export function createWebServer(deps: WebServerDeps) {
       return; // keep connection open
     }
 
-    // --- GET /providers ---
-    if (method === 'GET' && url === '/providers') {
-      json(res, 200, [...deps.configs.keys()]); return;
-    }
-
     // --- GET /sessions/:id --- (status only — busy is server-internal state, not session data)
     const sessionStatusMatch = /^\/sessions\/([^/]+)$/.exec(url);
     if (method === 'GET' && sessionStatusMatch) {
@@ -252,18 +248,9 @@ export function createWebServer(deps: WebServerDeps) {
       let   session   = await deps.store.get(targetId);
       if (!session) { json(res, 404, { error: 'Session not found' }); return; }
 
-      const providerConfig = deps.configs.get(body.provider);
-      if (!providerConfig) { json(res, 400, { error: `Unknown provider "${body.provider}"` }); return; }
-
-      // Resolve credential placeholders through the vault
-      const resolvedCreds: Record<string, string> = {};
-      for (const [k, v] of Object.entries(providerConfig.credentials)) {
-        resolvedCreds[k] = await deps.vault.resolve(v);
-      }
-      const resolvedConfig: ProviderConfig = { ...providerConfig, credentials: resolvedCreds };
-
-      const provider = deps.providers.get(resolvedConfig.module);
-      if (!provider) { json(res, 400, { error: `No adapter for module "${resolvedConfig.module}"` }); return; }
+      const resolved = await deps.resolveProvider(body.provider);
+      if (!resolved) { json(res, 400, { error: `Unknown provider "${body.provider}"` }); return; }
+      const { adapter: provider, config: resolvedConfig } = resolved;
 
       const traceId = body.traceId ?? crypto.randomUUID();
 
@@ -344,6 +331,7 @@ export function createWebServer(deps: WebServerDeps) {
           ...(deps.workdir    ? { workdir:    deps.workdir    } : {}),
           ...(deps.files      ? { files:      deps.files      } : {}),
           ...(deps.configPath ? { configPath: deps.configPath } : {}),
+          vault:          deps.vault,
           signal:         ac.signal,
           prompt:         promptFn,
           loadPlugin:     deps.loadPlugin,

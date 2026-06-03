@@ -24,29 +24,20 @@ export const plugin: MatbotPlugin = {
     const sessions = services.sessions;
     if (!sessions) throw new Error('frontend-web requires services.sessions');
 
-    const providers = new Map(
-      [...services.providers.values()]
-        .map(cfg => [cfg.module, resolveProviderFactory(cfg.module)(cfg)]),
-    );
-
-    // services.systemContext.register(() => {
-    //   const tools = services.tools.list();
-    //   if (tools.length === 0) return null;
-    //   const lines = tools.map(t => `- \`${t.name}\`: ${t.description}`).join('\n');
-    //   return (
-    //     `Tools are also available via HTTP from the current host:\n` +
-    //     `POST /tools/<name>\n` +
-    //     `Request body: the tool's JSON input directly (matches the tool's inputSchema).\n` +
-    //     `Response: the tool's result as JSON on success (200), or { error, stdout?, stderr? } on failure (500).\n\n` +
-    //     `Available tools:\n${lines}`
-    //   );
-    // });
-
     webServer = createWebServer({
-      store:         sessions,
-      providers,
-      configs:       services.providers,
-      vault:         services.vault,
+      store: sessions,
+      vault: services.vault,
+      async resolveProvider(name) {
+        const cfg = services.providers.get(name);
+        if (!cfg) return null;
+        const resolvedCreds: Record<string, string> = {};
+        for (const [k, v] of Object.entries(cfg.credentials ?? {})) {
+          resolvedCreds[k] = await services.vault.resolve(v);
+        }
+        const config = { ...cfg, ...(Object.keys(resolvedCreds).length > 0 ? { credentials: resolvedCreds } : {}) };
+        const adapter = resolveProviderFactory(config.module)(config);
+        return { adapter, config };
+      },
       loadPlugin:    services.loadPlugin.bind(services),
       unloadPlugin:  services.unloadPlugin.bind(services),
       tools:         services.tools,

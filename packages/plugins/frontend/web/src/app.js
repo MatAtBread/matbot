@@ -234,7 +234,20 @@ async function apiListSessions() {
 }
 async function apiGetSession(id)  { try { return await callTool('session_get', { sessionId: id }); } catch { return null; } }
 async function apiSessionBusy(id) { try { const r = await fetch('/sessions/' + id); return r.ok ? (await r.json()).busy : false; } catch { return false; } }
-async function apiListProviders() { const r = await fetch('/providers');        return r.ok ? r.json() : []; }
+async function apiListProviders() { try { return (await callTool('provider', { action: 'list' })).providers.map(p => p.name); } catch { return []; } }
+
+async function refreshProviderSelect() {
+  const current  = providerSel.value;
+  const providers = await apiListProviders();
+  providerSel.innerHTML = '';
+  for (const p of providers) {
+    const opt = document.createElement('option');
+    opt.value = opt.textContent = p;
+    providerSel.appendChild(opt);
+  }
+  providerSel.value = providers.includes(current) ? current : (providers[0] ?? '');
+  localStorage.setItem(LS_PROVIDER, providerSel.value);
+}
 
 // ── Tool API ──────────────────────────────────────────────────────────────────
 
@@ -277,7 +290,7 @@ async function joinSessionStream(id, renderedCount) {
   turnWrap.appendChild(loadingEl);
   function removeLoading() { loadingEl.remove(); }
 
-  let textEl = null, textAccum = '', thinkingContent = null, thinkingAccum = '', currentTool = null;
+  let textEl = null, textAccum = '', thinkingContent = null, thinkingAccum = '', currentTool = null, providerToolPending = false;
   let turnIn = 0, turnOut = 0, turnCost = 0, turnCacheRead = 0, turnCacheCreate = 0;
 
 
@@ -344,6 +357,7 @@ async function joinSessionStream(id, renderedCount) {
           }
           case 'tool:start': {
             removeLoading();
+            if (ev.name === 'provider') providerToolPending = true;
             currentTool = makeToolBlock(ev.name, ev.input);
             currentTool.open = true;
             turnWrap.appendChild(currentTool);
@@ -371,6 +385,7 @@ async function joinSessionStream(id, renderedCount) {
               currentTool.open = false;
             }
             currentTool = null;
+            if (providerToolPending && !ev.isError) { providerToolPending = false; refreshProviderSelect(); }
             break;
           }
           case 'usage':
@@ -1088,7 +1103,7 @@ async function submitFormResponse(sessionId, values) {
   turnWrap.appendChild(loadingEl);
   function removeLoading() { loadingEl.remove(); }
 
-  let textEl = null, textAccum = '', thinkingContent = null, thinkingAccum = '', currentTool = null;
+  let textEl = null, textAccum = '', thinkingContent = null, thinkingAccum = '', currentTool = null, providerToolPending = false;
   let turnIn = 0, turnOut = 0, turnCost = 0, turnCacheRead = 0, turnCacheCreate = 0;
 
 
@@ -1143,6 +1158,7 @@ async function submitFormResponse(sessionId, values) {
         }
         case 'tool:start': {
           removeLoading();
+          if (ev.name === 'provider') providerToolPending = true;
           currentTool = makeToolBlock(ev.name, ev.input);
           currentTool.open = true;
           turnWrap.appendChild(currentTool);
@@ -1170,6 +1186,7 @@ async function submitFormResponse(sessionId, values) {
             currentTool.open = false;
           }
           currentTool = null;
+          if (providerToolPending && !ev.isError) { providerToolPending = false; refreshProviderSelect(); }
           break;
         }
         case 'usage':
@@ -1244,6 +1261,7 @@ async function sendMessage() {
   let thinkingContent = null;
   let thinkingAccum   = '';
   let currentTool     = null;
+  let providerToolPending = false;
   let turnIn          = 0;
   let turnOut         = 0;
   let turnCost        = 0;
@@ -1312,6 +1330,7 @@ async function sendMessage() {
 
         case 'tool:start': {
           removeLoading();
+          if (ev.name === 'provider') providerToolPending = true;
           currentTool = makeToolBlock(ev.name, ev.input);
           currentTool.open = true;
           turnWrap.appendChild(currentTool);
@@ -1345,6 +1364,7 @@ async function sendMessage() {
             currentTool.open = false;
           }
           currentTool = null;
+          if (providerToolPending && !ev.isError) { providerToolPending = false; refreshProviderSelect(); }
           break;
         }
 

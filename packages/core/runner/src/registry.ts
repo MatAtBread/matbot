@@ -129,6 +129,7 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotServices
     ...services,
     tools: {
       register(tool: Tool) { services.tools.register({ ...tool, pluginName: plugin.name }); },
+      remove:        (name: string) => services.tools.remove(name),
       resolve:       (name: string) => services.tools.resolve(name),
       list:          ()             => services.tools.list(),
       removeByPlugin:(name: string) => services.tools.removeByPlugin(name),

@@ -1,7 +1,7 @@
 import type {
   Session, MessageContent,
   PipelineEvent, RunConfig, ProviderAdapter, ProviderConfig,
-  Tool, ToolContext, Store, FileStore, SystemContextRegistry,
+  Tool, ToolContext, Store, FileStore, SystemContextRegistry, Vault,
 } from './types.js';
 import type { MatbotPlugin } from './plugin.js';
 import { HookRegistry } from './hooks.js';
@@ -17,6 +17,7 @@ export interface RunSessionOpts {
   hooks?:         HookRegistry;
   systemContext?: SystemContextRegistry;
   signal:         AbortSignal;
+  vault?:         Vault;
   workdir?:       string;
   configPath?:    string;
   files?:         FileStore;
@@ -34,6 +35,11 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
     if (def !== undefined) return Promise.resolve(def);
     return Promise.reject(new Error(`Non-interactive context: cannot prompt for "${q}"`));
   });
+  const vault: Vault = opts.vault ?? {
+    async createSecret() { throw new Error('No vault configured'); },
+    async resolve(ref: string) { return ref; },
+    scrub(text: string) { return text; },
+  };
   const traceId = config.traceId ?? crypto.randomUUID();
 
   // ── 1. before:submit hooks ─────────────────────────────────────────────────
@@ -206,7 +212,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
       let isError = false;
 
       const toolCtx: ToolContext = {
-        callId: tc.id, session, principal: config.principal, signal,
+        callId: tc.id, session, principal: config.principal, signal, vault,
         prompt:       promptFn,
         loadPlugin:   opts.loadPlugin,
         unloadPlugin: opts.unloadPlugin,
