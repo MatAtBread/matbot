@@ -19,7 +19,7 @@ import type { MatbotServices, PluginSettings, ToolRegistry, Vault,
 import { systemPrincipal, VaultImpl }      from '@matatbread/matbot-security';
 import { FilesystemStore }                 from '@matatbread/matbot-storage-filesystem';
 import { FilesystemFileStore }             from '@matatbread/matbot-files-node';
-import { createBuiltinTools }              from '@matatbread/matbot-tool-plugin';
+import { createBuiltinTools, createProviderTool } from '@matatbread/matbot-tool-plugin';
 import { access, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { createInterface }                 from 'node:readline/promises';
 import { createRequire }                   from 'node:module';
@@ -839,6 +839,22 @@ async function main(): Promise<void> {
       matbotConfig.providers.set(key, { ...cfg, module: pluginName });
     }
   }
+
+  // Map plugin name → the original module specifier written in matbot.yaml.
+  // Used by the provider tool so its description and list output show YAML-valid paths,
+  // not the internal plugin names that the canonicalisation step produces.
+  const pluginNameToOrigPath = new Map<string, string>();
+  for (let i = 0; i < providerModules.length; i++) {
+    const orig     = providerModules[i];
+    const resolved = resolvedProviderMods[i];
+    if (orig === undefined || resolved === undefined) continue;
+    const name = getPluginNameForSpecifier(resolved);
+    if (name !== undefined && !pluginNameToOrigPath.has(name)) pluginNameToOrigPath.set(name, orig);
+  }
+
+  // Register the provider management tool now that adapter plugins are loaded —
+  // createProviderTool reads getRegisteredPlugins() to build its description.
+  toolReg.register(createProviderTool(matbotConfig.providers, pluginNameToOrigPath));
 
   await loadPlugins(resolvedPluginMods, services);
 
