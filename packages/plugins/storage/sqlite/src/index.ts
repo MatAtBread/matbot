@@ -13,8 +13,8 @@ export const plugin: MatbotPlugin = {
     // Pre-scan already opened this backend at startup — nothing to do.
     if (services.storageBackend instanceof SQLiteStorageBackend) return;
     // Hot-loaded at runtime: activate now.
-    if (!services.replaceStorageBackend || !services.configPath) return;
+    if (!services.configPath) return;
     const dotData = join(dirname(services.configPath), '.data');
-    await services.replaceStorageBackend(await SQLiteStorageBackend.open(dotData));
+    await services.register('storageBackend', await SQLiteStorageBackend.open(dotData));
   },
 };

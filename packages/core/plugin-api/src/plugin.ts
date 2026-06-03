@@ -31,22 +31,6 @@ export interface PluginSettings {
   delete(key: string): Promise<void>;
 }
 
-// ── Service registry ──────────────────────────────────────────────────────────
-
-/**
- * Open interface extended by plugin type packages via module augmentation.
- * Each entry maps a package name (the canonical contract identifier) to the
- * service interface it defines.
- *
- * Example (in @matatbread/matbot-memory-types):
- *   declare module '@matatbread/matbot-plugin-api' {
- *     interface ServiceMap {
- *       '@matatbread/matbot-memory-types': MemoryManager;
- *     }
- *   }
- */
-export interface ServiceMap {}
-
 // ── Services container ────────────────────────────────────────────────────────
 
 export interface MatbotServices {
@@ -69,41 +53,44 @@ export interface MatbotServices {
    */
   createStore<T extends { id: string; version: string }>(namespace: string): Store<T>;
 
-  /** Look up a service registered by a plugin. Key is the plugin's types package name. */
-  get<K extends keyof ServiceMap>(key: K): ServiceMap[K] | undefined;
-
-  /** Register a service implementation. Called by a plugin's setup() to advertise itself. */
-  register<K extends keyof ServiceMap>(key: K, service: ServiceMap[K]): void;
-
-  /** Remove a service entry previously registered by a plugin. */
-  unregisterService?(key: string): void;
-
   /**
-   * Replace the active storage backend at runtime. All Store and FileStore references
-   * previously vended by createStore / services.sessions / services.files remain valid —
-   * they are forwarding proxies that will transparently route to the new backend after
-   * this call returns. The old backend is closed if it implements close().
+   * Register a service under a MatbotServices key. Well-known keys have dedicated behaviour:
+   *   'storageBackend' — replaces the active storage backend and re-wires all Store proxies.
+   *   'knowledge'      — replaces the active KnowledgeIndex, draining entries from the old one.
+   * All other keys store the value in a per-plugin service registry accessible via get().
+   *
+   * Third-party plugins advertise novel services by augmenting MatbotServices:
+   *
+   *   declare module '@matatbread/matbot-plugin-api' {
+   *     interface MatbotServices { memory?: MemoryManager; }
+   *   }
+   *
+   * Then register and retrieve with full type safety:
+   *   await services.register('memory', new MemoryManagerImpl(store));
+   *   const mem = services.get('memory'); // MemoryManager | undefined
    */
-  replaceStorageBackend?(next: StorageBackend): Promise<void>;
+  register<K extends keyof MatbotServices>(key: K, value: NonNullable<MatbotServices[K]>): Promise<void>;
 
-  /** Declare that this plugin provides a frontend. The runtime records the plugin name implicitly. */
-  registerFrontend?(): void;
+  /** Look up a service registered under a MatbotServices key via register(). */
+  get<K extends keyof MatbotServices>(key: K): MatbotServices[K] | undefined;
 
-  readonly providers:      ReadonlyMap<string, ProviderConfig>;
-  readonly sessions?:      Store<Session>;
+  /** @internal Remove a service entry — called by the runtime when the registering plugin is unloaded. */
+  unregister(key: string): void;
+
+  readonly providers:       ReadonlyMap<string, ProviderConfig>;
+  readonly sessions?:       Store<Session>;
   readonly storageBackend?: StorageBackend | undefined;
-  readonly files?:      FileStore;
-  readonly vault:          Vault;
-  readonly hooks:          HookRegistry;
-  readonly tools:          ToolRegistry;
-  readonly systemContext:  SystemContextRegistry;
+  readonly files?:          FileStore;
+  readonly vault:           Vault;
+  readonly hooks:           HookRegistry;
+  readonly tools:           ToolRegistry;
+  readonly systemContext:   SystemContextRegistry;
   /** Default working directory for tool execution. Plugins that create servers should forward this to tool contexts. */
-  readonly workdir?:    string;
+  readonly workdir?:        string;
   /** Absolute path to the loaded config file. Plugins that create servers should forward this to tool contexts. */
-  readonly configPath?: string;
+  readonly configPath?:     string;
 
   readonly knowledge: KnowledgeIndex;
-  replaceKnowledgeBackend(impl: KnowledgeIndex): void;
 }
 
 // ── Factory types ─────────────────────────────────────────────────────────────
@@ -143,13 +130,15 @@ export interface StorageBackend {
 // ── Plugin interface ──────────────────────────────────────────────────────────
 
 export interface MatbotPlugin {
-  readonly name:       string;
-  readonly apiVersion: string;
-  readonly manifest?:  PluginManifest;
-  readonly provider?:  ProviderAdapterFactory;
-  readonly storage?:   Record<string, StoreFactory>;
-  readonly tools?:     readonly Tool[];
-  readonly frontend?:  FrontendFactory;
+  readonly name:        string;
+  readonly apiVersion:  string;
+  readonly manifest?:   PluginManifest;
+  readonly provider?:   ProviderAdapterFactory;
+  readonly storage?:    Record<string, StoreFactory>;
+  readonly tools?:      readonly Tool[];
+  readonly frontend?:   FrontendFactory;
+  /** True for plugins that act as frontends but manage their own I/O without a FrontendFactory. */
+  readonly isFrontend?: boolean;
   /**
    * When present, the runtime calls open(dotData) before creating the services
    * object and uses the returned backend for all Store and FileStore creation.

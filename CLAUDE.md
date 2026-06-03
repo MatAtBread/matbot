@@ -48,24 +48,29 @@ Consequences:
 packages/
   core/
     runner/        — agentic loop, hook dispatch, plugin loader (@matatbread/matbot-core)
-    plugin-api/    — MatbotPlugin, MatbotServices, ServiceMap, all shared types (@matatbread/matbot-plugin-api)
-    config/        — YAML loading, .env parsing, placeholder resolution
-    security/      — VaultImpl, principal/grants
+    plugin-api/    — MatbotPlugin, MatbotServices, all shared types (@matatbread/matbot-plugin-api)
+    config/        — YAML loading, .env parsing
+    security/      — VaultImpl, principal/grants; resolves ${env:} and ${secret:} placeholders
+    knowledge/     — LookupKnowledgeIndex (default in-memory KnowledgeIndex implementation)
     storage/
       _base/       — filter/sort engine shared by all Store implementations
       filesystem/  — FilesystemStore<T> (Node, CAS-safe)
     providers/
       _base/       — SSE parser, shared HTTP helpers
-    tool-plugin/   — built-in plugin management tool (@matatbread/matbot-tool-plugin)
+    tool-plugin/   — built-in plugin and provider management tools (@matatbread/matbot-tool-plugin)
 
   plugins/
-    memory-types/  — MemoryManager interface + ServiceMap augmentation (@matatbread/matbot-memory-types)
+    memory-types/  — MemoryManager interface + MatbotServices augmentation (@matatbread/matbot-memory-types)
     memory/        — MemoryManagerImpl, JobQueueImpl, MemoryExtractorWorker (@matatbread/matbot-memory-node)
+    rumsfeld/      — contextual_search tool; knowledge fault handler (@matatbread/matbot-rumsfeld-node)
+    persist-ki-bge/ — persistent KnowledgeIndex with BGE reranker (@matatbread/matbot-persist-ki-bge-node)
     skills/        — skill injection via hook-based classifier (@matatbread/matbot-skills-node)
+    edit-session/  — edit_session_cut/fork/compact tools (@matatbread/matbot-edit-session)
     files/         — file codec and producer registry
     browser/       — OPFS store, WebCrypto vault (browser-only)
     frontend/
       web/         — HTTP + SSE web UI with session management
+      telegram/    — Telegram bot frontend (@matatbread/matbot-frontend-telegram)
     providers/
       anthropic/   — Anthropic Messages API adapter (also handles DeepSeek Anthropic-compat)
       openai-compat/ — OpenAI-compatible chat completions adapter
@@ -82,7 +87,7 @@ apps/
 
 ### Package naming
 - `@matatbread/matbot-foo` for packages with a single implementation
-- `@matatbread/matbot-foo-types` for interface-only packages (no implementation, used as ServiceMap keys)
+- `@matatbread/matbot-foo-types` for interface-only packages (no implementation; augments `MatbotServices`)
 - `@matatbread/matbot-foo-node` / `@matatbread/matbot-foo-browser` for platform-specific implementations
 
 ### Dependency direction
@@ -99,7 +104,7 @@ Providers are named LLM configurations in `matbot.yaml`. Each name is **fully se
 ```yaml
 providers:
   claude-sonnet-4-6:
-    type: anthropic
+    module: ./packages/plugins/providers/anthropic
     endpoint: https://api.anthropic.com
     model: claude-sonnet-4-6
     credentials:
@@ -109,9 +114,12 @@ providers:
 ```
 
 - Prefer duplication over references — five similar provider blocks is fine
-- `${env:VAR}` is resolved at config-load time; `${secret:name}` is resolved at runtime by `VaultImpl`
+- Both `${env:VAR}` and `${secret:name}` are resolved at runtime by `VaultImpl`; the YAML loader
+  leaves placeholders intact
 - Credentials never appear in source code
-- `type` selects the adapter (`anthropic` or `openai-compat`); `endpoint` overrides the base URL
+- `module` is the npm package name or relative path of the provider plugin; `endpoint` overrides
+  the base URL
+- The built-in `provider` tool can add and remove profiles live — no restart needed
 
 ---
 
@@ -125,6 +133,7 @@ All runtime state lives under `.data/` **next to `matbot.yaml`**, never in the s
   settings/    — Store<SettingsDoc> (plugin key-value settings)
   skills/      — Store<SkillDoc>
   schedules/   — Store<Schedule> (background plugin recurring jobs)
+  knowledge/   — Store<KnowledgeEntry> (persist-ki-bge plugin)
   bash-cwd/    — default working directory for bash tool execution (created lazily)
   files/       — FileStore blobs (MIME-typed, served by frontend); the 'workspace' namespace
                within files/ holds files written by workspace_write
@@ -138,40 +147,43 @@ Plugins may create additional subdirectories (e.g. `files/`, `settings/`) as nee
 ## Service registry
 
 `MatbotServices` is the runtime environment passed to every plugin's `setup()`. Its core
-members (hooks, tools, complete, settings, vault, sessions) are always present. Additional
-services — memory, file stores, custom cognitive subsystems — are advertised and consumed
-through a typed open registry:
+members (hooks, tools, complete, settings, vault, sessions) are always present. Optional
+services — memory, custom cognitive subsystems, etc. — are advertised and consumed through
+`register` and `get`, both typed against `keyof MatbotServices`:
 
 ```ts
-// Consuming a service (in any plugin's setup()):
-const memory = services.get('@matatbread/matbot-memory-types');
+// Advertising (in the providing plugin's setup()):
+await services.register('memory', new MemoryManagerImpl(store));
 
-// Advertising a service (in a plugin's setup()):
-services.register('@matatbread/matbot-memory-types', new MemoryManagerImpl(store));
+// Consuming (in any plugin's setup()):
+const memory = services.get('memory'); // MemoryManager | undefined
 ```
 
-The key is the **npm package name of the types package** that defines the interface. This
-guarantees global uniqueness (npm enforces it) and makes the contract self-documenting.
-TypeScript type safety comes from module augmentation of the `ServiceMap` interface in
-`@matatbread/matbot-plugin-api`:
+Type safety comes from augmenting `MatbotServices` in `@matatbread/matbot-plugin-api`:
 
 ```ts
-// In @matatbread/matbot-memory-types:
+// In the providing package (or alongside it):
 declare module '@matatbread/matbot-plugin-api' {
-  interface ServiceMap {
-    '@matatbread/matbot-memory-types': MemoryManager;
+  interface MatbotServices {
+    memory?: MemoryManager;
   }
 }
 ```
 
-Any plugin that imports the types package gets a fully-typed `services.get(...)` call at
-compile time. Core never references `MemoryManager` or any other optional service — they
-are negotiated at runtime between plugins.
+Any plugin that imports this declaration gets fully-typed `register`/`get` calls. Core
+never references `MemoryManager` — services are negotiated at runtime between plugins.
+
+Well-known keys have dedicated behaviour inside `register`:
+- `'storageBackend'` — replaces the active storage backend and re-wires all Store proxies
+- `'knowledge'` — replaces the active KnowledgeIndex, draining entries from the old one
 
 To introduce a new cognitive subsystem (e.g. `Imagination`):
-1. Create `@matatbread/matbot-imagination-types` — interface only, augments `ServiceMap`
-2. Create one or more implementation packages that depend on the types package
-3. Core is unchanged; other plugins discover the service via `services.get(...)`
+1. Declare `imagination?: Imagination` on `MatbotServices` (augment in your package)
+2. Call `await services.register('imagination', new ImaginationImpl(...))` in `setup()`
+3. Core is unchanged; other plugins discover the service via `services.get('imagination')`
+
+**Name collision**: the property name becomes the contract identifier. Choose a name
+that is unambiguous within the ecosystem — short but domain-specific beats globally unique.
 
 ---
 
@@ -199,6 +211,26 @@ in its `setup()`. A plugin that consumes memory calls `services.get('@matatbread
 The storage backend is swappable: `MemoryManagerImpl` depends only on `Store<MemoryEntry>`.
 Any storage plugin (filesystem, SQLite, Elasticsearch) that satisfies that interface can back
 the memory subsystem without touching the cognitive layer.
+
+---
+
+## Knowledge subsystem
+
+`KnowledgeIndex` is a **core** service (always present on `MatbotServices`), unlike memory
+which is plugin-optional. It stores named knowledge entries and supports term-based and
+semantic search.
+
+The default implementation (`LookupKnowledgeIndex` in `packages/core/knowledge/`) is
+in-memory and scores by term frequency. `packages/plugins/persist-ki-bge/` replaces it with
+a `Store<KnowledgeEntry>`-backed index that survives restarts and optionally calls a
+Cloudflare BGE reranker for semantic scoring.
+
+`packages/plugins/rumsfeld/` registers a `contextual_search` tool that queries the active
+`KnowledgeIndex` when the model encounters an unknown term. This is the primary consumption
+path: the model calls `contextual_search`, gets back the best-matching entry, and continues.
+
+`services.register('knowledge', impl)` swaps the active index at runtime — all subsequent
+`contextual_search` calls use the new backend immediately.
 
 ---
 

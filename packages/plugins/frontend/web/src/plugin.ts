@@ -9,8 +9,9 @@ const port = Number(process.env['MATBOT_WEB_PORT'] ?? 19778); // 19778 is "MB" i
 
 
 export const plugin: MatbotPlugin = {
-  name:       'frontend-web',
-  apiVersion: PLUGIN_API_VERSION,
+  name:        'frontend-web',
+  apiVersion:  PLUGIN_API_VERSION,
+  isFrontend:  true,
 
   async installationMessage(): Promise<string> {
     return `Go to http://localhost:${port}/ to access the web interface.`;
@@ -18,8 +19,6 @@ export const plugin: MatbotPlugin = {
 
   async setup(services: MatbotServices) {
     if (process.env['IS_SUB_AGENT'] === '1') return;
-
-    services.registerFrontend?.();
 
     const sessions = services.sessions;
     if (!sessions) throw new Error('frontend-web requires services.sessions');

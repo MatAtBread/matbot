@@ -687,7 +687,7 @@ async function main(): Promise<void> {
 
   // Each Store and FileStore is a forwarding proxy backed by a mutable `current` target.
   // Callers may freely capture references — all method calls route through the proxy to
-  // whichever backend is current. replaceStorageBackend() calls each proxy's swap fn.
+  // whichever backend is current. register('storageBackend', …) calls each proxy's swap fn.
   type AnyStore = Store<{ id: string; version: string }>;
   type SwapFn<T extends object> = (next: T) => void;
 
@@ -761,9 +761,26 @@ async function main(): Promise<void> {
 
     createStore,
 
-    get(key) { return serviceRegistry.get(key) as never; },
-    register(key, svc) { serviceRegistry.set(key, svc); },
-    unregisterService(key: string) { serviceRegistry.delete(key); },
+    get(key) { return serviceRegistry.get(key as string) as never; },
+    async register(key, value) {
+      if (key === 'storageBackend') {
+        const next = value as StorageBackend;
+        for (const [ns, [, swap]] of storeProxies) swap(next.createStore(ns));
+        swapFiles(next.fileStore);
+        const old = activeStorageBackend;
+        activeStorageBackend = next;
+        await old?.close?.();
+      } else if (key === 'knowledge') {
+        const prev = knowledgeImpl;
+        knowledgeImpl = value as KnowledgeIndex;
+        if (prev.entries !== undefined) {
+          for (const entry of prev.entries()) void (value as KnowledgeIndex).index(entry);
+        }
+      } else {
+        serviceRegistry.set(key as string, value);
+      }
+    },
+    unregister(key: string) { serviceRegistry.delete(key); },
 
     async complete(req) {
       const rawCfg = matbotConfig.providers.get(req.provider);
@@ -827,23 +844,7 @@ async function main(): Promise<void> {
     systemContext:  systemContextReg,
     workdir:    workDir,
     configPath,
-    async replaceStorageBackend(next: StorageBackend): Promise<void> {
-      // Swap every cached store proxy to the new backend.
-      for (const [ns, [, swap]] of storeProxies) swap(next.createStore(ns));
-      swapFiles(next.fileStore);
-      const old = activeStorageBackend;
-      activeStorageBackend = next;
-      await old?.close?.();
-    },
-
     knowledge: knowledgeProxy,
-    replaceKnowledgeBackend(impl: KnowledgeIndex) {
-      const prev = knowledgeImpl;
-      knowledgeImpl = impl;
-      if (prev.entries !== undefined) {
-        for (const entry of prev.entries()) void impl.index(entry);
-      }
-    },
   };
 
   // Load provider plugins first so module names can be canonicalised before any

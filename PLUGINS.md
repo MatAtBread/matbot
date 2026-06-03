@@ -116,62 +116,66 @@ interface MatbotServices {
   /** Hot-unload a plugin, removing its tools, hooks, and system context contributions. */
   unloadPlugin(specifier: string): Promise<void>;
 
-  /** Look up a service registered by another plugin. */
-  get<K extends keyof ServiceMap>(key: K): ServiceMap[K] | undefined;
+  /**
+   * Register a service under a MatbotServices key.
+   * Well-known keys: 'storageBackend' (re-wires all Store proxies), 'knowledge' (drains entries).
+   * All other keys are stored in a per-plugin registry, retrievable via get().
+   */
+  register<K extends keyof MatbotServices>(key: K, value: NonNullable<MatbotServices[K]>): Promise<void>;
 
-  /** Advertise a service implementation to other plugins. */
-  register<K extends keyof ServiceMap>(key: K, service: ServiceMap[K]): void;
+  /** Look up a service previously registered under a MatbotServices key. */
+  get<K extends keyof MatbotServices>(key: K): MatbotServices[K] | undefined;
 
-  /** Replace the active storage backend at runtime. All Store and FileStore references
-   *  captured before the call remain valid — they are forwarding proxies. */
-  replaceStorageBackend?(next: StorageBackend): Promise<void>;
+  /** @internal Remove a service entry — called by the runtime on plugin unload. */
+  unregister(key: string): void;
 
-  readonly providers:        ReadonlyMap<string, ProviderConfig>;
-  readonly storageBackend?:  StorageBackend | undefined;
-  readonly sessions?:        Store<Session>;
-  readonly files?:           FileStore;
-  readonly vault:            Vault;
-  readonly hooks:            HookRegistry;
-  readonly tools:            ToolRegistry;
-  readonly systemContext:    SystemContextRegistry;
-  readonly workdir?:         string;
-  readonly configPath?:      string;
+  readonly providers:       ReadonlyMap<string, ProviderConfig>;
+  readonly storageBackend?: StorageBackend | undefined;
+  readonly sessions?:       Store<Session>;
+  readonly files?:          FileStore;
+  readonly knowledge:       KnowledgeIndex;
+  readonly vault:           Vault;
+  readonly hooks:           HookRegistry;
+  readonly tools:           ToolRegistry;
+  readonly systemContext:   SystemContextRegistry;
+  readonly workdir?:        string;
+  readonly configPath?:     string;
 }
 ```
 
-### Plugin-to-plugin services: `ServiceMap`
+### Plugin-to-plugin services
 
-Optional services use an open registry keyed by the npm package name of the interface
-package. This keeps core minimal and allows any plugin to advertise novel services without
-modifying the harness.
+Plugins advertise novel services to each other by augmenting `MatbotServices` in
+`@matatbread/matbot-plugin-api`. The key is a property name that must not collide with any
+existing property — use a short, unambiguous name unique to your domain.
+
+**Declaring the contract** (in a types package, e.g. `@matatbread/matbot-memory-node`):
+
+```ts
+// memory-types.ts — augment MatbotServices to declare the property
+declare module '@matatbread/matbot-plugin-api' {
+  interface MatbotServices {
+    memory?: MemoryManager;   // optional: present only when the memory plugin is loaded
+  }
+}
+```
 
 **Advertising a service** (in the providing plugin's `setup()`):
 
 ```ts
-import type { MemoryManager } from '@matatbread/matbot-memory-types';
-// importing the types package also loads the ServiceMap augmentation
-
-services.register('@matatbread/matbot-memory-types', new MemoryManagerImpl(store));
+await services.register('memory', new MemoryManagerImpl(store));
 ```
 
 **Consuming a service** (in any plugin's `setup()`):
 
 ```ts
-import type { MemoryManager } from '@matatbread/matbot-memory-types';
-
-const memory = services.get('@matatbread/matbot-memory-types'); // MemoryManager | undefined
+const memory = services.get('memory'); // MemoryManager | undefined
+if (memory) { /* use it */ }
 ```
 
-Type safety comes from module augmentation in the types package:
-
-```ts
-// In @matatbread/matbot-memory-types:
-declare module '@matatbread/matbot-plugin-api' {
-  interface ServiceMap {
-    '@matatbread/matbot-memory-types': MemoryManager;
-  }
-}
-```
+Both `register` and `get` are typed through `MatbotServices`, so the compiler enforces that
+`'memory'` is a valid key and that the value is a `MemoryManager`. No separate types
+package or import-side-effect trick is needed — the augmentation alone is sufficient.
 
 ### Sub-runner: `services.complete()`
 
@@ -369,18 +373,18 @@ export const plugin: MatbotPlugin = {
     // If already activated via startup pre-scan, skip.
     if (services.storageBackend instanceof MyBackend) return;
     // Hot-loaded at runtime: activate now.
-    if (!services.replaceStorageBackend || !services.configPath) return;
+    if (!services.configPath) return;
     const { join, dirname } = await import('node:path');
     const dotData = join(dirname(services.configPath), '.data');
-    await services.replaceStorageBackend(await MyBackend.open(dotData));
+    await services.register('storageBackend', await MyBackend.open(dotData));
   },
 };
 ```
 
 When the plugin is listed in `matbot.yaml`, `open()` is called before any `setup()`
 runs and the backend is used for all stores from startup. When hot-loaded at runtime,
-`setup()` calls `replaceStorageBackend()`, which transparently re-targets all existing
-`Store` and `FileStore` proxy references — callers do not need to be updated.
+`setup()` calls `register('storageBackend', backend)`, which transparently re-targets all
+existing `Store` and `FileStore` proxy references — callers do not need to be updated.
 
 ### `Store<T>` interface
 
@@ -532,11 +536,64 @@ independently swappable.
 
 ---
 
+## Knowledge index
+
+The knowledge index is a **core** service — always present at `services.knowledge`. By
+default it uses `LookupKnowledgeIndex`, an in-memory implementation that scores entries by
+term-occurrence frequency. Plugins can replace it with a richer backend at any time by
+calling `services.register('knowledge', impl)`.
+
+```ts
+interface KnowledgeIndex {
+  /** Add or update an entry. */
+  index(entry: KnowledgeEntry): Promise<void>;
+
+  /** Find the most relevant entries for a list of query terms. */
+  search(
+    terms:  Array<{ term: string; context?: string }>,
+    signal: AbortSignal,
+  ): Promise<KnowledgeEntry[]>;
+
+  /** Iterate all indexed entries (optional — used by loaders). */
+  entries?(): Iterable<KnowledgeEntry>;
+}
+
+interface KnowledgeEntry {
+  id:       string;
+  version:  string;
+  entities: string[];   // canonical names / aliases for this entry
+  content:  string;     // the knowledge text shown to the model
+}
+```
+
+### Rumsfeld: contextual knowledge fault handling
+
+The `@matatbread/matbot-rumsfeld-node` plugin registers a `contextual_search` tool. When
+the model encounters an unknown term it calls this tool, which queries `services.knowledge`
+and returns the best-matching entry. This lets the model resolve domain-specific references
+(personal nouns, proprietary systems, user preferences) without hallucinating.
+
+### Persistent BGE knowledge index
+
+`@matatbread/matbot-persist-ki-bge-node` replaces the default in-memory index with one
+backed by a `Store<KnowledgeEntry>`, with entity/heading search and an optional Cloudflare
+BGE reranker for semantic scoring. Credentials: `SKILL_RANK_API_KEY`,
+`CLOUDFLARE_ACCOUNT_ID`.
+
+### Custom knowledge backend
+
+Implement `KnowledgeIndex` and call `services.register('knowledge', impl)` in your
+plugin's `setup()`. The replacement takes effect immediately for all subsequent
+`contextual_search` calls.
+
+---
+
 ## First-party plugins
 
 | Package | Tools / Kind | Description |
 |---------|--------------|-------------|
-| `@matatbread/matbot-tool-plugin` | `plugin` · **always loaded** | Manage plugins: list, add, remove |
+| `@matatbread/matbot-tool-plugin` | `plugin` · **always loaded** | Manage plugins: list, add, remove, discover |
+| *(built-in)* | `provider` · **always loaded** | Manage LLM provider profiles: list, add, remove |
 | `@matatbread/matbot-tool-bash` | `bash` | Run bash scripts; stream stdout/stderr |
 | `@matatbread/matbot-tool-docker-bash` | `bash` (sandboxed) | Drop-in for bash; runs scripts inside Docker |
 | `@matatbread/matbot-tool-http` | `http` | Make HTTP requests |
@@ -544,13 +601,18 @@ independently swappable.
 | `@matatbread/matbot-tool-background` | `background`, `every`, `every_list`, `every_cancel` | Run prompts in detached processes; recurring schedules |
 | `@matatbread/matbot-tool-mcp` | MCP client | Connect to Model Context Protocol servers |
 | `@matatbread/matbot-sessions` | `session_list/get/rename/hide` | Session management tools |
+| `@matatbread/matbot-edit-session` | `edit_session_cut/fork/compact` | Trim, branch, and compact sessions to manage context window |
 | `@matatbread/matbot-skills-node` | hooks + classifier | File-backed skill injection |
+| `@matatbread/matbot-rumsfeld-node` | `contextual_search` | Contextual knowledge fault handler — resolves unknown terms via the knowledge index |
+| `@matatbread/matbot-persist-ki-bge-node` | knowledge backend | Persistent KnowledgeIndex with entity search and optional BGE reranker |
+| `@matatbread/matbot-memory-node` | hooks + service | Automatic memory extraction, recall, and context injection |
 | `@matatbread/matbot-frontend-web` | frontend + hooks | Web UI with session management |
-| `@matatbread/matbot-provider-anthropic` | provider | Anthropic Messages API (also DeepSeek compat) |
+| `@matatbread/matbot-frontend-telegram` | frontend + tools | Telegram bot with `telegram_send/open_door/set_provider` tools |
+| `@matatbread/matbot-provider-anthropic` | provider | Anthropic Messages API (also DeepSeek Anthropic-compat) |
 | `@matatbread/matbot-provider-openai-compat` | provider | OpenAI-compatible chat completions |
 | `@matatbread/matbot-storage-sqlite` | storage backend | SQLite-backed Store + FileStore |
 
-Provider plugins are loaded automatically when their `type` is referenced in a provider
+Provider plugins are loaded automatically when their `module` is referenced in a provider
 config entry — they don't need an explicit `plugins:` entry.
 
 ---

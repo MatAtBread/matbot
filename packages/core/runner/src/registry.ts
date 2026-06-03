@@ -16,7 +16,7 @@ const state = {
   toolRegistry:    undefined as ToolRegistry | undefined,
   frontend:         undefined as FrontendFactory | undefined,
   frontendPlugins:  new Set<string>(),
-  serviceKeys:     new Map<string, string[]>(),  // pluginName → ServiceMap keys it registered
+  serviceKeys:     new Map<string, string[]>(),  // pluginName → MatbotServices keys it registered
   specifierToName: new Map<string, string>(),    // resolved specifier → plugin name
 };
 
@@ -83,6 +83,9 @@ export function registerPlugin(plugin: MatbotPlugin, specifier?: string): void {
   if (plugin.frontend !== undefined) {
     state.frontend = plugin.frontend;
   }
+  if (plugin.frontend !== undefined || plugin.isFrontend === true) {
+    state.frontendPlugins.add(plugin.name);
+  }
   if (specifier !== undefined) {
     state.specifierToName.set(specifier, plugin.name);
   }
@@ -144,13 +147,12 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotServices
       removeByPlugin: (name: string) => services.systemContext.removeByPlugin(name),
       build:          (ctx)          => services.systemContext.build(ctx),
     },
-    register(key, svc) {
+    async register(key, svc) {
       const keys = state.serviceKeys.get(plugin.name) ?? [];
       keys.push(key as string);
       state.serviceKeys.set(plugin.name, keys);
-      services.register(key, svc);
+      await services.register(key, svc);
     },
-    registerFrontend() { state.frontendPlugins.add(plugin.name); },
   };
   for (const tool of plugin.tools ?? []) {
     scopedServices.tools.register(tool);
@@ -176,7 +178,7 @@ export async function unloadPlugin(pluginName: string, services: MatbotServices)
   services.systemContext.removeByPlugin(pluginName);
 
   for (const key of state.serviceKeys.get(pluginName) ?? []) {
-    services.unregisterService?.(key);
+    services.unregister(key);
   }
   state.serviceKeys.delete(pluginName);
 

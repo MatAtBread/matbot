@@ -13,7 +13,7 @@ export function createPersistKIBGEPlugin(): MatbotPlugin {
 
     async setup(services) {
       const store = services.createStore<KnowledgeEntry>('knowledge') as Store<KnowledgeEntry>;
-      services.replaceKnowledgeBackend(new PersistBGEKnowledgeIndex(store, services.vault));
+      await services.register('knowledge', new PersistBGEKnowledgeIndex(store, services.vault));
     },
   };
 }
