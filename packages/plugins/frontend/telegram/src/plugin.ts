@@ -44,7 +44,7 @@ async function buildProvider(name: string, services: MatbotServices): Promise<Ac
   if (!rawConfig) throw new Error(`Provider "${name}" not found`);
 
   const resolvedCreds: Record<string, string> = {};
-  for (const [k, v] of Object.entries(rawConfig.credentials)) {
+  for (const [k, v] of Object.entries(rawConfig.credentials ?? {})) {
     resolvedCreds[k] = await services.vault.resolve(v);
   }
   const config: ProviderConfig = { ...rawConfig, credentials: resolvedCreds };
@@ -152,8 +152,10 @@ export const plugin: MatbotPlugin = {
   ],
 
   async setup(services: MatbotServices) {
-    const botToken = process.env['TELEGRAM_API_KEY']!;
-    if (!botToken) {
+    let botToken: string;
+    try {
+      botToken = await services.vault.resolve('${env:TELEGRAM_API_KEY}');
+    } catch {
       console.warn('[frontend-telegram] TELEGRAM_API_KEY not set; skipping');
       return;
     }

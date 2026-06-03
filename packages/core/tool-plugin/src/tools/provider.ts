@@ -213,6 +213,33 @@ function makeExecutor(liveProviders: Map<string, ProviderConfig>, pluginNameToOr
           return;
         }
 
+        // Resolve the canonical plugin name so resolveProviderFactory can find the factory.
+        // The module field in liveProviders must be the plugin name (e.g. @matatbread/matbot-provider-anthropic),
+        // not the original file path. The YAML block keeps the original path for portability.
+        let canonicalModule = mod;
+        try {
+          const loadedPlugin = await ctx.loadPlugin(mod);
+          canonicalModule = loadedPlugin.name;
+        } catch {
+          // Plugin already loaded — find its canonical name from the registry.
+          const existing = getRegisteredPlugins().find(p =>
+            p.provider !== undefined &&
+            (pluginNameToOrigPath?.get(p.name) === mod || p.name === mod),
+          );
+          if (existing !== undefined) {
+            canonicalModule = existing.name;
+          } else {
+            yield { type: 'error', message: `Could not load provider module "${mod}". Ensure it is installed and the path is correct.` };
+            return;
+          }
+        }
+
+        // Keep the original path in YAML (human-readable, portable).
+        // Map the canonical name back to the original path for list/description display.
+        if (pluginNameToOrigPath !== undefined && canonicalModule !== mod) {
+          (pluginNameToOrigPath as Map<string, string>).set(canonicalModule, mod);
+        }
+
         const block = buildProviderBlock({
           name,
           module: mod,
@@ -228,7 +255,7 @@ function makeExecutor(liveProviders: Map<string, ProviderConfig>, pluginNameToOr
         // Hot-update the live map — new profile is usable immediately without restart.
         liveProviders.set(name, {
           name,
-          module: mod,
+          module: canonicalModule,
           model,
           ...(endpoint   !== undefined ? { endpoint } : {}),
           ...(envVarName !== undefined

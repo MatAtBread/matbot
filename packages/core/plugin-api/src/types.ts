@@ -385,6 +385,7 @@ export type HealthStatus =
 
 export interface ToolRegistry {
   register(tool: Tool): void;
+  remove(name: string): void;
   resolve(name: string): Tool | null;
   list(): readonly Tool[];
   removeByPlugin(pluginName: string): void;

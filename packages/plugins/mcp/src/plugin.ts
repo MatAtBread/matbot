@@ -266,6 +266,9 @@ The connection is validated and tools are discovered before the server is saved.
         const server = activeServers.get(name);
         if (server) {
           server.client.close();
+          for (const toolDef of server.tools) {
+            registry!.remove(`mcp__${name}__${toolDef.name}`);
+          }
           activeServers.delete(name);
         }
 
@@ -277,7 +280,7 @@ The connection is validated and tools are discovered before the server is saved.
         yield {
           type: 'result',
           value: {
-            message: `"${name}" disconnected and removed. Tools prefixed mcp__${name}__ will report errors if called before restart.`,
+            message: `"${name}" disconnected and removed. Its tools have been unregistered.`,
           },
         };
       },
