@@ -184,7 +184,7 @@ export function createSkillTools(
       description: `Load a skill by context.
 
       Examples:
-        - Is my <unkonwn> currently working?
+        - Is <unkonwn> currently working?
         - Tell me about <unknown>.
         - Use your skill about <unknown>.
         - <unknown> said to <unknown> that <unknown> is broken.
@@ -198,7 +198,7 @@ export function createSkillTools(
       Only ask for more information about the unknown term if you have already tried to find a relevant skill using the term as a search query, and that search did not return any relevant results.
 
       Markers of "unknown" terms are:
-      - use of definite articles or possessives ("the", "my") even if the noun is common, for example "my Volvo" isn't a reference to Volvo's in general, it's about the user's specific car which they assume you have information about.
+      - use of definite articles, demonstratives or possessives ("the", "my", "his", "that", "Fred's") even if the noun is common, for example "my Volvo" isn't a reference to Volvo's in general, it's about the user's specific car which they assume you have information about.
       - words that are clearly novel proper nouns or nouns used in an non-standard or domain-specific way, for example "the Xmit system" or "What does Xmit say?".
       - when the user directly uses the term 'skill' in their query, for example "Use your skill about <unknown> to do <unknown>".
 
