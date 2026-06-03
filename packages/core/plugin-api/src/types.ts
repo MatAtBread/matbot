@@ -264,6 +264,29 @@ export interface Store<T extends { id: string; version: string }> {
   query(q: StoreQuery<T>): Promise<QueryResult<T>>;
 }
 
+// ── Knowledge index ───────────────────────────────────────────────────────────
+
+export interface KnowledgeEntry {
+  id:           string;
+  version:      string;
+  entities:     string[];
+  tags:         string[];
+  summary:      string;
+  content:      string;
+  contentHash?: string;
+  source:       { type: string; uuid: string };
+  confidence?:  number;
+  createdAt:    string;
+  updatedAt:    string;
+}
+
+export interface KnowledgeIndex {
+  index(entry: KnowledgeEntry): Promise<void>;
+  search(terms: Array<{ term: string; context?: string }>, signal: AbortSignal): Promise<KnowledgeEntry[]>;
+  /** Enumerate all indexed entries. When present, replaceKnowledgeBackend drains these into the incoming backend. */
+  entries?(): Iterable<KnowledgeEntry>;
+}
+
 // ── Tools ─────────────────────────────────────────────────────────────────────
 
 export type ToolEvent =

@@ -32,6 +32,9 @@ importers:
       '@matatbread/matbot-files-node':
         specifier: workspace:*
         version: link:../../packages/plugins/files
+      '@matatbread/matbot-knowledge':
+        specifier: workspace:*
+        version: link:../../packages/core/knowledge
       '@matatbread/matbot-security':
         specifier: workspace:*
         version: link:../../packages/core/security
@@ -50,6 +53,16 @@ importers:
         version: 5.9.3
 
   packages/core/config:
+    dependencies:
+      '@matatbread/matbot-plugin-api':
+        specifier: workspace:*
+        version: link:../plugin-api
+    devDependencies:
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
+
+  packages/core/knowledge:
     dependencies:
       '@matatbread/matbot-plugin-api':
         specifier: workspace:*
@@ -266,6 +279,19 @@ importers:
         specifier: 'catalog:'
         version: 5.9.3
 
+  packages/plugins/persist-ki-bge:
+    dependencies:
+      '@matatbread/matbot-plugin-api':
+        specifier: workspace:*
+        version: link:../../core/plugin-api
+    devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 22.19.19
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
+
   packages/plugins/providers/anthropic:
     dependencies:
       '@matatbread/matbot-plugin-api':
@@ -298,6 +324,19 @@ importers:
         specifier: workspace:*
         version: link:../../../core/providers/_base
     devDependencies:
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
+
+  packages/plugins/rumsfeld:
+    dependencies:
+      '@matatbread/matbot-plugin-api':
+        specifier: workspace:*
+        version: link:../../core/plugin-api
+    devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 22.19.19
       typescript:
         specifier: 'catalog:'
         version: 5.9.3

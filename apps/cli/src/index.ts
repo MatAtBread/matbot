@@ -15,11 +15,12 @@ import { appendMessage, createMessage,
          unloadPlugin as unloadPluginFn,
          getPluginNameForSpecifier }       from '@matatbread/matbot-core';
 import type { MatbotServices, PluginSettings, ToolRegistry, Vault,
-              MatbotPlugin, StorageBackend } from '@matatbread/matbot-core';
+              MatbotPlugin, StorageBackend, KnowledgeIndex } from '@matatbread/matbot-core';
 import { systemPrincipal, VaultImpl }      from '@matatbread/matbot-security';
 import { FilesystemStore }                 from '@matatbread/matbot-storage-filesystem';
 import { FilesystemFileStore }             from '@matatbread/matbot-files-node';
 import { createBuiltinTools, createProviderTool } from '@matatbread/matbot-tool-plugin';
+import { LookupKnowledgeIndex }               from '@matatbread/matbot-knowledge';
 import { access, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { createInterface }                 from 'node:readline/promises';
 import { createRequire }                   from 'node:module';
@@ -660,6 +661,12 @@ async function main(): Promise<void> {
   // A plugin with storageBackend replaces the default filesystem stores.
   // It must be listed before any plugin whose setup() calls createStore.
   let activeStorageBackend: StorageBackend | undefined;
+  let knowledgeImpl: KnowledgeIndex = new LookupKnowledgeIndex();
+  const knowledgeProxy = new Proxy({} as KnowledgeIndex, {
+    get(_t, prop: string | symbol) {
+      return (knowledgeImpl as unknown as Record<string | symbol, unknown>)[prop];
+    },
+  });
   for (const spec of allSpecifiers) {
     try {
       const mod  = await import(/* @vite-ignore */ spec) as Record<string, unknown>;
@@ -725,6 +732,7 @@ async function main(): Promise<void> {
   const toolMap = new Map<string, Tool>(createBuiltinTools().map(t => [t.name, t]));
   const toolReg: ToolRegistry = {
     register: (t: Tool) => { toolMap.set(t.name, t); },
+    remove:   (n: string) => { toolMap.delete(n); },
     resolve:  (n) => toolMap.get(n) ?? null,
     list:     () => [...toolMap.values()],
     removeByPlugin: (pluginName: string) => {
@@ -826,6 +834,15 @@ async function main(): Promise<void> {
       const old = activeStorageBackend;
       activeStorageBackend = next;
       await old?.close?.();
+    },
+
+    knowledge: knowledgeProxy,
+    replaceKnowledgeBackend(impl: KnowledgeIndex) {
+      const prev = knowledgeImpl;
+      knowledgeImpl = impl;
+      if (prev.entries !== undefined) {
+        for (const entry of prev.entries()) void impl.index(entry);
+      }
     },
   };
 

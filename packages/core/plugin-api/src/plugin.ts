@@ -1,7 +1,7 @@
 import type {
   FileStore, Vault, Message, ModelParameters,
   ProviderAdapter, ProviderConfig, Tool, ToolRegistry, FrontendAdapter,
-  Store, Session, SystemContextRegistry,
+  Store, Session, SystemContextRegistry, KnowledgeIndex,
 } from './types.js';
 import type { HookRegistry } from './hooks.js';
 
@@ -101,6 +101,9 @@ export interface MatbotServices {
   readonly workdir?:    string;
   /** Absolute path to the loaded config file. Plugins that create servers should forward this to tool contexts. */
   readonly configPath?: string;
+
+  readonly knowledge: KnowledgeIndex;
+  replaceKnowledgeBackend(impl: KnowledgeIndex): void;
 }
 
 // ── Factory types ─────────────────────────────────────────────────────────────
