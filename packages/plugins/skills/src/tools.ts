@@ -180,7 +180,7 @@ export function createSkillTools(
 
   return [
     {
-      name: 'unknown_skill',
+      name: 'skill_search',
       description: `Load a skill by context.
 
       Examples:
@@ -190,11 +190,12 @@ export function createSkillTools(
         - <unknown> said to <unknown> that <unknown> is broken.
         - The <unknown> is arriving for <unknown>'s birthday.
 
-      Use when you encounter an "unknown" concept, system, term, entity or domain you lack specific context about — a named
-      system you haven't been trained on, user-specific preferences or setup, or a specialised topic the user assumes you know.
+      Use when you encounter an "unknown" concept, system, term, entity or domain you lack specific context about — a named system you haven't
+      been trained on, user-specific preferences, personal information, a specialised topic or other subject the user assumes you know about.
 
-      You should use this tool early and as a higher priority than external searches as it is more likely to yield domain specific
-      results than a general search.
+      Use this tool early and as a higher priority than external searches as it is more likely to yield domain specific results than a general search.
+      Use this tool in preference to guessing, hallucinating, confabnulating or making assumptions about what the unknown term might refer to.
+      Only ask for more information about the unknown term if you have already tried to find a relevant skill using the term as a search query, and that search did not return any relevant results.
 
       Markers of "unknown" terms are:
       - use of definite articles or possessives ("the", "my") even if the noun is common, for example "my Volvo" isn't a reference to Volvo's in general, it's about the user's specific car which they assume you have information about.
