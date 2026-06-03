@@ -20,7 +20,8 @@ and frontends. Not a product; infrastructure.
   - **Storage backends** — filesystem (default) or SQLite
   - **Providers** — add and remove LLM profiles live via the built-in `provider` tool
 
-[Design ethos and developer nodes](CLAUDE.md)
+To find out more about what makes MatBot special, take a look at the [Design ethos and developer notes](CLAUDE.md)
+
 ---
 
 ## Requirements
@@ -288,7 +289,7 @@ subdirectories as needed.
 
 ## Writing your own plugin
 
-See [PLUGINS.md](PLUGINS.md) for the full plugin API reference. I recommend checking the [design ethos and developer nodes](CLAUDE.md) too.
+See [PLUGINS.md](PLUGINS.md) for the full plugin API reference. I recommend checking the [design ethos and developer notes](CLAUDE.md) too.
 
 Plugins can provide tools, frontends, LLM providers (try the 'customer-services' "LLM" - my personal
 favourite - it's free and runs without GPU support or an API key!)

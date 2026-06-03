@@ -4,6 +4,8 @@ Plugins are the extension point for everything beyond the built-in `plugin` mana
 tool. They register tools, LLM providers, storage backends, frontends, and hooks, and
 can call LLMs programmatically, persist scoped settings, and access shared services.
 
+I recommend checking the [design ethos and developer notes](CLAUDE.md) before writing plugins.
+
 ---
 
 ## The contract
