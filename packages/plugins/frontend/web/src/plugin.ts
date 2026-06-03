@@ -26,6 +26,7 @@ export const plugin: MatbotPlugin = {
 
     webServer = createWebServer({
       store: sessions,
+      vault: services.vault,
       async resolveProvider(name) {
         const cfg = services.providers.get(name);
         if (!cfg) return null;

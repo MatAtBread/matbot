@@ -3,6 +3,11 @@ import { getRegisteredPlugins }                             from '@matatbread/ma
 import { readFile, writeFile }                              from 'node:fs/promises';
 import path                                                 from 'node:path';
 
+// Credential env-var naming convention for secrets created by this tool.
+function credEnvVarName(profileName: string): string {
+  return `MATBOT_API_KEY_${profileName.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
+}
+
 // ── Input types ───────────────────────────────────────────────────────────────
 
 type ProviderInput =
@@ -140,7 +145,6 @@ function makeExecutor(liveProviders: Map<string, ProviderConfig>, pluginNameToOr
         yield { type: 'error', message: 'No config path in tool context — cannot manage providers.' };
         return;
       }
-      const projectDir = path.dirname(configPath);
 
       // ── list ───────────────────────────────────────────────────────────────
       if (action === 'list') {
@@ -179,16 +183,9 @@ function makeExecutor(liveProviders: Map<string, ProviderConfig>, pluginNameToOr
           const credKey = credentialKey ?? 'apiKey';
           const answer  = await ctx.prompt(`${credKey} for provider "${name}" (leave blank if none required):`, '');
           if (answer.trim()) {
-            const varName = `MATBOT_API_KEY_${name.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
-            const envPath = path.join(projectDir, '.env');
-            let existing  = '';
-            try { existing = await readFile(envPath, 'utf8'); } catch { /* no .env yet */ }
-            const lines   = existing
-              ? existing.split('\n').filter(l => !l.startsWith(`${varName}=`) && l !== '')
-              : [];
-            lines.push(`${varName}=${answer.trim()}`);
-            await writeFile(envPath, lines.join('\n') + '\n', 'utf8');
-            yield { type: 'stdout', chunk: `API key written to .env as ${varName}.\n` };
+            const varName = credEnvVarName(name);
+            await ctx.vault.createSecret(varName, answer.trim());
+            yield { type: 'stdout', chunk: `API key stored in vault as ${varName}.\n` };
             envVarName = varName;
           }
         }

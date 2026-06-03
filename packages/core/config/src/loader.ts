@@ -60,14 +60,12 @@ function toProviderConfig(name: string, raw: YamlMap): ProviderConfig {
 }
 
 export function parseConfig(
-  text: string,
-  env:  Record<string, string | undefined> = {},
+  text:  string,
   base?: string,
 ): MatbotConfig {
-  // Shallow merge: derived keys win over base keys.
-  const derived = parseYaml(text, env);
+  const derived = parseYaml(text);
   const doc: YamlMap = base !== undefined
-    ? { ...parseYaml(base, env), ...derived }
+    ? { ...parseYaml(base), ...derived }
     : derived;
 
   // plugins: optional ordered list of specifiers

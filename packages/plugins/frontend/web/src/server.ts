@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { join, relative, resolve, extname } from 'node:path';
 import type {
   HookRegistry, MatbotPlugin, Principal, ProviderAdapter, ProviderConfig,
-  Session, Store, ToolRegistry, FileStore, SystemContextRegistry,
+  Session, Store, ToolRegistry, FileStore, SystemContextRegistry, Vault,
 } from '@matatbread/matbot-core';
 import { appendMessage, createMessage, createSession, runSession } from '@matatbread/matbot-core';
 import { sseComment, sseEvent } from './sse-writer.js';
@@ -11,6 +11,7 @@ import { html, js, favicon } from './ui.js';
 
 export interface WebServerDeps {
   store:          Store<Session>;
+  vault:          Vault;
   /** Resolve a provider name to its adapter and fully-resolved config. Returns null if unknown. */
   resolveProvider: (name: string) => Promise<{ adapter: ProviderAdapter; config: ProviderConfig } | null>;
   loadPlugin:     (specifier: string) => Promise<MatbotPlugin>;
@@ -173,6 +174,7 @@ export function createWebServer(deps: WebServerDeps) {
       session:    stubSession,
       principal:  DEFAULT_PRINCIPAL,
       signal:     ac.signal,
+      vault:      deps.vault,
       loadPlugin:   deps.loadPlugin,
       unloadPlugin: deps.unloadPlugin,
       prompt:     (q: string, def?: string) => def !== undefined
@@ -329,6 +331,7 @@ export function createWebServer(deps: WebServerDeps) {
           ...(deps.workdir    ? { workdir:    deps.workdir    } : {}),
           ...(deps.files      ? { files:      deps.files      } : {}),
           ...(deps.configPath ? { configPath: deps.configPath } : {}),
+          vault:          deps.vault,
           signal:         ac.signal,
           prompt:         promptFn,
           loadPlugin:     deps.loadPlugin,

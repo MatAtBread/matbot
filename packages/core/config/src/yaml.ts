@@ -7,9 +7,9 @@
  *   - Scalar types: string, number, boolean, null
  *   - Quoted strings (single and double)
  *   - Comments (# ...)
- *   - ${env:VAR_NAME} substitution in string values (expanded from env)
  *
- * Does NOT support anchors, aliases, or flow syntax.
+ * Does NOT support anchors, aliases, flow syntax, or ${env:} expansion.
+ * ${env:NAME} and ${secret:name} placeholders are left intact for the Vault to resolve.
  * Supports literal block scalars (|) and folded block scalars (>).
  */
 
@@ -19,7 +19,7 @@ export type YamlMap   = { [key: string]: YamlValue };
 
 interface Token {
   indent: number;
-  raw:    string;    // original stripped content (no comment)
+  raw:    string;
 }
 
 function tokenize(text: string): Token[] {
@@ -33,34 +33,27 @@ function tokenize(text: string): Token[] {
   return tokens;
 }
 
-function parseScalar(raw: string, env: Record<string, string | undefined>): YamlScalar {
-  // Expand ${env:VAR}
-  const expanded = raw.replace(/\$\{env:([^}]+)\}/g, (_, name: string) =>
-    env[name] ?? `\${env:${name}}`
-  );
-
-  // Quoted string
-  if ((expanded.startsWith('"') && expanded.endsWith('"')) ||
-      (expanded.startsWith("'") && expanded.endsWith("'"))) {
-    return expanded.slice(1, -1);
+function parseScalar(raw: string): YamlScalar {
+  if ((raw.startsWith('"') && raw.endsWith('"')) ||
+      (raw.startsWith("'") && raw.endsWith("'"))) {
+    return raw.slice(1, -1);
   }
 
-  if (expanded === 'null' || expanded === '~') return null;
-  if (expanded === 'true')  return true;
-  if (expanded === 'false') return false;
+  if (raw === 'null' || raw === '~') return null;
+  if (raw === 'true')  return true;
+  if (raw === 'false') return false;
 
-  const num = Number(expanded);
-  if (!Number.isNaN(num) && expanded !== '') return num;
+  const num = Number(raw);
+  if (!Number.isNaN(num) && raw !== '') return num;
 
-  return expanded;
+  return raw;
 }
 
-function parse(tokens: Token[], pos: number, baseIndent: number, env: Record<string, string | undefined>): { value: YamlValue; next: number } {
+function parse(tokens: Token[], pos: number, baseIndent: number): { value: YamlValue; next: number } {
   if (pos >= tokens.length) return { value: null, next: pos };
 
   const first = tokens[pos]!;
 
-  // Sequence
   if (first.raw.startsWith('- ')) {
     const items: YamlValue[] = [];
     let i = pos;
@@ -70,12 +63,11 @@ function parse(tokens: Token[], pos: number, baseIndent: number, env: Record<str
       if (tok.indent === first.indent && tok.raw.startsWith('- ')) {
         const itemRaw = tok.raw.slice(2).trim();
         if (itemRaw === '') {
-          // Multi-line nested value
-          const sub = parse(tokens, i + 1, tok.indent + 2, env);
+          const sub = parse(tokens, i + 1, tok.indent + 2);
           items.push(sub.value);
           i = sub.next;
         } else {
-          items.push(parseScalar(itemRaw, env));
+          items.push(parseScalar(itemRaw));
           i++;
         }
       } else {
@@ -85,7 +77,6 @@ function parse(tokens: Token[], pos: number, baseIndent: number, env: Record<str
     return { value: items, next: i };
   }
 
-  // Mapping
   if (first.raw.includes(':')) {
     const map: YamlMap = {};
     let i = pos;
@@ -99,7 +90,6 @@ function parse(tokens: Token[], pos: number, baseIndent: number, env: Record<str
       const rest     = tok.raw.slice(colonIdx + 1).trimStart();
 
       if (rest === '|' || rest === '>') {
-        // Block scalar: collect indented lines as raw text, don't recurse.
         const blockIndent = tok.indent + 2;
         const lines: string[] = [];
         let j = i + 1;
@@ -113,28 +103,24 @@ function parse(tokens: Token[], pos: number, baseIndent: number, env: Record<str
           : lines.join(' ');
         i = j;
       } else if (rest === '') {
-        // Value is the next indented block — recurse as nested YAML.
-        const sub = parse(tokens, i + 1, tok.indent + 2, env);
+        const sub = parse(tokens, i + 1, tok.indent + 2);
         map[key]  = sub.value;
         i         = sub.next;
       } else {
-        map[key] = parseScalar(rest, env);
+        map[key] = parseScalar(rest);
         i++;
       }
     }
     return { value: map, next: i };
   }
 
-  return { value: parseScalar(first.raw, env), next: pos + 1 };
+  return { value: parseScalar(first.raw), next: pos + 1 };
 }
 
-export function parseYaml(
-  text: string,
-  env: Record<string, string | undefined> = {},
-): YamlMap {
+export function parseYaml(text: string): YamlMap {
   const tokens = tokenize(text);
   if (tokens.length === 0) return {};
-  const { value } = parse(tokens, 0, 0, env);
+  const { value } = parse(tokens, 0, 0);
   return (typeof value === 'object' && value !== null && !Array.isArray(value))
     ? value as YamlMap
     : {};

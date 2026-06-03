@@ -227,6 +227,7 @@ async function runTurn(
   loadPluginFn:   (specifier: string) => Promise<MatbotPlugin>,
   unloadPluginFn: (specifier: string) => Promise<void>,
   configPath:     string,
+  vault:          Vault,
 ): Promise<Session> {
   const traceId  = crypto.randomUUID();
   const ac       = new AbortController();
@@ -277,6 +278,7 @@ async function runTurn(
       workdir,
       files,
       configPath,
+      vault,
       prompt:       promptFn,
       loadPlugin:   loadPluginFn,
       unloadPlugin: unloadPluginFn,
@@ -331,7 +333,7 @@ async function runTurn(
               updated = await runTurn(
                 ev.session, [{ type: 'form-response', values }],
                 providerConfig, adapter, tools, store, principal, workdir, files,
-                hooks, systemContext, promptFn, loadPluginFn, unloadPluginFn, configPath,
+                hooks, systemContext, promptFn, loadPluginFn, unloadPluginFn, configPath, vault,
               );
               return updated;
             }
@@ -570,7 +572,6 @@ async function main(): Promise<void> {
 
   // ── Config loading ────────────────────────────────────────────────────────────
 
-  const env = process.env as Record<string, string | undefined>;
   let matbotConfig!: import('./config.js').MatbotConfig;
   let configPath: string;
 
@@ -582,7 +583,7 @@ async function main(): Promise<void> {
       process.stdin.on('end',  () => resolve(Buffer.concat(chunks).toString('utf8')));
       process.stdin.on('error', reject);
     });
-    const { config, projectDir } = await loadConfigFromText(text, env, process.cwd());
+    const { config, projectDir } = await loadConfigFromText(text, process.cwd());
     matbotConfig = config;
     configPath   = path.join(projectDir, 'matbot.yaml'); // virtual — used for plugin resolution
     process.chdir(projectDir);
@@ -599,7 +600,7 @@ async function main(): Promise<void> {
     await loadDotEnv(path.dirname(configPath));
     let loadResult: { config: import('./config.js').MatbotConfig; projectDir: string } | null = null;
     try {
-      loadResult = await loadConfig(configPath, env);
+      loadResult = await loadConfig(configPath);
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code !== 'ENOENT') throw err;
@@ -764,7 +765,11 @@ async function main(): Promise<void> {
           `Available: ${[...matbotConfig.providers.keys()].join(', ')}`,
         );
       }
-      const resolved: ProviderConfig = { ...rawCfg, ...(rawCfg.credentials ? {credentials: await resolveCredentials(rawCfg.credentials, vault) } : {}) };
+      const resolved: ProviderConfig = {
+        ...rawCfg,
+        ...(rawCfg.credentials !== undefined ? { credentials: await resolveCredentials(rawCfg.credentials, vault) } : {}),
+        ...(rawCfg.endpoint    !== undefined ? { endpoint: await vault.resolve(rawCfg.endpoint) } : {}),
+      };
       const adpt = resolveProviderFactory(resolved.module)(resolved);
       const msgs = req.system !== undefined
         ? [
@@ -887,10 +892,10 @@ async function main(): Promise<void> {
     name:        rawConfig.name,
     module:      rawConfig.module,
     model:       rawConfig.model,
-    ...(rawConfig.credentials ? { credentials: await resolveCredentials(rawConfig.credentials, vault) } : {}),
-    ...(rawConfig.endpoint   !== undefined ? { endpoint:   rawConfig.endpoint   } : {}),
-    ...(rawConfig.parameters !== undefined ? { parameters: rawConfig.parameters } : {}),
-    ...(rawConfig.fallback   !== undefined ? { fallback:   rawConfig.fallback   } : {}),
+    ...(rawConfig.credentials !== undefined ? { credentials: await resolveCredentials(rawConfig.credentials, vault) } : {}),
+    ...(rawConfig.endpoint    !== undefined ? { endpoint: await vault.resolve(rawConfig.endpoint) } : {}),
+    ...(rawConfig.parameters  !== undefined ? { parameters: rawConfig.parameters } : {}),
+    ...(rawConfig.fallback    !== undefined ? { fallback:   rawConfig.fallback   } : {}),
   };
 
   const adapter: ProviderAdapter = resolveProviderFactory(providerConfig.module)(providerConfig);
@@ -938,7 +943,7 @@ async function main(): Promise<void> {
   // ── Single-turn ──────────────────────────────────────────────────────────────
   if (argPrompt !== undefined) {
     try {
-      await runTurn(session, argPrompt, providerConfig, adapter, toolMap, runStore, principal, workDir, fileStore, hookReg, systemContextReg, stdinPrompt, services.loadPlugin.bind(services), services.unloadPlugin.bind(services), configPath);
+      await runTurn(session, argPrompt, providerConfig, adapter, toolMap, runStore, principal, workDir, fileStore, hookReg, systemContextReg, stdinPrompt, services.loadPlugin.bind(services), services.unloadPlugin.bind(services), configPath, vault);
     } finally {
       rl.close();
       await teardownPlugins();
@@ -958,7 +963,7 @@ async function main(): Promise<void> {
       }
       if (!line.trim()) continue;
       process.stderr.write('assistant: ');
-      session = await runTurn(session, line, providerConfig, adapter, toolMap, runStore, principal, workDir, fileStore, hookReg, systemContextReg, stdinPrompt, services.loadPlugin.bind(services), services.unloadPlugin.bind(services), configPath);
+      session = await runTurn(session, line, providerConfig, adapter, toolMap, runStore, principal, workDir, fileStore, hookReg, systemContextReg, stdinPrompt, services.loadPlugin.bind(services), services.unloadPlugin.bind(services), configPath, vault);
     }
   } finally {
     rl.close();
