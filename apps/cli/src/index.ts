@@ -432,16 +432,12 @@ async function discoverProviders(): Promise<ProviderPackage[]> {
   return results;
 }
 
-async function testEndpointReachable(url: string): Promise<boolean> {
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), 5000);
+async function testEndpointReachable(url: string): Promise<string | false> {
   try {
-    await fetch(url, { method: 'HEAD', signal: ac.signal });
-    return true;
-  } catch {
-    return false;
-  } finally {
-    clearTimeout(timer);
+    const { status, statusText } = (await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(5000) }));
+    return (status == 401 || status == 403) ? `Endpoint reachable but returned ${statusText} (check credentials)` : false;
+  } catch (ex: any) {
+    return `Endpoint failed (${ex?.message ?? String(ex)})`;
   }
 }
 
@@ -488,33 +484,23 @@ async function runSetupWizard(configPath: string): Promise<import('./config.js')
       process.stderr.write('Model name is required.\n');
     }
 
-    let endpoint = '';
-    for (;;) {
-      endpoint = await ask('Endpoint URL');
-      if (endpoint) break;
-      process.stderr.write('Endpoint URL is required.\n');
-    }
+    let endpoint = await ask('Endpoint URL');
+    let apiKey = await ask('API key');
 
-    let apiKey = '';
-    for (;;) {
-      apiKey = await ask('API key');
-      if (apiKey) break;
-      process.stderr.write('API key is required.\n');
-    }
-
-    process.stderr.write(`\nTesting ${endpoint}… `);
-    const reachable = await testEndpointReachable(endpoint);
-    if (reachable) {
-      process.stderr.write('reachable\n');
-    } else {
-      process.stderr.write('not reachable\n');
-      const cont = await ask('Continue with this endpoint anyway? [y/N]');
-      if (cont.toLowerCase() !== 'y') {
-        process.stderr.write('Setup cancelled.\n');
-        process.exit(1);
+    if (endpoint && !endpoint.startsWith('http')) {
+      process.stderr.write(`\nTesting ${endpoint}… `);
+      const reachable = await testEndpointReachable(endpoint);
+      if (!reachable) {
+        process.stderr.write('reachable\n');
+      } else {
+        process.stderr.write(reachable + '\n');
+        const cont = await ask('Continue with this endpoint anyway? [y/N]');
+        if (cont.toLowerCase() !== 'y') {
+          process.stderr.write('Setup cancelled.\n');
+          process.exit(1);
+        }
       }
     }
-
     const configDir  = path.dirname(configPath);
     const envPath    = path.join(configDir, '.env');
     const envVarName = `MATBOT_API_KEY_${providerName.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
@@ -778,7 +764,7 @@ async function main(): Promise<void> {
           `Available: ${[...matbotConfig.providers.keys()].join(', ')}`,
         );
       }
-      const resolved: ProviderConfig = { ...rawCfg, credentials: await resolveCredentials(rawCfg.credentials, vault) };
+      const resolved: ProviderConfig = { ...rawCfg, ...(rawCfg.credentials ? {credentials: await resolveCredentials(rawCfg.credentials, vault) } : {}) };
       const adpt = resolveProviderFactory(resolved.module)(resolved);
       const msgs = req.system !== undefined
         ? [
@@ -885,7 +871,7 @@ async function main(): Promise<void> {
     name:        rawConfig.name,
     module:      rawConfig.module,
     model:       rawConfig.model,
-    credentials: await resolveCredentials(rawConfig.credentials, vault),
+    ...(rawConfig.credentials ? { credentials: await resolveCredentials(rawConfig.credentials, vault) } : {}),
     ...(rawConfig.endpoint   !== undefined ? { endpoint:   rawConfig.endpoint   } : {}),
     ...(rawConfig.parameters !== undefined ? { parameters: rawConfig.parameters } : {}),
     ...(rawConfig.fallback   !== undefined ? { fallback:   rawConfig.fallback   } : {}),
