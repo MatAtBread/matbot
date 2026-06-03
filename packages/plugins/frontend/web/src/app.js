@@ -12,9 +12,10 @@ if (crypto && typeof crypto.randomUUID !== 'function') {
 // ── State ─────────────────────────────────────────────────────────────────────
 
 // localStorage keys
-const LS_FONT_SIZE = 'fontSize';
-const LS_PROVIDER = 'provider';
-const LS_SIDEBAR = 'sidebarSections';
+const LS_FONT_SIZE      = 'fontSize';
+const LS_PROVIDER       = 'provider';
+const LS_SIDEBAR        = 'sidebarSections';
+const LS_SIDEBAR_WIDTH  = 'sidebarWidth';
 
 let currentSessionId = null;
 let sending = false;
@@ -163,7 +164,9 @@ function loadSidebarState() {
     const state = JSON.parse(raw);
     for (const [name, collapsed] of Object.entries(state)) {
       const section = document.querySelector('.sidebar-section[data-section="' + name + '"]');
-      if (section && collapsed) section.classList.add('collapsed');
+      if (!section) continue;
+      if (collapsed) section.classList.add('collapsed');
+      else           section.classList.remove('collapsed');
     }
   } catch { /* ignore */ }
 }
@@ -186,6 +189,39 @@ document.getElementById('sidebar').addEventListener('click', (e) => {
 });
 
 loadSidebarState();
+
+// ── Sidebar resize ────────────────────────────────────────────────────────────
+
+{
+  const sidebarEl  = document.getElementById('sidebar');
+  const resizerEl  = document.getElementById('sidebar-resizer');
+  const MIN_W = 160, MAX_W = 600;
+
+  const savedW = parseInt(localStorage.getItem(LS_SIDEBAR_WIDTH) ?? '');
+  if (savedW >= MIN_W && savedW <= MAX_W) sidebarEl.style.width = savedW + 'px';
+
+  resizerEl?.addEventListener('mousedown', e => {
+    e.preventDefault();
+    const startX     = e.clientX;
+    const startWidth = sidebarEl.offsetWidth;
+    resizerEl.classList.add('active');
+    document.body.classList.add('sidebar-resizing');
+
+    function onMove(e) {
+      const w = Math.max(MIN_W, Math.min(MAX_W, startWidth + e.clientX - startX));
+      sidebarEl.style.width = w + 'px';
+    }
+    function onUp() {
+      resizerEl.classList.remove('active');
+      document.body.classList.remove('sidebar-resizing');
+      localStorage.setItem(LS_SIDEBAR_WIDTH, String(sidebarEl.offsetWidth));
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup',   onUp);
+    }
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup',   onUp);
+  });
+}
 
 // ── Markdown ──────────────────────────────────────────────────────────────────
 
@@ -290,7 +326,7 @@ async function joinSessionStream(id, renderedCount) {
   turnWrap.appendChild(loadingEl);
   function removeLoading() { loadingEl.remove(); }
 
-  let textEl = null, textAccum = '', thinkingContent = null, thinkingAccum = '', currentTool = null, providerToolPending = false;
+  let textEl = null, textAccum = '', thinkingContent = null, thinkingAccum = '', currentTool = null, providerToolPending = false, pluginToolPending = false;
   let turnIn = 0, turnOut = 0, turnCost = 0, turnCacheRead = 0, turnCacheCreate = 0;
 
 
@@ -358,6 +394,7 @@ async function joinSessionStream(id, renderedCount) {
           case 'tool:start': {
             removeLoading();
             if (ev.name === 'provider') providerToolPending = true;
+            if (ev.name === 'plugin')   pluginToolPending   = true;
             currentTool = makeToolBlock(ev.name, ev.input);
             currentTool.open = true;
             turnWrap.appendChild(currentTool);
@@ -386,6 +423,7 @@ async function joinSessionStream(id, renderedCount) {
             }
             currentTool = null;
             if (providerToolPending && !ev.isError) { providerToolPending = false; refreshProviderSelect(); }
+            if (pluginToolPending   && !ev.isError) { pluginToolPending   = false; loadPlugins(); }
             break;
           }
           case 'usage':
@@ -562,6 +600,121 @@ async function loadFiles() {
     } else {
       renderFiles([]);
     }
+  }
+}
+
+function makePluginLabel(name) {
+  const container = document.createElement('span');
+  container.className = 'plugin-name-label';
+  // Split at the last non-alpha char so the trailing word is always visible.
+  const idx = name.search(/[^a-zA-Z][a-zA-Z]+$/);
+  const prefix = document.createElement('span');
+  prefix.className = 'plugin-name-prefix';
+  const suffix = document.createElement('span');
+  suffix.className = 'plugin-name-suffix';
+  if (idx >= 0) {
+    prefix.textContent = name.slice(0, idx + 1); // includes the separator
+    suffix.textContent = name.slice(idx + 1);
+    container.appendChild(prefix);
+    container.appendChild(suffix);
+  } else {
+    prefix.textContent = name;
+    container.appendChild(prefix);
+  }
+  return container;
+}
+
+async function loadPlugins() {
+  let listResult;
+  try {
+    listResult = await callTool('plugin', { action: 'list' });
+  } catch {
+    return;
+  }
+  let localResult = [];
+  try {
+    localResult = await callTool('plugin', { action: 'discover_local' });
+  } catch { /* discover_local optional */ }
+  renderPlugins(listResult.loaded ?? [], Array.isArray(localResult) ? localResult : []);
+}
+
+function renderPlugins(loaded, local) {
+  const el = document.getElementById('plugin-list');
+  if (!el) return;
+  el.innerHTML = '';
+
+  const loadedNames = new Set(loaded.map(p => p.name));
+
+  for (const p of loaded) {
+    const det = document.createElement('details');
+    det.className = 'plugin-entry';
+    const sum = document.createElement('summary');
+    if (p.description) sum.title = p.description;
+    const label = makePluginLabel(p.name);
+    sum.appendChild(label);
+    if (p.specifier) {
+      const actions = document.createElement('div');
+      actions.className = 'plugin-actions';
+      const removeBtn = document.createElement('button');
+      removeBtn.className = 'plugin-action-btn remove';
+      removeBtn.textContent = '×';
+      removeBtn.title = 'Remove plugin';
+      removeBtn.onclick = (e) => {
+        e.stopPropagation();
+        closeSidebar();
+        inputEl.value = `Remove the plugin '${p.specifier}'`;
+        sendMessage();
+      };
+      actions.appendChild(removeBtn);
+      sum.appendChild(actions);
+    }
+    det.appendChild(sum);
+    const tools = p.tools ?? [];
+    if (tools.length) {
+      const toolList = document.createElement('div');
+      toolList.className = 'plugin-tool-list';
+      for (const t of tools) {
+        const name = typeof t === 'string' ? t : t.name;
+        const desc = typeof t === 'object' && t !== null ? t.description : undefined;
+        const row = document.createElement('div');
+        row.className = 'plugin-tool-row';
+        row.textContent = name;
+        if (desc) row.title = desc;
+        toolList.appendChild(row);
+      }
+      det.appendChild(toolList);
+    }
+    el.appendChild(det);
+  }
+
+  for (const p of local) {
+    if (loadedNames.has(p.name)) continue;
+    const row = document.createElement('div');
+    row.className = 'plugin-entry-inactive';
+    if (p.description) row.title = p.description;
+    row.appendChild(makePluginLabel(p.name));
+    const actions = document.createElement('div');
+    actions.className = 'plugin-actions';
+    const addBtn = document.createElement('button');
+    addBtn.className = 'plugin-action-btn add';
+    addBtn.textContent = '+';
+    addBtn.title = 'Add plugin';
+    addBtn.onclick = (e) => {
+      e.stopPropagation();
+      closeSidebar();
+      inputEl.value = `Add the plugin '${p.specifier}'`;
+      sendMessage();
+    };
+    actions.appendChild(addBtn);
+    row.appendChild(actions);
+    el.appendChild(row);
+  }
+
+  if (!loaded.length && !local.length) {
+    const empty = document.createElement('div');
+    empty.style.cssText = 'color:#9ca3af;font-size:12px;padding:4px 10px;';
+    empty.textContent = '(none)';
+    el.appendChild(empty);
   }
 }
 
@@ -1103,7 +1256,7 @@ async function submitFormResponse(sessionId, values) {
   turnWrap.appendChild(loadingEl);
   function removeLoading() { loadingEl.remove(); }
 
-  let textEl = null, textAccum = '', thinkingContent = null, thinkingAccum = '', currentTool = null, providerToolPending = false;
+  let textEl = null, textAccum = '', thinkingContent = null, thinkingAccum = '', currentTool = null, providerToolPending = false, pluginToolPending = false;
   let turnIn = 0, turnOut = 0, turnCost = 0, turnCacheRead = 0, turnCacheCreate = 0;
 
 
@@ -1159,6 +1312,7 @@ async function submitFormResponse(sessionId, values) {
         case 'tool:start': {
           removeLoading();
           if (ev.name === 'provider') providerToolPending = true;
+          if (ev.name === 'plugin')   pluginToolPending   = true;
           currentTool = makeToolBlock(ev.name, ev.input);
           currentTool.open = true;
           turnWrap.appendChild(currentTool);
@@ -1187,6 +1341,7 @@ async function submitFormResponse(sessionId, values) {
           }
           currentTool = null;
           if (providerToolPending && !ev.isError) { providerToolPending = false; refreshProviderSelect(); }
+          if (pluginToolPending   && !ev.isError) { pluginToolPending   = false; loadPlugins(); }
           break;
         }
         case 'usage':
@@ -1262,6 +1417,7 @@ async function sendMessage() {
   let thinkingAccum   = '';
   let currentTool     = null;
   let providerToolPending = false;
+  let pluginToolPending   = false;
   let turnIn          = 0;
   let turnOut         = 0;
   let turnCost        = 0;
@@ -1331,6 +1487,7 @@ async function sendMessage() {
         case 'tool:start': {
           removeLoading();
           if (ev.name === 'provider') providerToolPending = true;
+          if (ev.name === 'plugin')   pluginToolPending   = true;
           currentTool = makeToolBlock(ev.name, ev.input);
           currentTool.open = true;
           turnWrap.appendChild(currentTool);
@@ -1365,6 +1522,7 @@ async function sendMessage() {
           }
           currentTool = null;
           if (providerToolPending && !ev.isError) { providerToolPending = false; refreshProviderSelect(); }
+          if (pluginToolPending   && !ev.isError) { pluginToolPending   = false; loadPlugins(); }
           break;
         }
 
@@ -1721,6 +1879,7 @@ async function init() {
     showEmpty();
   }
   loadFiles();
+  loadPlugins();
 }
 
 // ── File drag-drop + upload button ───────────────────────────────────────────

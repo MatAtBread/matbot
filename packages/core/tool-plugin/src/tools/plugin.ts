@@ -1,8 +1,8 @@
 import type { Tool, ToolEvent, ToolContext, MatbotPlugin } from '@matatbread/matbot-plugin-api';
-import { getRegisteredPlugins, getRegisteredTools, getRegisteredFrontendPlugins } from '@matatbread/matbot-core';
+import { getRegisteredPlugins, getRegisteredTools, getRegisteredFrontendPlugins, getSpecifierForPlugin } from '@matatbread/matbot-core';
 import { readFile, writeFile, access, readdir } from 'node:fs/promises';
 import { spawn }                             from 'node:child_process';
-import { pathToFileURL }                     from 'node:url';
+import { pathToFileURL, fileURLToPath }       from 'node:url';
 import path                                  from 'node:path';
 import process                               from 'node:process';
 
@@ -111,6 +111,31 @@ async function discoverLocalPlugins(
   return results;
 }
 
+async function pkgNameFromSpecifier(specifier: string, projectDir: string): Promise<string | undefined> {
+  let dir: string;
+
+  if (specifier.startsWith('file://')) {
+    // Specifiers are resolved to file: URLs by the CLI before registration.
+    // Strip any cache-buster query string, convert to a path, then start from
+    // the entry file's directory and walk up to find the package.json.
+    dir = path.dirname(fileURLToPath((specifier.split('?')[0]) ?? specifier));
+  } else if (specifier.startsWith('./') || specifier.startsWith('../') || path.isAbsolute(specifier)) {
+    dir = path.resolve(projectDir, specifier);
+  } else {
+    return specifier; // bare npm package name — specifier already is the package name
+  }
+
+  while (true) {
+    try {
+      const pkg = JSON.parse(await readFile(path.join(dir, 'package.json'), 'utf8')) as { name?: string };
+      if (pkg.name) return pkg.name;
+    } catch { /* no package.json here, keep walking */ }
+    const parent = path.dirname(dir);
+    if (parent === dir) return undefined; // reached filesystem root without finding package.json
+    dir = parent;
+  }
+}
+
 async function readProviderModules(configPath: string): Promise<string[]> {
   const text = await readFile(configPath, 'utf8');
   return [...text.matchAll(/^\s+module:\s+(\S+)/gm)].map(m => m[1] ?? '').filter(Boolean);
@@ -188,12 +213,19 @@ const executor = {
         [...toolsByPlugin.keys()].filter((k): k is string => k !== undefined),
       );
 
-      const loaded = getRegisteredPlugins().map(p => ({
-        name:        p.name,
-        apiVersion:  p.apiVersion,
-        types:       pluginTypes(p, pluginToolNames),
-        tools:       toolsByPlugin.get(p.name) ?? [],
-        ...(p.manifest?.description ? { description: p.manifest.description } : {}),
+      const loaded = await Promise.all(getRegisteredPlugins().map(async p => {
+        const specifier   = getSpecifierForPlugin(p.name);
+        const packageName = specifier !== undefined
+          ? (await pkgNameFromSpecifier(specifier, projectDir) ?? p.name)
+          : p.name;
+        return {
+          name:        packageName,
+          apiVersion:  p.apiVersion,
+          types:       pluginTypes(p, pluginToolNames),
+          tools:       toolsByPlugin.get(p.name) ?? [],
+          ...(specifier !== undefined ? { specifier } : {}),
+          ...(p.manifest?.description ? { description: p.manifest.description } : {}),
+        };
       }));
 
       yield {

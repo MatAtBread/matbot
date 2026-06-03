@@ -123,6 +123,14 @@ export function getPluginNameForSpecifier(specifier: string): string | undefined
   return state.specifierToName.get(specifier);
 }
 
+/** Reverse of getPluginNameForSpecifier — finds the specifier used to load the named plugin. */
+export function getSpecifierForPlugin(pluginName: string): string | undefined {
+  for (const [spec, name] of state.specifierToName) {
+    if (name === pluginName) return spec;
+  }
+  return undefined;
+}
+
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
 
 /** Run setup() for a single plugin. Called by loadPlugins immediately after registration. */
