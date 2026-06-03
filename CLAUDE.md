@@ -60,8 +60,6 @@ packages/
     tool-plugin/   — built-in plugin and provider management tools (@matatbread/matbot-tool-plugin)
 
   plugins/
-    memory-types/  — MemoryManager interface + MatbotServices augmentation (@matatbread/matbot-memory-types)
-    memory/        — MemoryManagerImpl, JobQueueImpl, MemoryExtractorWorker (@matatbread/matbot-memory-node)
     rumsfeld/      — contextual_search tool; knowledge fault handler (@matatbread/matbot-rumsfeld-node)
     persist-ki-bge/ — persistent KnowledgeIndex with BGE reranker (@matatbread/matbot-persist-ki-bge-node)
     skills/        — skill injection via hook-based classifier (@matatbread/matbot-skills-node)
@@ -148,15 +146,15 @@ Plugins may create additional subdirectories (e.g. `files/`, `settings/`) as nee
 
 `MatbotServices` is the runtime environment passed to every plugin's `setup()`. Its core
 members (hooks, tools, complete, settings, vault, sessions) are always present. Optional
-services — memory, custom cognitive subsystems, etc. — are advertised and consumed through
-`register` and `get`, both typed against `keyof MatbotServices`:
+services — custom cognitive subsystems, domain-specific backends, etc. — are advertised and
+consumed through `register` and `get`, both typed against `keyof MatbotServices`:
 
 ```ts
 // Advertising (in the providing plugin's setup()):
-await services.register('memory', new MemoryManagerImpl(store));
+await services.register('myService', new MyServiceImpl(store));
 
 // Consuming (in any plugin's setup()):
-const memory = services.get('memory'); // MemoryManager | undefined
+const svc = services.get('myService'); // MyService | undefined
 ```
 
 Type safety comes from augmenting `MatbotServices` in `@matatbread/matbot-plugin-api`:
@@ -165,13 +163,13 @@ Type safety comes from augmenting `MatbotServices` in `@matatbread/matbot-plugin
 // In the providing package (or alongside it):
 declare module '@matatbread/matbot-plugin-api' {
   interface MatbotServices {
-    memory?: MemoryManager;
+    myService?: MyService;
   }
 }
 ```
 
 Any plugin that imports this declaration gets fully-typed `register`/`get` calls. Core
-never references `MemoryManager` — services are negotiated at runtime between plugins.
+never references plugin services — they are negotiated at runtime between plugins.
 
 Well-known keys have dedicated behaviour inside `register`:
 - `'storageBackend'` — replaces the active storage backend and re-wires all Store proxies
@@ -187,38 +185,9 @@ that is unambiguous within the ecosystem — short but domain-specific beats glo
 
 ---
 
-## Memory subsystem
-
-Memory types (`MemoryManager`, `MemoryEntry`, `RecallQuery`, `ContextBlock`) live in
-`@matatbread/matbot-memory-types`. The implementation (`MemoryManagerImpl`, `JobQueueImpl`,
-`MemoryExtractorWorker`) lives in `@matatbread/matbot-memory-node`.
-
-The LLM does **not** have direct memory tools. Memory is a subsystem concern:
-
-- **Live capture** (hooks): `before:submit` / `after:submit` hooks extract high-confidence facts
-  and store them before the next turn
-- **Passive capture** (job queue): `MemoryExtractorWorker` processes sessions out-of-band,
-  calling a classifier LLM to assign confidence, tags, and embeddings
-- **Injection**: `MemoryManager.buildContext(session, signal)` returns `ContextBlock[]` (role:
-  `'system'`) prepended to the conversation at session start — not on every turn, to preserve
-  the provider's prompt cache
-- Memories store **references** back to session messages (`sessionId` + `messageId`), not copies
-  of text
-
-A plugin that provides memory calls `services.register('@matatbread/matbot-memory-types', impl)`
-in its `setup()`. A plugin that consumes memory calls `services.get('@matatbread/matbot-memory-types')`.
-
-The storage backend is swappable: `MemoryManagerImpl` depends only on `Store<MemoryEntry>`.
-Any storage plugin (filesystem, SQLite, Elasticsearch) that satisfies that interface can back
-the memory subsystem without touching the cognitive layer.
-
----
-
 ## Knowledge subsystem
 
-`KnowledgeIndex` is a **core** service (always present on `MatbotServices`), unlike memory
-which is plugin-optional. It stores named knowledge entries and supports term-based and
-semantic search.
+`KnowledgeIndex` is a **core** service (always present on `MatbotServices`). It stores named knowledge entries and supports term-based and semantic search.
 
 The default implementation (`LookupKnowledgeIndex` in `packages/core/knowledge/`) is
 in-memory and scores by term frequency. `packages/plugins/persist-ki-bge/` replaces it with
@@ -246,15 +215,15 @@ Never write to a store without a version check when concurrent updates are possi
 
 ```
 before:submit   → can mutate session or abort
-after:submit    → observe final session; trigger memory extraction
+after:submit    → observe final session
 before:response → runs between tool results and next LLM call
 after:response  → (reserved)
 before:tool     → capability check, rate limiting
 after:tool      → audit logging
 ```
 
-Hooks receive and return `HookContext`; they may replace `ctx.session` to inject context
-(e.g. memory blocks). They may set `ctx.abort` to cancel the turn.
+Hooks receive and return `HookContext`; they may replace `ctx.session` to inject context.
+They may set `ctx.abort` to cancel the turn.
 
 ---
 

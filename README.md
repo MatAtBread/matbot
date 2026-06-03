@@ -1,7 +1,7 @@
 # matbot
 
-A TypeScript AI harness — a thin, composable runtime that connects language models to tools,
-memory, and frontends. Not a product; infrastructure.
+A TypeScript AI harness — a thin, composable runtime that connects language models to tools
+and frontends. Not a product; infrastructure.
 
 ---
 
@@ -13,7 +13,6 @@ memory, and frontends. Not a product; infrastructure.
   extras required for basic conversational use
 - **Hot-loaded plugins** — extend at runtime without restart:
   - **Tools** — bash, HTTP, workspace files, sandboxed Docker bash, MCP server bridge, background jobs
-  - **Memory** — persistent facts automatically extracted from conversations and injected as context
   - **Skills** — reusable system-context fragments injected on demand via a classifier
   - **Knowledge** — semantic knowledge index for domain-specific context (Rumsfeld + optional BGE reranker)
   - **Session editing** — cut, fork, and compact sessions to control context window size
@@ -21,6 +20,7 @@ memory, and frontends. Not a product; infrastructure.
   - **Storage backends** — filesystem (default) or SQLite
   - **Providers** — add and remove LLM profiles live via the built-in `provider` tool
 
+[Design ethos and developer nodes](CLAUDE.md)
 ---
 
 ## Requirements
@@ -207,15 +207,14 @@ Here are all the local plugins available for installation:
 | 6 | `./packages/plugins/frontend/web` | `@matatbread/matbot-frontend-web` | ✅ Already installed |
 | 7 | `./packages/plugins/http` | `@matatbread/matbot-tool-http` | |
 | 8 | `./packages/plugins/mcp` | `@matatbread/matbot-tool-mcp` | |
-| 9 | `./packages/plugins/memory` | `@matatbread/matbot-memory-node` | |
-| 10 | `./packages/plugins/persist-ki-bge` | `@matatbread/matbot-persist-ki-bge-node` | |
-| 11 | `./packages/plugins/providers/anthropic` | `@matatbread/matbot-provider-anthropic` | ✅ Already installed |
-| 12 | `./packages/plugins/providers/openai-compat` | `@matatbread/matbot-provider-openai-compat` | |
-| 13 | `./packages/plugins/rumsfeld` | `@matatbread/matbot-rumsfeld-node` | |
-| 14 | `./packages/plugins/sessions` | `@matatbread/matbot-sessions` | |
-| 15 | `./packages/plugins/skills` | `@matatbread/matbot-skills-node` | |
-| 16 | `./packages/plugins/storage/sqlite` | `@matatbread/matbot-storage-sqlite` | |
-| 17 | `./packages/plugins/workspace` | `@matatbread/matbot-tool-workspace` | |
+| 9 | `./packages/plugins/persist-ki-bge` | `@matatbread/matbot-persist-ki-bge-node` | |
+| 10 | `./packages/plugins/providers/anthropic` | `@matatbread/matbot-provider-anthropic` | ✅ Already installed |
+| 11 | `./packages/plugins/providers/openai-compat` | `@matatbread/matbot-provider-openai-compat` | |
+| 12 | `./packages/plugins/rumsfeld` | `@matatbread/matbot-rumsfeld-node` | |
+| 13 | `./packages/plugins/sessions` | `@matatbread/matbot-sessions` | |
+| 14 | `./packages/plugins/skills` | `@matatbread/matbot-skills-node` | |
+| 15 | `./packages/plugins/storage/sqlite` | `@matatbread/matbot-storage-sqlite` | |
+| 16 | `./packages/plugins/workspace` | `@matatbread/matbot-tool-workspace` | |
 
 Would you like to install any of these?
 [↑1622 ↓550 tokens]
@@ -289,7 +288,7 @@ subdirectories as needed.
 
 ## Writing your own plugin
 
-See [PLUGINS.md](PLUGINS.md) for the full plugin API reference.
+See [PLUGINS.md](PLUGINS.md) for the full plugin API reference. I recommend checking the [design ethos and developer nodes](CLAUDE.md) too.
 
 Plugins can provide tools, frontends, LLM providers (try the 'customer-services' "LLM" - my personal
 favourite - it's free and runs without GPU support or an API key!)

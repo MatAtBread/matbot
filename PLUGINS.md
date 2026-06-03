@@ -149,13 +149,13 @@ Plugins advertise novel services to each other by augmenting `MatbotServices` in
 `@matatbread/matbot-plugin-api`. The key is a property name that must not collide with any
 existing property — use a short, unambiguous name unique to your domain.
 
-**Declaring the contract** (in a types package, e.g. `@matatbread/matbot-memory-node`):
+**Declaring the contract** (in a types package, e.g. `@matatbread/matbot-analytics-types`):
 
 ```ts
-// memory-types.ts — augment MatbotServices to declare the property
+// analytics-types.ts — augment MatbotServices to declare the property
 declare module '@matatbread/matbot-plugin-api' {
   interface MatbotServices {
-    memory?: MemoryManager;   // optional: present only when the memory plugin is loaded
+    analytics?: AnalyticsService;   // optional: present only when the analytics plugin is loaded
   }
 }
 ```
@@ -163,18 +163,18 @@ declare module '@matatbread/matbot-plugin-api' {
 **Advertising a service** (in the providing plugin's `setup()`):
 
 ```ts
-await services.register('memory', new MemoryManagerImpl(store));
+await services.register('analytics', new AnalyticsServiceImpl(store));
 ```
 
 **Consuming a service** (in any plugin's `setup()`):
 
 ```ts
-const memory = services.get('memory'); // MemoryManager | undefined
-if (memory) { /* use it */ }
+const analytics = services.get('analytics'); // AnalyticsService | undefined
+if (analytics) { /* use it */ }
 ```
 
 Both `register` and `get` are typed through `MatbotServices`, so the compiler enforces that
-`'memory'` is a valid key and that the value is a `MemoryManager`. No separate types
+`'analytics'` is a valid key and that the value is an `AnalyticsService`. No separate types
 package or import-side-effect trick is needed — the augmentation alone is sufficient.
 
 ### Sub-runner: `services.complete()`
@@ -469,7 +469,7 @@ Plugins register hooks in `setup()` to intercept the processing pipeline:
 ```ts
 type HookPoint =
   | 'before:submit'    // can mutate session or abort
-  | 'after:submit'     // observe final session; trigger memory extraction
+  | 'after:submit'     // observe final session
   | 'before:response'  // runs between tool results and next LLM call
   | 'after:response'   // (reserved)
   | 'before:tool'      // capability check, rate limiting
@@ -509,30 +509,6 @@ export const plugin: MatbotPlugin = {
   },
 };
 ```
-
----
-
-## Memory manager
-
-Memory is a plugin-provided service, not a core concern. The interface lives in
-`@matatbread/matbot-memory-types`; the implementation in `@matatbread/matbot-memory-node`.
-
-The LLM does **not** have direct memory tools — memory is managed entirely by plugins
-via hooks and the service registry.
-
-```ts
-interface MemoryManager {
-  recall(query: RecallQuery): Promise<MemoryEntry[]>;
-  remember(entry: Omit<MemoryEntry, 'id' | 'version' | 'createdAt'>): Promise<MemoryEntry>;
-  reinforce(id: string, delta?: number): Promise<void>;
-  forget(id: string): Promise<void>;
-  purge(ownerPrincipalId: string): Promise<number>;
-  buildContext(session: Session, signal: AbortSignal): Promise<ContextBlock[]>;
-}
-```
-
-The implementation depends only on `Store<MemoryEntry>`, so the storage backend is
-independently swappable.
 
 ---
 
@@ -605,7 +581,6 @@ plugin's `setup()`. The replacement takes effect immediately for all subsequent
 | `@matatbread/matbot-skills-node` | hooks + classifier | File-backed skill injection |
 | `@matatbread/matbot-rumsfeld-node` | `contextual_search` | Contextual knowledge fault handler — resolves unknown terms via the knowledge index |
 | `@matatbread/matbot-persist-ki-bge-node` | knowledge backend | Persistent KnowledgeIndex with entity search and optional BGE reranker |
-| `@matatbread/matbot-memory-node` | hooks + service | Automatic memory extraction, recall, and context injection |
 | `@matatbread/matbot-frontend-web` | frontend + hooks | Web UI with session management |
 | `@matatbread/matbot-frontend-telegram` | frontend + tools | Telegram bot with `telegram_send/open_door/set_provider` tools |
 | `@matatbread/matbot-provider-anthropic` | provider | Anthropic Messages API (also DeepSeek Anthropic-compat) |
