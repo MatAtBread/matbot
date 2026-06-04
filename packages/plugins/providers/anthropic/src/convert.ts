@@ -41,11 +41,15 @@ export function toAnthropicMessages(messages: Message[]): AnthropicMessage[] {
         case 'text':
           return [{ type: 'text', text: c.text }];
         case 'thinking':
-          return [{ type: 'thinking', thinking: c.thinking, signature: c.signature }];
         case 'redacted-thinking':
-          return [{ type: 'redacted_thinking', data: c.data }];
+          // Anthropic thinking blocks are signed provider-native state, not
+          // portable conversation content. The API accepts them only when the
+          // signature verifies for the exact target request; the neutral message
+          // format does not carry enough information to prove that, so elide
+          // them deterministically rather than sending possibly-invalid input.
+          return [];
         case 'reasoning':
-          return [];  // DeepSeek reasoning — strip; Anthropic has no equivalent
+          return [];  // OpenAI/DeepSeek reasoning — strip; Anthropic has no equivalent
         case 'image':
           return [{ type: 'image', source: { type: 'base64', media_type: c.mimeType, data: c.data } }];
         case 'image-url':

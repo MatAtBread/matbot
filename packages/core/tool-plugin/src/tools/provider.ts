@@ -1,7 +1,8 @@
-import type { Tool, ToolEvent, ToolContext, ProviderConfig } from '@matatbread/matbot-plugin-api';
-import { getRegisteredPlugins }                             from '@matatbread/matbot-core';
-import { readFile, writeFile }                              from 'node:fs/promises';
-import path                                                 from 'node:path';
+import type { Tool, ToolEvent, ToolContext, ProviderConfig, MatbotPlugin } from '@matatbread/matbot-plugin-api';
+import { getRegisteredPlugins, getSpecifierForPlugin }       from '@matatbread/matbot-core';
+import { readFile, writeFile }                               from 'node:fs/promises';
+import { fileURLToPath }                                     from 'node:url';
+import path                                                  from 'node:path';
 
 // Credential env-var naming convention for secrets created by this tool.
 function credEnvVarName(profileName: string): string {
@@ -28,6 +29,67 @@ type ProviderInput =
 
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// ── Module resolution (write-time) ──────────────────────────────────────────────
+//
+// The LLM interchanges the canonical package name, the YAML path, and the resolved
+// file URL for the same adapter "according to the weather". All resolution and
+// validation therefore happens here, before anything is written: we resolve whatever
+// form arrives to (a) the canonical plugin name for the live map and
+// resolveProviderFactory, and (b) a specifier the loader can resolve at startup.
+// We never echo the raw input into matbot.yaml — a bare package name for a local
+// plugin is not resolvable at load time and crashes startup.
+
+const pathLike = (s: string): boolean => s.startsWith('.') || s.startsWith('/') || path.isAbsolute(s);
+
+// The path part of a resolved specifier, or undefined if it isn't a file: URL.
+function resolvedEntryPath(name: string): string | undefined {
+  const resolved = getSpecifierForPlugin(name);
+  if (resolved?.startsWith('file:')) return fileURLToPath((resolved.split('?')[0]) ?? resolved);
+  return undefined;
+}
+
+// Find the already-loaded provider adapter that `mod` refers to, in any of the forms
+// the LLM might use: canonical name, recorded YAML specifier, resolved file URL, or a
+// differently-spelled path (absolute vs relative, trailing slash).
+function findLoadedAdapter(
+  mod:                 string,
+  projectDir:          string,
+  pluginNameToOrigPath?: ReadonlyMap<string, string>,
+): MatbotPlugin | undefined {
+  const adapters = getRegisteredPlugins().filter(p => p.provider !== undefined);
+
+  for (const p of adapters) {
+    if (mod === p.name) return p;
+    if (pluginNameToOrigPath?.get(p.name) === mod) return p;
+    if (getSpecifierForPlugin(p.name) === mod) return p;
+  }
+
+  if (pathLike(mod)) {
+    const target = path.resolve(projectDir, mod);
+    for (const p of adapters) {
+      const entry = resolvedEntryPath(p.name);
+      if (entry !== undefined && (entry === target || entry.startsWith(target + path.sep))) return p;
+    }
+  }
+  return undefined;
+}
+
+// The YAML-valid specifier to write for an already-loaded adapter: prefer the exact
+// string from matbot.yaml (portable, human-authored), otherwise derive a relative path
+// from the resolved entry file. Never the bare package name of a local plugin.
+function yamlSpecifierFor(
+  name:                 string,
+  projectDir:           string,
+  pluginNameToOrigPath?: ReadonlyMap<string, string>,
+): string | undefined {
+  const orig = pluginNameToOrigPath?.get(name);
+  if (orig !== undefined) return orig;
+  const entry = resolvedEntryPath(name);
+  if (entry !== undefined) return './' + path.relative(projectDir, entry).replace(/\\/g, '/');
+  // No file: URL — the adapter resolved as a real npm package, so its name is valid.
+  return getSpecifierForPlugin(name);
 }
 
 function appendYamlFields(obj: Record<string, unknown>, indent: string, lines: string[]): void {
@@ -174,6 +236,49 @@ function makeExecutor(liveProviders: Map<string, ProviderConfig>, pluginNameToOr
           return;
         }
 
+        const projectDir = path.dirname(configPath);
+
+        // Resolve and validate the module up front, before prompting for anything.
+        // canonicalModule drives the live map / resolveProviderFactory; yamlModule is
+        // the loader-resolvable specifier written to matbot.yaml. We never write the
+        // raw `mod` the LLM supplied.
+        let canonicalModule: string;
+        let yamlModule:      string;
+
+        const loaded = findLoadedAdapter(mod, projectDir, pluginNameToOrigPath);
+        if (loaded !== undefined) {
+          const spec = yamlSpecifierFor(loaded.name, projectDir, pluginNameToOrigPath);
+          if (spec === undefined) {
+            yield { type: 'error', message: `Adapter "${loaded.name}" is loaded but its module path could not be determined.` };
+            return;
+          }
+          canonicalModule = loaded.name;
+          yamlModule      = spec;
+        } else {
+          // Not yet loaded — try to load it (a new npm package or an unused path).
+          try {
+            const justLoaded = await ctx.loadPlugin(mod);
+            if (justLoaded.provider === undefined) {
+              yield { type: 'error', message: `Module "${mod}" loaded but is not a provider adapter.` };
+              return;
+            }
+            canonicalModule = justLoaded.name;
+            yamlModule      = mod; // mod resolved and loaded, so it is YAML-valid as written
+            if (pluginNameToOrigPath !== undefined) {
+              (pluginNameToOrigPath as Map<string, string>).set(justLoaded.name, mod);
+            }
+          } catch {
+            const available = getRegisteredPlugins()
+              .filter(p => p.provider !== undefined)
+              .map(p => yamlSpecifierFor(p.name, projectDir, pluginNameToOrigPath) ?? p.name);
+            yield {
+              type:    'error',
+              message: `Could not resolve provider module "${mod}". Use one of the available adapter modules: ${available.join(', ')}.`,
+            };
+            return;
+          }
+        }
+
         // Obtain the credential value out-of-band (keeps it out of session history).
         let envVarName: string | undefined;
 
@@ -205,7 +310,7 @@ function makeExecutor(liveProviders: Map<string, ProviderConfig>, pluginNameToOr
         }
 
         const confirm = await ctx.prompt(
-          `Add provider profile "${name}" (${model} via ${mod})? [y/N]`,
+          `Add provider profile "${name}" (${model} via ${yamlModule})? [y/N]`,
           'N',
         );
         if (!/^y(es)?$/i.test(confirm.trim())) {
@@ -213,36 +318,9 @@ function makeExecutor(liveProviders: Map<string, ProviderConfig>, pluginNameToOr
           return;
         }
 
-        // Resolve the canonical plugin name so resolveProviderFactory can find the factory.
-        // The module field in liveProviders must be the plugin name (e.g. @matatbread/matbot-provider-anthropic),
-        // not the original file path. The YAML block keeps the original path for portability.
-        let canonicalModule = mod;
-        try {
-          const loadedPlugin = await ctx.loadPlugin(mod);
-          canonicalModule = loadedPlugin.name;
-        } catch {
-          // Plugin already loaded — find its canonical name from the registry.
-          const existing = getRegisteredPlugins().find(p =>
-            p.provider !== undefined &&
-            (pluginNameToOrigPath?.get(p.name) === mod || p.name === mod),
-          );
-          if (existing !== undefined) {
-            canonicalModule = existing.name;
-          } else {
-            yield { type: 'error', message: `Could not load provider module "${mod}". Ensure it is installed and the path is correct.` };
-            return;
-          }
-        }
-
-        // Keep the original path in YAML (human-readable, portable).
-        // Map the canonical name back to the original path for list/description display.
-        if (pluginNameToOrigPath !== undefined && canonicalModule !== mod) {
-          (pluginNameToOrigPath as Map<string, string>).set(canonicalModule, mod);
-        }
-
         const block = buildProviderBlock({
           name,
-          module: mod,
+          module: yamlModule,
           model,
           ...(endpoint      !== undefined ? { endpoint      } : {}),
           ...(envVarName    !== undefined ? { envVarName    } : {}),

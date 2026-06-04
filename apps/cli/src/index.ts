@@ -897,22 +897,32 @@ async function main(): Promise<void> {
   }
 
   // Map plugin name → the original module specifier written in matbot.yaml.
-  // Used by the provider tool so its description and list output show YAML-valid paths,
-  // not the internal plugin names that the canonicalisation step produces.
+  // Used by the provider tool so its description and list output show YAML-valid
+  // specifiers, and so `provider add` writes a path the loader can resolve — never
+  // the bare package name of a local plugin, which crashes startup.
   const pluginNameToOrigPath = new Map<string, string>();
-  for (let i = 0; i < providerModules.length; i++) {
-    const orig     = providerModules[i];
-    const resolved = resolvedProviderMods[i];
-    if (orig === undefined || resolved === undefined) continue;
-    const name = getPluginNameForSpecifier(resolved);
-    if (name !== undefined && !pluginNameToOrigPath.has(name)) pluginNameToOrigPath.set(name, orig);
-  }
-
-  // Register the provider management tool now that adapter plugins are loaded —
-  // createProviderTool reads getRegisteredPlugins() to build its description.
-  toolReg.register(createProviderTool(matbotConfig.providers, pluginNameToOrigPath));
+  const recordOrigPaths = (origs: readonly string[], resolved: readonly string[]): void => {
+    for (let i = 0; i < origs.length; i++) {
+      const orig = origs[i];
+      const res  = resolved[i];
+      if (orig === undefined || res === undefined) continue;
+      const name = getPluginNameForSpecifier(res);
+      if (name !== undefined && !pluginNameToOrigPath.has(name)) pluginNameToOrigPath.set(name, orig);
+    }
+  };
+  recordOrigPaths(providerModules, resolvedProviderMods);
 
   await loadPluginsWithDescriptions(resolvedPluginMods, services, path.dirname(configPath));
+
+  // A provider adapter may be loaded via the plugins list (as a path) rather than a
+  // provider config. Record those too, so the provider tool knows the YAML-valid path
+  // for every loaded adapter, not just ones already referenced by a provider profile.
+  recordOrigPaths(matbotConfig.plugins, resolvedPluginMods);
+
+  // Register the provider management tool now that all adapter plugins are loaded and
+  // their YAML specifiers are recorded — createProviderTool reads getRegisteredPlugins()
+  // and pluginNameToOrigPath to build its description.
+  toolReg.register(createProviderTool(matbotConfig.providers, pluginNameToOrigPath));
 
   // ── Server mode ───────────────────────────────────────────────────────────────
 
