@@ -209,14 +209,6 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
         continue;
       }
 
-      // Capability check
-      if (!checkGrants(tool, config)) {
-        const err = { error: `Capability denied for tool "${tc.name}"` };
-        toolResults.push({ type: 'tool-result', id: tc.id, result: err, isError: true });
-        yield { type: 'tool:end', callId: tc.id, result: err, isError: true, traceId };
-        continue;
-      }
-
       let result: unknown;
       let isError = false;
 
@@ -282,11 +274,4 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
   });
 
   yield { type: 'done', session, traceId };
-}
-
-function checkGrants(tool: Tool, config: RunConfig): boolean {
-  if (!tool.requires || tool.requires.length === 0) return true;
-  return tool.requires.every(cap =>
-    config.principal.grants.some(g => g.capability === cap),
-  );
 }

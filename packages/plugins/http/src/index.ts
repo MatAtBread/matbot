@@ -54,7 +54,6 @@ const executor = {
 export const httpTool: Tool = {
   name:        'http',
   description: 'Make an HTTP request and return the response body.',
-  requires:    ['network'],
   inputSchema: {
     type:       'object',
     required:   ['url'],

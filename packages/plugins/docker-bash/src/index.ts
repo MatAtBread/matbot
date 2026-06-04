@@ -210,7 +210,6 @@ export const plugin: MatbotPlugin = {
     const tool: Tool = {
       name:        'bash',
       description: TOOL_DESCRIPTION,
-      requires:    ['spawn'],
       inputSchema: INPUT_SCHEMA,
       executor:    createContainerExecutor(CONTAINER),
     };

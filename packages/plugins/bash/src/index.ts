@@ -178,9 +178,7 @@ const INPUT_SCHEMA = {
 export function createBashTool(docker?: DockerConfig): Tool {
   return {
     name:        'bash',
-    description: TOOL_DESCRIPTION,
-    requires:    ['spawn'],
-    inputSchema: INPUT_SCHEMA,
+    description: TOOL_DESCRIPTION,    inputSchema: INPUT_SCHEMA,
     executor:    docker ? createDockerExecutor(docker) : createLocalExecutor(),
   };
 }

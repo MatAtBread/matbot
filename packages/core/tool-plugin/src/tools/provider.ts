@@ -420,7 +420,6 @@ export function createProviderTool(
 
   return {
     name:     'provider',
-    requires: ['filesystem'],
     description: `Manage LLM provider profiles in matbot.yaml. Each profile is a named
 configuration combining an adapter module, model identifier, endpoint URL,
 API credentials, and optional generation parameters. Profiles are what users

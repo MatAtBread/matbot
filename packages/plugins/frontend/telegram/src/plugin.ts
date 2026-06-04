@@ -13,16 +13,8 @@ const SETTINGS_KEY_PROVIDER = 'provider';
 const SETTINGS_KEY_KNOWN = 'knownChats';
 
 const PRINCIPAL: Principal = {
-  id:       'telegram-user',
-  type:     'user',
-  grants:   [
-    { capability: 'network' },
-    { capability: 'filesystem' },
-    { capability: 'spawn' },
-    { capability: 'container' },
-    { capability: 'audit:read' },
-  ],
-  contexts: [],
+  id:   'telegram-user',
+  type: 'user',
 };
 
 interface ActiveProvider {
@@ -189,12 +181,15 @@ export const plugin: MatbotPlugin = {
         await busy.get(chatId);
       }
 
-      if (knownChats.size === 0 || (openDoor && (Date.now() - openDoor) < 30_000)) {
-        knownChats.add(chatId);
-        openDoor = 0;
-        settings.set(SETTINGS_KEY_KNOWN, [...knownChats]).catch(() => {});
-      } else if (!knownChats.has(chatId)) {
-        return; // Ignore messages from unknown chats if we've already interacted with at least one chat and openDoor isn't set.
+      if (!knownChats.has(chatId)) {
+        // A new user. Admit them only as the first-ever chat, or while the door is open.
+        if (knownChats.size === 0 || (openDoor && (Date.now() - openDoor) < 30_000)) {
+          knownChats.add(chatId);
+          openDoor = 0; // a new user has joined — close the door immediately
+          settings.set(SETTINGS_KEY_KNOWN, [...knownChats]).catch(() => {});
+        } else {
+          return; // Door closed and chat unknown — ignore.
+        }
       }
 
       // Snapshot the active provider so a mid-run switch doesn't affect this call.

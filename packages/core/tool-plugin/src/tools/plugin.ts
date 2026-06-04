@@ -449,9 +449,7 @@ const executor = {
 
 export const pluginTool: Tool = {
   name:        'plugin',
-  description: 'Manage matbot plugins: list configured plugins, add a new one, remove an existing one, reload one from disk, discover available local plugins, or store a secret a plugin/provider requires.',
-  requires:    ['filesystem', 'spawn'],
-  inputSchema: {
+  description: 'Manage matbot plugins: list configured plugins, add a new one, remove an existing one, reload one from disk, discover available local plugins, or store a secret a plugin/provider requires.',  inputSchema: {
     type:       'object',
     required:   ['action'],
     properties: {

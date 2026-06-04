@@ -47,7 +47,14 @@
       "Bash(grep -E \"\\\\.\\(ts|js\\)$\")",
       "Bash(npm run *)",
       "Bash(grep -rn manifest __TRACKED_VAR__/src)",
-      "Bash(git -c advice.detachedHead=false stash)"
+      "Bash(git -c advice.detachedHead=false stash)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Read(//tmp/**)",
+      "Bash(rm -f tinymde.js)",
+      "Bash(curl -s -L -o tinymde.js https://cdn.jsdelivr.net/npm/tiny-markdown-editor/dist/tiny-mde.min.js)",
+      "Bash(node -e ' *)",
+      "Bash(rm -f tinymde.css)",
+      "Bash(curl -s -L -o tinymde.css https://cdn.jsdelivr.net/npm/tiny-markdown-editor/dist/tiny-mde.min.css)"
     ]
   }
 }

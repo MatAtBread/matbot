@@ -120,9 +120,7 @@ export function createSkillTools(
     },
     {
       name:        'skill_save',
-      description: 'Create or update a skill with the given name and markdown content.',
-      requires:    ['filesystem'],
-      inputSchema: {
+      description: 'Create or update a skill with the given name and markdown content.',      inputSchema: {
         type:       'object',
         required:   ['name', 'content'],
         properties: {
@@ -134,9 +132,7 @@ export function createSkillTools(
     },
     {
       name:        'skill_delete',
-      description: 'Delete a skill by name.',
-      requires:    ['filesystem'],
-      inputSchema: {
+      description: 'Delete a skill by name.',      inputSchema: {
         type:       'object',
         required:   ['name'],
         properties: {

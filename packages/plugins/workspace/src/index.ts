@@ -70,7 +70,6 @@ const workspaceReadTool: Tool = {
     'Read a file from the session workspace. ' +
     'When the web frontend is running, workspace files are also accessible as static links ' +
     'at /workspace/<path> on the current HTTP host (use a relative URL) — you can share these URLs directly with the user.',
-  requires:    ['filesystem'],
   inputSchema: {
     type:       'object',
     required:   ['path'],
@@ -112,9 +111,7 @@ const workspaceWriteTool: Tool = {
     'Write a file to the session workspace. ' +
     'Parent directories are created automatically. ' +
     'Once written, the file is immediately accessible as a static link at /workspace/<path> on the HTTP server ' +
-    'when the web frontend is running — provide this URL to the user so they can download or view the file.',
-  requires:    ['filesystem'],
-  inputSchema: {
+    'when the web frontend is running — provide this URL to the user so they can download or view the file.',  inputSchema: {
     type:       'object',
     required:   ['path', 'content'],
     properties: {
@@ -155,9 +152,7 @@ const workspaceListTool: Tool = {
   description:
     'List files in the session workspace. ' +
     'Returns each file\'s relative path and size in bytes. ' +
-    'Files are accessible at /workspace/<path> on the HTTP server when the web frontend is running.',
-  requires:    ['filesystem'],
-  inputSchema: {
+    'Files are accessible at /workspace/<path> on the HTTP server when the web frontend is running.',  inputSchema: {
     type:       'object',
     properties: {
       path:      { type: 'string', description: 'Subdirectory to list, relative to workspace root. Defaults to the workspace root.' },
@@ -192,9 +187,7 @@ const workspaceListTool: Tool = {
 
 const workspaceDeleteTool: Tool = {
   name: 'workspace_delete',
-  description: 'Delete a file from the session workspace.',
-  requires:    ['filesystem'],
-  inputSchema: {
+  description: 'Delete a file from the session workspace.',  inputSchema: {
     type:       'object',
     required:   ['path'],
     properties: {
