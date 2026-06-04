@@ -326,7 +326,7 @@ async function joinSessionStream(id, renderedCount) {
   turnWrap.appendChild(loadingEl);
   function removeLoading() { loadingEl.remove(); }
 
-  let textEl = null, textAccum = '', thinkingContent = null, thinkingAccum = '', currentTool = null, providerToolPending = false, pluginToolPending = false;
+  let textEl = null, textAccum = '', textElFinalised = false, thinkingContent = null, thinkingAccum = '', currentTool = null, providerToolPending = false, pluginToolPending = false;
   let turnIn = 0, turnOut = 0, turnCost = 0, turnCacheRead = 0, turnCacheCreate = 0;
 
 
@@ -370,6 +370,7 @@ async function joinSessionStream(id, renderedCount) {
         switch (ev.type) {
           case 'text-delta':
             removeLoading();
+            if (textElFinalised) { textEl = null; textAccum = ''; textElFinalised = false; }
             textAccum += ev.delta;
             getOrMakeTextEl().innerHTML = md(textAccum);
             scrollToOutputStart();
@@ -395,7 +396,7 @@ async function joinSessionStream(id, renderedCount) {
             removeLoading();
             if (ev.name === 'provider') providerToolPending = true;
             if (ev.name === 'plugin')   pluginToolPending   = true;
-            currentTool = makeToolBlock(ev.name, ev.input);
+            currentTool = makeToolBlock(ev.name, ev.input, ev.callId);
             currentTool.open = true;
             turnWrap.appendChild(currentTool);
             // If no text content yet, scroll to show the user processing is happening.
@@ -422,6 +423,8 @@ async function joinSessionStream(id, renderedCount) {
               currentTool.open = false;
             }
             currentTool = null;
+            textElFinalised = true;
+            textAccum = '';
             if (providerToolPending && !ev.isError) { providerToolPending = false; refreshProviderSelect(); }
             if (pluginToolPending   && !ev.isError) { pluginToolPending   = false; loadPlugins(); }
             break;
@@ -1256,7 +1259,7 @@ async function submitFormResponse(sessionId, values) {
   turnWrap.appendChild(loadingEl);
   function removeLoading() { loadingEl.remove(); }
 
-  let textEl = null, textAccum = '', thinkingContent = null, thinkingAccum = '', currentTool = null, providerToolPending = false, pluginToolPending = false;
+  let textEl = null, textAccum = '', textElFinalised = false, thinkingContent = null, thinkingAccum = '', currentTool = null, providerToolPending = false, pluginToolPending = false;
   let turnIn = 0, turnOut = 0, turnCost = 0, turnCacheRead = 0, turnCacheCreate = 0;
 
 
@@ -1288,6 +1291,7 @@ async function submitFormResponse(sessionId, values) {
       switch (ev.type) {
         case 'text-delta':
           removeLoading();
+          if (textElFinalised) { textEl = null; textAccum = ''; textElFinalised = false; }
           textAccum += ev.delta;
           getOrMakeTextEl().innerHTML = md(textAccum);
           scrollToOutputStart();
@@ -1313,7 +1317,7 @@ async function submitFormResponse(sessionId, values) {
           removeLoading();
           if (ev.name === 'provider') providerToolPending = true;
           if (ev.name === 'plugin')   pluginToolPending   = true;
-          currentTool = makeToolBlock(ev.name, ev.input);
+          currentTool = makeToolBlock(ev.name, ev.input, ev.callId);
           currentTool.open = true;
           turnWrap.appendChild(currentTool);
             // If no text content yet, scroll to show the user processing is happening.
@@ -1340,6 +1344,8 @@ async function submitFormResponse(sessionId, values) {
             currentTool.open = false;
           }
           currentTool = null;
+          textElFinalised = true;
+          textAccum = '';
           if (providerToolPending && !ev.isError) { providerToolPending = false; refreshProviderSelect(); }
           if (pluginToolPending   && !ev.isError) { pluginToolPending   = false; loadPlugins(); }
           break;
@@ -1413,6 +1419,7 @@ async function sendMessage() {
   // Per-turn streaming state
   let textEl          = null;
   let textAccum       = '';
+  let textElFinalised = false;
   let thinkingContent = null;
   let thinkingAccum   = '';
   let currentTool     = null;
@@ -1460,6 +1467,7 @@ async function sendMessage() {
       switch (ev.type) {
         case 'text-delta':
           removeLoading();
+          if (textElFinalised) { textEl = null; textAccum = ''; textElFinalised = false; }
           textAccum += ev.delta;
           getOrMakeTextEl().innerHTML = md(textAccum);
           scrollToOutputStart();
@@ -1488,7 +1496,7 @@ async function sendMessage() {
           removeLoading();
           if (ev.name === 'provider') providerToolPending = true;
           if (ev.name === 'plugin')   pluginToolPending   = true;
-          currentTool = makeToolBlock(ev.name, ev.input);
+          currentTool = makeToolBlock(ev.name, ev.input, ev.callId);
           currentTool.open = true;
           turnWrap.appendChild(currentTool);
             // If no text content yet, scroll to show the user processing is happening.
@@ -1521,6 +1529,8 @@ async function sendMessage() {
             currentTool.open = false;
           }
           currentTool = null;
+          textElFinalised = true;
+          textAccum = '';
           if (providerToolPending && !ev.isError) { providerToolPending = false; refreshProviderSelect(); }
           if (pluginToolPending   && !ev.isError) { pluginToolPending   = false; loadPlugins(); }
           break;
