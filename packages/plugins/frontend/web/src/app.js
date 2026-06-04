@@ -738,6 +738,128 @@ function renderPlugins(loaded, local) {
   }
 }
 
+// ── Skills ──────────────────────────────────────────────────────────────────
+
+async function loadSkills() {
+  let result;
+  try {
+    result = await callTool('skill_list', {});
+  } catch {
+    // skills plugin not loaded — leave the section empty.
+    renderSkills([]);
+    return;
+  }
+  renderSkills(Array.isArray(result.skills) ? result.skills : []);
+}
+
+function renderSkills(skills) {
+  const el = document.getElementById('skill-list');
+  if (!el) return;
+  el.innerHTML = '';
+
+  skills = [...skills].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+
+  for (const s of skills) {
+    const row = document.createElement('div');
+    row.className = 'skill-entry';
+    row.appendChild(makePluginLabel(s.name));
+
+    const actions = document.createElement('div');
+    actions.className = 'plugin-actions';
+
+    const editBtn = document.createElement('button');
+    editBtn.className = 'plugin-action-btn edit';
+    editBtn.textContent = '✎';
+    editBtn.title = 'Edit skill';
+    editBtn.onclick = (e) => { e.stopPropagation(); openSkillEditor(s.name); };
+    actions.appendChild(editBtn);
+
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'plugin-action-btn remove';
+    removeBtn.textContent = '×';
+    removeBtn.title = 'Delete skill';
+    removeBtn.onclick = async (e) => {
+      e.stopPropagation();
+      if (!confirm(`Delete skill "${s.name}"?`)) return;
+      try {
+        await callTool('skill_delete', { name: s.name });
+      } catch (err) {
+        alert('Failed to delete skill: ' + (err?.message ?? err));
+        return;
+      }
+      loadSkills();
+    };
+    actions.appendChild(removeBtn);
+
+    row.appendChild(actions);
+    el.appendChild(row);
+  }
+
+  if (!skills.length) {
+    const empty = document.createElement('div');
+    empty.style.cssText = 'color:#9ca3af;font-size:12px;padding:4px 10px;';
+    empty.textContent = '(none)';
+    el.appendChild(empty);
+  }
+}
+
+const skillEditorOverlay = document.getElementById('skill-editor-overlay');
+const skillEditorText    = document.getElementById('skill-editor-text');
+const skillEditorTitle   = document.getElementById('skill-editor-title');
+const skillEditorError   = document.getElementById('skill-editor-error');
+const skillEditorSave    = document.getElementById('skill-editor-save');
+let editingSkillName = null;
+
+async function openSkillEditor(name) {
+  editingSkillName = name;
+  skillEditorError.textContent = '';
+  skillEditorTitle.textContent = name;
+  skillEditorText.value = 'Loading…';
+  skillEditorText.disabled = true;
+  skillEditorSave.disabled = true;
+  skillEditorOverlay.classList.add('open');
+  try {
+    const result = await callTool('skill_load', { name });
+    skillEditorText.value = result.content ?? '';
+  } catch (err) {
+    skillEditorText.value = '';
+    skillEditorError.textContent = 'Failed to load: ' + (err?.message ?? err);
+  }
+  skillEditorText.disabled = false;
+  skillEditorSave.disabled = false;
+  skillEditorText.focus();
+}
+
+function closeSkillEditor() {
+  skillEditorOverlay.classList.remove('open');
+  editingSkillName = null;
+}
+
+if (skillEditorOverlay) {
+  skillEditorOverlay.addEventListener('click', (e) => {
+    if (e.target === skillEditorOverlay) closeSkillEditor();
+  });
+  document.getElementById('skill-editor-close').onclick  = closeSkillEditor;
+  document.getElementById('skill-editor-cancel').onclick = closeSkillEditor;
+  skillEditorSave.onclick = async () => {
+    if (editingSkillName === null) return;
+    skillEditorSave.disabled = true;
+    skillEditorError.textContent = '';
+    try {
+      await callTool('skill_save', { name: editingSkillName, content: skillEditorText.value });
+    } catch (err) {
+      skillEditorError.textContent = 'Failed to save: ' + (err?.message ?? err);
+      skillEditorSave.disabled = false;
+      return;
+    }
+    closeSkillEditor();
+    loadSkills();
+  };
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && skillEditorOverlay.classList.contains('open')) closeSkillEditor();
+  });
+}
+
 async function uploadFiles(fileList) {
   const files = Array.from(fileList);
   if (!files.length) return;
@@ -1907,6 +2029,7 @@ async function init() {
   }
   loadFiles();
   loadPlugins();
+  loadSkills();
 }
 
 // ── File drag-drop + upload button ───────────────────────────────────────────

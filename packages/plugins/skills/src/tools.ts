@@ -84,6 +84,21 @@ export function createSkillTools(
     },
   };
 
+  const deleteExecutor: ToolExecutor = {
+    async *execute(input: unknown, _ctx: ToolContext): AsyncIterable<ToolEvent> {
+      const { name } = input as { name: string };
+      const key = name.toLowerCase();
+      const doc = skills.get(key);
+      if (doc === undefined) {
+        yield { type: 'error', message: `Skill not found: "${name}"` };
+        return;
+      }
+      await store.delete(doc.id, doc.version);
+      skills.delete(key);
+      yield { type: 'result', value: { name: doc.name } };
+    },
+  };
+
   return [
     {
       name:        'skill_list',
@@ -116,6 +131,19 @@ export function createSkillTools(
         },
       },
       executor: saveExecutor,
+    },
+    {
+      name:        'skill_delete',
+      description: 'Delete a skill by name.',
+      requires:    ['filesystem'],
+      inputSchema: {
+        type:       'object',
+        required:   ['name'],
+        properties: {
+          name: { type: 'string', description: 'Exact skill name (case-insensitive).' },
+        },
+      },
+      executor: deleteExecutor,
     },
   ];
 }

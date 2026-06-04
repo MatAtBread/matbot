@@ -349,6 +349,112 @@
     .plugin-action-btn.remove:hover { background: #fecaca; }
     .plugin-action-btn.add { color: #16a34a; }
     .plugin-action-btn.add:hover { background: #dcfce7; }
+    .plugin-action-btn.edit { color: #2563eb; font-size: 0.95em; }
+    .plugin-action-btn.edit:hover { background: #dbeafe; }
+
+    /* ── Skills ─────────────────────────────────────────────────── */
+    #skill-list { padding: 4px 8px 8px; }
+    .skill-entry {
+      padding: 4px 10px;
+      font-size: 0.86em;
+      color: #555;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      border-radius: 4px;
+    }
+    .skill-entry:hover { background: #f0f0f2; color: #111; }
+    .skill-entry .plugin-name-label { flex: 1; min-width: 0; }
+    .skill-entry .plugin-actions { display: none; }
+    .skill-entry:hover .plugin-actions { display: flex; }
+
+    /* ── Skill editor overlay ───────────────────────────────────── */
+    #skill-editor-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.45);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    #skill-editor-overlay.open { display: flex; }
+    #skill-editor {
+      background: #fff;
+      border-radius: 10px;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+      width: min(820px, 100%);
+      height: min(680px, 100%);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    #skill-editor-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 16px;
+      border-bottom: 1px solid #e5e7eb;
+    }
+    #skill-editor-title {
+      flex: 1;
+      font-weight: 600;
+      font-size: 0.95em;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    #skill-editor-close {
+      background: none;
+      border: none;
+      cursor: pointer;
+      font-size: 1.4em;
+      line-height: 1;
+      color: #9ca3af;
+      padding: 0 4px;
+    }
+    #skill-editor-close:hover { color: #111; }
+    #skill-editor-text {
+      flex: 1;
+      min-height: 0;
+      resize: none;
+      border: none;
+      outline: none;
+      padding: 16px;
+      font-family: 'SF Mono', 'Cascadia Code', ui-monospace, monospace;
+      font-size: 0.88em;
+      line-height: 1.55;
+      color: #1f2937;
+      tab-size: 2;
+    }
+    #skill-editor-footer {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 16px;
+      border-top: 1px solid #e5e7eb;
+    }
+    #skill-editor-error { flex: 1; color: #ef4444; font-size: 0.82em; }
+    .skill-editor-btn {
+      padding: 6px 16px;
+      border-radius: 6px;
+      border: 1px solid #d1d5db;
+      background: #fff;
+      color: #374151;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 0.88em;
+      font-weight: 500;
+    }
+    .skill-editor-btn:hover { background: #f3f4f6; }
+    .skill-editor-btn.primary {
+      background: #2563eb;
+      border-color: #2563eb;
+      color: #fff;
+    }
+    .skill-editor-btn.primary:hover { background: #1d4ed8; }
+    .skill-editor-btn:disabled { opacity: 0.5; cursor: default; }
 
     [data-section="files"] .sidebar-heading { display: flex; align-items: center; }
     #upload-btn {
@@ -1202,8 +1308,27 @@
       <div class="sidebar-heading">Plugins</div>
       <div id="plugin-list" class="sidebar-list"></div>
     </div>
+    <div class="sidebar-section collapsed" data-section="skills">
+      <div class="sidebar-heading">Skills</div>
+      <div id="skill-list" class="sidebar-list"></div>
+    </div>
     <div id="sidebar-resizer"></div>
   </nav>
+
+  <div id="skill-editor-overlay">
+    <div id="skill-editor">
+      <div id="skill-editor-header">
+        <span id="skill-editor-title"></span>
+        <button id="skill-editor-close" title="Close">&times;</button>
+      </div>
+      <textarea id="skill-editor-text" spellcheck="false" placeholder="Skill content (markdown)…"></textarea>
+      <div id="skill-editor-footer">
+        <span id="skill-editor-error"></span>
+        <button id="skill-editor-cancel" class="skill-editor-btn">Cancel</button>
+        <button id="skill-editor-save" class="skill-editor-btn primary">Save</button>
+      </div>
+    </div>
+  </div>
 
   <main id="main">
     <div id="chat-header"><button id="burger" aria-label="Open menu">&#9776;</button><span id="chat-title"></span></div>
