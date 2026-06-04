@@ -762,6 +762,7 @@ function renderSkills(skills) {
   for (const s of skills) {
     const row = document.createElement('div');
     row.className = 'skill-entry';
+    row.onclick = () => openSkillEditor(s.name);
     row.appendChild(makePluginLabel(s.name));
 
     const actions = document.createElement('div');
@@ -809,25 +810,42 @@ const skillEditorTitle   = document.getElementById('skill-editor-title');
 const skillEditorError   = document.getElementById('skill-editor-error');
 const skillEditorSave    = document.getElementById('skill-editor-save');
 let editingSkillName = null;
+let skillEditor = null; // TinyMDE.Editor, created lazily on first open
+
+function ensureSkillEditor() {
+  if (!skillEditor) {
+    skillEditor = new TinyMDE.Editor({ textarea: skillEditorText });
+    new TinyMDE.CommandBar({
+      element: 'skill-editor-toolbar',
+      editor: skillEditor,
+      commands: [
+        { name: 'h1', action: 'h1', title: 'Level 1 heading', innerHTML: '<span style="font-size:1.3em;font-weight:700">H</span>' },
+        { name: 'h2', action: 'h2', title: 'Level 2 heading', innerHTML: '<span style="font-size:1.05em;font-weight:700">H</span>' },
+        { name: 'h3', action: 'h3', title: 'Level 3 heading', innerHTML: '<span style="font-size:0.82em;font-weight:700">H</span>' },
+        '|', 'bold', 'italic', 'strikethrough', '|', 'code', 'blockquote', '|', 'ul', 'ol', '|', 'insertLink',
+      ],
+    });
+  }
+  return skillEditor;
+}
 
 async function openSkillEditor(name) {
   editingSkillName = name;
   skillEditorError.textContent = '';
   skillEditorTitle.textContent = name;
-  skillEditorText.value = 'Loading…';
-  skillEditorText.disabled = true;
-  skillEditorSave.disabled = true;
   skillEditorOverlay.classList.add('open');
+  const editor = ensureSkillEditor();
+  editor.setContent('Loading…');
+  skillEditorSave.disabled = true;
   try {
     const result = await callTool('skill_load', { name });
-    skillEditorText.value = result.content ?? '';
+    editor.setContent(result.content ?? '');
   } catch (err) {
-    skillEditorText.value = '';
+    editor.setContent('');
     skillEditorError.textContent = 'Failed to load: ' + (err?.message ?? err);
   }
-  skillEditorText.disabled = false;
   skillEditorSave.disabled = false;
-  skillEditorText.focus();
+  skillEditorOverlay.querySelector('.TinyMDE')?.focus();
 }
 
 function closeSkillEditor() {
@@ -846,7 +864,7 @@ if (skillEditorOverlay) {
     skillEditorSave.disabled = true;
     skillEditorError.textContent = '';
     try {
-      await callTool('skill_save', { name: editingSkillName, content: skillEditorText.value });
+      await callTool('skill_save', { name: editingSkillName, content: skillEditor.getContent() });
     } catch (err) {
       skillEditorError.textContent = 'Failed to save: ' + (err?.message ?? err);
       skillEditorSave.disabled = false;
