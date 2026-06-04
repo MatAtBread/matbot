@@ -96,9 +96,7 @@ Before calling this tool, gather all required information from the user:
 3. For **local**: the exact command to run; any environment variables it needs (e.g. API keys or tokens)
 4. For **remote**: the full HTTP endpoint URL; any authentication headers (e.g. \`Authorization: Bearer ...\`)
 
-The connection is validated and tools are discovered before the server is saved. On success, all MCP tools are immediately available in this session.`,
-    requires: ['spawn', 'network'],
-    inputSchema: {
+The connection is validated and tools are discovered before the server is saved. On success, all MCP tools are immediately available in this session.`,    inputSchema: {
       type: 'object',
       required: ['name', 'type'],
       properties: {

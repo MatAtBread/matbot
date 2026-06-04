@@ -252,9 +252,7 @@ const backgroundTool: Tool = {
     The background process has access to the same tools and providers.
     Optionally name a workspace file to capture any output the process emits. In the absence of an output file, stdout is discarded.
     You should not wait for the output if the user has asked you to do something in the background - they are expecting to check themselves on the status later,
-    but you should notify the user that the task has started and what the output file, if specified, is named.`,
-  requires:    ['spawn'],
-  inputSchema: {
+    but you should notify the user that the task has started and what the output file, if specified, is named.`,  inputSchema: {
     type:       'object',
     required:   ['prompt'],
     properties: {
@@ -286,9 +284,7 @@ const everyTool: Tool = {
   name: 'every',
   description:
     'Schedule a prompt to run repeatedly, each run separated by the specified interval. ' +
-    'Schedules persist across restarts. Returns the schedule ID needed for every_cancel, every_suspend, and every_resume.',
-  requires:    ['spawn'],
-  inputSchema: {
+    'Schedules persist across restarts. Returns the schedule ID needed for every_cancel, every_suspend, and every_resume.',  inputSchema: {
     type:       'object',
     required:   ['prompt', 'interval'],
     properties: {

@@ -34,16 +34,8 @@ interface SubmitBody {
 
 // Single server-side principal used for all requests until real auth is added.
 const DEFAULT_PRINCIPAL: Principal = {
-  id:       'web-user',
-  type:     'user',
-  grants:   [
-    { capability: 'network' },
-    { capability: 'filesystem' },
-    { capability: 'spawn' },
-    { capability: 'container' },
-    { capability: 'audit:read' },
-  ],
-  contexts: [],
+  id:   'web-user',
+  type: 'user',
 };
 
 async function readBody(req: IncomingMessage, maxBytes = 1_048_576): Promise<string> {

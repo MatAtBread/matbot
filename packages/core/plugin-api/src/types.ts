@@ -7,27 +7,13 @@ export type ISODate = string;
 export type MimeType = string;
 export type JSONSchema = Record<string, unknown>;
 
-// ── Principal & Security ──────────────────────────────────────────────────────
+// ── Principal ───────────────────────────────────────────────────────────────
 
-export type CapabilityKind =
-  | 'network'
-  | 'filesystem'
-  | 'spawn'
-  | 'container'
-  | 'audit:read';
-
-export interface CapabilityGrant {
-  capability: CapabilityKind;
-  scope?:     string;
-}
-
+/** Identity of whatever initiated an operation — a turn, a tool call, a store read/write.
+ *  Carried through so an implementation can attribute or test the origin; it grants nothing. */
 export interface Principal {
-  id:       string;
-  type:     'user' | 'agent' | 'system';
-  grants:   CapabilityGrant[];
-  contexts: string[];
-  locale?:  string;
-  tz?:      string;
+  id:    string;
+  type:  'user' | 'agent' | 'system';
 }
 
 // ── Provider ──────────────────────────────────────────────────────────────────
@@ -334,7 +320,6 @@ export interface Tool {
   name:         string;
   description:  string;
   inputSchema:  JSONSchema;
-  requires?:    CapabilityKind[];
   executor:     ToolExecutor;
   pluginName?:  string;
 }
