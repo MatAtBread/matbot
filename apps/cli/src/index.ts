@@ -13,10 +13,12 @@ import { appendMessage, createMessage,
          resolveProviderFactory,
          teardownPlugins,
          unloadPlugin as unloadPluginFn,
-         getPluginNameForSpecifier }       from '@matatbread/matbot-core';
+         getPluginNameForSpecifier,
+         MissingSecretError }              from '@matatbread/matbot-core';
 import type { MatbotServices, PluginSettings, ToolRegistry, Vault,
               MatbotPlugin, StorageBackend, KnowledgeIndex } from '@matatbread/matbot-core';
-import { systemPrincipal, VaultImpl }      from '@matatbread/matbot-security';
+import { systemPrincipal }                 from '@matatbread/matbot-security';
+import { EnvFileVault }                     from './env-vault.js';
 import { FilesystemStore }                 from '@matatbread/matbot-storage-filesystem';
 import { FilesystemFileStore }             from '@matatbread/matbot-files-node';
 import { createBuiltinTools, createProviderTool } from '@matatbread/matbot-tool-plugin';
@@ -114,6 +116,34 @@ async function resolveCredentials(
     resolved[k] = await vault.resolve(v);
   }
   return resolved;
+}
+
+// Bootstrap path: the provider credential is needed before any LLM exists, so it cannot
+// be gathered lazily via the `plugin store-key` tool. On a MissingSecretError, prompt
+// out-of-band for the unresolved keys, store them in the vault (which persists to .env),
+// and retry until every placeholder resolves.
+async function resolveCredentialsInteractive(
+  credentials: Record<string, string>,
+  vault: Vault,
+): Promise<Record<string, string>> {
+  for (;;) {
+    try {
+      return await resolveCredentials(credentials, vault);
+    } catch (e) {
+      if (!(e instanceof MissingSecretError)) throw e;
+      const rl = createInterface({ input: process.stdin, output: process.stderr });
+      try {
+        for (const ref of e.missingKeys) {
+          const name  = ref.replace(/^(env|secret):/, '');
+          const value = await rl.question(`Secret required — ${name}: `);
+          if (!value.trim()) throw new Error(`No value provided for required secret "${name}".`);
+          await vault.createSecret(name, value.trim());
+        }
+      } finally {
+        rl.close();
+      }
+    }
+  }
 }
 
 // Reused as the no-op signal fallback; never aborted.
@@ -634,7 +664,10 @@ async function main(): Promise<void> {
 
   // ── Plugin setup ─────────────────────────────────────────────────────────────
 
-  const vault = new VaultImpl({}, process.env as Record<string, string | undefined>);
+  const vault = new EnvFileVault(
+    path.join(path.dirname(configPath), '.env'),
+    process.env as Record<string, string | undefined>,
+  );
 
   // ── Stores (created early so plugins like frontend-web can use them) ──────────
 
@@ -864,22 +897,32 @@ async function main(): Promise<void> {
   }
 
   // Map plugin name → the original module specifier written in matbot.yaml.
-  // Used by the provider tool so its description and list output show YAML-valid paths,
-  // not the internal plugin names that the canonicalisation step produces.
+  // Used by the provider tool so its description and list output show YAML-valid
+  // specifiers, and so `provider add` writes a path the loader can resolve — never
+  // the bare package name of a local plugin, which crashes startup.
   const pluginNameToOrigPath = new Map<string, string>();
-  for (let i = 0; i < providerModules.length; i++) {
-    const orig     = providerModules[i];
-    const resolved = resolvedProviderMods[i];
-    if (orig === undefined || resolved === undefined) continue;
-    const name = getPluginNameForSpecifier(resolved);
-    if (name !== undefined && !pluginNameToOrigPath.has(name)) pluginNameToOrigPath.set(name, orig);
-  }
-
-  // Register the provider management tool now that adapter plugins are loaded —
-  // createProviderTool reads getRegisteredPlugins() to build its description.
-  toolReg.register(createProviderTool(matbotConfig.providers, pluginNameToOrigPath));
+  const recordOrigPaths = (origs: readonly string[], resolved: readonly string[]): void => {
+    for (let i = 0; i < origs.length; i++) {
+      const orig = origs[i];
+      const res  = resolved[i];
+      if (orig === undefined || res === undefined) continue;
+      const name = getPluginNameForSpecifier(res);
+      if (name !== undefined && !pluginNameToOrigPath.has(name)) pluginNameToOrigPath.set(name, orig);
+    }
+  };
+  recordOrigPaths(providerModules, resolvedProviderMods);
 
   await loadPluginsWithDescriptions(resolvedPluginMods, services, path.dirname(configPath));
+
+  // A provider adapter may be loaded via the plugins list (as a path) rather than a
+  // provider config. Record those too, so the provider tool knows the YAML-valid path
+  // for every loaded adapter, not just ones already referenced by a provider profile.
+  recordOrigPaths(matbotConfig.plugins, resolvedPluginMods);
+
+  // Register the provider management tool now that all adapter plugins are loaded and
+  // their YAML specifiers are recorded — createProviderTool reads getRegisteredPlugins()
+  // and pluginNameToOrigPath to build its description.
+  toolReg.register(createProviderTool(matbotConfig.providers, pluginNameToOrigPath));
 
   // ── Server mode ───────────────────────────────────────────────────────────────
 
@@ -910,7 +953,7 @@ async function main(): Promise<void> {
     name:        rawConfig.name,
     module:      rawConfig.module,
     model:       rawConfig.model,
-    ...(rawConfig.credentials !== undefined ? { credentials: await resolveCredentials(rawConfig.credentials, vault) } : {}),
+    ...(rawConfig.credentials !== undefined ? { credentials: await resolveCredentialsInteractive(rawConfig.credentials, vault) } : {}),
     ...(rawConfig.endpoint    !== undefined ? { endpoint: await vault.resolve(rawConfig.endpoint) } : {}),
     ...(rawConfig.parameters  !== undefined ? { parameters: rawConfig.parameters } : {}),
     ...(rawConfig.fallback    !== undefined ? { fallback:   rawConfig.fallback   } : {}),

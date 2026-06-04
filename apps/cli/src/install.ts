@@ -1,6 +1,5 @@
 import { readFile, writeFile, access } from 'node:fs/promises';
 import { spawn }                        from 'node:child_process';
-import { createInterface }              from 'node:readline/promises';
 import path                             from 'node:path';
 import process                          from 'node:process';
 import type { MatbotPlugin }            from '@matatbread/matbot-core';
@@ -57,21 +56,10 @@ async function addToPluginsList(configPath: string, specifier: string): Promise<
   await writeFile(configPath, updated, 'utf8');
 }
 
-// ── .env writer ──────────────────────────��──────────────────────────���─────────
-
-async function appendEnvVar(envPath: string, key: string, value: string): Promise<void> {
-  let existing = '';
-  try { existing = await readFile(envPath, 'utf8'); } catch { /* file may not exist yet */ }
-  if (existing.includes(`${key}=`)) return;  // already set
-  const separator = existing.length > 0 && !existing.endsWith('\n') ? '\n' : '';
-  await writeFile(envPath, `${existing}${separator}${key}=${value}\n`, 'utf8');
-}
-
 // ── Main install flow ─────────────────────���─────────────────────────────────��─
 
 export async function installPlugin(specifier: string, configPath: string): Promise<void> {
   const projectDir = path.dirname(configPath);
-  const envPath    = path.join(projectDir, '.env');
 
   // 1. Install via package manager (skip for local paths — already on disk)
   const isLocalPath = specifier.startsWith('./') || specifier.startsWith('../') || path.isAbsolute(specifier);
@@ -100,23 +88,7 @@ export async function installPlugin(specifier: string, configPath: string): Prom
   await addToPluginsList(configPath, specifier);
   process.stderr.write(`Added "${specifier}" to plugins in ${path.basename(configPath)}\n`);
 
-  // 4. Prompt for any required credentials not yet in the environment
-  const needed = plugin?.manifest?.credentials ?? [];
-  if (needed.length > 0) {
-    const missing = needed.filter((k: string) => !process.env[k]);
-    if (missing.length > 0) {
-      process.stderr.write(`\nThis plugin requires the following environment variables:\n`);
-      const rl = createInterface({ input: process.stdin, output: process.stderr });
-      for (const key of missing) {
-        const value = await rl.question(`  ${key}: `);
-        if (value.trim()) {
-          await appendEnvVar(envPath, key, value.trim());
-          process.stderr.write(`  → written to ${path.basename(envPath)}\n`);
-        }
-      }
-      rl.close();
-    }
-  }
-
+  // Secrets a plugin needs are gathered lazily on first use: the plugin raises
+  // MissingSecretError naming the key, and the model supplies it via `plugin store-key`.
   process.stderr.write(`\nPlugin installed.\n`);
 }

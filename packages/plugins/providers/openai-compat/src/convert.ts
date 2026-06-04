@@ -101,6 +101,12 @@ export function toOAIMessages(messages: Message[]): OAIMessage[] {
       }).filter(Boolean);
     }
 
+    // Provider-specific reasoning/thinking blocks are intentionally stripped
+    // above. If that leaves a message with no OpenAI-compatible payload, drop
+    // it rather than sending an assistant/user message with null content and no
+    // tool calls, which some OpenAI-compatible providers reject.
+    if (content === null && (oaiMsg.tool_calls?.length ?? 0) === 0) continue;
+
     result.push(oaiMsg);
   }
 

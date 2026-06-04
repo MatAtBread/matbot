@@ -1,4 +1,10 @@
 import type { KnowledgeIndex, KnowledgeEntry, Store, Vault } from '@matatbread/matbot-plugin-api';
+import { MissingSecretError } from '@matatbread/matbot-plugin-api';
+
+const ifMissing = (e: unknown): undefined => {
+  if (e instanceof MissingSecretError) return undefined;
+  throw e;
+};
 
 function fnv1a(s: string): string {
   let h = 0x811c9dc5;
@@ -83,8 +89,8 @@ export class PersistBGEKnowledgeIndex implements KnowledgeIndex {
     }
 
     // Step 3: BGE reranker via Cloudflare Workers AI
-    const apiKey    = await this.vault.resolve('${env:SKILL_RANK_API_KEY}').catch(() => undefined);
-    const accountId = await this.vault.resolve('${env:CLOUDFLARE_ACCOUNT_ID}').catch(() => undefined);
+    const apiKey    = await this.vault.resolve('${env:SKILL_RANK_API_KEY}').catch(ifMissing);
+    const accountId = await this.vault.resolve('${env:CLOUDFLARE_ACCOUNT_ID}').catch(ifMissing);
     const rerankPool = scored.length > 0 ? scored.map(s => s.entry) : candidatePool;
 
     if (!apiKey || !accountId || rerankPool.length === 0) {
@@ -109,7 +115,16 @@ export class PersistBGEKnowledgeIndex implements KnowledgeIndex {
       },
     );
 
-    if (!response.ok) return first ? [first.entry] : [];
+    // Surface auth/quota failures: the reranker otherwise degrades silently to heading
+    // scoring, making a bad/expired token impossible to distinguish from "search got worse".
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '');
+      console.warn(
+        `[persist-ki-bge] BGE reranker HTTP ${response.status}: ${detail.slice(0, 300)} — ` +
+        `check SKILL_RANK_API_KEY / CLOUDFLARE_ACCOUNT_ID. Falling back to heading scoring.`,
+      );
+      return first ? [first.entry] : [];
+    }
 
     type RerankResult = {
       success:  boolean;
@@ -118,7 +133,13 @@ export class PersistBGEKnowledgeIndex implements KnowledgeIndex {
       result:   { response: Array<{ id: number; score: number }> };
     };
     const ranking = (await response.json()) as RerankResult;
-    const best    = ranking.success
+    if (!ranking.success) {
+      console.warn(
+        `[persist-ki-bge] BGE reranker returned success:false: ` +
+        `${JSON.stringify(ranking.errors).slice(0, 300)}. Falling back to heading scoring.`,
+      );
+    }
+    const best = ranking.success
       ? ranking.result.response.slice().sort((a, b) => b.score - a.score)[0]
       : undefined;
 
