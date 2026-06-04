@@ -2,7 +2,7 @@ import type { ProviderAdapter, ProviderConfig, Message, Tool, CompletionEvent, H
 import { parseSSE } from '@matatbread/matbot-providers-base';
 import { toOAIMessages, toOAITools } from './convert.js';
 
-const DEFAULT_ENDPOINT   = 'https://api.openai.com';
+const DEFAULT_ENDPOINT   = 'https://api.openai.com/v1/chat/completions';
 const DEFAULT_MAX_TOKENS = 4096;
 
 interface OAIDelta {
@@ -44,15 +44,14 @@ export class OpenAICompatAdapter implements ProviderAdapter {
     signal:   AbortSignal,
   ): AsyncIterable<CompletionEvent> {
     const endpoint = config.endpoint ?? DEFAULT_ENDPOINT;
-    const apiKey   = config.credentials['apiKey'] ?? '';
+    const apiKey   = config.credentials?.['apiKey'] ?? '';
 
-    const isOpenAI = endpoint.includes('api.openai.com');
     const body: Record<string, unknown> = {
-      model:      config.model,
-      max_tokens: config.parameters?.maxTokens ?? DEFAULT_MAX_TOKENS,
-      messages:   toOAIMessages(messages),
-      stream:     true,
-      ...(isOpenAI ? { stream_options: { include_usage: true } } : {}),
+      model:                config.model,
+      max_completion_tokens: config.parameters?.maxTokens ?? DEFAULT_MAX_TOKENS,
+      messages:             toOAIMessages(messages),
+      stream:               true,
+      stream_options:       { include_usage: true },
     };
 
     const toolDefs = toOAITools(tools);
@@ -62,13 +61,13 @@ export class OpenAICompatAdapter implements ProviderAdapter {
       body['temperature'] = config.parameters.temperature;
     }
 
-    const res = await fetch(`${endpoint}/v1/chat/completions`, {
+    const res = await fetch(endpoint, {
       method:  'POST',
       headers: {
         'content-type':  'application/json',
         'authorization': `Bearer ${apiKey}`,
-        ...(config.credentials['organization']
-          ? { 'openai-organization': config.credentials['organization'] }
+        ...(config.credentials?.['organization']
+          ? { 'openai-organization': config.credentials?.['organization'] }
           : {}),
       },
       body:   JSON.stringify(body),
