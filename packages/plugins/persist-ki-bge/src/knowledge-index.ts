@@ -6,6 +6,25 @@ const ifMissing = (e: unknown): undefined => {
   throw e;
 };
 
+// Selection threshold for weight-coverage results: return the top-scoring entries whose
+// scores together cover this fraction of the total weight, surfacing clear winners without
+// long-tail noise. Tune here to widen (higher) or narrow (lower) results.
+const WEIGHT_COVERAGE_THRESHOLD = 0.5;
+
+function topByWeightCoverage<T>(scored: Array<{ entry: T; score: number }>): T[] {
+  const total = scored.reduce((sum, s) => sum + s.score, 0);
+  if (total <= 0) return scored.map(s => s.entry);
+  const target = total * WEIGHT_COVERAGE_THRESHOLD;
+  let cumulative = 0;
+  const top: T[] = [];
+  for (const { entry, score } of scored) {
+    top.push(entry);
+    cumulative += score;
+    if (cumulative >= target) break;
+  }
+  return top;
+}
+
 function fnv1a(s: string): string {
   let h = 0x811c9dc5;
   for (let i = 0; i < s.length; i++) {
@@ -19,21 +38,41 @@ function normalizeAlphanum(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
+// Heading weights (H1=20, H2=10, H3=5) are 5x the body-occurrence weight of 1, so a term
+// in an H2 is worth ten plain body mentions. Step 2 sees full content (the reranker only
+// gets the first 1500 chars), so it can afford to count every body hit.
 function headingWeight(level: number): number {
-  if (level === 1) return 4;
-  if (level === 2) return 2;
-  return 1;
+  if (level === 1) return 20;
+  if (level === 2) return 10;
+  return 5;
 }
 
-function scoreByHeadings(content: string, terms: Array<{ term: string }>): number {
+function countOccurrences(haystack: string, needle: string): number {
+  let idx   = 0;
+  let count = 0;
+  for (;;) {
+    const next = haystack.indexOf(needle, idx);
+    if (next === -1) return count;
+    count++;
+    idx = next + needle.length;
+  }
+}
+
+function scoreContent(content: string, terms: Array<{ term: string }>): number {
   let score = 0;
   for (const line of content.split('\n')) {
     const m = /^(#{1,3})(?!#)\s+(.+)/.exec(line);
-    if (!m) continue;
-    const level   = m[1]!.length;
-    const heading = m[2]!.toLowerCase();
-    for (const { term } of terms) {
-      if (heading.includes(term.toLowerCase())) score += headingWeight(level);
+    if (m) {
+      const level   = m[1]!.length;
+      const heading = m[2]!.toLowerCase();
+      for (const { term } of terms) {
+        if (heading.includes(term.toLowerCase())) score += headingWeight(level);
+      }
+    } else {
+      const lower = line.toLowerCase();
+      for (const { term } of terms) {
+        score += countOccurrences(lower, term.toLowerCase());
+      }
     }
   }
   return score;
@@ -76,10 +115,10 @@ export class PersistBGEKnowledgeIndex implements KnowledgeIndex {
 
     if (nameMatches.length === 1) return nameMatches;
 
-    // Step 2: heading-weighted score (H1=4, H2=2, H3=1)
+    // Step 2: content-weighted score — headings H1=20/H2=10/H3=5, plus 1 per body occurrence
     const candidatePool = nameMatches.length > 1 ? nameMatches : all;
     const scored = candidatePool
-      .map(entry => ({ entry, score: scoreByHeadings(entry.content, terms) }))
+      .map(entry => ({ entry, score: scoreContent(entry.content, terms) }))
       .filter(({ score }) => score > 0)
       .sort((a, b) => b.score - a.score);
 
@@ -139,13 +178,17 @@ export class PersistBGEKnowledgeIndex implements KnowledgeIndex {
         `${JSON.stringify(ranking.errors).slice(0, 300)}. Falling back to heading scoring.`,
       );
     }
-    const best = ranking.success
-      ? ranking.result.response.slice().sort((a, b) => b.score - a.score)[0]
-      : undefined;
+    const ranked = ranking.success
+      ? ranking.result.response
+          .slice()
+          .sort((a, b) => b.score - a.score)
+          .filter(r => r.id < rerankPool.length)
+          .map(r => ({ entry: rerankPool[r.id]!, score: r.score }))
+      : [];
 
-    if (best === undefined || best.id >= rerankPool.length) {
+    if (ranked.length === 0) {
       return first ? [first.entry] : [];
     }
-    return [rerankPool[best.id]!];
+    return topByWeightCoverage(ranked);
   }
 }
