@@ -130,6 +130,9 @@ providers:
 
 ## Data layout
 
+When using the built-in filesystem storage. Other storage providers will differ (for example
+the optional SQLite plugin stores all data in a local SQLite DB)
+
 All runtime state lives under `.data/` **next to `matbot.yaml`**, never in the source tree:
 
 ```
