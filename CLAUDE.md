@@ -26,6 +26,13 @@ the browser. Use web-platform APIs: `fetch`, `crypto.randomUUID()`, `AbortContro
 `Buffer`, `EventEmitter`, `fs`, `path`, `child_process`, or `os` in shared packages.
 Node-only code lives in packages named `*-node` or in `apps/`.
 
+Also avoid `process.env`: it is an anti-pattern in matbot. Secrets and key substitution
+go through the `Vault` (`${env:NAME}` / `${secret:name}` placeholders resolved at runtime);
+all other per-install configuration goes through plugin `Settings`. Both are abstractions
+with swappable backends (`.env` is merely the default node `Vault`; the browser build uses
+WebCrypto + browser storage and has no `.env` or `matbot.yaml`), so a plugin reaching for
+`process.env` directly is not portable. (TODO: enforce with a lint rule once eslint lands.)
+
 ### AsyncIterators, not callbacks
 Streaming events flow through `AsyncIterable<T>`. Never use `EventEmitter` or raw callbacks
 for inter-layer communication. All provider adapters return `AsyncIterable<CompletionEvent>`,

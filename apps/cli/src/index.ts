@@ -13,10 +13,12 @@ import { appendMessage, createMessage,
          resolveProviderFactory,
          teardownPlugins,
          unloadPlugin as unloadPluginFn,
-         getPluginNameForSpecifier }       from '@matatbread/matbot-core';
+         getPluginNameForSpecifier,
+         MissingSecretError }              from '@matatbread/matbot-core';
 import type { MatbotServices, PluginSettings, ToolRegistry, Vault,
               MatbotPlugin, StorageBackend, KnowledgeIndex } from '@matatbread/matbot-core';
-import { systemPrincipal, VaultImpl }      from '@matatbread/matbot-security';
+import { systemPrincipal }                 from '@matatbread/matbot-security';
+import { EnvFileVault }                     from './env-vault.js';
 import { FilesystemStore }                 from '@matatbread/matbot-storage-filesystem';
 import { FilesystemFileStore }             from '@matatbread/matbot-files-node';
 import { createBuiltinTools, createProviderTool } from '@matatbread/matbot-tool-plugin';
@@ -114,6 +116,34 @@ async function resolveCredentials(
     resolved[k] = await vault.resolve(v);
   }
   return resolved;
+}
+
+// Bootstrap path: the provider credential is needed before any LLM exists, so it cannot
+// be gathered lazily via the `plugin store-key` tool. On a MissingSecretError, prompt
+// out-of-band for the unresolved keys, store them in the vault (which persists to .env),
+// and retry until every placeholder resolves.
+async function resolveCredentialsInteractive(
+  credentials: Record<string, string>,
+  vault: Vault,
+): Promise<Record<string, string>> {
+  for (;;) {
+    try {
+      return await resolveCredentials(credentials, vault);
+    } catch (e) {
+      if (!(e instanceof MissingSecretError)) throw e;
+      const rl = createInterface({ input: process.stdin, output: process.stderr });
+      try {
+        for (const ref of e.missingKeys) {
+          const name  = ref.replace(/^(env|secret):/, '');
+          const value = await rl.question(`Secret required — ${name}: `);
+          if (!value.trim()) throw new Error(`No value provided for required secret "${name}".`);
+          await vault.createSecret(name, value.trim());
+        }
+      } finally {
+        rl.close();
+      }
+    }
+  }
 }
 
 // Reused as the no-op signal fallback; never aborted.
@@ -634,7 +664,10 @@ async function main(): Promise<void> {
 
   // ── Plugin setup ─────────────────────────────────────────────────────────────
 
-  const vault = new VaultImpl({}, process.env as Record<string, string | undefined>);
+  const vault = new EnvFileVault(
+    path.join(path.dirname(configPath), '.env'),
+    process.env as Record<string, string | undefined>,
+  );
 
   // ── Stores (created early so plugins like frontend-web can use them) ──────────
 
@@ -910,7 +943,7 @@ async function main(): Promise<void> {
     name:        rawConfig.name,
     module:      rawConfig.module,
     model:       rawConfig.model,
-    ...(rawConfig.credentials !== undefined ? { credentials: await resolveCredentials(rawConfig.credentials, vault) } : {}),
+    ...(rawConfig.credentials !== undefined ? { credentials: await resolveCredentialsInteractive(rawConfig.credentials, vault) } : {}),
     ...(rawConfig.endpoint    !== undefined ? { endpoint: await vault.resolve(rawConfig.endpoint) } : {}),
     ...(rawConfig.parameters  !== undefined ? { parameters: rawConfig.parameters } : {}),
     ...(rawConfig.fallback    !== undefined ? { fallback:   rawConfig.fallback   } : {}),

@@ -1,4 +1,10 @@
 import type { KnowledgeIndex, KnowledgeEntry, Store, Vault } from '@matatbread/matbot-plugin-api';
+import { MissingSecretError } from '@matatbread/matbot-plugin-api';
+
+const ifMissing = (e: unknown): undefined => {
+  if (e instanceof MissingSecretError) return undefined;
+  throw e;
+};
 
 function fnv1a(s: string): string {
   let h = 0x811c9dc5;
@@ -83,8 +89,8 @@ export class PersistBGEKnowledgeIndex implements KnowledgeIndex {
     }
 
     // Step 3: BGE reranker via Cloudflare Workers AI
-    const apiKey    = await this.vault.resolve('${env:SKILL_RANK_API_KEY}').catch(() => undefined);
-    const accountId = await this.vault.resolve('${env:CLOUDFLARE_ACCOUNT_ID}').catch(() => undefined);
+    const apiKey    = await this.vault.resolve('${env:SKILL_RANK_API_KEY}').catch(ifMissing);
+    const accountId = await this.vault.resolve('${env:CLOUDFLARE_ACCOUNT_ID}').catch(ifMissing);
     const rerankPool = scored.length > 0 ? scored.map(s => s.entry) : candidatePool;
 
     if (!apiKey || !accountId || rerankPool.length === 0) {

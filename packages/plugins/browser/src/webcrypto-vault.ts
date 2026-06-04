@@ -1,4 +1,5 @@
 import type { Vault } from '@matatbread/matbot-core';
+import { MissingSecretError } from '@matatbread/matbot-core';
 
 const REF_RE = /\$\{secret:([^}]+)\}/g;
 
@@ -38,7 +39,7 @@ export class WebCryptoVault implements Vault {
       return value;
     });
     if (errors.length > 0) {
-      throw new Error(`Vault: secret(s) not found: ${errors.join(', ')}`);
+      throw new MissingSecretError(errors);
     }
     return result;
   }

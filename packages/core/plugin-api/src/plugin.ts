@@ -109,8 +109,6 @@ export type FrontendFactory = (services: MatbotServices) => FrontendAdapter;
 export interface PluginManifest {
   /** Human-readable description shown by `matbot install` */
   description?: string;
-  /** Process env var names required by this plugin (e.g. 'OPENAI_API_KEY') */
-  credentials?: readonly string[];
   /** matbot.yaml extensions.<pluginName> keys this plugin reads */
   config?: readonly string[];
 }

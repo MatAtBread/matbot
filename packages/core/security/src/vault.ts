@@ -1,4 +1,5 @@
 import type { Vault } from '@matatbread/matbot-core';
+import { MissingSecretError } from '@matatbread/matbot-core';
 
 const ENV_RE    = /\$\{env:([^}]+)\}/g;
 const SECRET_RE = /\$\{secret:([^}]+)\}/g;
@@ -67,7 +68,7 @@ export class VaultImpl implements Vault {
     });
 
     if (errors.length > 0) {
-      throw new Error(`Vault: secret(s) not found: ${errors.join(', ')}`);
+      throw new MissingSecretError(errors);
     }
     return result;
   }

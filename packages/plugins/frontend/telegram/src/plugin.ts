@@ -56,9 +56,6 @@ export const plugin: MatbotPlugin = {
   name:       PLUGIN_NAME,
   apiVersion: PLUGIN_API_VERSION,
   isFrontend: true,
-  manifest: {
-    credentials: ['TELEGRAM_API_KEY'],
-  },
 
   tools: [
     {

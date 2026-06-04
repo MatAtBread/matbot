@@ -223,6 +223,7 @@ type PluginInput =
   | { action: 'add';            specifier: string }
   | { action: 'remove';         specifier: string }
   | { action: 'reload';         specifier: string }
+  | { action: 'store-key';      key: string }
   | { action: 'discover_local' };
 
 // ── Executor ──────────────────────────────────────────────────────────────────
@@ -296,6 +297,26 @@ const executor = {
                        : null,
         })),
       };
+      return;
+    }
+
+    // ── store-key ──────────────────────────────────────────────────────────────
+    // A plugin or provider that needs a secret raises MissingSecretError naming the
+    // key; call this to supply it. The value is requested out-of-band via ctx.prompt
+    // so it never enters the conversation transcript, then stored in the vault.
+    if (action === 'store-key') {
+      const { key } = input as { action: 'store-key'; key: string };
+      if (!key || !key.trim()) {
+        yield { type: 'error', message: 'store-key requires a "key" name.' };
+        return;
+      }
+      const value = await ctx.prompt(`Enter the value for secret "${key.trim()}" (not added to the conversation):`, '');
+      if (!value.trim()) {
+        yield { type: 'result', value: { message: `No value entered; "${key.trim()}" was not stored.` } };
+        return;
+      }
+      await ctx.vault.createSecret(key.trim(), value.trim());
+      yield { type: 'result', value: { message: `Secret "${key.trim()}" stored in the vault.` } };
       return;
     }
 
@@ -421,7 +442,7 @@ const executor = {
 
 export const pluginTool: Tool = {
   name:        'plugin',
-  description: 'Manage matbot plugins: list configured plugins, add a new one, remove an existing one, reload one from disk, or discover available local plugins.',
+  description: 'Manage matbot plugins: list configured plugins, add a new one, remove an existing one, reload one from disk, discover available local plugins, or store a secret a plugin/provider requires.',
   requires:    ['filesystem', 'spawn'],
   inputSchema: {
     type:       'object',
@@ -429,12 +450,16 @@ export const pluginTool: Tool = {
     properties: {
       action: {
         type:        'string',
-        enum:        ['list', 'add', 'remove', 'reload', 'discover_local'],
-        description: 'list: show configured plugins. add: install and register a plugin. remove: deregister and optionally uninstall. reload: unload and re-import from disk (picks up code changes without restarting). discover_local: scan packages/plugins for available local plugins.',
+        enum:        ['list', 'add', 'remove', 'reload', 'discover_local', 'store-key'],
+        description: 'list: show configured plugins. add: install and register a plugin. remove: deregister and optionally uninstall. reload: unload and re-import from disk (picks up code changes without restarting). discover_local: scan packages/plugins for available local plugins. store-key: supply a secret (e.g. an API key) that a plugin or provider reported missing — you provide only the key name; the value is entered out-of-band.',
       },
       specifier: {
         type:        'string',
         description: 'npm package name, file path, or GitHub shorthand (required for add/remove).',
+      },
+      key: {
+        type:        'string',
+        description: 'Name of the secret to store, e.g. SKILL_RANK_API_KEY (required for store-key). The value is prompted for separately and never enters the conversation.',
       },
     },
   },
