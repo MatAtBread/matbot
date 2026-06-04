@@ -127,7 +127,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
             break;
         }
       }
-    } catch (e) {
+    } catch (e: any) {
       if (signal.aborted) {
         // Save whatever the LLM streamed before the abort hit.
         if (textAcc) assistantParts.push({ type: 'text', text: textAcc });
@@ -140,7 +140,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
         yield { type: 'aborted', reason: 'user-abort', session, traceId };
         return;
       }
-      yield { type: 'error', error: String(e), traceId };
+      yield { type: 'error', error: String(e) + (('cause' in e && e.cause) ? ' ('+String(e.cause)+')' : '' ), traceId };
       return;
     }
 

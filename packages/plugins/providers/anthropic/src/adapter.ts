@@ -28,7 +28,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     signal:   AbortSignal,
   ): AsyncIterable<CompletionEvent> {
     const endpoint = config.endpoint ?? DEFAULT_ENDPOINT;
-    const apiKey   = config.credentials['apiKey'] ?? '';
+    const apiKey   = config.credentials?.['apiKey'] ?? '';
 
     const body: Record<string, unknown> = {
       model:      config.model,
