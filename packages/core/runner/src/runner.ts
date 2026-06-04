@@ -1,7 +1,7 @@
 import type {
   Session, MessageContent,
   PipelineEvent, RunConfig, ProviderAdapter, ProviderConfig,
-  Tool, ToolContext, Store, FileStore, SystemContextRegistry, Vault,
+  Tool, ToolContext, ToolHookContext, Store, FileStore, SystemContextRegistry, Vault,
 } from './types.js';
 import type { MatbotPlugin } from './plugin.js';
 import { HookRegistry } from './hooks.js';
@@ -127,7 +127,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
             break;
         }
       }
-    } catch (e) {
+    } catch (e: any) {
       if (signal.aborted) {
         // Save whatever the LLM streamed before the abort hit.
         if (textAcc) assistantParts.push({ type: 'text', text: textAcc });
@@ -140,7 +140,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
         yield { type: 'aborted', reason: 'user-abort', session, traceId };
         return;
       }
-      yield { type: 'error', error: String(e), traceId };
+      yield { type: 'error', error: String(e) + (('cause' in e && e.cause) ? ' ('+String(e.cause)+')' : '' ), traceId };
       return;
     }
 
@@ -183,18 +183,27 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
     for (const tc of pendingCalls) {
       yield { type: 'tool:start', callId: tc.id, name: tc.name, input: tc.input, traceId };
 
+      const tool = tools.get(tc.name);
+      if (!tool) {
+        const err = { error: `Unknown tool: ${tc.name}` };
+        toolResults.push({ type: 'tool-result', id: tc.id, result: err, isError: true });
+        yield { type: 'tool:end', callId: tc.id, result: err, isError: true, traceId };
+        continue;
+      }
+
       const toolCtxPre = await hookReg.run('before:tool', {
         session, principal: config.principal, config, signal,
-      });
+        toolCall: { id: tc.id, name: tc.name, input: tc.input },
+        tool,
+      }) as ToolHookContext;
+      session = toolCtxPre.session as Session;
+
       if (toolCtxPre.abort) {
         yield { type: 'aborted', reason: toolCtxPre.abort, session: toolCtxPre.session as Session, traceId };
         return;
       }
-      session = toolCtxPre.session as Session;
-
-      const tool = tools.get(tc.name);
-      if (!tool) {
-        const err = { error: `Unknown tool: ${tc.name}` };
+      if (toolCtxPre.rejectTool) {
+        const err = { error: toolCtxPre.rejectTool.message };
         toolResults.push({ type: 'tool-result', id: tc.id, result: err, isError: true });
         yield { type: 'tool:end', callId: tc.id, result: err, isError: true, traceId };
         continue;
