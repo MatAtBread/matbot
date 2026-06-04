@@ -43,7 +43,8 @@
       "Bash(pnpm --filter @matatbread/matbot-knowledge exec tsc --noEmit)",
       "Bash(pnpm --filter @matatbread/matbot-persist-ki-bge-node exec tsc --noEmit)",
       "Bash(pnpm --filter @matatbread/matbot-plugin-api --filter @matatbread/matbot-core --filter @matatbread/matbot-cli --filter @matatbread/matbot-persist-ki-bge-node --filter @matatbread/matbot-frontend-web --filter @matatbread/matbot-frontend-telegram exec tsc --noEmit)",
-      "Bash(pnpm --filter @matatbread/matbot-plugin-api --filter @matatbread/matbot-core --filter @matatbread/matbot-cli --filter @matatbread/matbot-storage-sqlite --filter @matatbread/matbot-persist-ki-bge-node --filter @matatbread/matbot-frontend-web --filter @matatbread/matbot-frontend-telegram exec tsc --noEmit)"
+      "Bash(pnpm --filter @matatbread/matbot-plugin-api --filter @matatbread/matbot-core --filter @matatbread/matbot-cli --filter @matatbread/matbot-storage-sqlite --filter @matatbread/matbot-persist-ki-bge-node --filter @matatbread/matbot-frontend-web --filter @matatbread/matbot-frontend-telegram exec tsc --noEmit)",
+      "Bash(grep -E \"\\\\.\\(ts|js\\)$\")"
     ]
   }
 }

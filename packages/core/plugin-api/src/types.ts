@@ -203,6 +203,18 @@ export interface HookContext {
   [key: string]: unknown;
 }
 
+/**
+ * Context for `before:tool` / `after:tool` hooks. Carries the resolved tool and the
+ * pending call so hooks can inspect or validate it. Setting `rejectTool` makes the
+ * runner skip execution and return an error tool-result to the model (which can then
+ * self-correct), without aborting the whole turn or breaking tool_use/tool_result pairing.
+ */
+export interface ToolHookContext extends HookContext {
+  toolCall:    { id: string; name: string; input: unknown };
+  tool:        Tool;
+  rejectTool?: { message: string };
+}
+
 export interface Hook<C extends HookContext = HookContext> {
   point:       HookPoint;
   priority?:   number;

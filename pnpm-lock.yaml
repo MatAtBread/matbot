@@ -266,6 +266,16 @@ importers:
         specifier: 'catalog:'
         version: 5.9.3
 
+  packages/plugins/json-validation:
+    dependencies:
+      '@matatbread/matbot-plugin-api':
+        specifier: workspace:*
+        version: link:../../core/plugin-api
+    devDependencies:
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
+
   packages/plugins/mcp:
     dependencies:
       '@matatbread/matbot-plugin-api':
