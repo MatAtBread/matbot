@@ -546,8 +546,13 @@ export function createWebServer(deps: WebServerDeps) {
     for (const resolver of pendingPrompts.values()) resolver('');
     pendingPrompts.clear();
 
-    await new Promise<void>((resolve, reject) =>
-      server.close(err => (err ? reject(err) : resolve())),
+    await new Promise<void>((resolve) =>
+      server.close(err => {
+        if (err) {
+          console.warn('[frontend-web] Error closing server:', String(err));
+        }
+        resolve();
+      }),
     );
   }
 
