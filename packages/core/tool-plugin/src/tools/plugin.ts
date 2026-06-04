@@ -429,8 +429,15 @@ const executor = {
       }
 
       try {
-        await ctx.loadPlugin(specifier);
-        yield { type: 'result', value: { message: `"${specifier}" reloaded successfully.` } };
+        const loaded  = await ctx.loadPlugin(specifier);
+        const welcome = await loaded.installationMessage?.();
+        yield {
+          type:  'result',
+          value: {
+            message: `"${specifier}" reloaded successfully.`,
+            ...(welcome !== undefined ? { installationMessage: welcome } : {}),
+          },
+        };
       } catch (e) {
         yield { type: 'error', message: `Reload failed during load phase: ${String(e)}` };
       }

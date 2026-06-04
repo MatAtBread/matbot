@@ -115,7 +115,16 @@ export class PersistBGEKnowledgeIndex implements KnowledgeIndex {
       },
     );
 
-    if (!response.ok) return first ? [first.entry] : [];
+    // Surface auth/quota failures: the reranker otherwise degrades silently to heading
+    // scoring, making a bad/expired token impossible to distinguish from "search got worse".
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '');
+      console.warn(
+        `[persist-ki-bge] BGE reranker HTTP ${response.status}: ${detail.slice(0, 300)} — ` +
+        `check SKILL_RANK_API_KEY / CLOUDFLARE_ACCOUNT_ID. Falling back to heading scoring.`,
+      );
+      return first ? [first.entry] : [];
+    }
 
     type RerankResult = {
       success:  boolean;
@@ -124,7 +133,13 @@ export class PersistBGEKnowledgeIndex implements KnowledgeIndex {
       result:   { response: Array<{ id: number; score: number }> };
     };
     const ranking = (await response.json()) as RerankResult;
-    const best    = ranking.success
+    if (!ranking.success) {
+      console.warn(
+        `[persist-ki-bge] BGE reranker returned success:false: ` +
+        `${JSON.stringify(ranking.errors).slice(0, 300)}. Falling back to heading scoring.`,
+      );
+    }
+    const best = ranking.success
       ? ranking.result.response.slice().sort((a, b) => b.score - a.score)[0]
       : undefined;
 
