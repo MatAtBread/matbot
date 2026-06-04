@@ -205,9 +205,6 @@ const INPUT_SCHEMA = {
 export const plugin: MatbotPlugin = {
   name:       'docker-bash',
   apiVersion: PLUGIN_API_VERSION,
-  manifest: {
-    description: 'Replaces the bash tool with a persistent Docker container (exec-based). Project root is read-only at /app; .data is read-write.',
-  },
 
   async setup(services) {
     const tool: Tool = {

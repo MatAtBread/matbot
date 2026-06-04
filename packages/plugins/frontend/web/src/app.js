@@ -653,8 +653,25 @@ function renderPlugins(loaded, local) {
     det.className = 'plugin-entry';
     const sum = document.createElement('summary');
     if (p.description) sum.title = p.description;
-    const label = makePluginLabel(p.name);
-    sum.appendChild(label);
+    const main = document.createElement('div');
+    main.className = 'plugin-summary-main';
+    main.appendChild(makePluginLabel(p.name));
+    const types = p.types ?? [];
+    if (types.length) {
+      const badges = document.createElement('div');
+      badges.className = 'plugin-badges';
+      for (const ty of types) {
+        const isService = ty.startsWith('service:');
+        const badge = document.createElement('span');
+        badge.className = 'plugin-badge';
+        badge.dataset.type = isService ? 'service' : ty;
+        badge.textContent = isService ? ty.slice('service:'.length) : ty;
+        if (isService) badge.title = ty;
+        badges.appendChild(badge);
+      }
+      main.appendChild(badges);
+    }
+    sum.appendChild(main);
     if (p.specifier) {
       const actions = document.createElement('div');
       actions.className = 'plugin-actions';

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { loadConfig, loadConfigFromText, loadDotEnv } from './config.js';
 import { installPlugin }                    from './install.js';
+import { loadPluginsWithDescriptions }      from './plugin-description.js';
 import type { Principal, ProviderAdapter,
               ProviderConfig, Session,
               Store, StoreQuery, QueryResult, CASResult,
@@ -8,7 +9,6 @@ import type { Principal, ProviderAdapter,
 import { appendMessage, createMessage,
          createSession, runSession,
          HookRegistry, SystemContextRegistryImpl,
-         loadPlugins,
          registerPlugin,
          resolveProviderFactory,
          teardownPlugins,
@@ -818,7 +818,7 @@ async function main(): Promise<void> {
     },
     async loadPlugin(specifier: string) {
       const resolved = await resolvePluginSpecifiers([specifier], path.dirname(configPath));
-      const plugins  = await loadPlugins(resolved, services, /* bustCache */ true);
+      const plugins  = await loadPluginsWithDescriptions(resolved, services, path.dirname(configPath), /* bustCache */ true);
       const plugin   = plugins[0];
       if (plugin === undefined) throw new Error(`No plugin loaded for specifier "${specifier}"`);
       return plugin;
@@ -849,7 +849,7 @@ async function main(): Promise<void> {
 
   // Load provider plugins first so module names can be canonicalised before any
   // frontend plugin's setup() calls resolveProviderFactory(cfg.module).
-  await loadPlugins(resolvedProviderMods, services);
+  await loadPluginsWithDescriptions(resolvedProviderMods, services, path.dirname(configPath));
 
   // Canonicalise each provider config's module to the loaded plugin's name so that
   // resolveProviderFactory() (keyed by plugin.name) finds the factory regardless of
@@ -879,7 +879,7 @@ async function main(): Promise<void> {
   // createProviderTool reads getRegisteredPlugins() to build its description.
   toolReg.register(createProviderTool(matbotConfig.providers, pluginNameToOrigPath));
 
-  await loadPlugins(resolvedPluginMods, services);
+  await loadPluginsWithDescriptions(resolvedPluginMods, services, path.dirname(configPath));
 
   // ── Server mode ───────────────────────────────────────────────────────────────
 

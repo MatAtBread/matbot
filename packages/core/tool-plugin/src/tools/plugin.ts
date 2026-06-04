@@ -1,5 +1,6 @@
 import type { Tool, ToolEvent, ToolContext, MatbotPlugin } from '@matatbread/matbot-plugin-api';
-import { getRegisteredPlugins, getRegisteredTools, getRegisteredFrontendPlugins, getSpecifierForPlugin } from '@matatbread/matbot-core';
+import { getRegisteredPlugins, getRegisteredTools, getRegisteredFrontendPlugins, getSpecifierForPlugin,
+         getRegisteredServiceKeys, getHookPlugins, getSystemContextPlugins } from '@matatbread/matbot-core';
 import { readFile, writeFile, access, readdir } from 'node:fs/promises';
 import { spawn }                             from 'node:child_process';
 import { pathToFileURL, fileURLToPath }       from 'node:url';
@@ -136,6 +137,32 @@ async function pkgNameFromSpecifier(specifier: string, projectDir: string): Prom
   }
 }
 
+// Read the plugin's package.json description without importing the module — the
+// confirmation prompt runs before the user has consented to install, so we must not
+// execute untrusted plugin code to read manifest.description here. Bare npm names are
+// not yet on disk, so they have no resolvable description until after install.
+async function pkgDescriptionFromSpecifier(specifier: string, projectDir: string): Promise<string | undefined> {
+  let dir: string;
+
+  if (specifier.startsWith('file://')) {
+    dir = path.dirname(fileURLToPath((specifier.split('?')[0]) ?? specifier));
+  } else if (specifier.startsWith('./') || specifier.startsWith('../') || path.isAbsolute(specifier)) {
+    dir = path.resolve(projectDir, specifier);
+  } else {
+    return undefined; // bare npm package name — not installed yet, nothing to read
+  }
+
+  while (true) {
+    try {
+      const pkg = JSON.parse(await readFile(path.join(dir, 'package.json'), 'utf8')) as { description?: string };
+      if (pkg.description) return pkg.description;
+    } catch { /* no package.json here, keep walking */ }
+    const parent = path.dirname(dir);
+    if (parent === dir) return undefined;
+    dir = parent;
+  }
+}
+
 async function readProviderModules(configPath: string): Promise<string[]> {
   const text = await readFile(configPath, 'utf8');
   return [...text.matchAll(/^\s+module:\s+(\S+)/gm)].map(m => m[1] ?? '').filter(Boolean);
@@ -163,14 +190,30 @@ function runCommand(cmd: string, args: string[], cwd: string): Promise<string> {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+// A plugin contributes through several channels: static fields on the plugin object
+// (provider, tools, storage, storageBackend, frontend) and runtime registrations made
+// during setup() (tools, hooks, system-context contributors, and MatbotServices keys such
+// as 'knowledge'). Reflect every channel so the reported type list is complete, not just
+// the static ones.
 function pluginTypes(p: MatbotPlugin, registeredToolPlugins: Set<string>): string[] {
   const t: string[] = [];
-  if (p.tools?.length || registeredToolPlugins.has(p.name))                 t.push('tools');
-  if (p.provider !== undefined)                                              t.push('provider');
-  if (Object.keys(p.storage   ?? {}).length)                                t.push('storage');
-  if (p.frontend !== undefined || getRegisteredFrontendPlugins().has(p.name)) t.push('frontend');
-  if (!t.length)                                                            t.push('extension');
-  return t;
+  const serviceKeys = getRegisteredServiceKeys(p.name);
+
+  if (p.provider !== undefined)                                                   t.push('provider');
+  if (p.tools?.length || registeredToolPlugins.has(p.name))                       t.push('tools');
+  if (Object.keys(p.storage ?? {}).length || p.storageBackend !== undefined
+      || serviceKeys.includes('storageBackend'))                                  t.push('storage');
+  if (p.frontend !== undefined || p.isFrontend === true
+      || getRegisteredFrontendPlugins().has(p.name))                              t.push('frontend');
+  if (getHookPlugins().has(p.name))                                               t.push('hooks');
+  if (getSystemContextPlugins().has(p.name))                                      t.push('system-context');
+
+  // Any other runtime-registered service (custom cognitive subsystems, domain backends).
+  // 'knowledge' and 'storageBackend' are already surfaced as dedicated types above.
+  t.push(...serviceKeys);
+
+  if (!t.length) t.push('extension');
+  return [...new Set(t)];
 }
 
 // ── Input types ───────────────────────────────────────────────────────────────
@@ -270,7 +313,11 @@ const executor = {
       // privileged operation. Breaking the LLM's execution chain and requiring an
       // out-of-band human response prevents prompt injection or a malicious plugin
       // from auto-installing further plugins by simply passing confirmed:true.
-      const confirm = await ctx.prompt(`Install plugin "${specifier}"? [y/N]`, 'N');
+      const description = await pkgDescriptionFromSpecifier(specifier, projectDir);
+      const confirm = await ctx.prompt(
+        `Install plugin "${specifier}"?${description !== undefined ? `\n${description}` : ''} [y/N]`,
+        'N',
+      );
       if (!/^y(es)?$/i.test(confirm.trim())) {
         yield { type: 'result', value: { message: 'Cancelled.' } };
         return;

@@ -57,7 +57,6 @@ export const plugin: MatbotPlugin = {
   apiVersion: PLUGIN_API_VERSION,
   isFrontend: true,
   manifest: {
-    description: 'Telegram bot frontend',
     credentials: ['TELEGRAM_API_KEY'],
   },
 

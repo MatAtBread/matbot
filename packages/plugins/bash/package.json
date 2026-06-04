@@ -1,6 +1,7 @@
 {
   "name": "@matatbread/matbot-tool-bash",
   "version": "0.1.0",
+  "description": "Run bash scripts in the session workspace.",
   "private": true,
   "type": "module",
   "exports": {

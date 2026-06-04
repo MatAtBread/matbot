@@ -1,6 +1,7 @@
 {
   "name": "@matatbread/matbot-edit-session",
   "version": "0.1.0",
+  "description": "Session-editing tools: cut messages, fork a session into a branch, and compact history to reclaim context.",
   "private": true,
   "type": "module",
   "exports": {

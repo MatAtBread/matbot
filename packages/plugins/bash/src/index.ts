@@ -192,6 +192,5 @@ export const bashTool: Tool = createBashTool();
 export const plugin: MatbotPlugin = {
   name:       'bash',
   apiVersion: PLUGIN_API_VERSION,
-  manifest:   { description: 'Run bash scripts in the session workspace.' },
   tools:      [bashTool],
 };

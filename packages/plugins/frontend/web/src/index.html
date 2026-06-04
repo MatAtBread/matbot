@@ -276,6 +276,37 @@
       flex-shrink: 0;
       white-space: nowrap;
     }
+    .plugin-summary-main {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .plugin-summary-main > .plugin-name-label { flex: 0 0 auto; }
+    .plugin-badges {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+    }
+    .plugin-badge {
+      font-size: 0.7em;
+      line-height: 1.5;
+      padding: 0 6px;
+      border-radius: 999px;
+      background: #f3f4f6;
+      color: #6b7280;
+      white-space: nowrap;
+      font-weight: 500;
+    }
+    .plugin-badge[data-type="provider"]        { background: #dbeafe; color: #1e40af; }
+    .plugin-badge[data-type="tools"]           { background: #e0e7ff; color: #3730a3; }
+    .plugin-badge[data-type="storage"]         { background: #fef3c7; color: #92400e; }
+    .plugin-badge[data-type="frontend"]        { background: #dcfce7; color: #166534; }
+    .plugin-badge[data-type="knowledge"]       { background: #f3e8ff; color: #6b21a8; }
+    .plugin-badge[data-type="hooks"]           { background: #cffafe; color: #155e75; }
+    .plugin-badge[data-type="system-context"]  { background: #fce7f3; color: #9d174f; }
+    .plugin-badge[data-type="service"]         { background: #e2e8f0; color: #475569; }
     .plugin-tool-list {
       padding: 1px 0 3px 22px;
     }

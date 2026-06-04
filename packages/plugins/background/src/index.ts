@@ -488,9 +488,6 @@ const everythingResumeTool: Tool = {
 export const plugin: MatbotPlugin = {
   name:       'background',
   apiVersion: PLUGIN_API_VERSION,
-  manifest: {
-    description: 'Run prompts in detached background processes. Schedule recurring prompts with every/every_list/every_cancel/every_suspend/every_resume/everything_suspend/everything_resume.',
-  },
   tools: [backgroundTool, everyTool, everyListTool, everyCancelTool, everySuspendTool, everyResumeTool, everythingSuspendTool, everythingResumeTool],
 
   async setup(services: MatbotServices) {

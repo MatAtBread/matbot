@@ -23,6 +23,10 @@ export class WebCryptoVault implements Vault {
     }
   }
 
+  async createSecret(name: string, value: string): Promise<void> {
+    this.plain.set(name, value);
+  }
+
   async resolve(ref: string): Promise<string> {
     const errors: string[] = [];
     const result = ref.replace(REF_RE, (_, name: string) => {

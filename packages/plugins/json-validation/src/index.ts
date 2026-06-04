@@ -129,9 +129,6 @@ function makeValidatorHook(): Hook<ToolHookContext> {
 export const plugin: MatbotPlugin = {
   name:       '@matatbread/matbot-tool-json-validation',
   apiVersion: PLUGIN_API_VERSION,
-  manifest: {
-    description: 'Validates tool-call inputs against each tool\'s JSON Schema, returning an error result on mismatch so the model can self-correct.',
-  },
 
   async setup(services) {
     services.hooks.register(makeValidatorHook());

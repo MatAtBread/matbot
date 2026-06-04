@@ -20,7 +20,6 @@ export function createSkillsPlugin(config: SkillsPluginConfig): MatbotPlugin {
     name:       'skills',
     apiVersion: PLUGIN_API_VERSION,
     manifest: {
-      description: 'Skill documents injected into sessions on demand.',
       config:      ['skillsDir'],
     },
 

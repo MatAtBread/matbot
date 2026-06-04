@@ -1,6 +1,7 @@
 {
   "name": "@matatbread/matbot-sessions",
   "version": "0.1.0",
+  "description": "Session-management tools: list, get, rename, and hide conversation sessions.",
   "private": true,
   "type": "module",
   "exports": {

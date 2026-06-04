@@ -1,6 +1,7 @@
 {
   "name": "@matatbread/matbot-tool-mcp",
   "version": "0.1.0",
+  "description": "Connect MCP (Model Context Protocol) servers and expose their tools. Supports local stdio and remote HTTP transports.",
   "private": true,
   "type": "module",
   "exports": {

@@ -5,9 +5,6 @@ export function createRumsfeldPlugin(): MatbotPlugin {
   return {
     name:       'rumsfeld',
     apiVersion: PLUGIN_API_VERSION,
-    manifest: {
-      description: 'Contextual knowledge fault handler — looks up the knowledge index when the model encounters an unknown term.',
-    },
 
     async setup(services: MatbotServices) {
       const executor: ToolExecutor = {

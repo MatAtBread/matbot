@@ -1,6 +1,7 @@
 {
   "name": "@matatbread/matbot-browser",
   "version": "0.1.0",
+  "description": "Browser-native backends for the web frontend: an IndexedDB Store, an OPFS file store, and a WebCrypto-backed vault.",
   "private": true,
   "type": "module",
   "exports": {

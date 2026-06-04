@@ -4,6 +4,7 @@ import { createInterface }              from 'node:readline/promises';
 import path                             from 'node:path';
 import process                          from 'node:process';
 import type { MatbotPlugin }            from '@matatbread/matbot-core';
+import { backfillPluginDescription }    from './plugin-description.js';
 
 // ── Package manager detection ───────────────────────��─────────────────────────
 
@@ -88,6 +89,8 @@ export async function installPlugin(specifier: string, configPath: string): Prom
   } catch {
     process.stderr.write(`[warn] Could not import "${specifier}" to inspect its manifest.\n`);
   }
+
+  if (plugin !== undefined) await backfillPluginDescription(plugin, specifier, projectDir);
 
   if (plugin?.manifest?.description) {
     process.stderr.write(`\n${plugin.manifest.description}\n`);

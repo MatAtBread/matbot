@@ -7,7 +7,6 @@ export function createPersistKIBGEPlugin(): MatbotPlugin {
     name:       'persist-ki-bge',
     apiVersion: PLUGIN_API_VERSION,
     manifest: {
-      description: 'Persistent KnowledgeIndex backed by a Store, with entity/heading search and optional BGE reranker.',
       credentials: ['SKILL_RANK_API_KEY', 'CLOUDFLARE_ACCOUNT_ID'],
     },
 

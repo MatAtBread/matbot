@@ -292,9 +292,6 @@ The connection is validated and tools are discovered before the server is saved.
   return {
     name: 'mcp',
     apiVersion: PLUGIN_API_VERSION,
-    manifest: {
-      description: 'Connect MCP (Model Context Protocol) servers and expose their tools. Supports local stdio and remote HTTP transports.',
-    },
     tools: [mcpAddTool, mcpListTool, mcpRemoveTool],
 
     async setup(services) {

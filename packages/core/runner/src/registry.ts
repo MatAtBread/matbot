@@ -17,6 +17,8 @@ const state = {
   frontend:         undefined as FrontendFactory | undefined,
   frontendPlugins:  new Set<string>(),
   serviceKeys:     new Map<string, string[]>(),  // pluginName → MatbotServices keys it registered
+  hookPlugins:        new Set<string>(),         // plugins that registered at least one hook
+  systemContextPlugins: new Set<string>(),       // plugins that registered a system-context contributor
   specifierToName: new Map<string, string>(),    // resolved specifier → plugin name
 };
 
@@ -118,6 +120,21 @@ export function getRegisteredFrontendPlugins(): ReadonlySet<string> {
   return state.frontendPlugins;
 }
 
+/** MatbotServices keys a plugin registered at runtime via services.register() (e.g. 'knowledge'). */
+export function getRegisteredServiceKeys(pluginName: string): readonly string[] {
+  return state.serviceKeys.get(pluginName) ?? [];
+}
+
+/** Plugins that registered at least one hook in setup(). */
+export function getHookPlugins(): ReadonlySet<string> {
+  return state.hookPlugins;
+}
+
+/** Plugins that registered a system-context contributor in setup(). */
+export function getSystemContextPlugins(): ReadonlySet<string> {
+  return state.systemContextPlugins;
+}
+
 /** Resolve a loaded plugin's name from the specifier used to load it. */
 export function getPluginNameForSpecifier(specifier: string): string | undefined {
   return state.specifierToName.get(specifier);
@@ -146,12 +163,18 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotServices
       removeByPlugin:(name: string) => services.tools.removeByPlugin(name),
     },
     hooks: {
-      register(hook: Hook) { services.hooks.register({ ...hook, pluginName: plugin.name }); },
+      register(hook: Hook) {
+        state.hookPlugins.add(plugin.name);
+        services.hooks.register({ ...hook, pluginName: plugin.name });
+      },
       removeByPlugin: (name: string)                      => services.hooks.removeByPlugin(name),
       run:            (point: HookPoint, ctx: HookContext) => services.hooks.run(point, ctx),
     } as unknown as HookRegistry,
     systemContext: {
-      register(contributor) { services.systemContext.register(contributor, plugin.name); },
+      register(contributor) {
+        state.systemContextPlugins.add(plugin.name);
+        services.systemContext.register(contributor, plugin.name);
+      },
       removeByPlugin: (name: string) => services.systemContext.removeByPlugin(name),
       build:          (ctx)          => services.systemContext.build(ctx),
     },
@@ -189,6 +212,8 @@ export async function unloadPlugin(pluginName: string, services: MatbotServices)
     services.unregister(key);
   }
   state.serviceKeys.delete(pluginName);
+  state.hookPlugins.delete(pluginName);
+  state.systemContextPlugins.delete(pluginName);
 
   if (plugin.provider !== undefined) state.providers.delete(plugin.name);
   for (const type of Object.keys(plugin.storage   ?? {})) state.storage.delete(type);

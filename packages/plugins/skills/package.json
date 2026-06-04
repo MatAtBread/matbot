@@ -1,6 +1,7 @@
 {
   "name": "@matatbread/matbot-skills-node",
   "version": "0.1.0",
+  "description": "Skill documents injected into sessions on demand.",
   "private": true,
   "type": "module",
   "exports": {
