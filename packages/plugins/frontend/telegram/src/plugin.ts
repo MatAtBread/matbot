@@ -1,5 +1,5 @@
 import type {
-  MatbotPlugin, MatbotServices, Principal, ProviderAdapter, ProviderConfig, Session,
+  MatbotPlugin, MatbotServices, Principal, ProviderAdapter, ProviderConfig, Session, PromptFn, FormField,
 } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import {
@@ -241,7 +241,11 @@ export const plugin: MatbotPlugin = {
               ...(services.files         ? { files:         services.files         } : {}),
               ...(services.configPath    ? { configPath:    services.configPath    } : {}),
               signal:       ac.signal,
-              prompt:       (_q, def) => Promise.resolve(def ?? ''),
+              // Stub: auto-accepts the default. A future Telegram plugin could send the
+              // question (or FormField) to the chat and resolve with the user's next message —
+              // that one change makes both tool prompts and tool-collision prompts interactive here.
+              prompt:       ((p: string | FormField, def?: string) =>
+                Promise.resolve(typeof p === 'string' ? (def ?? '') : (p.default ?? ''))) as PromptFn,
               loadPlugin:   services.loadPlugin.bind(services),
               unloadPlugin: services.unloadPlugin.bind(services),
             })) {

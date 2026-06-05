@@ -336,7 +336,7 @@ const executor = {
       // from auto-installing further plugins by simply passing confirmed:true.
       const description = await pkgDescriptionFromSpecifier(specifier, projectDir);
       const confirm = await ctx.prompt(
-        `Install plugin "${specifier}"?${description !== undefined ? `\n${description}` : ''} [y/N]`,
+        `Install plugin **"${specifier}"?**${description !== undefined ? `\n_${description}_` : ''} [y/N]`,
         'N',
       );
       if (!/^y(es)?$/i.test(confirm.trim())) {
@@ -385,7 +385,7 @@ const executor = {
       }
 
       // Same security rationale as add: out-of-band prompt, not a confirmable parameter.
-      const confirm = await ctx.prompt(`Remove plugin "${specifier}"? [y/N]`, 'N');
+      const confirm = await ctx.prompt(`Remove plugin **"${specifier}"**? [y/N]`, 'N');
       if (!/^y(es)?$/i.test(confirm.trim())) {
         yield { type: 'result', value: { message: 'Cancelled.' } };
         return;
@@ -422,39 +422,15 @@ const executor = {
     if (action === 'reload') {
       yield { type: 'stdout', chunk: `Reloading "${specifier}"...\n` };
 
-      // Race the teardown+load against a short timeout so we can give
-      // the user immediate feedback.  If the plugin tears down quickly
-      // the result message includes the installation message.
-      const reloadPromise = ctx.unloadPlugin(specifier)
-        .then(() => ctx.loadPlugin(specifier));
-
-      const result = await Promise.race([
-        reloadPromise.then(async (loaded) => {
-          const welcome = await loaded.installationMessage?.();
-          return welcome ?? `"${specifier}" reloaded successfully.`;
-        }),
-        new Promise<string>(resolve => {
-          setTimeout(() => resolve(null as unknown as string), 5_000);
-        }),
-      ]);
+      const unloaded = await ctx.unloadPlugin(specifier).catch(e => String(e));
+      if (unloaded) {
+        yield { type: 'stderr', chunk: `${unloaded}\n` };
+      }
+      const reloaded = await ctx.loadPlugin(specifier);
+      const result = reloaded.installationMessage?.() || `"${specifier}" reloaded successfully.`;
 
       if (result !== null) {
         yield { type: 'result', value: { message: result } };
-      } else {
-        // Teardown is taking a while — let the user know and let it complete
-        // in the background.
-        yield {
-          type: 'result',
-          value: { message: `Reload of "${specifier}" is taking longer than expected — it will complete in the background.` },
-        };
-        reloadPromise
-          .then(async (loaded) => {
-            const welcome = await loaded.installationMessage?.();
-            console.info(`[reload] ${specifier}: ${welcome ?? 'OK'} (async)`);
-          })
-          .catch((e: unknown) => {
-            console.error(`[reload] ${specifier}: ${String(e)}`);
-          });
       }
     }
   },

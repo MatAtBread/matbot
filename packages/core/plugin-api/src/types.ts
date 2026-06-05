@@ -295,6 +295,25 @@ export type ToolEvent =
   | { type: 'file';     handle: FileHandle }
   | { type: 'error';    message: string; code?: number; stdout?: string; stderr?: string };
 
+/**
+ * Ask the user a question and resolve with their answer. The host supplies the
+ * implementation — readline in the CLI, an SSE round-trip in the web frontend. This is
+ * matbot's single mechanism for eliciting user input at runtime; it is injected both into
+ * tool execution (`ToolContext.prompt`) and into plugin loading (collision resolution in setup).
+ *
+ * Two call forms:
+ *   - `(question, defaultValue?)` — free text; resolves to the typed string (or the default).
+ *   - `(field: FormField)` — a single structured field (`select`/`confirm`/`password`/`text`),
+ *     letting rich frontends render real controls (buttons, masked input). Frontends that can't
+ *     render it fall back to `field.label` as plain text. Resolves to the chosen/typed value.
+ *     This reuses `FormField` rather than a parallel type; it is a one-shot request/response and
+ *     deliberately does NOT engage the session-bound `form`/`form-response` flow.
+ */
+export interface PromptFn {
+  (question: string, defaultValue?: string): Promise<string>;
+  (field: FormField): Promise<string>;
+}
+
 export interface ToolContext {
   callId:      string;
   session:     Session;
@@ -305,7 +324,7 @@ export interface ToolContext {
   configPath?: string;
   files?:      FileStore;
   /** Prompt the user for input. The host provides a readline or form implementation. */
-  prompt(question: string, defaultValue?: string): Promise<string>;
+  prompt:      PromptFn;
   /** Hot-load a plugin by specifier without restarting the process. Returns the loaded plugin. */
   loadPlugin(specifier: string): Promise<MatbotPlugin>;
   /** Hot-unload a plugin by specifier, removing its tools, hooks, and system context contributions. */

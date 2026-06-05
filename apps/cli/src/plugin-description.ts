@@ -3,7 +3,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { getSpecifierForPlugin, loadPlugins } from '@matatbread/matbot-core';
-import type { MatbotPlugin, PluginManifest, MatbotServices } from '@matatbread/matbot-core';
+import type { MatbotPlugin, PluginManifest, MatbotServices, PromptFn } from '@matatbread/matbot-core';
 
 // Where to begin the upward package.json search for a load specifier. Specifiers that
 // reach the runtime are file: URLs (resolved by the CLI before registration); install-time
@@ -65,8 +65,9 @@ export async function loadPluginsWithDescriptions(
   services:   MatbotServices,
   baseDir:    string,
   bustCache = false,
+  prompt?:    PromptFn,
 ): Promise<MatbotPlugin[]> {
-  const plugins = await loadPlugins(specifiers, services, bustCache);
+  const plugins = await loadPlugins(specifiers, services, bustCache, prompt);
   for (const plugin of plugins) {
     const specifier = getSpecifierForPlugin(plugin.name);
     if (specifier !== undefined) await backfillPluginDescription(plugin, specifier, baseDir);

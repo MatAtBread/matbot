@@ -1719,24 +1719,35 @@ async function sendMessage() {
 
         case 'prompt': {
           removeLoading();
+          const field      = ev.field;
           const rawQ       = ev.question ?? '';
-          const choiceMatch = /\[([^\/\]]+)\/([^\/\]]+)\]\s*$/.exec(rawQ);
+          // Buttons come from a structured select/confirm field; failing that, from a
+          // legacy trailing [A/B] in the question text. Otherwise it's a free-text input.
+          const choiceMatch = field ? null : /\[([^\/\]]+)\/([^\/\]]+)\]\s*$/.exec(rawQ);
+          const choices = field
+            ? (field.type === 'select'  ? (field.options ?? [])
+             : field.type === 'confirm' ? ['yes', 'no']
+             : null)
+            : (choiceMatch ? [choiceMatch[1], choiceMatch[2]] : null);
+          const questionText = field ? field.label
+            : (choiceMatch ? rawQ.slice(0, choiceMatch.index).trimEnd() : rawQ);
+          const defaultValue = field ? field.default : ev.defaultValue;
+          const inputType    = field && field.type === 'password' ? 'password' : 'text';
           const answer = await new Promise(resolve => {
             const block = document.createElement('div');
             block.className = 'prompt-block';
             const q = document.createElement('div');
             q.className = 'prompt-question';
-            q.textContent = choiceMatch ? rawQ.slice(0, choiceMatch.index).trimEnd() : rawQ;
+            q.innerHTML = md(questionText);
             block.appendChild(q);
-            if (choiceMatch) {
-              const choices = [choiceMatch[1], choiceMatch[2]];
+            if (choices) {
               const row = document.createElement('div');
               row.className = 'prompt-choices';
               let defaultBtn = null;
               for (const choice of choices) {
                 const btn = document.createElement('button');
                 btn.type = 'button';
-                const isDefault = choice.toLowerCase() === (ev.defaultValue ?? '').toLowerCase();
+                const isDefault = choice.toLowerCase() === (defaultValue ?? '').toLowerCase();
                 btn.className = 'prompt-choice-btn' + (isDefault ? ' primary' : '');
                 btn.textContent = choice.toLowerCase() === 'y' ? 'Yes'
                   : choice.toLowerCase() === 'n' ? 'No'
@@ -1761,9 +1772,9 @@ async function sendMessage() {
               const row = document.createElement('div');
               row.className = 'prompt-row';
               const inp = document.createElement('input');
-              inp.type = 'text';
+              inp.type = inputType;
               inp.className = 'prompt-input';
-              inp.value = ev.defaultValue ?? '';
+              inp.value = defaultValue ?? '';
               const btn = document.createElement('button');
               btn.type = 'button';
               btn.className = 'prompt-submit';
@@ -1771,7 +1782,7 @@ async function sendMessage() {
               const submit = () => {
                 inp.disabled = true;
                 btn.disabled = true;
-                resolve(inp.value.trim() || ev.defaultValue || '');
+                resolve(inp.value.trim() || defaultValue || '');
               };
               btn.onclick = submit;
               inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });

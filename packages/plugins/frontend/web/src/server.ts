@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { join, relative, resolve, extname } from 'node:path';
 import type {
   HookRegistry, MatbotPlugin, Principal, ProviderAdapter, ProviderConfig,
-  Session, Store, ToolRegistry, FileStore, SystemContextRegistry, Vault,
+  Session, Store, ToolRegistry, FileStore, SystemContextRegistry, Vault, FormField, PromptFn,
 } from '@matatbread/matbot-core';
 import { appendMessage, createMessage, createSession, runSession } from '@matatbread/matbot-core';
 import { sseComment, sseEvent } from './sse-writer.js';
@@ -169,9 +169,12 @@ export function createWebServer(deps: WebServerDeps) {
       vault:      deps.vault,
       loadPlugin:   deps.loadPlugin,
       unloadPlugin: deps.unloadPlugin,
-      prompt:     (q: string, def?: string) => def !== undefined
-        ? Promise.resolve(def)
-        : Promise.reject(new Error(`Non-interactive context: "${q}"`)),
+      prompt:     ((p: string | FormField, def?: string) => {
+        const fallback = typeof p === 'string' ? def : p.default;
+        return fallback !== undefined
+          ? Promise.resolve(fallback)
+          : Promise.reject(new Error(`Non-interactive context: "${typeof p === 'string' ? p : p.label}"`));
+      }) as PromptFn,
       ...(deps.workdir    !== undefined ? { workdir:    deps.workdir    } : {}),
       ...(deps.files      !== undefined ? { files:      deps.files      } : {}),
       ...(deps.configPath !== undefined ? { configPath: deps.configPath } : {}),
@@ -289,18 +292,20 @@ export function createWebServer(deps: WebServerDeps) {
         for (const sub of active.subs) { if (sub.writable) sub.write(s); }
       };
 
-      const promptFn = (question: string, defaultValue?: string): Promise<string> =>
+      const promptFn = ((p: string | FormField, defaultValue?: string): Promise<string> =>
         new Promise(resolve => {
+          const def = typeof p === 'string' ? defaultValue : p.default;
           pendingPrompts.set(targetId, answer => {
             pendingPrompts.delete(targetId);
-            resolve(answer || defaultValue || '');
+            resolve(answer || def || '');
           });
           broadcast(sseEvent('prompt', {
             type: 'prompt',
-            question,
-            ...(defaultValue !== undefined ? { defaultValue } : {}),
+            question: typeof p === 'string' ? p : p.label,
+            ...(def !== undefined ? { defaultValue: def } : {}),
+            ...(typeof p === 'string' ? {} : { field: p }),
           }));
-        });
+        })) as PromptFn;
 
       // Switch to SSE
       res.writeHead(200, {

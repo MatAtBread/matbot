@@ -1,4 +1,5 @@
 import type { MatbotPlugin, MatbotServices } from './plugin.js';
+import type { PromptFn } from './types.js';
 import { registerPlugin, setupPlugin } from './registry.js';
 
 /**
@@ -45,11 +46,15 @@ let freshSeq = 0;
  *   subtree re-evaluates — necessary when reloading a plugin whose code, or whose
  *   own modules' code, changed since startup. Has no effect if import.meta.resolve
  *   is unavailable; falls back to the original specifier (and logs a warning).
+ * @param prompt Optional host prompt used by setup() to resolve tool-name collisions
+ *   interactively. Omitted by non-interactive hosts, in which case collisions overwrite
+ *   silently (the historical default).
  */
 export async function loadPlugins(
   specifiers: readonly string[],
   services:   MatbotServices,
   bustCache = false,
+  prompt?:    PromptFn,
 ): Promise<MatbotPlugin[]> {
   if (bustCache) {
     console.debug(
@@ -94,7 +99,7 @@ export async function loadPlugins(
 
     try {
       registerPlugin(plugin, spec);
-      await setupPlugin(plugin, services);
+      await setupPlugin(plugin, services, prompt);
       loaded.push(plugin);
     } catch (err) {
       console.error(`[matbot] Ignoring plugin "${plugin.name}" from "${spec}" due to an error:`, err instanceof Error ? err.message : err);

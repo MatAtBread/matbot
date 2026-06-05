@@ -1,7 +1,7 @@
 import type {
   FileStore, Vault, Message, ModelParameters,
   ProviderAdapter, ProviderConfig, Tool, ToolRegistry, FrontendAdapter,
-  Store, Session, SystemContextRegistry, KnowledgeIndex,
+  Store, Session, SystemContextRegistry, KnowledgeIndex, PromptFn,
 } from './types.js';
 import type { HookRegistry } from './hooks.js';
 
@@ -39,8 +39,12 @@ export interface MatbotServices {
   /** Returns a namespaced settings store for the given plugin. Keys are isolated per plugin name. */
   settings(pluginName: string): PluginSettings;
 
-  /** Hot-load a plugin by specifier into the running process. Returns the loaded plugin. */
-  loadPlugin(specifier: string): Promise<MatbotPlugin>;
+  /**
+   * Hot-load a plugin by specifier into the running process. Returns the loaded plugin.
+   * `prompt`, when supplied, resolves tool-name collisions interactively during the new
+   * plugin's setup(); the runner injects the triggering session's prompt automatically.
+   */
+  loadPlugin(specifier: string, prompt?: PromptFn): Promise<MatbotPlugin>;
 
   /** Hot-unload a plugin by specifier, removing its tools, hooks, and system context contributions. */
   unloadPlugin(specifier: string): Promise<void>;

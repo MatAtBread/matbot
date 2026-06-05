@@ -21,8 +21,8 @@ function resolveIndex(session: Session, msgIndex: number): number | null {
 function generateSplitTitle(title: string): string {
   // If title ends with " pt N", bump the number
   const match = title.match(/^(.*?)\s*pt\s+(\d+)$/);
-  if (match) {
-    return `${match[1].trimEnd()} pt ${parseInt(match[2]) + 1}`;
+  if (match && match.length > 2) {
+    return `${match[1]?.trimEnd()} pt ${parseInt(match[2] ?? '0') + 1}`;
   }
   // Otherwise append " pt 2"
   return `${title || 'Untitled'} pt 2`;
