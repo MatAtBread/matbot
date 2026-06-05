@@ -246,6 +246,55 @@ verbatim. Never strip thinking blocks from message history.
 
 ---
 
+## Plugin hot-reload
+
+A plugin can be reloaded from disk without restarting the process (the `plugin reload` tool;
+`loadPlugins(..., bustCache = true)`). The requirement is **freshness all the way down**: if a
+plugin's code — or the code of any module it imports — changed since startup, the reload must
+re-evaluate it. The mechanism is split so the platform-neutral core stays node-free:
+
+- **Core marks intent.** `toFreshUrl` in `packages/core/runner/src/loader.ts` stamps the plugin
+  *entry* URL with a namespaced query param (`?mbfresh=<gen>`, `FRESH_PARAM`). On its own this
+  re-evaluates only the entry — a barrel re-export would leave all the real code behind it cached.
+- **A node-only resolve hook propagates it.** `apps/cli/ts-hooks.js` (registered via
+  `--import ./register.js`) reads the stamp off `context.parentURL` and re-stamps the entry's
+  first-party imports, cascading the generation through the whole subtree. The marker is just an
+  inert query string anywhere no such hook is installed — browser builds reload the whole realm
+  (`location.reload()`) instead, and node without the hook degrades to entry-only busting.
+- **The boundary is "only what the plugin API loaded".** The stamp originates solely at the plugin
+  entry and flows through *its* graph; it stops at host-shared singletons. `register.js` resolves
+  the host-shared package roots (`@matatbread/matbot-core`, `@matatbread/matbot-plugin-api`) and
+  passes them to the hook as an exclusion set. This is mandatory, not cosmetic: those packages
+  export runtime values used with identity semantics (e.g. `MissingSecretError`, matched with
+  `instanceof`). Re-stamp one and the reloaded plugin gets a *second copy* of the module, and
+  cross-boundary `instanceof` / shared-state checks silently break.
+
+### Caveats
+
+- **Memory: every reload leaks its subtree.** Node's ESM module registry never evicts, and each
+  distinct `?mbfresh=<gen>` URL is a permanent new entry. A reloaded plugin's entire re-stamped
+  subtree stays resident for the life of the process. This is acceptable *because reloads are
+  rare* (startup-and-done for ~99% of runs); it is **not** a mechanism to call on a timer, per
+  request, or per turn. There is no `require.cache`-style eviction for ESM — true reclamation
+  needs a dropped realm (worker/child process or `vm` modules), which we deliberately did not build.
+- **First-party only by default.** The exclusion protects `core` + `plugin-api`; everything else
+  the plugin reaches, *including its private `node_modules` deps*, is re-evaluated on reload. That
+  is correct for "code changed all the way down", but a third-party lib holding a module-level
+  singleton not routed through `services` would be duplicated. matbot's "all shared state goes
+  through `services`, not shared module imports" rule is what keeps this safe; if you ever hit a
+  lib that breaks it, add its package root to `hostSharedDirs()` in `register.js`.
+- **The stamp must reach children as static imports.** Propagation is via `context.parentURL`, so
+  it follows the static import graph. A module pulled in by a bare dynamic `import(userString)`
+  with no stamped parent context is busted only if it resolves through a stamped ancestor.
+- **Keep `FRESH_PARAM` and the hook's marker name in sync.** Core writes it; the node hook reads
+  it. They are intentionally decoupled (core must not import node code), so the contract is the
+  literal param name — documented at both ends.
+- **Diagnostics.** `toFreshUrl` warns when `import.meta.resolve` throws and it falls back to the
+  cached module (no busting at all), and `loadPlugins` notes when busting runs without the hook
+  (entry-only). A reload that "doesn't pick up changes" should first be checked against these logs.
+
+---
+
 ## Code style
 
 - No provider SDKs (already said — worth repeating)
