@@ -177,7 +177,7 @@ export const plugin: MatbotPlugin = {
     const ac   = new AbortController();
     teardownAc = ac;
 
-    async function handleMessage(chatId: number, text: string): Promise<void> {
+    async function handleMessage(chatId: number, text: string, senderName?: string): Promise<void> {
       if (messageBusy.has(chatId)) {
         await messageBusy.get(chatId);
       }
@@ -209,8 +209,8 @@ export const plugin: MatbotPlugin = {
           if (!session) {
             session = createSession({ ownerPrincipal: PRINCIPAL });
             // Name the session after the sender so it's identifiable in the web UI
-            const senderName = msg.from?.first_name || msg.from?.username || 'Telegram';
-            session.title = `${senderName} on Telegram`;
+            const name = senderName || 'Telegram';
+            session.title = `${name} on Telegram`;
             await sessions.set(session.id, session);
             await settings.set(sessionKey, session.id);
           }
@@ -280,7 +280,7 @@ export const plugin: MatbotPlugin = {
             offset = update.update_id + 1;
             const msg = update.message;
             if (msg?.text) {
-              void handleMessage(msg.chat.id, msg.text);
+              void handleMessage(msg.chat.id, msg.text, msg.from?.first_name || msg.from?.username);
             }
           }
         } catch (e) {
