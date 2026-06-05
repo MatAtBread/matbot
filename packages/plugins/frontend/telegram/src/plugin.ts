@@ -204,6 +204,9 @@ export const plugin: MatbotPlugin = {
           let session: Session | null = storedId !== undefined ? await sessions.get(storedId) : null;
           if (!session) {
             session = createSession({ ownerPrincipal: PRINCIPAL });
+            // Name the session after the sender so it's identifiable in the web UI
+            const senderName = msg.from?.first_name || msg.from?.username || 'Telegram';
+            session.title = `${senderName} on Telegram`;
             await sessions.set(session.id, session);
             await settings.set(sessionKey, session.id);
           }
