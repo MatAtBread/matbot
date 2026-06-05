@@ -202,6 +202,9 @@ export const plugin: MatbotPlugin = {
           const sessionKey = `chat:${chatId}`;
           const storedId   = await settings.get<string>(sessionKey);
           let session: Session | null = storedId !== undefined ? await sessions.get(storedId) : null;
+          // If the session was hidden/archived in the web UI, treat it as gone
+          // so a new session is created with the current naming convention
+          if (session?.status !== 'active') session = null;
           if (!session) {
             session = createSession({ ownerPrincipal: PRINCIPAL });
             // Name the session after the sender so it's identifiable in the web UI
