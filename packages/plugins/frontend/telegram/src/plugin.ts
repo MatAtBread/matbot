@@ -25,6 +25,7 @@ interface ActiveProvider {
 
 // Module-level state: readable/writable by the tools regardless of where setup() is in scope.
 let teardownAc:    AbortController | undefined;
+const messageBusy = new Map<number, Promise<void>>();
 let activeProvider: ActiveProvider;
 let servicesRef:   MatbotServices | undefined;
 let botTokenRef:   string | undefined;
@@ -172,13 +173,13 @@ export const plugin: MatbotPlugin = {
 
     activeProvider = await buildProvider(initialName, services);
 
-    const busy = new Map<number, Promise<void>>();
+
     const ac   = new AbortController();
     teardownAc = ac;
 
-    async function handleMessage(chatId: number, text: string): Promise<void> {
-      if (busy.has(chatId)) {
-        await busy.get(chatId);
+    async function handleMessage(chatId: number, text: string, senderName?: string): Promise<void> {
+      if (messageBusy.has(chatId)) {
+        await messageBusy.get(chatId);
       }
 
       if (!knownChats.has(chatId)) {
@@ -202,8 +203,14 @@ export const plugin: MatbotPlugin = {
           const sessionKey = `chat:${chatId}`;
           const storedId   = await settings.get<string>(sessionKey);
           let session: Session | null = storedId !== undefined ? await sessions.get(storedId) : null;
+          // If the session was hidden/archived in the web UI, treat it as gone
+          // so a new session is created with the current naming convention
+          if (session?.status !== 'active') session = null;
           if (!session) {
             session = createSession({ ownerPrincipal: PRINCIPAL });
+            // Name the session after the sender so it's identifiable in the web UI
+            const name = senderName || 'Telegram';
+            session.title = `${name} on Telegram`;
             await sessions.set(session.id, session);
             await settings.set(sessionKey, session.id);
           }
@@ -252,7 +259,7 @@ export const plugin: MatbotPlugin = {
           }
         }
 
-        busy.set(chatId, processMessage().finally(() => busy.delete(chatId)).catch(() => {}));
+        messageBusy.set(chatId, processMessage().finally(() => messageBusy.delete(chatId)).catch(() => {}));
       } catch (e) {
         if (!ac.signal.aborted) {
           console.warn(`[frontend-telegram] Error for chat ${chatId}: ${e}\n`);
@@ -273,7 +280,7 @@ export const plugin: MatbotPlugin = {
             offset = update.update_id + 1;
             const msg = update.message;
             if (msg?.text) {
-              void handleMessage(msg.chat.id, msg.text);
+              void handleMessage(msg.chat.id, msg.text, msg.from?.first_name || msg.from?.username);
             }
           }
         } catch (e) {
@@ -294,6 +301,11 @@ export const plugin: MatbotPlugin = {
   async teardown() {
     teardownAc?.abort();
     teardownAc     = undefined;
+    // Wait for any in-flight message handlers to complete before resolving.
+    if (messageBusy.size > 0) {
+      await Promise.allSettled([...messageBusy.values()]);
+    }
+    messageBusy.clear();
     servicesRef    = undefined;
     botTokenRef    = undefined;
     knownChats.clear();

@@ -422,24 +422,39 @@ const executor = {
     if (action === 'reload') {
       yield { type: 'stdout', chunk: `Reloading "${specifier}"...\n` };
 
-      try {
-        await ctx.unloadPlugin(specifier);
-      } catch (e) {
-        yield { type: 'stderr', chunk: `Unload phase failed: ${String(e)}\n` };
-      }
+      // Race the teardown+load against a short timeout so we can give
+      // the user immediate feedback.  If the plugin tears down quickly
+      // the result message includes the installation message.
+      const reloadPromise = ctx.unloadPlugin(specifier)
+        .then(() => ctx.loadPlugin(specifier));
 
-      try {
-        const loaded  = await ctx.loadPlugin(specifier);
-        const welcome = await loaded.installationMessage?.();
+      const result = await Promise.race([
+        reloadPromise.then(async (loaded) => {
+          const welcome = await loaded.installationMessage?.();
+          return welcome ?? `"${specifier}" reloaded successfully.`;
+        }),
+        new Promise<string>(resolve => {
+          setTimeout(() => resolve(null as unknown as string), 5_000);
+        }),
+      ]);
+
+      if (result !== null) {
+        yield { type: 'result', value: { message: result } };
+      } else {
+        // Teardown is taking a while — let the user know and let it complete
+        // in the background.
         yield {
-          type:  'result',
-          value: {
-            message: `"${specifier}" reloaded successfully.`,
-            ...(welcome !== undefined ? { installationMessage: welcome } : {}),
-          },
+          type: 'result',
+          value: { message: `Reload of "${specifier}" is taking longer than expected — it will complete in the background.` },
         };
-      } catch (e) {
-        yield { type: 'error', message: `Reload failed during load phase: ${String(e)}` };
+        reloadPromise
+          .then(async (loaded) => {
+            const welcome = await loaded.installationMessage?.();
+            console.info(`[reload] ${specifier}: ${welcome ?? 'OK'} (async)`);
+          })
+          .catch((e: unknown) => {
+            console.error(`[reload] ${specifier}: ${String(e)}`);
+          });
       }
     }
   },
