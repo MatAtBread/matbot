@@ -20,6 +20,8 @@ and frontends. Not a product; infrastructure.
   - **Storage backends** — filesystem (default) or SQLite
   - **Providers** — add and remove LLM profiles live via the built-in `provider` tool
 
+A clean, TypeScript API encourages you to write your own plugins to get the bot you want. Your own UI, your own memory system, your own persistent storage, your own tools or new concepts like imagination, dreaming, LLM routing - all are supported via hot-loaded npm modules.
+
 To find out more about what makes MatBot special, take a look at the [Design ethos and developer notes](CLAUDE.md)
 
 ---
@@ -43,6 +45,134 @@ pnpm repl   # ephemeral REPL — session discarded on exit
 The REPL starts with no config file needed. Use the built-in `plugin` tool to discover and
 install providers and plugins interactively, or drop a `matbot.yaml` next to your working
 directory (see examples below).
+
+## Auto-configuration
+
+**_You don't actually need to worry about configuration files. Matbot comes with a `plugin` tool that can discover and install plugins that provide new tools, LLM providers, front-ends and more_**. If it has nothing to go on, it will just ask you the basics to get your favourite
+LLM up and running.
+
+
+```text
+$ pnpm repl
+
+No providers configured. Let's set one up.
+
+Available provider types:
+  1. anthropic  (@matatbread/matbot-provider-anthropic)
+  2. customer-services  (@matatbread/matbot-provider-customer-services)
+  3. openai-compat  (@matatbread/matbot-provider-openai-compat)
+
+Choose a type [1-3]: 1
+Provider name (how this LLM key is named in ~/git/matbot/matbot.yaml and presented to you): deepseek
+Model name: deepseek-v4-flash
+Endpoint URL: https://api.deepseek.com/anthropic
+API key: ************************************
+
+Configuration written to ~/git/matbot/matbot.yaml
+
+[2026-06-05T17:34:49.488Z 1153628] provider: deepseek  (ephemeral)
+
+you: got any cool plugins?
+[thinking… ×23]
+Let me check what we've got!
+⚙  plugin {"action":"list"}
+
+
+⚙  plugin {"action":"discover_local"}
+[2026-06-05T17:35:13.813Z 1153628] (node:1153628) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+[thinking… ×22]
+Oh yeah, there's a ton of cool stuff available! Here's the lineup of discoverable plugins you can add:
+
+---
+
+### 🔧 **Tool Plugins** (give me new abilities)
+| Plugin | What it does |
+|--------|-------------|
+| **`bash`** | Run bash scripts right in the workspace — I can execute code, install packages, etc. |
+| **`docker-bash`** | Same but inside a persistent Docker container — sandboxed! Project root is read-only, `.data` is read-write. |
+| **`workspace`** | Read, write, and list files in the workspace. With the web UI, files are downloadable too. |
+| **`http`** | Make HTTP requests to any web API or remote resource. |
+| **`mcp`** | Connect MCP (Model Context Protocol) servers and expose their tools — huge for extending capabilities! |
+| **`json-validation`** | Auto-validates my tool call inputs against schemas so I self-correct on mismatches. |
+| **`edit-session`** | Cut messages, fork sessions into branches, compact history — power editing for convos. |
+
+### 🧠 **Knowledge & Skills**
+| Plugin | What it does |
+|--------|-------------|
+| **`persist-ki-bge`** | Persistent KnowledgeIndex with entity/heading search + optional BGE reranker. |
+| **`rumsfeld`** | "Unknowns unknown" handler — looks up knowledge index when I hit a term I don't know. |
+| **`skills`** | Inject skill documents into sessions on demand. |
+
+### 🖥️ **Frontends** (ways to interact)
+| Plugin | What it does |
+|--------|-------------|
+| **`frontend/web`** | HTTP + SSE web UI with session management — serves a chat UI on a local port. |
+| **`frontend/telegram`** | Run this whole setup as a Telegram bot! |
+
+### 🗄️ **Storage & Sessions**
+| Plugin | What it does |
+|--------|-------------|
+| **`storage/sqlite`** | Persistent SQLite backend (WAL mode) for all runtime state. |
+| **`sessions`** | List, get, rename, hide conversations. |
+
+### ⏰ **Background Automation**
+| Plugin | What it does |
+|--------|-------------|
+| **`background`** | Run prompts in detached background processes + schedule recurring prompts (cron-style). |
+
+---
+
+Wanna **add** any of these? Some highlights I'd personally recommend:
+- **`bash`** + **`workspace`** → I can actually code, write files, and execute things
+- **`http`** → I can hit APIs, fetch data, etc.
+- **`mcp`** → Opens up the whole MCP ecosystem
+- **`frontend/web`** → Gives you a slick web UI
+- **`docker-bash`** → If you want a sandboxed execution environment
+
+Just say the word and I'll install whichever ones sound fun! 🚀
+[↑2130 ↓779 tokens]
+```
+```
+you: install the local plugin for the web frontend
+```
+```
+[thinking… ×24]
+Let me first discover what local plugins are available.
+⚙  plugin {"action":"discover_local"}
+
+[thinking… ×45]
+I found a local web frontend plugin: `@matatbread/matbot-frontend-web` located at `./packages/plugins/frontend/web`. Let me install it.
+⚙  plugin {"action":"add","specifier":"./packages/plugins/frontend/web"}
+Install plugin "./packages/plugins/frontend/web"? [y/N] [N] y
+Activating "./packages/plugins/frontend/web"...
+[frontend-web] http://localhost:19778
+
+[thinking… ×19]
+The web frontend plugin has been successfully installed and is now active. Let me verify by listing the configured plugins.
+⚙  plugin {"action":"list"}
+
+[thinking… ×24]
+The web frontend plugin (`@matatbread/matbot-frontend-web`) has been successfully installed and is now active. You can see it listed under both configured and loaded plugins:
+
+- **Configured**: `./packages/plugins/frontend/web`
+- **Loaded**: `frontend-web` (type: `frontend`, API version: `0.1`)
+
+The plugin is ready to use!
+[↑1021 ↓424 tokens]
+```
+
+The built-in `plugin` tool installs the package, updates `matbot.yaml`, and hot-loads it
+immediately — no restart needed.
+
+Ask it what other plugins there are:
+
+```
+you: what other local plugins do you have?
+```
+> Of course, now the web front-end is loaded, you could have opened your browser
+and done this from the web UI if you wanted
 
 ---
 
@@ -74,24 +204,24 @@ DEEPSEEK_API_KEY=sk-...
 
 ```sh
 # Interactive REPL (ephemeral — session discarded on exit)
-pnpm --filter @matatbread/matbot-cli repl
+pnpm repl
 
 # Single turn
-pnpm --filter @matatbread/matbot-cli repl "What is the capital of France?"
+pnpm repl "What is the capital of France?"
 
 # New persistent session (prints a resume command on exit)
-pnpm --filter @matatbread/matbot-cli repl --session create
+pnpm repl --session create
 
 # Resume an existing session
-pnpm --filter @matatbread/matbot-cli repl --session <id>
+pnpm repl --session <id>
 
 # Server mode — headless, waits for a frontend plugin to handle requests
-pnpm --filter @matatbread/matbot-cli start
+pnpm start
 ```
 
 Sessions are **ephemeral by default**. Nothing is written to disk unless you pass
 `--session create` (or `--session <id>` to resume). On exit a persistent session prints
-a `--session <id>` resume command.
+a `--session <id>` resume command. You can change the storage via plugins. The default is local files under `.data` (`.gitignored`)
 
 ---
 
@@ -148,78 +278,6 @@ providers:
 pnpm repl
 ```
 
-## Auto-configuration
-
-**_You don't actually need to worry about configuration files. Matbot comes with a `plugin` tool that can discover and install plugins that provide new tools, LLM providers, front-ends and more_**
-
-```text
-~/git/matbot$ pnpm repl
-provider: deepseek-v4-flash  (ephemeral)
-
-you: install the local plugin for the web frontend
-```
-```
-[thinking… ×24]
-Let me first discover what local plugins are available.
-⚙  plugin {"action":"discover_local"}
-
-[thinking… ×45]
-I found a local web frontend plugin: `@matatbread/matbot-frontend-web` located at `./packages/plugins/frontend/web`. Let me install it.
-⚙  plugin {"action":"add","specifier":"./packages/plugins/frontend/web"}
-Install plugin "./packages/plugins/frontend/web"? [y/N] [N] y
-Activating "./packages/plugins/frontend/web"...
-[frontend-web] http://localhost:19778
-
-[thinking… ×19]
-The web frontend plugin has been successfully installed and is now active. Let me verify by listing the configured plugins.
-⚙  plugin {"action":"list"}
-
-[thinking… ×24]
-The web frontend plugin (`@matatbread/matbot-frontend-web`) has been successfully installed and is now active. You can see it listed under both configured and loaded plugins:
-
-- **Configured**: `./packages/plugins/frontend/web`
-- **Loaded**: `frontend-web` (type: `frontend`, API version: `0.1`)
-
-The plugin is ready to use!
-[↑1021 ↓424 tokens]
-```
-
-The built-in `plugin` tool installs the package, updates `matbot.yaml`, and hot-loads it
-immediately — no restart needed.
-
-Ask it what other plugins there are:
-
-```
-you: what other local plugins do you have?
-```
-> Of course, you could have opened your browser and done this from the web UI if you wanted
-
-```
-[thinking… ×32]
-Here are all the local plugins available for installation:
-
-| # | Specifier (Path) | Package Name | Notes |
-|---|-----------------|--------------|-------|
-| 1 | `./packages/plugins/background` | `@matatbread/matbot-tool-background` | |
-| 2 | `./packages/plugins/bash` | `@matatbread/matbot-tool-bash` | |
-| 3 | `./packages/plugins/docker-bash` | `@matatbread/matbot-tool-docker-bash` | |
-| 4 | `./packages/plugins/edit-session` | `@matatbread/matbot-edit-session` | |
-| 5 | `./packages/plugins/frontend/telegram` | `@matatbread/matbot-frontend-telegram` | |
-| 6 | `./packages/plugins/frontend/web` | `@matatbread/matbot-frontend-web` | ✅ Already installed |
-| 7 | `./packages/plugins/http` | `@matatbread/matbot-tool-http` | |
-| 8 | `./packages/plugins/mcp` | `@matatbread/matbot-tool-mcp` | |
-| 9 | `./packages/plugins/persist-ki-bge` | `@matatbread/matbot-persist-ki-bge-node` | |
-| 10 | `./packages/plugins/providers/anthropic` | `@matatbread/matbot-provider-anthropic` | ✅ Already installed |
-| 11 | `./packages/plugins/providers/openai-compat` | `@matatbread/matbot-provider-openai-compat` | |
-| 12 | `./packages/plugins/rumsfeld` | `@matatbread/matbot-rumsfeld-node` | |
-| 13 | `./packages/plugins/sessions` | `@matatbread/matbot-sessions` | |
-| 14 | `./packages/plugins/skills` | `@matatbread/matbot-skills-node` | |
-| 15 | `./packages/plugins/storage/sqlite` | `@matatbread/matbot-storage-sqlite` | |
-| 16 | `./packages/plugins/workspace` | `@matatbread/matbot-tool-workspace` | |
-
-Would you like to install any of these?
-[↑1622 ↓550 tokens]
-```
 ---
 
 ## Configuration reference
@@ -267,6 +325,9 @@ Both placeholder forms are resolved at runtime by the Vault:
 
 Credentials are resolved at startup and never written to session storage.
 
+Note: The `Vault` is also a plugin. The default behaviour is to manage the .env, but you can
+override this easily and store them in any way you wish.
+
 ### Data directory
 
 All runtime state lives in `.data/` next to `matbot.yaml` and is .gitignored:
@@ -280,6 +341,9 @@ All runtime state lives in `.data/` next to `matbot.yaml` and is .gitignored:
   bash-cwd/    — default working directory for bash tool execution
   files/       — file store blobs; the workspace namespace holds workspace_write output
 ```
+
+Note: The `Store` is also a plugin. MatBot will persist it's key data, as can plugins, via
+a simple, pluggable storage interface.
 
 The SQLite storage plugin (`@matatbread/matbot-storage-sqlite`) replaces the per-directory
 filesystem stores with a single `.data/matbot.db` file. Plugins may create additional
@@ -329,4 +393,8 @@ Add it to your config:
 ```yaml
 plugins:
   - ./my-plugin
+```
+...or ask MatBot to do it in the repl or web-frontend
+```
+Add the local plugin called my-plugin
 ```
