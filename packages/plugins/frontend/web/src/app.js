@@ -1070,17 +1070,24 @@ function createMsgDivider(msgIdx) {
 
   const menu = document.createElement('div');
   menu.className = 'msg-divider-menu';
-  for (const [label, action, danger] of [
-    ['🔗 Copy link', 'copy-link', false],
-    ['✂ Cut',             'cut',       true],
-    ['⎇ Fork',            'fork',      false],
-    ['🗜 Compact',   'compact',   true],
-    ['⇉ Split',          'split',      false],
+  for (const [icon, label, action, danger] of [
+    ['🔗', 'Copy link', 'copy-link', false],
+    ['✂',  'Cut',             'cut',       true],
+    ['⎇',  'Fork',            'fork',      false],
+    ['🗜', 'Compact',   'compact',   true],
+    ['⇉',  'Split',          'split',      false],
   ]) {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'msg-divider-btn' + (danger ? ' danger' : '');
-    btn.textContent = label;
+    const iconSpan = document.createElement('span');
+    iconSpan.className = 'msg-divider-btn-icon';
+    iconSpan.textContent = icon;
+    const labelSpan = document.createElement('span');
+    labelSpan.className = 'msg-divider-btn-label';
+    labelSpan.textContent = label;
+    btn.appendChild(iconSpan);
+    btn.appendChild(labelSpan);
     btn.addEventListener('click', (e) => { e.stopPropagation(); handleDividerAction(div, action); });
     menu.appendChild(btn);
   }
@@ -1143,6 +1150,7 @@ async function handleDividerAction(divider, action) {
       const session = await apiGetSession(currentSessionId);
       if (session) renderSession(session);
     } else if (action === 'split') {
+      if (!confirm('Split session at this point? Messages before will be moved to a new session.')) return;
       const result = await callTool('edit_session_split', { sessionId: currentSessionId, msgIndex: msgIdx });
       if (result?.newSessionId) {
         // Navigate to the current (trimmed) session

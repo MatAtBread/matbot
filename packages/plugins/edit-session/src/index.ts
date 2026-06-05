@@ -18,6 +18,16 @@ function resolveIndex(session: Session, msgIndex: number): number | null {
   return msgIndex;
 }
 
+function generateSplitTitle(title: string): string {
+  // If title ends with " pt N", bump the number
+  const match = title.match(/^(.*?)\s*pt\s+(\d+)$/);
+  if (match) {
+    return `${match[1].trimEnd()} pt ${parseInt(match[2]) + 1}`;
+  }
+  // Otherwise append " pt 2"
+  return `${title || 'Untitled'} pt 2`;
+}
+
 // ── tool factories ────────────────────────────────────────────────────────────
 
 function makeCutTool(store: Store<Session>): Tool {
@@ -121,6 +131,7 @@ function makeSplitTool(store: Store<Session>): Tool {
           ...bumpVersion(session),
           id:               crypto.randomUUID(),
           parentSessionId:  sessionId,
+          title:            generateSplitTitle(session.title ?? ''),
           messages:         prefixMsgs,
           createdAt:        now(),
           updatedAt:        now(),
