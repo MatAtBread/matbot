@@ -48,7 +48,6 @@ async function buildProvider(name: string, services: MatbotServices): Promise<Ac
 export const plugin: MatbotPlugin = {
   name:       PLUGIN_NAME,
   apiVersion: PLUGIN_API_VERSION,
-  isFrontend: true,
 
   tools: [
     {
@@ -152,6 +151,8 @@ export const plugin: MatbotPlugin = {
 
     const sessions = services.sessions!;
     if (!sessions) throw new Error('frontend-telegram requires services.sessions');
+
+    services.registerFrontend({ name: PLUGIN_NAME });
 
     servicesRef = services;
     botTokenRef = botToken;

@@ -570,6 +570,24 @@
     /* Assistant: left-aligned, no background */
     .message.assistant { align-self: flex-start; }
 
+    /* Marker: centered cross-thread link notice */
+    .marker-note {
+      align-self: center;
+      max-width: 560px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 14px;
+      background: #f3f4f6;
+      border: 1px solid #e5e7eb;
+      border-radius: 999px;
+      color: #6b7280;
+      font-size: 0.84em;
+    }
+    .marker-note .marker-icon { font-size: 1.05em; line-height: 1; }
+    .marker-note a { color: #4f46e5; font-weight: 600; text-decoration: none; cursor: pointer; }
+    .marker-note a:hover { text-decoration: underline; }
+
     .msg-label {
       font-size: 0.79em;
       font-weight: 600;

@@ -63,7 +63,7 @@ export interface ProviderAdapter {
 
 // ── Messages & Session ────────────────────────────────────────────────────────
 
-export type MessageRole = 'user' | 'assistant' | 'tool' | 'system';
+export type MessageRole = 'user' | 'assistant' | 'tool' | 'system' | 'marker';
 
 export type MessageContent =
   | { type: 'text';              text: string }
@@ -80,7 +80,33 @@ export type MessageContent =
   | { type: 'file-ref';          fileId: string; name: string; mimeType: MimeType }
   | { type: 'form';              fields: FormField[]; submitLabel?: string }
   | { type: 'form-response';     values: Record<string, string> }
+  | { type: 'marker';            creator: string; data: unknown }
   | { type: 'unknown-content';   blockType: string; raw: unknown };
+
+/**
+ * A marker is opaque, durable annotation carried in the message stream: links, status,
+ * cross-references that are meaningful to a frontend but transparent to the LLM. They are
+ * persisted unchanged, elided from provider submission, and deliberately preserved by
+ * session compaction (removing one can break things — e.g. a pointer back to an ancestor
+ * session). Any code with session access may emit one, normally as its own message.
+ *
+ * `creator` is the emitting plugin's reference; `data` is anything serialisable. For
+ * per-creator type safety, augment `MarkerData` and read/write via `Marker<'your-creator'>`:
+ *
+ *   declare module '@matatbread/matbot-plugin-api' {
+ *     interface MarkerData { 'split-session': { peerSessionId: string } }
+ *   }
+ *
+ * Unregistered creators fall back to `data: unknown`. The base `MessageContent` member stays
+ * loose (`creator: string`) so the union and its exhaustive switches are unaffected.
+ */
+export interface MarkerData {}
+
+export type Marker<K extends string = string> = {
+  type:    'marker';
+  creator: K;
+  data:    K extends keyof MarkerData ? MarkerData[K] : unknown;
+};
 
 export interface FormField {
   name:      string;
@@ -117,32 +143,6 @@ export interface Session {
   branchPointMessageId?: string;
   createdAt:             ISODate;
   updatedAt:             ISODate;
-}
-
-export type MessageKind =
-  | 'thinking'
-  | 'tool-call'
-  | 'tool-result'
-  | 'tool-stdout'
-  | 'tool-stderr'
-  | 'file'
-  | 'usage'
-  | 'error'
-  | 'form';
-
-export interface InboundMessage {
-  id:           string;
-  /** Plain text string, or a pre-formed content array (e.g. a form-response). */
-  content:      string | MessageContent[];
-  attachments?: FileHandle[];
-  metadata?:    Record<string, unknown>;
-}
-
-export interface OutboundMessage {
-  id:         string;
-  content:    string;
-  artefacts?: FileHandle[];
-  metadata?:  Record<string, unknown>;
 }
 
 // ── System context ────────────────────────────────────────────────────────────
@@ -390,17 +390,14 @@ export interface FileStore {
 
 // ── Frontend ──────────────────────────────────────────────────────────────────
 
-export interface FrontendAdapter {
-  readonly name: string;
-  subscribe:     MessageKind[];
-  files?: {
-    accept?:   MimeType[];
-    produce?:  MimeType[];
-    maxBytes?: number;
-  };
-  receive(): AsyncIterable<InboundMessage>;
-  send(message: OutboundMessage): Promise<void>;
-  health(): Promise<HealthStatus>;
+/**
+ * Passed to `services.registerFrontend()` by a plugin declaring itself a frontend. A frontend
+ * owns its own I/O (an HTTP server, a bot connection, a REPL); matbot only needs to know it
+ * exists. This object is the growth point for frontend-level capability advertisement
+ * (accepted/produced MIME types, size limits, …) as media support lands.
+ */
+export interface FrontendInfo {
+  name: string;
 }
 
 // ── Vault ─────────────────────────────────────────────────────────────────────

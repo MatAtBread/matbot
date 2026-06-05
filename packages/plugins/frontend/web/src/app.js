@@ -1224,6 +1224,50 @@ function createAssistantWrap(labelText) {
   return wrap;
 }
 
+// Render marker blocks as centered cross-thread notices. Markers are opaque to the LLM; the UI
+// is free to interpret known creators. Unknown creators get a generic, non-navigating chip.
+function appendMarker(content) {
+  messagesEl.querySelector('.empty-state')?.remove();
+  for (const part of content) {
+    if (part.type !== 'marker') continue;
+    messagesEl.appendChild(renderMarker(part));
+  }
+}
+
+function renderMarker(part) {
+  const note = document.createElement('div');
+  note.className = 'marker-note';
+  const data = part.data || {};
+
+  if (part.creator === '@matatbread/matbot-edit-session' && data.peerSessionId) {
+    const forward = data.relation === 'continued-in';
+    const icon = document.createElement('span');
+    icon.className = 'marker-icon';
+    icon.textContent = forward ? '↪' : '↩';
+    note.appendChild(icon);
+    const text = document.createElement('span');
+    text.textContent = forward
+      ? 'Conversation continued in another thread'
+      : 'Earlier messages split to another thread';
+    note.appendChild(text);
+    const link = document.createElement('a');
+    link.href = '#' + data.peerSessionId;
+    link.textContent = 'Open →';
+    link.addEventListener('click', (e) => { e.preventDefault(); openSession(data.peerSessionId); });
+    note.appendChild(link);
+    return note;
+  }
+
+  const icon = document.createElement('span');
+  icon.className = 'marker-icon';
+  icon.textContent = '🔖';
+  note.appendChild(icon);
+  const text = document.createElement('span');
+  text.textContent = part.creator + ': ' + JSON.stringify(data);
+  note.appendChild(text);
+  return note;
+}
+
 // Populate a wrapper from historical message content parts
 function renderContentParts(wrap, content) {
   for (const part of content) {
@@ -1360,6 +1404,8 @@ function renderSession(session, startIdx, scrollTarget) {
       // Results are attached to their matching .tool-block via data-call-id; no wrapper needed.
       const dummy = document.createDocumentFragment();
       renderContentParts(dummy, msg.content);
+    } else if (msg.role === 'marker') {
+      appendMarker(msg.content);
     }
   }
   if (scrollTarget !== undefined) {

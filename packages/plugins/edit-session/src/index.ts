@@ -1,11 +1,42 @@
 import type {
-  MatbotPlugin, MatbotServices, Tool, ToolEvent, Session, Store,
+  MatbotPlugin, MatbotServices, Tool, ToolEvent, Session, Store, Message, Marker,
 } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
+
+const PLUGIN_NAME = '@matatbread/matbot-edit-session';
+
+// This plugin's marker payload, made type-safe by augmenting the shared MarkerData registry.
+// Any reader narrowing on creator === PLUGIN_NAME gets the typed `data` for free.
+declare module '@matatbread/matbot-plugin-api' {
+  interface MarkerData {
+    '@matatbread/matbot-edit-session': {
+      /** 'split-from': earlier messages were split into peerSessionId (navigate back).
+       *  'continued-in': this conversation continued in peerSessionId (navigate forward). */
+      relation:      'split-from' | 'continued-in';
+      peerSessionId: string;
+    };
+  }
+}
+
+type SplitMarkerData = Marker<typeof PLUGIN_NAME>['data'];
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 function now(): string { return new Date().toISOString(); }
+
+// A standalone marker message: opaque to the LLM (the 'marker' role is skipped by every provider
+// converter), preserved by compaction, carried with the session for the UI to render as a
+// cross-thread link.
+function markerMessage(data: SplitMarkerData): Message {
+  const marker: Marker<typeof PLUGIN_NAME> = { type: 'marker', creator: PLUGIN_NAME, data };
+  return {
+    id:        crypto.randomUUID(),
+    role:      'marker',
+    content:   [marker],
+    createdAt: now(),
+    traceId:   crypto.randomUUID(),
+  };
+}
 
 function bumpVersion<T extends { version: string }>(doc: T): T {
   return { ...doc, version: crypto.randomUUID() };
@@ -126,22 +157,26 @@ function makeSplitTool(store: Store<Session>): Tool {
         // Messages from the split point onward stay in the current session
         const suffixMsgs = session.messages.slice(idx);
 
-        // Create the new session with the prefix messages
+        const newSessionId = crypto.randomUUID();
+
+        // Create the new session with the prefix messages, tailed by a marker pointing forward to
+        // the continuing (current) session.
         const newSession: Session = {
           ...bumpVersion(session),
-          id:               crypto.randomUUID(),
+          id:               newSessionId,
           parentSessionId:  sessionId,
-          messages:         prefixMsgs,
+          messages:         [...prefixMsgs, markerMessage({ relation: 'continued-in', peerSessionId: sessionId })],
           createdAt:        now(),
           updatedAt:        now(),
         };
         await store.set(newSession.id, newSession);
 
-        // Update the current session to keep only suffix messages
+        // Update the current session to keep only suffix messages, headed by a marker pointing back
+        // to where the earlier messages now live.
         const updated: Session = bumpVersion({
           ...session,
           title:     generateSplitTitle(session.title ?? ''),
-          messages:  suffixMsgs,
+          messages:  [markerMessage({ relation: 'split-from', peerSessionId: newSessionId }), ...suffixMsgs],
           updatedAt: now(),
         });
         const res = await store.cas(sessionId, session.version, updated);
@@ -166,7 +201,7 @@ function makeSplitTool(store: Store<Session>): Tool {
   };
 }
 
-const KEEP_TYPES = new Set(['text', 'refusal']);
+const KEEP_TYPES = new Set(['text', 'refusal', 'marker']);
 
 function makeCompactTool(store: Store<Session>): Tool {
   return {
@@ -210,7 +245,7 @@ function makeCompactTool(store: Store<Session>): Tool {
 // ── plugin ────────────────────────────────────────────────────────────────────
 
 export const plugin: MatbotPlugin = {
-  name:       '@matatbread/matbot-edit-session',
+  name:       PLUGIN_NAME,
   apiVersion: PLUGIN_API_VERSION,
 
   async setup(services: MatbotServices) {
