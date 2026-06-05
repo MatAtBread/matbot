@@ -1,7 +1,7 @@
 import type {
   Session, MessageContent,
   PipelineEvent, RunConfig, ProviderAdapter, ProviderConfig,
-  Tool, ToolContext, ToolHookContext, Store, FileStore, SystemContextRegistry, Vault,
+  Tool, ToolContext, ToolHookContext, Store, FileStore, SystemContextRegistry, Vault, PromptFn, FormField,
 } from './types.js';
 import type { MatbotPlugin } from './plugin.js';
 import { HookRegistry } from './hooks.js';
@@ -22,8 +22,8 @@ export interface RunSessionOpts {
   configPath?:    string;
   files?:         FileStore;
   /** Supply a prompt implementation to allow tools to ask interactive questions. */
-  prompt?:        (question: string, defaultValue?: string) => Promise<string>;
-  loadPlugin:     (specifier: string) => Promise<MatbotPlugin>;
+  prompt?:        PromptFn;
+  loadPlugin:     (specifier: string, prompt?: PromptFn) => Promise<MatbotPlugin>;
   unloadPlugin:   (specifier: string) => Promise<void>;
 }
 
@@ -31,10 +31,12 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
   const { config, provider, providerConfig, store, signal } = opts;
   const tools   = opts.tools   ?? new Map<string, Tool>();
   const hookReg = opts.hooks   ?? new HookRegistry();
-  const promptFn = opts.prompt ?? ((q: string, def?: string) => {
-    if (def !== undefined) return Promise.resolve(def);
-    return Promise.reject(new Error(`Non-interactive context: cannot prompt for "${q}"`));
-  });
+  const promptFn: PromptFn = opts.prompt ?? (((p: string | FormField, def?: string): Promise<string> => {
+    const fallback = typeof p === 'string' ? def : p.default;
+    if (fallback !== undefined) return Promise.resolve(fallback);
+    const label = typeof p === 'string' ? p : p.label;
+    return Promise.reject(new Error(`Non-interactive context: cannot prompt for "${label}"`));
+  }) as PromptFn);
   const vault: Vault = opts.vault ?? {
     async createSecret() { throw new Error('No vault configured'); },
     async resolve(ref: string) { return ref; },
@@ -215,7 +217,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
       const toolCtx: ToolContext = {
         callId: tc.id, session, principal: config.principal, signal, vault,
         prompt:       promptFn,
-        loadPlugin:   opts.loadPlugin,
+        loadPlugin:   (specifier: string) => opts.loadPlugin(specifier, promptFn),
         unloadPlugin: opts.unloadPlugin,
         ...(opts.workdir     !== undefined ? { workdir:     opts.workdir     } : {}),
         ...(opts.configPath  !== undefined ? { configPath:  opts.configPath  } : {}),

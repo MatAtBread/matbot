@@ -16,7 +16,7 @@ import { appendMessage, createMessage,
          getPluginNameForSpecifier,
          MissingSecretError }              from '@matatbread/matbot-core';
 import type { MatbotServices, PluginSettings, ToolRegistry, Vault,
-              MatbotPlugin, StorageBackend, KnowledgeIndex } from '@matatbread/matbot-core';
+              MatbotPlugin, StorageBackend, KnowledgeIndex, PromptFn, FormField } from '@matatbread/matbot-core';
 import { systemPrincipal }                 from '@matatbread/matbot-security';
 import { EnvFileVault }                     from './env-vault.js';
 import { FilesystemStore }                 from '@matatbread/matbot-storage-filesystem';
@@ -254,7 +254,7 @@ async function runTurn(
   files:          FileStore,
   hooks:          HookRegistry,
   systemContext:  SystemContextRegistryImpl,
-  promptFn:       (question: string, defaultValue?: string) => Promise<string>,
+  promptFn:       PromptFn,
   loadPluginFn:   (specifier: string) => Promise<MatbotPlugin>,
   unloadPluginFn: (specifier: string) => Promise<void>,
   configPath:     string,
@@ -849,9 +849,9 @@ async function main(): Promise<void> {
       }
       return { text, usage: { inputTokens, outputTokens } };
     },
-    async loadPlugin(specifier: string) {
+    async loadPlugin(specifier: string, prompt?: PromptFn) {
       const resolved = await resolvePluginSpecifiers([specifier], path.dirname(configPath));
-      const plugins  = await loadPluginsWithDescriptions(resolved, services, path.dirname(configPath), /* bustCache */ true);
+      const plugins  = await loadPluginsWithDescriptions(resolved, services, path.dirname(configPath), /* bustCache */ true, prompt);
       const plugin   = plugins[0];
       if (plugin === undefined) throw new Error(`No plugin loaded for specifier "${specifier}"`);
       return plugin;
@@ -995,11 +995,23 @@ async function main(): Promise<void> {
   const rl = createInterface({ input: process.stdin, output: process.stderr });
   rl.on('SIGINT', () => { process.stderr.write('\n'); rl.close(); });
 
-  const stdinPrompt = async (question: string, defaultValue?: string): Promise<string> => {
+  const stdinPrompt = (async (p: string | FormField, defaultValue?: string): Promise<string> => {
+    if (typeof p !== 'string') {
+      const def = p.default;
+      if (p.type === 'select' || p.type === 'confirm') {
+        const opts = p.type === 'confirm' ? ['yes', 'no'] : (p.options ?? []);
+        const hint = opts.map(o => def !== undefined && o.toLowerCase() === def.toLowerCase() ? o.toUpperCase() : o).join('/');
+        const raw  = (await rl.question(`${p.label} [${hint}] `)).trim();
+        if (!raw) return def ?? '';
+        return opts.find(o => o.toLowerCase().startsWith(raw.toLowerCase())) ?? def ?? raw;
+      }
+      const suffix = def !== undefined ? ` [${def}] ` : ' ';
+      return (await rl.question(`${p.label}${suffix}`)).trim() || def || '';
+    }
     const suffix = defaultValue !== undefined ? ` [${defaultValue}] ` : ' ';
-    const answer = await rl.question(`${question}${suffix}`);
+    const answer = await rl.question(`${p}${suffix}`);
     return answer.trim() || defaultValue || '';
-  };
+  }) as PromptFn;
 
   // ── Single-turn ──────────────────────────────────────────────────────────────
   if (argPrompt !== undefined) {

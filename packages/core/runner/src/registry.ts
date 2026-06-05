@@ -1,4 +1,4 @@
-import type { Tool, ToolRegistry, Hook, HookPoint, HookContext } from './types.js';
+import type { Tool, ToolRegistry, Hook, HookPoint, HookContext, PromptFn, FormField } from './types.js';
 import type {
   MatbotPlugin, MatbotServices,
   ProviderAdapterFactory, StoreFactory, FrontendFactory,
@@ -20,7 +20,61 @@ const state = {
   hookPlugins:        new Set<string>(),         // plugins that registered at least one hook
   systemContextPlugins: new Set<string>(),       // plugins that registered a system-context contributor
   specifierToName: new Map<string, string>(),    // resolved specifier → plugin name
+  overwriteAllTools: undefined as boolean | undefined,  // persisted "overwrite on collision, this install" choice, loaded lazily
 };
+
+// Settings namespace + key under which the user's "overwrite all colliding tools" choice
+// is persisted for the installation. The namespace doubles as a Store document id, so it must
+// satisfy the storage id charset (/^[\w-]+$/) — hence underscores, not '@matbot/core'. The
+// dunder marks it reserved (internal), so it won't collide with a real plugin's settings.
+const CORE_SETTINGS_NS    = '__matbot_core__';
+const OVERWRITE_TOOLS_KEY = 'overwriteToolsOnCollision';
+
+/**
+ * Decide whether an incoming tool registration may overwrite an existing tool of the
+ * same name owned by a different plugin. Returns true to overwrite, false to keep the
+ * existing one and drop the incoming registration.
+ *
+ * Resolution order: a persisted "overwrite all (this install)" choice short-circuits to
+ * true; otherwise the user is prompted [n / Y / all] with Y (overwrite) as the default.
+ * 'all' persists the choice. With no prompt available (non-interactive host) we overwrite —
+ * the default — preserving matbot's historical last-registration-wins behaviour.
+ */
+async function resolveToolCollision(
+  services:      MatbotServices,
+  toolName:      string,
+  existingOwner: string | undefined,
+  incomingOwner: string,
+  prompt:        PromptFn | undefined,
+): Promise<boolean> {
+  if (state.overwriteAllTools === undefined) {
+    state.overwriteAllTools = (await services.settings(CORE_SETTINGS_NS).get<boolean>(OVERWRITE_TOOLS_KEY)) ?? false;
+  }
+  if (state.overwriteAllTools) return true;
+
+  const owner = existingOwner !== undefined ? `"${existingOwner}"` : 'a built-in';
+  const label = `Tool \`"${toolName}"\` is already registered by **${owner}**. Overwrite it with the one from **"${incomingOwner}"**?`;
+
+  if (prompt === undefined) {
+    console.warn(`[matbot] ${label} — non-interactive, overwriting (default).`);
+    return true;
+  }
+
+  const field: FormField = {
+    name:    'overwrite',
+    label,
+    type:    'select',
+    options: ['Keep existing', 'Overwrite', 'Always overwrite'],
+    default: 'Overwrite',
+  };
+  const answer = (await prompt(field)).trim().toLowerCase();
+  if (answer.startsWith('a')) {  // "Always overwrite" — persist for the installation
+    state.overwriteAllTools = true;
+    await services.settings(CORE_SETTINGS_NS).set(OVERWRITE_TOOLS_KEY, true);
+    return true;
+  }
+  return !answer.startsWith('k');  // "Keep existing" → false; "Overwrite"/default → true
+}
 
 // ── Version check ─────────────────────────────────────────────────────────────
 
@@ -150,13 +204,34 @@ export function getSpecifierForPlugin(pluginName: string): string | undefined {
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
 
-/** Run setup() for a single plugin. Called by loadPlugins immediately after registration. */
-export async function setupPlugin(plugin: MatbotPlugin, services: MatbotServices): Promise<void> {
+/**
+ * Run setup() for a single plugin. Called by loadPlugins immediately after registration.
+ *
+ * `prompt`, when supplied by the host, makes tool-name collisions interactive: registering a
+ * tool whose name a *different* plugin already owns asks the user whether to overwrite. Absent
+ * (non-interactive host), collisions overwrite silently — the historical default.
+ */
+export async function setupPlugin(plugin: MatbotPlugin, services: MatbotServices, prompt?: PromptFn): Promise<void> {
   state.toolRegistry ??= services.tools;
+
+  // Single choke point for every plugin tool registration (static `plugin.tools` and in-setup
+  // `services.tools.register`). Stamps ownership and resolves name collisions. The no-collision
+  // path runs synchronously (an async fn yields nothing before its first await), so fire-and-forget
+  // callers that don't await still get the tool registered in the same tick.
+  const registerTool = async (tool: Tool): Promise<void> => {
+    const stamped: Tool = { ...tool, pluginName: plugin.name };
+    const existing = services.tools.resolve(stamped.name);
+    if (existing !== null && existing.pluginName !== plugin.name) {
+      const overwrite = await resolveToolCollision(services, stamped.name, existing.pluginName, plugin.name, prompt);
+      if (!overwrite) return;
+    }
+    services.tools.register(stamped);
+  };
+
   const scopedServices: MatbotServices = {
     ...services,
     tools: {
-      register(tool: Tool) { services.tools.register({ ...tool, pluginName: plugin.name }); },
+      register:      registerTool,
       remove:        (name: string) => services.tools.remove(name),
       resolve:       (name: string) => services.tools.resolve(name),
       list:          ()             => services.tools.list(),
@@ -186,23 +261,19 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotServices
     },
   };
   for (const tool of plugin.tools ?? []) {
-    scopedServices.tools.register(tool);
+    await registerTool(tool);
   }
   await plugin.setup?.(scopedServices);
 }
 
 /** Tear down and fully unload a single plugin, removing all its registered contributions. */
 export async function unloadPlugin(pluginName: string, services: MatbotServices): Promise<void> {
+  console.warn(`[matbot] Unloading plugin "${pluginName}"`);
   const idx = state.plugins.findIndex(p => p.name === pluginName);
   if (idx === -1) return;
 
+  // Note: all synchronous cleanup (removing tools, hooks, services) is done before any asynchronous teardown() calls, to ensure a consistent state even if teardown() fails or hangs.
   const plugin = state.plugins[idx]!;
-
-  try {
-    await plugin.teardown?.();
-  } catch (e) {
-    console.error(`[matbot] teardown error in plugin "${pluginName}":`, e);
-  }
 
   services.tools.removeByPlugin(pluginName);
   services.hooks.removeByPlugin(pluginName);
@@ -228,18 +299,19 @@ export async function unloadPlugin(pluginName: string, services: MatbotServices)
   }
 
   state.plugins.splice(idx, 1);
-  console.warn(`[matbot] Unloaded plugin "${pluginName}"`);
+  return Promise.race([
+    plugin.teardown?.(),
+    new Promise<void>((_, reject) => setTimeout(() => reject(new Error(`Teardown timeout for plugin ${pluginName}`)), 10000))
+  ]);
 }
 
 /** Run each plugin's teardown() in reverse-registration order. Errors are logged, not thrown. */
 export async function teardownPlugins(): Promise<void> {
-  for (let i = state.plugins.length - 1; i >= 0; i--) {
-    const plugin = state.plugins[i]!;
-    try {
-      await plugin.teardown?.();
-    } catch (e) {
-      console.error(`[matbot] teardown error in plugin "${plugin.name}":`, e);
+  const results = await Promise.allSettled([...state.plugins].reverse().map(plugin => plugin.teardown?.()));
+  results.forEach((result, i) => {
+    if (result.status === 'rejected') {
+      console.error(`[matbot] teardown error in plugin "${state.plugins[i]?.name}":`, result.reason);
     }
-  }
+  });
 }
 
