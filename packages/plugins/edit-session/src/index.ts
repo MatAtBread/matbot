@@ -86,6 +86,75 @@ function makeForkTool(store: Store<Session>): Tool {
   };
 }
 
+function makeSplitTool(store: Store<Session>): Tool {
+  return {
+    name:        'edit_session_split',
+    description: 'Split a session at msgIndex: move messages before msgIndex into a new session and remove them from the current session. The current session keeps only messages from msgIndex onward.',
+    inputSchema: {
+      type:       'object',
+      required:   ['sessionId', 'msgIndex'],
+      properties: {
+        sessionId: { type: 'string' },
+        msgIndex:  { type: 'number', description: 'Split point: messages before this index are moved to a new session and removed from the current session.' },
+      },
+    },
+    executor: {
+      async *execute(input: unknown): AsyncIterable<ToolEvent> {
+        const { sessionId, msgIndex } = input as { sessionId: string; msgIndex: number };
+        const session = await store.get(sessionId);
+        if (!session) { yield { type: 'error', message: `Session "${sessionId}" not found.` }; return; }
+        const idx = resolveIndex(session, msgIndex);
+        if (idx === null) { yield { type: 'error', message: `msgIndex ${msgIndex} out of range.` }; return; }
+        if (idx === 0) {
+          yield { type: 'error', message: 'Cannot split at index 0 — nothing to split off.' };
+          return;
+        }
+
+        // Messages before the split point go to the new session
+        const prefixMsgs = session.messages.slice(0, idx);
+
+        // Messages from the split point onward stay in the current session
+        const suffixMsgs = session.messages.slice(idx);
+
+        // Create the new session with the prefix messages
+        const newSession: Session = {
+          ...bumpVersion(session),
+          id:               crypto.randomUUID(),
+          parentSessionId:  sessionId,
+          messages:         prefixMsgs,
+          createdAt:        now(),
+          updatedAt:        now(),
+        };
+        await store.set(newSession.id, newSession);
+
+        // Update the current session to keep only suffix messages
+        const updated: Session = bumpVersion({
+          ...session,
+          messages:  suffixMsgs,
+          updatedAt: now(),
+        });
+        const res = await store.cas(sessionId, session.version, updated);
+        if (!res.ok) {
+          // CAS failed — clean up the new session we just created
+          await store.delete(newSession.id);
+          yield { type: 'error', message: 'Concurrent modification — please retry.' };
+          return;
+        }
+
+        yield {
+          type: 'result',
+          value: {
+            newSessionId: newSession.id,
+            messagesSplit: prefixMsgs.length,
+            currentSessionId: sessionId,
+            messagesRemaining: suffixMsgs.length,
+          },
+        };
+      },
+    },
+  };
+}
+
 const KEEP_TYPES = new Set(['text', 'refusal']);
 
 function makeCompactTool(store: Store<Session>): Tool {
@@ -136,7 +205,7 @@ export const plugin: MatbotPlugin = {
   async setup(services: MatbotServices) {
     const store = services.sessions;
     if (!store) return;
-    for (const tool of [makeCutTool(store), makeForkTool(store), makeCompactTool(store)]) {
+    for (const tool of [makeCutTool(store), makeForkTool(store), makeSplitTool(store), makeCompactTool(store)]) {
       services.tools.register(tool);
     }
   },
