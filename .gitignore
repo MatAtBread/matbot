@@ -7,6 +7,6 @@ dist/
 .env.*
 !.env.example
 .data*
-.claude
+.claude/settings.local.json
 matbot.yaml
 matbot.*.yaml
