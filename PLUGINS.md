@@ -80,7 +80,6 @@ Plugins are hot-loaded immediately after install — no restart needed.
 | `manifest`       | `PluginManifest`                               | Human-readable metadata, required env vars |
 | `tools`          | `readonly Tool[]`                              | Tool implementations to register |
 | `providers`      | `Record<string, ProviderAdapterFactory>`       | LLM adapter factories keyed by `type` string |
-| `frontend`       | `FrontendFactory`                              | Frontend adapter factory |
 | `storageBackend` | `{ open(dotData: string): Promise<StorageBackend> }` | Storage backend (see below) |
 | `setup`          | `(services: MatbotServices) => Promise<void>`  | Called once after all plugins are registered |
 | `teardown`       | `() => Promise<void>`                          | Called on graceful shutdown |
@@ -438,28 +437,34 @@ nothing and return when the signal fires.
 
 ## Writing a frontend plugin
 
-Frontends consume `InboundMessage`s and emit `OutboundMessage`s:
+A frontend owns its own I/O — an HTTP server, a bot connection, a REPL — and declares itself at
+runtime by calling `services.registerFrontend({ name: 'my-plugin-name' })` inside `setup()`. There is no adapter interface
+for the runtime to drive: matbot only records that the plugin is a frontend (so tools like
+`plugin list` can label it). Declaring is an action, symmetric with `services.register()` —
+multiple frontends may run at once, and a frontend is auto-unregistered when its plugin unloads.
 
 ```ts
-type FrontendFactory = (services: MatbotServices) => FrontendAdapter;
-
-interface FrontendAdapter {
-  readonly name: string;
-  subscribe:     MessageKind[];
-  files?: {
-    accept?:   MimeType[];
-    produce?:  MimeType[];
-    maxBytes?: number;
-  };
-  receive(): AsyncIterable<InboundMessage>;
-  send(message: OutboundMessage): Promise<void>;
-  health(): Promise<HealthStatus>;
+interface FrontendInfo {
+  name: string;
 }
 
-type MessageKind =
-  | 'thinking' | 'tool-call' | 'tool-result'
-  | 'tool-stdout' | 'tool-stderr' | 'file'
-  | 'usage' | 'error' | 'form';
+// on MatbotServices:
+registerFrontend(info: FrontendInfo): void;
+```
+
+A frontend drives the runtime itself: it reads and writes sessions through `services.sessions`
+and runs turns through the runner, rendering pipeline events however it likes.
+
+```ts
+export const plugin: MatbotPlugin = {
+  name:       'frontend-example',
+  apiVersion: PLUGIN_API_VERSION,
+
+  async setup(services: MatbotServices) {
+    services.registerFrontend({ name: 'frontend-example' });
+    // start your own I/O loop here: HTTP server, bot client, readline, …
+  },
+};
 ```
 
 ---
@@ -511,6 +516,46 @@ export const plugin: MatbotPlugin = {
   },
 };
 ```
+
+---
+
+## Markers
+
+A marker is an opaque annotation a plugin attaches to a session — a cross-reference, a status, a
+link — that a frontend can render but the LLM never sees. Markers are persisted with the session,
+elided from provider submission, and preserved by compaction (they survive
+`edit_session_compact`). Any plugin with session access can create one.
+
+A marker is a `MessageContent` block, usually emitted as its own message with the `marker` role:
+
+```ts
+import type { Marker, Message } from '@matatbread/matbot-plugin-api';
+
+// Make the payload type-safe by augmenting the shared MarkerData registry, keyed by your plugin's
+// reference. Readers that narrow on `creator` then get a typed `data`.
+declare module '@matatbread/matbot-plugin-api' {
+  interface MarkerData {
+    'my-plugin': { peerSessionId: string; relation: 'parent' | 'fork' };
+  }
+}
+
+function markerMessage(data: MarkerData['my-plugin']): Message {
+  const marker: Marker<'my-plugin'> = { type: 'marker', creator: 'my-plugin', data };
+  return {
+    id:        crypto.randomUUID(),
+    role:      'marker',          // skipped by every provider adapter
+    content:   [marker],
+    createdAt: new Date().toISOString(),
+    traceId:   crypto.randomUUID(),
+  };
+}
+```
+
+Append the message to a session and persist it through `services.sessions` like any other edit.
+The base `marker` content type stays loose (`creator: string; data: unknown`), so unregistered
+creators still work — augmenting `MarkerData` only adds compile-time safety for your own.
+Interpreting and rendering markers is entirely up to the creating plugin and the frontend; the
+runtime treats them as inert.
 
 ---
 

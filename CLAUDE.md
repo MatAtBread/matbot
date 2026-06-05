@@ -57,7 +57,7 @@ packages/
     runner/        — agentic loop, hook dispatch, plugin loader (@matatbread/matbot-core)
     plugin-api/    — MatbotPlugin, MatbotServices, all shared types (@matatbread/matbot-plugin-api)
     config/        — YAML loading, .env parsing
-    security/      — VaultImpl, principal/grants; resolves ${env:} and ${secret:} placeholders
+    security/      — VaultImpl, principal (origin of operations); resolves ${env:} and ${secret:} placeholders
     knowledge/     — LookupKnowledgeIndex (default in-memory KnowledgeIndex implementation)
     storage/
       _base/       — filter/sort engine shared by all Store implementations
@@ -96,8 +96,8 @@ apps/
 - `@matatbread/matbot-foo-node` / `@matatbread/matbot-foo-browser` for platform-specific implementations
 
 ### Dependency direction
-`apps` → `packages/plugins/*-node` → `packages/plugins/*-types` → `packages/core/plugin-api`  
-`packages/core/runner` → `packages/core/plugin-api`  
+`apps` → `packages/plugins/*-node` → `packages/plugins/*-types` → `packages/core/plugin-api`
+`packages/core/runner` → `packages/core/plugin-api`
 Nothing in `packages/` may depend on `apps/`.
 
 ---
@@ -243,6 +243,26 @@ When `parameters.thinking` is set, the Anthropic adapter captures both the think
 its cryptographic `signature`. Complete thinking blocks are stored in session messages as
 `{ type: 'thinking', thinking: string, signature: string }` and round-tripped back to the API
 verbatim. Never strip thinking blocks from message history.
+
+---
+
+## Markers
+
+Markers are opaque, durable annotations carried in the message stream — links, status, and
+cross-references that mean something to a frontend or another plugin but are transparent to the
+LLM. A marker is stored as a `MessageContent` block,
+`{ type: 'marker', creator: string, data: unknown }` — `creator` is the emitting plugin's
+reference, `data` anything serialisable. A standalone marker is its own message with the dedicated
+`marker` role (`MessageRole`), so every provider adapter skips it rather than letting it
+masquerade as tool-protocol I/O.
+
+Invariants: markers are **elided from LLM submission**, **persisted unchanged**, and **preserved
+by session compaction** — removing one can break things (e.g. a pointer back to an ancestor
+session). For per-creator type safety, augment the `MarkerData` registry and read/write through
+`Marker<'your-creator'>` (the same augmentation pattern as `MatbotServices`); the base
+`MessageContent` member stays loose so exhaustive switches are unaffected. Any code with session
+access may emit a marker — interpreting and rendering it is the creator's and the frontend's
+concern, never the core's.
 
 ---
 
