@@ -1239,21 +1239,25 @@ function renderMarker(part) {
   note.className = 'marker-note';
   const data = part.data || {};
 
-  if (part.creator === '@matatbread/matbot-edit-session' && data.peerSessionId) {
-    const forward = data.relation === 'continued-in';
+  const EDIT_SESSION_RELATIONS = {
+    'continued-in': { icon: '↪', text: 'Conversation continued in another thread' },
+    'split-from':   { icon: '↩', text: 'Earlier messages split to another thread' },
+    'forked-from':  { icon: '⎇', text: 'Forked from another thread' },
+  };
+  const rel = EDIT_SESSION_RELATIONS[data.relation];
+  if (part.creator === '@matatbread/matbot-edit-session' && data.peerSessionId && rel) {
     const icon = document.createElement('span');
     icon.className = 'marker-icon';
-    icon.textContent = forward ? '↪' : '↩';
+    icon.textContent = rel.icon;
     note.appendChild(icon);
     const text = document.createElement('span');
-    text.textContent = forward
-      ? 'Conversation continued in another thread'
-      : 'Earlier messages split to another thread';
+    text.textContent = rel.text;
     note.appendChild(text);
     const link = document.createElement('a');
-    link.href = '#' + data.peerSessionId;
+    const hasTarget = typeof data.targetMsg === 'number';
+    link.href = '#' + data.peerSessionId + (hasTarget ? '~' + JSON.stringify({ msg: data.targetMsg }) : '');
     link.textContent = 'Open →';
-    link.addEventListener('click', (e) => { e.preventDefault(); openSession(data.peerSessionId); });
+    link.addEventListener('click', (e) => { e.preventDefault(); openSession(data.peerSessionId, hasTarget ? data.targetMsg : undefined); });
     note.appendChild(link);
     return note;
   }

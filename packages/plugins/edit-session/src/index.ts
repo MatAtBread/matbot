@@ -11,14 +11,18 @@ declare module '@matatbread/matbot-plugin-api' {
   interface MarkerData {
     '@matatbread/matbot-edit-session': {
       /** 'split-from': earlier messages were split into peerSessionId (navigate back).
-       *  'continued-in': this conversation continued in peerSessionId (navigate forward). */
-      relation:      'split-from' | 'continued-in';
+       *  'continued-in': this conversation continued in peerSessionId (navigate forward).
+       *  'forked-from': this session was forked from peerSessionId (navigate to the origin). */
+      relation:      'split-from' | 'continued-in' | 'forked-from';
       peerSessionId: string;
+      /** Message index in peerSessionId to scroll to. Baked at edit time, so it's fragile to later
+       *  inserts/removes in the peer — best-effort; the UI scrolls there only if it still resolves. */
+      targetMsg:     number;
     };
   }
 }
 
-type SplitMarkerData = Marker<typeof PLUGIN_NAME>['data'];
+type EditSessionMarkerData = Marker<typeof PLUGIN_NAME>['data'];
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -27,7 +31,7 @@ function now(): string { return new Date().toISOString(); }
 // A standalone marker message: opaque to the LLM (the 'marker' role is skipped by every provider
 // converter), preserved by compaction, carried with the session for the UI to render as a
 // cross-thread link.
-function markerMessage(data: SplitMarkerData): Message {
+function markerMessage(data: EditSessionMarkerData): Message {
   const marker: Marker<typeof PLUGIN_NAME> = { type: 'marker', creator: PLUGIN_NAME, data };
   return {
     id:        crypto.randomUUID(),
@@ -112,16 +116,20 @@ function makeForkTool(store: Store<Session>): Tool {
         if (!session) { yield { type: 'error', message: `Session "${sessionId}" not found.` }; return; }
         const idx = resolveIndex(session, msgIndex);
         if (idx === null) { yield { type: 'error', message: `msgIndex ${msgIndex} out of range.` }; return; }
+        // One-way: only the fork is marked (pointing back to its origin). The original is left
+        // unchanged, per this tool's contract.
         const forked: Session = {
           ...bumpVersion(session),
           id:               crypto.randomUUID(),
           parentSessionId:  sessionId,
-          messages:         session.messages.slice(0, idx),
+          // targetMsg idx-1: the fork point in the (unchanged) parent — its last message shared with
+          // this fork.
+          messages:         [...session.messages.slice(0, idx), markerMessage({ relation: 'forked-from', peerSessionId: sessionId, targetMsg: Math.max(0, idx - 1) })],
           createdAt:        now(),
           updatedAt:        now(),
         };
         await store.set(forked.id, forked);
-        yield { type: 'result', value: { newSessionId: forked.id, messagesCopied: forked.messages.length } };
+        yield { type: 'result', value: { newSessionId: forked.id, messagesCopied: idx } };
       },
     },
   };
@@ -165,7 +173,9 @@ function makeSplitTool(store: Store<Session>): Tool {
           ...bumpVersion(session),
           id:               newSessionId,
           parentSessionId:  sessionId,
-          messages:         [...prefixMsgs, markerMessage({ relation: 'continued-in', peerSessionId: sessionId })],
+          // targetMsg 1: in the current session the prepended split-from marker is index 0, so the
+          // continuation (first suffix message) lands at index 1.
+          messages:         [...prefixMsgs, markerMessage({ relation: 'continued-in', peerSessionId: sessionId, targetMsg: 1 })],
           createdAt:        now(),
           updatedAt:        now(),
         };
@@ -176,7 +186,9 @@ function makeSplitTool(store: Store<Session>): Tool {
         const updated: Session = bumpVersion({
           ...session,
           title:     generateSplitTitle(session.title ?? ''),
-          messages:  [markerMessage({ relation: 'split-from', peerSessionId: newSessionId }), ...suffixMsgs],
+          // targetMsg idx-1: the last earlier message in the new session (its prefix is messages
+          // 0..idx-1, then the continued-in marker).
+          messages:  [markerMessage({ relation: 'split-from', peerSessionId: newSessionId, targetMsg: idx - 1 }), ...suffixMsgs],
           updatedAt: now(),
         });
         const res = await store.cas(sessionId, session.version, updated);
