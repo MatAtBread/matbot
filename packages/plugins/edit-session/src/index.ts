@@ -131,7 +131,6 @@ function makeSplitTool(store: Store<Session>): Tool {
           ...bumpVersion(session),
           id:               crypto.randomUUID(),
           parentSessionId:  sessionId,
-          title:            generateSplitTitle(session.title ?? ''),
           messages:         prefixMsgs,
           createdAt:        now(),
           updatedAt:        now(),
@@ -141,6 +140,7 @@ function makeSplitTool(store: Store<Session>): Tool {
         // Update the current session to keep only suffix messages
         const updated: Session = bumpVersion({
           ...session,
+          title:     generateSplitTitle(session.title ?? ''),
           messages:  suffixMsgs,
           updatedAt: now(),
         });
