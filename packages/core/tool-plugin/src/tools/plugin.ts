@@ -422,25 +422,27 @@ const executor = {
     if (action === 'reload') {
       yield { type: 'stdout', chunk: `Reloading "${specifier}"...\n` };
 
-      try {
-        await ctx.unloadPlugin(specifier);
-      } catch (e) {
-        yield { type: 'stderr', chunk: `Unload phase failed: ${String(e)}\n` };
-      }
+      // Chain load after teardown rather than awaiting it inline, so the
+      // runner loop isn't blocked if teardown hangs (e.g. waiting for
+      // in-flight message handlers).  If the teardown promise never settles
+      // the reload simply never completes — no harm done.
+      ctx.unloadPlugin(specifier)
+        .then(() => ctx.loadPlugin(specifier))
+        .then(async (loaded) => {
+          const welcome = await loaded.installationMessage?.();
+          // FIXME: In a background chain we can't yield back to the tool
+          // caller.  The reload either succeeds or fails silently for now.
+          if (welcome) console.info(`[reload] ${specifier}: ${welcome}`);
+          else         console.info(`[reload] ${specifier}: OK`);
+        })
+        .catch((e: unknown) => {
+          console.error(`[reload] ${specifier}: ${String(e)}`);
+        });
 
-      try {
-        const loaded  = await ctx.loadPlugin(specifier);
-        const welcome = await loaded.installationMessage?.();
-        yield {
-          type:  'result',
-          value: {
-            message: `"${specifier}" reloaded successfully.`,
-            ...(welcome !== undefined ? { installationMessage: welcome } : {}),
-          },
-        };
-      } catch (e) {
-        yield { type: 'error', message: `Reload failed during load phase: ${String(e)}` };
-      }
+      yield {
+        type:  'result',
+        value: { message: `Reload of "${specifier}" initiated (may complete asynchronously).` },
+      };
     }
   },
 };

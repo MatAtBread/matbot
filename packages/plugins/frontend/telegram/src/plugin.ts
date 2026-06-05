@@ -25,6 +25,7 @@ interface ActiveProvider {
 
 // Module-level state: readable/writable by the tools regardless of where setup() is in scope.
 let teardownAc:    AbortController | undefined;
+const messageBusy = new Map<number, Promise<void>>();
 let activeProvider: ActiveProvider;
 let servicesRef:   MatbotServices | undefined;
 let botTokenRef:   string | undefined;
@@ -172,13 +173,13 @@ export const plugin: MatbotPlugin = {
 
     activeProvider = await buildProvider(initialName, services);
 
-    const busy = new Map<number, Promise<void>>();
+
     const ac   = new AbortController();
     teardownAc = ac;
 
     async function handleMessage(chatId: number, text: string): Promise<void> {
-      if (busy.has(chatId)) {
-        await busy.get(chatId);
+      if (messageBusy.has(chatId)) {
+        await messageBusy.get(chatId);
       }
 
       if (!knownChats.has(chatId)) {
@@ -258,7 +259,7 @@ export const plugin: MatbotPlugin = {
           }
         }
 
-        busy.set(chatId, processMessage().finally(() => busy.delete(chatId)).catch(() => {}));
+        messageBusy.set(chatId, processMessage().finally(() => messageBusy.delete(chatId)).catch(() => {}));
       } catch (e) {
         if (!ac.signal.aborted) {
           console.warn(`[frontend-telegram] Error for chat ${chatId}: ${e}\n`);
@@ -300,6 +301,11 @@ export const plugin: MatbotPlugin = {
   async teardown() {
     teardownAc?.abort();
     teardownAc     = undefined;
+    // Wait for any in-flight message handlers to complete before resolving.
+    if (messageBusy.size > 0) {
+      await Promise.allSettled([...messageBusy.values()]);
+    }
+    messageBusy.clear();
     servicesRef    = undefined;
     botTokenRef    = undefined;
     knownChats.clear();
