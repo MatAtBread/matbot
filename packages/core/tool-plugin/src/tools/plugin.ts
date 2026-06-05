@@ -203,8 +203,7 @@ function pluginTypes(p: MatbotPlugin, registeredToolPlugins: Set<string>): strin
   if (p.tools?.length || registeredToolPlugins.has(p.name))                       t.push('tools');
   if (Object.keys(p.storage ?? {}).length || p.storageBackend !== undefined
       || serviceKeys.includes('storageBackend'))                                  t.push('storage');
-  if (p.frontend !== undefined || p.isFrontend === true
-      || getRegisteredFrontendPlugins().has(p.name))                              t.push('frontend');
+  if (getRegisteredFrontendPlugins().has(p.name))                                 t.push('frontend');
   if (getHookPlugins().has(p.name))                                               t.push('hooks');
   if (getSystemContextPlugins().has(p.name))                                      t.push('system-context');
 

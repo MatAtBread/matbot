@@ -1,6 +1,6 @@
 import type {
   FileStore, Vault, Message, ModelParameters,
-  ProviderAdapter, ProviderConfig, Tool, ToolRegistry, FrontendAdapter,
+  ProviderAdapter, ProviderConfig, Tool, ToolRegistry, FrontendInfo,
   Store, Session, SystemContextRegistry, KnowledgeIndex, PromptFn,
 } from './types.js';
 import type { HookRegistry } from './hooks.js';
@@ -78,6 +78,14 @@ export interface MatbotServices {
   /** Look up a service registered under a MatbotServices key via register(). */
   get<K extends keyof MatbotServices>(key: K): MatbotServices[K] | undefined;
 
+  /**
+   * Declare the calling plugin as a frontend. Being a frontend is an action taken in setup(),
+   * symmetric with register() — not a static manifest flag. A frontend owns its own I/O; matbot
+   * only records that it exists. Multiple frontends may be active at once. Auto-unregistered when
+   * the plugin is unloaded.
+   */
+  registerFrontend(info: FrontendInfo): void;
+
   /** @internal Remove a service entry — called by the runtime when the registering plugin is unloaded. */
   unregister(key: string): void;
 
@@ -105,8 +113,6 @@ export type StoreFactory = (
   kind:    string,
   options: Record<string, unknown>,
 ) => Store<{ id: string; version: string }>;
-
-export type FrontendFactory = (services: MatbotServices) => FrontendAdapter;
 
 // ── Plugin manifest ───────────────────────────────────────────────────────────
 
@@ -138,9 +144,6 @@ export interface MatbotPlugin {
   readonly provider?:   ProviderAdapterFactory;
   readonly storage?:    Record<string, StoreFactory>;
   readonly tools?:      readonly Tool[];
-  readonly frontend?:   FrontendFactory;
-  /** True for plugins that act as frontends but manage their own I/O without a FrontendFactory. */
-  readonly isFrontend?: boolean;
   /**
    * When present, the runtime calls open(dotData) before creating the services
    * object and uses the returned backend for all Store and FileStore creation.

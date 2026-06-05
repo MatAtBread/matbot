@@ -70,6 +70,7 @@ export function toAnthropicMessages(messages: Message[]): AnthropicMessage[] {
         case 'refusal':
         case 'form':
         case 'form-response':
+        case 'marker':         // opaque UI annotation; transparent to the model
         case 'unknown-content':
           return [];
       }

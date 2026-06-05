@@ -75,6 +75,7 @@ export function toOAIMessages(messages: Message[]): OAIMessage[] {
         case 'refusal':
         case 'form':
         case 'form-response':
+        case 'marker':         // opaque UI annotation; transparent to the model
         case 'unknown-content':
           return [];
       }

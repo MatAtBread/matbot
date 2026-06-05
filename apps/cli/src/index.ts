@@ -814,6 +814,7 @@ async function main(): Promise<void> {
       }
     },
     unregister(key: string) { serviceRegistry.delete(key); },
+    registerFrontend() { /* bound per-plugin in setupPlugin's scopedServices; base is a no-op */ },
 
     async complete(req) {
       const rawCfg = matbotConfig.providers.get(req.provider);

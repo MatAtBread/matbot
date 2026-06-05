@@ -1,7 +1,7 @@
-import type { Tool, ToolRegistry, Hook, HookPoint, HookContext, PromptFn, FormField } from './types.js';
+import type { Tool, ToolRegistry, Hook, HookPoint, HookContext, PromptFn, FormField, FrontendInfo } from './types.js';
 import type {
   MatbotPlugin, MatbotServices,
-  ProviderAdapterFactory, StoreFactory, FrontendFactory,
+  ProviderAdapterFactory, StoreFactory,
 } from './plugin.js';
 import { PLUGIN_API_VERSION } from './plugin.js';
 import { HookRegistry } from './hooks.js';
@@ -14,8 +14,7 @@ const state = {
   providers:       new Map<string, ProviderAdapterFactory>(),
   storage:         new Map<string, StoreFactory>(),
   toolRegistry:    undefined as ToolRegistry | undefined,
-  frontend:         undefined as FrontendFactory | undefined,
-  frontendPlugins:  new Set<string>(),
+  frontendPlugins:  new Map<string, FrontendInfo>(),  // pluginName → info, written by services.registerFrontend()
   serviceKeys:     new Map<string, string[]>(),  // pluginName → MatbotServices keys it registered
   hookPlugins:        new Set<string>(),         // plugins that registered at least one hook
   systemContextPlugins: new Set<string>(),       // plugins that registered a system-context contributor
@@ -120,14 +119,6 @@ export function registerPlugin(plugin: MatbotPlugin, specifier?: string): void {
     }
   }
 
-  if (plugin.frontend !== undefined && state.frontend !== undefined) {
-    const owner = state.plugins.find(p => p.frontend !== undefined)?.name ?? '?';
-    throw new Error(
-      `A frontend is already registered by "${owner}". ` +
-      `Only one frontend plugin may be active at a time.`,
-    );
-  }
-
   state.plugins.push(plugin);
 
   if (plugin.provider !== undefined) {
@@ -135,12 +126,6 @@ export function registerPlugin(plugin: MatbotPlugin, specifier?: string): void {
   }
   for (const [type, factory] of Object.entries(plugin.storage ?? {})) {
     state.storage.set(type, factory);
-  }
-  if (plugin.frontend !== undefined) {
-    state.frontend = plugin.frontend;
-  }
-  if (plugin.frontend !== undefined || plugin.isFrontend === true) {
-    state.frontendPlugins.add(plugin.name);
   }
   if (specifier !== undefined) {
     state.specifierToName.set(specifier, plugin.name);
@@ -170,7 +155,7 @@ export function getRegisteredPlugins(): readonly MatbotPlugin[] {
   return state.plugins;
 }
 
-export function getRegisteredFrontendPlugins(): ReadonlySet<string> {
+export function getRegisteredFrontendPlugins(): ReadonlyMap<string, FrontendInfo> {
   return state.frontendPlugins;
 }
 
@@ -259,6 +244,9 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotServices
       state.serviceKeys.set(plugin.name, keys);
       await services.register(key, svc);
     },
+    registerFrontend(info) {
+      state.frontendPlugins.set(plugin.name, info);
+    },
   };
   for (const tool of plugin.tools ?? []) {
     await registerTool(tool);
@@ -290,9 +278,6 @@ export async function unloadPlugin(pluginName: string, services: MatbotServices)
   for (const type of Object.keys(plugin.storage   ?? {})) state.storage.delete(type);
 
   state.frontendPlugins.delete(pluginName);
-  if (state.frontendPlugins.size === 0) {
-    state.frontend = undefined;
-  }
 
   for (const [spec, name] of state.specifierToName) {
     if (name === pluginName) state.specifierToName.delete(spec);
