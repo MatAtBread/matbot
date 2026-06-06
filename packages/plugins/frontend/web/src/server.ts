@@ -1,24 +1,20 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { readFile } from 'node:fs/promises';
-import { join, relative, resolve, extname } from 'node:path';
 import type {
-  HookRegistry, MatbotPlugin, Principal, ProviderAdapter, ProviderConfig,
-  Session, Store, ToolRegistry, FileStore, SystemContextRegistry, Vault, FormField, PromptFn,
+  MatbotPlugin, Principal, Session, Store, ToolRegistry, FileStore, Vault,
+  FormField, PromptFn, SessionRunner,
 } from '@matatbread/matbot-core';
-import { appendMessage, createMessage, createSession, runSession } from '@matatbread/matbot-core';
+import { createSession } from '@matatbread/matbot-core';
 import { sseComment, sseEvent } from './sse-writer.js';
 import { html, js, favicon } from './ui.js';
 
 export interface WebServerDeps {
   store:          Store<Session>;
+  /** Per-session turn serialiser — submits queue instead of running concurrently. */
+  run:            SessionRunner;
   vault:          Vault;
-  /** Resolve a provider name to its adapter and fully-resolved config. Returns null if unknown. */
-  resolveProvider: (name: string) => Promise<{ adapter: ProviderAdapter; config: ProviderConfig } | null>;
   loadPlugin:     (specifier: string) => Promise<MatbotPlugin>;
   unloadPlugin:   (specifier: string) => Promise<boolean>;
   tools?:         ToolRegistry;
-  hooks?:         HookRegistry;
-  systemContext?: SystemContextRegistry;
   cors?:          string;  // Access-Control-Allow-Origin value, default '*'
   workdir?:       string;
   files?:         FileStore;
@@ -68,25 +64,6 @@ function corsHeaders(origin: string): Record<string, string> {
     'access-control-allow-methods': 'GET, POST, OPTIONS',
   };
 }
-
-const WORKSPACE_MIME: Record<string, string> = {
-  '.txt':  'text/plain; charset=utf-8',
-  '.md':   'text/markdown; charset=utf-8',
-  '.html': 'text/html; charset=utf-8',
-  '.css':  'text/css; charset=utf-8',
-  '.js':   'application/javascript; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.csv':  'text/csv; charset=utf-8',
-  '.xml':  'application/xml; charset=utf-8',
-  '.svg':  'image/svg+xml',
-  '.png':  'image/png',
-  '.jpg':  'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.gif':  'image/gif',
-  '.webp': 'image/webp',
-  '.pdf':  'application/pdf',
-  '.zip':  'application/zip',
-};
 
 function static200(res: ServerResponse, contentType: string, body: string): void {
   res.writeHead(200, { 'content-type': contentType, 'content-length': Buffer.byteLength(body) });
@@ -249,41 +226,17 @@ export function createWebServer(deps: WebServerDeps) {
       catch { json(res, 400, { error: 'Invalid JSON' }); return; }
 
       const targetId  = body.sessionId ?? sessionId;
-      let   session   = await deps.store.get(targetId);
+      const session   = await deps.store.get(targetId);
       if (!session) { json(res, 404, { error: 'Session not found' }); return; }
-
-      const resolved = await deps.resolveProvider(body.provider);
-      if (!resolved) { json(res, 400, { error: `Unknown provider "${body.provider}"` }); return; }
-      const { adapter: provider, config: resolvedConfig } = resolved;
 
       const traceId = body.traceId ?? crypto.randomUUID();
 
-      // Normalise content and construct the user message, then persist it so that
-      // re-joining this session mid-run shows the in-flight prompt immediately.
+      // Normalise content into MessageContent[]. The runner appends + persists the user message
+      // when this submission's turn actually starts (persist-at-turn-start) — never here — so a
+      // mid-turn submit queues behind the running turn instead of clobbering session state.
       const contentArr = typeof body.content === 'string'
         ? [{ type: 'text' as const, text: body.content }]
         : [body.content];
-      const userMsg = createMessage({ role: 'user', content: contentArr, traceId });
-
-      // Auto-title from the first user message
-      if (!session.title && !session.messages.some(m => m.role === 'user')) {
-        const text = contentArr
-          .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
-          .map(c => c.text).join(' ').trim();
-        if (text) {
-          const words = text.split(/\s+/).slice(0, 8).join(' ');
-          session = { ...session, title: words.length > 60 ? `${words.slice(0, 60)}…` : words };
-        }
-      }
-
-      session = appendMessage(session, userMsg);
-      await deps.store.set(session.id, session);
-
-      const runConfig = {
-        principal: DEFAULT_PRINCIPAL,
-        provider:  body.provider,
-        traceId,
-      };
 
       const ac = new AbortController();
       req.on('close', () => {
@@ -325,25 +278,26 @@ export function createWebServer(deps: WebServerDeps) {
       res.write(sseComment('stream open'));
 
       try {
-        for await (const event of runSession({
-          session,
-          config:         runConfig,
-          provider,
-          providerConfig: resolvedConfig,
-          ...(deps.tools         ? { tools: new Map(deps.tools.list().map(t => [t.name, t])) } : {}),
-          store:          deps.store,
-          ...(deps.hooks         ? { hooks:         deps.hooks         } : {}),
-          ...(deps.systemContext ? { systemContext: deps.systemContext } : {}),
-          ...(deps.workdir    ? { workdir:    deps.workdir    } : {}),
-          ...(deps.files      ? { files:      deps.files      } : {}),
-          ...(deps.configPath ? { configPath: deps.configPath } : {}),
-          vault:          deps.vault,
-          signal:         ac.signal,
-          prompt:         promptFn,
-          loadPlugin:     deps.loadPlugin,
-          unloadPlugin:   deps.unloadPlugin,
-        })) {
+        const view = await deps.run.open({
+          sessionId: targetId,
+          signal:    ac.signal,
+          content:   contentArr,
+          provider:  body.provider,
+          principal: DEFAULT_PRINCIPAL,
+          prompt:    promptFn,
+          traceId,
+        });
+        // Tell the client its queue position up front: queued > 0 means this submission is waiting
+        // behind a running turn, so the UI can show it as pending instead of appearing to hang.
+        broadcast(sseEvent('queued', { type: 'queued', queued: view.queued, traceId: view.traceId }));
+        // Stream only this submission's turn. The per-session tap also carries events of any other
+        // submission that drains ahead of this one in the queue — skip those; a separate /stream
+        // connection (or that submit's own request) renders them.
+        for await (const event of view.events) {
+          if (event.traceId !== view.traceId) continue;
           broadcast(sseEvent(event.type, event));
+          if (event.type === 'done' || event.type === 'aborted'
+              || event.type === 'error' || event.type === 'cancelled') break;
         }
       } catch (e) {
         broadcast(sseEvent('error', { type: 'error', error: String(e) }));
@@ -377,9 +331,10 @@ export function createWebServer(deps: WebServerDeps) {
     const abortMatch = /^\/sessions\/([^/]+)\/abort$/.exec(url);
     if (method === 'POST' && abortMatch) {
       const sId    = abortMatch[1]!;
-      const active = activeSessions.get(sId);
-      if (!active) { json(res, 404, { error: 'No active session' }); return; }
-      active.ac.abort();
+      // Aborts the running turn and drops any queued submissions for this session. The aborted/
+      // cancelled events that result close the streaming /submit loops above.
+      deps.run.abort(sId);
+      activeSessions.get(sId)?.ac.abort();
       json(res, 200, { ok: true });
       return;
     }

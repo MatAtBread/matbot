@@ -5,6 +5,7 @@ export { MissingSecretError } from '@matatbread/matbot-plugin-api';
 export * from './session.js';
 export * from './hooks.js';
 export * from './runner.js';
+export * from './session-runner.js';
 export * from './plugin.js';
 export * from './registry.js';
 export * from './loader.js';

@@ -567,6 +567,26 @@
     .message.user .md-body th, .message.user .md-body td { border-color: rgba(255,255,255,0.2); }
     .message.user .md-body hr { border-top-color: rgba(255,255,255,0.2); }
 
+    /* Queued (not-yet-running) submissions: a muted user bubble with a small badge. These appear
+       from the server's pending overlay (session_action get) or live via the 'queued' event, so a
+       refresh shows exactly what's still waiting — the count of these IS the queue depth. */
+    .message.user.pending { opacity: 0.55; }
+    .message.user.pending::before {
+      content: '⏳ queued';
+      display: block;
+      font-size: 0.7em;
+      opacity: 0.8;
+      margin-bottom: 4px;
+      letter-spacing: 0.03em;
+    }
+    .msg-queued {
+      align-self: flex-start;
+      color: #6b7280;
+      font-size: 0.85em;
+      font-style: italic;
+      padding: 2px 4px;
+    }
+
     /* Assistant: left-aligned, no background */
     .message.assistant { align-self: flex-start; }
 
@@ -1005,6 +1025,24 @@
     #send-btn.stop-mode:hover    { background: #b91c1c; }
     #send-btn.stop-mode:disabled { background: #fca5a5; cursor: not-allowed; }
 
+    /* Stop button: a distinct, always-red control shown only while a turn is running, so the
+       busy state is unambiguous and the input/Send stay live for type-ahead queueing. */
+    #stop-btn {
+      border-radius: 50%;
+      background: #dc2626;
+      color: #fff;
+      border: none;
+      cursor: pointer;
+      font-size: 1.4em;
+      flex-shrink: 0;
+      transition: background 0.1s;
+      height: 1.5em;
+      width: 1.5em;
+      line-height: 1em;
+    }
+    #stop-btn:hover    { background: #b91c1c; }
+    #stop-btn:disabled { background: #fca5a5; cursor: not-allowed; }
+
     /* ── Scroll-down button (appears after generation when output extends below fold) ── */
     #send-btn.scroll-down-mode          { background: #2563eb; }
     #send-btn.scroll-down-mode:hover    { background: #1d4ed8; }
@@ -1396,6 +1434,7 @@
       </div>
       <div id="input-row">
         <textarea id="input" rows="1" placeholder="Shift+⬅️ to send, ⬅️ for newline"></textarea>
+        <button id="stop-btn" style="display:none" title="Stop the running turn and drop anything queued">&#9209;</button>
         <button id="send-btn">▶</button>
       </div>
     </div>

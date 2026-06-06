@@ -1,7 +1,7 @@
 import type {
   FileStore, Vault, Message, ModelParameters,
   ProviderAdapter, ProviderConfig, Tool, ToolRegistry, FrontendInfo,
-  Store, Session, SystemContextRegistry, KnowledgeIndex, PromptFn,
+  Store, Session, SystemContextRegistry, KnowledgeIndex, PromptFn, SessionRunner,
 } from './types.js';
 import type { HookRegistry } from './hooks.js';
 
@@ -94,6 +94,9 @@ export interface MatbotServices {
 
   readonly providers:       ReadonlyMap<string, ProviderConfig>;
   readonly sessions?:       Store<Session>;
+  /** Per-session turn serialiser. Frontends submit and observe through this rather than calling
+   *  runSession directly, so concurrent submits queue instead of clobbering the session. */
+  readonly run?:            SessionRunner | undefined;
   readonly storageBackend?: StorageBackend | undefined;
   readonly files?:          FileStore;
   readonly vault:           Vault;

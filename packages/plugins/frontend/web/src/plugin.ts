@@ -1,6 +1,5 @@
 import type { MatbotPlugin, MatbotServices } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION }                from '@matatbread/matbot-plugin-api';
-import { resolveProviderFactory }            from '@matatbread/matbot-core';
 import { createWebServer }                   from './server.js';
 import process                               from 'node:process';
 
@@ -23,26 +22,16 @@ export const plugin: MatbotPlugin = {
 
     const sessions = services.sessions;
     if (!sessions) throw new Error('frontend-web requires services.sessions');
+    const run = services.run;
+    if (!run) throw new Error('frontend-web requires services.run');
 
     webServer = createWebServer({
       store: sessions,
+      run,
       vault: services.vault,
-      async resolveProvider(name) {
-        const cfg = services.providers.get(name);
-        if (!cfg) return null;
-        const resolvedCreds: Record<string, string> = {};
-        for (const [k, v] of Object.entries(cfg.credentials ?? {})) {
-          resolvedCreds[k] = await services.vault.resolve(v);
-        }
-        const config = { ...cfg, ...(Object.keys(resolvedCreds).length > 0 ? { credentials: resolvedCreds } : {}) };
-        const adapter = resolveProviderFactory(config.module)(config);
-        return { adapter, config };
-      },
       loadPlugin:    services.loadPlugin.bind(services),
       unloadPlugin:  services.unloadPlugin.bind(services),
       tools:         services.tools,
-      hooks:         services.hooks,
-      systemContext: services.systemContext,
       ...(services.workdir    !== undefined ? { workdir:    services.workdir    } : {}),
       ...(services.files      !== undefined ? { files:      services.files      } : {}),
       ...(services.configPath !== undefined ? { configPath: services.configPath } : {}),

@@ -18,8 +18,9 @@ const LS_SIDEBAR        = 'sidebarSections';
 const LS_SIDEBAR_WIDTH  = 'sidebarWidth';
 
 let currentSessionId = null;
-let sending = false;
-let sendingForSession = null; // session ID that owns the current sending = true state
+let sending = false;          // derived: true while this tab has ≥1 active/queued submission
+let activeSends = 0;          // count of in-flight submit() calls (submissions can now queue)
+let sendingForSession = null; // session ID of the most recent active submission (abort target)
 let stopRequested = false;   // true once the user has clicked stop for the current turn
 const busySessions   = new Set();
 const unreadSessions = new Set();
@@ -83,29 +84,18 @@ function isMessagesBottomVisible() {
   return fits || atBottom;
 }
 
-// Morph the send button into a ▼ scroll-down button.
+// Morph the send button into a ▼ scroll-down button. Stop is now its own button, and the input
+// stays enabled while a turn runs (so you can type-ahead and queue), so neither is touched here.
 function showScrollDownButton() {
   sendBtn.textContent = '▼';   // ▼
   sendBtn.classList.add('scroll-down-mode');
-  sendBtn.classList.remove('stop-mode');
-  sendBtn.disabled = false;
-  inputEl.disabled = false;
 }
 
-// Scroll to the very bottom of the messages pane, restore the normal
-// send button, and place focus in the input so the user can type immediately.
+// Scroll to the very bottom of the messages pane and restore the ▶ send button. The Stop button's
+// visibility is driven independently by setSending, so we don't reason about it here.
 function scrollToBottomAndReset() {
   messagesEl.scrollTop = messagesEl.scrollHeight;
-  // After scrolling to bottom, restore the button's primary function:
-  // ⏹ (stop) if still generating, ▶ (send) if idle.
-  if (sending) {
-    sendBtn.textContent = '⏹';
-    sendBtn.classList.remove('scroll-down-mode');
-    sendBtn.classList.add('stop-mode');
-    sendBtn.disabled = false;
-  } else {
-    resetSendButton();
-  }
+  resetSendButton();
   inputEl.focus();
 }
 
@@ -114,7 +104,6 @@ function resetSendButton() {
   sendBtn.textContent = '▶';
   sendBtn.classList.remove('scroll-down-mode', 'stop-mode');
   sendBtn.disabled = false;
-  inputEl.disabled = false;
 }
 
 // ── Floating scroll-down button ─────────────────────────────────
@@ -145,6 +134,7 @@ const chatHeaderEl   = document.getElementById('chat-header');
 const chatTitleEl    = document.getElementById('chat-title');
 const inputEl        = document.getElementById('input');
 const sendBtn        = document.getElementById('send-btn');
+const stopBtn        = document.getElementById('stop-btn');
 const newBtn         = document.getElementById('new-btn');
 const providerSel    = document.getElementById('provider-select');
 const burgerBtn      = document.getElementById('burger');
@@ -595,8 +585,7 @@ async function loadFiles() {
         btn.onmouseover = () => { btn.style.background = '#b45309'; };
         btn.onmouseout  = () => { btn.style.background = '#d97706'; };
         btn.onclick = () => {
-          inputEl.value = 'Please discover local plugins and add the workspace plugin to enable file management.';
-          sendMessage();
+          submit('Please discover local plugins and add the workspace plugin to enable file management.');
         };
         el.appendChild(prompt);
       }
@@ -682,8 +671,8 @@ function renderPlugins(loaded, local) {
       removeBtn.onclick = (e) => {
         e.stopPropagation();
         closeSidebar();
-        inputEl.value = `Remove the plugin '${p.specifier}'`;
-        sendMessage();
+        // Direct submit so it queues during a turn instead of being blocked by the input.
+        submit(`Remove the plugin '${p.specifier}'`);
       };
       actions.appendChild(removeBtn);
       sum.appendChild(actions);
@@ -722,8 +711,8 @@ function renderPlugins(loaded, local) {
     addBtn.onclick = (e) => {
       e.stopPropagation();
       closeSidebar();
-      inputEl.value = `Add the plugin '${p.specifier}'`;
-      sendMessage();
+      // Direct submit so it queues during a turn instead of being blocked by the input.
+      submit(`Add the plugin '${p.specifier}'`);
     };
     actions.appendChild(addBtn);
     row.appendChild(actions);
@@ -1038,13 +1027,13 @@ function renderSessions(sessions) {
   }
 }
 
-function appendUserBubble(text, msgIdx) {
+function appendUserBubble(text, msgIdx, pending) {
   messagesEl.querySelector('.empty-state')?.remove();
   if (messagesEl.querySelector('.message')) {
     messagesEl.appendChild(createMsgDivider(msgIdx));
   }
   const div = document.createElement('div');
-  div.className = 'message user';
+  div.className = 'message user' + (pending ? ' pending' : '');
   const inner = document.createElement('div');
   inner.className = 'md-body';
   inner.innerHTML = md(text);
@@ -1057,6 +1046,7 @@ function appendUserBubble(text, msgIdx) {
       messagesEl.scrollTop = messagesEl.scrollHeight;
     });
   }
+  return div;
 }
 
 function createMsgDivider(msgIdx) {
@@ -1184,9 +1174,8 @@ function showEditSessionBanner() {
   const btn = document.createElement('button');
   btn.textContent = 'Install edit-session';
   btn.onclick = () => {
-    inputEl.value = 'Please discover and install the edit-session plugin';
     banner.remove();
-    sendMessage();
+    submit('Please discover and install the edit-session plugin');
   };
   banner.appendChild(btn);
   const inputArea = document.getElementById('input-area');
@@ -1400,7 +1389,9 @@ function renderSession(session, startIdx, scrollTarget) {
     if (startIdx && fi < startIdx) continue;
     if (msg.role === 'user') {
       const text = msg.content.filter(c => c.type === 'text').map(c => c.text).join('\n');
-      if (text) appendUserBubble(text, origIdx);
+      // Pending overlay messages (still queued server-side) carry metadata.pending — render them
+      // muted so a freshly-loaded session shows exactly what's still waiting to run.
+      if (text) appendUserBubble(text, origIdx, msg.metadata && msg.metadata.pending === true);
     } else if (msg.role === 'assistant') {
       const wrap = createAssistantWrap('assistant');
       renderContentParts(wrap, msg.content);
@@ -1614,10 +1605,21 @@ async function submitFormResponse(sessionId, values) {
 
 // ── Send ──────────────────────────────────────────────────────────────────────
 
+// Read the input box and submit it. The single entry point for *typed* messages; canned/programmatic
+// messages (plugin install banners, etc.) call submit() directly so they aren't gated by the input.
 async function sendMessage() {
-  const content  = inputEl.value.trim();
+  const content = inputEl.value.trim();
+  if (!content) return;
+  inputEl.value = '';
+  inputEl.style.height = 'auto';
+  await submit(content);
+}
+
+// Submit content to the current session. No busy gate: if a turn is already running the server
+// queues this submission, and the 'queued' event below renders it as pending until its turn starts.
+async function submit(content) {
   const provider = providerSel.value;
-  if (!content || sending || !provider) return;
+  if (!content || !provider) return;
 
   if (!currentSessionId) {
     const { id } = await apiNewSession();
@@ -1625,11 +1627,9 @@ async function sendMessage() {
   }
 
   const submittingFor = currentSessionId;
-  inputEl.value = '';
-  inputEl.style.height = 'auto';
   setSending(true, submittingFor);
 
-  appendUserBubble(content);
+  const userBubble = appendUserBubble(content);
   const turnWrap = createAssistantWrap('assistant');
 
   // Loading dots until first content arrives
@@ -1637,7 +1637,15 @@ async function sendMessage() {
   loadingEl.className = 'msg-loading';
   turnWrap.appendChild(loadingEl);
 
-  function removeLoading() { loadingEl.remove(); }
+  // A queued note shown while this submission waits behind a running turn (set on the 'queued'
+  // event). Cleared, along with the loading dots and the bubble's pending style, once real content
+  // for this turn starts arriving.
+  let queuedNote = null;
+  function clearPending() {
+    userBubble.classList.remove('pending');
+    if (queuedNote) { queuedNote.remove(); queuedNote = null; }
+  }
+  function removeLoading() { loadingEl.remove(); clearPending(); }
 
   // Per-turn streaming state
   let textEl          = null;
@@ -1688,6 +1696,21 @@ async function sendMessage() {
   try {
     for await (const ev of streamSubmit(submittingFor, content, provider)) {
       switch (ev.type) {
+        case 'queued':
+          // Sent first by the server. queued > 0 ⇒ this submission is waiting behind a running
+          // turn; show it as pending until its own events start (which call removeLoading).
+          if (ev.queued > 0) {
+            loadingEl.remove();
+            userBubble.classList.add('pending');
+            if (!queuedNote) {
+              queuedNote = document.createElement('div');
+              queuedNote.className = 'msg-queued';
+              queuedNote.textContent = '⏳ queued — waiting for the current turn to finish';
+              turnWrap.appendChild(queuedNote);
+            }
+          }
+          break;
+
         case 'text-delta':
           removeLoading();
           if (textElFinalised) { textEl = null; textAccum = ''; textElFinalised = false; }
@@ -1877,6 +1900,15 @@ async function sendMessage() {
           break;
         }
 
+        case 'cancelled': {
+          // This queued submission was dropped (Stop pressed before it ran). It never executed and
+          // was never persisted, so remove its optimistic bubble and empty turn entirely.
+          removeLoading();
+          turnWrap.remove();
+          userBubble.remove();
+          break;
+        }
+
         case 'done':
           if (thinkingContent) {
             const det = thinkingContent.closest('details');
@@ -1932,24 +1964,20 @@ async function sendMessage() {
   }
 }
 
-// ── Send button click handler ─────────────────────────────────────────────────
+// ── Send / Stop button handlers ───────────────────────────────────────────────
 //
-// Three modes (priority order):
-//   1. scroll-down-mode (▼) — scroll to bottom + focus input + restore ▶
-//   2. stop-mode (⏹)        — request abort of in-flight generation
-//   3. default  (▶)        — send the current message
-
+// Send has two modes: scroll-down (▼ — jump to bottom) or default (▶ — send/queue). Stop is a
+// separate button shown only while a turn is running; it aborts and clears the queue. Send and the
+// input stay live during a turn so you can type-ahead and queue.
 sendBtn.onclick = () => {
-  if (sending) {
-    requestStop();
-  } else {
-    sendMessage();
-  }
+  if (sendBtn.classList.contains('scroll-down-mode')) scrollToBottomAndReset();
+  else sendMessage();
 };
 
+stopBtn.onclick = () => requestStop();
+
 document.getElementById('sessions-enable-btn').onclick = () => {
-  inputEl.value = 'Discover the local plugins and add the sessions plugin to enable persistent conversations.';
-  sendMessage();
+  submit('Discover the local plugins and add the sessions plugin to enable persistent conversations.');
 };
 
 inputEl.addEventListener('keydown', e => {
@@ -1961,38 +1989,35 @@ inputEl.addEventListener('input', () => {
   inputEl.style.height = Math.min(inputEl.scrollHeight, 180) + 'px';
 });
 
+// Submissions can now queue, so "sending" is a count, not a flag. The Stop button is shown whenever
+// anything is in flight; the input/Send stay live throughout so you can type-ahead and queue.
 function setSending(val, sessionId) {
   const sid = sessionId ?? currentSessionId;
   if (val) {
-    sending = true;
+    activeSends++;
     sendingForSession = sid;
     stopRequested = false;
-    sendBtn.textContent = '\u25a0';   // ⏹ stop square
-    sendBtn.classList.add('stop-mode');
-    sendBtn.disabled = false;
-    inputEl.disabled = true;
   } else {
-    // Only clear if the session that set it is still the current one,
-    // or if the caller is the current session (prevents session A's completion
-    // from clearing session B's in-flight request).
-    if (sendingForSession === sid || sid === currentSessionId) {
-      sending = false;
-      sendingForSession = null;
-      stopRequested = false;
-      sendBtn.textContent = '\u25b6';   // ▶
-      sendBtn.classList.remove('stop-mode');
-      sendBtn.disabled = false;
-      inputEl.disabled = false;
-      inputEl.focus();
-    }
+    activeSends = Math.max(0, activeSends - 1);
+  }
+  sending = activeSends > 0;
+  if (sending) {
+    stopBtn.style.display = '';
+    stopBtn.disabled = false;
+  } else {
+    sendingForSession = null;
+    stopRequested = false;
+    stopBtn.style.display = 'none';
   }
 }
 
 function requestStop() {
-  if (!sending || stopRequested || !sendingForSession) return;
+  const target = sendingForSession ?? currentSessionId;
+  if (!sending || stopRequested || !target) return;
   stopRequested = true;
-  sendBtn.disabled = true;
-  fetch('/sessions/' + sendingForSession + '/abort', { method: 'POST' }).catch(() => {});
+  stopBtn.disabled = true;
+  // Server-side this aborts the running turn AND drops everything still queued for the session.
+  fetch('/sessions/' + target + '/abort', { method: 'POST' }).catch(() => {});
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
