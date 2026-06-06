@@ -67,7 +67,7 @@ function generateSplitTitle(title: string): string {
 
 function makeCutTool(store: Store<Session>): Tool {
   return {
-    name:        'edit_session_cut',
+    name:        'session_cut',
     description: 'Remove all messages from msgIndex onward, truncating the session at that point.',
     inputSchema: {
       type:       'object',
@@ -99,7 +99,7 @@ function makeCutTool(store: Store<Session>): Tool {
 
 function makeForkTool(store: Store<Session>): Tool {
   return {
-    name:        'edit_session_fork',
+    name:        'session_fork',
     description: 'Create a new session containing messages before msgIndex, leaving the original unchanged.',
     inputSchema: {
       type:       'object',
@@ -137,7 +137,7 @@ function makeForkTool(store: Store<Session>): Tool {
 
 function makeSplitTool(store: Store<Session>): Tool {
   return {
-    name:        'edit_session_split',
+    name:        'session_split',
     description: 'Split a session at msgIndex: move messages before msgIndex into a new session and remove them from the current session. The current session keeps only messages from msgIndex onward.',
     inputSchema: {
       type:       'object',
@@ -217,7 +217,7 @@ const KEEP_TYPES = new Set(['text', 'refusal', 'marker']);
 
 function makeCompactTool(store: Store<Session>): Tool {
   return {
-    name:        'edit_session_compact',
+    name:        'session_compact',
     description: 'Strip thinking blocks, tool calls, and tool results from messages before msgIndex, keeping all user/assistant text so context is preserved but token count is reduced.',
     inputSchema: {
       type:       'object',

@@ -1139,19 +1139,19 @@ async function handleDividerAction(divider, action) {
 
   try {
     if (action === 'fork') {
-      const result = await callTool('edit_session_fork', { sessionId: currentSessionId, msgIndex: msgIdx });
+      const result = await callTool('session_fork', { sessionId: currentSessionId, msgIndex: msgIdx });
       if (result?.newSessionId) {
         await openSession(result.newSessionId);
         apiListSessions().then(renderSessions);
       }
     } else if (action === 'cut') {
       if (!confirm('Delete all messages from this point forward?')) return;
-      await callTool('edit_session_cut', { sessionId: currentSessionId, msgIndex: msgIdx });
+      await callTool('session_cut', { sessionId: currentSessionId, msgIndex: msgIdx });
       const session = await apiGetSession(currentSessionId);
       if (session) renderSession(session);
     } else if (action === 'split') {
       if (!confirm('Split session at this point? Messages before will be moved to a new session.')) return;
-      const result = await callTool('edit_session_split', { sessionId: currentSessionId, msgIndex: msgIdx });
+      const result = await callTool('session_split', { sessionId: currentSessionId, msgIndex: msgIdx });
       if (result?.newSessionId) {
         // Navigate to the current (trimmed) session
         await openSession(result.currentSessionId);
@@ -1159,7 +1159,7 @@ async function handleDividerAction(divider, action) {
       }
     } else if (action === 'compact') {
       if (!confirm('Strip thinking blocks and tool calls from messages before this point?')) return;
-      await callTool('edit_session_compact', { sessionId: currentSessionId, msgIndex: msgIdx });
+      await callTool('session_compact', { sessionId: currentSessionId, msgIndex: msgIdx });
       const session = await apiGetSession(currentSessionId);
       if (session) renderSession(session);
     }
