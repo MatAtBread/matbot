@@ -5,6 +5,21 @@ import { toOAIMessages, toOAITools } from './convert.js';
 const DEFAULT_ENDPOINT   = 'https://api.openai.com/v1/chat/completions';
 const DEFAULT_MAX_TOKENS = 4096;
 
+// OpenAI renamed `max_tokens` → `max_completion_tokens` for its newer models. The two are mutually
+// exclusive — OpenAI returns 400 if both are present — and the o-series / gpt-5 / 4o models reject
+// the legacy name outright. The rest of the compat ecosystem (DeepSeek, vLLM, llama.cpp, ollama,
+// legacy gpt-4/3.5) still wants `max_tokens`; DeepSeek in particular *silently ignores*
+// `max_completion_tokens`, leaving the cap unenforced. So the field is chosen per model, with an
+// explicit `tokenLimitParam` override for names this heuristic can't anticipate.
+function tokenLimitParam(config: ProviderConfig): 'max_tokens' | 'max_completion_tokens' {
+  const override = config.parameters?.['tokenLimitParam'];
+  if (override === 'max_tokens' || override === 'max_completion_tokens') return override;
+  const m = config.model.toLowerCase();
+  return /^o\d/.test(m) || m.startsWith('gpt-5') || m.includes('4o')
+    ? 'max_completion_tokens'
+    : 'max_tokens';
+}
+
 interface OAIDelta {
   role?:               string;
   content?:            string | null;
@@ -47,16 +62,11 @@ export class OpenAICompatAdapter implements ProviderAdapter {
     const apiKey   = config.credentials?.['apiKey'] ?? '';
 
     const body: Record<string, unknown> = {
-      model:      config.model,
-      // Classic OpenAI `max_tokens`, not the newer `max_completion_tokens`: the compat ecosystem
-      // (DeepSeek, vLLM, llama.cpp, ollama, classic gpt-4o) honors `max_tokens`. DeepSeek in
-      // particular *silently ignores* `max_completion_tokens` — verified against api.deepseek.com —
-      // so sending it leaves the cap unenforced. OpenAI's o-series is the lone exception (it wants
-      // `max_completion_tokens` and rejects `max_tokens`); that would need a per-provider override.
-      max_tokens: config.parameters?.maxTokens ?? DEFAULT_MAX_TOKENS,
-      messages:             toOAIMessages(messages),
-      stream:               true,
-      stream_options:       { include_usage: true },
+      model:    config.model,
+      [tokenLimitParam(config)]: config.parameters?.maxTokens ?? DEFAULT_MAX_TOKENS,
+      messages:       toOAIMessages(messages),
+      stream:         true,
+      stream_options: { include_usage: true },
     };
 
     const toolDefs = toOAITools(tools);
