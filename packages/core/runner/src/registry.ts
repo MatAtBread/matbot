@@ -255,10 +255,10 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotServices
 }
 
 /** Tear down and fully unload a single plugin, removing all its registered contributions. */
-export async function unloadPlugin(pluginName: string, services: MatbotServices): Promise<void> {
+export async function unloadPlugin(pluginName: string, services: MatbotServices): Promise<boolean> {
   console.warn(`[matbot] Unloading plugin "${pluginName}"`);
   const idx = state.plugins.findIndex(p => p.name === pluginName);
-  if (idx === -1) return;
+  if (idx === -1) return false;
 
   // Note: all synchronous cleanup (removing tools, hooks, services) is done before any asynchronous teardown() calls, to ensure a consistent state even if teardown() fails or hangs.
   const plugin = state.plugins[idx]!;
@@ -284,10 +284,11 @@ export async function unloadPlugin(pluginName: string, services: MatbotServices)
   }
 
   state.plugins.splice(idx, 1);
-  return Promise.race([
+  await Promise.race([
     plugin.teardown?.(),
     new Promise<void>((_, reject) => setTimeout(() => reject(new Error(`Teardown timeout for plugin ${pluginName}`)), 10000))
   ]);
+  return true;
 }
 
 /** Run each plugin's teardown() in reverse-registration order. Errors are logged, not thrown. */

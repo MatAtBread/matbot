@@ -1799,8 +1799,9 @@ async function sendMessage() {
                 btn.type = 'button';
                 const isDefault = choice.toLowerCase() === (defaultValue ?? '').toLowerCase();
                 btn.className = 'prompt-choice-btn' + (isDefault ? ' primary' : '');
-                btn.textContent = choice.toLowerCase() === 'y' ? 'Yes'
-                  : choice.toLowerCase() === 'n' ? 'No'
+                const cl = choice.toLowerCase();
+                btn.textContent = cl === 'y' || cl === 'yes' ? 'Yes'
+                  : cl === 'n' || cl === 'no' ? 'No'
                   : choice;
                 btn.onclick = () => {
                   row.querySelectorAll('button').forEach(b => { b.disabled = true; });
