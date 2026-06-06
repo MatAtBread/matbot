@@ -620,7 +620,7 @@ plugin's `setup()`. The replacement takes effect immediately for all subsequent
 | `@matatbread/matbot-tool-bash` | `bash` | Run bash scripts; stream stdout/stderr |
 | `@matatbread/matbot-tool-docker-bash` | `bash` (sandboxed) | Drop-in for bash; runs scripts inside Docker |
 | `@matatbread/matbot-tool-http` | `http` | Make HTTP requests |
-| `@matatbread/matbot-tool-workspace` | `workspace_read/write/list/delete` | Read and write files in the workspace namespace |
+| `@matatbread/matbot-tool-workspace` | `workspace_action` | Read/write/list/delete files in the workspace namespace (one tool, `action` parameter) |
 | `@matatbread/matbot-tool-background` | `background`, `every`, `every_list`, `every_cancel` | Run prompts in detached processes; recurring schedules |
 | `@matatbread/matbot-tool-mcp` | MCP client | Connect to Model Context Protocol servers |
 | `@matatbread/matbot-sessions` | `session_list/get/rename/hide` | Session management tools |

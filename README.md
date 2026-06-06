@@ -339,7 +339,7 @@ All runtime state lives in `.data/` next to `matbot.yaml` and is .gitignored:
   schedules/   — recurring background job definitions (background plugin)
   knowledge/   — KnowledgeIndex entries (persist-ki-bge plugin)
   bash-cwd/    — default working directory for bash tool execution
-  files/       — file store blobs; the workspace namespace holds workspace_write output
+  files/       — file store blobs; the workspace namespace holds workspace_action (write) output
 ```
 
 Note: The `Store` is also a plugin. MatBot will persist it's key data, as can plugins, via

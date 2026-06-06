@@ -564,7 +564,7 @@ function renderFiles(files) {
     delBtn.onclick = async (e) => {
       e.stopPropagation();
       try {
-        await callTool('workspace_delete', { path: f.path });
+        await callTool('workspace_action', { action: 'delete', path: f.path });
         loadFiles();
       } catch (err) {
         alert('Delete failed: ' + err.message);
@@ -578,7 +578,7 @@ function renderFiles(files) {
 
 async function loadFiles() {
   try {
-    const data = await callTool('workspace_list', {});
+    const data = await callTool('workspace_action', { action: 'list' });
     const files = Array.isArray(data) ? data : (data?.files ?? []);
     renderFiles(files);
   } catch (e) {
@@ -888,7 +888,7 @@ async function uploadFiles(fileList) {
       const CHUNK = 0x8000;
       let bin = '';
       for (let i = 0; i < bytes.length; i += CHUNK) bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
-      await callTool('workspace_write', { path: file.name, content: btoa(bin), encoding: 'base64' });
+      await callTool('workspace_action', { action: 'write', path: file.name, content: btoa(bin), encoding: 'base64' });
     } catch (err) {
       alert('Upload failed for ' + file.name + ': ' + err.message);
     }

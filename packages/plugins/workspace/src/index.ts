@@ -59,154 +59,140 @@ async function collectStream(stream: AsyncIterable<Uint8Array>): Promise<Uint8Ar
   return out;
 }
 
-interface ReadInput   { path: string; encoding?: 'utf8' | 'base64' }
-interface WriteInput  { path: string; content: string; encoding?: 'utf8' | 'base64' }
-interface ListInput   { path?: string; recursive?: boolean }
-interface DeleteInput { path: string }
+// The precise per-action contract. JSON Schema can't express "content is required only for write"
+// without an awkward oneOf the providers honour inconsistently, so the schema stays loose and the
+// description below carries this TypeScript discriminated union — which LLMs read accurately — as
+// the source of truth. The executor enforces it.
+type WorkspaceInput =
+  | { action: 'read';   path: string; encoding?: 'utf8' | 'base64' }
+  | { action: 'write';  path: string; content: string; encoding?: 'utf8' | 'base64' }
+  | { action: 'list';   path?: string; recursive?: boolean }
+  | { action: 'delete'; path: string };
 
-const workspaceReadTool: Tool = {
-  name: 'workspace_read',
+const workspaceTool: Tool = {
+  name: 'workspace_action',
   description:
-    'Read a file from the session workspace. ' +
-    'When the web frontend is running, workspace files are also accessible as static links ' +
-    'at /workspace/<path> on the current HTTP host (use a relative URL) — you can share these URLs directly with the user.',
+    'Read, write, list, and delete files in the **session workspace** — a small per-session scratch ' +
+    'and transfer area, NOT the host filesystem. Use it for files the user uploads or downloads, ' +
+    'generated artifacts (reports, charts, exports), and working notes or to-do lists. It is not a code ' +
+    'workspace: files here are not executable, and the project source does NOT live here — do not reach ' +
+    'for it to read or edit the codebase. When the web frontend is running, every workspace file is served ' +
+    'as a static link at /workspace/<path> on the current HTTP host (use a relative URL), so you can hand ' +
+    'that URL to the user to view or download.\n\n' +
+    'Parameters depend on `action` (TypeScript):\n' +
+    '```ts\n' +
+    'type WorkspaceAction =\n' +
+    "  | { action: 'read';   path: string; encoding?: 'utf8' | 'base64' }              // -> file contents\n" +
+    "  | { action: 'write';  path: string; content: string; encoding?: 'utf8' | 'base64' } // -> { path, bytes }\n" +
+    "  | { action: 'list';   path?: string; recursive?: boolean }                      // -> [{ path, size }]\n" +
+    "  | { action: 'delete'; path: string };                                           // -> { path }\n" +
+    '```\n' +
+    "Use encoding 'base64' for binary files (images, PDFs, zips); 'utf8' (the default) for text.",
   inputSchema: {
     type:       'object',
-    required:   ['path'],
+    required:   ['action'],
     properties: {
-      path:     { type: 'string', description: 'Path of the file to read, relative to the workspace root.' },
-      encoding: { type: 'string', enum: ['utf8', 'base64'], default: 'utf8', description: 'utf8 for text files, base64 for binary.' },
+      action:    { type: 'string', enum: ['read', 'write', 'list', 'delete'], description: 'The operation to perform.' },
+      path:      { type: 'string', description: 'File path relative to the workspace root (e.g. "report.md", "charts/data.csv"). Required for read/write/delete; optional subdirectory filter for list.' },
+      content:   { type: 'string', description: 'File contents — required for action "write".' },
+      encoding:  { type: 'string', enum: ['utf8', 'base64'], default: 'utf8', description: "Used by read/write. 'base64' for binary files, 'utf8' (default) for text." },
+      recursive: { type: 'boolean', default: false, description: 'list only: include files in subdirectories.' },
     },
   },
   executor: {
     async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
-      const { path: inputPath, encoding = 'utf8' } = input as ReadInput;
+      const args = input as Partial<WorkspaceInput> & { action?: string };
       if (!ctx.files) { yield { type: 'error', message: 'No file store is configured for this session.' }; return; }
 
-      const safe = safePath(inputPath);
-      if (!safe) { yield { type: 'error', message: 'Path escapes the workspace directory.' }; return; }
+      switch (args.action) {
+        case 'read': {
+          const { path: inputPath, encoding = 'utf8' } = args as Extract<WorkspaceInput, { action: 'read' }>;
+          if (!inputPath) { yield { type: 'error', message: 'action "read" requires "path".' }; return; }
+          const safe = safePath(inputPath);
+          if (!safe) { yield { type: 'error', message: 'Path escapes the workspace directory.' }; return; }
 
-      const handle = await ctx.files.getByName(safe, WORKSPACE_NS);
-      if (!handle) { yield { type: 'error', message: `File not found: "${safe}"` }; return; }
+          const handle = await ctx.files.getByName(safe, WORKSPACE_NS);
+          if (!handle) { yield { type: 'error', message: `File not found: "${safe}"` }; return; }
 
-      let bytes: Uint8Array;
-      try {
-        bytes = await collectStream(handle.stream(ctx.signal));
-      } catch (e) {
-        yield { type: 'error', message: String(e) };
-        return;
-      }
+          let bytes: Uint8Array;
+          try {
+            bytes = await collectStream(handle.stream(ctx.signal));
+          } catch (e) {
+            yield { type: 'error', message: String(e) };
+            return;
+          }
 
-      yield {
-        type:  'result',
-        value: encoding === 'base64' ? uint8ToBase64(bytes) : new TextDecoder().decode(bytes),
-      };
-    },
-  },
-};
-
-const workspaceWriteTool: Tool = {
-  name: 'workspace_write',
-  description:
-    'Write a file to the session workspace. ' +
-    'Parent directories are created automatically. ' +
-    'Once written, the file is immediately accessible as a static link at /workspace/<path> on the HTTP server ' +
-    'when the web frontend is running — provide this URL to the user so they can download or view the file.',  inputSchema: {
-    type:       'object',
-    required:   ['path', 'content'],
-    properties: {
-      path:     { type: 'string', description: 'Destination path relative to the workspace root (e.g. "report.md", "charts/data.csv").' },
-      content:  { type: 'string', description: 'File content to write.' },
-      encoding: { type: 'string', enum: ['utf8', 'base64'], default: 'utf8', description: 'utf8 for text, base64 for binary content.' },
-    },
-  },
-  executor: {
-    async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
-      const { path: inputPath, content, encoding = 'utf8' } = input as WriteInput;
-      if (!ctx.files) { yield { type: 'error', message: 'No file store is configured for this session.' }; return; }
-
-      const safe = safePath(inputPath);
-      if (!safe) { yield { type: 'error', message: 'Path escapes the workspace directory.' }; return; }
-
-      const bytes = encoding === 'base64'
-        ? base64ToUint8(content)
-        : new TextEncoder().encode(content);
-
-      async function* makeStream(): AsyncIterable<Uint8Array> { yield bytes; }
-
-      let handle;
-      try {
-        handle = await ctx.files.put(safe, mimeFromName(safe), makeStream(), { namespace: WORKSPACE_NS });
-      } catch (e) {
-        yield { type: 'error', message: String(e) };
-        return;
-      }
-
-      yield { type: 'result', value: { path: safe, bytes: handle.size } };
-    },
-  },
-};
-
-const workspaceListTool: Tool = {
-  name: 'workspace_list',
-  description:
-    'List files in the session workspace. ' +
-    'Returns each file\'s relative path and size in bytes. ' +
-    'Files are accessible at /workspace/<path> on the HTTP server when the web frontend is running.',  inputSchema: {
-    type:       'object',
-    properties: {
-      path:      { type: 'string', description: 'Subdirectory to list, relative to workspace root. Defaults to the workspace root.' },
-      recursive: { type: 'boolean', default: false, description: 'Whether to list files in subdirectories.' },
-    },
-  },
-  executor: {
-    async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
-      const { path: inputPath, recursive = false } = input as ListInput;
-      if (!ctx.files) { yield { type: 'error', message: 'No file store is configured for this session.' }; return; }
-
-      const prefix = inputPath ? `${safePath(inputPath) ?? ''}/` : '';
-
-      const files: Array<{ path: string; size: number }> = [];
-      try {
-        for await (const handle of ctx.files.list({ namespace: WORKSPACE_NS })) {
-          const name = handle.name;
-          if (prefix && !name.startsWith(prefix)) continue;
-          const rel = prefix ? name.slice(prefix.length) : name;
-          if (!recursive && rel.includes('/')) continue;
-          files.push({ path: name, size: handle.size });
+          yield {
+            type:  'result',
+            value: encoding === 'base64' ? uint8ToBase64(bytes) : new TextDecoder().decode(bytes),
+          };
+          return;
         }
-      } catch (e) {
-        yield { type: 'error', message: String(e) };
-        return;
+
+        case 'write': {
+          const { path: inputPath, content, encoding = 'utf8' } = args as Extract<WorkspaceInput, { action: 'write' }>;
+          if (!inputPath) { yield { type: 'error', message: 'action "write" requires "path".' }; return; }
+          if (content === undefined) { yield { type: 'error', message: 'action "write" requires "content".' }; return; }
+          const safe = safePath(inputPath);
+          if (!safe) { yield { type: 'error', message: 'Path escapes the workspace directory.' }; return; }
+
+          const bytes = encoding === 'base64'
+            ? base64ToUint8(content)
+            : new TextEncoder().encode(content);
+
+          async function* makeStream(): AsyncIterable<Uint8Array> { yield bytes; }
+
+          let handle;
+          try {
+            handle = await ctx.files.put(safe, mimeFromName(safe), makeStream(), { namespace: WORKSPACE_NS });
+          } catch (e) {
+            yield { type: 'error', message: String(e) };
+            return;
+          }
+
+          yield { type: 'result', value: { path: safe, bytes: handle.size } };
+          return;
+        }
+
+        case 'list': {
+          const { path: inputPath, recursive = false } = args as Extract<WorkspaceInput, { action: 'list' }>;
+          const prefix = inputPath ? `${safePath(inputPath) ?? ''}/` : '';
+
+          const files: Array<{ path: string; size: number }> = [];
+          try {
+            for await (const handle of ctx.files.list({ namespace: WORKSPACE_NS })) {
+              const name = handle.name;
+              if (prefix && !name.startsWith(prefix)) continue;
+              const rel = prefix ? name.slice(prefix.length) : name;
+              if (!recursive && rel.includes('/')) continue;
+              files.push({ path: name, size: handle.size });
+            }
+          } catch (e) {
+            yield { type: 'error', message: String(e) };
+            return;
+          }
+
+          yield { type: 'result', value: files };
+          return;
+        }
+
+        case 'delete': {
+          const { path: inputPath } = args as Extract<WorkspaceInput, { action: 'delete' }>;
+          if (!inputPath) { yield { type: 'error', message: 'action "delete" requires "path".' }; return; }
+          const safe = safePath(inputPath);
+          if (!safe) { yield { type: 'error', message: 'Path escapes the workspace directory.' }; return; }
+
+          const handle = await ctx.files.getByName(safe, WORKSPACE_NS);
+          if (!handle) { yield { type: 'error', message: `File not found: "${safe}"` }; return; }
+
+          await ctx.files.delete(handle.id);
+          yield { type: 'result', value: { path: safe } };
+          return;
+        }
+
+        default:
+          yield { type: 'error', message: `Unknown action "${String(args.action)}". Expected one of: read, write, list, delete.` };
       }
-
-      yield { type: 'result', value: files };
-    },
-  },
-};
-
-const workspaceDeleteTool: Tool = {
-  name: 'workspace_delete',
-  description: 'Delete a file from the session workspace.',  inputSchema: {
-    type:       'object',
-    required:   ['path'],
-    properties: {
-      path: { type: 'string', description: 'Path of the file to delete, relative to the workspace root.' },
-    },
-  },
-  executor: {
-    async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
-      const { path: inputPath } = input as DeleteInput;
-      if (!ctx.files) { yield { type: 'error', message: 'No file store is configured for this session.' }; return; }
-
-      const safe = safePath(inputPath);
-      if (!safe) { yield { type: 'error', message: 'Path escapes the workspace directory.' }; return; }
-
-      const handle = await ctx.files.getByName(safe, WORKSPACE_NS);
-      if (!handle) { yield { type: 'error', message: `File not found: "${safe}"` }; return; }
-
-      await ctx.files.delete(handle.id);
-      yield { type: 'result', value: { path: safe } };
     },
   },
 };
@@ -214,5 +200,5 @@ const workspaceDeleteTool: Tool = {
 export const plugin: MatbotPlugin = {
   name:       'workspace',
   apiVersion: PLUGIN_API_VERSION,
-  tools: [workspaceReadTool, workspaceWriteTool, workspaceListTool, workspaceDeleteTool],
+  tools: [workspaceTool],
 };

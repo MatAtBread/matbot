@@ -144,7 +144,7 @@ All runtime state lives under `.data/` **next to `matbot.yaml`**, never in the s
   knowledge/   — Store<KnowledgeEntry> (persist-ki-bge plugin)
   bash-cwd/    — default working directory for bash tool execution (created lazily)
   files/       — FileStore blobs (MIME-typed, served by frontend); the 'workspace' namespace
-               within files/ holds files written by workspace_write
+               within files/ holds files written by workspace_action (write)
 ```
 
 Plugins may create additional subdirectories (e.g. `files/`, `settings/`) as needed.
