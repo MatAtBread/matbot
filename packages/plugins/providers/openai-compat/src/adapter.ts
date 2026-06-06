@@ -124,28 +124,52 @@ export class OpenAICompatAdapter implements ProviderAdapter {
         }
       }
 
-      if (choice.finish_reason === 'tool_calls' || choice.finish_reason === 'stop') {
+      // 'length' is OpenAI's truncation reason (the analogue of Anthropic's max_tokens) — treat
+      // it as terminal too, so a tool call cut off mid-arguments is flushed and surfaced here
+      // rather than silently dropped to the fallback below.
+      if (choice.finish_reason === 'tool_calls' || choice.finish_reason === 'stop' || choice.finish_reason === 'length') {
         if (reasoningAcc) {
           yield { type: 'reasoning-block', reasoning: reasoningAcc };
           reasoningAcc = '';
         }
+        let truncatedTool: { name: string; bytes: number } | undefined;
         for (const [, call] of toolAccum) {
-          let input: unknown = {};
-          try { input = JSON.parse(call.args || '{}'); } catch { /* malformed */ }
-          yield { type: 'tool-call', id: call.id, name: call.name, input };
+          try {
+            yield { type: 'tool-call', id: call.id, name: call.name, input: JSON.parse(call.args || '{}') };
+          } catch {
+            truncatedTool ??= { name: call.name, bytes: call.args.length };
+          }
         }
         toolAccum.clear();
+        if (truncatedTool) {
+          throw new Error(
+            `Tool "${truncatedTool.name}" arguments could not be parsed — ${truncatedTool.bytes} bytes received, ` +
+            `finish_reason "${choice.finish_reason}". ` +
+            (choice.finish_reason === 'length'
+              ? 'The response hit the token limit mid tool-call; increase the provider\'s maxTokens.'
+              : 'The provider returned malformed tool arguments.'),
+          );
+        }
         yield { type: 'done' };
       }
     }
 
-    // Fallback done if stream ended without finish_reason
+    // Fallback if the stream ended without a finish_reason (e.g. a dropped connection).
     if (reasoningAcc) yield { type: 'reasoning-block', reasoning: reasoningAcc };
     if (toolAccum.size > 0) {
+      let truncatedTool: { name: string; bytes: number } | undefined;
       for (const [, call] of toolAccum) {
-        let input: unknown = {};
-        try { input = JSON.parse(call.args || '{}'); } catch { /* malformed */ }
-        yield { type: 'tool-call', id: call.id, name: call.name, input };
+        try {
+          yield { type: 'tool-call', id: call.id, name: call.name, input: JSON.parse(call.args || '{}') };
+        } catch {
+          truncatedTool ??= { name: call.name, bytes: call.args.length };
+        }
+      }
+      if (truncatedTool) {
+        throw new Error(
+          `Tool "${truncatedTool.name}" arguments could not be parsed — ${truncatedTool.bytes} bytes received ` +
+          `before the stream ended. The provider returned malformed or truncated tool arguments.`,
+        );
       }
     }
     yield { type: 'done' };
