@@ -87,9 +87,13 @@ const nonInteractivePrompt: PromptFn = ((p: string | FormField, def?: string) =>
 export function createWebServer(deps: WebServerDeps) {
   const origin = deps.cors ?? '*';
 
-  // Fan-out: each active submit gets a subscriber set, replay buffer, and its AbortController.
-  const activeSessions = new Map<string, { subs: Set<ServerResponse>; buffer: string[]; ac: AbortController }>();
-  const pendingPrompts  = new Map<string, (answer: string) => void>(); // session ID → resolver
+  // Persistent per-session event subscribers (the GET /sessions/:id/events SSE streams). Submits are
+  // fire-and-forget — all turn output, and interactive prompts, reach clients over these. Holding one
+  // connection per session (not per submission) is what keeps queued submits off the browser's
+  // ~6-socket-per-host limit, which otherwise starved both the `queued` signal and POST /prompt.
+  const sessionConns = new Map<string, Set<ServerResponse>>();
+  const busyState    = new Map<string, boolean>();                     // last-broadcast busy per session
+  const pendingPrompts = new Map<string, (answer: string) => void>(); // session ID → prompt resolver
 
   // Clients subscribed to server-sent session status events (busy/idle).
   const statusListeners = new Set<ServerResponse>();
@@ -117,12 +121,20 @@ export function createWebServer(deps: WebServerDeps) {
     })();
   }
 
-  function broadcastStatus(sessionId: string, busy: boolean): void {
+  function sendToSession(sessionId: string, msg: string): void {
+    const conns = sessionConns.get(sessionId);
+    if (conns === undefined) return;
+    for (const res of conns) { if (res.writable) res.write(msg); else conns.delete(res); }
+  }
+
+  // Broadcast a session's busy/idle transition to the global status listeners (sidebar), deduped
+  // against the last value. Authoritative busy comes from the runner (running || queued > 0).
+  function updateBusy(sessionId: string): void {
+    const busy = deps.run.status(sessionId).busy;
+    if ((busyState.get(sessionId) ?? false) === busy) return;
+    if (busy) busyState.set(sessionId, true); else busyState.delete(sessionId);
     const msg = sseEvent('session-busy', { sessionId, busy });
-    for (const res of statusListeners) {
-      if (res.writable) res.write(msg);
-      else statusListeners.delete(res);
-    }
+    for (const res of statusListeners) { if (res.writable) res.write(msg); else statusListeners.delete(res); }
   }
 
   const server = createServer(async (req, res) => {
@@ -190,7 +202,7 @@ export function createWebServer(deps: WebServerDeps) {
       });
       res.write(sseComment('status stream open'));
       // Send current busy state so the client is up-to-date immediately.
-      for (const sessionId of activeSessions.keys()) {
+      for (const sessionId of busyState.keys()) {
         res.write(sseEvent('session-busy', { sessionId, busy: true }));
       }
       statusListeners.add(res);
@@ -201,7 +213,7 @@ export function createWebServer(deps: WebServerDeps) {
     // --- GET /sessions/:id --- (status only — busy is server-internal state, not session data)
     const sessionStatusMatch = /^\/sessions\/([^/]+)$/.exec(url);
     if (method === 'GET' && sessionStatusMatch) {
-      json(res, 200, { busy: activeSessions.has(sessionStatusMatch[1]!) }); return;
+      json(res, 200, { busy: deps.run.status(sessionStatusMatch[1]!).busy }); return;
     }
 
     // --- POST /sessions ---
@@ -238,22 +250,10 @@ export function createWebServer(deps: WebServerDeps) {
         ? [{ type: 'text' as const, text: body.content }]
         : [body.content];
 
-      const ac = new AbortController();
-      req.on('close', () => {
-        ac.abort();
-        const resolver = pendingPrompts.get(targetId);
-        if (resolver) { pendingPrompts.delete(targetId); resolver(''); }
-      });
-
-      const active = { subs: new Set<ServerResponse>([res]), buffer: [] as string[], ac };
-      activeSessions.set(targetId, active);
-      broadcastStatus(targetId, true);
-
-      const broadcast = (s: string): void => {
-        active.buffer.push(s);
-        for (const sub of active.subs) { if (sub.writable) sub.write(s); }
-      };
-
+      // Fire-and-forget: we enqueue and return immediately. The turn's output — and this prompt —
+      // reach the client over its persistent GET /sessions/:id/events stream, not this request.
+      // Answered via POST /sessions/:id/prompt. (Only one prompt is outstanding per session, since
+      // turns are serialised.)
       const promptFn = ((p: string | FormField, defaultValue?: string): Promise<string> =>
         new Promise(resolve => {
           const def = typeof p === 'string' ? defaultValue : p.default;
@@ -261,69 +261,74 @@ export function createWebServer(deps: WebServerDeps) {
             pendingPrompts.delete(targetId);
             resolve(answer || def || '');
           });
-          broadcast(sseEvent('prompt', {
+          sendToSession(targetId, sseEvent('prompt', {
             type: 'prompt',
+            traceId,
             question: typeof p === 'string' ? p : p.label,
             ...(def !== undefined ? { defaultValue: def } : {}),
             ...(typeof p === 'string' ? {} : { field: p }),
           }));
         })) as PromptFn;
 
-      // Switch to SSE
-      res.writeHead(200, {
-        'content-type':  'text/event-stream',
-        'cache-control': 'no-cache',
-        'connection':    'keep-alive',
-      });
-      res.write(sseComment('stream open'));
-
       try {
         const view = await deps.run.open({
           sessionId: targetId,
-          signal:    ac.signal,
+          signal:    new AbortController().signal, // events aren't consumed on this request
           content:   contentArr,
           provider:  body.provider,
           principal: DEFAULT_PRINCIPAL,
           prompt:    promptFn,
           traceId,
         });
-        // Tell the client its queue position up front: queued > 0 means this submission is waiting
-        // behind a running turn, so the UI can show it as pending instead of appearing to hang.
-        broadcast(sseEvent('queued', { type: 'queued', queued: view.queued, traceId: view.traceId }));
-        // Stream only this submission's turn. The per-session tap also carries events of any other
-        // submission that drains ahead of this one in the queue — skip those; a separate /stream
-        // connection (or that submit's own request) renders them.
-        for await (const event of view.events) {
-          if (event.traceId !== view.traceId) continue;
-          broadcast(sseEvent(event.type, event));
-          if (event.type === 'done' || event.type === 'aborted'
-              || event.type === 'error' || event.type === 'cancelled') break;
-        }
+        updateBusy(targetId);
+        json(res, 200, { queued: view.queued, traceId: view.traceId });
       } catch (e) {
-        broadcast(sseEvent('error', { type: 'error', error: String(e) }));
-      } finally {
-        activeSessions.delete(targetId);
-        broadcastStatus(targetId, false);
-        for (const sub of active.subs) { sub.end(); }
+        json(res, 500, { error: String(e) });
       }
       return;
     }
 
-    // --- GET /sessions/:id/stream ---
-    // Lets a second client join an in-progress run with full event replay.
-    const streamMatch2 = /^\/sessions\/([^/]+)\/stream$/.exec(url);
-    if (method === 'GET' && streamMatch2) {
-      const sId    = streamMatch2[1]!;
-      const active = activeSessions.get(sId);
-      if (!active) { json(res, 404, { error: 'No active stream' }); return; }
+    // --- GET /sessions/:id/events --- (persistent per-session SSE: ALL turn output for the session)
+    const eventsMatch = /^\/sessions\/([^/]+)\/events$/.exec(url);
+    if (method === 'GET' && eventsMatch) {
+      const sId = eventsMatch[1]!;
       res.writeHead(200, {
         'content-type':  'text/event-stream',
         'cache-control': 'no-cache',
         'connection':    'keep-alive',
       });
-      for (const s of active.buffer) { if (res.writable) res.write(s); }
-      active.subs.add(res);
-      req.on('close', () => active.subs.delete(res));
+      res.write(sseComment('events stream open'));
+
+      let conns = sessionConns.get(sId);
+      if (conns === undefined) { conns = new Set(); sessionConns.set(sId, conns); }
+      conns.add(res);
+
+      const ac = new AbortController();
+      req.on('close', () => {
+        ac.abort();
+        const set = sessionConns.get(sId);
+        if (set) {
+          set.delete(res);
+          if (set.size === 0) {
+            sessionConns.delete(sId);
+            // No viewers left: release any pending prompt so a turn parked on ctx.prompt() doesn't
+            // hang awaiting an answer that can never arrive.
+            const r = pendingPrompts.get(sId);
+            if (r) { pendingPrompts.delete(sId); r(''); }
+          }
+        }
+      });
+
+      const view = await deps.run.open({ sessionId: sId, signal: ac.signal });
+      void (async () => {
+        try {
+          for await (const ev of view.events) {
+            if (!res.writable) break;
+            res.write(sseEvent(ev.type, ev));
+            updateBusy(sId);
+          }
+        } catch { /* stream torn down */ }
+      })();
       return;
     }
 
@@ -331,10 +336,12 @@ export function createWebServer(deps: WebServerDeps) {
     const abortMatch = /^\/sessions\/([^/]+)\/abort$/.exec(url);
     if (method === 'POST' && abortMatch) {
       const sId    = abortMatch[1]!;
-      // Aborts the running turn and drops any queued submissions for this session. The aborted/
-      // cancelled events that result close the streaming /submit loops above.
+      // Release any pending prompt first so a turn parked on ctx.prompt() can observe the abort
+      // rather than hang, then drop the queue + abort the running turn.
+      const r = pendingPrompts.get(sId);
+      if (r) { pendingPrompts.delete(sId); r(''); }
       deps.run.abort(sId);
-      activeSessions.get(sId)?.ac.abort();
+      updateBusy(sId);
       json(res, 200, { ok: true });
       return;
     }
@@ -493,12 +500,10 @@ export function createWebServer(deps: WebServerDeps) {
   }
 
   async function close(): Promise<void> {
-    // Abort and drain all active streaming sessions.
-    for (const active of activeSessions.values()) {
-      active.ac.abort();
-      for (const sub of active.subs) sub.end();
-    }
-    activeSessions.clear();
+    // Close all persistent per-session event streams.
+    for (const conns of sessionConns.values()) for (const res of conns) res.end();
+    sessionConns.clear();
+    busyState.clear();
 
     // Close all status stream connections.
     for (const res of statusListeners) res.end();

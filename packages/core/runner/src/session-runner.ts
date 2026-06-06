@@ -269,5 +269,12 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
       }
       s.ac?.abort();
     },
+
+    status(sessionId: string): { busy: boolean; running: boolean; queued: number } {
+      const s = states.get(sessionId);
+      const running = s?.running ?? false;
+      const queued  = s?.queue.length ?? 0;
+      return { busy: running || queued > 0, running, queued };
+    },
   };
 }

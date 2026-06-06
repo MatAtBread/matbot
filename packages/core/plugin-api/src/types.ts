@@ -515,4 +515,7 @@ export interface SessionRunner {
   open(opts: OpenOpts | SubmitOpenOpts): Promise<SessionView>;
   /** Abort the running turn (if any) and drop all queued submissions, emitting `cancelled` for each. */
   abort(sessionId: string): void;
+  /** Snapshot of a session's live state: whether a turn is running and how many submissions wait
+   *  behind it. `busy` is `running || queued > 0`. */
+  status(sessionId: string): { busy: boolean; running: boolean; queued: number };
 }

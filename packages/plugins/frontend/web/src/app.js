@@ -18,10 +18,7 @@ const LS_SIDEBAR        = 'sidebarSections';
 const LS_SIDEBAR_WIDTH  = 'sidebarWidth';
 
 let currentSessionId = null;
-let sending = false;          // derived: true while this tab has ≥1 active/queued submission
-let activeSends = 0;          // count of in-flight submit() calls (submissions can now queue)
-let sendingForSession = null; // session ID of the most recent active submission (abort target)
-let stopRequested = false;   // true once the user has clicked stop for the current turn
+let sending = false;          // current session busy? mirrors the server's 'session-busy' status
 const busySessions   = new Set();
 const unreadSessions = new Set();
 const updatedFiles   = new Set();
@@ -92,7 +89,7 @@ function showScrollDownButton() {
 }
 
 // Scroll to the very bottom of the messages pane and restore the ▶ send button. The Stop button's
-// visibility is driven independently by setSending, so we don't reason about it here.
+// visibility is driven independently by the server's busy status, so we don't reason about it here.
 function scrollToBottomAndReset() {
   messagesEl.scrollTop = messagesEl.scrollHeight;
   resetSendButton();
@@ -290,186 +287,6 @@ async function callTool(toolName, input) {
 
 // Join an in-progress server run for sessionId. renderedCount is the number of
 // non-system messages already in the DOM so incremental appends start from there.
-async function joinSessionStream(id, renderedCount) {
-  let streamRes;
-  try { streamRes = await fetch('/sessions/' + id + '/stream'); }
-  catch { return; }
-
-  if (!streamRes.ok || !streamRes.body) {
-    // Run already finished — append any messages not yet rendered.
-    if (id === currentSessionId) {
-      const s = await apiGetSession(id);
-      if (s) {
-        renderSession(s, renderedCount);
-        if (chatHeaderEl) chatTitleEl.textContent = s.title || '';
-        apiListSessions().then(renderSessions);
-      }
-    }
-    return;
-  }
-
-  // Active stream — join it and render events incrementally.
-  setSending(true, id);
-  const turnWrap = createAssistantWrap('assistant');
-  const loadingEl = document.createElement('div');
-  loadingEl.className = 'msg-loading';
-  turnWrap.appendChild(loadingEl);
-  function removeLoading() { loadingEl.remove(); }
-
-  let textEl = null, textAccum = '', textElFinalised = false, thinkingContent = null, thinkingAccum = '', currentTool = null, providerToolPending = false, pluginToolPending = false;
-  let turnIn = 0, turnOut = 0, turnCost = 0, turnCacheRead = 0, turnCacheCreate = 0;
-
-
-  function getOrMakeTextEl() {
-    if (!textEl) { textEl = document.createElement('div'); textEl.className = 'msg-text md-body'; turnWrap.appendChild(textEl); }
-    return textEl;
-  }
-
-  // Scroll the assistant wrapper to the top of the viewport so the user sees
-  // the beginning of the output. Only called once per turn and only when
-  // auto-scrolling is not suppressed by a recent manual user scroll.
-  function scrollToOutputStart() {
-    if (isScrollSuppressed()) return;
-    programmaticScrollTo(() => {
-      // While the text block fits within the viewport, scroll its bottom
-      // into view so the user sees the message filling in from the bottom.
-      // Once the content is taller than the container, stop scrolling so
-      // the user can read from the top without it being pushed away.
-      const el = textEl;
-      const avail = window.innerHeight - (chatHeaderEl?.offsetHeight ?? 0)
-                    - (document.getElementById('input-area')?.offsetHeight ?? 0);
-      if (el && el.offsetHeight <= avail) {
-        el.scrollIntoView({ block: 'end', behavior: 'instant' });
-      }
-      updateScrollDownButton();
-    });
-  }
-
-  try {
-    const reader = streamRes.body.getReader();
-    const dec    = new TextDecoder();
-    let   buf    = '';
-    outer: while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (id !== currentSessionId) { reader.cancel(); break; }
-      buf += dec.decode(value, { stream: true });
-      const { events, remaining } = parseSSEChunk(buf);
-      buf = remaining;
-      for (const ev of events) {
-        switch (ev.type) {
-          case 'text-delta':
-            removeLoading();
-            if (textElFinalised) { textEl = null; textAccum = ''; textElFinalised = false; }
-            textAccum += ev.delta;
-            getOrMakeTextEl().innerHTML = md(textAccum);
-            scrollToOutputStart();
-            break;
-          case 'thinking': {
-            removeLoading();
-            if (!thinkingContent) {
-              const { details, content: c } = makeThinkingBlock('\ud83d\udcad Thinking', true);
-              turnWrap.insertBefore(details, textEl);
-              thinkingContent = c;
-            }
-            thinkingAccum += ev.delta;
-            thinkingContent.textContent = thinkingAccum;
-            // If no text content yet, scroll to show the user processing is happening.
-            if (!turnWrap.querySelector('.msg-text') && !isScrollSuppressed()) {
-              programmaticScrollTo(() => {
-                turnWrap.scrollIntoView({ block: 'end', behavior: 'instant' });
-              });
-            }
-            break;
-          }
-          case 'tool:start': {
-            removeLoading();
-            if (ev.name === 'provider') providerToolPending = true;
-            if (ev.name === 'plugin')   pluginToolPending   = true;
-            currentTool = makeToolBlock(ev.name, ev.input, ev.callId);
-            currentTool.open = true;
-            turnWrap.appendChild(currentTool);
-            // If no text content yet, scroll to show the user processing is happening.
-            if (!turnWrap.querySelector('.msg-text') && !isScrollSuppressed()) {
-              programmaticScrollTo(() => {
-                turnWrap.scrollIntoView({ block: 'end', behavior: 'instant' });
-              });
-            }
-            break;
-          }
-          case 'tool:stdout':
-          case 'tool:stderr': {
-            if (currentTool) {
-              let outEl = currentTool.querySelector('.tool-output');
-              if (!outEl) { outEl = document.createElement('pre'); outEl.className = 'tool-output'; currentTool.appendChild(outEl); }
-              outEl.textContent += ev.chunk;
-              outEl.scrollTop = outEl.scrollHeight;
-            }
-            break;
-          }
-          case 'tool:end': {
-            if (currentTool) {
-              currentTool.appendChild(makeToolResultBlock(ev.result, ev.isError));
-              currentTool.open = false;
-            }
-            currentTool = null;
-            textElFinalised = true;
-            textAccum = '';
-            if (providerToolPending && !ev.isError) { providerToolPending = false; refreshProviderSelect(); }
-            if (pluginToolPending   && !ev.isError) { pluginToolPending   = false; loadPlugins(); }
-            break;
-          }
-          case 'usage':
-            turnIn  += ev.inputTokens; turnOut += ev.outputTokens;
-            if (ev.costUsd              !== undefined) turnCost      += ev.costUsd;
-            if (ev.cacheReadTokens     !== undefined) turnCacheRead  += ev.cacheReadTokens;
-            if (ev.cacheCreationTokens !== undefined) turnCacheCreate += ev.cacheCreationTokens;
-            break;
-          case 'done':
-            if (thinkingContent) { const det = thinkingContent.closest('details'); if (det) det.open = false; }
-            if (ev.session?.title && chatHeaderEl) chatTitleEl.textContent = ev.session.title;
-            if (turnIn > 0 || turnOut > 0) turnWrap.appendChild(makeTokenStatsBlock(turnIn, turnOut, turnCost, turnCacheRead, turnCacheCreate));
-            loadFiles();
-            break outer;
-          case 'aborted':
-            removeLoading();
-            if (ev.reason !== 'user-abort') {
-              turnWrap.remove();
-              if (ev.session && id === currentSessionId) renderSession(ev.session);
-            }
-            break outer;
-          case 'error': {
-            removeLoading();
-            const errDiv = document.createElement('div');
-            errDiv.className = 'msg-error';
-            errDiv.textContent = '[error: ' + (ev.error ?? ev.message ?? 'unknown') + ']';
-            turnWrap.appendChild(errDiv);
-            break outer;
-          }
-          case 'system-context':
-            console.log('[system-context]', ev.text);
-            break;
-        }
-        // NOTE: NO per-event scroll-to-bottom here.
-        // We scrolled once to the output start; the user reads at their own pace.
-      }
-    }
-  } catch (e) {
-    removeLoading();
-    const errDiv = document.createElement('div');
-    errDiv.className = 'msg-error';
-    errDiv.textContent = '[error: ' + e.message + ']';
-    turnWrap.appendChild(errDiv);
-  } finally {
-    removeLoading();
-    setSending(false, id);
-    apiListSessions().then(renderSessions);
-    loadFiles();
-    // If the output extends below the fold, show the ▼ scroll-down button.
-    maybeShowScrollDown();
-  }
-}
-
 // If the bottom of messages is not visible in the viewport, transform the
 // send button into a ▼ down-arrow that scrolls to bottom on click.
 function maybeShowScrollDown() {
@@ -883,26 +700,6 @@ async function uploadFiles(fileList) {
     }
   }
   loadFiles();
-}
-
-async function* streamSubmit(sessionId, content, provider) {
-  const res = await fetch('/sessions/' + sessionId + '/submit', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ content, provider }),
-  });
-  if (!res.ok || !res.body) throw new Error('HTTP ' + res.status);
-  const reader = res.body.getReader();
-  const dec    = new TextDecoder();
-  let   buf    = '';
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    const { events, remaining } = parseSSEChunk(buf);
-    buf = remaining;
-    for (const ev of events) yield ev;
-  }
 }
 
 // ── DOM builders ──────────────────────────────────────────────────────────────
@@ -1419,18 +1216,17 @@ async function openSession(id, scrollTarget) {
   unreadSessions.delete(id);
   sessionListEl.querySelector('[data-sid="' + id + '"]')?.classList.remove('unread');
   location.hash = id;
-  // Reset button state for the incoming session; watchUntilDone will re-lock if it's busy.
-  setSending(false, id);
   const [sessions, session, busy] = await Promise.all([apiListSessions(), apiGetSession(id), apiSessionBusy(id)]);
   renderSessions(sessions);
   if (session) {
     renderSession(session, undefined, scrollTarget);
     if (chatHeaderEl) chatTitleEl.textContent = session.title ?? '';
-    if (busy) {
-      const renderedCount = session.messages.filter(m => m.role !== 'system').length;
-      joinSessionStream(id, renderedCount);
-    }
   }
+  sending = busy;
+  setStop(busy);
+  // One persistent stream for this session; it replays any in-progress turn and carries all future
+  // turns. Renders happen via renderTurn() keyed by traceId.
+  connectSessionStream(id);
   loadFiles();
   inputEl.focus();
 }
@@ -1464,146 +1260,78 @@ newBtn.addEventListener('click', async (e) => {
 
 async function submitFormResponse(sessionId, values) {
   const provider = providerSel.value;
-  if (sending || !provider || !sessionId) return;
-  setSending(true, sessionId);
-
-  const turnWrap = createAssistantWrap('assistant');
-  const loadingEl = document.createElement('div');
-  loadingEl.className = 'msg-loading';
-  turnWrap.appendChild(loadingEl);
-  function removeLoading() { loadingEl.remove(); }
-
-  let textEl = null, textAccum = '', textElFinalised = false, thinkingContent = null, thinkingAccum = '', currentTool = null, providerToolPending = false, pluginToolPending = false;
-  let turnIn = 0, turnOut = 0, turnCost = 0, turnCacheRead = 0, turnCacheCreate = 0;
-
-
-  function getOrMakeTextEl() {
-    if (!textEl) { textEl = document.createElement('div'); textEl.className = 'msg-text md-body'; turnWrap.appendChild(textEl); }
-    return textEl;
-  }
-
-  // Scroll the assistant wrapper to the top of the viewport once, on first content.
-  function scrollToOutputStart() {
-    if (isScrollSuppressed()) return;
-    programmaticScrollTo(() => {
-      // While the text block fits within the viewport, scroll its bottom
-      // into view so the user sees the message filling in from the bottom.
-      // Once the content is taller than the container, stop scrolling so
-      // the user can read from the top without it being pushed away.
-      const el = textEl;
-      const avail = window.innerHeight - (chatHeaderEl?.offsetHeight ?? 0)
-                    - (document.getElementById('input-area')?.offsetHeight ?? 0);
-      if (el && el.offsetHeight <= avail) {
-        el.scrollIntoView({ block: 'end', behavior: 'instant' });
-      }
-      updateScrollDownButton();
-    });
-  }
-
-  try {
-    for await (const ev of streamSubmit(sessionId, { type: 'form-response', values }, provider)) {
-      switch (ev.type) {
-        case 'text-delta':
-          removeLoading();
-          if (textElFinalised) { textEl = null; textAccum = ''; textElFinalised = false; }
-          textAccum += ev.delta;
-          getOrMakeTextEl().innerHTML = md(textAccum);
-          scrollToOutputStart();
-          break;
-        case 'thinking': {
-          removeLoading();
-          if (!thinkingContent) {
-            const { details, content: c } = makeThinkingBlock('\ud83d\udcad Thinking', true);
-            turnWrap.insertBefore(details, textEl);
-            thinkingContent = c;
-          }
-          thinkingAccum += ev.delta;
-          thinkingContent.textContent = thinkingAccum;
-            // If no text content yet, scroll to show the user processing is happening.
-            if (!turnWrap.querySelector('.msg-text') && !isScrollSuppressed()) {
-              programmaticScrollTo(() => {
-                turnWrap.scrollIntoView({ block: 'end', behavior: 'instant' });
-              });
-            }
-          break;
-        }
-        case 'tool:start': {
-          removeLoading();
-          if (ev.name === 'provider') providerToolPending = true;
-          if (ev.name === 'plugin')   pluginToolPending   = true;
-          currentTool = makeToolBlock(ev.name, ev.input, ev.callId);
-          currentTool.open = true;
-          turnWrap.appendChild(currentTool);
-            // If no text content yet, scroll to show the user processing is happening.
-            if (!turnWrap.querySelector('.msg-text') && !isScrollSuppressed()) {
-              programmaticScrollTo(() => {
-                turnWrap.scrollIntoView({ block: 'end', behavior: 'instant' });
-              });
-            }
-          break;
-        }
-        case 'tool:stdout':
-        case 'tool:stderr': {
-          if (currentTool) {
-            let outEl = currentTool.querySelector('.tool-output');
-            if (!outEl) { outEl = document.createElement('pre'); outEl.className = 'tool-output'; currentTool.appendChild(outEl); }
-            outEl.textContent += ev.chunk;
-            outEl.scrollTop = outEl.scrollHeight;
-          }
-          break;
-        }
-        case 'tool:end': {
-          if (currentTool) {
-            currentTool.appendChild(makeToolResultBlock(ev.result, ev.isError));
-            currentTool.open = false;
-          }
-          currentTool = null;
-          textElFinalised = true;
-          textAccum = '';
-          if (providerToolPending && !ev.isError) { providerToolPending = false; refreshProviderSelect(); }
-          if (pluginToolPending   && !ev.isError) { pluginToolPending   = false; loadPlugins(); }
-          break;
-        }
-        case 'usage':
-          turnIn         += ev.inputTokens;
-          turnOut        += ev.outputTokens;
-          if (ev.costUsd              !== undefined) turnCost        += ev.costUsd;
-          if (ev.cacheReadTokens     !== undefined) turnCacheRead   += ev.cacheReadTokens;
-          if (ev.cacheCreationTokens !== undefined) turnCacheCreate += ev.cacheCreationTokens;
-          break;
-        case 'done':
-          if (thinkingContent) { const det = thinkingContent.closest('details'); if (det) det.open = false; }
-          if (ev.session?.title && chatHeaderEl) chatTitleEl.textContent = ev.session.title;
-          if (turnIn > 0 || turnOut > 0) turnWrap.appendChild(makeTokenStatsBlock(turnIn, turnOut, turnCost, turnCacheRead, turnCacheCreate));
-          loadFiles();
-          break;
-        case 'error': {
-          removeLoading();
-          const errDiv = document.createElement('div');
-          errDiv.className = 'msg-error';
-          errDiv.textContent = '[error: ' + (ev.error ?? ev.message ?? 'unknown') + ']';
-          turnWrap.appendChild(errDiv);
-          break;
-        }
-      }
-      // NOTE: NO per-event scroll-to-bottom here.
-    }
-  } catch (e) {
-    removeLoading();
-    const errDiv = document.createElement('div');
-    errDiv.className = 'msg-error';
-    errDiv.textContent = '[error: ' + e.message + ']';
-    turnWrap.appendChild(errDiv);
-  } finally {
-    removeLoading();
-    setSending(false, sessionId);
-    apiListSessions().then(renderSessions);
-    loadFiles();
-    maybeShowScrollDown();
-  }
+  if (!provider || !sessionId) return;
+  // A form answer is just another submission; it queues if a turn is running, and renders over
+  // the persistent stream like any other turn.
+  await doSubmit(sessionId, { type: 'form-response', values }, null);
 }
 
 // ── Send ──────────────────────────────────────────────────────────────────────
+
+// ── Per-session event stream (one persistent connection; submits are fire-and-forget) ──────────
+//
+// A single GET /sessions/:id/events SSE carries ALL turns for the session. Events are demuxed by
+// traceId into per-turn queues, each drained by renderTurn(). One connection per session (not per
+// submission) is what keeps queued submits off the browser's ~6-socket-per-host limit — the cause
+// of both the missing-queued-badge and the prompt-stall bugs.
+
+let streamSessionId = null;       // session the persistent stream is bound to
+let streamAc        = null;       // AbortController for the current stream
+const turnQueues    = new Map();  // traceId -> { items, wake, done, consumed }
+
+function queueFor(traceId) {
+  let q = turnQueues.get(traceId);
+  if (!q) { q = { items: [], wake: null, done: false, consumed: false }; turnQueues.set(traceId, q); }
+  return q;
+}
+
+function pushTurnEvent(ev) {
+  const q = queueFor(ev.traceId);
+  q.items.push(ev);
+  if (ev.type === 'done' || ev.type === 'aborted' || ev.type === 'error' || ev.type === 'cancelled') q.done = true;
+  if (q.wake) { const w = q.wake; q.wake = null; w(); }
+  // A turn we didn't initiate (an in-progress run we just joined): render it (no optimistic bubble).
+  if (!q.consumed) { q.consumed = true; void renderTurn(streamSessionId, ev.traceId, null); }
+}
+
+async function* turnEvents(traceId) {
+  const q = queueFor(traceId);
+  for (;;) {
+    while (q.items.length) yield q.items.shift();
+    if (q.done) { turnQueues.delete(traceId); return; }
+    await new Promise(res => { q.wake = res; });
+  }
+}
+
+async function connectSessionStream(sid) {
+  if (streamAc) streamAc.abort();
+  streamAc = new AbortController();
+  streamSessionId = sid;
+  turnQueues.clear();
+  const ac = streamAc;
+  while (!ac.signal.aborted && sid === currentSessionId) {
+    try {
+      const res = await fetch('/sessions/' + sid + '/events', { signal: ac.signal });
+      if (!res.ok || !res.body) break;
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (ac.signal.aborted || sid !== currentSessionId) { reader.cancel(); break; }
+        buf += dec.decode(value, { stream: true });
+        const parsed = parseSSEChunk(buf);
+        buf = parsed.remaining;
+        for (const ev of parsed.events) pushTurnEvent(ev);
+      }
+    } catch (e) {
+      if (ac.signal.aborted) return;
+    }
+    if (ac.signal.aborted || sid !== currentSessionId) return;
+    await new Promise(r => setTimeout(r, 1000)); // reconnect backoff
+  }
+}
 
 // Read the input box and submit it. The single entry point for *typed* messages; canned/programmatic
 // messages (plugin install banners, etc.) call submit() directly so they aren't gated by the input.
@@ -1615,21 +1343,51 @@ async function sendMessage() {
   await submit(content);
 }
 
-// Submit content to the current session. No busy gate: if a turn is already running the server
-// queues this submission, and the 'queued' event below renders it as pending until its turn starts.
+// Submit content to the current session, fire-and-forget. The server queues it if a turn is running;
+// renderTurn() (consuming this turn's events off the persistent stream) shows it pending meanwhile.
 async function submit(content) {
   const provider = providerSel.value;
   if (!content || !provider) return;
-
   if (!currentSessionId) {
     const { id } = await apiNewSession();
     currentSessionId = id;
   }
-
-  const submittingFor = currentSessionId;
-  setSending(true, submittingFor);
-
+  // Ensure the persistent event stream is bound to this session before we enqueue, so the turn's
+  // events have a consumer (covers the just-created session and the "New session" button path).
+  if (streamSessionId !== currentSessionId) connectSessionStream(currentSessionId);
   const userBubble = appendUserBubble(content);
+  await doSubmit(currentSessionId, content, userBubble);
+}
+
+// Generate a client-side traceId, pre-register + render the turn, then POST fire-and-forget. The
+// traceId is ours so the turn's events (arriving on the persistent stream) route to this renderer
+// with no race against the POST response.
+async function doSubmit(sid, content, userBubble) {
+  const provider = providerSel.value;
+  const traceId  = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
+  queueFor(traceId).consumed = true;
+  void renderTurn(sid, traceId, userBubble ?? null);
+  try {
+    const res = await fetch('/sessions/' + sid + '/submit', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ content, provider, traceId }),
+      // A submit is a quick POST; if it can't even be sent (network down, or — pre-fix — a browser
+      // socket-exhaustion stall, which never errors on its own) we surface it instead of hanging.
+      signal: AbortSignal.timeout(20000),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) { pushTurnEvent({ type: 'error', error: data.error || ('HTTP ' + res.status), traceId }); return; }
+    // Surface the server's queue position so renderTurn can mark the bubble pending if it's waiting.
+    pushTurnEvent({ type: 'queued', queued: data.queued ?? 0, traceId });
+  } catch (e) {
+    pushTurnEvent({ type: 'error', error: e.name === 'TimeoutError' ? 'submit timed out (no response)' : String(e), traceId });
+  }
+}
+
+// Render one turn by draining its event queue. `userBubble` is the optimistic message when WE
+// submitted (so queued/cancelled can style/remove it); null for a turn we merely joined.
+async function renderTurn(sid, traceId, userBubble) {
   const turnWrap = createAssistantWrap('assistant');
 
   // Loading dots until first content arrives
@@ -1640,7 +1398,7 @@ async function submit(content) {
   // While this submission waits behind a running turn it gets a floating egg-timer badge (CSS on
   // the bubble via the 'pending' class) and no loading dots. Both are cleared once its own turn
   // starts producing content.
-  function clearPending() { userBubble.classList.remove('pending'); }
+  function clearPending() { if (userBubble) userBubble.classList.remove('pending'); }
   function removeLoading() { loadingEl.remove(); clearPending(); }
 
   // Per-turn streaming state
@@ -1690,7 +1448,7 @@ async function submit(content) {
   }
 
   try {
-    for await (const ev of streamSubmit(submittingFor, content, provider)) {
+    for await (const ev of turnEvents(traceId)) {
       switch (ev.type) {
         case 'queued':
           // Sent first by the server. queued > 0 ⇒ waiting behind a running turn: float the
@@ -1698,7 +1456,7 @@ async function submit(content) {
           // content event calls removeLoading, which clears the badge).
           if (ev.queued > 0) {
             loadingEl.remove();
-            userBubble.classList.add('pending');
+            if (userBubble) userBubble.classList.add('pending');
           }
           break;
 
@@ -1863,7 +1621,7 @@ async function submit(content) {
               inp.focus();
             }
           });
-          await fetch('/sessions/' + submittingFor + '/prompt', {
+          await fetch('/sessions/' + sid + '/prompt', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ answer }),
@@ -1896,7 +1654,7 @@ async function submit(content) {
           // was never persisted, so remove its optimistic bubble and empty turn entirely.
           removeLoading();
           turnWrap.remove();
-          userBubble.remove();
+          if (userBubble) userBubble.remove();
           break;
         }
 
@@ -1946,7 +1704,6 @@ async function submit(content) {
     turnWrap.appendChild(errDiv);
   } finally {
     removeLoading();
-    setSending(false, submittingFor);
     apiListSessions().then(renderSessions);
     loadFiles();
     // If the output extends below the viewport fold, morph the send button
@@ -1980,35 +1737,23 @@ inputEl.addEventListener('input', () => {
   inputEl.style.height = Math.min(inputEl.scrollHeight, 180) + 'px';
 });
 
-// Submissions can now queue, so "sending" is a count, not a flag. The Stop button is shown whenever
-// anything is in flight; the input/Send stay live throughout so you can type-ahead and queue.
-function setSending(val, sessionId) {
-  const sid = sessionId ?? currentSessionId;
-  if (val) {
-    activeSends++;
-    sendingForSession = sid;
-    stopRequested = false;
-  } else {
-    activeSends = Math.max(0, activeSends - 1);
-  }
-  sending = activeSends > 0;
-  if (sending) {
-    stopBtn.style.visibility = 'visible';
-    stopBtn.disabled = false;
-  } else {
-    sendingForSession = null;
-    stopRequested = false;
-    stopBtn.style.visibility = 'hidden';
-  }
+// Busy is now authoritative from the server (the per-session 'session-busy' status events), not a
+// client-side count. Show/hide the Stop button accordingly; Send + input stay live throughout so
+// you can type-ahead and queue. The input is never disabled.
+function setStop(visible) {
+  stopBtn.style.visibility = visible ? 'visible' : 'hidden';
+  if (visible) stopBtn.disabled = false;
 }
 
 function requestStop() {
-  const target = sendingForSession ?? currentSessionId;
-  if (!sending || stopRequested || !target) return;
-  stopRequested = true;
+  const target = currentSessionId;
+  if (!target) return;
   stopBtn.disabled = true;
-  // Server-side this aborts the running turn AND drops everything still queued for the session.
-  fetch('/sessions/' + target + '/abort', { method: 'POST' }).catch(() => {});
+  // Server-side this aborts the running turn AND drops everything still queued for the session;
+  // the resulting aborted/cancelled events tidy the rendered turns over the persistent stream.
+  fetch('/sessions/' + target + '/abort', { method: 'POST' })
+    .catch(() => {})
+    .finally(() => { stopBtn.disabled = false; });
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
@@ -2092,6 +1837,8 @@ async function init() {
           if (item) item.classList.remove('busy');
         }
       }
+      // Drive the Stop button + the busy flag for the session currently in view.
+      if (sessionId === currentSessionId) { sending = busy; setStop(busy); }
     });
     es.onerror = () => { es.close(); setTimeout(connectStatusStream, 3000); };
   })();
