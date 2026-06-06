@@ -47,8 +47,13 @@ export class OpenAICompatAdapter implements ProviderAdapter {
     const apiKey   = config.credentials?.['apiKey'] ?? '';
 
     const body: Record<string, unknown> = {
-      model:                config.model,
-      max_completion_tokens: config.parameters?.maxTokens ?? DEFAULT_MAX_TOKENS,
+      model:      config.model,
+      // Classic OpenAI `max_tokens`, not the newer `max_completion_tokens`: the compat ecosystem
+      // (DeepSeek, vLLM, llama.cpp, ollama, classic gpt-4o) honors `max_tokens`. DeepSeek in
+      // particular *silently ignores* `max_completion_tokens` — verified against api.deepseek.com —
+      // so sending it leaves the cap unenforced. OpenAI's o-series is the lone exception (it wants
+      // `max_completion_tokens` and rejects `max_tokens`); that would need a per-provider override.
+      max_tokens: config.parameters?.maxTokens ?? DEFAULT_MAX_TOKENS,
       messages:             toOAIMessages(messages),
       stream:               true,
       stream_options:       { include_usage: true },
