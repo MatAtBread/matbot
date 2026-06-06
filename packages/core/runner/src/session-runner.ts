@@ -109,27 +109,22 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
     if (!s.running && s.queue.length === 0 && s.subscribers.size === 0) states.delete(id);
   };
 
+  // Turn events go to the replay buffer (so a mid-flight subscriber sees the in-progress turn) and
+  // all live subscribers.
   const emit = (s: SessionState, ev: PipelineEvent): void => {
     s.replay.push(ev);
     for (const sink of s.subscribers) sink.push(ev);
   };
 
-  // The authoritative read model: committed messages + the pending queue as `metadata.pending`
-  // messages. A pending message and its eventual persisted message share a traceId, so a frontend
-  // reconciles the same bubble across the pending → committed transition rather than duplicating it.
-  const overlay = (session: Session, s: SessionState): Session => {
-    if (s.queue.length === 0) return session;
-    const now = new Date().toISOString();
-    const pending: Message[] = s.queue.map(item => ({
-      id:        item.traceId,
-      role:      'user',
-      content:   item.content,
-      createdAt: now,
-      traceId:   item.traceId,
-      metadata:  { pending: true },
-    }));
-    return { ...session, messages: [...session.messages, ...pending] };
+  // Subscribers-only (no replay buffer): used for the `queued` events that describe the pending
+  // queue. Pending is NOT kept in `replay` (which is per-turn) — it's reconstructed from `s.queue`
+  // when a subscriber joins, so it survives turn boundaries correctly.
+  const notify = (s: SessionState, ev: PipelineEvent): void => {
+    for (const sink of s.subscribers) sink.push(ev);
   };
+
+  // How many submissions sit ahead of the item at queue index `i` (the running turn counts as one).
+  const aheadOf = (s: SessionState, i: number): number => (s.running ? 1 : 0) + i;
 
   const pump = async (id: string, s: SessionState): Promise<void> => {
     if (s.running) return;
@@ -232,16 +227,21 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
           concatQueue: opts.concatQueue ?? false,
           ...(opts.prompt !== undefined ? { prompt: opts.prompt } : {}),
         });
+        // Announce the submission on the stream as part of the live delta, before its turn's events.
+        // If it runs immediately `queued` is 0 (no wait); otherwise it's how many are ahead.
+        notify(s, { type: 'queued', content: opts.content, queued: aheadOf(s, s.queue.length - 1), traceId });
         void pump(opts.sessionId, s);
       }
 
+      // Stored state is pure committed history (ends at the running turn's user message). The pending
+      // queue and the in-progress response are the "delta", delivered over `events` — never overlaid
+      // here — so `stored ++ delta` concatenates in a single, refresh-stable order.
       const base = await deps.store.get(opts.sessionId);
       if (base === null) throw new Error(`Session "${opts.sessionId}" not found`);
-      const session = s !== undefined ? overlay(base, s) : base;
 
       let cached: AsyncIterable<PipelineEvent> | undefined;
       const view: SessionView = {
-        session,
+        session: base,
         queued: s !== undefined ? s.queue.length : 0,
         ...(traceId !== undefined ? { traceId } : {}),
         get events(): AsyncIterable<PipelineEvent> {
@@ -250,7 +250,10 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
             const remove = (): void => { st.subscribers.delete(sink); maybeCleanup(opts.sessionId, st); };
             const sink = createSink(remove);
             st.subscribers.add(sink);
+            // Replay the in-progress turn, then the pending queue — the delta region, in order.
             for (const ev of st.replay) sink.push(ev);
+            st.queue.forEach((item, i) =>
+              sink.push({ type: 'queued', content: item.content, queued: aheadOf(st, i), traceId: item.traceId }));
             if (opts.signal.aborted) { sink.close(); remove(); }
             else opts.signal.addEventListener('abort', () => { sink.close(); remove(); }, { once: true });
             cached = sink.iterable;

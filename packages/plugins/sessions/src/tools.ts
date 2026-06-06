@@ -1,4 +1,4 @@
-import type { Tool, ToolEvent, ToolContext, Session, Store, SessionRunner } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolEvent, ToolContext, Session, Store } from '@matatbread/matbot-plugin-api';
 
 function sessionPreview(session: Session): string {
   const first = session.messages.find(m => m.role === 'user');
@@ -8,14 +8,8 @@ function sessionPreview(session: Session): string {
   return text.length > 60 ? `${text.slice(0, 60)}…` : text;
 }
 
-// `getRunner` is looked up lazily (the runner may register after this plugin loads) so that
-// `get` can overlay queued-but-not-yet-run submissions onto the returned session — making the
-// pending queue part of the authoritative read model, visible across a client refresh.
-export function makeSessionTools(
-  store:      Store<Session>,
-  getRunner?: () => SessionRunner | undefined,
-): readonly Tool[] {
-  return [makeSessionActionTool(store, getRunner)];
+export function makeSessionTools(store: Store<Session>): readonly Tool[] {
+  return [makeSessionActionTool(store)];
 }
 
 // The precise per-action contract. JSON Schema can't express "title required only for rename"
@@ -27,10 +21,7 @@ type SessionInput =
   | { action: 'rename'; sessionId: string; title: string }
   | { action: 'hide';   sessionId: string };
 
-function makeSessionActionTool(
-  store:      Store<Session>,
-  getRunner?: () => SessionRunner | undefined,
-): Tool {
+function makeSessionActionTool(store: Store<Session>): Tool {
   return {
     name: 'session_action',
     description:
@@ -57,7 +48,7 @@ function makeSessionActionTool(
       },
     },
     executor: {
-      async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
+      async *execute(input: unknown, _ctx: ToolContext): AsyncIterable<ToolEvent> {
         const args = input as Partial<SessionInput> & { action?: string };
 
         switch (args.action) {
@@ -82,16 +73,10 @@ function makeSessionActionTool(
           case 'get': {
             const { sessionId } = args as Extract<SessionInput, { action: 'get' }>;
             if (!sessionId) { yield { type: 'error', message: 'action "get" requires "sessionId".' }; return; }
+            // Pure committed history. Pending submissions and the in-progress response are the live
+            // "delta" delivered over the runner's event stream, never overlaid onto stored state.
             const session = await store.get(sessionId);
             if (!session) { yield { type: 'error', message: `Session "${sessionId}" not found.` }; return; }
-            // When the runner is present, return its view so queued submissions show up as pending
-            // messages — the read reflects server truth even mid-turn / before a queued turn starts.
-            const runner = getRunner?.();
-            if (runner) {
-              const view = await runner.open({ sessionId, signal: ctx.signal });
-              yield { type: 'result', value: view.session };
-              return;
-            }
             yield { type: 'result', value: session };
             return;
           }

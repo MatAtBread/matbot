@@ -461,6 +461,11 @@ export type PipelineEvent =
   | { type: 'done';           session: Session;       traceId: string }
   | { type: 'aborted';        reason: string; session: Session; traceId: string }
   | { type: 'cancelled';      sessionId: string;      traceId: string }
+  // A queued (not-yet-running) submission, carried on the stream so a frontend renders it as part
+  // of the live "delta" (everything after the last committed message), never from stored state.
+  // `queued` is the number of submissions ahead of it (0 ⇒ about to run). Emitted live on enqueue
+  // and replayed (in queue order) to anyone subscribing mid-flight.
+  | { type: 'queued';         content: MessageContent[]; queued: number; traceId: string }
   | { type: 'robo-user';      content: MessageContent[]; traceId: string }
   | { type: 'error';          error: string;          traceId: string }
   | { type: 'system-context'; text: string;           traceId: string };

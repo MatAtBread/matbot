@@ -1186,9 +1186,9 @@ function renderSession(session, startIdx, scrollTarget) {
     if (startIdx && fi < startIdx) continue;
     if (msg.role === 'user') {
       const text = msg.content.filter(c => c.type === 'text').map(c => c.text).join('\n');
-      // Pending overlay messages (still queued server-side) carry metadata.pending — render them
-      // muted so a freshly-loaded session shows exactly what's still waiting to run.
-      if (text) appendUserBubble(text, origIdx, msg.metadata && msg.metadata.pending === true);
+      // Stored history is pure committed messages; queued/pending items arrive via the live stream,
+      // not from here.
+      if (text) appendUserBubble(text, origIdx);
     } else if (msg.role === 'assistant') {
       const wrap = createAssistantWrap('assistant');
       renderContentParts(wrap, msg.content);
@@ -1259,11 +1259,9 @@ newBtn.addEventListener('click', async (e) => {
 // ── Form submission ───────────────────────────────────────────────────────────
 
 async function submitFormResponse(sessionId, values) {
-  const provider = providerSel.value;
-  if (!provider || !sessionId) return;
-  // A form answer is just another submission; it queues if a turn is running, and renders over
-  // the persistent stream like any other turn.
-  await doSubmit(sessionId, { type: 'form-response', values }, null);
+  if (!sessionId) return;
+  // A form answer is just another submission; it renders over the persistent stream like any turn.
+  await postSubmit(sessionId, { type: 'form-response', values });
 }
 
 // ── Send ──────────────────────────────────────────────────────────────────────
@@ -1277,11 +1275,11 @@ async function submitFormResponse(sessionId, values) {
 
 let streamSessionId = null;       // session the persistent stream is bound to
 let streamAc        = null;       // AbortController for the current stream
-const turnQueues    = new Map();  // traceId -> { items, wake, done, consumed }
+const turnQueues    = new Map();  // traceId -> { items, wake, done, started }
 
 function queueFor(traceId) {
   let q = turnQueues.get(traceId);
-  if (!q) { q = { items: [], wake: null, done: false, consumed: false }; turnQueues.set(traceId, q); }
+  if (!q) { q = { items: [], wake: null, done: false, started: false }; turnQueues.set(traceId, q); }
   return q;
 }
 
@@ -1290,8 +1288,9 @@ function pushTurnEvent(ev) {
   q.items.push(ev);
   if (ev.type === 'done' || ev.type === 'aborted' || ev.type === 'error' || ev.type === 'cancelled') q.done = true;
   if (q.wake) { const w = q.wake; q.wake = null; w(); }
-  // A turn we didn't initiate (an in-progress run we just joined): render it (no optimistic bubble).
-  if (!q.consumed) { q.consumed = true; void renderTurn(streamSessionId, ev.traceId, null); }
+  // First time we see this traceId, spin up its renderer. Every turn — ours or one we joined —
+  // is created here from the stream; there is no optimistic/pre-registered path to race against.
+  if (!q.started) { q.started = true; void renderTurn(streamSessionId, ev.traceId); }
 }
 
 async function* turnEvents(traceId) {
@@ -1343,8 +1342,9 @@ async function sendMessage() {
   await submit(content);
 }
 
-// Submit content to the current session, fire-and-forget. The server queues it if a turn is running;
-// renderTurn() (consuming this turn's events off the persistent stream) shows it pending meanwhile.
+// Submit typed content to the current session, fire-and-forget. The server enqueues it and the
+// turn (its 'queued' user bubble + response) renders entirely over the persistent stream — there's
+// no optimistic rendering here, so there's a single source of truth.
 async function submit(content) {
   const provider = providerSel.value;
   if (!content || !provider) return;
@@ -1355,51 +1355,64 @@ async function submit(content) {
   // Ensure the persistent event stream is bound to this session before we enqueue, so the turn's
   // events have a consumer (covers the just-created session and the "New session" button path).
   if (streamSessionId !== currentSessionId) connectSessionStream(currentSessionId);
-  const userBubble = appendUserBubble(content);
-  await doSubmit(currentSessionId, content, userBubble);
+  await postSubmit(currentSessionId, content);
 }
 
-// Generate a client-side traceId, pre-register + render the turn, then POST fire-and-forget. The
-// traceId is ours so the turn's events (arriving on the persistent stream) route to this renderer
-// with no race against the POST response.
-async function doSubmit(sid, content, userBubble) {
+// POST a submission and return. The user bubble + response arrive on the stream as a 'queued' event
+// then turn events. Only *failures* are surfaced here (the stream can't, since no turn was created):
+// a timeout (incl. the socket-exhaustion stall that never errors on its own), network error, or
+// non-2xx is shown inline so the message is never silently lost.
+async function postSubmit(sid, content) {
   const provider = providerSel.value;
-  const traceId  = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
-  queueFor(traceId).consumed = true;
-  void renderTurn(sid, traceId, userBubble ?? null);
+  if (!provider) return;
   try {
     const res = await fetch('/sessions/' + sid + '/submit', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ content, provider, traceId }),
-      // A submit is a quick POST; if it can't even be sent (network down, or — pre-fix — a browser
-      // socket-exhaustion stall, which never errors on its own) we surface it instead of hanging.
+      body: JSON.stringify({ content, provider }),
       signal: AbortSignal.timeout(20000),
     });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) { pushTurnEvent({ type: 'error', error: data.error || ('HTTP ' + res.status), traceId }); return; }
-    // Surface the server's queue position so renderTurn can mark the bubble pending if it's waiting.
-    pushTurnEvent({ type: 'queued', queued: data.queued ?? 0, traceId });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      showSubmitError(content, data.error || ('HTTP ' + res.status));
+    }
   } catch (e) {
-    pushTurnEvent({ type: 'error', error: e.name === 'TimeoutError' ? 'submit timed out (no response)' : String(e), traceId });
+    showSubmitError(content, e.name === 'TimeoutError' ? 'submit timed out (no response)' : String(e));
   }
 }
 
-// Render one turn by draining its event queue. `userBubble` is the optimistic message when WE
-// submitted (so queued/cancelled can style/remove it); null for a turn we merely joined.
-async function renderTurn(sid, traceId, userBubble) {
-  const turnWrap = createAssistantWrap('assistant');
+// The submission never reached a turn, so show what was typed plus the failure, inline.
+function showSubmitError(content, msg) {
+  const text = typeof content === 'string' ? content : '';
+  if (text) appendUserBubble(text);
+  const div = document.createElement('div');
+  div.className = 'msg-error';
+  div.textContent = '[send failed: ' + msg + ']';
+  messagesEl.appendChild(div);
+}
 
-  // Loading dots until first content arrives
-  const loadingEl = document.createElement('div');
-  loadingEl.className = 'msg-loading';
-  turnWrap.appendChild(loadingEl);
+// Render one turn by draining its event queue, keyed by traceId. The user bubble is created from
+// the 'queued' event (so it lands in the live delta in stream order); the assistant wrap + loading
+// dots are created lazily on first activity. A turn we merely joined (the in-progress run, replayed
+// on connect) gets no 'queued' — its user message is already in committed/stored history.
+async function renderTurn(sid, traceId) {
+  let userBubble = null;   // set by the 'queued' event when this turn is a fresh submission
+  let turnWrap   = null;   // assistant wrap, created lazily
+  let loadingEl  = null;
+  let started    = false;
 
-  // While this submission waits behind a running turn it gets a floating egg-timer badge (CSS on
-  // the bubble via the 'pending' class) and no loading dots. Both are cleared once its own turn
-  // starts producing content.
-  function clearPending() { if (userBubble) userBubble.classList.remove('pending'); }
-  function removeLoading() { loadingEl.remove(); clearPending(); }
+  // First visible activity for this turn: drop the queued egg-timer and create the assistant wrap
+  // with loading dots. Idempotent.
+  function markStarted() {
+    if (started) return;
+    started = true;
+    if (userBubble) userBubble.classList.remove('pending');
+    turnWrap = createAssistantWrap('assistant');
+    loadingEl = document.createElement('div');
+    loadingEl.className = 'msg-loading';
+    turnWrap.appendChild(loadingEl);
+  }
+  function removeLoading() { markStarted(); if (loadingEl) { loadingEl.remove(); loadingEl = null; } }
 
   // Per-turn streaming state
   let textEl          = null;
@@ -1418,6 +1431,7 @@ async function renderTurn(sid, traceId, userBubble) {
 
 
   function getOrMakeTextEl() {
+    markStarted();
     if (!textEl) {
       textEl = document.createElement('div');
       textEl.className = 'msg-text md-body';
@@ -1450,15 +1464,17 @@ async function renderTurn(sid, traceId, userBubble) {
   try {
     for await (const ev of turnEvents(traceId)) {
       switch (ev.type) {
-        case 'queued':
-          // Sent first by the server. queued > 0 ⇒ waiting behind a running turn: float the
-          // egg-timer badge on the bubble and drop the loading dots until this turn starts (a real
-          // content event calls removeLoading, which clears the badge).
-          if (ev.queued > 0) {
-            loadingEl.remove();
-            if (userBubble) userBubble.classList.add('pending');
+        case 'queued': {
+          // The submission itself, delivered on the stream. Render its user bubble here (in delta
+          // order). queued > 0 ⇒ it's waiting behind a running turn → float the egg-timer; queued
+          // === 0 ⇒ it runs immediately → show loading dots. A content event later promotes it.
+          if (!userBubble) {
+            const text = (ev.content ?? []).filter(c => c.type === 'text').map(c => c.text).join('\n');
+            if (text) userBubble = appendUserBubble(text, undefined, ev.queued > 0);
           }
+          if (ev.queued === 0) markStarted();
           break;
+        }
 
         case 'text-delta':
           removeLoading();
@@ -1643,7 +1659,7 @@ async function renderTurn(sid, traceId, userBubble) {
           if (ev.reason === 'user-abort') {
             // Partial content already in DOM and saved to store — nothing to re-render.
           } else {
-            turnWrap.remove();
+            if (turnWrap) turnWrap.remove();
             if (ev.session) renderSession(ev.session);
           }
           break;
@@ -1651,9 +1667,9 @@ async function renderTurn(sid, traceId, userBubble) {
 
         case 'cancelled': {
           // This queued submission was dropped (Stop pressed before it ran). It never executed and
-          // was never persisted, so remove its optimistic bubble and empty turn entirely.
-          removeLoading();
-          turnWrap.remove();
+          // was never persisted, so remove its bubble and (if any) its empty turn entirely.
+          if (loadingEl) { loadingEl.remove(); loadingEl = null; }
+          if (turnWrap) turnWrap.remove();
           if (userBubble) userBubble.remove();
           break;
         }
@@ -1664,7 +1680,7 @@ async function renderTurn(sid, traceId, userBubble) {
             if (det) det.open = false;
           }
           if (ev.session?.title && chatHeaderEl) chatTitleEl.textContent = ev.session.title;
-          if (turnIn > 0 || turnOut > 0) turnWrap.appendChild(makeTokenStatsBlock(turnIn, turnOut, turnCost, turnCacheRead, turnCacheCreate));
+          if (turnWrap && (turnIn > 0 || turnOut > 0)) turnWrap.appendChild(makeTokenStatsBlock(turnIn, turnOut, turnCost, turnCacheRead, turnCacheCreate));
           loadFiles();
           // Back-fill origIdx on any dividers added without an index this turn.
           if (ev.session) {
@@ -1703,7 +1719,9 @@ async function renderTurn(sid, traceId, userBubble) {
     errDiv.textContent = '[error: ' + e.message + ']';
     turnWrap.appendChild(errDiv);
   } finally {
-    removeLoading();
+    // Don't markStarted() here — a turn that was only queued then cancelled must not spawn an empty
+    // assistant wrap. Just clear any loading dots that are still showing.
+    if (loadingEl) { loadingEl.remove(); loadingEl = null; }
     apiListSessions().then(renderSessions);
     loadFiles();
     // If the output extends below the viewport fold, morph the send button
