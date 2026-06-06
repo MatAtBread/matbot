@@ -117,6 +117,14 @@ export interface FormField {
   required?: boolean;
 }
 
+/**
+ * Canonical values a `type: 'confirm'` prompt resolves to. The rendered label and buttons are a
+ * cosmetic, host-specific concern (and may be localised), so consumers MUST branch on these tokens
+ * — never on the displayed string. Compare case-insensitively to tolerate host casing differences.
+ */
+export const CONFIRM_YES = 'yes';
+export const CONFIRM_NO  = 'no';
+
 export interface Message {
   id:            string;
   role:          MessageRole;
@@ -327,8 +335,12 @@ export interface ToolContext {
   prompt:      PromptFn;
   /** Hot-load a plugin by specifier without restarting the process. Returns the loaded plugin. */
   loadPlugin(specifier: string): Promise<MatbotPlugin>;
-  /** Hot-unload a plugin by specifier, removing its tools, hooks, and system context contributions. */
-  unloadPlugin(specifier: string): Promise<void>;
+  /**
+   * Hot-unload a plugin by specifier, removing its tools, hooks, and system context contributions.
+   * Resolves `true` if a plugin was actually resident and unloaded, `false` if there was nothing
+   * to unload. A failed `teardown()` (e.g. timeout) still throws — the plugin was resident in that case.
+   */
+  unloadPlugin(specifier: string): Promise<boolean>;
 }
 
 export interface ToolExecutor {

@@ -146,6 +146,16 @@ importers:
         specifier: 'catalog:'
         version: 5.9.3
 
+  packages/plugins/ask-user:
+    dependencies:
+      '@matatbread/matbot-plugin-api':
+        specifier: workspace:*
+        version: link:../../core/plugin-api
+    devDependencies:
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
+
   packages/plugins/background:
     dependencies:
       '@matatbread/matbot-plugin-api':

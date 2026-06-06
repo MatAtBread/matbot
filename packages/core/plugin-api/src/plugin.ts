@@ -46,8 +46,11 @@ export interface MatbotServices {
    */
   loadPlugin(specifier: string, prompt?: PromptFn): Promise<MatbotPlugin>;
 
-  /** Hot-unload a plugin by specifier, removing its tools, hooks, and system context contributions. */
-  unloadPlugin(specifier: string): Promise<void>;
+  /**
+   * Hot-unload a plugin by specifier, removing its tools, hooks, and system context contributions.
+   * Resolves `true` if a plugin was resident and unloaded, `false` if there was nothing to unload.
+   */
+  unloadPlugin(specifier: string): Promise<boolean>;
 
   /**
    * Create (or retrieve a cached) typed store for the given namespace.

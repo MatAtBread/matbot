@@ -260,7 +260,7 @@ function parseSSEChunk(text) {
 
 async function apiListSessions() {
   try {
-    const sessions = await callTool('session_list', {});
+    const sessions = await callTool('session_action', { action: 'list' });
     sessionsBanner.style.display = 'none';
     return sessions;
   } catch (e) {
@@ -268,7 +268,7 @@ async function apiListSessions() {
     return [];
   }
 }
-async function apiGetSession(id)  { try { return await callTool('session_get', { sessionId: id }); } catch { return null; } }
+async function apiGetSession(id)  { try { return await callTool('session_action', { action: 'get', sessionId: id }); } catch { return null; } }
 async function apiSessionBusy(id) { try { const r = await fetch('/sessions/' + id); return r.ok ? (await r.json()).busy : false; } catch { return false; } }
 async function apiListProviders() { try { return (await callTool('provider', { action: 'list' })).providers.map(p => p.name); } catch { return []; } }
 
@@ -491,7 +491,7 @@ async function renameSession(id, current) {
   const title = window.prompt('Rename session:', current ?? '');
   if (!title || !title.trim()) return;
   try {
-    await callTool('session_rename', { sessionId: id, title: title.trim() });
+    await callTool('session_action', { action: 'rename', sessionId: id, title: title.trim() });
     if (id === currentSessionId && chatHeaderEl) chatTitleEl.textContent = title.trim();
     apiListSessions().then(renderSessions);
   } catch (e) { alert('Rename failed: ' + e.message); }
@@ -499,7 +499,7 @@ async function renameSession(id, current) {
 
 async function hideSession(id) {
   try {
-    await callTool('session_hide', { sessionId: id });
+    await callTool('session_action', { action: 'hide', sessionId: id });
     const sessions = await apiListSessions();
     if (id === currentSessionId) {
       currentSessionId = sessions[0]?.id ?? null;
@@ -564,7 +564,7 @@ function renderFiles(files) {
     delBtn.onclick = async (e) => {
       e.stopPropagation();
       try {
-        await callTool('workspace_delete', { path: f.path });
+        await callTool('workspace_action', { action: 'delete', path: f.path });
         loadFiles();
       } catch (err) {
         alert('Delete failed: ' + err.message);
@@ -578,7 +578,7 @@ function renderFiles(files) {
 
 async function loadFiles() {
   try {
-    const data = await callTool('workspace_list', {});
+    const data = await callTool('workspace_action', { action: 'list' });
     const files = Array.isArray(data) ? data : (data?.files ?? []);
     renderFiles(files);
   } catch (e) {
@@ -743,7 +743,7 @@ function renderPlugins(loaded, local) {
 async function loadSkills() {
   let result;
   try {
-    result = await callTool('skill_list', {});
+    result = await callTool('skill_action', { action: 'list' });
   } catch {
     // skills plugin not loaded — leave the section empty.
     renderSkills([]);
@@ -783,7 +783,7 @@ function renderSkills(skills) {
       e.stopPropagation();
       if (!confirm(`Delete skill "${s.name}"?`)) return;
       try {
-        await callTool('skill_delete', { name: s.name });
+        await callTool('skill_action', { action: 'delete', name: s.name });
       } catch (err) {
         alert('Failed to delete skill: ' + (err?.message ?? err));
         return;
@@ -838,7 +838,7 @@ async function openSkillEditor(name) {
   editor.setContent('Loading…');
   skillEditorSave.disabled = true;
   try {
-    const result = await callTool('skill_load', { name });
+    const result = await callTool('skill_action', { action: 'load', name });
     editor.setContent(result.content ?? '');
   } catch (err) {
     editor.setContent('');
@@ -864,7 +864,7 @@ if (skillEditorOverlay) {
     skillEditorSave.disabled = true;
     skillEditorError.textContent = '';
     try {
-      await callTool('skill_save', { name: editingSkillName, content: skillEditor.getContent() });
+      await callTool('skill_action', { action: 'save', name: editingSkillName, content: skillEditor.getContent() });
     } catch (err) {
       skillEditorError.textContent = 'Failed to save: ' + (err?.message ?? err);
       skillEditorSave.disabled = false;
@@ -888,7 +888,7 @@ async function uploadFiles(fileList) {
       const CHUNK = 0x8000;
       let bin = '';
       for (let i = 0; i < bytes.length; i += CHUNK) bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
-      await callTool('workspace_write', { path: file.name, content: btoa(bin), encoding: 'base64' });
+      await callTool('workspace_action', { action: 'write', path: file.name, content: btoa(bin), encoding: 'base64' });
     } catch (err) {
       alert('Upload failed for ' + file.name + ': ' + err.message);
     }
@@ -1139,19 +1139,19 @@ async function handleDividerAction(divider, action) {
 
   try {
     if (action === 'fork') {
-      const result = await callTool('edit_session_fork', { sessionId: currentSessionId, msgIndex: msgIdx });
+      const result = await callTool('session_edit', { action: 'fork', sessionId: currentSessionId, msgIndex: msgIdx });
       if (result?.newSessionId) {
         await openSession(result.newSessionId);
         apiListSessions().then(renderSessions);
       }
     } else if (action === 'cut') {
       if (!confirm('Delete all messages from this point forward?')) return;
-      await callTool('edit_session_cut', { sessionId: currentSessionId, msgIndex: msgIdx });
+      await callTool('session_edit', { action: 'cut', sessionId: currentSessionId, msgIndex: msgIdx });
       const session = await apiGetSession(currentSessionId);
       if (session) renderSession(session);
     } else if (action === 'split') {
       if (!confirm('Split session at this point? Messages before will be moved to a new session.')) return;
-      const result = await callTool('edit_session_split', { sessionId: currentSessionId, msgIndex: msgIdx });
+      const result = await callTool('session_edit', { action: 'split', sessionId: currentSessionId, msgIndex: msgIdx });
       if (result?.newSessionId) {
         // Navigate to the current (trimmed) session
         await openSession(result.currentSessionId);
@@ -1159,7 +1159,7 @@ async function handleDividerAction(divider, action) {
       }
     } else if (action === 'compact') {
       if (!confirm('Strip thinking blocks and tool calls from messages before this point?')) return;
-      await callTool('edit_session_compact', { sessionId: currentSessionId, msgIndex: msgIdx });
+      await callTool('session_edit', { action: 'compact', sessionId: currentSessionId, msgIndex: msgIdx });
       const session = await apiGetSession(currentSessionId);
       if (session) renderSession(session);
     }
@@ -1799,8 +1799,9 @@ async function sendMessage() {
                 btn.type = 'button';
                 const isDefault = choice.toLowerCase() === (defaultValue ?? '').toLowerCase();
                 btn.className = 'prompt-choice-btn' + (isDefault ? ' primary' : '');
-                btn.textContent = choice.toLowerCase() === 'y' ? 'Yes'
-                  : choice.toLowerCase() === 'n' ? 'No'
+                const cl = choice.toLowerCase();
+                btn.textContent = cl === 'y' || cl === 'yes' ? 'Yes'
+                  : cl === 'n' || cl === 'no' ? 'No'
                   : choice;
                 btn.onclick = () => {
                   row.querySelectorAll('button').forEach(b => { b.disabled = true; });

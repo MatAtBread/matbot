@@ -27,6 +27,7 @@ interface JsonRpcResponse {
 }
 
 export interface MCPClient {
+  readonly instructions: string | undefined;
   listTools(): Promise<MCPToolDef[]>;
   callTool(name: string, args: unknown, signal?: AbortSignal): Promise<MCPToolResult>;
   close(): void;
@@ -57,6 +58,7 @@ function tokenize(cmd: string): string[] {
 // ── Stdio transport ───────────────────────────────────────────────────────────
 
 class StdioMCPClient implements MCPClient {
+  instructions: string | undefined;
   private readonly child;
   private pending = new Map<number, {
     resolve: (v: unknown) => void;
@@ -132,11 +134,12 @@ class StdioMCPClient implements MCPClient {
   }
 
   async initialize(): Promise<void> {
-    await this.request('initialize', {
+    const result = await this.request('initialize', {
       protocolVersion: PROTOCOL_VERSION,
       capabilities: {},
       clientInfo: CLIENT_INFO,
-    });
+    }) as { instructions?: unknown };
+    if (typeof result?.instructions === 'string') this.instructions = result.instructions;
     this.write({ jsonrpc: '2.0', method: 'notifications/initialized' });
   }
 
@@ -161,6 +164,7 @@ class StdioMCPClient implements MCPClient {
 // ── HTTP transport ────────────────────────────────────────────────────────────
 
 class HttpMCPClient implements MCPClient {
+  instructions: string | undefined;
   private readonly endpoint: string;
   private readonly extraHeaders: Record<string, string> | undefined;
   private nextId = 1;
@@ -168,6 +172,22 @@ class HttpMCPClient implements MCPClient {
   constructor(endpoint: string, extraHeaders?: Record<string, string>) {
     this.endpoint = endpoint;
     this.extraHeaders = extraHeaders;
+  }
+
+  // Best-effort: stateless HTTP MCP servers serve tools/call without an init
+  // handshake, so a server that rejects initialize must not block the connection.
+  // We only need the result for its `instructions`.
+  async initialize(): Promise<void> {
+    try {
+      const result = await this.post('initialize', {
+        protocolVersion: PROTOCOL_VERSION,
+        capabilities: {},
+        clientInfo: CLIENT_INFO,
+      }) as { instructions?: unknown };
+      if (typeof result?.instructions === 'string') this.instructions = result.instructions;
+    } catch {
+      // ignore — server is stateless or does not support initialize
+    }
   }
 
   private async post(method: string, params: unknown = {}, signal?: AbortSignal): Promise<unknown> {
@@ -236,5 +256,7 @@ export async function createMCPClient(config: MCPServerConfig): Promise<MCPClien
     return client;
   }
 
-  return new HttpMCPClient(config.endpoint, config.headers);
+  const client = new HttpMCPClient(config.endpoint, config.headers);
+  await client.initialize();
+  return client;
 }

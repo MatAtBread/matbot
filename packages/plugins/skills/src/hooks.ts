@@ -82,7 +82,7 @@ export function createSkillIndexHook(
       if (skills.length === 0) return ctx;
 
       const list = skills.map(s => `- ${s.name}`).join('\n');
-      const text = `Available skills (use the \`skill_load\` tool to read the full content of any skill):\n${list}`;
+      const text = `Available skills (use \`skill_action\` with action "load" to read the full content of any skill):\n${list}`;
 
       const session = {
         ...ctx.session,

@@ -429,12 +429,15 @@ ACTIONS
   list   — Show all configured profiles.
   add    — Create a new named profile. The API key (if required) is prompted
            out-of-band for security and never stored in session history.
-           Required fields: name, module, model.
-           Optional: endpoint, credentialKey (default "apiKey"),
-           credentialEnvVar (reuse an existing env var instead of prompting),
-           parameters (maxTokens, temperature, topP, thinking, etc.).
   remove — Delete a profile by name. Refuses if it is the only profile or
            the one powering the current turn.
+
+SHAPE  (TypeScript; see PARAMETERS below for the parameters object)
+  type ProviderAction =
+    | { action: 'list' }
+    | { action: 'add'; name: string; module: string; model: string;
+        endpoint?: string; credentialKey?: string; credentialEnvVar?: string; parameters?: object }
+    | { action: 'remove'; name: string };
 
 AVAILABLE ADAPTER MODULES  (use one of these as the module value when adding)
 ${adapterSection}

@@ -1,4 +1,5 @@
-import type { Tool, ToolEvent, ToolContext, MatbotPlugin } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolEvent, ToolContext, MatbotPlugin, FormField } from '@matatbread/matbot-plugin-api';
+import { CONFIRM_YES, CONFIRM_NO } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins, getRegisteredTools, getRegisteredFrontendPlugins, getSpecifierForPlugin,
          getRegisteredServiceKeys, getHookPlugins, getSystemContextPlugins } from '@matatbread/matbot-core';
 import { readFile, writeFile, access, readdir } from 'node:fs/promises';
@@ -46,6 +47,15 @@ async function removePlugin(configPath: string, specifier: string): Promise<bool
 
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Privileged actions (install/remove/first-time load) gate on an out-of-band yes/no. Use a
+// structured `confirm` field so rich frontends render real buttons and the affirmative is the
+// canonical CONFIRM_YES token — never a parse of the rendered (and potentially localised) label.
+async function confirmAction(ctx: ToolContext, label: string): Promise<boolean> {
+  const field: FormField = { name: 'confirm', label, type: 'confirm', default: CONFIRM_NO };
+  const answer = await ctx.prompt(field);
+  return answer.trim().toLowerCase() === CONFIRM_YES;
 }
 
 function resolveExportsMain(exports: unknown): string | undefined {
@@ -329,16 +339,16 @@ const executor = {
         return;
       }
 
-      // ctx.prompt rather than a `confirmed` input parameter: plugin installation is a
+      // confirmAction rather than a `confirmed` input parameter: plugin installation is a
       // privileged operation. Breaking the LLM's execution chain and requiring an
       // out-of-band human response prevents prompt injection or a malicious plugin
       // from auto-installing further plugins by simply passing confirmed:true.
       const description = await pkgDescriptionFromSpecifier(specifier, projectDir);
-      const confirm = await ctx.prompt(
-        `Install plugin **"${specifier}"?**${description !== undefined ? `\n_${description}_` : ''} [y/N]`,
-        'N',
+      const confirmed = await confirmAction(
+        ctx,
+        `Install plugin **"${specifier}"**?${description !== undefined ? `\n_${description}_` : ''}`,
       );
-      if (!/^y(es)?$/i.test(confirm.trim())) {
+      if (!confirmed) {
         yield { type: 'result', value: { message: 'Cancelled.' } };
         return;
       }
@@ -384,8 +394,7 @@ const executor = {
       }
 
       // Same security rationale as add: out-of-band prompt, not a confirmable parameter.
-      const confirm = await ctx.prompt(`Remove plugin **"${specifier}"**? [y/N]`, 'N');
-      if (!/^y(es)?$/i.test(confirm.trim())) {
+      if (!await confirmAction(ctx, `Remove plugin **"${specifier}"**?`)) {
         yield { type: 'result', value: { message: 'Cancelled.' } };
         return;
       }
@@ -403,8 +412,7 @@ const executor = {
         yield { type: 'stderr', chunk: `Deactivation failed: ${String(e)}\n` };
       }
 
-      const uninstall = await ctx.prompt(`Also uninstall the npm package? [y/N]`, 'N');
-      if (/^y(es)?$/i.test(uninstall.trim())) {
+      if (await confirmAction(ctx, 'Also uninstall the npm package?')) {
         const pm = await detectPackageManager(projectDir);
         try {
           const out = await runCommand(pm, ['remove', specifier], projectDir);
@@ -421,10 +429,24 @@ const executor = {
     if (action === 'reload') {
       yield { type: 'stdout', chunk: `Reloading "${specifier}"...\n` };
 
-      const unloaded = await ctx.unloadPlugin(specifier).catch(e => String(e));
-      if (unloaded) {
-        yield { type: 'stderr', chunk: `${unloaded}\n` };
+      let wasLoaded: boolean;
+      try {
+        wasLoaded = await ctx.unloadPlugin(specifier);
+      } catch (e) {
+        // teardown() failed (e.g. timeout) — the plugin was resident, so this is still a
+        // genuine reload of already-trusted code; surface the error but proceed.
+        yield { type: 'stderr', chunk: `${String(e)}\n` };
+        wasLoaded = true;
       }
+
+      // Reloading a resident plugin needs no confirmation — the user already trusts it. But if
+      // nothing was unloaded, "reload" is really a first-time load of code they haven't consented
+      // to, so gate it with the same confirmation as add/remove.
+      if (!wasLoaded && !await confirmAction(ctx, `Plugin **"${specifier}"** is not currently loaded — load it now?`)) {
+        yield { type: 'result', value: { message: 'Cancelled.' } };
+        return;
+      }
+
       const reloaded = await ctx.loadPlugin(specifier);
       const result = reloaded.installationMessage?.() || `"${specifier}" reloaded successfully.`;
 
@@ -439,7 +461,22 @@ const executor = {
 
 export const pluginTool: Tool = {
   name:        'plugin',
-  description: 'Manage matbot plugins: list configured plugins, add a new one, remove an existing one, reload one from disk, discover available local plugins, or store a secret a plugin/provider requires.',  inputSchema: {
+  description:
+    'Manage matbot plugins — the units that contribute tools, providers, storage, hooks, and ' +
+    'frontends to the running process. List or discover them, install or remove one, reload one ' +
+    'from disk to pick up code changes without restarting, or supply a secret a plugin or provider ' +
+    'reported missing.\n\n' +
+    'Parameters depend on `action` (TypeScript):\n' +
+    '```ts\n' +
+    'type PluginAction =\n' +
+    "  | { action: 'list' }                            // configured + loaded plugins, with types and tools\n" +
+    "  | { action: 'discover_local' }                  // scan packages/plugins for installable local plugins\n" +
+    "  | { action: 'add';        specifier: string }   // install & activate; specifier = npm name, path, or GitHub shorthand\n" +
+    "  | { action: 'remove';     specifier: string }   // deactivate & remove from matbot.yaml\n" +
+    "  | { action: 'reload';     specifier: string }   // re-import from disk without restarting\n" +
+    "  | { action: 'store-key';  key: string };        // store a secret a plugin/provider needs; value entered out-of-band\n" +
+    '```',
+  inputSchema: {
     type:       'object',
     required:   ['action'],
     properties: {
@@ -450,7 +487,7 @@ export const pluginTool: Tool = {
       },
       specifier: {
         type:        'string',
-        description: 'npm package name, file path, or GitHub shorthand (required for add/remove).',
+        description: 'npm package name, file path, or GitHub shorthand (required for add/remove/reload).',
       },
       key: {
         type:        'string',

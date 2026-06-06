@@ -256,7 +256,7 @@ async function runTurn(
   systemContext:  SystemContextRegistryImpl,
   promptFn:       PromptFn,
   loadPluginFn:   (specifier: string) => Promise<MatbotPlugin>,
-  unloadPluginFn: (specifier: string) => Promise<void>,
+  unloadPluginFn: (specifier: string) => Promise<boolean>,
   configPath:     string,
   vault:          Vault,
 ): Promise<Session> {
@@ -857,16 +857,16 @@ async function main(): Promise<void> {
       if (plugin === undefined) throw new Error(`No plugin loaded for specifier "${specifier}"`);
       return plugin;
     },
-    async unloadPlugin(specifier: string) {
+    async unloadPlugin(specifier: string): Promise<boolean> {
       const resolved = await resolvePluginSpecifiers([specifier], path.dirname(configPath));
       const spec     = resolved[0];
-      if (spec === undefined) return;
+      if (spec === undefined) return false;
       const name = getPluginNameForSpecifier(spec);
       if (name === undefined) {
         console.warn(`[matbot] No loaded plugin found for specifier "${specifier}"`);
-        return;
+        return false;
       }
-      await unloadPluginFn(name, services);
+      return unloadPluginFn(name, services);
     },
     providers: matbotConfig.providers,
     get storageBackend() { return activeStorageBackend; },

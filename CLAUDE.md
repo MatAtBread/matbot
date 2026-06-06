@@ -70,7 +70,7 @@ packages/
     rumsfeld/      — contextual_search tool; knowledge fault handler (@matatbread/matbot-rumsfeld-node)
     persist-ki-bge/ — persistent KnowledgeIndex with BGE reranker (@matatbread/matbot-persist-ki-bge-node)
     skills/        — skill injection via hook-based classifier (@matatbread/matbot-skills-node)
-    edit-session/  — edit_session_cut/fork/compact tools (@matatbread/matbot-edit-session)
+    edit-session/  — session_edit tool (cut/fork/split/compact via action) (@matatbread/matbot-edit-session)
     files/         — file codec and producer registry
     browser/       — OPFS store, WebCrypto vault (browser-only)
     frontend/
@@ -144,7 +144,7 @@ All runtime state lives under `.data/` **next to `matbot.yaml`**, never in the s
   knowledge/   — Store<KnowledgeEntry> (persist-ki-bge plugin)
   bash-cwd/    — default working directory for bash tool execution (created lazily)
   files/       — FileStore blobs (MIME-typed, served by frontend); the 'workspace' namespace
-               within files/ holds files written by workspace_write
+               within files/ holds files written by workspace_action (write)
 ```
 
 Plugins may create additional subdirectories (e.g. `files/`, `settings/`) as needed.
@@ -234,6 +234,42 @@ after:tool      → audit logging
 
 Hooks receive and return `HookContext`; they may replace `ctx.session` to inject context.
 They may set `ctx.abort` to cancel the turn.
+
+---
+
+## Tool design — multi-action tools (preferred, not enforced)
+
+When a plugin exposes several closely-related operations (a noun with a handful of verbs —
+`mcp` add/list/remove, sessions list/get/rename, schedule list/suspend/resume/cancel), the
+**preferred** style is to collapse them into a single tool that takes an `action` discriminator
+rather than shipping one `noun_verb` tool per verb. This is a convention, **not** a rule the
+runtime enforces — nothing breaks if you ship separate tools, and some tools should stay
+separate (see below).
+
+The shape that has worked well:
+
+- **One description that teaches the domain once.** The wordy shared context (what the thing is,
+  the gotchas) lives in a single place; the verbs are usually self-evident given that context.
+- **Per-action contract as a TypeScript discriminated union in the description.** LLMs read a TS
+  union (`{ action: 'add'; name: string; … } | { action: 'list' } | …`) far more reliably than a
+  verbose JSON-Schema `oneOf`, which providers honour inconsistently.
+- **Keep `inputSchema` loose** — `required: ['action']` plus the union of every action's optional
+  fields. **The executor enforces** per-action requirements and emits a loud `error` event on a
+  missing field or unknown action. (`switch (action)` with a `default` that errors.)
+
+**When to collapse:** the operations share a parameter shape, *or* they share a domain worth
+teaching once. Parameter divergence between actions is fine — that is exactly what the
+discriminated union absorbs.
+
+**When to keep separate (the other valid style):** genuinely standalone, single-purpose tools
+with nothing to share (`http`, `bash`, `ask_user`), or operations that belong to qualitatively
+different concerns even within one plugin — e.g. the telegram frontend keeps `telegram_send`
+(messaging), `telegram_provider` (config), and `telegram_open_door` (admission/permissions)
+separate rather than forcing a hollow `telegram_action` over three unrelated jobs.
+
+**Cross-references between tools may only point *down* the dependency graph** — a tool may name
+another tool that is guaranteed present (same plugin, or a hard dependency), never an optional
+dependent that dangles when its plugin is absent.
 
 ---
 
