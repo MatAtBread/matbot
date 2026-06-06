@@ -70,7 +70,7 @@ packages/
     rumsfeld/      — contextual_search tool; knowledge fault handler (@matatbread/matbot-rumsfeld-node)
     persist-ki-bge/ — persistent KnowledgeIndex with BGE reranker (@matatbread/matbot-persist-ki-bge-node)
     skills/        — skill injection via hook-based classifier (@matatbread/matbot-skills-node)
-    edit-session/  — session_cut/fork/compact tools (@matatbread/matbot-edit-session)
+    edit-session/  — session_edit tool (cut/fork/split/compact via action) (@matatbread/matbot-edit-session)
     files/         — file codec and producer registry
     browser/       — OPFS store, WebCrypto vault (browser-only)
     frontend/

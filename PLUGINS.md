@@ -524,7 +524,7 @@ export const plugin: MatbotPlugin = {
 A marker is an opaque annotation a plugin attaches to a session — a cross-reference, a status, a
 link — that a frontend can render but the LLM never sees. Markers are persisted with the session,
 elided from provider submission, and preserved by compaction (they survive
-`session_compact`). Any plugin with session access can create one.
+`session_edit`'s compact). Any plugin with session access can create one.
 
 A marker is a `MessageContent` block, usually emitted as its own message with the `marker` role:
 
@@ -623,8 +623,8 @@ plugin's `setup()`. The replacement takes effect immediately for all subsequent
 | `@matatbread/matbot-tool-workspace` | `workspace_action` | Read/write/list/delete files in the workspace namespace (one tool, `action` parameter) |
 | `@matatbread/matbot-tool-background` | `background`, `every`, `every_list`, `every_cancel` | Run prompts in detached processes; recurring schedules |
 | `@matatbread/matbot-tool-mcp` | MCP client | Connect to Model Context Protocol servers |
-| `@matatbread/matbot-sessions` | `session_list/get/rename/hide` | Session management tools |
-| `@matatbread/matbot-edit-session` | `session_cut/fork/compact` | Trim, branch, and compact sessions to manage context window |
+| `@matatbread/matbot-sessions` | `session_action` | Session lifecycle (list/get/rename/hide via `action` parameter) |
+| `@matatbread/matbot-edit-session` | `session_edit` | Trim, branch, split, and compact sessions to manage context window (cut/fork/split/compact via `action`) |
 | `@matatbread/matbot-skills-node` | hooks + classifier | File-backed skill injection |
 | `@matatbread/matbot-rumsfeld-node` | `contextual_search` | Contextual knowledge fault handler — resolves unknown terms via the knowledge index |
 | `@matatbread/matbot-persist-ki-bge-node` | knowledge backend | Persistent KnowledgeIndex with entity search and optional BGE reranker |

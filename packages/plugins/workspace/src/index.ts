@@ -72,11 +72,10 @@ type WorkspaceInput =
 const workspaceTool: Tool = {
   name: 'workspace_action',
   description:
-    'Read, write, list, and delete files in the **session workspace** — a small per-session scratch ' +
+    'Read, write, list, and delete files in the **workspace** — a small scratch ' +
     'and transfer area, NOT the host filesystem. Use it for files the user uploads or downloads, ' +
     'generated artifacts (reports, charts, exports), and working notes or to-do lists. It is not a code ' +
-    'workspace: files here are not executable, and the project source does NOT live here — do not reach ' +
-    'for it to read or edit the codebase. When the web frontend is running, every workspace file is served ' +
+    'workspace: files here are not executable. If the web frontend is running, every workspace file is served ' +
     'as a static link at /workspace/<path> on the current HTTP host (use a relative URL), so you can hand ' +
     'that URL to the user to view or download.\n\n' +
     'Parameters depend on `action` (TypeScript):\n' +

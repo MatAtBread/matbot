@@ -461,7 +461,22 @@ const executor = {
 
 export const pluginTool: Tool = {
   name:        'plugin',
-  description: 'Manage matbot plugins: list configured plugins, add a new one, remove an existing one, reload one from disk, discover available local plugins, or store a secret a plugin/provider requires.',  inputSchema: {
+  description:
+    'Manage matbot plugins — the units that contribute tools, providers, storage, hooks, and ' +
+    'frontends to the running process. List or discover them, install or remove one, reload one ' +
+    'from disk to pick up code changes without restarting, or supply a secret a plugin or provider ' +
+    'reported missing.\n\n' +
+    'Parameters depend on `action` (TypeScript):\n' +
+    '```ts\n' +
+    'type PluginAction =\n' +
+    "  | { action: 'list' }                            // configured + loaded plugins, with types and tools\n" +
+    "  | { action: 'discover_local' }                  // scan packages/plugins for installable local plugins\n" +
+    "  | { action: 'add';        specifier: string }   // install & activate; specifier = npm name, path, or GitHub shorthand\n" +
+    "  | { action: 'remove';     specifier: string }   // deactivate & remove from matbot.yaml\n" +
+    "  | { action: 'reload';     specifier: string }   // re-import from disk without restarting\n" +
+    "  | { action: 'store-key';  key: string };        // store a secret a plugin/provider needs; value entered out-of-band\n" +
+    '```',
+  inputSchema: {
     type:       'object',
     required:   ['action'],
     properties: {
@@ -472,7 +487,7 @@ export const pluginTool: Tool = {
       },
       specifier: {
         type:        'string',
-        description: 'npm package name, file path, or GitHub shorthand (required for add/remove).',
+        description: 'npm package name, file path, or GitHub shorthand (required for add/remove/reload).',
       },
       key: {
         type:        'string',
