@@ -51,12 +51,52 @@ export const plugin: MatbotPlugin = {
 
   tools: [
     {
-      name:        'telegram_get_provider',
-      description: 'Get the name of the LLM provider currently used by the Telegram bot.',
-      inputSchema: { type: 'object', properties: {} },
+      name:        'telegram_provider',
+      description: `Get or set the LLM provider the Telegram bot uses. A 'set' is persisted and restored on restart.
+
+  type TelegramProvider =
+    | { action: 'get' }
+    | { action: 'set'; provider: string };  // provider name as defined in matbot.yaml`,
+      inputSchema: {
+        type: 'object',
+        required: ['action'],
+        properties: {
+          action: {
+            type:        'string',
+            enum:        ['get', 'set'],
+            description: 'get: return the current provider. set: switch to a different provider.',
+          },
+          provider: {
+            type:        'string',
+            description: 'Provider name as defined in matbot.yaml (set only).',
+          },
+        },
+      },
       executor: {
-        async *execute() {
-          yield { type: 'result' as const, value: { provider: activeProvider?.name ?? null } };
+        async *execute(input: unknown) {
+          const act = input as { action: 'get' | 'set'; provider?: string };
+
+          if (act.action === 'get') {
+            yield { type: 'result' as const, value: { provider: activeProvider?.name ?? null } };
+            return;
+          }
+
+          if (act.action === 'set') {
+            const svc = servicesRef;
+            if (!svc) { yield { type: 'error' as const, message: 'Plugin not active' }; return; }
+            if (!act.provider) { yield { type: 'error' as const, message: "'set' requires a provider name." }; return; }
+
+            try {
+              activeProvider = await buildProvider(act.provider, svc);
+              await svc.settings(PLUGIN_NAME).set(SETTINGS_KEY_PROVIDER, act.provider);
+              yield { type: 'result' as const, value: { provider: act.provider } };
+            } catch (e) {
+              yield { type: 'error' as const, message: String(e) };
+            }
+            return;
+          }
+
+          yield { type: 'error' as const, message: `Unknown telegram_provider action "${(act as { action: string }).action}". Expected 'get' or 'set'.` };
         },
       },
     },
@@ -106,35 +146,6 @@ export const plugin: MatbotPlugin = {
             }
           }
           yield { type: 'result' as const, value: { sent } };
-        },
-      },
-    },
-    {
-      name:        'telegram_set_provider',
-      description: 'Set the LLM provider used by the Telegram bot. The selection is persisted and restored on restart.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          provider: {
-            type:        'string',
-            description: 'Provider name as defined in matbot.yaml',
-          },
-        },
-        required: ['required'],
-      },
-      executor: {
-        async *execute(input: unknown) {
-          const svc = servicesRef;
-          if (!svc) { yield { type: 'error' as const, message: 'Plugin not active' }; return; }
-
-          const { provider: name } = input as { provider: string };
-          try {
-            activeProvider = await buildProvider(name, svc);
-            await svc.settings(PLUGIN_NAME).set(SETTINGS_KEY_PROVIDER, name);
-            yield { type: 'result' as const, value: { provider: name } };
-          } catch (e) {
-            yield { type: 'error' as const, message: String(e) };
-          }
         },
       },
     },

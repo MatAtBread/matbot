@@ -24,7 +24,7 @@ export interface RunSessionOpts {
   /** Supply a prompt implementation to allow tools to ask interactive questions. */
   prompt?:        PromptFn;
   loadPlugin:     (specifier: string, prompt?: PromptFn) => Promise<MatbotPlugin>;
-  unloadPlugin:   (specifier: string) => Promise<void>;
+  unloadPlugin:   (specifier: string) => Promise<boolean>;
 }
 
 export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineEvent> {

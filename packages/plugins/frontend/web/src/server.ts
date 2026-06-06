@@ -15,7 +15,7 @@ export interface WebServerDeps {
   /** Resolve a provider name to its adapter and fully-resolved config. Returns null if unknown. */
   resolveProvider: (name: string) => Promise<{ adapter: ProviderAdapter; config: ProviderConfig } | null>;
   loadPlugin:     (specifier: string) => Promise<MatbotPlugin>;
-  unloadPlugin:   (specifier: string) => Promise<void>;
+  unloadPlugin:   (specifier: string) => Promise<boolean>;
   tools?:         ToolRegistry;
   hooks?:         HookRegistry;
   systemContext?: SystemContextRegistry;
@@ -93,6 +93,20 @@ function static200(res: ServerResponse, contentType: string, body: string): void
   res.end(body);
 }
 
+// The single interactive prompt implementation is the SSE round-trip built per-submit (see the
+// `/sessions/:id/submit` handler): it parks on `pendingPrompts` and is answered via
+// `POST /sessions/:id/prompt`. The direct tool-invocation endpoints (`/tools/:name`,
+// `/stream/tools/:name`) have no session and no answer channel, so they CANNOT prompt
+// interactively — a known, deliberate blind spot. Any UI flow that needs to ask the user
+// something must drive the tool through `/submit` instead. This fallback makes that boundary
+// explicit: take the default if one was offered, otherwise fail loudly rather than hang.
+const nonInteractivePrompt: PromptFn = ((p: string | FormField, def?: string) => {
+  const fallback = typeof p === 'string' ? def : p.default;
+  return fallback !== undefined
+    ? Promise.resolve(fallback)
+    : Promise.reject(new Error(`Non-interactive context (use /submit for interactive prompts): "${typeof p === 'string' ? p : p.label}"`));
+}) as PromptFn;
+
 export function createWebServer(deps: WebServerDeps) {
   const origin = deps.cors ?? '*';
 
@@ -169,12 +183,7 @@ export function createWebServer(deps: WebServerDeps) {
       vault:      deps.vault,
       loadPlugin:   deps.loadPlugin,
       unloadPlugin: deps.unloadPlugin,
-      prompt:     ((p: string | FormField, def?: string) => {
-        const fallback = typeof p === 'string' ? def : p.default;
-        return fallback !== undefined
-          ? Promise.resolve(fallback)
-          : Promise.reject(new Error(`Non-interactive context: "${typeof p === 'string' ? p : p.label}"`));
-      }) as PromptFn,
+      prompt:       nonInteractivePrompt,
       ...(deps.workdir    !== undefined ? { workdir:    deps.workdir    } : {}),
       ...(deps.files      !== undefined ? { files:      deps.files      } : {}),
       ...(deps.configPath !== undefined ? { configPath: deps.configPath } : {}),

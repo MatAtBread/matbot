@@ -241,6 +241,54 @@ const myTool: Tool = {
 };
 ```
 
+### Multi-action tools (preferred convention)
+
+When a plugin would otherwise expose several `noun_verb` tools for one noun (e.g.
+`mcp_add` / `mcp_list` / `mcp_remove`), the preferred style is a single `noun_action`
+tool with an `action` discriminator. This is a convention, not enforced by the runtime —
+separate tools still work, and standalone single-purpose tools (`http`, `bash`, `ask_user`)
+stay separate. See **Tool design — multi-action tools** in `CLAUDE.md` for the full rationale.
+
+The shape:
+
+- The **description teaches the domain once** and carries the per-action contract as a
+  **TypeScript discriminated union** (LLMs read TS unions more reliably than JSON-Schema `oneOf`).
+- `inputSchema` stays **loose**: `required: ['action']` plus the union of every action's optional
+  fields.
+- The **executor enforces** per-action requirements and errors on a missing field or unknown action.
+
+```ts
+const mcpAction: Tool = {
+  name: 'mcp_action',
+  description: `Manage MCP server connections. … (teach the domain here)
+
+  type McpAction =
+    | { action: 'add'; name: string; type: 'local' | 'remote'; … }
+    | { action: 'list' }
+    | { action: 'remove'; name: string };`,
+  inputSchema: {
+    type: 'object',
+    required: ['action'],
+    properties: {
+      action: { type: 'string', enum: ['add', 'list', 'remove'] },
+      name:   { type: 'string', description: 'add/remove only.' },
+      // … union of all optional per-action fields …
+    },
+  },
+  executor: {
+    async *execute(input, ctx) {
+      const act = input as McpAction;
+      switch (act.action) {
+        case 'add':    /* validate add fields, then … */ return;
+        case 'list':   /* … */ return;
+        case 'remove': /* … */ return;
+        default: yield { type: 'error', message: `Unknown action "${(act as { action: string }).action}".` };
+      }
+    },
+  },
+};
+```
+
 ### `ToolEvent` variants
 
 | Event      | Fields                                                                      | Meaning |
@@ -524,7 +572,7 @@ export const plugin: MatbotPlugin = {
 A marker is an opaque annotation a plugin attaches to a session — a cross-reference, a status, a
 link — that a frontend can render but the LLM never sees. Markers are persisted with the session,
 elided from provider submission, and preserved by compaction (they survive
-`edit_session_compact`). Any plugin with session access can create one.
+`session_edit`'s compact). Any plugin with session access can create one.
 
 A marker is a `MessageContent` block, usually emitted as its own message with the `marker` role:
 
@@ -620,16 +668,16 @@ plugin's `setup()`. The replacement takes effect immediately for all subsequent
 | `@matatbread/matbot-tool-bash` | `bash` | Run bash scripts; stream stdout/stderr |
 | `@matatbread/matbot-tool-docker-bash` | `bash` (sandboxed) | Drop-in for bash; runs scripts inside Docker |
 | `@matatbread/matbot-tool-http` | `http` | Make HTTP requests |
-| `@matatbread/matbot-tool-workspace` | `workspace_read/write/list/delete` | Read and write files in the workspace namespace |
-| `@matatbread/matbot-tool-background` | `background`, `every`, `every_list`, `every_cancel` | Run prompts in detached processes; recurring schedules |
-| `@matatbread/matbot-tool-mcp` | MCP client | Connect to Model Context Protocol servers |
-| `@matatbread/matbot-sessions` | `session_list/get/rename/hide` | Session management tools |
-| `@matatbread/matbot-edit-session` | `edit_session_cut/fork/compact` | Trim, branch, and compact sessions to manage context window |
+| `@matatbread/matbot-tool-workspace` | `workspace_action` | Read/write/list/delete files in the workspace namespace (one tool, `action` parameter) |
+| `@matatbread/matbot-tool-background` | `background`, `every_action` | Run prompts in detached processes once or on a recurring interval; manage schedules (list/suspend/resume/cancel via `action`, `id: "*"` = all for suspend/resume) |
+| `@matatbread/matbot-tool-mcp` | `mcp_action` | Connect to Model Context Protocol servers (add/list/remove via `action`) |
+| `@matatbread/matbot-sessions` | `session_action` | Session lifecycle (list/get/rename/hide via `action` parameter) |
+| `@matatbread/matbot-edit-session` | `session_edit` | Trim, branch, split, and compact sessions to manage context window (cut/fork/split/compact via `action`) |
 | `@matatbread/matbot-skills-node` | hooks + classifier | File-backed skill injection |
 | `@matatbread/matbot-rumsfeld-node` | `contextual_search` | Contextual knowledge fault handler — resolves unknown terms via the knowledge index |
 | `@matatbread/matbot-persist-ki-bge-node` | knowledge backend | Persistent KnowledgeIndex with entity search and optional BGE reranker |
 | `@matatbread/matbot-frontend-web` | frontend + hooks | Web UI with session management |
-| `@matatbread/matbot-frontend-telegram` | frontend + tools | Telegram bot with `telegram_send/open_door/set_provider` tools |
+| `@matatbread/matbot-frontend-telegram` | frontend + tools | Telegram bot with `telegram_send`, `telegram_open_door`, `telegram_provider` (get/set) tools |
 | `@matatbread/matbot-provider-anthropic` | provider | Anthropic Messages API (also DeepSeek Anthropic-compat) |
 | `@matatbread/matbot-provider-openai-compat` | provider | OpenAI-compatible chat completions |
 | `@matatbread/matbot-storage-sqlite` | storage backend | SQLite-backed Store + FileStore |

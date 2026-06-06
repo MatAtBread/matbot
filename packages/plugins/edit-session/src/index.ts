@@ -63,192 +63,155 @@ function generateSplitTitle(title: string): string {
   return `${title || 'Untitled'} pt 2`;
 }
 
-// ── tool factories ────────────────────────────────────────────────────────────
-
-function makeCutTool(store: Store<Session>): Tool {
-  return {
-    name:        'edit_session_cut',
-    description: 'Remove all messages from msgIndex onward, truncating the session at that point.',
-    inputSchema: {
-      type:       'object',
-      required:   ['sessionId', 'msgIndex'],
-      properties: {
-        sessionId: { type: 'string' },
-        msgIndex:  { type: 'number', description: 'Index in session.messages to cut from (inclusive).' },
-      },
-    },
-    executor: {
-      async *execute(input: unknown): AsyncIterable<ToolEvent> {
-        const { sessionId, msgIndex } = input as { sessionId: string; msgIndex: number };
-        const session = await store.get(sessionId);
-        if (!session) { yield { type: 'error', message: `Session "${sessionId}" not found.` }; return; }
-        const idx = resolveIndex(session, msgIndex);
-        if (idx === null) { yield { type: 'error', message: `msgIndex ${msgIndex} out of range.` }; return; }
-        const next: Session = bumpVersion({
-          ...session,
-          messages:  session.messages.slice(0, idx),
-          updatedAt: now(),
-        });
-        const res = await store.cas(sessionId, session.version, next);
-        if (!res.ok) { yield { type: 'error', message: 'Concurrent modification — please retry.' }; return; }
-        yield { type: 'result', value: { sessionId, messagesRemaining: next.messages.length } };
-      },
-    },
-  };
-}
-
-function makeForkTool(store: Store<Session>): Tool {
-  return {
-    name:        'edit_session_fork',
-    description: 'Create a new session containing messages before msgIndex, leaving the original unchanged.',
-    inputSchema: {
-      type:       'object',
-      required:   ['sessionId', 'msgIndex'],
-      properties: {
-        sessionId: { type: 'string' },
-        msgIndex:  { type: 'number', description: 'Fork point: new session gets messages[0..msgIndex-1].' },
-      },
-    },
-    executor: {
-      async *execute(input: unknown): AsyncIterable<ToolEvent> {
-        const { sessionId, msgIndex } = input as { sessionId: string; msgIndex: number };
-        const session = await store.get(sessionId);
-        if (!session) { yield { type: 'error', message: `Session "${sessionId}" not found.` }; return; }
-        const idx = resolveIndex(session, msgIndex);
-        if (idx === null) { yield { type: 'error', message: `msgIndex ${msgIndex} out of range.` }; return; }
-        // One-way: only the fork is marked (pointing back to its origin). The original is left
-        // unchanged, per this tool's contract.
-        const forked: Session = {
-          ...bumpVersion(session),
-          id:               crypto.randomUUID(),
-          parentSessionId:  sessionId,
-          // targetMsg idx-1: the fork point in the (unchanged) parent — its last message shared with
-          // this fork.
-          messages:         [...session.messages.slice(0, idx), markerMessage({ relation: 'forked-from', peerSessionId: sessionId, targetMsg: Math.max(0, idx - 1) })],
-          createdAt:        now(),
-          updatedAt:        now(),
-        };
-        await store.set(forked.id, forked);
-        yield { type: 'result', value: { newSessionId: forked.id, messagesCopied: idx } };
-      },
-    },
-  };
-}
-
-function makeSplitTool(store: Store<Session>): Tool {
-  return {
-    name:        'edit_session_split',
-    description: 'Split a session at msgIndex: move messages before msgIndex into a new session and remove them from the current session. The current session keeps only messages from msgIndex onward.',
-    inputSchema: {
-      type:       'object',
-      required:   ['sessionId', 'msgIndex'],
-      properties: {
-        sessionId: { type: 'string' },
-        msgIndex:  { type: 'number', description: 'Split point: messages before this index are moved to a new session and removed from the current session.' },
-      },
-    },
-    executor: {
-      async *execute(input: unknown): AsyncIterable<ToolEvent> {
-        const { sessionId, msgIndex } = input as { sessionId: string; msgIndex: number };
-        const session = await store.get(sessionId);
-        if (!session) { yield { type: 'error', message: `Session "${sessionId}" not found.` }; return; }
-        const idx = resolveIndex(session, msgIndex);
-        if (idx === null) { yield { type: 'error', message: `msgIndex ${msgIndex} out of range.` }; return; }
-        if (idx === 0) {
-          yield { type: 'error', message: 'Cannot split at index 0 — nothing to split off.' };
-          return;
-        }
-
-        // Messages before the split point go to the new session
-        const prefixMsgs = session.messages.slice(0, idx);
-
-        // Messages from the split point onward stay in the current session
-        const suffixMsgs = session.messages.slice(idx);
-
-        const newSessionId = crypto.randomUUID();
-
-        // Create the new session with the prefix messages, tailed by a marker pointing forward to
-        // the continuing (current) session.
-        const newSession: Session = {
-          ...bumpVersion(session),
-          id:               newSessionId,
-          parentSessionId:  sessionId,
-          // targetMsg 1: in the current session the prepended split-from marker is index 0, so the
-          // continuation (first suffix message) lands at index 1.
-          messages:         [...prefixMsgs, markerMessage({ relation: 'continued-in', peerSessionId: sessionId, targetMsg: 1 })],
-          createdAt:        now(),
-          updatedAt:        now(),
-        };
-        await store.set(newSession.id, newSession);
-
-        // Update the current session to keep only suffix messages, headed by a marker pointing back
-        // to where the earlier messages now live.
-        const updated: Session = bumpVersion({
-          ...session,
-          title:     generateSplitTitle(session.title ?? ''),
-          // targetMsg idx-1: the last earlier message in the new session (its prefix is messages
-          // 0..idx-1, then the continued-in marker).
-          messages:  [markerMessage({ relation: 'split-from', peerSessionId: newSessionId, targetMsg: idx - 1 }), ...suffixMsgs],
-          updatedAt: now(),
-        });
-        const res = await store.cas(sessionId, session.version, updated);
-        if (!res.ok) {
-          // CAS failed — clean up the new session we just created
-          await store.delete(newSession.id);
-          yield { type: 'error', message: 'Concurrent modification — please retry.' };
-          return;
-        }
-
-        yield {
-          type: 'result',
-          value: {
-            newSessionId: newSession.id,
-            messagesSplit: prefixMsgs.length,
-            currentSessionId: sessionId,
-            messagesRemaining: suffixMsgs.length,
-          },
-        };
-      },
-    },
-  };
-}
-
 const KEEP_TYPES = new Set(['text', 'refusal', 'marker']);
 
-function makeCompactTool(store: Store<Session>): Tool {
+// ── tool ──────────────────────────────────────────────────────────────────────
+
+// All four actions share the same parameter shape ({ sessionId, msgIndex }); only the behaviour
+// differs. The schema stays loose (action enum + the shared fields) and the description carries
+// this TypeScript signature, which the executor enforces.
+interface SessionEditInput { action: string; sessionId: string; msgIndex: number }
+
+function makeSessionEditTool(store: Store<Session>): Tool {
   return {
-    name:        'edit_session_compact',
-    description: 'Strip thinking blocks, tool calls, and tool results from messages before msgIndex, keeping all user/assistant text so context is preserved but token count is reduced.',
+    name: 'session_edit',
+    description:
+      'Edit the message history of a session (see `session_action` for what a session is). Every ' +
+      'action takes a session ID and a message index (`msgIndex`, an index into session.messages) ' +
+      'and uses it to manage the conversation\'s length and structure:\n' +
+      '  cut     — Truncate: remove all messages from msgIndex onward.\n' +
+      '  fork    — Branch: create a NEW session with messages[0..msgIndex-1]; the original is unchanged.\n' +
+      '  split   — Move: messages before msgIndex move to a new session; the current session keeps\n' +
+      '            msgIndex onward. Both sides get cross-link markers.\n' +
+      '  compact — Shrink: strip thinking blocks, tool calls, and tool results from messages before\n' +
+      '            msgIndex, keeping user/assistant text — fewer tokens, same thread.\n\n' +
+      '```ts\n' +
+      "type SessionEdit = { action: 'cut' | 'fork' | 'split' | 'compact'; sessionId: string; msgIndex: number };\n" +
+      '```',
     inputSchema: {
       type:       'object',
-      required:   ['sessionId', 'msgIndex'],
+      required:   ['action', 'sessionId', 'msgIndex'],
       properties: {
-        sessionId: { type: 'string' },
-        msgIndex:  { type: 'number', description: 'Strip verbose content from messages[0..msgIndex-1].' },
+        action:    { type: 'string', enum: ['cut', 'fork', 'split', 'compact'], description: 'The edit to perform.' },
+        sessionId: { type: 'string', description: 'ID of the session to edit.' },
+        msgIndex:  { type: 'number', description: 'Index into session.messages the action pivots on (see per-action meaning in the description).' },
       },
     },
     executor: {
       async *execute(input: unknown): AsyncIterable<ToolEvent> {
-        const { sessionId, msgIndex } = input as { sessionId: string; msgIndex: number };
+        const { action, sessionId, msgIndex } = input as Partial<SessionEditInput>;
+        if (!sessionId) { yield { type: 'error', message: 'session_edit requires "sessionId".' }; return; }
+        if (typeof msgIndex !== 'number') { yield { type: 'error', message: 'session_edit requires "msgIndex" (number).' }; return; }
+
         const session = await store.get(sessionId);
         if (!session) { yield { type: 'error', message: `Session "${sessionId}" not found.` }; return; }
         const idx = resolveIndex(session, msgIndex);
-        if (idx === null || idx === 0) {
-          yield { type: 'error', message: `msgIndex ${msgIndex} out of range or nothing to compact.` };
-          return;
+        if (idx === null) { yield { type: 'error', message: `msgIndex ${msgIndex} out of range.` }; return; }
+
+        switch (action) {
+          case 'cut': {
+            const next: Session = bumpVersion({
+              ...session,
+              messages:  session.messages.slice(0, idx),
+              updatedAt: now(),
+            });
+            const res = await store.cas(sessionId, session.version, next);
+            if (!res.ok) { yield { type: 'error', message: 'Concurrent modification — please retry.' }; return; }
+            yield { type: 'result', value: { sessionId, messagesRemaining: next.messages.length } };
+            return;
+          }
+
+          case 'fork': {
+            // One-way: only the fork is marked (pointing back to its origin). The original is left
+            // unchanged, per this action's contract.
+            const forked: Session = {
+              ...bumpVersion(session),
+              id:               crypto.randomUUID(),
+              parentSessionId:  sessionId,
+              // targetMsg idx-1: the fork point in the (unchanged) parent — its last message shared
+              // with this fork.
+              messages:         [...session.messages.slice(0, idx), markerMessage({ relation: 'forked-from', peerSessionId: sessionId, targetMsg: Math.max(0, idx - 1) })],
+              createdAt:        now(),
+              updatedAt:        now(),
+            };
+            await store.set(forked.id, forked);
+            yield { type: 'result', value: { newSessionId: forked.id, messagesCopied: idx } };
+            return;
+          }
+
+          case 'split': {
+            if (idx === 0) { yield { type: 'error', message: 'Cannot split at index 0 — nothing to split off.' }; return; }
+
+            // Messages before the split point go to the new session
+            const prefixMsgs = session.messages.slice(0, idx);
+            // Messages from the split point onward stay in the current session
+            const suffixMsgs = session.messages.slice(idx);
+
+            const newSessionId = crypto.randomUUID();
+
+            // New session: prefix messages, tailed by a marker pointing forward to the continuing
+            // (current) session.
+            const newSession: Session = {
+              ...bumpVersion(session),
+              id:               newSessionId,
+              parentSessionId:  sessionId,
+              // targetMsg 1: in the current session the prepended split-from marker is index 0, so the
+              // continuation (first suffix message) lands at index 1.
+              messages:         [...prefixMsgs, markerMessage({ relation: 'continued-in', peerSessionId: sessionId, targetMsg: 1 })],
+              createdAt:        now(),
+              updatedAt:        now(),
+            };
+            await store.set(newSession.id, newSession);
+
+            // Current session: keep only suffix messages, headed by a marker pointing back to where
+            // the earlier messages now live.
+            const updated: Session = bumpVersion({
+              ...session,
+              title:     generateSplitTitle(session.title ?? ''),
+              // targetMsg idx-1: the last earlier message in the new session.
+              messages:  [markerMessage({ relation: 'split-from', peerSessionId: newSessionId, targetMsg: idx - 1 }), ...suffixMsgs],
+              updatedAt: now(),
+            });
+            const res = await store.cas(sessionId, session.version, updated);
+            if (!res.ok) {
+              // CAS failed — clean up the new session we just created
+              await store.delete(newSession.id);
+              yield { type: 'error', message: 'Concurrent modification — please retry.' };
+              return;
+            }
+
+            yield {
+              type: 'result',
+              value: {
+                newSessionId:      newSession.id,
+                messagesSplit:     prefixMsgs.length,
+                currentSessionId:  sessionId,
+                messagesRemaining: suffixMsgs.length,
+              },
+            };
+            return;
+          }
+
+          case 'compact': {
+            if (idx === 0) { yield { type: 'error', message: `msgIndex ${msgIndex} out of range or nothing to compact.` }; return; }
+            let stripped = 0;
+            const messages = session.messages.map((m, i) => {
+              if (i >= idx) return m;
+              const compact = m.content.filter(c => KEEP_TYPES.has(c.type));
+              if (compact.length === m.content.length) return m;
+              stripped++;
+              return { ...m, content: compact };
+            });
+            const next: Session = bumpVersion({ ...session, messages, updatedAt: now() });
+            const res = await store.cas(sessionId, session.version, next);
+            if (!res.ok) { yield { type: 'error', message: 'Concurrent modification — please retry.' }; return; }
+            yield { type: 'result', value: { sessionId, messagesStripped: stripped } };
+            return;
+          }
+
+          default:
+            yield { type: 'error', message: `Unknown action "${String(action)}". Expected one of: cut, fork, split, compact.` };
         }
-        let stripped = 0;
-        const messages = session.messages.map((m, i) => {
-          if (i >= idx) return m;
-          const compact = m.content.filter(c => KEEP_TYPES.has(c.type));
-          if (compact.length === m.content.length) return m;
-          stripped++;
-          return { ...m, content: compact };
-        });
-        const next: Session = bumpVersion({ ...session, messages, updatedAt: now() });
-        const res = await store.cas(sessionId, session.version, next);
-        if (!res.ok) { yield { type: 'error', message: 'Concurrent modification — please retry.' }; return; }
-        yield { type: 'result', value: { sessionId, messagesStripped: stripped } };
       },
     },
   };
@@ -263,8 +226,6 @@ export const plugin: MatbotPlugin = {
   async setup(services: MatbotServices) {
     const store = services.sessions;
     if (!store) return;
-    for (const tool of [makeCutTool(store), makeForkTool(store), makeSplitTool(store), makeCompactTool(store)]) {
-      services.tools.register(tool);
-    }
+    services.tools.register(makeSessionEditTool(store));
   },
 };
