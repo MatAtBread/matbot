@@ -1637,14 +1637,10 @@ async function submit(content) {
   loadingEl.className = 'msg-loading';
   turnWrap.appendChild(loadingEl);
 
-  // A queued note shown while this submission waits behind a running turn (set on the 'queued'
-  // event). Cleared, along with the loading dots and the bubble's pending style, once real content
-  // for this turn starts arriving.
-  let queuedNote = null;
-  function clearPending() {
-    userBubble.classList.remove('pending');
-    if (queuedNote) { queuedNote.remove(); queuedNote = null; }
-  }
+  // While this submission waits behind a running turn it gets a floating egg-timer badge (CSS on
+  // the bubble via the 'pending' class) and no loading dots. Both are cleared once its own turn
+  // starts producing content.
+  function clearPending() { userBubble.classList.remove('pending'); }
   function removeLoading() { loadingEl.remove(); clearPending(); }
 
   // Per-turn streaming state
@@ -1697,17 +1693,12 @@ async function submit(content) {
     for await (const ev of streamSubmit(submittingFor, content, provider)) {
       switch (ev.type) {
         case 'queued':
-          // Sent first by the server. queued > 0 ⇒ this submission is waiting behind a running
-          // turn; show it as pending until its own events start (which call removeLoading).
+          // Sent first by the server. queued > 0 ⇒ waiting behind a running turn: float the
+          // egg-timer badge on the bubble and drop the loading dots until this turn starts (a real
+          // content event calls removeLoading, which clears the badge).
           if (ev.queued > 0) {
             loadingEl.remove();
             userBubble.classList.add('pending');
-            if (!queuedNote) {
-              queuedNote = document.createElement('div');
-              queuedNote.className = 'msg-queued';
-              queuedNote.textContent = '⏳ queued — waiting for the current turn to finish';
-              turnWrap.appendChild(queuedNote);
-            }
           }
           break;
 
@@ -2002,12 +1993,12 @@ function setSending(val, sessionId) {
   }
   sending = activeSends > 0;
   if (sending) {
-    stopBtn.style.display = '';
+    stopBtn.style.visibility = 'visible';
     stopBtn.disabled = false;
   } else {
     sendingForSession = null;
     stopRequested = false;
-    stopBtn.style.display = 'none';
+    stopBtn.style.visibility = 'hidden';
   }
 }
 

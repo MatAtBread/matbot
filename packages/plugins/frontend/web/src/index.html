@@ -556,6 +556,7 @@
       border-radius: 12px 12px 2px 12px;
       line-height: 1.65;
       word-break: break-word;
+      position: relative;   /* anchor for the floating queued badge */
     }
     .message.user .md-body { color: #fff; }
     .message.user .md-body code { background: rgba(255,255,255,0.15); border-color: rgba(255,255,255,0.2); color: #fff; }
@@ -567,24 +568,19 @@
     .message.user .md-body th, .message.user .md-body td { border-color: rgba(255,255,255,0.2); }
     .message.user .md-body hr { border-top-color: rgba(255,255,255,0.2); }
 
-    /* Queued (not-yet-running) submissions: a muted user bubble with a small badge. These appear
-       from the server's pending overlay (session_action get) or live via the 'queued' event, so a
-       refresh shows exactly what's still waiting — the count of these IS the queue depth. */
-    .message.user.pending { opacity: 0.55; }
+    /* Queued (not-yet-running) submissions: a muted bubble with an egg-timer floating on its
+       top-left corner — purely an indicator, so the bubble never changes size or shape. Applies
+       both live (the 'queued' event) and on reload (the server's pending overlay), so the number
+       of these badges IS the queue depth. */
+    .message.user.pending { opacity: 0.6; }
     .message.user.pending::before {
-      content: '⏳ queued';
-      display: block;
-      font-size: 0.7em;
-      opacity: 0.8;
-      margin-bottom: 4px;
-      letter-spacing: 0.03em;
-    }
-    .msg-queued {
-      align-self: flex-start;
-      color: #6b7280;
-      font-size: 0.85em;
-      font-style: italic;
-      padding: 2px 4px;
+      content: '⏳';
+      position: absolute;
+      top: -9px;
+      left: -9px;
+      font-size: 0.95em;
+      line-height: 1;
+      pointer-events: none;
     }
 
     /* Assistant: left-aligned, no background */
@@ -1027,13 +1023,15 @@
 
     /* Stop button: a distinct, always-red control shown only while a turn is running, so the
        busy state is unambiguous and the input/Send stay live for type-ahead queueing. */
+    /* Same metrics as #send-btn (h/w are em, so the font-size must match for an identical circle).
+       Toggled via visibility (not display) so it reserves its slot and Send never shifts. */
     #stop-btn {
       border-radius: 50%;
       background: #dc2626;
       color: #fff;
       border: none;
       cursor: pointer;
-      font-size: 1.4em;
+      font-size: 2.14em;
       flex-shrink: 0;
       transition: background 0.1s;
       height: 1.5em;
@@ -1434,8 +1432,8 @@
       </div>
       <div id="input-row">
         <textarea id="input" rows="1" placeholder="Shift+⬅️ to send, ⬅️ for newline"></textarea>
-        <button id="stop-btn" style="display:none" title="Stop the running turn and drop anything queued">&#9209;</button>
         <button id="send-btn">▶</button>
+        <button id="stop-btn" style="visibility:hidden" title="Stop the running turn and drop anything queued">&#9209;</button>
       </div>
     </div>
     <button id="scroll-down-btn" style="display:none" title="Scroll to bottom">▼</button>
