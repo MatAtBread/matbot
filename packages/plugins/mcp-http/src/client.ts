@@ -14,8 +14,13 @@ interface JsonRpcResponse { jsonrpc: string; id?: unknown; result?: unknown; err
 export class HttpMCPClient implements MCPClient {
   instructions: string | undefined;
   private nextId = 1;
+  private readonly endpoint: string;
+  private readonly extraHeaders: Record<string, string> | undefined;
 
-  constructor(private readonly endpoint: string, private readonly extraHeaders?: Record<string, string>) {}
+  constructor(endpoint: string, extraHeaders?: Record<string, string>) {
+    this.endpoint = endpoint;
+    this.extraHeaders = extraHeaders;
+  }
 
   // Best-effort: stateless HTTP MCP servers serve tools/call without an init handshake, so a server
   // that rejects initialize must not block the connection. We only want the `instructions` if offered.

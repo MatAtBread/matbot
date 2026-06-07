@@ -58,6 +58,7 @@ function textOf(content: MessageContent[]): string {
  * over SSE — only here the runner is in the same realm, so there is no wire.
  */
 export class ChatUI {
+  private readonly services: MatbotServices;
   private readonly root: HTMLElement;
   private msgs!:     HTMLElement;
   private input!:    HTMLTextAreaElement;
@@ -77,7 +78,8 @@ export class ChatUI {
   // undefined and messages render as plain text — keeping the bundle self-contained and offline.
   private renderMd: ((src: string) => string) | undefined;
 
-  constructor(private readonly services: MatbotServices, root: HTMLElement) {
+  constructor(services: MatbotServices, root: HTMLElement) {
+    this.services = services;
     this.root = root;
   }
 

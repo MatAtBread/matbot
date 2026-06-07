@@ -16,8 +16,13 @@ const PERSIST_KEY = 'servers';
  */
 export class RemoteMcpManager implements McpRemoteService {
   private readonly active = new Map<string, ActiveRemote>();
+  private readonly services: MatbotServices;
+  private readonly settings: PluginSettings;
 
-  constructor(private readonly services: MatbotServices, private readonly settings: PluginSettings) {}
+  constructor(services: MatbotServices, settings: PluginSettings) {
+    this.services = services;
+    this.settings = settings;
+  }
 
   private resolveClient = (name: string): MCPClient | undefined => this.active.get(name)?.client;
 
