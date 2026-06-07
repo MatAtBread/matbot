@@ -14,6 +14,14 @@ const CSS = `
 .mb-bubble { max-width:72ch; padding:8px 12px; border-radius:12px; white-space:pre-wrap; word-break:break-word; }
 .mb-row.user  .mb-bubble { background:#2563eb; color:#fff; }
 .mb-row.assistant .mb-bubble { background:#fff; border:1px solid #e2e2e2; }
+.mb-bubble.mb-md { white-space:normal; }
+.mb-bubble.mb-md > :first-child { margin-top:0; }
+.mb-bubble.mb-md > :last-child { margin-bottom:0; }
+.mb-bubble.mb-md pre { background:#0f172a; color:#e2e8f0; padding:8px 10px; border-radius:8px; overflow-x:auto; }
+.mb-bubble.mb-md code { font-family:ui-monospace,monospace; font-size:.92em; }
+.mb-bubble.mb-md :not(pre) > code { background:rgba(0,0,0,.06); padding:1px 4px; border-radius:4px; }
+.mb-row.user .mb-bubble.mb-md :not(pre) > code { background:rgba(255,255,255,.2); }
+.mb-bubble.mb-md a { color:inherit; }
 .mb-tool { font-family:ui-monospace,monospace; font-size:12px; background:#0f172a; color:#e2e8f0; border-radius:8px; padding:8px 10px; max-width:72ch; white-space:pre-wrap; }
 .mb-tool .mb-tool-name { color:#7dd3fc; }
 .mb-err { color:#b91c1c; }
@@ -62,7 +70,12 @@ export class ChatUI {
   private busy      = false;
   private currentAbort: AbortController | undefined;
   private liveAssistant: HTMLElement | undefined;
+  private liveText = '';
   private liveTools = new Map<string, HTMLElement>();
+  private session: Session | undefined;
+  // Markdown renderer, loaded from a CDN only when served over http(s). On file:// it stays
+  // undefined and messages render as plain text — keeping the bundle self-contained and offline.
+  private renderMd: ((src: string) => string) | undefined;
 
   constructor(private readonly services: MatbotServices, root: HTMLElement) {
     this.root = root;
@@ -110,6 +123,8 @@ export class ChatUI {
     app.append(head, this.msgs, foot);
     this.root.appendChild(app);
 
+    void this.loadMarkdown();
+
     await this.refreshSessionList();
     const first = this.sessionSel.options[0]?.value;
     if (first) await this.selectSession(first);
@@ -118,6 +133,25 @@ export class ChatUI {
 
   private principal(): Principal {
     return tryCurrentPrincipal() ?? { id: 'web-user', type: 'user' };
+  }
+
+  // Markdown is a served-mode nicety, not a bundle dependency: only when running over http(s) do we
+  // pull `marked` from a CDN. On file:// (the self-contained, offline case) we never touch the
+  // network and messages stay plain text. The specifier is built at runtime so the bundler/loader
+  // doesn't try to resolve it. Note: rendered markdown is injected as HTML — acceptable for a
+  // single-user local demonstrator; a hardened deployment would sanitise it.
+  private async loadMarkdown(): Promise<void> {
+    const proto = globalThis.location?.protocol;
+    if (proto !== 'http:' && proto !== 'https:') return;
+    try {
+      const url = 'https://esm.sh/marked@14';
+      const mod = await import(/* @vite-ignore */ url) as { marked?: unknown };
+      const fn  = mod.marked;
+      if (typeof fn === 'function') {
+        this.renderMd = (src: string) => String((fn as (s: string) => unknown)(src));
+        if (!this.busy) this.renderSession(this.session);   // re-render history now that markdown is available
+      }
+    } catch { /* offline or blocked — stay plain text */ }
   }
 
   // ── providers ──────────────────────────────────────────────────────────────
@@ -177,8 +211,10 @@ export class ChatUI {
   }
 
   private renderSession(session: Session | undefined): void {
+    this.session = session;
     this.msgs.replaceChildren();
     this.liveAssistant = undefined;
+    this.liveText = '';
     this.liveTools.clear();
     if (session === undefined) return;
     for (const m of session.messages) {
@@ -197,11 +233,28 @@ export class ChatUI {
   }
 
   // ── rendering primitives ──────────────────────────────────────────────────
-  private bubble(role: 'user' | 'assistant', text: string): HTMLElement {
+  private addBubble(role: 'user' | 'assistant'): HTMLElement {
     const row = el('div', `mb-row ${role}`);
-    const b   = el('div', 'mb-bubble', text);
+    const b   = el('div', 'mb-bubble');
     row.appendChild(b);
     this.msgs.appendChild(row);
+    return b;
+  }
+
+  // Markdown when available (innerHTML + .mb-md), else plain text (textContent, kept readable by the
+  // bubble's white-space:pre-wrap). The streaming assistant bubble stays plain until finalised.
+  private setContent(el: HTMLElement, text: string): void {
+    if (this.renderMd !== undefined) {
+      try { el.innerHTML = this.renderMd(text); el.classList.add('mb-md'); return; }
+      catch { /* fall back to plain */ }
+    }
+    el.classList.remove('mb-md');
+    el.textContent = text;
+  }
+
+  private bubble(role: 'user' | 'assistant', text: string): HTMLElement {
+    const b = this.addBubble(role);
+    this.setContent(b, text);
     return b;
   }
 
@@ -242,6 +295,7 @@ export class ChatUI {
     this.scroll();
     this.setBusy(true);
     this.liveAssistant = undefined;
+    this.liveText = '';
 
     const ac = new AbortController();
     this.currentAbort = ac;
@@ -263,6 +317,7 @@ export class ChatUI {
     } catch (e) {
       this.bubble('assistant', `[error] ${String(e)}`).classList.add('mb-err');
     } finally {
+      this.finalizeLive();
       this.currentAbort = undefined;
       this.setBusy(false);
       await this.refreshSessionList();
@@ -270,15 +325,23 @@ export class ChatUI {
     }
   }
 
+  // Re-render the streamed assistant text as markdown once the turn (or tool break) ends.
+  private finalizeLive(): void {
+    if (this.liveAssistant !== undefined && this.liveText) this.setContent(this.liveAssistant, this.liveText);
+    this.liveAssistant = undefined;
+    this.liveText = '';
+  }
+
   private render(ev: PipelineEvent): void {
     switch (ev.type) {
       case 'text-delta':
-        if (this.liveAssistant === undefined) this.liveAssistant = this.bubble('assistant', '');
-        this.liveAssistant.textContent += ev.delta;
+        if (this.liveAssistant === undefined) { this.liveAssistant = this.addBubble('assistant'); this.liveText = ''; }
+        this.liveText += ev.delta;
+        this.liveAssistant.textContent = this.liveText;   // plain while streaming; markdown on finalise
         break;
       case 'thinking': break;
       case 'tool:start':
-        this.liveAssistant = undefined;
+        this.finalizeLive();
         this.toolBlock(ev.callId, ev.name, ev.input);
         break;
       case 'tool:stdout':

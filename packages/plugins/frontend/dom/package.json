@@ -11,8 +11,9 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@matatbread/matbot-core":       "workspace:*",
-    "@matatbread/matbot-plugin-api": "workspace:*"
+    "@matatbread/matbot-core": "workspace:*",
+    "@matatbread/matbot-plugin-api": "workspace:*",
+    "marked": "^14.0.0"
   },
   "devDependencies": {
     "typescript": "catalog:"
