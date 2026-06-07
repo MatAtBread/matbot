@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>matbot · web</title>
+  <style>
+    html, body { margin: 0; height: 100%; }
+    #mb-loading { display:flex; align-items:center; justify-content:center; height:100vh;
+                  font:14px system-ui,sans-serif; color:#666; }
+  </style>
+</head>
+<body>
+  <div id="matbot-root"><div id="mb-loading">Starting matbot — stripping %%MODULE_COUNT%% modules in your browser…</div></div>
+
+  <!-- 1. The TypeScript compiler (inlined). Exposes globalThis.ts; used to type-strip every module. -->
+  <script>%%TYPESCRIPT%%</script>
+
+  <!-- 2. The inlined payload: raw .ts sources, the package→entry map, config, and identity map. -->
+  <script>globalThis.__MB__ = %%PAYLOAD%%;</script>
+
+  <!-- 3. The loader (classic script): strip → blob → import map → boot. The browser mirror of
+          apps/cli/ts-hooks.js. No service worker, no fetch — runs from file:// or any static host. -->
+  <script>%%LOADER%%</script>
+</body>
+</html>

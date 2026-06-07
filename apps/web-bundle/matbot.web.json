@@ -1,0 +1,34 @@
+{
+  "_comment": "Browser matbot config (the matbot.yaml analogue, as JSON so the node assembler needs no YAML parser). Plugin entries are repo-relative package paths; the assembler resolves them to inlined modules. `providers` is intentionally empty — the browser asks for the full provider config (name, adapter, URL, model, key) at first startup and persists it. `providerModules` are the adapters that wizard offers. Only browser-safe plugins are listed — bash/docker/mcp/skills and the node web frontend require Node and are omitted.",
+
+  "plugins": [
+    "packages/plugins/browser",
+    "packages/plugins/frontend/dom",
+    "packages/plugins/http",
+    "packages/plugins/ask-user",
+    "packages/plugins/sessions",
+    "packages/plugins/edit-session",
+    "packages/plugins/workspace",
+    "packages/plugins/rumsfeld",
+    "packages/plugins/json-validation"
+  ],
+
+  "providers": {},
+
+  "providerModules": [
+    {
+      "label": "Anthropic Messages API (Claude, DeepSeek /anthropic)",
+      "module": "packages/plugins/providers/anthropic",
+      "endpointHint": "https://api.deepseek.com/anthropic",
+      "modelHint": "deepseek-chat"
+    },
+    {
+      "label": "OpenAI-compatible chat completions (GPT, DeepSeek, Azure, local)",
+      "module": "packages/plugins/providers/openai-compat",
+      "endpointHint": "https://api.deepseek.com/v1/chat/completions",
+      "modelHint": "deepseek-chat"
+    }
+  ],
+
+  "defaultProvider": null
+}
