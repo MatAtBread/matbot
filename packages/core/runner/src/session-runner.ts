@@ -6,6 +6,7 @@ import type {
 import type { MatbotPlugin } from './plugin.js';
 import type { HookRegistry } from './hooks.js';
 import { appendMessage, createMessage } from './session.js';
+import { runAs } from '@matatbread/matbot-plugin-api';
 import { runSession } from './runner.js';
 
 export interface SessionRunnerDeps {
@@ -177,26 +178,33 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
           : undefined;
 
         try {
-          for await (const ev of runSession({
-            session,
-            config:         { principal: head.principal, provider: head.provider, traceId: head.traceId },
-            provider:       resolved.adapter,
-            providerConfig: resolved.config,
-            store:          deps.store,
-            signal:         ac.signal,
-            loadPlugin:     deps.loadPlugin,
-            unloadPlugin:   deps.unloadPlugin,
-            ...(toolMap            !== undefined ? { tools:         toolMap            } : {}),
-            ...(deps.hooks         !== undefined ? { hooks:         deps.hooks         } : {}),
-            ...(deps.systemContext !== undefined ? { systemContext: deps.systemContext } : {}),
-            ...(deps.workdir       !== undefined ? { workdir:       deps.workdir       } : {}),
-            ...(deps.files         !== undefined ? { files:         deps.files         } : {}),
-            ...(deps.configPath    !== undefined ? { configPath:    deps.configPath    } : {}),
-            ...(deps.vault         !== undefined ? { vault:         deps.vault         } : {}),
-            ...(head.prompt        !== undefined ? { prompt:        head.prompt        } : {}),
-          })) {
-            emit(s, ev);
-          }
+          // Establish the submitter's principal for the whole turn here, not inside runSession:
+          // pump runs detached (`void pump`), so this scope — not the request that enqueued — is the
+          // turn's async root. Everything downstream (hooks, tools, and any Store/FileStore/Vault
+          // access they trigger) reads it via currentPrincipal(). The consumption MUST happen inside
+          // the callback: an async iterator returned out of runAs would lose the scope before it pulls.
+          await runAs(head.principal, async () => {
+            for await (const ev of runSession({
+              session,
+              config:         { provider: head.provider, traceId: head.traceId },
+              provider:       resolved.adapter,
+              providerConfig: resolved.config,
+              store:          deps.store,
+              signal:         ac.signal,
+              loadPlugin:     deps.loadPlugin,
+              unloadPlugin:   deps.unloadPlugin,
+              ...(toolMap            !== undefined ? { tools:         toolMap            } : {}),
+              ...(deps.hooks         !== undefined ? { hooks:         deps.hooks         } : {}),
+              ...(deps.systemContext !== undefined ? { systemContext: deps.systemContext } : {}),
+              ...(deps.workdir       !== undefined ? { workdir:       deps.workdir       } : {}),
+              ...(deps.files         !== undefined ? { files:         deps.files         } : {}),
+              ...(deps.configPath    !== undefined ? { configPath:    deps.configPath    } : {}),
+              ...(deps.vault         !== undefined ? { vault:         deps.vault         } : {}),
+              ...(head.prompt        !== undefined ? { prompt:        head.prompt        } : {}),
+            })) {
+              emit(s, ev);
+            }
+          });
         } catch (e) {
           emit(s, { type: 'error', error: String(e), traceId: head.traceId });
         } finally {

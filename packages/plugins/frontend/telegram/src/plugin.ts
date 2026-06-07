@@ -3,7 +3,7 @@ import type {
 } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import {
-  createSession, resolveProviderFactory,
+  createSession, resolveProviderFactory, runAs,
 } from '@matatbread/matbot-core';
 import process from 'node:process';
 import { getUpdates, sendChatAction, sendMessage } from './bot.js';
@@ -279,7 +279,9 @@ export const plugin: MatbotPluginSpec = {
             offset = update.update_id + 1;
             const msg = update.message;
             if (msg?.text) {
-              void handleMessage(msg.chat.id, msg.text, msg.from?.first_name || msg.from?.username);
+              // Establish this message's principal at the dispatch entry so the session/settings
+              // store access inside handleMessage runs under it (the turn itself is scoped by pump).
+              void runAs(PRINCIPAL, () => handleMessage(msg.chat.id, msg.text!, msg.from?.first_name || msg.from?.username));
             }
           }
         } catch (e) {

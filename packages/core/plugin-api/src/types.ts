@@ -10,7 +10,9 @@ export type JSONSchema = Record<string, unknown>;
 // ── Principal ───────────────────────────────────────────────────────────────
 
 /** Identity of whatever initiated an operation — a turn, a tool call, a store read/write.
- *  Carried through so an implementation can attribute or test the origin; it grants nothing. */
+ *  Established at each entry point and carried ambiently via the `PrincipalCarrier`
+ *  (`currentPrincipal()` / `runAs()`), so any layer can attribute or test the origin without it
+ *  being threaded through every signature. It grants nothing — policy is the service's concern. */
 export interface Principal {
   id:    string;
   type:  'user' | 'agent' | 'system';
@@ -165,7 +167,6 @@ export interface Session {
 
 export type SystemContextContributor = (ctx: {
   session:   Session;
-  principal: Principal;
   signal:    AbortSignal;
 }) => string | null | Promise<string | null>;
 
@@ -173,7 +174,7 @@ export interface SystemContextRegistry {
   register(contributor: SystemContextContributor, pluginName?: string): void;
   removeByPlugin(pluginName: string): void;
   /** Calls all contributors and joins non-null, non-empty results with double newlines. */
-  build(ctx: { session: Session; principal: Principal; signal: AbortSignal }): Promise<string | null>;
+  build(ctx: { session: Session; signal: AbortSignal }): Promise<string | null>;
 }
 
 // ── Pipeline hooks ────────────────────────────────────────────────────────────
@@ -187,7 +188,6 @@ export type HookPoint =
   | 'after:tool';
 
 export interface RunConfig {
-  principal:  Principal;
   provider:   string;
   persona?:   string;
   sessionId?: string;
@@ -196,7 +196,6 @@ export interface RunConfig {
 
 export interface HookContext {
   session:   Session;
-  principal: Principal;
   config:    RunConfig;
   signal:    AbortSignal;
   abort?:    string;
@@ -338,7 +337,6 @@ export interface PromptFn {
 export interface ToolContext {
   callId:      string;
   session:     Session;
-  principal:   Principal;
   signal:      AbortSignal;
   vault:       Vault;
   workdir?:    string;

@@ -15,10 +15,12 @@ import { appendMessage, createMessage,
          teardownPlugins,
          unloadPlugin as unloadPluginFn,
          getPluginNameForSpecifier,
+         installPrincipalCarrier, enterPrincipal,
          MissingSecretError }              from '@matatbread/matbot-core';
 import type { MatbotServices, PluginSettings, ToolRegistry, Vault, SessionRunner,
               MatbotPlugin, StorageBackend, KnowledgeIndex, PromptFn, FormField } from '@matatbread/matbot-core';
 import { systemPrincipal }                 from '@matatbread/matbot-security';
+import { createAlsPrincipalCarrier }       from './principal-als.js';
 import { EnvFileVault }                     from './env-vault.js';
 import { FilesystemStore }                 from '@matatbread/matbot-storage-filesystem';
 import { FilesystemFileStore }             from '@matatbread/matbot-files-node';
@@ -577,6 +579,13 @@ async function main(): Promise<void> {
   }
 
   // ── Plugin setup ─────────────────────────────────────────────────────────────
+
+  // Install the ambient security carrier before anything that could read it. The node app uses an
+  // AsyncLocalStorage carrier so concurrent turns / frontend requests stay isolated; entering the
+  // system principal here gives the CLI process its identity for any out-of-turn backend access
+  // (frontend handlers and per-turn pumps shadow it with their own principal via runAs).
+  installPrincipalCarrier(createAlsPrincipalCarrier());
+  enterPrincipal(systemPrincipal());
 
   const vault = new EnvFileVault(
     path.join(path.dirname(configPath), '.env'),

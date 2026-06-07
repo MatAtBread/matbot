@@ -3,7 +3,7 @@ import type {
   MatbotPlugin, Principal, Session, Store, ToolRegistry, FileStore, Vault,
   FormField, PromptFn, SessionRunner,
 } from '@matatbread/matbot-core';
-import { createSession, PromptCancelledError } from '@matatbread/matbot-core';
+import { createSession, PromptCancelledError, runAs } from '@matatbread/matbot-core';
 import { sseComment, sseEvent } from './sse-writer.js';
 import { html, js, favicon } from './ui.js';
 
@@ -152,7 +152,11 @@ export function createWebServer(deps: WebServerDeps) {
     if (method === 'OPTIONS') { res.writeHead(204).end(); return; }
 
     try {
-      await handleRequest(req, res, method, url);
+      // Establish the request's security principal at the entry, so every store/file/vault access
+      // made while handling it (not just the submitted turn, which pump scopes separately) can read
+      // it via currentPrincipal(). A real auth layer would derive this from a header instead of the
+      // single placeholder principal.
+      await runAs(DEFAULT_PRINCIPAL, () => handleRequest(req, res, method, url));
     } catch (e) {
       if (!res.headersSent) json(res, 500, { error: String(e) });
       else if (res.writable)  res.end();
@@ -170,7 +174,6 @@ export function createWebServer(deps: WebServerDeps) {
     return {
       callId:     crypto.randomUUID(),
       session:    stubSession,
-      principal:  DEFAULT_PRINCIPAL,
       signal:     ac.signal,
       vault:      deps.vault,
       loadPlugin:   deps.loadPlugin,

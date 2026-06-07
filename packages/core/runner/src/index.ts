@@ -3,6 +3,11 @@ export type * from './types.js';
 // above would otherwise win and strip its value meaning under verbatimModuleSyntax.
 export { MissingSecretError, PromptCancelledError } from '@matatbread/matbot-plugin-api';
 export { applyCreateSecret }  from '@matatbread/matbot-plugin-api';
+// Ambient security principal: interface is a type (carried by `export type *`); these are the values.
+export {
+  installPrincipalCarrier, currentPrincipal, tryCurrentPrincipal,
+  runAs, enterPrincipal, createConstantPrincipalCarrier,
+} from '@matatbread/matbot-plugin-api';
 export * from './session.js';
 export * from './hooks.js';
 export * from './runner.js';
