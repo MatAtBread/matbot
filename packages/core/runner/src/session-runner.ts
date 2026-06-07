@@ -32,12 +32,12 @@ interface QueuedItem {
 }
 
 interface SessionState {
-  // The queue is deliberately a plain array, drained FIFO. Default (queue mode): each submission
-  // becomes its own turn — faithful, and correct when one submission's tools/state are a
-  // precondition for the next (e.g. "add plugin X" then "use X": tools are rebuilt per turn, so X
-  // is only visible to a *later* turn). When a drained item has concatQueue set, the whole pending
-  // batch is merged into one turn instead — cheaper, but it collapses distinct asks and is meant
-  // as a per-frontend policy, not mixed per-call.
+  // The queue is deliberately a plain array, drained FIFO. concatQueue is per-submission: a non-concat
+  // submission is its own turn — faithful, and correct when one submission's tools/state are a
+  // precondition for the next (e.g. "add plugin X" then "use X": tools are rebuilt per turn, so X is
+  // only visible to a *later* turn). A run of consecutive concat submissions merges into one turn —
+  // cheaper, and the common "let me add more context now" case — without collapsing the queued/robo
+  // submissions interleaved among them (see the batch-building loop in pump). Concat and queued mix freely.
   queue:       QueuedItem[];
   running:     boolean;
   ac:          AbortController | undefined;
@@ -131,8 +131,15 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
     s.running = true;
     try {
       while (s.queue.length > 0) {
-        const head  = s.queue[0]!;
-        const batch = head.concatQueue ? s.queue.splice(0) : [s.queue.shift()!];
+        // Per-submission concat: the head always runs; if the head is a concat submission it absorbs
+        // the following submissions while they too are concat, stopping at the first non-concat (a turn
+        // boundary). Net effect: maximal runs of consecutive concat submissions merge into one turn,
+        // while every queued/robo submission stays its own ordered turn — concat and queued mix freely.
+        const head  = s.queue.shift()!;
+        const batch = [head];
+        if (head.concatQueue) {
+          while (s.queue.length > 0 && s.queue[0]!.concatQueue) batch.push(s.queue.shift()!);
+        }
         const content = batch.flatMap(i => i.content);
         s.replay = [];
 
@@ -219,17 +226,20 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
         }
         s = stateFor(opts.sessionId);
         traceId = opts.traceId ?? crypto.randomUUID();
+        const concatQueue = opts.concatQueue ?? false;
         s.queue.push({
           traceId,
           content:     opts.content,
           provider:    opts.provider,
           principal:   opts.principal,
-          concatQueue: opts.concatQueue ?? false,
+          concatQueue,
           ...(opts.prompt !== undefined ? { prompt: opts.prompt } : {}),
         });
         // Announce the submission on the stream as part of the live delta, before its turn's events.
-        // If it runs immediately `queued` is 0 (no wait); otherwise it's how many are ahead.
-        notify(s, { type: 'queued', content: opts.content, queued: aheadOf(s, s.queue.length - 1), traceId });
+        // If it runs immediately `queued` is 0 (no wait); otherwise it's how many are ahead. concatQueue
+        // tells a frontend whether this submission will merge into the running batch (so it can fold the
+        // bubble) or run as its own turn.
+        notify(s, { type: 'queued', content: opts.content, queued: aheadOf(s, s.queue.length - 1), concatQueue, traceId });
         void pump(opts.sessionId, s);
       }
 
@@ -253,7 +263,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
             // Replay the in-progress turn, then the pending queue — the delta region, in order.
             for (const ev of st.replay) sink.push(ev);
             st.queue.forEach((item, i) =>
-              sink.push({ type: 'queued', content: item.content, queued: aheadOf(st, i), traceId: item.traceId }));
+              sink.push({ type: 'queued', content: item.content, queued: aheadOf(st, i), concatQueue: item.concatQueue, traceId: item.traceId }));
             if (opts.signal.aborted) { sink.close(); remove(); }
             else opts.signal.addEventListener('abort', () => { sink.close(); remove(); }, { once: true });
             cached = sink.iterable;

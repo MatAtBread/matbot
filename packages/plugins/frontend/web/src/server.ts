@@ -22,10 +22,11 @@ export interface WebServerDeps {
 }
 
 interface SubmitBody {
-  content:    string | { type: 'form-response'; values: Record<string, string> };
-  provider:   string;       // opaque name passed to deps.resolveProvider
-  sessionId?: string;
-  traceId?:   string;
+  content:      string | { type: 'form-response'; values: Record<string, string> };
+  provider:     string;       // opaque name passed to deps.resolveProvider
+  sessionId?:   string;
+  traceId?:     string;
+  concatQueue?: boolean;      // true (default): merge into the running turn's batch; false: own turn
 }
 
 // Single server-side principal used for all requests until real auth is added.
@@ -272,13 +273,14 @@ export function createWebServer(deps: WebServerDeps) {
 
       try {
         const view = await deps.run.open({
-          sessionId: targetId,
-          signal:    new AbortController().signal, // events aren't consumed on this request
-          content:   contentArr,
-          provider:  body.provider,
-          principal: DEFAULT_PRINCIPAL,
-          prompt:    promptFn,
+          sessionId:   targetId,
+          signal:      new AbortController().signal, // events aren't consumed on this request
+          content:     contentArr,
+          provider:    body.provider,
+          principal:   DEFAULT_PRINCIPAL,
+          prompt:      promptFn,
           traceId,
+          concatQueue: body.concatQueue ?? false, // per-submission; conservative default (own turn) when unspecified
         });
         updateBusy(targetId);
         json(res, 200, { queued: view.queued, traceId: view.traceId });

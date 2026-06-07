@@ -998,7 +998,13 @@ function scrollToMsgIdx(msgIdx) {
   });
 }
 
-function createAssistantWrap(labelText) {
+// anchorAfter: insert the wrap immediately after this node (its turn's user bubble) rather than at
+// the container tail. Live, several submissions can be queued — and their user bubbles drawn — before
+// any response streams; appending each response at the tail would group all bubbles then all
+// responses. Anchoring each turn's wrap to its own user bubble keeps responses interleaved, matching
+// the reload (renderSession) order. A joined in-progress turn has no user bubble (it's in committed
+// history); passing nothing falls back to tail-append, which is correct there.
+function createAssistantWrap(labelText, anchorAfter) {
   messagesEl.querySelector('.empty-state')?.remove();
   const wrap = document.createElement('div');
   wrap.className = 'message assistant';
@@ -1006,7 +1012,11 @@ function createAssistantWrap(labelText) {
   label.className = 'msg-label';
   label.textContent = labelText || 'assistant';
   wrap.appendChild(label);
-  messagesEl.appendChild(wrap);
+  if (anchorAfter && anchorAfter.parentNode === messagesEl) {
+    messagesEl.insertBefore(wrap, anchorAfter.nextSibling);
+  } else {
+    messagesEl.appendChild(wrap);
+  }
   return wrap;
 }
 
@@ -1277,17 +1287,50 @@ let streamSessionId = null;       // session the persistent stream is bound to
 let streamAc        = null;       // AbortController for the current stream
 const turnQueues    = new Map();  // traceId -> { items, wake, done, started }
 
+// Concat policy (the runner merges submissions queued behind a running turn into one turn, answered
+// under the first/head submission's traceId). Mirror it in the UI: a submission that arrives while an
+// earlier one is still queued-and-unanswered folds its text into that head bubble instead of getting
+// its own turn — whose traceId the runner dropped, so it would never receive a response. activeBatchHead
+// is the head's traceId; it resets the moment the head turn produces real output (its response has
+// started, so the next submission begins a fresh batch). Tracked synchronously here — not via the DOM —
+// so the refresh-replay, which delivers all pending `queued` events in one synchronous batch, folds
+// correctly without racing the async bubble creation in renderTurn.
+let activeBatchHead = null;   // { traceId, concat } | null — the open batch a follower may fold into
+const foldedTraces  = new Set();
+
 function queueFor(traceId) {
   let q = turnQueues.get(traceId);
   if (!q) { q = { items: [], wake: null, done: false, started: false }; turnQueues.set(traceId, q); }
   return q;
 }
 
+function wake(q) { if (q.wake) { const w = q.wake; q.wake = null; w(); } }
+
 function pushTurnEvent(ev) {
+  if (foldedTraces.has(ev.traceId)) return;   // a folded submission's later events (incl. cancelled) are noise
+
+  if (ev.type === 'queued') {
+    // Fold a follower into the head only when BOTH the head and this submission are concat — mirroring
+    // the runner, which absorbs consecutive concat submissions into the head's turn and treats any
+    // non-concat (Ctrl+Enter / robo) submission as a boundary that runs as its own turn.
+    if (activeBatchHead !== null && activeBatchHead.concat && ev.concatQueue === true && ev.traceId !== activeBatchHead.traceId) {
+      const headQ = turnQueues.get(activeBatchHead.traceId);
+      if (headQ && !headQ.done) {
+        headQ.items.push({ ...ev, type: 'queued-append' });
+        wake(headQ);
+        foldedTraces.add(ev.traceId);
+        return;
+      }
+    }
+    activeBatchHead = { traceId: ev.traceId, concat: ev.concatQueue === true };
+  } else if (activeBatchHead !== null && ev.traceId === activeBatchHead.traceId) {
+    activeBatchHead = null;   // head turn has started responding → next submission opens a new batch
+  }
+
   const q = queueFor(ev.traceId);
   q.items.push(ev);
   if (ev.type === 'done' || ev.type === 'aborted' || ev.type === 'error' || ev.type === 'cancelled') q.done = true;
-  if (q.wake) { const w = q.wake; q.wake = null; w(); }
+  wake(q);
   // First time we see this traceId, spin up its renderer. Every turn — ours or one we joined —
   // is created here from the stream; there is no optimistic/pre-registered path to race against.
   if (!q.started) { q.started = true; void renderTurn(streamSessionId, ev.traceId); }
@@ -1307,6 +1350,8 @@ async function connectSessionStream(sid) {
   streamAc = new AbortController();
   streamSessionId = sid;
   turnQueues.clear();
+  activeBatchHead = null;
+  foldedTraces.clear();
   const ac = streamAc;
   while (!ac.signal.aborted && sid === currentSessionId) {
     try {
@@ -1334,18 +1379,24 @@ async function connectSessionStream(sid) {
 
 // Read the input box and submit it. The single entry point for *typed* messages; canned/programmatic
 // messages (plugin install banners, etc.) call submit() directly so they aren't gated by the input.
-async function sendMessage() {
+// concat = true (Shift+Enter / send button): fold into the running turn's batch — fastest way to
+// add more context. concat = false (Ctrl+Enter): a distinct queued turn, run in order — use when the
+// next ask depends on this one's tools/state (e.g. install a plugin, then use it).
+async function sendMessage(concat = true) {
   const content = inputEl.value.trim();
   if (!content) return;
   inputEl.value = '';
   inputEl.style.height = 'auto';
-  await submit(content);
+  await submit(content, concat);
 }
 
 // Submit typed content to the current session, fire-and-forget. The server enqueues it and the
 // turn (its 'queued' user bubble + response) renders entirely over the persistent stream — there's
 // no optimistic rendering here, so there's a single source of truth.
-async function submit(content) {
+// concat defaults false: robo/programmatic submits (plugin install/remove banners, etc.) must each be
+// their own ordered turn — one's tools/state are a precondition for the next ("add plugin X" then "use
+// X", X only visible to a later turn). The human path passes its choice explicitly via sendMessage.
+async function submit(content, concat = false) {
   const provider = providerSel.value;
   if (!content || !provider) return;
   if (!currentSessionId) {
@@ -1355,21 +1406,21 @@ async function submit(content) {
   // Ensure the persistent event stream is bound to this session before we enqueue, so the turn's
   // events have a consumer (covers the just-created session and the "New session" button path).
   if (streamSessionId !== currentSessionId) connectSessionStream(currentSessionId);
-  await postSubmit(currentSessionId, content);
+  await postSubmit(currentSessionId, content, concat);
 }
 
 // POST a submission and return. The user bubble + response arrive on the stream as a 'queued' event
 // then turn events. Only *failures* are surfaced here (the stream can't, since no turn was created):
 // a timeout (incl. the socket-exhaustion stall that never errors on its own), network error, or
 // non-2xx is shown inline so the message is never silently lost.
-async function postSubmit(sid, content) {
+async function postSubmit(sid, content, concat = false) {
   const provider = providerSel.value;
   if (!provider) return;
   try {
     const res = await fetch('/sessions/' + sid + '/submit', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ content, provider }),
+      body: JSON.stringify({ content, provider, concatQueue: concat }),
       signal: AbortSignal.timeout(20000),
     });
     if (!res.ok) {
@@ -1397,6 +1448,7 @@ function showSubmitError(content, msg) {
 // on connect) gets no 'queued' — its user message is already in committed/stored history.
 async function renderTurn(sid, traceId) {
   let userBubble = null;   // set by the 'queued' event when this turn is a fresh submission
+  let userBubbleText = ''; // raw markdown of the bubble; grows as concat'd submissions fold in
   let turnWrap   = null;   // assistant wrap, created lazily
   let loadingEl  = null;
   let started    = false;
@@ -1407,7 +1459,7 @@ async function renderTurn(sid, traceId) {
     if (started) return;
     started = true;
     if (userBubble) userBubble.classList.remove('pending');
-    turnWrap = createAssistantWrap('assistant');
+    turnWrap = createAssistantWrap('assistant', userBubble);
     loadingEl = document.createElement('div');
     loadingEl.className = 'msg-loading';
     turnWrap.appendChild(loadingEl);
@@ -1470,9 +1522,22 @@ async function renderTurn(sid, traceId) {
           // === 0 ⇒ it runs immediately → show loading dots. A content event later promotes it.
           if (!userBubble) {
             const text = (ev.content ?? []).filter(c => c.type === 'text').map(c => c.text).join('\n');
-            if (text) userBubble = appendUserBubble(text, undefined, ev.queued > 0);
+            if (text) { userBubble = appendUserBubble(text, undefined, ev.queued > 0); userBubbleText = text; }
           }
           if (ev.queued === 0) markStarted();
+          break;
+        }
+
+        case 'queued-append': {
+          // A later submission the runner folded into this turn (concat policy). Grow the head bubble
+          // so the UI matches the single merged user message that gets persisted. Joined with '\n' to
+          // match how renderSession concatenates a multi-block user message on reload.
+          const text = (ev.content ?? []).filter(c => c.type === 'text').map(c => c.text).join('\n');
+          if (userBubble && text) {
+            userBubbleText = userBubbleText ? `${userBubbleText}\n${text}` : text;
+            const inner = userBubble.querySelector('.md-body');
+            if (inner) inner.innerHTML = md(userBubbleText);
+          }
           break;
         }
 
@@ -1747,7 +1812,11 @@ document.getElementById('sessions-enable-btn').onclick = () => {
 };
 
 inputEl.addEventListener('keydown', e => {
-  if (e.key === 'Enter' && e.shiftKey) { e.preventDefault(); sendMessage(); }
+  if (e.key !== 'Enter') return;
+  // Ctrl/Cmd+Enter → queued (own turn, run in order). Shift+Enter → concat (fold into the running
+  // batch). Plain Enter keeps the textarea's newline behaviour.
+  if (e.ctrlKey || e.metaKey) { e.preventDefault(); sendMessage(false); }
+  else if (e.shiftKey)        { e.preventDefault(); sendMessage(true); }
 });
 
 inputEl.addEventListener('input', () => {
