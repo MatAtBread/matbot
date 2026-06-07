@@ -12,3 +12,9 @@ matbot.yaml
 matbot.*.yaml
 # macOS
 .DS_Store
+
+# The web bundle is a shippable, self-contained artifact — keep it tracked even
+# though dist/ is ignored everywhere else. (The directory must be re-included
+# before the file, per gitignore precedence rules.)
+!apps/web-bundle/dist/
+!apps/web-bundle/dist/matbot.html
