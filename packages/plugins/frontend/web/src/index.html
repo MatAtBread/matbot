@@ -1137,6 +1137,8 @@
     }
     .prompt-row { display: flex; gap: 8px; }
     .prompt-input {
+      resize: vertical;
+      min-height: 2.5em;
       flex: 1;
       border: 1px solid #d1d5db;
       border-radius: 6px;
@@ -1160,7 +1162,20 @@
     }
     .prompt-submit:hover    { background: #374151; }
     .prompt-submit:disabled { background: #d1d5db; cursor: not-allowed; }
-    .prompt-choices { display: flex; gap: 8px; }
+    .prompt-choices {
+      container-type: inline-size;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    @container (max-width: 300px) {
+      .prompt-choices {
+        flex-direction: column;
+      }
+      .prompt-choice-btn {
+        width: 100%;
+      }
+    }
     .prompt-choice-btn {
       padding: 6px 16px;
       border-radius: 6px;
