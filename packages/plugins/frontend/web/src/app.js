@@ -1684,9 +1684,9 @@ async function renderTurn(sid, traceId) {
                   row.querySelectorAll('button').forEach(b => { b.disabled = true; });
                   const orow = document.createElement('div');
                   orow.className = 'prompt-row';
-                  const inp = document.createElement('input');
-                  inp.type = 'text';
+                  const inp = document.createElement('textarea');
                   inp.className = 'prompt-input';
+                  inp.rows = 2;
                   const sbtn = document.createElement('button');
                   sbtn.type = 'button';
                   sbtn.className = 'prompt-submit';
@@ -1698,7 +1698,7 @@ async function renderTurn(sid, traceId) {
                     resolve({ answer: v });
                   };
                   sbtn.onclick = submitOther;
-                  inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submitOther(); } });
+                  inp.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submitOther(); } });
                   orow.appendChild(inp);
                   orow.appendChild(sbtn);
                   block.appendChild(orow);
