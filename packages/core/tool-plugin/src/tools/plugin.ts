@@ -293,7 +293,9 @@ const executor = {
         yield { type: 'result', value: { message: `No value entered; "${key.trim()}" was not stored.` } };
         return;
       }
-      await ctx.vault.createSecret(key.trim(), value.trim());
+      // writeSecret, not createSecret: this answers a MissingSecretError naming an exact key,
+      // so the value must land under that name verbatim — no reference/dedup canonicalisation.
+      await ctx.vault.writeSecret(key.trim(), value.trim());
       yield { type: 'result', value: { message: `Secret "${key.trim()}" stored in the vault.` } };
       return;
     }

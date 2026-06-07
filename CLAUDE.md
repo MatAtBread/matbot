@@ -27,7 +27,7 @@ the browser. Use web-platform APIs: `fetch`, `crypto.randomUUID()`, `AbortContro
 Node-only code lives in packages named `*-node` or in `apps/`.
 
 Also avoid `process.env`: it is an anti-pattern in matbot. Secrets and key substitution
-go through the `Vault` (`${env:NAME}` / `${secret:name}` placeholders resolved at runtime);
+go through the `Vault` (`${NAME}` placeholders resolved at runtime against one flat namespace);
 all other per-install configuration goes through plugin `Settings`. Both are abstractions
 with swappable backends (`.env` is merely the default node `Vault`; the browser build uses
 WebCrypto + browser storage and has no `.env` or `matbot.yaml`), so a plugin reaching for
@@ -57,7 +57,7 @@ packages/
     runner/        — agentic loop, hook dispatch, plugin loader (@matatbread/matbot-core)
     plugin-api/    — MatbotPlugin, MatbotServices, all shared types (@matatbread/matbot-plugin-api)
     config/        — YAML loading, .env parsing
-    security/      — VaultImpl, principal (origin of operations); resolves ${env:} and ${secret:} placeholders
+    security/      — VaultImpl, principal (origin of operations); resolves ${NAME} placeholders
     knowledge/     — LookupKnowledgeIndex (default in-memory KnowledgeIndex implementation)
     storage/
       _base/       — filter/sort engine shared by all Store implementations
@@ -113,14 +113,16 @@ providers:
     endpoint: https://api.anthropic.com
     model: claude-sonnet-4-6
     credentials:
-      apiKey: ${env:ANTHROPIC_API_KEY}
+      apiKey: ${ANTHROPIC_API_KEY}
     parameters:
       maxTokens: 4096
 ```
 
 - Prefer duplication over references — five similar provider blocks is fine
-- Both `${env:VAR}` and `${secret:name}` are resolved at runtime by `VaultImpl`; the YAML loader
-  leaves placeholders intact
+- `${NAME}` placeholders are resolved at runtime by the `Vault`; the YAML loader leaves them intact.
+  There is no env/secret distinction — a name resolves against one flat namespace (`.env` is just
+  the default node backend). `createSecret` returns the canonical key name to reference (it may
+  differ from the requested name — see the `Vault` interface); `writeSecret` stores verbatim
 - Credentials never appear in source code
 - `module` is the npm package name or relative path of the provider plugin; `endpoint` overrides
   the base URL

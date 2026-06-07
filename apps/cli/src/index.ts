@@ -134,11 +134,11 @@ async function resolveCredentialsInteractive(
       if (!(e instanceof MissingSecretError)) throw e;
       const rl = createInterface({ input: process.stdin, output: process.stderr });
       try {
-        for (const ref of e.missingKeys) {
-          const name  = ref.replace(/^(env|secret):/, '');
+        for (const name of e.missingKeys) {
           const value = await rl.question(`Secret required — ${name}: `);
           if (!value.trim()) throw new Error(`No value provided for required secret "${name}".`);
-          await vault.createSecret(name, value.trim());
+          // writeSecret, not createSecret: the placeholder named this exact key, so store verbatim.
+          await vault.writeSecret(name, value.trim());
         }
       } finally {
         rl.close();
@@ -472,7 +472,7 @@ async function runSetupWizard(configPath: string): Promise<import('./config.js')
       `    endpoint: ${endpoint}`,
       `    model: ${model}`,
       `    credentials:`,
-      `      apiKey: \${env:${envVarName}}`,
+      `      apiKey: \${${envVarName}}`,
     ].join('\n') + '\n';
 
     await mkdir(configDir, { recursive: true });

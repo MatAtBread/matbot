@@ -123,7 +123,7 @@ function buildProviderBlock(opts: {
   ];
   if (opts.envVarName) {
     lines.push(`    credentials:`);
-    lines.push(`      ${opts.credentialKey ?? 'apiKey'}: \${env:${opts.envVarName}}`);
+    lines.push(`      ${opts.credentialKey ?? 'apiKey'}: \${${opts.envVarName}}`);
   }
   if (opts.parameters && Object.keys(opts.parameters).length > 0) {
     lines.push(`    parameters:`);
@@ -289,9 +289,10 @@ function makeExecutor(liveProviders: Map<string, ProviderConfig>, pluginNameToOr
           const answer  = await ctx.prompt(`${credKey} for provider "${name}" (leave blank if none required):`, '');
           if (answer.trim()) {
             const varName = credEnvVarName(name);
-            await ctx.vault.createSecret(varName, answer.trim());
-            yield { type: 'stdout', chunk: `API key stored in vault as ${varName}.\n` };
-            envVarName = varName;
+            // createSecret may return a different name (an existing key the value already lives
+            // under, or a key name the user typed by mistake); reference what it returns.
+            envVarName = await ctx.vault.createSecret(varName, answer.trim());
+            yield { type: 'stdout', chunk: `API key stored in vault as ${envVarName}.\n` };
           }
         }
 
@@ -337,7 +338,7 @@ function makeExecutor(liveProviders: Map<string, ProviderConfig>, pluginNameToOr
           model,
           ...(endpoint   !== undefined ? { endpoint } : {}),
           ...(envVarName !== undefined
-            ? { credentials: { [credentialKey ?? 'apiKey']: `\${env:${envVarName}}` } }
+            ? { credentials: { [credentialKey ?? 'apiKey']: `\${${envVarName}}` } }
             : {}),
           ...(parameters !== undefined ? { parameters } : {}),
         });

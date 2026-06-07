@@ -2,6 +2,7 @@ export type * from './types.js';
 // Explicit value re-export: MissingSecretError is a class, so the `export type *`
 // above would otherwise win and strip its value meaning under verbatimModuleSyntax.
 export { MissingSecretError } from '@matatbread/matbot-plugin-api';
+export { applyCreateSecret }  from '@matatbread/matbot-plugin-api';
 export * from './session.js';
 export * from './hooks.js';
 export * from './runner.js';

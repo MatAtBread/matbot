@@ -39,6 +39,8 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
   }) as PromptFn);
   const vault: Vault = opts.vault ?? {
     async createSecret() { throw new Error('No vault configured'); },
+    async writeSecret()  { throw new Error('No vault configured'); },
+    hasKey() { return false; },
     async resolve(ref: string) { return ref; },
     scrub(text: string) { return text; },
   };

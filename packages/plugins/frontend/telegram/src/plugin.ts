@@ -152,7 +152,7 @@ export const plugin: MatbotPluginSpec = {
   async setup(services: MatbotServices) {
     let botToken: string;
     try {
-      botToken = await services.vault.resolve('${env:TELEGRAM_API_KEY}');
+      botToken = await services.vault.resolve('${TELEGRAM_API_KEY}');
     } catch {
       console.warn('[frontend-telegram] TELEGRAM_API_KEY not set; skipping');
       return;

@@ -128,8 +128,8 @@ export class PersistBGEKnowledgeIndex implements KnowledgeIndex {
     }
 
     // Step 3: BGE reranker via Cloudflare Workers AI
-    const apiKey    = await this.vault.resolve('${env:SKILL_RANK_API_KEY}').catch(ifMissing);
-    const accountId = await this.vault.resolve('${env:CLOUDFLARE_ACCOUNT_ID}').catch(ifMissing);
+    const apiKey    = await this.vault.resolve('${SKILL_RANK_API_KEY}').catch(ifMissing);
+    const accountId = await this.vault.resolve('${CLOUDFLARE_ACCOUNT_ID}').catch(ifMissing);
     const rerankPool = scored.length > 0 ? scored.map(s => s.entry) : candidatePool;
 
     if (!apiKey || !accountId || rerankPool.length === 0) {
