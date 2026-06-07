@@ -283,10 +283,16 @@ export function createWebServer(deps: WebServerDeps) {
           }));
         })) as PromptFn;
 
+      // The first submit of a busy period anchors the server-owned busy tracker on its OWN view
+      // (claimed synchronously here, before any await, so two near-simultaneous submits can't both
+      // become trackers). Concat/queued submits arriving mid-turn reuse it and don't tap their events.
+      const isTracker = !busyTrackers.has(targetId);
+      if (isTracker) busyTrackers.add(targetId);
+      const trackAc = new AbortController();
       try {
         const view = await deps.run.open({
           sessionId:   targetId,
-          signal:      new AbortController().signal, // events aren't consumed on this request
+          signal:      isTracker ? trackAc.signal : new AbortController().signal,
           content:     contentArr,
           provider:    body.provider,
           principal:   DEFAULT_PRINCIPAL,
@@ -297,34 +303,30 @@ export function createWebServer(deps: WebServerDeps) {
         updateBusy(targetId);
         json(res, 200, { queued: view.queued, traceId: view.traceId });
 
-        // Server-owned busy tracker. The idle (busy:false) broadcast otherwise rides on a client's
-        // GET /sessions/:id/events consumer (below); if no client is draining this session when its
-        // turn ends, busyState stays stuck true and the sidebar dot pulses forever. So whoever turned
-        // busy ON owns turning it OFF: drain a dedicated read-view purely to drive updateBusy until the
-        // runner reports idle, then tear down. One tracker per busy period — concat/queued submits that
-        // arrive while it's live reuse it — so cost is bounded by concurrent running turns, nothing on
-        // idle sessions.
-        if (!busyTrackers.has(targetId)) {
-          busyTrackers.add(targetId);
-          const trackAc = new AbortController();
-          const trackView = await deps.run.open({ sessionId: targetId, signal: trackAc.signal });
+        // Server-owned busy tracker. The busy:false broadcast requires *someone* draining this
+        // session's stream when the turn ends — but a client's GET /sessions/:id/events consumer may
+        // not be attached (user switched away). So whoever turns busy ON owns turning it OFF: drain
+        // this submission's own view until the runner's deterministic `idle` event, driving updateBusy.
+        // The view was subscribed (the `events` getter) before pump can run, so it can't miss even a
+        // fast/erroring turn; one tracker per busy period, so cost is bounded by concurrent running
+        // turns, nothing on idle sessions.
+        if (isTracker) {
           void (async () => {
             try {
-              for await (const _ev of trackView.events) {
+              for await (const ev of view.events) {
                 updateBusy(targetId);
-                // The terminal event is consumed while pump's `running` is still true; it flips to
-                // false in pump's finally on a later microtask. Re-check then so we observe idle and
-                // emit the false transition (mirrors the client consumer's deferred re-check).
-                queueMicrotask(() => {
-                  updateBusy(targetId);
-                  if (!deps.run.status(targetId).busy) trackAc.abort();
-                });
+                // Tear down only on a *genuine* idle. `idle` fires after `running` flips false, so
+                // status() is authoritative here: if a back-to-back submit has already re-armed the
+                // session (running again, or freshly queued), keep tracking — this same view stays
+                // subscribed across pump restarts and will see the next idle.
+                if (ev.type === 'idle' && !deps.run.status(targetId).busy) break;
               }
             } catch { /* stream torn down */ }
-            finally { busyTrackers.delete(targetId); }
+            finally { busyTrackers.delete(targetId); trackAc.abort(); }
           })();
         }
       } catch (e) {
+        if (isTracker) busyTrackers.delete(targetId);
         json(res, 500, { error: String(e) });
       }
       return;
@@ -366,13 +368,13 @@ export function createWebServer(deps: WebServerDeps) {
         try {
           for await (const ev of view.events) {
             if (!res.writable) break;
+            // `idle` is the runner's busy→idle lifecycle signal (session-runner pump): it arrives
+            // *after* `running` flips false, so updateBusy reads an authoritative idle with no
+            // microtask race. It's status bookkeeping, not turn content — don't forward it to the
+            // client (app.js has no case for it).
+            if (ev.type === 'idle') { updateBusy(sId); continue; }
             res.write(sseEvent(ev.type, ev));
             updateBusy(sId);
-            // A terminal event (done/aborted/cancelled) is consumed while pump's `running` flag is
-            // still true — it flips to false in pump's finally, on a microtask queued *after* this
-            // one. Re-check on a deferred microtask so the idle transition (and the Stop button
-            // hiding) isn't missed. Reads authoritative status, so a queued follow-up keeps it busy.
-            queueMicrotask(() => updateBusy(sId));
           }
         } catch { /* stream torn down */ }
       })();

@@ -214,6 +214,10 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
     } finally {
       s.running = false;
       s.replay  = [];
+      // Deterministic busy→idle signal: running is now false, so any subscriber draining the stream
+      // (a frontend's status tracker) reads an authoritative idle the moment it sees this — no racing
+      // the microtask on which `running` flipped. Not in `replay` (transient lifecycle, not history).
+      notify(s, { type: 'idle', sessionId: id });
       maybeCleanup(id, s);
     }
   };

@@ -496,6 +496,10 @@ export type PipelineEvent =
   | { type: 'done';           session: Session;       traceId: string }
   | { type: 'aborted';        reason: string; session: Session; traceId: string }
   | { type: 'cancelled';      sessionId: string;      traceId: string }
+  // Session-level (not turn-level, hence no traceId): the runner has fully drained its queue and is
+  // now idle. Emitted once per busy period, *after* `running` flips false, so a consumer can map it
+  // to an authoritative busy→idle transition without racing the internal state flip.
+  | { type: 'idle';           sessionId: string }
   // A queued (not-yet-running) submission, carried on the stream so a frontend renders it as part
   // of the live "delta" (everything after the last committed message), never from stored state.
   // `queued` is the number of submissions ahead of it (0 ⇒ about to run). Emitted live on enqueue
