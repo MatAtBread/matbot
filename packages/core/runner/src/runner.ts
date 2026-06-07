@@ -87,7 +87,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
     // Respect an abort that arrived between turns (e.g. during tool execution).
     if (signal.aborted) {
       await store.set(session.id, session);
-      yield { type: 'aborted', reason: 'user-abort', session, traceId };
+      yield { type: 'aborted', reason: typeof signal.reason === 'string' ? signal.reason : 'user-abort', session, traceId };
       return;
     }
 
@@ -141,7 +141,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
           }));
         }
         await store.set(session.id, session);
-        yield { type: 'aborted', reason: 'user-abort', session, traceId };
+        yield { type: 'aborted', reason: typeof signal.reason === 'string' ? signal.reason : 'user-abort', session, traceId };
         return;
       }
       yield { type: 'error', error: String(e) + (('cause' in e && e.cause) ? ' ('+String(e.cause)+')' : '' ), traceId };

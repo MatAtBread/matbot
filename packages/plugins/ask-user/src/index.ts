@@ -48,12 +48,14 @@ export const askUserTool: Tool = {
 ## Input contract
 \`\`\`typescript
 interface FormField {
-  name:      string;   // machine-readable key for the response
-  label:     string;   // the question text shown to the user
-  type:      'text' | 'password' | 'select' | 'confirm';
-  options?:  string[]; // required when type is 'select' — mutually exclusive choices
-  default?:  string;   // pre-filled or pre-selected value
-  required?: boolean;  // if true, user must supply a non-empty value
+  name:        string;   // machine-readable key for the response
+  label:       string;   // the question text shown to the user
+  type:        'text' | 'password' | 'select' | 'confirm';
+  options?:    string[]; // required when type is 'select' — mutually exclusive choices
+  allowOther?: boolean;  // select-only: also let the user type a free-form answer
+  default?:    string;   // pre-filled or pre-selected value
+  required?:   boolean;  // if true, user must supply a non-empty value
+  cancelable?: boolean;  // default true; set false to forbid cancelling (see below)
 }
 \`\`\`
 
@@ -61,8 +63,14 @@ interface FormField {
 
 - **text** — free-form text input. Use for open-ended questions.
 - **password** — masked text input. Use for secrets, API keys, tokens (the value is not displayed).
-- **select** — mutually exclusive pick from \`options\`. Use for multiple-choice questions. The frontend renders options as buttons or a dropdown.
+- **select** — mutually exclusive pick from \`options\`. Use for multiple-choice questions. The frontend renders options as buttons or a dropdown. Set \`allowOther: true\` to also offer a free-text answer when your options may not cover every case.
 - **confirm** — yes/no confirmation. Use for irreversible actions. The frontend renders as a confirm/cancel dialog. Returns "Yes" or "No".
+
+## Declining vs cancelling
+
+These are different and you should design for the first one. If the user might legitimately say "no thanks", "skip", or "I don't know", offer that as one of your \`options\` (or a \`confirm\`) — you get the choice back as a normal answer and branch on it. Only omit such an option when an answer is genuinely required (e.g. a password with no fallback).
+
+\`cancelable\` is unrelated: it controls whether the frontend shows a "give up entirely" affordance. Cancelling is not an answer — it abandons the whole operation and returns control to the user, and this tool reports it as an error. Leave \`cancelable\` at its default (true); set it false only for a prompt the user must not be able to escape.
 
 ## Examples
 
@@ -111,9 +119,11 @@ interface FormField {
       name:     { type: 'string', description: 'Machine-readable key for the response value.' },
       label:    { type: 'string', description: 'The question text shown to the user.' },
       type:     { type: 'string', enum: ['text', 'password', 'select', 'confirm'], description: 'Control type: text (free text), password (masked), select (multiple choice from options), confirm (yes/no).' },
-      options:  { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: MAX_OPTIONS, description: 'Mutually exclusive options. Required when type is "select".' },
-      default:  { type: 'string', description: 'Pre-filled or pre-selected value.' },
-      required: { type: 'boolean', description: 'If true, user must supply a non-empty value.' },
+      options:    { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: MAX_OPTIONS, description: 'Mutually exclusive options. Required when type is "select".' },
+      allowOther: { type: 'boolean', description: 'select-only: also let the user type a free-form answer alongside the options.' },
+      default:    { type: 'string', description: 'Pre-filled or pre-selected value.' },
+      required:   { type: 'boolean', description: 'If true, user must supply a non-empty value.' },
+      cancelable: { type: 'boolean', description: 'Default true. Set false to forbid cancelling — a graceful "decline" should be an option/confirm value, not a cancel.' },
     },
   },
   executor,

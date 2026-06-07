@@ -3,7 +3,7 @@ import type {
   MatbotPlugin, Principal, Session, Store, ToolRegistry, FileStore, Vault,
   FormField, PromptFn, SessionRunner,
 } from '@matatbread/matbot-core';
-import { createSession } from '@matatbread/matbot-core';
+import { createSession, PromptCancelledError } from '@matatbread/matbot-core';
 import { sseComment, sseEvent } from './sse-writer.js';
 import { html, js, favicon } from './ui.js';
 
@@ -94,7 +94,9 @@ export function createWebServer(deps: WebServerDeps) {
   // ~6-socket-per-host limit, which otherwise starved both the `queued` signal and POST /prompt.
   const sessionConns = new Map<string, Set<ServerResponse>>();
   const busyState    = new Map<string, boolean>();                     // last-broadcast busy per session
-  const pendingPrompts = new Map<string, (answer: string) => void>(); // session ID → prompt resolver
+  // session ID → the parked prompt's settlers. `resolve` delivers an answer (applying the default
+  // fallback); `cancel` rejects it with PromptCancelledError — the "give up" path.
+  const pendingPrompts = new Map<string, { resolve: (answer: string) => void; cancel: () => void }>();
 
   // Clients subscribed to server-sent session status events (busy/idle).
   const statusListeners = new Set<ServerResponse>();
@@ -256,11 +258,11 @@ export function createWebServer(deps: WebServerDeps) {
       // Answered via POST /sessions/:id/prompt. (Only one prompt is outstanding per session, since
       // turns are serialised.)
       const promptFn = ((p: string | FormField, defaultValue?: string): Promise<string> =>
-        new Promise(resolve => {
+        new Promise<string>((resolve, reject) => {
           const def = typeof p === 'string' ? defaultValue : p.default;
-          pendingPrompts.set(targetId, answer => {
-            pendingPrompts.delete(targetId);
-            resolve(answer || def || '');
+          pendingPrompts.set(targetId, {
+            resolve: answer => { pendingPrompts.delete(targetId); resolve(answer || def || ''); },
+            cancel:  ()     => { pendingPrompts.delete(targetId); reject(new PromptCancelledError()); },
           });
           sendToSession(targetId, sseEvent('prompt', {
             type: 'prompt',
@@ -316,7 +318,7 @@ export function createWebServer(deps: WebServerDeps) {
             // No viewers left: release any pending prompt so a turn parked on ctx.prompt() doesn't
             // hang awaiting an answer that can never arrive.
             const r = pendingPrompts.get(sId);
-            if (r) { pendingPrompts.delete(sId); r(''); }
+            if (r) { pendingPrompts.delete(sId); r.resolve(''); }
           }
         }
       });
@@ -328,6 +330,11 @@ export function createWebServer(deps: WebServerDeps) {
             if (!res.writable) break;
             res.write(sseEvent(ev.type, ev));
             updateBusy(sId);
+            // A terminal event (done/aborted/cancelled) is consumed while pump's `running` flag is
+            // still true — it flips to false in pump's finally, on a microtask queued *after* this
+            // one. Re-check on a deferred microtask so the idle transition (and the Stop button
+            // hiding) isn't missed. Reads authoritative status, so a queued follow-up keeps it busy.
+            queueMicrotask(() => updateBusy(sId));
           }
         } catch { /* stream torn down */ }
       })();
@@ -341,7 +348,7 @@ export function createWebServer(deps: WebServerDeps) {
       // Release any pending prompt first so a turn parked on ctx.prompt() can observe the abort
       // rather than hang, then drop the queue + abort the running turn.
       const r = pendingPrompts.get(sId);
-      if (r) { pendingPrompts.delete(sId); r(''); }
+      if (r) { pendingPrompts.delete(sId); r.resolve(''); }
       deps.run.abort(sId);
       updateBusy(sId);
       json(res, 200, { ok: true });
@@ -435,12 +442,19 @@ export function createWebServer(deps: WebServerDeps) {
     const promptMatch = /^\/sessions\/([^/]+)\/prompt$/.exec(url);
     if (method === 'POST' && promptMatch) {
       const sId = promptMatch[1]!;
-      let body: { answer: string };
-      try { body = JSON.parse(await readBody(req)) as { answer: string }; }
+      let body: { answer?: string; cancel?: boolean };
+      try { body = JSON.parse(await readBody(req)) as { answer?: string; cancel?: boolean }; }
       catch { json(res, 400, { error: 'Invalid JSON' }); return; }
-      const resolver = pendingPrompts.get(sId);
-      if (!resolver) { json(res, 409, { error: 'No pending prompt for this session' }); return; }
-      resolver(body.answer ?? '');
+      const entry = pendingPrompts.get(sId);
+      if (!entry) { json(res, 409, { error: 'No pending prompt for this session' }); return; }
+      if (body.cancel) {
+        // Give up: reject the prompt (the tool closes its call with an error result) and abandon the
+        // turn without disturbing the queue — pump advances to the next submission or idles.
+        entry.cancel();
+        deps.run.cancelTurn(sId);
+      } else {
+        entry.resolve(body.answer ?? '');
+      }
       json(res, 200, { ok: true });
       return;
     }
@@ -519,7 +533,7 @@ export function createWebServer(deps: WebServerDeps) {
     fileEventListeners.clear();
 
     // Resolve all pending prompts so callers don't hang.
-    for (const resolver of pendingPrompts.values()) resolver('');
+    for (const entry of pendingPrompts.values()) entry.resolve('');
     pendingPrompts.clear();
 
     await new Promise<void>((resolve) =>

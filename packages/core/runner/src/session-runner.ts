@@ -280,7 +280,15 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
       for (const item of s.queue.splice(0)) {
         emit(s, { type: 'cancelled', sessionId, traceId: item.traceId });
       }
-      s.ac?.abort();
+      s.ac?.abort('user-abort');
+    },
+
+    cancelTurn(sessionId: string): void {
+      const s = states.get(sessionId);
+      if (s === undefined) return;
+      // Deliberately no queue splice: cancel abandons only the running turn; queued submissions are
+      // separate operations the user lined up and survive into the next `pump` iteration.
+      s.ac?.abort('user-cancel');
     },
 
     status(sessionId: string): { busy: boolean; running: boolean; queued: number } {

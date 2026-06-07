@@ -12,3 +12,15 @@ export class MissingSecretError extends Error {
     this.missingKeys = missingKeys;
   }
 }
+
+/**
+ * Thrown by a `PromptFn` implementation when the user cancels — the "give up" path, not a graceful
+ * decline. Callers awaiting `ctx.prompt()` need not branch on it: the surrounding try/catch turns
+ * it into a tool error that closes the tool call, while the host separately abandons the turn.
+ */
+export class PromptCancelledError extends Error {
+  constructor(message = 'User cancelled — cannot proceed.') {
+    super(message);
+    this.name = 'PromptCancelledError';
+  }
+}

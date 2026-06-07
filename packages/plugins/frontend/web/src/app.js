@@ -1636,9 +1636,24 @@ async function renderTurn(sid, traceId) {
             : (choiceMatch ? rawQ.slice(0, choiceMatch.index).trimEnd() : rawQ);
           const defaultValue = field ? field.default : ev.defaultValue;
           const inputType    = field && field.type === 'password' ? 'password' : 'text';
-          const answer = await new Promise(resolve => {
+          // Cancel is the "give up" path (default on); only an explicit cancelable:false suppresses it.
+          const cancelable   = !(field && field.cancelable === false);
+          const allowOther   = !!(field && field.type === 'select' && field.allowOther);
+          const result = await new Promise(resolve => {
             const block = document.createElement('div');
             block.className = 'prompt-block';
+            // Settle the dialog: disable every control (incl. the cancel ×) once answered or cancelled.
+            const done = () => block.querySelectorAll('button, input').forEach(el => { el.disabled = true; });
+            if (cancelable) {
+              const x = document.createElement('button');
+              x.type = 'button';
+              x.className = 'prompt-cancel-x';
+              x.title = 'Cancel';
+              x.setAttribute('aria-label', 'Cancel');
+              x.textContent = '×';
+              x.onclick = () => { done(); resolve({ cancelled: true }); };
+              block.appendChild(x);
+            }
             const q = document.createElement('div');
             q.className = 'prompt-question';
             q.innerHTML = md(questionText);
@@ -1656,12 +1671,40 @@ async function renderTurn(sid, traceId) {
                 btn.textContent = cl === 'y' || cl === 'yes' ? 'Yes'
                   : cl === 'n' || cl === 'no' ? 'No'
                   : choice;
-                btn.onclick = () => {
-                  row.querySelectorAll('button').forEach(b => { b.disabled = true; });
-                  resolve(choice);
-                };
+                btn.onclick = () => { done(); resolve({ answer: choice }); };
                 if (isDefault) defaultBtn = btn;
                 row.appendChild(btn);
+              }
+              if (allowOther) {
+                const otherBtn = document.createElement('button');
+                otherBtn.type = 'button';
+                otherBtn.className = 'prompt-choice-btn';
+                otherBtn.textContent = 'Other…';
+                otherBtn.onclick = () => {
+                  row.querySelectorAll('button').forEach(b => { b.disabled = true; });
+                  const orow = document.createElement('div');
+                  orow.className = 'prompt-row';
+                  const inp = document.createElement('input');
+                  inp.type = 'text';
+                  inp.className = 'prompt-input';
+                  const sbtn = document.createElement('button');
+                  sbtn.type = 'button';
+                  sbtn.className = 'prompt-submit';
+                  sbtn.textContent = 'Submit';
+                  const submitOther = () => {
+                    const v = inp.value.trim();
+                    if (field.required && !v) return;
+                    done();
+                    resolve({ answer: v });
+                  };
+                  sbtn.onclick = submitOther;
+                  inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submitOther(); } });
+                  orow.appendChild(inp);
+                  orow.appendChild(sbtn);
+                  block.appendChild(orow);
+                  inp.focus();
+                };
+                row.appendChild(otherBtn);
               }
               block.appendChild(row);
               turnWrap.appendChild(block);
@@ -1684,9 +1727,8 @@ async function renderTurn(sid, traceId) {
               btn.className = 'prompt-submit';
               btn.textContent = 'Submit';
               const submit = () => {
-                inp.disabled = true;
-                btn.disabled = true;
-                resolve(inp.value.trim() || defaultValue || '');
+                done();
+                resolve({ answer: inp.value.trim() || defaultValue || '' });
               };
               btn.onclick = submit;
               inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
@@ -1705,7 +1747,7 @@ async function renderTurn(sid, traceId) {
           await fetch('/sessions/' + sid + '/prompt', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ answer }),
+            body: JSON.stringify(result.cancelled ? { cancel: true } : { answer: result.answer }),
           });
           break;
         }

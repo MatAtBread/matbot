@@ -109,12 +109,20 @@ export type Marker<K extends string = string> = {
 };
 
 export interface FormField {
-  name:      string;
-  label:     string;
-  type:      'text' | 'password' | 'select' | 'confirm';
-  options?:  string[];
-  default?:  string;
-  required?: boolean;
+  name:        string;
+  label:       string;
+  type:        'text' | 'password' | 'select' | 'confirm';
+  options?:    string[];
+  /** select-only: render an "Other…" affordance that lets the user type a free-form answer instead
+   *  of picking an option. The typed value is returned verbatim, on the same channel as a pick —
+   *  callers never learn whether the answer was a preset or free text. Ignored for other types. */
+  allowOther?: boolean;
+  default?:    string;
+  required?:   boolean;
+  /** Presentation hint only (default true): whether the frontend offers a cancel affordance (the
+   *  "give up" path — see `PromptFn`). Set false to render a hard-blocking prompt with no out. The
+   *  runner and server never consult this; a frontend with no cancel UI simply can't fire one. */
+  cancelable?: boolean;
 }
 
 /**
@@ -314,6 +322,11 @@ export type ToolEvent =
  *   - `(field: FormField)` — a single structured field (`select`/`confirm`/`password`/`text`),
  *     letting rich frontends render real controls (buttons, masked input). Frontends that can't
  *     render it fall back to `field.label` as plain text. Resolves to the chosen/typed value.
+ *
+ * Cancellation is the "we can't proceed — give up" path (distinct from a graceful "decline", which
+ * is simply one of the offered `options`). The host rejects the promise with `PromptCancelledError`
+ * and abandons the current turn, returning to idle; a caller's surrounding try/catch turns the
+ * rejection into a tool error that closes the tool call cleanly.
  *     This reuses `FormField` rather than a parallel type; it is a one-shot request/response and
  *     deliberately does NOT engage the session-bound `form`/`form-response` flow.
  */
@@ -544,6 +557,10 @@ export interface SessionRunner {
   open(opts: OpenOpts | SubmitOpenOpts): Promise<SessionView>;
   /** Abort the running turn (if any) and drop all queued submissions, emitting `cancelled` for each. */
   abort(sessionId: string): void;
+  /** Abandon the running turn (if any) WITHOUT touching the queue — `pump` advances to the next
+   *  queued submission, or idles. The "give up on this turn" path (a prompt cancel); contrast
+   *  `abort`, which also clears the queue. A no-op if nothing is running. */
+  cancelTurn(sessionId: string): void;
   /** Snapshot of a session's live state: whether a turn is running and how many submissions wait
    *  behind it. `busy` is `running || queued > 0`. */
   status(sessionId: string): { busy: boolean; running: boolean; queued: number };
