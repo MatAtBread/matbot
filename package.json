@@ -1,6 +1,5 @@
 {
   "name": "matbot",
-  "private": true,
   "type": "module",
   "engines": {
     "node": ">=24.0.0",
