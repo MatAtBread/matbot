@@ -26,6 +26,20 @@ To find out more about what makes MatBot special, take a look at the [Design eth
 
 ---
 
+## Run it entirely in the browser
+
+matbot also ships as a **single self-contained `matbot.html`** that runs the whole runtime
+client-side — no server, calling the LLM directly from your browser. It's the same platform-neutral
+core and the browser-safe plugins, type-stripped and wired together in-page, loadable from a
+`file://` URL or any static host.
+
+- **Try it live:** [open the web build](https://raw.githack.com/MatAtBread/matbot/main/apps/web-bundle/dist/matbot.html)
+  — on first launch it asks for any OpenAI- or Anthropic-compatible provider (endpoint, model, key;
+  e.g. DeepSeek), then you're chatting.
+- **How it works and how to build it:** [apps/web-bundle/README.md](apps/web-bundle/README.md).
+
+---
+
 ## Requirements
 
 - Node 24+
