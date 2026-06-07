@@ -246,7 +246,11 @@ export async function boot(env: BootEnv): Promise<void> {
         spec = remote.spec;
         specNames[spec] = remote.name;
       }
-      const loaded = await loadPlugins([spec], services, /* bustCache */ true, prompt);
+      // bustCache=false: the in-browser loader has no disk to re-read, and the query stamp toFreshUrl
+      // appends would corrupt a blob:/mbmod: specifier (those don't take query strings) — making the
+      // import reject. A remote spec is a freshly fetched blob, so it's already fresh; baked specs
+      // re-import their existing blob. (True reload in the browser is a realm reload, by design.)
+      const loaded = await loadPlugins([spec], services, /* bustCache */ false, prompt);
       const plugin = loaded[0];
       if (plugin === undefined) throw new Error(`No plugin loaded for specifier "${specifier}"`);
       return plugin;
