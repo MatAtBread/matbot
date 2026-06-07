@@ -1,4 +1,4 @@
-import type { Session, Principal, SystemContextContributor, SystemContextRegistry } from './types.js';
+import type { Session, SystemContextContributor, SystemContextRegistry } from './types.js';
 
 interface TaggedContributor {
   fn:          SystemContextContributor;
@@ -18,7 +18,7 @@ export class SystemContextRegistryImpl implements SystemContextRegistry {
     }
   }
 
-  async build(ctx: { session: Session; principal: Principal; signal: AbortSignal }): Promise<string | null> {
+  async build(ctx: { session: Session; signal: AbortSignal }): Promise<string | null> {
     const parts = (await Promise.all(this._contributors.map(c => c.fn(ctx))))
       .filter((s): s is string => typeof s === 'string' && s.length > 0);
     return parts.length > 0 ? parts.join('\n\n') : null;

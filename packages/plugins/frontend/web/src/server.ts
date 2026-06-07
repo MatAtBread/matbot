@@ -1,24 +1,20 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { readFile } from 'node:fs/promises';
-import { join, relative, resolve, extname } from 'node:path';
 import type {
-  HookRegistry, MatbotPlugin, Principal, ProviderAdapter, ProviderConfig,
-  Session, Store, ToolRegistry, FileStore, SystemContextRegistry, Vault, FormField, PromptFn,
+  MatbotPlugin, Principal, Session, Store, ToolRegistry, FileStore, Vault,
+  FormField, PromptFn, SessionRunner,
 } from '@matatbread/matbot-core';
-import { appendMessage, createMessage, createSession, runSession } from '@matatbread/matbot-core';
+import { createSession, PromptCancelledError, runAs } from '@matatbread/matbot-core';
 import { sseComment, sseEvent } from './sse-writer.js';
 import { html, js, favicon } from './ui.js';
 
 export interface WebServerDeps {
   store:          Store<Session>;
+  /** Per-session turn serialiser — submits queue instead of running concurrently. */
+  run:            SessionRunner;
   vault:          Vault;
-  /** Resolve a provider name to its adapter and fully-resolved config. Returns null if unknown. */
-  resolveProvider: (name: string) => Promise<{ adapter: ProviderAdapter; config: ProviderConfig } | null>;
   loadPlugin:     (specifier: string) => Promise<MatbotPlugin>;
   unloadPlugin:   (specifier: string) => Promise<boolean>;
   tools?:         ToolRegistry;
-  hooks?:         HookRegistry;
-  systemContext?: SystemContextRegistry;
   cors?:          string;  // Access-Control-Allow-Origin value, default '*'
   workdir?:       string;
   files?:         FileStore;
@@ -26,10 +22,11 @@ export interface WebServerDeps {
 }
 
 interface SubmitBody {
-  content:    string | { type: 'form-response'; values: Record<string, string> };
-  provider:   string;       // opaque name passed to deps.resolveProvider
-  sessionId?: string;
-  traceId?:   string;
+  content:      string | { type: 'form-response'; values: Record<string, string> };
+  provider:     string;       // opaque name passed to deps.resolveProvider
+  sessionId?:   string;
+  traceId?:     string;
+  concatQueue?: boolean;      // true (default): merge into the running turn's batch; false: own turn
 }
 
 // Single server-side principal used for all requests until real auth is added.
@@ -69,25 +66,6 @@ function corsHeaders(origin: string): Record<string, string> {
   };
 }
 
-const WORKSPACE_MIME: Record<string, string> = {
-  '.txt':  'text/plain; charset=utf-8',
-  '.md':   'text/markdown; charset=utf-8',
-  '.html': 'text/html; charset=utf-8',
-  '.css':  'text/css; charset=utf-8',
-  '.js':   'application/javascript; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.csv':  'text/csv; charset=utf-8',
-  '.xml':  'application/xml; charset=utf-8',
-  '.svg':  'image/svg+xml',
-  '.png':  'image/png',
-  '.jpg':  'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.gif':  'image/gif',
-  '.webp': 'image/webp',
-  '.pdf':  'application/pdf',
-  '.zip':  'application/zip',
-};
-
 function static200(res: ServerResponse, contentType: string, body: string): void {
   res.writeHead(200, { 'content-type': contentType, 'content-length': Buffer.byteLength(body) });
   res.end(body);
@@ -110,9 +88,18 @@ const nonInteractivePrompt: PromptFn = ((p: string | FormField, def?: string) =>
 export function createWebServer(deps: WebServerDeps) {
   const origin = deps.cors ?? '*';
 
-  // Fan-out: each active submit gets a subscriber set, replay buffer, and its AbortController.
-  const activeSessions = new Map<string, { subs: Set<ServerResponse>; buffer: string[]; ac: AbortController }>();
-  const pendingPrompts  = new Map<string, (answer: string) => void>(); // session ID → resolver
+  // Persistent per-session event subscribers (the GET /sessions/:id/events SSE streams). Submits are
+  // fire-and-forget — all turn output, and interactive prompts, reach clients over these. Holding one
+  // connection per session (not per submission) is what keeps queued submits off the browser's
+  // ~6-socket-per-host limit, which otherwise starved both the `queued` signal and POST /prompt.
+  const sessionConns = new Map<string, Set<ServerResponse>>();
+  const busyState    = new Map<string, boolean>();                     // last-broadcast busy per session
+  // Sessions with a live server-owned busy tracker (see the submit handler). One transient tracker
+  // per busy period drives the idle broadcast independently of any client events stream.
+  const busyTrackers = new Set<string>();
+  // session ID → the parked prompt's settlers. `resolve` delivers an answer (applying the default
+  // fallback); `cancel` rejects it with PromptCancelledError — the "give up" path.
+  const pendingPrompts = new Map<string, { resolve: (answer: string) => void; cancel: () => void }>();
 
   // Clients subscribed to server-sent session status events (busy/idle).
   const statusListeners = new Set<ServerResponse>();
@@ -140,12 +127,20 @@ export function createWebServer(deps: WebServerDeps) {
     })();
   }
 
-  function broadcastStatus(sessionId: string, busy: boolean): void {
+  function sendToSession(sessionId: string, msg: string): void {
+    const conns = sessionConns.get(sessionId);
+    if (conns === undefined) return;
+    for (const res of conns) { if (res.writable) res.write(msg); else conns.delete(res); }
+  }
+
+  // Broadcast a session's busy/idle transition to the global status listeners (sidebar), deduped
+  // against the last value. Authoritative busy comes from the runner (running || queued > 0).
+  function updateBusy(sessionId: string): void {
+    const busy = deps.run.status(sessionId).busy;
+    if ((busyState.get(sessionId) ?? false) === busy) return;
+    if (busy) busyState.set(sessionId, true); else busyState.delete(sessionId);
     const msg = sseEvent('session-busy', { sessionId, busy });
-    for (const res of statusListeners) {
-      if (res.writable) res.write(msg);
-      else statusListeners.delete(res);
-    }
+    for (const res of statusListeners) { if (res.writable) res.write(msg); else statusListeners.delete(res); }
   }
 
   const server = createServer(async (req, res) => {
@@ -160,7 +155,11 @@ export function createWebServer(deps: WebServerDeps) {
     if (method === 'OPTIONS') { res.writeHead(204).end(); return; }
 
     try {
-      await handleRequest(req, res, method, url);
+      // Establish the request's security principal at the entry, so every store/file/vault access
+      // made while handling it (not just the submitted turn, which pump scopes separately) can read
+      // it via currentPrincipal(). A real auth layer would derive this from a header instead of the
+      // single placeholder principal.
+      await runAs(DEFAULT_PRINCIPAL, () => handleRequest(req, res, method, url));
     } catch (e) {
       if (!res.headersSent) json(res, 500, { error: String(e) });
       else if (res.writable)  res.end();
@@ -178,7 +177,6 @@ export function createWebServer(deps: WebServerDeps) {
     return {
       callId:     crypto.randomUUID(),
       session:    stubSession,
-      principal:  DEFAULT_PRINCIPAL,
       signal:     ac.signal,
       vault:      deps.vault,
       loadPlugin:   deps.loadPlugin,
@@ -212,8 +210,12 @@ export function createWebServer(deps: WebServerDeps) {
         'connection':    'keep-alive',
       });
       res.write(sseComment('status stream open'));
-      // Send current busy state so the client is up-to-date immediately.
-      for (const sessionId of activeSessions.keys()) {
+      // Send current busy state so the client is up-to-date immediately. Reconcile against the
+      // authoritative runner status first: a stale true (busyState that never got its idle
+      // transition — e.g. a turn that ended with no events consumer attached) self-heals here,
+      // broadcasting false to existing listeners instead of replaying a phantom busy.
+      for (const sessionId of [...busyState.keys()]) {
+        if (!deps.run.status(sessionId).busy) { updateBusy(sessionId); continue; }
         res.write(sseEvent('session-busy', { sessionId, busy: true }));
       }
       statusListeners.add(res);
@@ -224,7 +226,7 @@ export function createWebServer(deps: WebServerDeps) {
     // --- GET /sessions/:id --- (status only — busy is server-internal state, not session data)
     const sessionStatusMatch = /^\/sessions\/([^/]+)$/.exec(url);
     if (method === 'GET' && sessionStatusMatch) {
-      json(res, 200, { busy: activeSessions.has(sessionStatusMatch[1]!) }); return;
+      json(res, 200, { busy: deps.run.status(sessionStatusMatch[1]!).busy }); return;
     }
 
     // --- POST /sessions ---
@@ -249,127 +251,131 @@ export function createWebServer(deps: WebServerDeps) {
       catch { json(res, 400, { error: 'Invalid JSON' }); return; }
 
       const targetId  = body.sessionId ?? sessionId;
-      let   session   = await deps.store.get(targetId);
+      const session   = await deps.store.get(targetId);
       if (!session) { json(res, 404, { error: 'Session not found' }); return; }
-
-      const resolved = await deps.resolveProvider(body.provider);
-      if (!resolved) { json(res, 400, { error: `Unknown provider "${body.provider}"` }); return; }
-      const { adapter: provider, config: resolvedConfig } = resolved;
 
       const traceId = body.traceId ?? crypto.randomUUID();
 
-      // Normalise content and construct the user message, then persist it so that
-      // re-joining this session mid-run shows the in-flight prompt immediately.
+      // Normalise content into MessageContent[]. The runner appends + persists the user message
+      // when this submission's turn actually starts (persist-at-turn-start) — never here — so a
+      // mid-turn submit queues behind the running turn instead of clobbering session state.
       const contentArr = typeof body.content === 'string'
         ? [{ type: 'text' as const, text: body.content }]
         : [body.content];
-      const userMsg = createMessage({ role: 'user', content: contentArr, traceId });
 
-      // Auto-title from the first user message
-      if (!session.title && !session.messages.some(m => m.role === 'user')) {
-        const text = contentArr
-          .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
-          .map(c => c.text).join(' ').trim();
-        if (text) {
-          const words = text.split(/\s+/).slice(0, 8).join(' ');
-          session = { ...session, title: words.length > 60 ? `${words.slice(0, 60)}…` : words };
-        }
-      }
-
-      session = appendMessage(session, userMsg);
-      await deps.store.set(session.id, session);
-
-      const runConfig = {
-        principal: DEFAULT_PRINCIPAL,
-        provider:  body.provider,
-        traceId,
-      };
-
-      const ac = new AbortController();
-      req.on('close', () => {
-        ac.abort();
-        const resolver = pendingPrompts.get(targetId);
-        if (resolver) { pendingPrompts.delete(targetId); resolver(''); }
-      });
-
-      const active = { subs: new Set<ServerResponse>([res]), buffer: [] as string[], ac };
-      activeSessions.set(targetId, active);
-      broadcastStatus(targetId, true);
-
-      const broadcast = (s: string): void => {
-        active.buffer.push(s);
-        for (const sub of active.subs) { if (sub.writable) sub.write(s); }
-      };
-
+      // Fire-and-forget: we enqueue and return immediately. The turn's output — and this prompt —
+      // reach the client over its persistent GET /sessions/:id/events stream, not this request.
+      // Answered via POST /sessions/:id/prompt. (Only one prompt is outstanding per session, since
+      // turns are serialised.)
       const promptFn = ((p: string | FormField, defaultValue?: string): Promise<string> =>
-        new Promise(resolve => {
+        new Promise<string>((resolve, reject) => {
           const def = typeof p === 'string' ? defaultValue : p.default;
-          pendingPrompts.set(targetId, answer => {
-            pendingPrompts.delete(targetId);
-            resolve(answer || def || '');
+          pendingPrompts.set(targetId, {
+            resolve: answer => { pendingPrompts.delete(targetId); resolve(answer || def || ''); },
+            cancel:  ()     => { pendingPrompts.delete(targetId); reject(new PromptCancelledError()); },
           });
-          broadcast(sseEvent('prompt', {
+          sendToSession(targetId, sseEvent('prompt', {
             type: 'prompt',
+            traceId,
             question: typeof p === 'string' ? p : p.label,
             ...(def !== undefined ? { defaultValue: def } : {}),
             ...(typeof p === 'string' ? {} : { field: p }),
           }));
         })) as PromptFn;
 
-      // Switch to SSE
-      res.writeHead(200, {
-        'content-type':  'text/event-stream',
-        'cache-control': 'no-cache',
-        'connection':    'keep-alive',
-      });
-      res.write(sseComment('stream open'));
-
       try {
-        for await (const event of runSession({
-          session,
-          config:         runConfig,
-          provider,
-          providerConfig: resolvedConfig,
-          ...(deps.tools         ? { tools: new Map(deps.tools.list().map(t => [t.name, t])) } : {}),
-          store:          deps.store,
-          ...(deps.hooks         ? { hooks:         deps.hooks         } : {}),
-          ...(deps.systemContext ? { systemContext: deps.systemContext } : {}),
-          ...(deps.workdir    ? { workdir:    deps.workdir    } : {}),
-          ...(deps.files      ? { files:      deps.files      } : {}),
-          ...(deps.configPath ? { configPath: deps.configPath } : {}),
-          vault:          deps.vault,
-          signal:         ac.signal,
-          prompt:         promptFn,
-          loadPlugin:     deps.loadPlugin,
-          unloadPlugin:   deps.unloadPlugin,
-        })) {
-          broadcast(sseEvent(event.type, event));
+        const view = await deps.run.open({
+          sessionId:   targetId,
+          signal:      new AbortController().signal, // events aren't consumed on this request
+          content:     contentArr,
+          provider:    body.provider,
+          principal:   DEFAULT_PRINCIPAL,
+          prompt:      promptFn,
+          traceId,
+          concatQueue: body.concatQueue ?? false, // per-submission; conservative default (own turn) when unspecified
+        });
+        updateBusy(targetId);
+        json(res, 200, { queued: view.queued, traceId: view.traceId });
+
+        // Server-owned busy tracker. The idle (busy:false) broadcast otherwise rides on a client's
+        // GET /sessions/:id/events consumer (below); if no client is draining this session when its
+        // turn ends, busyState stays stuck true and the sidebar dot pulses forever. So whoever turned
+        // busy ON owns turning it OFF: drain a dedicated read-view purely to drive updateBusy until the
+        // runner reports idle, then tear down. One tracker per busy period — concat/queued submits that
+        // arrive while it's live reuse it — so cost is bounded by concurrent running turns, nothing on
+        // idle sessions.
+        if (!busyTrackers.has(targetId)) {
+          busyTrackers.add(targetId);
+          const trackAc = new AbortController();
+          const trackView = await deps.run.open({ sessionId: targetId, signal: trackAc.signal });
+          void (async () => {
+            try {
+              for await (const _ev of trackView.events) {
+                updateBusy(targetId);
+                // The terminal event is consumed while pump's `running` is still true; it flips to
+                // false in pump's finally on a later microtask. Re-check then so we observe idle and
+                // emit the false transition (mirrors the client consumer's deferred re-check).
+                queueMicrotask(() => {
+                  updateBusy(targetId);
+                  if (!deps.run.status(targetId).busy) trackAc.abort();
+                });
+              }
+            } catch { /* stream torn down */ }
+            finally { busyTrackers.delete(targetId); }
+          })();
         }
       } catch (e) {
-        broadcast(sseEvent('error', { type: 'error', error: String(e) }));
-      } finally {
-        activeSessions.delete(targetId);
-        broadcastStatus(targetId, false);
-        for (const sub of active.subs) { sub.end(); }
+        json(res, 500, { error: String(e) });
       }
       return;
     }
 
-    // --- GET /sessions/:id/stream ---
-    // Lets a second client join an in-progress run with full event replay.
-    const streamMatch2 = /^\/sessions\/([^/]+)\/stream$/.exec(url);
-    if (method === 'GET' && streamMatch2) {
-      const sId    = streamMatch2[1]!;
-      const active = activeSessions.get(sId);
-      if (!active) { json(res, 404, { error: 'No active stream' }); return; }
+    // --- GET /sessions/:id/events --- (persistent per-session SSE: ALL turn output for the session)
+    const eventsMatch = /^\/sessions\/([^/]+)\/events$/.exec(url);
+    if (method === 'GET' && eventsMatch) {
+      const sId = eventsMatch[1]!;
       res.writeHead(200, {
         'content-type':  'text/event-stream',
         'cache-control': 'no-cache',
         'connection':    'keep-alive',
       });
-      for (const s of active.buffer) { if (res.writable) res.write(s); }
-      active.subs.add(res);
-      req.on('close', () => active.subs.delete(res));
+      res.write(sseComment('events stream open'));
+
+      let conns = sessionConns.get(sId);
+      if (conns === undefined) { conns = new Set(); sessionConns.set(sId, conns); }
+      conns.add(res);
+
+      const ac = new AbortController();
+      req.on('close', () => {
+        ac.abort();
+        const set = sessionConns.get(sId);
+        if (set) {
+          set.delete(res);
+          if (set.size === 0) {
+            sessionConns.delete(sId);
+            // No viewers left: release any pending prompt so a turn parked on ctx.prompt() doesn't
+            // hang awaiting an answer that can never arrive.
+            const r = pendingPrompts.get(sId);
+            if (r) { pendingPrompts.delete(sId); r.resolve(''); }
+          }
+        }
+      });
+
+      const view = await deps.run.open({ sessionId: sId, signal: ac.signal });
+      void (async () => {
+        try {
+          for await (const ev of view.events) {
+            if (!res.writable) break;
+            res.write(sseEvent(ev.type, ev));
+            updateBusy(sId);
+            // A terminal event (done/aborted/cancelled) is consumed while pump's `running` flag is
+            // still true — it flips to false in pump's finally, on a microtask queued *after* this
+            // one. Re-check on a deferred microtask so the idle transition (and the Stop button
+            // hiding) isn't missed. Reads authoritative status, so a queued follow-up keeps it busy.
+            queueMicrotask(() => updateBusy(sId));
+          }
+        } catch { /* stream torn down */ }
+      })();
       return;
     }
 
@@ -377,9 +383,12 @@ export function createWebServer(deps: WebServerDeps) {
     const abortMatch = /^\/sessions\/([^/]+)\/abort$/.exec(url);
     if (method === 'POST' && abortMatch) {
       const sId    = abortMatch[1]!;
-      const active = activeSessions.get(sId);
-      if (!active) { json(res, 404, { error: 'No active session' }); return; }
-      active.ac.abort();
+      // Release any pending prompt first so a turn parked on ctx.prompt() can observe the abort
+      // rather than hang, then drop the queue + abort the running turn.
+      const r = pendingPrompts.get(sId);
+      if (r) { pendingPrompts.delete(sId); r.resolve(''); }
+      deps.run.abort(sId);
+      updateBusy(sId);
       json(res, 200, { ok: true });
       return;
     }
@@ -471,12 +480,19 @@ export function createWebServer(deps: WebServerDeps) {
     const promptMatch = /^\/sessions\/([^/]+)\/prompt$/.exec(url);
     if (method === 'POST' && promptMatch) {
       const sId = promptMatch[1]!;
-      let body: { answer: string };
-      try { body = JSON.parse(await readBody(req)) as { answer: string }; }
+      let body: { answer?: string; cancel?: boolean };
+      try { body = JSON.parse(await readBody(req)) as { answer?: string; cancel?: boolean }; }
       catch { json(res, 400, { error: 'Invalid JSON' }); return; }
-      const resolver = pendingPrompts.get(sId);
-      if (!resolver) { json(res, 409, { error: 'No pending prompt for this session' }); return; }
-      resolver(body.answer ?? '');
+      const entry = pendingPrompts.get(sId);
+      if (!entry) { json(res, 409, { error: 'No pending prompt for this session' }); return; }
+      if (body.cancel) {
+        // Give up: reject the prompt (the tool closes its call with an error result) and abandon the
+        // turn without disturbing the queue — pump advances to the next submission or idles.
+        entry.cancel();
+        deps.run.cancelTurn(sId);
+      } else {
+        entry.resolve(body.answer ?? '');
+      }
       json(res, 200, { ok: true });
       return;
     }
@@ -538,12 +554,10 @@ export function createWebServer(deps: WebServerDeps) {
   }
 
   async function close(): Promise<void> {
-    // Abort and drain all active streaming sessions.
-    for (const active of activeSessions.values()) {
-      active.ac.abort();
-      for (const sub of active.subs) sub.end();
-    }
-    activeSessions.clear();
+    // Close all persistent per-session event streams.
+    for (const conns of sessionConns.values()) for (const res of conns) res.end();
+    sessionConns.clear();
+    busyState.clear();
 
     // Close all status stream connections.
     for (const res of statusListeners) res.end();
@@ -557,7 +571,7 @@ export function createWebServer(deps: WebServerDeps) {
     fileEventListeners.clear();
 
     // Resolve all pending prompts so callers don't hang.
-    for (const resolver of pendingPrompts.values()) resolver('');
+    for (const entry of pendingPrompts.values()) entry.resolve('');
     pendingPrompts.clear();
 
     await new Promise<void>((resolve) =>

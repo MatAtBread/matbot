@@ -2,22 +2,25 @@
 import { loadConfig, loadConfigFromText, loadDotEnv } from './config.js';
 import { installPlugin }                    from './install.js';
 import { loadPluginsWithDescriptions }      from './plugin-description.js';
+import { nodePluginResolver }               from './plugin-resolver.js';
 import type { Principal, ProviderAdapter,
               ProviderConfig, Session,
               Store, StoreQuery, QueryResult, CASResult,
               Tool, MessageContent, FileStore } from '@matatbread/matbot-core';
 import { appendMessage, createMessage,
-         createSession, runSession,
+         createSession,
+         createSessionRunner,
          HookRegistry, SystemContextRegistryImpl,
-         registerPlugin,
          resolveProviderFactory,
          teardownPlugins,
          unloadPlugin as unloadPluginFn,
          getPluginNameForSpecifier,
+         installPrincipalCarrier, enterPrincipal,
          MissingSecretError }              from '@matatbread/matbot-core';
-import type { MatbotServices, PluginSettings, ToolRegistry, Vault,
+import type { MatbotServices, PluginSettings, ToolRegistry, Vault, SessionRunner,
               MatbotPlugin, StorageBackend, KnowledgeIndex, PromptFn, FormField } from '@matatbread/matbot-core';
 import { systemPrincipal }                 from '@matatbread/matbot-security';
+import { createAlsPrincipalCarrier }       from './principal-als.js';
 import { EnvFileVault }                     from './env-vault.js';
 import { FilesystemStore }                 from '@matatbread/matbot-storage-filesystem';
 import { FilesystemFileStore }             from '@matatbread/matbot-files-node';
@@ -133,11 +136,11 @@ async function resolveCredentialsInteractive(
       if (!(e instanceof MissingSecretError)) throw e;
       const rl = createInterface({ input: process.stdin, output: process.stderr });
       try {
-        for (const ref of e.missingKeys) {
-          const name  = ref.replace(/^(env|secret):/, '');
+        for (const name of e.missingKeys) {
           const value = await rl.question(`Secret required — ${name}: `);
           if (!value.trim()) throw new Error(`No value provided for required secret "${name}".`);
-          await vault.createSecret(name, value.trim());
+          // writeSecret, not createSecret: the placeholder named this exact key, so store verbatim.
+          await vault.writeSecret(name, value.trim());
         }
       } finally {
         rl.close();
@@ -243,47 +246,21 @@ If [prompt] and --prompt-file are both omitted, starts an interactive REPL.
 // ── Single turn ────────────────────────────────────────────────────────────────
 
 async function runTurn(
-  session:        Session,
-  content:        string | MessageContent[],
-  providerConfig: ProviderConfig,
-  adapter:        ProviderAdapter,
-  tools:          ReadonlyMap<string, Tool>,
-  store:          Store<Session>,
-  principal:      Principal,
-  workdir:        string,
-  files:          FileStore,
-  hooks:          HookRegistry,
-  systemContext:  SystemContextRegistryImpl,
-  promptFn:       PromptFn,
-  loadPluginFn:   (specifier: string) => Promise<MatbotPlugin>,
-  unloadPluginFn: (specifier: string) => Promise<boolean>,
-  configPath:     string,
-  vault:          Vault,
+  session:      Session,
+  content:      string | MessageContent[],
+  run:          SessionRunner,
+  providerName: string,
+  principal:    Principal,
+  promptFn:     PromptFn,
 ): Promise<Session> {
-  const traceId  = crypto.randomUUID();
   const ac       = new AbortController();
-  const onSigint = (): void => { ac.abort(); };
+  // Ctrl-C aborts the running turn (and drops anything queued) through the runner.
+  const onSigint = (): void => { run.abort(session.id); };
   process.once('SIGINT', onSigint);
 
-  // Normalise content, construct and pre-persist the user message so the
-  // session is readable mid-run if resumed from another client.
   const contentArr: MessageContent[] = typeof content === 'string'
     ? [{ type: 'text', text: content }]
     : content;
-  const userMsg = createMessage({ role: 'user', content: contentArr, traceId });
-
-  if (!session.title && !session.messages.some(m => m.role === 'user')) {
-    const text = contentArr
-      .filter((c): c is Extract<MessageContent, { type: 'text' }> => c.type === 'text')
-      .map(c => c.text).join(' ').trim();
-    if (text) {
-      const words = text.split(/\s+/).slice(0, 8).join(' ');
-      session = { ...session, title: words.length > 60 ? `${words.slice(0, 60)}…` : words };
-    }
-  }
-
-  session = appendMessage(session, userMsg);
-  await store.set(session.id, session);
 
   let updated       = session;
   let totalIn       = 0;
@@ -296,24 +273,17 @@ async function runTurn(
   };
 
   try {
-    for await (const ev of runSession({
-      session,
-      config:         { principal, provider: providerConfig.name, traceId },
-      provider:       adapter,
-      providerConfig,
-      tools,
-      store,
-      hooks,
-      systemContext,
-      signal:         ac.signal,
-      workdir,
-      files,
-      configPath,
-      vault,
-      prompt:       promptFn,
-      loadPlugin:   loadPluginFn,
-      unloadPlugin: unloadPluginFn,
-    })) {
+    // The runner appends + persists the user message and auto-titles at turn start.
+    const view = await run.open({
+      sessionId: session.id,
+      signal:    ac.signal,
+      content:   contentArr,
+      provider:  providerName,
+      principal,
+      prompt:    promptFn,
+    });
+    for await (const ev of view.events) {
+      if (ev.traceId !== view.traceId) continue;
       switch (ev.type) {
         case 'text-delta':
           clearThinking();
@@ -361,12 +331,8 @@ async function runTurn(
                 values[field.name] = await promptFn(`${field.label}${hint}`, field.default);
               }
               process.removeListener('SIGINT', onSigint);
-              updated = await runTurn(
-                ev.session, [{ type: 'form-response', values }],
-                providerConfig, adapter, tools, store, principal, workdir, files,
-                hooks, systemContext, promptFn, loadPluginFn, unloadPluginFn, configPath, vault,
-              );
-              return updated;
+              ac.abort();
+              return await runTurn(ev.session, [{ type: 'form-response', values }], run, providerName, principal, promptFn);
             }
           } else {
             process.stderr.write(`\n[aborted: ${ev.reason}]\n`);
@@ -376,9 +342,12 @@ async function runTurn(
         case 'error': clearThinking(); process.stderr.write(`\n[error: ${ev.error}]\n`); break;
         default: break;
       }
+      // One submission == one turn here; the per-session stream would otherwise keep yielding.
+      if (ev.type === 'done' || ev.type === 'aborted' || ev.type === 'error' || ev.type === 'cancelled') break;
     }
   } finally {
     process.removeListener('SIGINT', onSigint);
+    ac.abort();
   }
 
   write('\n');
@@ -391,59 +360,6 @@ async function runTurn(
 }
 
 // ── Main ───────────────────────────────────────────────────────────────────────
-
-interface SettingsDoc {
-  id:      string;
-  version: string;
-  data:    Record<string, unknown>;
-}
-
-function isSettingsDoc(v: unknown): v is SettingsDoc {
-  return typeof v === 'object' && v !== null &&
-    typeof (v as SettingsDoc).id      === 'string' &&
-    typeof (v as SettingsDoc).version === 'string' &&
-    typeof (v as SettingsDoc).data    === 'object' && (v as SettingsDoc).data !== null;
-}
-
-function makePluginSettings(store: Store<SettingsDoc>, pluginName: string): PluginSettings {
-  // Handles migration from the old flat-object format (pre-Store).
-  const getDoc = async (): Promise<SettingsDoc | null> => {
-    const raw = await store.get(pluginName);
-    if (raw === null) return null;
-    if (isSettingsDoc(raw)) return raw;
-    // Old format: flat { key: value } — wrap it so subsequent writes upgrade the file.
-    return { id: pluginName, version: '0', data: raw as unknown as Record<string, unknown> };
-  };
-
-  return {
-    async get<T>(key: string): Promise<T | undefined> {
-      return (await getDoc())?.data[key] as T | undefined;
-    },
-    async set<T>(key: string, value: T): Promise<void> {
-      for (;;) {
-        const doc  = await getDoc();
-        const data = { ...(doc?.data ?? {}), [key]: value as unknown };
-        const next: SettingsDoc = { id: pluginName, version: Date.now().toString(), data };
-        // version '0' means migrated-but-not-yet-written — use set to upgrade the file.
-        if (doc === null || doc.version === '0') { await store.set(pluginName, next); return; }
-        const r = await store.cas(pluginName, doc.version, next);
-        if (r.ok) return;
-      }
-    },
-    async delete(key: string): Promise<void> {
-      for (;;) {
-        const doc = await getDoc();
-        if (doc === null) return;
-        const data = { ...doc.data };
-        delete data[key];
-        const next: SettingsDoc = { id: pluginName, version: Date.now().toString(), data };
-        if (doc.version === '0') { await store.set(pluginName, next); return; }
-        const r = await store.cas(pluginName, doc.version, next);
-        if (r.ok) return;
-      }
-    },
-  };
-}
 
 // ── Setup wizard ───────────────────────────────────────────────────────────────
 
@@ -558,7 +474,7 @@ async function runSetupWizard(configPath: string): Promise<import('./config.js')
       `    endpoint: ${endpoint}`,
       `    model: ${model}`,
       `    credentials:`,
-      `      apiKey: \${env:${envVarName}}`,
+      `      apiKey: \${${envVarName}}`,
     ].join('\n') + '\n';
 
     await mkdir(configDir, { recursive: true });
@@ -664,6 +580,13 @@ async function main(): Promise<void> {
 
   // ── Plugin setup ─────────────────────────────────────────────────────────────
 
+  // Install the ambient security carrier before anything that could read it. The node app uses an
+  // AsyncLocalStorage carrier so concurrent turns / frontend requests stay isolated; entering the
+  // system principal here gives the CLI process its identity for any out-of-turn backend access
+  // (frontend handlers and per-turn pumps shadow it with their own principal via runAs).
+  installPrincipalCarrier(createAlsPrincipalCarrier());
+  enterPrincipal(systemPrincipal());
+
   const vault = new EnvFileVault(
     path.join(path.dirname(configPath), '.env'),
     process.env as Record<string, string | undefined>,
@@ -759,7 +682,6 @@ async function main(): Promise<void> {
   const [fileStore, swapFiles] = makeSwappable<FileStore>(
     activeStorageBackend?.fileStore ?? new FilesystemFileStore(filesDir),
   );
-  const settingsStore = createStore<SettingsDoc>('settings');
 
   // toolMap is shared: plugins register into it via services, runSession reads it
   const toolMap = new Map<string, Tool>(createBuiltinTools().map(t => [t.name, t]));
@@ -779,17 +701,18 @@ async function main(): Promise<void> {
   const hookReg = new HookRegistry();
   const systemContextReg = new SystemContextRegistryImpl();
 
-  const pluginSettingsCache = new Map<string, PluginSettings>();
   const serviceRegistry     = new Map<string, unknown>();
 
+  // Constructed just after the services object (it closes over services.loadPlugin); exposed via
+  // the `run` getter below so frontends submit/observe through one serialiser instead of each
+  // calling runSession directly.
+  let sessionRunner: SessionRunner | undefined;
+
   const services: MatbotServices = {
-    settings(pluginName: string): PluginSettings {
-      let s = pluginSettingsCache.get(pluginName);
-      if (s === undefined) {
-        s = makePluginSettings(settingsStore, pluginName);
-        pluginSettingsCache.set(pluginName, s);
-      }
-      return s;
+    // Plugins always receive the plugin-scoped override built in setupPlugin; the base is never the
+    // one a plugin calls. Core reads its reserved settings doc via makePluginSettings directly.
+    settings(): PluginSettings {
+      throw new Error('settings() is only available within a plugin scope (use the services passed to setup()).');
     },
 
     createStore,
@@ -868,9 +791,11 @@ async function main(): Promise<void> {
       }
       return unloadPluginFn(name, services);
     },
+    resolver:  nodePluginResolver(path.dirname(configPath)),
     providers: matbotConfig.providers,
     get storageBackend() { return activeStorageBackend; },
     sessions:  store,
+    get run() { return sessionRunner; },
     files:     fileStore,
     vault,
     hooks:          hookReg,
@@ -880,6 +805,38 @@ async function main(): Promise<void> {
     configPath,
     knowledge: knowledgeProxy,
   };
+
+  // resolveProvider reads matbotConfig.providers lazily (per turn), so it sees both the
+  // canonicalised module names set below and any live `provider add/remove` edits.
+  const resolveProvider = async (name: string): Promise<{ adapter: ProviderAdapter; config: ProviderConfig } | null> => {
+    const cfg = matbotConfig.providers.get(name);
+    if (cfg === undefined) return null;
+    const resolved: ProviderConfig = {
+      ...cfg,
+      ...(cfg.credentials !== undefined ? { credentials: await resolveCredentials(cfg.credentials, vault) } : {}),
+      ...(cfg.endpoint    !== undefined ? { endpoint: await vault.resolve(cfg.endpoint) } : {}),
+    };
+    return { adapter: resolveProviderFactory(resolved.module)(resolved), config: resolved };
+  };
+
+  // One runner per store: frontends share this one over the persistent sessions store, but the CLI
+  // can instantiate its own over an ephemeral MemoryStore (see main). That a SessionRunner composes
+  // over *any* Store is the point — nothing about the agentic loop is bound to a single backend.
+  const makeRunner = (sessionStore: Store<Session>): SessionRunner => createSessionRunner({
+    store:         sessionStore,
+    resolveProvider,
+    tools:         toolReg,
+    hooks:         hookReg,
+    systemContext: systemContextReg,
+    vault,
+    files:         fileStore,
+    workdir:       workDir,
+    configPath,
+    loadPlugin:    services.loadPlugin.bind(services),
+    unloadPlugin:  services.unloadPlugin.bind(services),
+  });
+
+  sessionRunner = makeRunner(store);
 
   // Load provider plugins first so module names can be canonicalised before any
   // frontend plugin's setup() calls resolveProviderFactory(cfg.module).
@@ -960,8 +917,6 @@ async function main(): Promise<void> {
     ...(rawConfig.fallback    !== undefined ? { fallback:   rawConfig.fallback   } : {}),
   };
 
-  const adapter: ProviderAdapter = resolveProviderFactory(providerConfig.module)(providerConfig);
-
   // ── Session ───────────────────────────────────────────────────────────────────
 
   const principal = systemPrincipal();
@@ -991,6 +946,12 @@ async function main(): Promise<void> {
   }
 
   const runStore: Store<Session> = isEphemeral ? new MemoryStore<Session>() : store;
+  // The runner loads the session before its first turn, so make sure it's resolvable: a fresh
+  // ephemeral session has never been persisted. (Non-ephemeral sessions were loaded from runStore.)
+  await runStore.set(session.id, session);
+  // Reuse the shared runner over the persistent store; spin up a private one over the ephemeral
+  // MemoryStore so a throwaway REPL session never shares a queue with the frontends.
+  const cliRun: SessionRunner = isEphemeral ? makeRunner(runStore) : (sessionRunner ?? makeRunner(store));
 
   // ── Readline (shared by single-turn and REPL for tool prompts) ──────────────
   const rl = createInterface({ input: process.stdin, output: process.stderr });
@@ -1017,7 +978,7 @@ async function main(): Promise<void> {
   // ── Single-turn ──────────────────────────────────────────────────────────────
   if (argPrompt !== undefined) {
     try {
-      await runTurn(session, argPrompt, providerConfig, adapter, toolMap, runStore, principal, workDir, fileStore, hookReg, systemContextReg, stdinPrompt, services.loadPlugin.bind(services), services.unloadPlugin.bind(services), configPath, vault);
+      await runTurn(session, argPrompt, cliRun, providerConfig.name, principal, stdinPrompt);
     } finally {
       rl.close();
       await teardownPlugins();
@@ -1037,7 +998,7 @@ async function main(): Promise<void> {
       }
       if (!line.trim()) continue;
       process.stderr.write('assistant: ');
-      session = await runTurn(session, line, providerConfig, adapter, toolMap, runStore, principal, workDir, fileStore, hookReg, systemContextReg, stdinPrompt, services.loadPlugin.bind(services), services.unloadPlugin.bind(services), configPath, vault);
+      session = await runTurn(session, line, cliRun, providerConfig.name, principal, stdinPrompt);
     }
   } finally {
     rl.close();

@@ -39,6 +39,8 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
   }) as PromptFn);
   const vault: Vault = opts.vault ?? {
     async createSecret() { throw new Error('No vault configured'); },
+    async writeSecret()  { throw new Error('No vault configured'); },
+    hasKey() { return false; },
     async resolve(ref: string) { return ref; },
     scrub(text: string) { return text; },
   };
@@ -49,7 +51,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
   let session = opts.session;
 
   let ctx = await hookReg.run('before:submit', {
-    session, principal: config.principal, config, signal,
+    session, config, signal,
   });
 
   if (ctx.abort) {
@@ -68,7 +70,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
   // ── 2. System context (built once per submit, never persisted) ─────────────
 
   const systemText = opts.systemContext
-    ? await opts.systemContext.build({ session, principal: config.principal, signal })
+    ? await opts.systemContext.build({ session, signal })
     : null;
 
   const systemMsg = systemText !== null
@@ -85,7 +87,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
     // Respect an abort that arrived between turns (e.g. during tool execution).
     if (signal.aborted) {
       await store.set(session.id, session);
-      yield { type: 'aborted', reason: 'user-abort', session, traceId };
+      yield { type: 'aborted', reason: typeof signal.reason === 'string' ? signal.reason : 'user-abort', session, traceId };
       return;
     }
 
@@ -139,7 +141,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
           }));
         }
         await store.set(session.id, session);
-        yield { type: 'aborted', reason: 'user-abort', session, traceId };
+        yield { type: 'aborted', reason: typeof signal.reason === 'string' ? signal.reason : 'user-abort', session, traceId };
         return;
       }
       yield { type: 'error', error: String(e) + (('cause' in e && e.cause) ? ' ('+String(e.cause)+')' : '' ), traceId };
@@ -163,7 +165,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
     }
 
     const afterRespCtx = await hookReg.run('after:response', {
-      session, principal: config.principal, config, signal,
+      session, config, signal,
     });
     if (afterRespCtx.abort) {
       yield { type: 'aborted', reason: afterRespCtx.abort, session: afterRespCtx.session as Session, traceId };
@@ -194,7 +196,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
       }
 
       const toolCtxPre = await hookReg.run('before:tool', {
-        session, principal: config.principal, config, signal,
+        session, config, signal,
         toolCall: { id: tc.id, name: tc.name, input: tc.input },
         tool,
       }) as ToolHookContext;
@@ -215,7 +217,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
       let isError = false;
 
       const toolCtx: ToolContext = {
-        callId: tc.id, session, principal: config.principal, signal, vault,
+        callId: tc.id, session, signal, vault,
         prompt:       promptFn,
         loadPlugin:   (specifier: string) => opts.loadPlugin(specifier, promptFn),
         unloadPlugin: opts.unloadPlugin,
@@ -245,7 +247,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
       }
 
       const toolCtxPost = await hookReg.run('after:tool', {
-        session, principal: config.principal, config, signal,
+        session, config, signal,
       });
       session = toolCtxPost.session as Session;
 
@@ -258,7 +260,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
     session = appendMessage(session, toolMsg);
 
     ctx = await hookReg.run('before:response', {
-      session, principal: config.principal, config, signal,
+      session, config, signal,
     });
     if (ctx.abort) {
       yield { type: 'aborted', reason: ctx.abort, session: ctx.session as Session, traceId };
@@ -272,7 +274,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
   await store.set(session.id, session);
 
   await hookReg.run('after:submit', {
-    session, principal: config.principal, config, signal,
+    session, config, signal,
   });
 
   yield { type: 'done', session, traceId };

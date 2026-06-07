@@ -1,6 +1,6 @@
 import type { Tool, ToolEvent, ToolContext, MatbotPlugin, FormField } from '@matatbread/matbot-plugin-api';
 import { CONFIRM_YES, CONFIRM_NO } from '@matatbread/matbot-plugin-api';
-import { getRegisteredPlugins, getRegisteredTools, getRegisteredFrontendPlugins, getSpecifierForPlugin,
+import { getRegisteredPlugins, getRegisteredTools, getRegisteredFrontendPlugins,
          getRegisteredServiceKeys, getHookPlugins, getSystemContextPlugins } from '@matatbread/matbot-core';
 import { readFile, writeFile, access, readdir } from 'node:fs/promises';
 import { spawn }                             from 'node:child_process';
@@ -122,31 +122,6 @@ async function discoverLocalPlugins(
   return results;
 }
 
-async function pkgNameFromSpecifier(specifier: string, projectDir: string): Promise<string | undefined> {
-  let dir: string;
-
-  if (specifier.startsWith('file://')) {
-    // Specifiers are resolved to file: URLs by the CLI before registration.
-    // Strip any cache-buster query string, convert to a path, then start from
-    // the entry file's directory and walk up to find the package.json.
-    dir = path.dirname(fileURLToPath((specifier.split('?')[0]) ?? specifier));
-  } else if (specifier.startsWith('./') || specifier.startsWith('../') || path.isAbsolute(specifier)) {
-    dir = path.resolve(projectDir, specifier);
-  } else {
-    return specifier; // bare npm package name — specifier already is the package name
-  }
-
-  while (true) {
-    try {
-      const pkg = JSON.parse(await readFile(path.join(dir, 'package.json'), 'utf8')) as { name?: string };
-      if (pkg.name) return pkg.name;
-    } catch { /* no package.json here, keep walking */ }
-    const parent = path.dirname(dir);
-    if (parent === dir) return undefined; // reached filesystem root without finding package.json
-    dir = parent;
-  }
-}
-
 // Read the plugin's package.json description without importing the module — the
 // confirmation prompt runs before the user has consented to install, so we must not
 // execute untrusted plugin code to read manifest.description here. Bare npm names are
@@ -266,19 +241,13 @@ const executor = {
         [...toolsByPlugin.keys()].filter((k): k is string => k !== undefined),
       );
 
-      const loaded = await Promise.all(getRegisteredPlugins().map(async p => {
-        const specifier   = getSpecifierForPlugin(p.name);
-        const packageName = specifier !== undefined
-          ? (await pkgNameFromSpecifier(specifier, projectDir) ?? p.name)
-          : p.name;
-        return {
-          name:        packageName,
-          apiVersion:  p.apiVersion,
-          types:       pluginTypes(p, pluginToolNames),
-          tools:       toolsByPlugin.get(p.name) ?? [],
-          ...(specifier !== undefined ? { specifier } : {}),
-          ...(p.manifest?.description ? { description: p.manifest.description } : {}),
-        };
+      const loaded = getRegisteredPlugins().map(p => ({
+        name:        p.name,
+        apiVersion:  p.apiVersion,
+        types:       pluginTypes(p, pluginToolNames),
+        tools:       toolsByPlugin.get(p.name) ?? [],
+        specifier:   p.specifier,
+        ...(p.manifest?.description ? { description: p.manifest.description } : {}),
       }));
 
       yield {
@@ -324,7 +293,9 @@ const executor = {
         yield { type: 'result', value: { message: `No value entered; "${key.trim()}" was not stored.` } };
         return;
       }
-      await ctx.vault.createSecret(key.trim(), value.trim());
+      // writeSecret, not createSecret: this answers a MissingSecretError naming an exact key,
+      // so the value must land under that name verbatim — no reference/dedup canonicalisation.
+      await ctx.vault.writeSecret(key.trim(), value.trim());
       yield { type: 'result', value: { message: `Secret "${key.trim()}" stored in the vault.` } };
       return;
     }
@@ -332,6 +303,9 @@ const executor = {
     const { specifier } = input as { action: string; specifier: string };
 
     // ── add ──────────────────────────────────────────────────────────────────
+    // `specifier` is a concrete npm name / path / GitHub shorthand / CDN URL. Resolving a fuzzy
+    // human name ("install the mcp plugin") to a specifier is the model's job (it can run
+    // `discover_local` first), not the tool's — there is no fuzzy-match step here.
     if (action === 'add') {
       const existing = await readPluginsList(configPath);
       if (existing.includes(specifier)) {

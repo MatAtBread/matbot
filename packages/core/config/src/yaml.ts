@@ -8,8 +8,8 @@
  *   - Quoted strings (single and double)
  *   - Comments (# ...)
  *
- * Does NOT support anchors, aliases, flow syntax, or ${env:} expansion.
- * ${env:NAME} and ${secret:name} placeholders are left intact for the Vault to resolve.
+ * Does NOT support anchors, aliases, flow syntax, or ${NAME} expansion.
+ * ${NAME} placeholders are left intact for the Vault to resolve.
  * Supports literal block scalars (|) and folded block scalars (>).
  */
 

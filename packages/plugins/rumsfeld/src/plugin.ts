@@ -1,9 +1,8 @@
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
-import type { MatbotPlugin, MatbotServices, ToolExecutor, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
+import type { MatbotPluginSpec, MatbotServices, ToolExecutor, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
 
-export function createRumsfeldPlugin(): MatbotPlugin {
+export function createRumsfeldPlugin(): MatbotPluginSpec {
   return {
-    name:       'rumsfeld',
     apiVersion: PLUGIN_API_VERSION,
 
     async setup(services: MatbotServices) {
@@ -75,4 +74,4 @@ export function createRumsfeldPlugin(): MatbotPlugin {
   };
 }
 
-export const plugin: MatbotPlugin = createRumsfeldPlugin();
+export const plugin: MatbotPluginSpec = createRumsfeldPlugin();

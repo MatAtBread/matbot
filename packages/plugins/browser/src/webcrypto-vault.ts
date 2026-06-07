@@ -1,7 +1,7 @@
 import type { Vault } from '@matatbread/matbot-core';
-import { MissingSecretError } from '@matatbread/matbot-core';
+import { MissingSecretError, applyCreateSecret } from '@matatbread/matbot-core';
 
-const REF_RE = /\$\{secret:([^}]+)\}/g;
+const REF_RE = /\$\{([^}]+)\}/g;
 
 /**
  * Browser `Vault` backed by the Web Crypto API.
@@ -24,8 +24,21 @@ export class WebCryptoVault implements Vault {
     }
   }
 
-  async createSecret(name: string, value: string): Promise<void> {
+  createSecret(name: string, value: string): Promise<string> {
+    return applyCreateSecret(this, name, value);
+  }
+
+  async writeSecret(name: string, value: string): Promise<void> {
     this.plain.set(name, value);
+  }
+
+  hasKey(name: string): boolean {
+    return this.plain.has(name);
+  }
+
+  findByValue(value: string): string | undefined {
+    for (const [k, v] of this.plain) if (v === value) return k;
+    return undefined;
   }
 
   async resolve(ref: string): Promise<string> {

@@ -1,10 +1,9 @@
 import { dirname, join } from 'node:path';
-import type { MatbotPlugin, MatbotServices } from '@matatbread/matbot-plugin-api';
+import type { MatbotPluginSpec, MatbotServices } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import { SQLiteStorageBackend } from './backend.js';
 
-export const plugin: MatbotPlugin = {
-  name:       '@matatbread/matbot-storage-sqlite',
+export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,
   storageBackend: {
     open: (dotData: string) => SQLiteStorageBackend.open(dotData),

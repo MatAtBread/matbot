@@ -1,5 +1,5 @@
 import type {
-  Tool, ToolEvent, ToolContext, MatbotPlugin, ToolRegistry, PluginSettings,
+  Tool, ToolEvent, ToolContext, MatbotPluginSpec, ToolRegistry, PluginSettings,
 } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import type { MCPServerConfig, MCPPersistedConfig, MCPToolDef } from './types.js';
@@ -66,7 +66,7 @@ function makeProxyTool(
 
 // ── Plugin factory ────────────────────────────────────────────────────────────
 
-export function createMCPPlugin(): MatbotPlugin {
+export function createMCPPlugin(): MatbotPluginSpec {
   const activeServers = new Map<string, ActiveServer>();
   let registry: ToolRegistry | undefined;
   let pluginSettings: PluginSettings | undefined;
@@ -304,13 +304,12 @@ SHAPE  (TypeScript)
   // ── Plugin object ─────────────────────────────────────────────────────────────
 
   return {
-    name: 'mcp',
     apiVersion: PLUGIN_API_VERSION,
     tools: [mcpActionTool],
 
     async setup(services) {
       registry = services.tools;
-      pluginSettings = services.settings('mcp');
+      pluginSettings = services.settings();
 
       const persisted = await pluginSettings.get<MCPPersistedConfig>('servers');
       for (const config of persisted?.servers ?? []) {

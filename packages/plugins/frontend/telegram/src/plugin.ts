@@ -1,9 +1,9 @@
 import type {
-  MatbotPlugin, MatbotServices, Principal, ProviderAdapter, ProviderConfig, Session, PromptFn, FormField,
+  MatbotPluginSpec, MatbotServices, Principal, ProviderAdapter, ProviderConfig, Session, PromptFn, FormField,
 } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import {
-  appendMessage, createMessage, createSession, resolveProviderFactory, runSession,
+  createSession, resolveProviderFactory, runAs,
 } from '@matatbread/matbot-core';
 import process from 'node:process';
 import { getUpdates, sendChatAction, sendMessage } from './bot.js';
@@ -25,7 +25,6 @@ interface ActiveProvider {
 
 // Module-level state: readable/writable by the tools regardless of where setup() is in scope.
 let teardownAc:    AbortController | undefined;
-const messageBusy = new Map<number, Promise<void>>();
 let activeProvider: ActiveProvider;
 let servicesRef:   MatbotServices | undefined;
 let botTokenRef:   string | undefined;
@@ -45,8 +44,7 @@ async function buildProvider(name: string, services: MatbotServices): Promise<Ac
   return { name, adapter, config };
 }
 
-export const plugin: MatbotPlugin = {
-  name:       PLUGIN_NAME,
+export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,
 
   tools: [
@@ -88,7 +86,7 @@ export const plugin: MatbotPlugin = {
 
             try {
               activeProvider = await buildProvider(act.provider, svc);
-              await svc.settings(PLUGIN_NAME).set(SETTINGS_KEY_PROVIDER, act.provider);
+              await svc.settings().set(SETTINGS_KEY_PROVIDER, act.provider);
               yield { type: 'result' as const, value: { provider: act.provider } };
             } catch (e) {
               yield { type: 'error' as const, message: String(e) };
@@ -154,7 +152,7 @@ export const plugin: MatbotPlugin = {
   async setup(services: MatbotServices) {
     let botToken: string;
     try {
-      botToken = await services.vault.resolve('${env:TELEGRAM_API_KEY}');
+      botToken = await services.vault.resolve('${TELEGRAM_API_KEY}');
     } catch {
       console.warn('[frontend-telegram] TELEGRAM_API_KEY not set; skipping');
       return;
@@ -162,13 +160,14 @@ export const plugin: MatbotPlugin = {
 
     const sessions = services.sessions!;
     if (!sessions) throw new Error('frontend-telegram requires services.sessions');
+    const run = services.run ?? (() => { throw new Error('frontend-telegram requires services.run'); })();
 
     services.registerFrontend({ name: PLUGIN_NAME });
 
     servicesRef = services;
     botTokenRef = botToken;
 
-    const settings = services.settings(PLUGIN_NAME);
+    const settings = services.settings();
     for (const id of await settings.get<number[]>(SETTINGS_KEY_KNOWN) ?? []) {
       knownChats.add(id);
     }
@@ -190,10 +189,6 @@ export const plugin: MatbotPlugin = {
     teardownAc = ac;
 
     async function handleMessage(chatId: number, text: string, senderName?: string): Promise<void> {
-      if (messageBusy.has(chatId)) {
-        await messageBusy.get(chatId);
-      }
-
       if (!knownChats.has(chatId)) {
         // A new user. Admit them only as the first-ever chat, or while the door is open.
         if (knownChats.size === 0 || (openDoor && (Date.now() - openDoor) < 30_000)) {
@@ -205,77 +200,65 @@ export const plugin: MatbotPlugin = {
         }
       }
 
-      // Snapshot the active provider so a mid-run switch doesn't affect this call.
-      const prov = activeProvider;
+      // Snapshot the active provider name so a mid-run switch doesn't affect this call. The runner
+      // resolves the adapter from the name, so we no longer build it here.
+      const providerName = activeProvider.name;
       try {
-        async function processMessage() {
-          sendChatAction(botToken, chatId, 'typing').catch(() => {});
+        sendChatAction(botToken, chatId, 'typing').catch(() => {});
 
-          // Look up or create a persistent session for this chat.
-          const sessionKey = `chat:${chatId}`;
-          const storedId   = await settings.get<string>(sessionKey);
-          let session: Session | null = storedId !== undefined ? await sessions.get(storedId) : null;
-          // If the session was hidden/archived in the web UI, treat it as gone
-          // so a new session is created with the current naming convention
-          if (session?.status !== 'active') session = null;
-          if (!session) {
-            session = createSession({ ownerPrincipal: PRINCIPAL });
-            // Name the session after the sender so it's identifiable in the web UI
-            const name = senderName || 'Telegram';
-            session.title = `${name} on Telegram`;
-            await sessions.set(session.id, session);
-            await settings.set(sessionKey, session.id);
-          }
-
-          const traceId = crypto.randomUUID();
-          const userMsg = createMessage({ role: 'user', content: [{ type: 'text', text }], traceId });
-          session = appendMessage(session, userMsg);
+        // Look up or create a persistent session for this chat. The runner appends + persists the
+        // user message when the turn starts, so we only ensure the session exists here.
+        const sessionKey = `chat:${chatId}`;
+        const storedId   = await settings.get<string>(sessionKey);
+        let session: Session | null = storedId !== undefined ? await sessions.get(storedId) : null;
+        // If the session was hidden/archived in the web UI, treat it as gone
+        // so a new session is created with the current naming convention
+        if (session?.status !== 'active') session = null;
+        if (!session) {
+          session = createSession({ ownerPrincipal: PRINCIPAL });
+          // Name the session after the sender so it's identifiable in the web UI
+          const name = senderName || 'Telegram';
+          session.title = `${name} on Telegram`;
           await sessions.set(session.id, session);
-
-          // Keep the typing indicator alive; Telegram expires it after ~5 s.
-          const typingInterval = setInterval(
-            () => { void sendChatAction(botToken, chatId, 'typing'); },
-            4_000,
-          );
-
-          let responseText = '';
-          try {
-            for await (const event of runSession({
-              session,
-              config:         { principal: PRINCIPAL, provider: prov.name, traceId },
-              provider:       prov.adapter,
-              providerConfig: prov.config,
-              ...(services.tools         ? { tools: new Map(services.tools.list().map(t => [t.name, t])) } : {}),
-              store:          sessions,
-              ...(services.hooks         ? { hooks:         services.hooks         } : {}),
-              ...(services.systemContext ? { systemContext: services.systemContext } : {}),
-              ...(services.workdir       ? { workdir:       services.workdir       } : {}),
-              ...(services.files         ? { files:         services.files         } : {}),
-              ...(services.configPath    ? { configPath:    services.configPath    } : {}),
-              signal:       ac.signal,
-              // Stub: auto-accepts the default. A future Telegram plugin could send the
-              // question (or FormField) to the chat and resolve with the user's next message —
-              // that one change makes both tool prompts and tool-collision prompts interactive here.
-              prompt:       ((p: string | FormField, def?: string) =>
-                Promise.resolve(typeof p === 'string' ? (def ?? '') : (p.default ?? ''))) as PromptFn,
-              loadPlugin:   services.loadPlugin.bind(services),
-              unloadPlugin: services.unloadPlugin.bind(services),
-            })) {
-              if (event.type === 'text-delta') {
-                responseText += event.delta;
-              }
-              // Swallow: thinking, usage, tool:start/stdout/stderr/end, robo-user, file, done, aborted
-            }
-          } finally {
-            clearInterval(typingInterval);
-          }
-
-          if (responseText.trim()) {
-            await sendMessage(botToken, chatId, responseText);
-          }
+          await settings.set(sessionKey, session.id);
         }
 
-        messageBusy.set(chatId, processMessage().finally(() => messageBusy.delete(chatId)).catch(() => {}));
+        // Keep the typing indicator alive; Telegram expires it after ~5 s.
+        const typingInterval = setInterval(
+          () => { void sendChatAction(botToken, chatId, 'typing'); },
+          4_000,
+        );
+
+        let responseText = '';
+        try {
+          // Concurrent messages for this chat hit the same session, so the runner queues them —
+          // no per-chat lock needed. We only render this submission's turn, hence the traceId filter.
+          const view = await run.open({
+            sessionId: session.id,
+            signal:    ac.signal,
+            content:   [{ type: 'text', text }],
+            provider:  providerName,
+            principal: PRINCIPAL,
+            // Stub: auto-accepts the default. A future Telegram plugin could send the question (or
+            // FormField) to the chat and resolve with the user's next message — that one change makes
+            // both tool prompts and tool-collision prompts interactive here.
+            prompt:    ((p: string | FormField, def?: string) =>
+              Promise.resolve(typeof p === 'string' ? (def ?? '') : (p.default ?? ''))) as PromptFn,
+          });
+          for await (const event of view.events) {
+            if (event.traceId !== view.traceId) continue;
+            if (event.type === 'text-delta') responseText += event.delta;
+            if (event.type === 'done' || event.type === 'aborted'
+                || event.type === 'error' || event.type === 'cancelled') break;
+            // Swallow: thinking, usage, tool:start/stdout/stderr/end, robo-user, file
+          }
+        } finally {
+          clearInterval(typingInterval);
+        }
+
+        if (responseText.trim()) {
+          await sendMessage(botToken, chatId, responseText);
+        }
       } catch (e) {
         if (!ac.signal.aborted) {
           console.warn(`[frontend-telegram] Error for chat ${chatId}: ${e}\n`);
@@ -296,7 +279,9 @@ export const plugin: MatbotPlugin = {
             offset = update.update_id + 1;
             const msg = update.message;
             if (msg?.text) {
-              void handleMessage(msg.chat.id, msg.text, msg.from?.first_name || msg.from?.username);
+              // Establish this message's principal at the dispatch entry so the session/settings
+              // store access inside handleMessage runs under it (the turn itself is scoped by pump).
+              void runAs(PRINCIPAL, () => handleMessage(msg.chat.id, msg.text!, msg.from?.first_name || msg.from?.username));
             }
           }
         } catch (e) {
@@ -315,13 +300,9 @@ export const plugin: MatbotPlugin = {
   },
 
   async teardown() {
+    // Aborting the shared signal cancels any in-flight turn via the runner.
     teardownAc?.abort();
     teardownAc     = undefined;
-    // Wait for any in-flight message handlers to complete before resolving.
-    if (messageBusy.size > 0) {
-      await Promise.allSettled([...messageBusy.values()]);
-    }
-    messageBusy.clear();
     servicesRef    = undefined;
     botTokenRef    = undefined;
     knownChats.clear();

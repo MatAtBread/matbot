@@ -1,4 +1,4 @@
-import type { MatbotPlugin, MatbotServices } from './plugin.js';
+import type { MatbotPlugin, MatbotPluginSpec, MatbotServices, PluginSource } from './plugin.js';
 import type { PromptFn } from './types.js';
 import { registerPlugin, setupPlugin } from './registry.js';
 
@@ -87,18 +87,30 @@ export async function loadPlugins(
       throw new Error(`Could not load plugin "${spec}": ${reason}`);
     }
 
-    const mod    = result.value;
-    const plugin = (mod['plugin'] ?? (mod['default'] as Record<string, unknown> | undefined)?.['plugin']) as MatbotPlugin | undefined;
+    const mod  = result.value;
+    const spec_obj = (mod['plugin'] ?? (mod['default'] as Record<string, unknown> | undefined)?.['plugin']) as MatbotPluginSpec | undefined;
 
-    if (plugin === undefined || typeof plugin !== 'object' || !('name' in plugin)) {
+    if (spec_obj === undefined || typeof spec_obj !== 'object' || !('apiVersion' in spec_obj)) {
       throw new Error(
         `Plugin module "${spec}" does not export a \`plugin\` object. ` +
-        `Expected: export const plugin: MatbotPlugin`,
+        `Expected: export const plugin: MatbotPluginSpec`,
       );
     }
 
+    // The single boundary where an author's spec becomes a loaded plugin: identity is stamped here,
+    // never declared by the author. The host-injected resolver derives the canonical name; absent a
+    // resolver (e.g. a bare host) we fall back to platform-neutral string munging.
+    const name   = services.resolver !== undefined ? await services.resolver.identify(spec) : defaultIdentify(spec);
+    const source = sourceOf(spec);
+    const plugin: MatbotPlugin = {
+      ...spec_obj,
+      name,
+      specifier: spec,
+      ...(source !== undefined ? { source } : {}),
+    };
+
     try {
-      registerPlugin(plugin, spec);
+      registerPlugin(plugin);
       await setupPlugin(plugin, services, prompt);
       loaded.push(plugin);
     } catch (err) {
@@ -122,6 +134,32 @@ export async function loadPlugins(
  *      re-evaluated, while everything it statically imports stays cached. We can
  *      detect (1) here; (2) is noted at the call site.
  */
+/**
+ * Classify how a specifier resolves to code, from its shape alone (platform-neutral; no fs).
+ * github shorthand is only recognised via the explicit `github:` prefix — a bare `owner/repo`
+ * is indistinguishable from a scoped npm package and is treated as npm.
+ */
+function sourceOf(spec: string): PluginSource | undefined {
+  if (/^https?:\/\//.test(spec))                                    return 'cdn';
+  if (spec.startsWith('github:'))                                   return 'github';
+  if (spec.startsWith('file://') || spec.startsWith('./') ||
+      spec.startsWith('../')     || spec.startsWith('/'))           return 'local';
+  return 'npm';
+}
+
+/**
+ * Degraded name derivation used only when no PluginResolver is injected. A bare package name is its
+ * own identity; anything path/URL-shaped collapses to its last segment (query and extension
+ * stripped). Real hosts inject a resolver that walks package.json (node) or parses the CDN URL
+ * (browser); this exists so a resolver-less host still loads rather than crashing.
+ */
+function defaultIdentify(spec: string): string {
+  if (sourceOf(spec) === 'npm') return spec;
+  const noQuery = (spec.split('?')[0]) ?? spec;
+  const last    = noQuery.replace(/\/+$/, '').split('/').pop() ?? noQuery;
+  return last.replace(/\.[^.]+$/, '') || noQuery;
+}
+
 function toFreshUrl(spec: string): string {
   try {
     const url = new URL(import.meta.resolve(spec));

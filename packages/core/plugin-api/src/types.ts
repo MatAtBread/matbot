@@ -10,7 +10,9 @@ export type JSONSchema = Record<string, unknown>;
 // ── Principal ───────────────────────────────────────────────────────────────
 
 /** Identity of whatever initiated an operation — a turn, a tool call, a store read/write.
- *  Carried through so an implementation can attribute or test the origin; it grants nothing. */
+ *  Established at each entry point and carried ambiently via the `PrincipalCarrier`
+ *  (`currentPrincipal()` / `runAs()`), so any layer can attribute or test the origin without it
+ *  being threaded through every signature. It grants nothing — policy is the service's concern. */
 export interface Principal {
   id:    string;
   type:  'user' | 'agent' | 'system';
@@ -109,12 +111,20 @@ export type Marker<K extends string = string> = {
 };
 
 export interface FormField {
-  name:      string;
-  label:     string;
-  type:      'text' | 'password' | 'select' | 'confirm';
-  options?:  string[];
-  default?:  string;
-  required?: boolean;
+  name:        string;
+  label:       string;
+  type:        'text' | 'password' | 'select' | 'confirm';
+  options?:    string[];
+  /** select-only: render an "Other…" affordance that lets the user type a free-form answer instead
+   *  of picking an option. The typed value is returned verbatim, on the same channel as a pick —
+   *  callers never learn whether the answer was a preset or free text. Ignored for other types. */
+  allowOther?: boolean;
+  default?:    string;
+  required?:   boolean;
+  /** Presentation hint only (default true): whether the frontend offers a cancel affordance (the
+   *  "give up" path — see `PromptFn`). Set false to render a hard-blocking prompt with no out. The
+   *  runner and server never consult this; a frontend with no cancel UI simply can't fire one. */
+  cancelable?: boolean;
 }
 
 /**
@@ -157,7 +167,6 @@ export interface Session {
 
 export type SystemContextContributor = (ctx: {
   session:   Session;
-  principal: Principal;
   signal:    AbortSignal;
 }) => string | null | Promise<string | null>;
 
@@ -165,7 +174,7 @@ export interface SystemContextRegistry {
   register(contributor: SystemContextContributor, pluginName?: string): void;
   removeByPlugin(pluginName: string): void;
   /** Calls all contributors and joins non-null, non-empty results with double newlines. */
-  build(ctx: { session: Session; principal: Principal; signal: AbortSignal }): Promise<string | null>;
+  build(ctx: { session: Session; signal: AbortSignal }): Promise<string | null>;
 }
 
 // ── Pipeline hooks ────────────────────────────────────────────────────────────
@@ -179,7 +188,6 @@ export type HookPoint =
   | 'after:tool';
 
 export interface RunConfig {
-  principal:  Principal;
   provider:   string;
   persona?:   string;
   sessionId?: string;
@@ -188,7 +196,6 @@ export interface RunConfig {
 
 export interface HookContext {
   session:   Session;
-  principal: Principal;
   config:    RunConfig;
   signal:    AbortSignal;
   abort?:    string;
@@ -314,6 +321,11 @@ export type ToolEvent =
  *   - `(field: FormField)` — a single structured field (`select`/`confirm`/`password`/`text`),
  *     letting rich frontends render real controls (buttons, masked input). Frontends that can't
  *     render it fall back to `field.label` as plain text. Resolves to the chosen/typed value.
+ *
+ * Cancellation is the "we can't proceed — give up" path (distinct from a graceful "decline", which
+ * is simply one of the offered `options`). The host rejects the promise with `PromptCancelledError`
+ * and abandons the current turn, returning to idle; a caller's surrounding try/catch turns the
+ * rejection into a tool error that closes the tool call cleanly.
  *     This reuses `FormField` rather than a parallel type; it is a one-shot request/response and
  *     deliberately does NOT engage the session-bound `form`/`form-response` flow.
  */
@@ -325,7 +337,6 @@ export interface PromptFn {
 export interface ToolContext {
   callId:      string;
   session:     Session;
-  principal:   Principal;
   signal:      AbortSignal;
   vault:       Vault;
   workdir?:    string;
@@ -414,12 +425,36 @@ export interface FrontendInfo {
 
 // ── Vault ─────────────────────────────────────────────────────────────────────
 
-export interface Vault {
-  /** Store a named secret and make it immediately available via resolve(). */
-  createSecret(name: string, value: string): Promise<void>;
-  /** Resolve ${env:NAME} placeholders by looking up the named value. */
+/**
+ * The primitives a vault backend must implement. Resolution, redaction, and the three
+ * low-level store operations the smart `createSecret` policy composes. A backend implements
+ * `Vault` (which is `VaultSpec` plus that policy); plugins are handed a `Vault`.
+ */
+export interface VaultSpec {
+  /** Resolve ${NAME} placeholders by looking up the named value; throws MissingSecretError for any miss. */
   resolve(ref: string): Promise<string>;
   scrub(text: string): string;
+  /** Store `value` under exactly `name`, overwriting. The literal write; no reference/dedup logic. */
+  writeSecret(name: string, value: string): Promise<void>;
+  /** Whether a secret is stored under this exact name. */
+  hasKey(name: string): boolean;
+  /**
+   * The name a value is already stored under, if any. Optional: backends that can't (or won't)
+   * reverse-index omit it, and `createSecret`'s dedup step is skipped.
+   */
+  findByValue?(value: string): string | undefined;
+}
+
+export interface Vault extends VaultSpec {
+  /**
+   * Store a secret coming (often) from a user via the LLM, where we cannot tell a real value
+   * from a key name they typed by mistake. Returns the key name callers MUST reference — not
+   * necessarily the `name` requested:
+   *   - `value` is already a known key name → returns `value` (it was a reference, not a secret)
+   *   - `value` already stored under another name → returns that name (dedup)
+   *   - otherwise → writes under `name` and returns `name`
+   */
+  createSecret(name: string, value: string): Promise<string>;
 }
 
 // ── Health ────────────────────────────────────────────────────────────────────
@@ -437,4 +472,94 @@ export interface ToolRegistry {
   resolve(name: string): Tool | null;
   list(): readonly Tool[];
   removeByPlugin(pluginName: string): void;
+}
+
+// ── Pipeline events ─────────────────────────────────────────────────────────────
+
+/**
+ * The streaming output of a single turn. Every event carries the `traceId` of the turn that
+ * produced it — that is the correlation key a frontend uses to route events to the right
+ * message/bubble (see `SessionRunner`). A turn ends with exactly one terminal event:
+ * `done` (completed), `aborted` (interrupted mid-flight), or `error`. `cancelled` is emitted
+ * for a queued submission that was dropped before it ever ran (e.g. by `SessionRunner.abort`),
+ * so it carries no session — there is nothing to persist.
+ */
+export type PipelineEvent =
+  | { type: 'text-delta';     delta: string;          traceId: string }
+  | { type: 'thinking';       delta: string;          traceId: string }
+  | { type: 'tool:start';     callId: string; name: string; input: unknown; traceId: string }
+  | { type: 'tool:stdout';    callId: string; chunk: string;  traceId: string }
+  | { type: 'tool:stderr';    callId: string; chunk: string;  traceId: string }
+  | { type: 'tool:end';       callId: string; result: unknown; isError: boolean; traceId: string }
+  | { type: 'file';           handle: FileHandle;     traceId: string }
+  | { type: 'usage';          inputTokens: number; outputTokens: number; costUsd?: number; cacheReadTokens?: number; cacheCreationTokens?: number; traceId: string }
+  | { type: 'done';           session: Session;       traceId: string }
+  | { type: 'aborted';        reason: string; session: Session; traceId: string }
+  | { type: 'cancelled';      sessionId: string;      traceId: string }
+  // A queued (not-yet-running) submission, carried on the stream so a frontend renders it as part
+  // of the live "delta" (everything after the last committed message), never from stored state.
+  // `queued` is the number of submissions ahead of it (0 ⇒ about to run). Emitted live on enqueue
+  // and replayed (in queue order) to anyone subscribing mid-flight.
+  | { type: 'queued';         content: MessageContent[]; queued: number; concatQueue: boolean; traceId: string }
+  | { type: 'robo-user';      content: MessageContent[]; traceId: string }
+  | { type: 'error';          error: string;          traceId: string }
+  | { type: 'system-context'; text: string;           traceId: string };
+
+// ── Session runner ──────────────────────────────────────────────────────────────
+
+/**
+ * A view onto a session returned by `SessionRunner.open`. `session` is the authoritative
+ * server-side state — committed messages plus an overlay of any queued-but-not-yet-run
+ * submissions (each carrying `metadata.pending: true`). `events` is a lazy, per-session live
+ * tap: accessing it subscribes to the turn event stream from now (replaying the in-flight
+ * turn, if any); never touching it costs nothing.
+ */
+export interface SessionView {
+  session:        Session;
+  /** Submissions waiting behind the current turn (does not count the running turn). */
+  queued:         number;
+  /** Correlation id of the submission this call enqueued — present only when content was supplied. */
+  traceId?:       string;
+  readonly events: AsyncIterable<PipelineEvent>;
+}
+
+/** Observe a session without submitting anything. */
+export interface OpenOpts {
+  sessionId: string;
+  signal:    AbortSignal;
+  /** Optional caller-supplied correlation id; one is generated when absent. */
+  traceId?:  string;
+}
+
+/** Observe a session AND enqueue a submission. The compiler enforces provider/principal here;
+ *  a remote frontend deserializing a request body must still validate the wire input itself. */
+export interface SubmitOpenOpts extends OpenOpts {
+  content:      MessageContent[];
+  provider:     string;
+  principal:    Principal;
+  /** When true, this submission may be merged with others drained in the same batch. Default false
+   *  (queue mode: one turn per submission). */
+  concatQueue?: boolean;
+  /** Interactive prompt implementation for this submission's turn. The frontend owns delivery —
+   *  it must target the frontend's per-session client connections, not a single request. */
+  prompt?:      PromptFn;
+}
+
+/**
+ * Serialises turns per session. A submission never executes concurrently with another for the
+ * same session; the in-memory queue (lost on process restart, by design) absorbs anything that
+ * arrives mid-turn. The server is the source of truth: a frontend renders whatever `open()`
+ * returns and treats the live `events` stream purely as an optimisation.
+ */
+export interface SessionRunner {
+  open(opts: OpenOpts | SubmitOpenOpts): Promise<SessionView>;
+  /** Abort the running turn (if any) and drop all queued submissions, emitting `cancelled` for each. */
+  abort(sessionId: string): void;
+  /** Abandon the running turn (if any) WITHOUT touching the queue — `pump` advances to the next
+   *  queued submission, or idles. The "give up on this turn" path (a prompt cancel); contrast
+   *  `abort`, which also clears the queue. A no-op if nothing is running. */
+  cancelTurn(sessionId: string): void;
+  /** Snapshot of a session's live state: whether a turn is running and how many submissions wait
+   *  behind it. `busy` is `running || queued > 0`. */
+  status(sessionId: string): { busy: boolean; running: boolean; queued: number };
 }

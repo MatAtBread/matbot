@@ -545,7 +545,7 @@
 
     /* ── Message types ─────────────────────────────────────────── */
 
-    .message { max-width: 700px; }
+    .message { max-width: min(700px, 95%); }
 
     /* User: right-aligned dark bubble */
     .message.user {
@@ -556,6 +556,7 @@
       border-radius: 12px 12px 2px 12px;
       line-height: 1.65;
       word-break: break-word;
+      position: relative;   /* anchor for the floating queued badge */
     }
     .message.user .md-body { color: #fff; }
     .message.user .md-body code { background: rgba(255,255,255,0.15); border-color: rgba(255,255,255,0.2); color: #fff; }
@@ -566,6 +567,21 @@
     .message.user .md-body th { background: rgba(0,0,0,0.2); }
     .message.user .md-body th, .message.user .md-body td { border-color: rgba(255,255,255,0.2); }
     .message.user .md-body hr { border-top-color: rgba(255,255,255,0.2); }
+
+    /* Queued (not-yet-running) submissions: a muted bubble with an egg-timer floating on its
+       top-left corner — purely an indicator, so the bubble never changes size or shape. Applies
+       both live (the 'queued' event) and on reload (the server's pending overlay), so the number
+       of these badges IS the queue depth. */
+    .message.user.pending { opacity: 0.6; }
+    .message.user.pending::before {
+      content: '⏳';
+      position: absolute;
+      top: -9px;
+      left: -9px;
+      font-size: 0.95em;
+      line-height: 1;
+      pointer-events: none;
+    }
 
     /* Assistant: left-aligned, no background */
     .message.assistant { align-self: flex-start; }
@@ -1005,6 +1021,26 @@
     #send-btn.stop-mode:hover    { background: #b91c1c; }
     #send-btn.stop-mode:disabled { background: #fca5a5; cursor: not-allowed; }
 
+    /* Stop button: a distinct, always-red control shown only while a turn is running, so the
+       busy state is unambiguous and the input/Send stay live for type-ahead queueing. */
+    /* Same metrics as #send-btn (h/w are em, so the font-size must match for an identical circle).
+       Toggled via visibility (not display) so it reserves its slot and Send never shifts. */
+    #stop-btn {
+      border-radius: 50%;
+      background: #dc2626;
+      color: #fff;
+      border: none;
+      cursor: pointer;
+      font-size: 2.14em;
+      flex-shrink: 0;
+      transition: background 0.1s;
+      height: 1.5em;
+      width: 1.5em;
+      line-height: 1em;
+    }
+    #stop-btn:hover    { background: #b91c1c; }
+    #stop-btn:disabled { background: #fca5a5; cursor: not-allowed; }
+
     /* ── Scroll-down button (appears after generation when output extends below fold) ── */
     #send-btn.scroll-down-mode          { background: #2563eb; }
     #send-btn.scroll-down-mode:hover    { background: #1d4ed8; }
@@ -1066,6 +1102,7 @@
     /* ── Prompt blocks ─────────────────────────────────────────── */
 
     .prompt-block {
+      position: relative;
       align-self: flex-start;
       background: #fffbeb;
       border: 1px solid #fde68a;
@@ -1074,14 +1111,34 @@
       max-width: 500px;
       margin-top: 4px;
     }
+    .prompt-cancel-x {
+      position: absolute;
+      top: 6px;
+      right: 6px;
+      width: 22px;
+      height: 22px;
+      padding: 0;
+      line-height: 20px;
+      font-size: 16px;
+      color: #92400e;
+      background: transparent;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .prompt-cancel-x:hover    { background: #fde68a; }
+    .prompt-cancel-x:disabled { opacity: 0.4; cursor: not-allowed; }
     .prompt-question {
       font-size: 0.93em;
       color: #374151;
       margin-bottom: 8px;
+      padding-right: 22px;
       white-space: pre-wrap;
     }
     .prompt-row { display: flex; gap: 8px; }
     .prompt-input {
+      resize: vertical;
+      min-height: 2.5em;
       flex: 1;
       border: 1px solid #d1d5db;
       border-radius: 6px;
@@ -1105,7 +1162,20 @@
     }
     .prompt-submit:hover    { background: #374151; }
     .prompt-submit:disabled { background: #d1d5db; cursor: not-allowed; }
-    .prompt-choices { display: flex; gap: 8px; }
+    .prompt-choices {
+      container-type: inline-size;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    @container (max-width: 300px) {
+      .prompt-choices {
+        flex-direction: column;
+      }
+      .prompt-choice-btn {
+        width: 100%;
+      }
+    }
     .prompt-choice-btn {
       padding: 6px 16px;
       border-radius: 6px;
@@ -1397,6 +1467,7 @@
       <div id="input-row">
         <textarea id="input" rows="1" placeholder="Shift+⬅️ to send, ⬅️ for newline"></textarea>
         <button id="send-btn">▶</button>
+        <button id="stop-btn" style="visibility:hidden" title="Stop the running turn and drop anything queued">&#9209;</button>
       </div>
     </div>
     <button id="scroll-down-btn" style="display:none" title="Scroll to bottom">▼</button>

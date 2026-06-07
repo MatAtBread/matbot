@@ -1,5 +1,5 @@
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
-import type { MatbotPlugin, Store } from '@matatbread/matbot-plugin-api';
+import type { MatbotPluginSpec, Store } from '@matatbread/matbot-plugin-api';
 import path from 'node:path';
 import process from 'node:process';
 import { createSkillIndexHook, createUserMessageClassifierHook, createAgentMessageClassifierHook } from './hooks.js';
@@ -12,12 +12,11 @@ export interface SkillsPluginConfig {
   pollMs?:   number;
 }
 
-export function createSkillsPlugin(config: SkillsPluginConfig): MatbotPlugin {
+export function createSkillsPlugin(config: SkillsPluginConfig): MatbotPluginSpec {
   const skills = new Map<string, SkillDoc>();
   let abortController: AbortController | undefined;
 
   return {
-    name:       'skills',
     apiVersion: PLUGIN_API_VERSION,
     manifest: {
       config:      ['skillsDir'],
@@ -43,7 +42,7 @@ export function createSkillsPlugin(config: SkillsPluginConfig): MatbotPlugin {
       void watchAndImportSkillDir(config.skillsDir, store, skills, abortController.signal, config.pollMs);
 
       const getSkills = (): SkillDoc[] => [...skills.values()];
-      const pluginSettings = services.settings('skills');
+      const pluginSettings = services.settings();
       // services.hooks.register(createUserMessageClassifierHook(pluginSettings, services.providers, getSkills));
       // services.hooks.register(createSkillIndexHook(getSkills));
       // services.hooks.register(createAgentMessageClassifierHook(getSkills, pluginSettings, req => services.complete(req)));
@@ -58,6 +57,6 @@ export function createSkillsPlugin(config: SkillsPluginConfig): MatbotPlugin {
 
 // ── Default plugin export ─────────────────────────────────────────────────────
 
-export const plugin: MatbotPlugin = createSkillsPlugin({
+export const plugin: MatbotPluginSpec = createSkillsPlugin({
   skillsDir: path.join(process.cwd(), '.data', 'skills'),
 });

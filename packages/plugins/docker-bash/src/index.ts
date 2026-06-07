@@ -1,4 +1,4 @@
-import type { MatbotPlugin, Tool, ToolEvent, ToolContext } from '@matatbread/matbot-plugin-api';
+import type { MatbotPluginSpec, Tool, ToolEvent, ToolContext } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import { spawn, execFile } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
@@ -202,8 +202,7 @@ const INPUT_SCHEMA = {
   },
 } as const;
 
-export const plugin: MatbotPlugin = {
-  name:       'docker-bash',
+export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,
 
   async setup(services) {

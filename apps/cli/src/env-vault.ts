@@ -2,10 +2,13 @@ import { VaultImpl } from '@matatbread/matbot-security';
 import { readFile, writeFile } from 'node:fs/promises';
 
 /**
- * The default node Vault implementation: an in-memory VaultImpl whose createSecret
- * writes through to the .env file next to matbot.yaml, so secrets stored at runtime
- * (via the `plugin store-key` tool or CLI bootstrap) survive a restart. Reads still
- * come from the env snapshot loaded into the constructor; this only adds persistence.
+ * The default node Vault implementation: an in-memory VaultImpl whose writes are persisted to
+ * the .env file next to matbot.yaml, so secrets stored at runtime (via the `plugin store-key`
+ * tool or CLI bootstrap) survive a restart. Reads still come from the env snapshot loaded into
+ * the constructor; this only adds persistence.
+ *
+ * Persistence hooks the write primitive, not createSecret — so the reference and dedup paths of
+ * createSecret (which never call writeSecret) never append a dead line to .env.
  */
 export class EnvFileVault extends VaultImpl {
   private readonly envPath: string;
@@ -15,8 +18,8 @@ export class EnvFileVault extends VaultImpl {
     this.envPath = envPath;
   }
 
-  override async createSecret(name: string, value: string): Promise<void> {
-    await super.createSecret(name, value);
+  override async writeSecret(name: string, value: string): Promise<void> {
+    await super.writeSecret(name, value);
 
     let existing = '';
     try { existing = await readFile(this.envPath, 'utf8'); } catch { /* no file yet */ }

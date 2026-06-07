@@ -1,4 +1,4 @@
-import type { Tool, ToolEvent, ToolContext, MatbotPlugin } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolEvent, ToolContext, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import { spawn } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
@@ -187,8 +187,7 @@ export function createBashTool(docker?: DockerConfig): Tool {
 
 export const bashTool: Tool = createBashTool();
 
-export const plugin: MatbotPlugin = {
-  name:       'bash',
+export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,
   tools:      [bashTool],
 };

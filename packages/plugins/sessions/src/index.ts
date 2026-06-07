@@ -1,9 +1,8 @@
-import type { MatbotPlugin, MatbotServices } from '@matatbread/matbot-plugin-api';
+import type { MatbotPluginSpec, MatbotServices } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION }               from '@matatbread/matbot-plugin-api';
 import { makeSessionTools }                 from './tools.js';
 
-export const plugin: MatbotPlugin = {
-  name:       '@matatbread/matbot-sessions',
+export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,
 
   async setup(services: MatbotServices) {

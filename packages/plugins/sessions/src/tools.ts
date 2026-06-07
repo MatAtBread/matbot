@@ -73,6 +73,8 @@ function makeSessionActionTool(store: Store<Session>): Tool {
           case 'get': {
             const { sessionId } = args as Extract<SessionInput, { action: 'get' }>;
             if (!sessionId) { yield { type: 'error', message: 'action "get" requires "sessionId".' }; return; }
+            // Pure committed history. Pending submissions and the in-progress response are the live
+            // "delta" delivered over the runner's event stream, never overlaid onto stored state.
             const session = await store.get(sessionId);
             if (!session) { yield { type: 'error', message: `Session "${sessionId}" not found.` }; return; }
             yield { type: 'result', value: session };

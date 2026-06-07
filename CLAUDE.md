@@ -27,7 +27,7 @@ the browser. Use web-platform APIs: `fetch`, `crypto.randomUUID()`, `AbortContro
 Node-only code lives in packages named `*-node` or in `apps/`.
 
 Also avoid `process.env`: it is an anti-pattern in matbot. Secrets and key substitution
-go through the `Vault` (`${env:NAME}` / `${secret:name}` placeholders resolved at runtime);
+go through the `Vault` (`${NAME}` placeholders resolved at runtime against one flat namespace);
 all other per-install configuration goes through plugin `Settings`. Both are abstractions
 with swappable backends (`.env` is merely the default node `Vault`; the browser build uses
 WebCrypto + browser storage and has no `.env` or `matbot.yaml`), so a plugin reaching for
@@ -57,7 +57,7 @@ packages/
     runner/        — agentic loop, hook dispatch, plugin loader (@matatbread/matbot-core)
     plugin-api/    — MatbotPlugin, MatbotServices, all shared types (@matatbread/matbot-plugin-api)
     config/        — YAML loading, .env parsing
-    security/      — VaultImpl, principal (origin of operations); resolves ${env:} and ${secret:} placeholders
+    security/      — VaultImpl, principal (origin of operations); resolves ${NAME} placeholders
     knowledge/     — LookupKnowledgeIndex (default in-memory KnowledgeIndex implementation)
     storage/
       _base/       — filter/sort engine shared by all Store implementations
@@ -113,14 +113,16 @@ providers:
     endpoint: https://api.anthropic.com
     model: claude-sonnet-4-6
     credentials:
-      apiKey: ${env:ANTHROPIC_API_KEY}
+      apiKey: ${ANTHROPIC_API_KEY}
     parameters:
       maxTokens: 4096
 ```
 
 - Prefer duplication over references — five similar provider blocks is fine
-- Both `${env:VAR}` and `${secret:name}` are resolved at runtime by `VaultImpl`; the YAML loader
-  leaves placeholders intact
+- `${NAME}` placeholders are resolved at runtime by the `Vault`; the YAML loader leaves them intact.
+  There is no env/secret distinction — a name resolves against one flat namespace (`.env` is just
+  the default node backend). `createSecret` returns the canonical key name to reference (it may
+  differ from the requested name — see the `Vault` interface); `writeSecret` stores verbatim
 - Credentials never appear in source code
 - `module` is the npm package name or relative path of the provider plugin; `endpoint` overrides
   the base URL
@@ -218,6 +220,43 @@ path: the model calls `contextual_search`, gets back the best-matching entry, an
 `Store<T extends { id: string; version: string }>` is the universal interface.
 All writes use compare-and-swap (`store.cas(id, expectedVersion, next)`) for thread safety.
 Never write to a store without a version check when concurrent updates are possible.
+
+---
+
+## Security principal
+
+A `Principal` (`{ id, type }`) is the identity that originated the current operation. It is carried
+**ambiently**, not threaded through signatures: there is one mechanism, the `PrincipalCarrier`,
+installed once at boot and read anywhere via free functions exported from `@matatbread/matbot-core`:
+
+- `currentPrincipal()` — the identity in force; throws if read outside any established scope.
+- `tryCurrentPrincipal()` — same, but `undefined` instead of throwing (fail-open backends).
+- `runAs(principal, fn)` — establish `principal` for the async extent of `fn` (nests cleanly).
+- `enterPrincipal(principal)` — imperative establishment at a process/request *entry* (throws on re-entry).
+
+**Why ambient, not a parameter.** The requirement is that the principal survive top-to-bottom,
+*including across tool-use boundaries*, into `Store`/`FileStore`/`Vault`/`KnowledgeIndex` and
+`complete()`. Threading it would make the security model opt-in at every call site (a tool that
+forgets to pass it is indistinguishable from a system call). Ambient propagation is un-forgettable:
+established once at the entry, every downstream call sees it with zero plumbing and **no interface
+churn** — backends gain only the *ability* to call `currentPrincipal()`; the stock impls ignore it.
+Passing is the mechanism's job; reject/ignore/branch is the service's.
+
+**Platform split** (mirrors `Vault`):
+- node — `createAlsPrincipalCarrier()` (`apps/cli`, `AsyncLocalStorage`-backed). The many concurrent
+  per-session `pump` loops and per-request frontend handlers each get an isolated scope — the
+  multi-user case. Lives in the node app so `packages/core` stays node-free.
+- browser / single-principal realms / tests — `createConstantPrincipalCarrier(principal)` (neutral,
+  in plugin-api). There is only ever one identity, so `run` is a passthrough and no isolation is needed.
+
+**Establishment points (entry-only).** Frontends establish at their entry — the CLI `enterPrincipal`s
+the system principal at boot; the web server `runAs` per HTTP request; telegram `runAs` per message.
+The `SessionRunner`'s `pump` separately wraps each turn in `runAs(submitter)` because it runs detached
+(`void pump`) from the request that enqueued it. In-process delegation is a nested `runAs`; cross-process
+delegation (a spawned worker) re-establishes at its own entry via `enterPrincipal`.
+
+`Session` persists `ownerPrincipalId`/`actorPrincipalId` as ownership *data* (set explicitly via
+`createSession`) — that is record-keeping, not the ambient mechanism.
 
 ---
 

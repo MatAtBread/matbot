@@ -1,4 +1,4 @@
-import type { Tool, ToolEvent, ToolContext, MatbotPlugin } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolEvent, ToolContext, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 
 interface HttpInput {
@@ -68,8 +68,7 @@ export const httpTool: Tool = {
   executor,
 };
 
-export const plugin: MatbotPlugin = {
-  name:       'http',
+export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,
   tools:      [httpTool],
 };

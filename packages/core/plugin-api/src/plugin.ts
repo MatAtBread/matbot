@@ -1,7 +1,7 @@
 import type {
   FileStore, Vault, Message, ModelParameters,
   ProviderAdapter, ProviderConfig, Tool, ToolRegistry, FrontendInfo,
-  Store, Session, SystemContextRegistry, KnowledgeIndex, PromptFn,
+  Store, Session, SystemContextRegistry, KnowledgeIndex, PromptFn, SessionRunner,
 } from './types.js';
 import type { HookRegistry } from './hooks.js';
 
@@ -31,13 +31,37 @@ export interface PluginSettings {
   delete(key: string): Promise<void>;
 }
 
+// ── Plugin identity ─────────────────────────────────────────────────────────────
+
+/** How a plugin specifier resolves to code. Loader-established, never author-declared. */
+export type PluginSource = 'local' | 'npm' | 'cdn' | 'github';
+
+/**
+ * Host-provided mapping from a load specifier to a plugin's canonical name.
+ *
+ * Identity is loader-established, not author-declared: the loader calls identify() at the single
+ * boundary where a MatbotPluginSpec becomes a MatbotPlugin. Deriving a name walks package.json
+ * (node) or parses a CDN URL (browser), so the implementation is host-specific and injected via
+ * MatbotServices rather than living in the platform-neutral core.
+ */
+export interface PluginResolver {
+  identify(specifier: string): Promise<string>;
+}
+
+/** A plugin's own loader-established identity, exposed to its setup() via scoped services. */
+export interface PluginSelf {
+  readonly name:      string;
+  readonly specifier: string;
+  readonly source?:   PluginSource;
+}
+
 // ── Services container ────────────────────────────────────────────────────────
 
 export interface MatbotServices {
   complete(req: CompletionRequest): Promise<CompletionResponse>;
 
-  /** Returns a namespaced settings store for the given plugin. Keys are isolated per plugin name. */
-  settings(pluginName: string): PluginSettings;
+  /** The calling plugin's own settings store. Scoped to the plugin — it cannot reach another's. */
+  settings(): PluginSettings;
 
   /**
    * Hot-load a plugin by specifier into the running process. Returns the loaded plugin.
@@ -92,8 +116,16 @@ export interface MatbotServices {
   /** @internal Remove a service entry — called by the runtime when the registering plugin is unloaded. */
   unregister(key: string): void;
 
+  /** Host-injected name deriver, used by the loader to stamp plugin identity. */
+  readonly resolver?:       PluginResolver;
+  /** The calling plugin's own loader-established identity. Bound per-plugin inside setup(). */
+  readonly self?:           PluginSelf;
+
   readonly providers:       ReadonlyMap<string, ProviderConfig>;
   readonly sessions?:       Store<Session>;
+  /** Per-session turn serialiser. Frontends submit and observe through this rather than calling
+   *  runSession directly, so concurrent submits queue instead of clobbering the session. */
+  readonly run?:            SessionRunner | undefined;
   readonly storageBackend?: StorageBackend | undefined;
   readonly files?:          FileStore;
   readonly vault:           Vault;
@@ -140,8 +172,11 @@ export interface StorageBackend {
 
 // ── Plugin interface ──────────────────────────────────────────────────────────
 
-export interface MatbotPlugin {
-  readonly name:        string;
+/**
+ * What a plugin author writes. No identity — that is loader-established, not the author's to assign.
+ * The loader turns a MatbotPluginSpec into a MatbotPlugin by stamping name/specifier/source.
+ */
+export interface MatbotPluginSpec {
   readonly apiVersion:  string;
   readonly manifest?:   PluginManifest;
   readonly provider?:   ProviderAdapterFactory;
@@ -158,4 +193,14 @@ export interface MatbotPlugin {
   setup?(services: MatbotServices): Promise<void>;
   teardown?(): Promise<void>;
   installationMessage?(): Promise<string>;
+}
+
+/**
+ * A loaded plugin: the author's spec plus the provenance the loader stamps at load time.
+ * Every consumer (registry, tools, UI) sees this type and reads `.name` / `.specifier` off it.
+ */
+export interface MatbotPlugin extends MatbotPluginSpec {
+  readonly name:      string;   // resolver.identify(specifier)
+  readonly specifier: string;   // how it was loaded
+  readonly source?:   PluginSource;
 }
