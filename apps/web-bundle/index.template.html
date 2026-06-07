@@ -11,16 +11,14 @@
   </style>
 </head>
 <body>
-  <div id="matbot-root"><div id="mb-loading">Starting matbot — stripping %%MODULE_COUNT%% modules in your browser…</div></div>
+  <div id="matbot-root"><div id="mb-loading">Starting matbot…</div></div>
 
-  <!-- 1. The TypeScript compiler (inlined). Exposes globalThis.ts; used to type-strip every module. -->
-  <script>%%TYPESCRIPT%%</script>
-
-  <!-- 2. The inlined payload: raw .ts sources, the package→entry map, config, and identity map. -->
+  <!-- 1. The inlined payload: build-time-stripped JS modules, the package→entry map, config, identity. -->
   <script>globalThis.__MB__ = %%PAYLOAD%%;</script>
 
-  <!-- 3. The loader (classic script): strip → blob → import map → boot. The browser mirror of
-          apps/cli/ts-hooks.js. No service worker, no fetch — runs from file:// or any static host. -->
+  <!-- 2. The loader (classic script): rewrite relative imports → blob → import map → boot. The browser
+          mirror of apps/cli/ts-hooks.js. No service worker, no fetch, no in-page stripping — runs from
+          file:// or any static host. (A runtime .ts plugin add lazy-loads sucrase from a CDN; http only.) -->
   <script>%%LOADER%%</script>
 </body>
 </html>

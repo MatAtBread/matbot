@@ -2,36 +2,37 @@
 //
 // A classic (non-module) script so no module graph — and therefore no import-map lock-in — exists
 // until we explicitly trigger the first dynamic import() below. It reads the inlined payload
-// (globalThis.__MB__), type-strips every .ts module with the inlined TypeScript compiler
-// (globalThis.ts), rewrites each module's *relative* imports to synthetic `mbmod:<id>` specifiers,
-// blob-ifies the result, and publishes one import map mapping every package name and every
-// synthetic id to its blob URL. Bare `@matatbread/*` imports are left untouched so host and plugins
-// resolve to the *same* module instance (the singleton boundary that `instanceof` depends on).
+// (globalThis.__MB__), whose modules are already type-stripped at build time, rewrites each module's
+// *relative* imports to synthetic `mbmod:<id>` specifiers, blob-ifies the result, and publishes one
+// import map mapping every package name and every synthetic id to its blob URL. Bare `@matatbread/*`
+// imports are left untouched so host and plugins resolve to the *same* module instance (the singleton
+// boundary that `instanceof` depends on).
 //
-// Because everything is in-memory (blobs + an injected import map, no fetch, no service worker), the
-// baseline runs identically from a file:// URL or any static host.
+// Everything is in-memory (blobs + an injected import map, no fetch, no service worker) and needs no
+// stripping at load, so boot is instant and identical from a file:// URL or any static host. The
+// inlined sucrase stripper is used only for *runtime* remote-plugin loading (loadRemote), the one
+// path that fetches raw .ts in the browser.
 
 (async () => {
   const MB = globalThis.__MB__;
   if (!MB) throw new Error('matbot: missing inlined payload (__MB__).');
-  const ts = globalThis.ts;
-  if (!ts) throw new Error('matbot: missing inlined TypeScript compiler.');
 
-  const SOURCES = MB.sources;          // { "/packages/.../index.ts": "<raw ts source>" }
+  const SOURCES = MB.sources;          // { "/packages/.../index.ts": "<pre-stripped JS>" }
   const PKG     = MB.packageEntries;   // { "@matatbread/matbot-core": "/packages/.../index.ts" }
   const ENTRY   = MB.entry;            // bootstrap module id
   const SYN = (id) => 'mbmod:' + id;
 
-  const strip = (src, fileName) => ts.transpileModule(src, {
-    fileName,
-    reportDiagnostics: false,
-    compilerOptions: {
-      target: ts.ScriptTarget.ESNext,
-      module: ts.ModuleKind.ESNext,
-      verbatimModuleSyntax: true,
-      removeComments: true,        // also avoids a `from '…'` in a comment tripping the specifier rewrite
-    },
-  }).outputText;
+  // The host is stripped at build time, so boot needs no stripper. The ONLY thing that needs stripping
+  // in-browser is a runtime-fetched remote .ts plugin (loadRemote) — and that path is http-only (you
+  // can't fetch a remote plugin from file://), so we lazy-load sucrase from a CDN on first use rather
+  // than inlining ~700 KB into every page. Cached after the first remote load.
+  let _transform;
+  const getTransform = async () => {
+    if (_transform) return _transform;
+    const mod = await import(/* @vite-ignore */ 'https://esm.sh/sucrase@3.35.1');
+    _transform = mod.transform;
+    return _transform;
+  };
 
   // Normalise a relative specifier against its importer's module id, with .js -> .ts remap (the same
   // remap ts-hooks.js does in node, for source that ships no compiled output).
@@ -75,8 +76,7 @@
   // ── Build the inlined (baseline) graph ──────────────────────────────────────────────────────
   const blobUrl = {};
   for (const id of Object.keys(SOURCES)) {
-    const stripped  = strip(SOURCES[id], id);
-    const rewritten = await rewrite(stripped, (spec) => {
+    const rewritten = await rewrite(SOURCES[id], (spec) => {   // SOURCES[id] is already stripped JS
       if (!isRelative(spec)) return null;                 // bare → import map (singleton boundary)
       const target = resolveRel(id, spec);
       if (SOURCES[target] === undefined) {                // not one of ours (e.g. a string literal) — leave
@@ -112,7 +112,7 @@
     if (!res.ok) throw new Error(`matbot: failed to fetch "${absUrl}" (${res.status})`);
 
     const raw      = await res.text();
-    const stripped = url.endsWith('.ts') ? strip(raw, url) : raw;
+    const stripped = url.endsWith('.ts') ? (await getTransform())(raw, { transforms: ['typescript'], filePath: url, preserveDynamicImport: true }).code : raw;
     const rewritten = await rewrite(stripped, async (spec) => {
       if (spec.startsWith('node:')) {
         throw new Error(`remote plugin "${absUrl}" imports the Node-only module "${spec}" and cannot run in the browser`);

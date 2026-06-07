@@ -8,7 +8,15 @@
 
 import { readFile, writeFile, mkdir, readdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import path from 'node:path';
+
+const localRequire = createRequire(import.meta.url);
+
+// Build-time type stripper: sucrase (pure JS — no native binary, no postinstall, invisible to anyone
+// installing matbot). Used per-module so each stays a separate module the import map wires up.
+const stripTypes = (src, filePath) =>
+  localRequire('sucrase').transform(src, { transforms: ['typescript'], filePath, preserveDynamicImport: true }).code;
 
 const here     = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '../..');
@@ -160,7 +168,12 @@ async function main() {
     });
   }
 
-  const { sources, usedNames } = await collect(rootIds, nameMap);
+  const { sources: rawSources, usedNames } = await collect(rootIds, nameMap);
+
+  // Strip types at BUILD time so the browser loads ready-to-run JS and boots instantly (no in-page
+  // stripping of 55 modules). Runtime remote-plugin loading lazy-loads sucrase from a CDN instead.
+  const sources = {};
+  for (const [id, src] of Object.entries(rawSources)) sources[id] = stripTypes(src, id);
 
   // packageEntries: every workspace package whose entry was pulled into the graph (so the import map
   // can map its bare name → blob), plus the ones referenced by config even if only dynamically.
@@ -184,16 +197,13 @@ async function main() {
     },
   };
 
-  const tsPath  = path.join(repoRoot, 'node_modules/typescript/lib/typescript.js');
-  const tsSrc   = await readFile(tsPath, 'utf8');
-  const loader  = await readFile(path.join(here, 'src/loader.js'), 'utf8');
+  const loader   = await readFile(path.join(here, 'src/loader.js'), 'utf8');
   const template = await readFile(path.join(here, 'index.template.html'), 'utf8');
 
   const moduleCount = Object.keys(sources).length;
   const html = template
-    .replace('%%TYPESCRIPT%%', () => guard(tsSrc))
-    .replace('%%PAYLOAD%%',    () => guard(JSON.stringify(payload)))
-    .replace('%%LOADER%%',     () => guard(loader))
+    .replace('%%PAYLOAD%%',  () => guard(JSON.stringify(payload)))
+    .replace('%%LOADER%%',   () => guard(loader))
     .replace(/%%MODULE_COUNT%%/g, String(moduleCount));
 
   const outDir = path.join(here, 'dist');
