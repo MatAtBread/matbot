@@ -94,6 +94,9 @@ export function createWebServer(deps: WebServerDeps) {
   // ~6-socket-per-host limit, which otherwise starved both the `queued` signal and POST /prompt.
   const sessionConns = new Map<string, Set<ServerResponse>>();
   const busyState    = new Map<string, boolean>();                     // last-broadcast busy per session
+  // Sessions with a live server-owned busy tracker (see the submit handler). One transient tracker
+  // per busy period drives the idle broadcast independently of any client events stream.
+  const busyTrackers = new Set<string>();
   // session ID → the parked prompt's settlers. `resolve` delivers an answer (applying the default
   // fallback); `cancel` rejects it with PromptCancelledError — the "give up" path.
   const pendingPrompts = new Map<string, { resolve: (answer: string) => void; cancel: () => void }>();
@@ -207,8 +210,12 @@ export function createWebServer(deps: WebServerDeps) {
         'connection':    'keep-alive',
       });
       res.write(sseComment('status stream open'));
-      // Send current busy state so the client is up-to-date immediately.
-      for (const sessionId of busyState.keys()) {
+      // Send current busy state so the client is up-to-date immediately. Reconcile against the
+      // authoritative runner status first: a stale true (busyState that never got its idle
+      // transition — e.g. a turn that ended with no events consumer attached) self-heals here,
+      // broadcasting false to existing listeners instead of replaying a phantom busy.
+      for (const sessionId of [...busyState.keys()]) {
+        if (!deps.run.status(sessionId).busy) { updateBusy(sessionId); continue; }
         res.write(sseEvent('session-busy', { sessionId, busy: true }));
       }
       statusListeners.add(res);
@@ -289,6 +296,34 @@ export function createWebServer(deps: WebServerDeps) {
         });
         updateBusy(targetId);
         json(res, 200, { queued: view.queued, traceId: view.traceId });
+
+        // Server-owned busy tracker. The idle (busy:false) broadcast otherwise rides on a client's
+        // GET /sessions/:id/events consumer (below); if no client is draining this session when its
+        // turn ends, busyState stays stuck true and the sidebar dot pulses forever. So whoever turned
+        // busy ON owns turning it OFF: drain a dedicated read-view purely to drive updateBusy until the
+        // runner reports idle, then tear down. One tracker per busy period — concat/queued submits that
+        // arrive while it's live reuse it — so cost is bounded by concurrent running turns, nothing on
+        // idle sessions.
+        if (!busyTrackers.has(targetId)) {
+          busyTrackers.add(targetId);
+          const trackAc = new AbortController();
+          const trackView = await deps.run.open({ sessionId: targetId, signal: trackAc.signal });
+          void (async () => {
+            try {
+              for await (const _ev of trackView.events) {
+                updateBusy(targetId);
+                // The terminal event is consumed while pump's `running` is still true; it flips to
+                // false in pump's finally on a later microtask. Re-check then so we observe idle and
+                // emit the false transition (mirrors the client consumer's deferred re-check).
+                queueMicrotask(() => {
+                  updateBusy(targetId);
+                  if (!deps.run.status(targetId).busy) trackAc.abort();
+                });
+              }
+            } catch { /* stream torn down */ }
+            finally { busyTrackers.delete(targetId); }
+          })();
+        }
       } catch (e) {
         json(res, 500, { error: String(e) });
       }
