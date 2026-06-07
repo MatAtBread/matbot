@@ -6,7 +6,7 @@ import { pathToFileURL }    from 'node:url';
 import { randomUUID }       from 'node:crypto';
 import type { Readable }    from 'node:stream';
 import type {
-  MatbotPlugin, MatbotServices, Tool, ToolEvent, ToolContext, FileStore, Store,
+  MatbotPluginSpec, MatbotServices, Tool, ToolEvent, ToolContext, FileStore, Store,
 } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 
@@ -452,8 +452,7 @@ id "*" to act on ALL schedules at once. cancel requires a specific id — "*" is
 
 // ── Plugin ────────────────────────────────────────────────────────────────────
 
-export const plugin: MatbotPlugin = {
-  name:       'background',
+export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,
   tools: [backgroundTool, everyActionTool],
 

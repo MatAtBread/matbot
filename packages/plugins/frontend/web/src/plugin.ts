@@ -1,4 +1,4 @@
-import type { MatbotPlugin, MatbotServices } from '@matatbread/matbot-plugin-api';
+import type { MatbotPluginSpec, MatbotServices } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION }                from '@matatbread/matbot-plugin-api';
 import { createWebServer }                   from './server.js';
 import process                               from 'node:process';
@@ -7,8 +7,7 @@ let webServer: Awaited<ReturnType<typeof createWebServer>> | undefined;
 const port = Number(process.env['MATBOT_WEB_PORT'] ?? 19778); // 19778 is "MB" in hex, a cute easter egg :)
 
 
-export const plugin: MatbotPlugin = {
-  name:        'frontend-web',
+export const plugin: MatbotPluginSpec = {
   apiVersion:  PLUGIN_API_VERSION,
 
   async installationMessage(): Promise<string> {

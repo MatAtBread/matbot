@@ -2,6 +2,7 @@
 import { loadConfig, loadConfigFromText, loadDotEnv } from './config.js';
 import { installPlugin }                    from './install.js';
 import { loadPluginsWithDescriptions }      from './plugin-description.js';
+import { nodePluginResolver }               from './plugin-resolver.js';
 import type { Principal, ProviderAdapter,
               ProviderConfig, Session,
               Store, StoreQuery, QueryResult, CASResult,
@@ -10,7 +11,6 @@ import { appendMessage, createMessage,
          createSession,
          createSessionRunner,
          HookRegistry, SystemContextRegistryImpl,
-         registerPlugin,
          resolveProviderFactory,
          teardownPlugins,
          unloadPlugin as unloadPluginFn,
@@ -359,59 +359,6 @@ async function runTurn(
 
 // ── Main ───────────────────────────────────────────────────────────────────────
 
-interface SettingsDoc {
-  id:      string;
-  version: string;
-  data:    Record<string, unknown>;
-}
-
-function isSettingsDoc(v: unknown): v is SettingsDoc {
-  return typeof v === 'object' && v !== null &&
-    typeof (v as SettingsDoc).id      === 'string' &&
-    typeof (v as SettingsDoc).version === 'string' &&
-    typeof (v as SettingsDoc).data    === 'object' && (v as SettingsDoc).data !== null;
-}
-
-function makePluginSettings(store: Store<SettingsDoc>, pluginName: string): PluginSettings {
-  // Handles migration from the old flat-object format (pre-Store).
-  const getDoc = async (): Promise<SettingsDoc | null> => {
-    const raw = await store.get(pluginName);
-    if (raw === null) return null;
-    if (isSettingsDoc(raw)) return raw;
-    // Old format: flat { key: value } — wrap it so subsequent writes upgrade the file.
-    return { id: pluginName, version: '0', data: raw as unknown as Record<string, unknown> };
-  };
-
-  return {
-    async get<T>(key: string): Promise<T | undefined> {
-      return (await getDoc())?.data[key] as T | undefined;
-    },
-    async set<T>(key: string, value: T): Promise<void> {
-      for (;;) {
-        const doc  = await getDoc();
-        const data = { ...(doc?.data ?? {}), [key]: value as unknown };
-        const next: SettingsDoc = { id: pluginName, version: Date.now().toString(), data };
-        // version '0' means migrated-but-not-yet-written — use set to upgrade the file.
-        if (doc === null || doc.version === '0') { await store.set(pluginName, next); return; }
-        const r = await store.cas(pluginName, doc.version, next);
-        if (r.ok) return;
-      }
-    },
-    async delete(key: string): Promise<void> {
-      for (;;) {
-        const doc = await getDoc();
-        if (doc === null) return;
-        const data = { ...doc.data };
-        delete data[key];
-        const next: SettingsDoc = { id: pluginName, version: Date.now().toString(), data };
-        if (doc.version === '0') { await store.set(pluginName, next); return; }
-        const r = await store.cas(pluginName, doc.version, next);
-        if (r.ok) return;
-      }
-    },
-  };
-}
-
 // ── Setup wizard ───────────────────────────────────────────────────────────────
 
 interface ProviderPackage { type: string; name: string; dir: string; }
@@ -726,7 +673,6 @@ async function main(): Promise<void> {
   const [fileStore, swapFiles] = makeSwappable<FileStore>(
     activeStorageBackend?.fileStore ?? new FilesystemFileStore(filesDir),
   );
-  const settingsStore = createStore<SettingsDoc>('settings');
 
   // toolMap is shared: plugins register into it via services, runSession reads it
   const toolMap = new Map<string, Tool>(createBuiltinTools().map(t => [t.name, t]));
@@ -746,7 +692,6 @@ async function main(): Promise<void> {
   const hookReg = new HookRegistry();
   const systemContextReg = new SystemContextRegistryImpl();
 
-  const pluginSettingsCache = new Map<string, PluginSettings>();
   const serviceRegistry     = new Map<string, unknown>();
 
   // Constructed just after the services object (it closes over services.loadPlugin); exposed via
@@ -755,13 +700,10 @@ async function main(): Promise<void> {
   let sessionRunner: SessionRunner | undefined;
 
   const services: MatbotServices = {
-    settings(pluginName: string): PluginSettings {
-      let s = pluginSettingsCache.get(pluginName);
-      if (s === undefined) {
-        s = makePluginSettings(settingsStore, pluginName);
-        pluginSettingsCache.set(pluginName, s);
-      }
-      return s;
+    // Plugins always receive the plugin-scoped override built in setupPlugin; the base is never the
+    // one a plugin calls. Core reads its reserved settings doc via makePluginSettings directly.
+    settings(): PluginSettings {
+      throw new Error('settings() is only available within a plugin scope (use the services passed to setup()).');
     },
 
     createStore,
@@ -840,6 +782,7 @@ async function main(): Promise<void> {
       }
       return unloadPluginFn(name, services);
     },
+    resolver:  nodePluginResolver(path.dirname(configPath)),
     providers: matbotConfig.providers,
     get storageBackend() { return activeStorageBackend; },
     sessions:  store,

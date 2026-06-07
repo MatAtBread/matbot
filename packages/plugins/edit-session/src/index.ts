@@ -1,12 +1,12 @@
 import type {
-  MatbotPlugin, MatbotServices, Tool, ToolEvent, Session, Store, Message, Marker,
+  MatbotPluginSpec, MatbotServices, Tool, ToolEvent, Session, Store, Message, Marker,
 } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 
-const PLUGIN_NAME = '@matatbread/matbot-edit-session';
+const MARKER_CREATOR = '@matatbread/matbot-edit-session';
 
 // This plugin's marker payload, made type-safe by augmenting the shared MarkerData registry.
-// Any reader narrowing on creator === PLUGIN_NAME gets the typed `data` for free.
+// Any reader narrowing on creator === MARKER_CREATOR gets the typed `data` for free.
 declare module '@matatbread/matbot-plugin-api' {
   interface MarkerData {
     '@matatbread/matbot-edit-session': {
@@ -22,7 +22,7 @@ declare module '@matatbread/matbot-plugin-api' {
   }
 }
 
-type EditSessionMarkerData = Marker<typeof PLUGIN_NAME>['data'];
+type EditSessionMarkerData = Marker<typeof MARKER_CREATOR>['data'];
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -32,7 +32,7 @@ function now(): string { return new Date().toISOString(); }
 // converter), preserved by compaction, carried with the session for the UI to render as a
 // cross-thread link.
 function markerMessage(data: EditSessionMarkerData): Message {
-  const marker: Marker<typeof PLUGIN_NAME> = { type: 'marker', creator: PLUGIN_NAME, data };
+  const marker: Marker<typeof MARKER_CREATOR> = { type: 'marker', creator: MARKER_CREATOR, data };
   return {
     id:        crypto.randomUUID(),
     role:      'marker',
@@ -219,8 +219,7 @@ function makeSessionEditTool(store: Store<Session>): Tool {
 
 // ── plugin ────────────────────────────────────────────────────────────────────
 
-export const plugin: MatbotPlugin = {
-  name:       PLUGIN_NAME,
+export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,
 
   async setup(services: MatbotServices) {

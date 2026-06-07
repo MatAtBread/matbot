@@ -2,14 +2,14 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
 import path from 'node:path';
-import { getSpecifierForPlugin, loadPlugins } from '@matatbread/matbot-core';
+import { loadPlugins } from '@matatbread/matbot-core';
 import type { MatbotPlugin, PluginManifest, MatbotServices, PromptFn } from '@matatbread/matbot-core';
 
 // Where to begin the upward package.json search for a load specifier. Specifiers that
 // reach the runtime are file: URLs (resolved by the CLI before registration); install-time
 // specifiers may be relative paths or bare npm names. A bare name is resolved through the
 // project's module graph, which only works once the package is actually on disk.
-function startDir(specifier: string, baseDir: string): string | undefined {
+export function startDir(specifier: string, baseDir: string): string | undefined {
   const bare = (specifier.split('?')[0]) ?? specifier;
   if (bare.startsWith('file://')) return path.dirname(fileURLToPath(bare));
   if (bare.startsWith('./') || bare.startsWith('../') || path.isAbsolute(bare)) {
@@ -69,8 +69,7 @@ export async function loadPluginsWithDescriptions(
 ): Promise<MatbotPlugin[]> {
   const plugins = await loadPlugins(specifiers, services, bustCache, prompt);
   for (const plugin of plugins) {
-    const specifier = getSpecifierForPlugin(plugin.name);
-    if (specifier !== undefined) await backfillPluginDescription(plugin, specifier, baseDir);
+    await backfillPluginDescription(plugin, plugin.specifier, baseDir);
   }
   return plugins;
 }

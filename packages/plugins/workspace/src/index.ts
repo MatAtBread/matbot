@@ -1,4 +1,4 @@
-import type { Tool, ToolEvent, ToolContext, MatbotPlugin } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolEvent, ToolContext, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 
 const WORKSPACE_NS = 'workspace';
@@ -196,8 +196,7 @@ const workspaceTool: Tool = {
   },
 };
 
-export const plugin: MatbotPlugin = {
-  name:       'workspace',
+export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,
   tools: [workspaceTool],
 };

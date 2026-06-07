@@ -1,10 +1,9 @@
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
-import type { MatbotPlugin, KnowledgeEntry, Store } from '@matatbread/matbot-plugin-api';
+import type { MatbotPluginSpec, KnowledgeEntry, Store } from '@matatbread/matbot-plugin-api';
 import { PersistBGEKnowledgeIndex } from './knowledge-index.js';
 
-export function createPersistKIBGEPlugin(): MatbotPlugin {
+export function createPersistKIBGEPlugin(): MatbotPluginSpec {
   return {
-    name:       'persist-ki-bge',
     apiVersion: PLUGIN_API_VERSION,
 
     async installationMessage() {
@@ -22,4 +21,4 @@ export function createPersistKIBGEPlugin(): MatbotPlugin {
   };
 }
 
-export const plugin: MatbotPlugin = createPersistKIBGEPlugin();
+export const plugin: MatbotPluginSpec = createPersistKIBGEPlugin();

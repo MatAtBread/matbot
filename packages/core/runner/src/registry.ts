@@ -5,6 +5,8 @@ import type {
 } from './plugin.js';
 import { PLUGIN_API_VERSION } from './plugin.js';
 import { HookRegistry } from './hooks.js';
+import { makePluginSettings } from './settings.js';
+import type { SettingsDoc } from './settings.js';
 
 // ── Internal state ────────────────────────────────────────────────────────────
 
@@ -18,7 +20,6 @@ const state = {
   serviceKeys:     new Map<string, string[]>(),  // pluginName → MatbotServices keys it registered
   hookPlugins:        new Set<string>(),         // plugins that registered at least one hook
   systemContextPlugins: new Set<string>(),       // plugins that registered a system-context contributor
-  specifierToName: new Map<string, string>(),    // resolved specifier → plugin name
   overwriteAllTools: undefined as boolean | undefined,  // persisted "overwrite on collision, this install" choice, loaded lazily
 };
 
@@ -46,8 +47,9 @@ async function resolveToolCollision(
   incomingOwner: string,
   prompt:        PromptFn | undefined,
 ): Promise<boolean> {
+  const coreSettings = makePluginSettings(services.createStore<SettingsDoc>('settings'), CORE_SETTINGS_NS);
   if (state.overwriteAllTools === undefined) {
-    state.overwriteAllTools = (await services.settings(CORE_SETTINGS_NS).get<boolean>(OVERWRITE_TOOLS_KEY)) ?? false;
+    state.overwriteAllTools = (await coreSettings.get<boolean>(OVERWRITE_TOOLS_KEY)) ?? false;
   }
   if (state.overwriteAllTools) return true;
 
@@ -69,7 +71,7 @@ async function resolveToolCollision(
   const answer = (await prompt(field)).trim().toLowerCase();
   if (answer.startsWith('a')) {  // "Always overwrite" — persist for the installation
     state.overwriteAllTools = true;
-    await services.settings(CORE_SETTINGS_NS).set(OVERWRITE_TOOLS_KEY, true);
+    await coreSettings.set(OVERWRITE_TOOLS_KEY, true);
     return true;
   }
   return !answer.startsWith('k');  // "Keep existing" → false; "Overwrite"/default → true
@@ -98,7 +100,7 @@ function checkApiVersion(plugin: MatbotPlugin): void {
 
 // ── Registration ──────────────────────────────────────────────────────────────
 
-export function registerPlugin(plugin: MatbotPlugin, specifier?: string): void {
+export function registerPlugin(plugin: MatbotPlugin): void {
   checkApiVersion(plugin);
 
   if (state.plugins.some(p => p.name === plugin.name)) {
@@ -126,9 +128,6 @@ export function registerPlugin(plugin: MatbotPlugin, specifier?: string): void {
   }
   for (const [type, factory] of Object.entries(plugin.storage ?? {})) {
     state.storage.set(type, factory);
-  }
-  if (specifier !== undefined) {
-    state.specifierToName.set(specifier, plugin.name);
   }
 }
 
@@ -174,17 +173,15 @@ export function getSystemContextPlugins(): ReadonlySet<string> {
   return state.systemContextPlugins;
 }
 
-/** Resolve a loaded plugin's name from the specifier used to load it. */
+/** Resolve a loaded plugin's name from the specifier used to load it. Each plugin carries its own
+ *  specifier, so this is a scan of the plugin list — no side-map to keep in sync. */
 export function getPluginNameForSpecifier(specifier: string): string | undefined {
-  return state.specifierToName.get(specifier);
+  return state.plugins.find(p => p.specifier === specifier)?.name;
 }
 
 /** Reverse of getPluginNameForSpecifier — finds the specifier used to load the named plugin. */
 export function getSpecifierForPlugin(pluginName: string): string | undefined {
-  for (const [spec, name] of state.specifierToName) {
-    if (name === pluginName) return spec;
-  }
-  return undefined;
+  return state.plugins.find(p => p.name === pluginName)?.specifier;
 }
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
@@ -213,8 +210,18 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotServices
     services.tools.register(stamped);
   };
 
+  // Plugin-scoped settings: bound to this plugin's identity, built once. A plugin reaches only its
+  // own settings — there is no way to name another's.
+  const ownSettings = makePluginSettings(services.createStore<SettingsDoc>('settings'), plugin.name);
+
   const scopedServices: MatbotServices = {
     ...services,
+    settings: () => ownSettings,
+    self: {
+      name:      plugin.name,
+      specifier: plugin.specifier,
+      ...(plugin.source !== undefined ? { source: plugin.source } : {}),
+    },
     tools: {
       register:      registerTool,
       remove:        (name: string) => services.tools.remove(name),
@@ -278,10 +285,6 @@ export async function unloadPlugin(pluginName: string, services: MatbotServices)
   for (const type of Object.keys(plugin.storage   ?? {})) state.storage.delete(type);
 
   state.frontendPlugins.delete(pluginName);
-
-  for (const [spec, name] of state.specifierToName) {
-    if (name === pluginName) state.specifierToName.delete(spec);
-  }
 
   state.plugins.splice(idx, 1);
   await Promise.race([

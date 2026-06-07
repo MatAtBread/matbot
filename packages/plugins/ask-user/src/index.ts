@@ -1,4 +1,4 @@
-import type { Tool, ToolEvent, ToolContext, MatbotPlugin, FormField } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolEvent, ToolContext, MatbotPluginSpec, FormField } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 
 const MAX_OPTIONS = 10;
@@ -119,8 +119,7 @@ interface FormField {
   executor,
 };
 
-export const plugin: MatbotPlugin = {
-  name:       '@matatbread/matbot-tool-ask-user',
+export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,
   tools:      [askUserTool],
 };

@@ -1,5 +1,5 @@
 import type {
-  MatbotPlugin, MatbotServices, Principal, ProviderAdapter, ProviderConfig, Session, PromptFn, FormField,
+  MatbotPluginSpec, MatbotServices, Principal, ProviderAdapter, ProviderConfig, Session, PromptFn, FormField,
 } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import {
@@ -44,8 +44,7 @@ async function buildProvider(name: string, services: MatbotServices): Promise<Ac
   return { name, adapter, config };
 }
 
-export const plugin: MatbotPlugin = {
-  name:       PLUGIN_NAME,
+export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,
 
   tools: [
@@ -87,7 +86,7 @@ export const plugin: MatbotPlugin = {
 
             try {
               activeProvider = await buildProvider(act.provider, svc);
-              await svc.settings(PLUGIN_NAME).set(SETTINGS_KEY_PROVIDER, act.provider);
+              await svc.settings().set(SETTINGS_KEY_PROVIDER, act.provider);
               yield { type: 'result' as const, value: { provider: act.provider } };
             } catch (e) {
               yield { type: 'error' as const, message: String(e) };
@@ -168,7 +167,7 @@ export const plugin: MatbotPlugin = {
     servicesRef = services;
     botTokenRef = botToken;
 
-    const settings = services.settings(PLUGIN_NAME);
+    const settings = services.settings();
     for (const id of await settings.get<number[]>(SETTINGS_KEY_KNOWN) ?? []) {
       knownChats.add(id);
     }

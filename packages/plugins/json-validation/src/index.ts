@@ -1,5 +1,5 @@
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
-import type { MatbotPlugin, Hook, ToolHookContext, JSONSchema } from '@matatbread/matbot-plugin-api';
+import type { MatbotPluginSpec, Hook, ToolHookContext, JSONSchema } from '@matatbread/matbot-plugin-api';
 
 // A deliberately small JSON Schema validator covering the subset matbot tool
 // inputSchemas use: type, properties, required, items, enum, additionalProperties,
@@ -126,8 +126,7 @@ function makeValidatorHook(): Hook<ToolHookContext> {
   };
 }
 
-export const plugin: MatbotPlugin = {
-  name:       '@matatbread/matbot-tool-json-validation',
+export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,
 
   async setup(services) {
