@@ -2,7 +2,6 @@
   "name": "@matatbread/matbot-provider-openai-compat",
   "version": "0.1.0",
   "description": "OpenAI-compatible chat completions provider adapter (OpenAI and any compatible endpoint) with streaming and tool calls.",
-  "private": true,
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

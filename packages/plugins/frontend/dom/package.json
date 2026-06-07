@@ -2,7 +2,6 @@
   "name": "@matatbread/matbot-frontend-dom",
   "version": "0.1.0",
   "description": "In-process browser chat frontend: renders to the DOM and drives the session runner directly (no HTTP/SSE server).",
-  "private": true,
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

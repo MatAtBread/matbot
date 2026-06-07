@@ -2,7 +2,6 @@
   "name": "@matatbread/matbot-frontend-web",
   "version": "0.1.0",
   "description": "HTTP + SSE web UI with session management, serving the chat frontend on a local port.",
-  "private": true,
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

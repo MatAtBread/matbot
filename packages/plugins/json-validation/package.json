@@ -2,7 +2,6 @@
   "name": "@matatbread/matbot-tool-json-validation",
   "version": "0.1.0",
   "description": "Validates tool-call inputs against each tool's JSON Schema, returning an error result on mismatch so the model can self-correct.",
-  "private": true,
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

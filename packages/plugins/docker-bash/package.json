@@ -2,7 +2,6 @@
   "name": "@matatbread/matbot-tool-docker-bash",
   "version": "0.1.0",
   "description": "Replaces the bash tool with a persistent Docker container (exec-based). Project root is read-only at /app; .data is read-write.",
-  "private": true,
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

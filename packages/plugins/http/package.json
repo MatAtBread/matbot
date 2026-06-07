@@ -2,7 +2,6 @@
   "name": "@matatbread/matbot-tool-http",
   "version": "0.1.0",
   "description": "Make HTTP requests (method, headers, body) to web APIs and remote resources; requires the network capability.",
-  "private": true,
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

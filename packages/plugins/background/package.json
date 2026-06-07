@@ -2,7 +2,6 @@
   "name": "@matatbread/matbot-tool-background",
   "version": "0.1.0",
   "description": "Run prompts in detached background processes. Schedule recurring prompts with every/every_list/every_cancel/every_suspend/every_resume/everything_suspend/everything_resume.",
-  "private": true,
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

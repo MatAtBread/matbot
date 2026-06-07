@@ -2,7 +2,6 @@
   "name": "@matatbread/matbot-frontend-telegram",
   "version": "0.1.0",
   "description": "Telegram bot frontend",
-  "private": true,
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

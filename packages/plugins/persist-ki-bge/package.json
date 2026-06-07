@@ -2,7 +2,6 @@
   "name": "@matatbread/matbot-persist-ki-bge-node",
   "version": "0.1.0",
   "description": "Persistent KnowledgeIndex backed by a Store, with entity/heading search and optional BGE reranker.",
-  "private": true,
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
