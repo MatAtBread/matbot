@@ -10,8 +10,7 @@
     "packages/plugins/edit-session",
     "packages/plugins/workspace",
     "packages/plugins/rumsfeld",
-    "packages/plugins/json-validation",
-    "packages/plugins/mcp-http"
+    "packages/plugins/json-validation"
   ],
 
   "providers": {},
