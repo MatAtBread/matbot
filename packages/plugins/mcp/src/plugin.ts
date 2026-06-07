@@ -1,6 +1,6 @@
 import type { Tool, ToolEvent, ToolContext, MatbotPluginSpec, MatbotServices, PluginSettings } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
-import type { MCPClient, MCPToolDef, McpRemoteService } from '@matatbread/matbot-mcp-http';
+import type { MCPClient, MCPToolDef, McpRemoteService, MCPRemoteConfig } from '@matatbread/matbot-mcp-http';
 import { makeProxyTool, proxyToolName } from '@matatbread/matbot-mcp-http';
 import process from 'node:process';
 import type { MCPServerConfigLocal, MCPPersistedLocal } from './types.js';
@@ -191,11 +191,32 @@ SHAPE  (TypeScript)
       // Take over: register our combined local+remote mcp_action, overriding the remote-only one.
       registry.register(mcpActionTool);
 
-      // Reconnect persisted local servers (remote ones are reconnected by the delegated plugin).
-      const persisted = await settings.get<MCPPersistedLocal>('servers');
-      for (const config of persisted?.servers ?? []) {
-        try { await connectLocal(config); }
-        catch (e) { process.stderr.write(`[mcp] Failed to reconnect "${config.name}": ${String(e)}\n`); }
+      // Reconnect persisted servers. The pre-split plugin stored remote servers under our key too;
+      // hand any such legacy entries to the remote service (which now owns remote) and drop them from
+      // our store, so they reconnect properly instead of being mis-spawned as a local process.
+      type PersistedMixed = { servers: Array<MCPServerConfigLocal | MCPRemoteConfig> };
+      const persisted = await settings.get<PersistedMixed>('servers');
+      if (persisted?.servers?.length) {
+        const keep: Array<MCPServerConfigLocal | MCPRemoteConfig> = [];
+        for (const config of persisted.servers) {
+          try {
+            if (config.type === 'remote') {
+              // Migrate to the remote service (which now owns remote). If it's already managed there
+              // (e.g. re-added since the refactor), just drop the stale duplicate. Either way it leaves
+              // our store — not kept.
+              if (!remote.has(config.name)) {
+                await remote.add({ name: config.name, endpoint: config.endpoint, ...(config.headers !== undefined ? { headers: config.headers } : {}) });
+              }
+            } else {
+              await connectLocal(config);
+              keep.push(config);
+            }
+          } catch (e) {
+            process.stderr.write(`[mcp] Failed to reconnect "${config.name}": ${String(e)}\n`);
+            keep.push(config);   // keep on failure so a transient outage doesn't lose the config
+          }
+        }
+        if (keep.length !== persisted.servers.length) await settings.set('servers', { servers: keep });
       }
     },
 
