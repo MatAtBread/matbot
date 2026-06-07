@@ -114,7 +114,10 @@
     const raw      = await res.text();
     const stripped = url.endsWith('.ts') ? strip(raw, url) : raw;
     const rewritten = await rewrite(stripped, async (spec) => {
-      if (!isRelative(spec)) return null;
+      if (spec.startsWith('node:')) {
+        throw new Error(`remote plugin "${absUrl}" imports the Node-only module "${spec}" and cannot run in the browser`);
+      }
+      if (!isRelative(spec)) return null;   // bare → baseline import map (host singletons)
       const childAbs = new URL(spec, url).href;
       return await loadRemoteModule(childAbs, [...stack, url]);
     });
@@ -123,12 +126,39 @@
     return blob;
   };
 
+  // exports["."] may be a string or a condition/subpath map — prefer import > default > first.
+  const resolveExportsEntry = (value) => {
+    if (typeof value === 'string') return value;
+    if (typeof value !== 'object' || value === null) return undefined;
+    if ('.' in value) return resolveExportsEntry(value['.']);
+    for (const k of ['import', 'default', ...Object.keys(value)]) if (k in value) return resolveExportsEntry(value[k]);
+    return undefined;
+  };
+
   const loader = {
     async loadRemote(specifier) {
-      const absUrl = new URL(specifier, globalThis.location?.href ?? 'http://localhost/').href;
-      const spec   = await loadRemoteModule(absUrl, []);
-      const base   = (specifier.split('?')[0] || specifier).replace(/\/+$/, '').split('/').pop() || specifier;
-      return { spec, name: base.replace(/\.[^.]+$/, '') || base };
+      let absUrl = new URL(specifier, globalThis.location?.href ?? 'http://localhost/').href;
+      let name;
+
+      // Accept a package directory or a package.json URL: resolve exports["."] to the real entry,
+      // mirroring how the node loader resolves a plugin path to its module.
+      if (absUrl.endsWith('/')) absUrl += 'package.json';
+      if (absUrl.endsWith('/package.json')) {
+        const res = await fetch(absUrl);
+        if (!res.ok) throw new Error(`matbot: failed to fetch "${absUrl}" (${res.status})`);
+        const pkg   = JSON.parse(await res.text());
+        const entry = resolveExportsEntry(pkg.exports) ?? pkg.module ?? pkg.main;
+        if (!entry) throw new Error(`matbot: "${absUrl}" has no exports["."], module, or main entry`);
+        name   = pkg.name;
+        absUrl = new URL(entry, absUrl).href;
+      }
+
+      const spec = await loadRemoteModule(absUrl, []);
+      if (name === undefined) {
+        const base = (specifier.split('?')[0] || specifier).replace(/\/+$/, '').split('/').pop() || specifier;
+        name = base.replace(/\.[^.]+$/, '') || base;
+      }
+      return { spec, name };
     },
   };
 

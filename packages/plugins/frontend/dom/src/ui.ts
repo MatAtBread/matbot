@@ -255,6 +255,7 @@ export class ChatUI {
         prompt:    this.promptFn,
       });
       for await (const ev of view.events) {
+        if (!('traceId' in ev)) continue;          // session-level events (e.g. 'idle') — not this turn
         if (ev.traceId !== view.traceId) continue;
         this.render(ev);
         if (ev.type === 'done' || ev.type === 'aborted' || ev.type === 'error' || ev.type === 'cancelled') break;
