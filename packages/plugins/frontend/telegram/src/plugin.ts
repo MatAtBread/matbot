@@ -246,6 +246,7 @@ export const plugin: MatbotPluginSpec = {
               Promise.resolve(typeof p === 'string' ? (def ?? '') : (p.default ?? ''))) as PromptFn,
           });
           for await (const event of view.events) {
+            if (event.type === 'idle') continue; // session-level lifecycle signal, not this turn's
             if (event.traceId !== view.traceId) continue;
             if (event.type === 'text-delta') responseText += event.delta;
             if (event.type === 'done' || event.type === 'aborted'

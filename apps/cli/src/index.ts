@@ -283,6 +283,7 @@ async function runTurn(
       prompt:    promptFn,
     });
     for await (const ev of view.events) {
+      if (ev.type === 'idle') continue; // session-level lifecycle signal, not this turn's
       if (ev.traceId !== view.traceId) continue;
       switch (ev.type) {
         case 'text-delta':
