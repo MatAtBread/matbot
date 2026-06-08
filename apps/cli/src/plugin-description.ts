@@ -66,8 +66,9 @@ export async function loadPluginsWithDescriptions(
   baseDir:    string,
   bustCache = false,
   prompt?:    PromptFn,
+  onIncompatibleRuntime: 'skip' | 'throw' = 'skip',
 ): Promise<MatbotPlugin[]> {
-  const plugins = await loadPlugins(specifiers, services, bustCache, prompt);
+  const plugins = await loadPlugins(specifiers, services, bustCache, prompt, onIncompatibleRuntime);
   for (const plugin of plugins) {
     await backfillPluginDescription(plugin, plugin.specifier, baseDir);
   }

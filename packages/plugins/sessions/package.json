@@ -1,5 +1,6 @@
 {
   "name": "@matatbread/matbot-sessions",
+  "matbotRuntime": ["node", "browser"],
   "version": "0.1.0",
   "description": "Session-management tools: list, get, rename, and hide conversation sessions.",
   "type": "module",

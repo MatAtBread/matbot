@@ -1,8 +1,8 @@
 {
-  "name": "@matatbread/matbot-frontend-web",
+  "name": "@matatbread/matbot-skills-node",
   "matbotRuntime": ["node"],
   "version": "0.1.0",
-  "description": "HTTP + SSE web UI with session management, serving the chat frontend on a local port.",
+  "description": "Node skills plugin: embeds @matatbread/matbot-skills CRUD and adds a local filesystem (.md) import + watch.",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
@@ -11,8 +11,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@matatbread/matbot-core":       "workspace:*",
-    "@matatbread/matbot-plugin-api": "workspace:*"
+    "@matatbread/matbot-plugin-api": "workspace:*",
+    "@matatbread/matbot-skills":     "workspace:*"
   },
   "devDependencies": {
     "@types/node": "catalog:",

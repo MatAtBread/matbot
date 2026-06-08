@@ -1,6 +1,14 @@
-import type { MatbotPlugin, MatbotPluginSpec, MatbotServices, PluginSource } from './plugin.js';
+import type { MatbotPlugin, MatbotPluginSpec, MatbotServices, PluginSource, Runtime } from './plugin.js';
 import type { PromptFn } from './types.js';
-import { registerPlugin, setupPlugin } from './registry.js';
+import { IncompatibleRuntimeError } from '@matatbread/matbot-plugin-api';
+import { registerPlugin, setupPlugin, unloadPlugin } from './registry.js';
+
+/**
+ * The runtime this process is executing in. Detected the same way the rejected-import branch below
+ * already distinguishes platforms (`typeof window`). Used only for the declarative pre-import gate;
+ * an absent `matbotRuntime` declaration bypasses the gate entirely.
+ */
+const CURRENT_RUNTIME: Runtime = typeof window !== 'undefined' ? 'browser' : 'node';
 
 /**
  * Query-param marker appended to a plugin entry URL when `bustCache` is set.
@@ -49,12 +57,19 @@ let freshSeq = 0;
  * @param prompt Optional host prompt used by setup() to resolve tool-name collisions
  *   interactively. Omitted by non-interactive hosts, in which case collisions overwrite
  *   silently (the historical default).
+ * @param onIncompatibleRuntime What to do when a plugin's `matbotRuntime` excludes this host.
+ *   `'skip'` (default, the startup batch) warns and moves on — one mis-targeted plugin in the
+ *   config must not abort the process. `'throw'` is for an explicit, single, user-initiated load
+ *   (the `plugin`/`provider` tools via `services.loadPlugin`): the user named *this* plugin, so a
+ *   silent skip would surface only as a confusing empty-result error downstream — fail loudly with
+ *   the reason instead. Both modes share the one gate below; only the mismatch reaction differs.
  */
 export async function loadPlugins(
   specifiers: readonly string[],
   services:   MatbotServices,
   bustCache = false,
   prompt?:    PromptFn,
+  onIncompatibleRuntime: 'skip' | 'throw' = 'skip',
 ): Promise<MatbotPlugin[]> {
   if (bustCache) {
     console.debug(
@@ -62,17 +77,41 @@ export async function loadPlugins(
       `and its first-party imports too IF the node resolve hook is installed (else only the entry).`,
     );
   }
-  const importSpecs = bustCache ? specifiers.map(toFreshUrl) : specifiers;
+  // Declarative pre-import gate. A plugin whose package.json `matbotRuntime` lists runtimes that
+  // exclude this host is skipped *before* import() — its (possibly platform-specific) top-level
+  // code never evaluates here, which is both the quick path and the only safe one for, e.g., a
+  // node-only plugin reached from a browser. An *absent* declaration means "don't know": the
+  // resolver returns undefined and we import it, falling back to the try-load / rollback path
+  // below. Reading the declaration is the host resolver's job (this module stays node-free).
+  const declared = await Promise.all(
+    specifiers.map(spec =>
+      services.resolver?.runtimes !== undefined ? services.resolver.runtimes(spec) : Promise.resolve(undefined),
+    ),
+  );
+
+  const toLoad: { spec: string; importSpec: string }[] = [];
+  for (let i = 0; i < specifiers.length; i++) {
+    const spec = specifiers[i]!;
+    const runtimes = declared[i];
+    if (runtimes !== undefined && runtimes.length > 0 && !runtimes.includes(CURRENT_RUNTIME)) {
+      if (onIncompatibleRuntime === 'throw') {
+        throw new IncompatibleRuntimeError(spec, runtimes, CURRENT_RUNTIME);
+      }
+      console.warn(`[matbot] Skipping plugin "${spec}": declares matbotRuntime [${runtimes.join(', ')}], host runtime is "${CURRENT_RUNTIME}".`);
+      continue;
+    }
+    toLoad.push({ spec, importSpec: bustCache ? toFreshUrl(spec) : spec });
+  }
 
   // Imports run in parallel; registration remains sequential to preserve order.
   const results = await Promise.allSettled(
-    importSpecs.map(spec => import(/* @vite-ignore */ spec) as Promise<Record<string, unknown>>),
+    toLoad.map(({ importSpec }) => import(/* @vite-ignore */ importSpec) as Promise<Record<string, unknown>>),
   );
 
   const loaded: MatbotPlugin[] = [];
 
-  for (let i = 0; i < specifiers.length; i++) {
-    const spec   = specifiers[i]!;
+  for (let i = 0; i < toLoad.length; i++) {
+    const spec   = toLoad[i]!.spec;
     const result = results[i]!;
 
     if (result.status === 'rejected') {
@@ -109,12 +148,35 @@ export async function loadPlugins(
       ...(source !== undefined ? { source } : {}),
     };
 
+    // registered gates the rollback: only an attempt that *itself* registered the
+    // plugin may unload it. A registerPlugin failure means the name/provider/storage
+    // was already owned by a different, healthy plugin — unloading by name there would
+    // tear down that innocent bystander.
+    let registered = false;
     try {
       registerPlugin(plugin);
+      registered = true;
       await setupPlugin(plugin, services, prompt);
       loaded.push(plugin);
     } catch (err) {
       console.error(`[matbot] Ignoring plugin "${plugin.name}" from "${spec}" due to an error:`, err instanceof Error ? err.message : err);
+      // Roll back partial registration so a failed load leaves no ghost state. setupPlugin
+      // can throw after the plugin is already in the registry with some of its tools / hooks /
+      // services / provider / storage wired (a wrong-platform plugin touching a missing
+      // primitive mid-setup is the common case). unloadPlugin is the exact inverse of
+      // register + setup, so it removes precisely those contributions. We run it defensively:
+      // a half-set-up plugin's own teardown() may throw, and a rollback failure must not abort
+      // the remaining loads.
+      if (registered) {
+        try {
+          await unloadPlugin(plugin.name, services);
+        } catch (cleanupErr) {
+          console.error(
+            `[matbot] Cleanup after failed load of "${plugin.name}" did not fully complete; some state may linger:`,
+            cleanupErr instanceof Error ? cleanupErr.message : cleanupErr,
+          );
+        }
+      }
     }
   }
 

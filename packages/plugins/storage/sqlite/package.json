@@ -1,5 +1,6 @@
 {
   "name": "@matatbread/matbot-storage-sqlite",
+  "matbotRuntime": ["node"],
   "version": "0.1.0",
   "description": "SQLite storage backend (WAL mode) providing persistent Stores and file storage for all runtime state.",
   "type": "module",

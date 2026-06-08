@@ -1,5 +1,5 @@
 import type { Tool, ToolEvent, ToolContext, MatbotPlugin, FormField } from '@matatbread/matbot-plugin-api';
-import { CONFIRM_YES, CONFIRM_NO } from '@matatbread/matbot-plugin-api';
+import { CONFIRM_YES, CONFIRM_NO, IncompatibleRuntimeError } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins, getRegisteredTools, getRegisteredFrontendPlugins,
          getRegisteredServiceKeys, getHookPlugins, getSystemContextPlugins } from '@matatbread/matbot-core';
 import { readFile, writeFile, access, readdir } from 'node:fs/promises';
@@ -354,6 +354,14 @@ const executor = {
           },
         };
       } catch (e) {
+        // A runtime mismatch is permanent for this host, not a fixable hiccup: roll the specifier
+        // back out of matbot.yaml so the config never carries a plugin that can never activate here.
+        // Other activation failures (e.g. a missing secret) are left in config to fix and retry.
+        if (e instanceof IncompatibleRuntimeError) {
+          await removePlugin(configPath, specifier);
+          yield { type: 'error', message: e.message };
+          return;
+        }
         yield { type: 'result', value: { message: `"${specifier}" added to config but activation failed: ${String(e)}.` } };
       }
       return;

@@ -1,5 +1,6 @@
 {
   "name": "@matatbread/matbot-tool-bash",
+  "matbotRuntime": ["node"],
   "version": "0.1.0",
   "description": "Run bash scripts in the session workspace.",
   "type": "module",

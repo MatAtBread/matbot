@@ -1,5 +1,6 @@
 {
   "name": "@matatbread/matbot-mcp-http",
+  "matbotRuntime": ["node", "browser"],
   "version": "0.1.0",
   "description": "Cross-platform MCP client: connect to remote MCP servers over HTTP/SSE and register their tools. Runs in the browser and Node (fetch only, no child processes).",
   "type": "module",

@@ -41,9 +41,10 @@ export interface MCPRemoteServerInfo {
 }
 
 /**
- * The delegation surface mcp-http registers under `services.mcpRemote`. A more capable plugin (e.g.
- * the node mcp plugin, which also speaks stdio) consumes this to handle *remote* servers without
- * re-implementing the HTTP transport — it owns local servers and delegates remote ones here.
+ * The remote-MCP delegation surface, implemented by {@link RemoteMcpManager}. mcp-http registers it
+ * under `services.McpRemoteService` when running standalone (e.g. in the browser). The node mcp plugin embeds
+ * RemoteMcpManager directly rather than discovering it here, so this service has no in-tree consumer;
+ * it remains as a documented seam for any plugin that wants to supply remote MCP without the HTTP code.
  */
 export interface McpRemoteService {
   /** Connect a remote MCP server, register its proxy tools, and persist it. */
@@ -59,6 +60,6 @@ export interface McpRemoteService {
 declare module '@matatbread/matbot-plugin-api' {
   interface MatbotServices {
     /** Registered by @matatbread/matbot-mcp-http: manage remote (HTTP/SSE) MCP servers. */
-    mcpRemote?: McpRemoteService;
+    McpRemoteService?: McpRemoteService;
   }
 }

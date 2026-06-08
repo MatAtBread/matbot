@@ -36,6 +36,9 @@ export interface PluginSettings {
 /** How a plugin specifier resolves to code. Loader-established, never author-declared. */
 export type PluginSource = 'local' | 'npm' | 'cdn' | 'github';
 
+/** The execution environments a plugin can run in, as declared by `matbotRuntime` in package.json. */
+export type Runtime = 'node' | 'browser';
+
 /**
  * Host-provided mapping from a load specifier to a plugin's canonical name.
  *
@@ -46,6 +49,15 @@ export type PluginSource = 'local' | 'npm' | 'cdn' | 'github';
  */
 export interface PluginResolver {
   identify(specifier: string): Promise<string>;
+  /**
+   * The runtimes a plugin declares support for via its package.json `matbotRuntime`
+   * (e.g. `["node"]`, `["browser"]`, `["node","browser"]`), or `undefined` when the field is
+   * absent — meaning "don't know". The loader skips a plugin *before* importing it when this
+   * returns a non-empty list that excludes the current runtime; `undefined` falls back to the
+   * try-load / catch / rollback path. Reading the declaration is host-specific (walk package.json
+   * on node; consult the baked manifest in the browser), so it lives here, not in the core loader.
+   */
+  runtimes?(specifier: string): Promise<readonly Runtime[] | undefined>;
 }
 
 /** A plugin's own loader-established identity, exposed to its setup() via scoped services. */

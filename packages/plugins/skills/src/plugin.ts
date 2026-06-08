@@ -1,62 +1,53 @@
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
-import type { MatbotPluginSpec, Store } from '@matatbread/matbot-plugin-api';
-import path from 'node:path';
-import process from 'node:process';
-import { createSkillIndexHook, createUserMessageClassifierHook, createAgentMessageClassifierHook } from './hooks.js';
+import type { MatbotPluginSpec, MatbotServices, Store } from '@matatbread/matbot-plugin-api';
+import { SkillManager } from './manager.js';
+import { createSkillTool } from './tools.js';
 import type { SkillDoc } from './types.js';
-import { watchAndImportSkillDir } from './watcher.js';
-import { createSkillTools, skillToKnowledgeEntry } from './tools.js';
+// import { createSkillIndexHook, createUserMessageClassifierHook, createAgentMessageClassifierHook } from './hooks.js';
 
-export interface SkillsPluginConfig {
-  skillsDir: string;
-  pollMs?:   number;
+/**
+ * Shared wiring: build the {@link SkillManager}, load persisted skills, and register the
+ * `skill_action` CRUD tool. Returns the manager so a specialization (e.g. the node plugin)
+ * can attach a filesystem watch on top of the same instance. Uses only web-platform APIs.
+ */
+export async function setupSkills(services: MatbotServices): Promise<SkillManager> {
+  const store   = services.createStore<SkillDoc>('skills') as Store<SkillDoc>;
+  const manager = new SkillManager(store, services.knowledge);
+  await manager.init();
+
+  services.tools.register(createSkillTool(manager));
+
+  // const getSkills       = (): SkillDoc[] => manager.all();
+  // const pluginSettings  = services.settings();
+  // services.hooks.register(createUserMessageClassifierHook(pluginSettings, services.providers, getSkills));
+  // services.hooks.register(createSkillIndexHook(getSkills));
+  // services.hooks.register(createAgentMessageClassifierHook(getSkills, pluginSettings, req => services.complete(req)));
+
+  return manager;
 }
 
-export function createSkillsPlugin(config: SkillsPluginConfig): MatbotPluginSpec {
-  const skills = new Map<string, SkillDoc>();
-  let abortController: AbortController | undefined;
+/**
+ * The cross-runtime base skills plugin: CRUD over skills via `skill_action`, persisted through
+ * the active storage backend and indexed into the knowledge subsystem. Runs in both Node and the
+ * browser. It has no filesystem watch — that lives in @matatbread/matbot-skills-node.
+ */
+export function createSkillsPlugin(): MatbotPluginSpec {
+  let manager: SkillManager | undefined;
 
   return {
     apiVersion: PLUGIN_API_VERSION,
     manifest: {
-      config:      ['skillsDir'],
+      description: 'Skill documents (named markdown playbooks) with CRUD via skill_action. Cross-runtime (node + browser).',
     },
 
     async setup(services) {
-      const store = services.createStore<SkillDoc>('skills') as Store<SkillDoc>;
-
-      // Pre-populate in-memory map from the store and index all existing skills.
-      const { items } = await store.query({});
-      for (const { doc } of items) {
-        skills.set(doc.name.toLowerCase(), doc);
-        void services.knowledge.index(skillToKnowledgeEntry(doc));
-      }
-
-      // Register tools dynamically (skillsDir not available at module eval time).
-      for (const tool of createSkillTools(store, skills, services.knowledge)) {
-        services.tools.register(tool);
-      }
-
-      // Import any .md files from the skills directory into the store.
-      abortController = new AbortController();
-      void watchAndImportSkillDir(config.skillsDir, store, skills, abortController.signal, config.pollMs);
-
-      const getSkills = (): SkillDoc[] => [...skills.values()];
-      const pluginSettings = services.settings();
-      // services.hooks.register(createUserMessageClassifierHook(pluginSettings, services.providers, getSkills));
-      // services.hooks.register(createSkillIndexHook(getSkills));
-      // services.hooks.register(createAgentMessageClassifierHook(getSkills, pluginSettings, req => services.complete(req)));
+      manager = await setupSkills(services);
     },
 
     async teardown() {
-      abortController?.abort();
-      skills.clear();
+      manager?.clear();
     },
   };
 }
 
-// ── Default plugin export ─────────────────────────────────────────────────────
-
-export const plugin: MatbotPluginSpec = createSkillsPlugin({
-  skillsDir: path.join(process.cwd(), '.data', 'skills'),
-});
+export const plugin: MatbotPluginSpec = createSkillsPlugin();

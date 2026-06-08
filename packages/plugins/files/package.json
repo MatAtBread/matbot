@@ -1,5 +1,6 @@
 {
   "name": "@matatbread/matbot-files-node",
+  "matbotRuntime": ["node"],
   "version": "0.1.0",
   "description": "Node filesystem-backed FileStore for MIME-typed blobs, served by the frontend.",
   "type": "module",

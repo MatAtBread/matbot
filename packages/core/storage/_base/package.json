@@ -1,5 +1,6 @@
 {
   "name": "@matatbread/matbot-storage-base",
+  "matbotRuntime": ["node", "browser"],
   "version": "0.1.0",
   "type": "module",
   "exports": {

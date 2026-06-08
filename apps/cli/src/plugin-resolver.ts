@@ -1,7 +1,25 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import type { PluginResolver } from '@matatbread/matbot-core';
+import type { PluginResolver, Runtime } from '@matatbread/matbot-core';
 import { startDir } from './plugin-description.js';
+
+const VALID_RUNTIMES: readonly Runtime[] = ['node', 'browser'];
+
+/** Coerce a raw package.json `matbotRuntime` value into a runtime list, or undefined if absent/malformed. */
+function normalizeRuntimes(raw: unknown, pkgName: string): readonly Runtime[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) {
+    console.warn(`[matbot] Ignoring matbotRuntime in "${pkgName}": expected an array of ${VALID_RUNTIMES.join('/')}, got ${typeof raw}.`);
+    return undefined;
+  }
+  const valid = raw.filter((r): r is Runtime => VALID_RUNTIMES.includes(r as Runtime));
+  for (const r of raw) {
+    if (!VALID_RUNTIMES.includes(r as Runtime)) {
+      console.warn(`[matbot] Ignoring unknown matbotRuntime "${String(r)}" in "${pkgName}" (known: ${VALID_RUNTIMES.join(', ')}).`);
+    }
+  }
+  return valid;
+}
 
 /**
  * Node host PluginResolver: derives a plugin's canonical name (its package.json `name`) from the
@@ -31,6 +49,23 @@ export function nodePluginResolver(baseDir: string): PluginResolver {
         } catch { /* no package.json here, keep walking up */ }
         const parent = path.dirname(dir);
         if (parent === dir) return fallback; // filesystem root reached without a named package.json
+        dir = parent;
+      }
+    },
+
+    // Read `matbotRuntime` off the plugin's package.json — the nearest one with a `name`, the same
+    // boundary identify() uses — so a declaration on the plugin (not an enclosing monorepo root) wins.
+    // Undefined means "not declared": the loader then imports and falls back to load/rollback.
+    async runtimes(specifier: string): Promise<readonly Runtime[] | undefined> {
+      let dir = startDir(specifier, baseDir);
+      if (dir === undefined) return undefined;
+      while (true) {
+        try {
+          const pkg = JSON.parse(await readFile(path.join(dir, 'package.json'), 'utf8')) as { name?: string; matbotRuntime?: unknown };
+          if (pkg.name) return normalizeRuntimes(pkg.matbotRuntime, pkg.name);
+        } catch { /* no package.json here, keep walking up */ }
+        const parent = path.dirname(dir);
+        if (parent === dir) return undefined;
         dir = parent;
       }
     },

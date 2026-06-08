@@ -1,7 +1,8 @@
 {
-  "name": "@matatbread/matbot-skills-node",
+  "name": "@matatbread/matbot-skills",
+  "matbotRuntime": ["node", "browser"],
   "version": "0.1.0",
-  "description": "Skill documents injected into sessions on demand.",
+  "description": "Cross-runtime skill documents: CRUD over named markdown playbooks via skill_action, persisted and knowledge-indexed. Runs in Node and the browser.",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
@@ -13,7 +14,6 @@
     "@matatbread/matbot-plugin-api": "workspace:*"
   },
   "devDependencies": {
-    "@types/node": "catalog:",
-    "typescript":  "catalog:"
+    "typescript": "catalog:"
   }
 }

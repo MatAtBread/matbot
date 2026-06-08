@@ -8,6 +8,7 @@ const CSS = `
 .mb-head { display:flex; gap:8px; align-items:center; padding:8px 12px; border-bottom:1px solid #e2e2e2; background:#fff; }
 .mb-head .mb-title { font-weight:600; margin-right:auto; }
 .mb-head select, .mb-head button { font:inherit; padding:4px 8px; border:1px solid #cfcfcf; border-radius:6px; background:#fff; }
+.mb-head option.mb-archived { color:#9a9a9a; }
 .mb-msgs { flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:12px; }
 .mb-row { display:flex; }
 .mb-row.user { justify-content:flex-end; }
@@ -188,11 +189,30 @@ export class ChatUI {
     if (store === undefined) return;
     const { items } = await store.query({ sort: [{ field: 'updatedAt', direction: 'desc' }], limit: 50 });
     this.sessionSel.replaceChildren();
-    for (const { doc } of items) {
+
+    const makeOption = (doc: Session): HTMLOptionElement => {
       const o = el('option');
       o.value = doc.id;
       o.textContent = doc.title?.trim() || `(untitled ${doc.id.slice(0, 8)})`;
-      this.sessionSel.appendChild(o);
+      return o;
+    };
+
+    // Unarchived (active/pinned) first, most-recent first.
+    for (const { doc } of items) if (doc.status !== 'archived') this.sessionSel.appendChild(makeOption(doc));
+
+    // Archived sink to the bottom under a labelled group. Native <select> popups ignore `color` on
+    // <option> (esp. on macOS), so the grey class alone is invisible there; the <optgroup> label is
+    // always rendered by the OS, which is what actually separates and de-emphasises them.
+    const archived = items.filter(({ doc }) => doc.status === 'archived');
+    if (archived.length > 0) {
+      const group = el('optgroup');
+      group.label = 'Archived';
+      for (const { doc } of archived) {
+        const o = makeOption(doc);
+        o.classList.add('mb-archived');
+        group.appendChild(o);
+      }
+      this.sessionSel.appendChild(group);
     }
   }
 

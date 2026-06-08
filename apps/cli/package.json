@@ -1,5 +1,6 @@
 {
   "name": "@matatbread/matbot-cli",
+  "matbotRuntime": ["node"],
   "version": "0.1.0",
   "type": "module",
   "scripts": {

@@ -74,11 +74,11 @@ export function createMcpHttpPlugin(): MatbotPluginSpec {
   let manager: RemoteMcpManager | undefined;
   return {
     apiVersion: PLUGIN_API_VERSION,
-    manifest: { description: 'Cross-platform remote MCP client (HTTP/SSE). Registers mcp_action and the mcpRemote delegation service.' },
+    manifest: { description: 'Cross-platform remote MCP client (HTTP/SSE). Registers mcp_action and the McpRemoteService delegation service.' },
 
     async setup(services) {
       manager = new RemoteMcpManager(services, services.settings());
-      await services.register('mcpRemote', manager);
+      await services.register('McpRemoteService', manager);
       services.tools.register(remoteMcpActionTool(manager));
       await manager.reconnectPersisted((name, err) => console.warn(`[mcp-http] Failed to reconnect "${name}":`, err));
     },

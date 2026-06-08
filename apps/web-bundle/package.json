@@ -1,5 +1,6 @@
 {
   "name": "@matatbread/matbot-web-bundle",
+  "matbotRuntime": ["node", "browser"],
   "version": "0.1.0",
   "description": "Self-contained, browser-only matbot: assembles the platform-neutral core and browser plugins into a single matbot.html that runs entirely client-side (file:// or any static host).",
   "type": "module",
