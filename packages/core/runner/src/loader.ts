@@ -1,6 +1,6 @@
 import type { MatbotPlugin, MatbotPluginSpec, MatbotServices, PluginSource } from './plugin.js';
 import type { PromptFn } from './types.js';
-import { registerPlugin, setupPlugin } from './registry.js';
+import { registerPlugin, setupPlugin, unloadPlugin } from './registry.js';
 
 /**
  * Query-param marker appended to a plugin entry URL when `bustCache` is set.
@@ -109,12 +109,35 @@ export async function loadPlugins(
       ...(source !== undefined ? { source } : {}),
     };
 
+    // registered gates the rollback: only an attempt that *itself* registered the
+    // plugin may unload it. A registerPlugin failure means the name/provider/storage
+    // was already owned by a different, healthy plugin — unloading by name there would
+    // tear down that innocent bystander.
+    let registered = false;
     try {
       registerPlugin(plugin);
+      registered = true;
       await setupPlugin(plugin, services, prompt);
       loaded.push(plugin);
     } catch (err) {
       console.error(`[matbot] Ignoring plugin "${plugin.name}" from "${spec}" due to an error:`, err instanceof Error ? err.message : err);
+      // Roll back partial registration so a failed load leaves no ghost state. setupPlugin
+      // can throw after the plugin is already in the registry with some of its tools / hooks /
+      // services / provider / storage wired (a wrong-platform plugin touching a missing
+      // primitive mid-setup is the common case). unloadPlugin is the exact inverse of
+      // register + setup, so it removes precisely those contributions. We run it defensively:
+      // a half-set-up plugin's own teardown() may throw, and a rollback failure must not abort
+      // the remaining loads.
+      if (registered) {
+        try {
+          await unloadPlugin(plugin.name, services);
+        } catch (cleanupErr) {
+          console.error(
+            `[matbot] Cleanup after failed load of "${plugin.name}" did not fully complete; some state may linger:`,
+            cleanupErr instanceof Error ? cleanupErr.message : cleanupErr,
+          );
+        }
+      }
     }
   }
 
