@@ -215,7 +215,7 @@ async function main() {
 
   const moduleCount = Object.keys(sources).length;
   const html = template
-    .replace('%%PAYLOAD%%',  () => guard(JSON.stringify(payload)))
+    .replace('%%PAYLOAD%%',  () => guard(JSON.stringify(payload, null, 2)))
     .replace('%%LOADER%%',   () => guard(loader))
     .replace(/%%MODULE_COUNT%%/g, String(moduleCount));
 

@@ -1,4 +1,4 @@
-import type { Tool, ToolEvent, ToolContext, MatbotPlugin, FormField } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolEvent, ToolContext, MatbotPlugin, FormField, Runtime } from '@matatbread/matbot-plugin-api';
 import { CONFIRM_YES, CONFIRM_NO, IncompatibleRuntimeError } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins, getRegisteredTools, getRegisteredFrontendPlugins,
          getRegisteredServiceKeys, getHookPlugins, getSystemContextPlugins } from '@matatbread/matbot-core';
@@ -72,11 +72,11 @@ function resolveExportsMain(exports: unknown): string | undefined {
 // discovery interface — registry lookup, repo scanning, or a plugin marketplace.
 async function discoverLocalPlugins(
   projectDir: string,
-): Promise<Array<{ specifier: string; name: string; description: string }>> {
+): Promise<Array<{ specifier: string; name: string; description: string; matbotRuntime?: Runtime[] }>> {
   const pluginsDir = path.join(projectDir, 'packages', 'plugins');
   try { await access(pluginsDir); } catch { return []; }
 
-  const results: Array<{ specifier: string; name: string; description: string }> = [];
+  const results: Array<{ specifier: string; name: string; description: string; matbotRuntime?: Runtime[] }> = [];
 
   const scan = async (dir: string, depth: number): Promise<void> => {
     let entries;
@@ -90,6 +90,7 @@ async function discoverLocalPlugins(
           name?: string;
           description?: string;
           dependencies?: Record<string, string>;
+          matbotRuntime?: unknown;
         };
         if (pkg.dependencies?.['@matatbread/matbot-plugin-api'] !== undefined) {
           // Prefer manifest.description (runtime source of truth) over package.json description.
@@ -107,10 +108,12 @@ async function discoverLocalPlugins(
             } catch { /* leave description as-is */ }
           }
 
+          const runtimes = normalizeRuntimes(pkg.matbotRuntime);
           results.push({
             specifier:   `./${path.relative(projectDir, sub).replace(/\\/g, '/')}`,
             name:        pkg.name ?? entry.name,
             description,
+            ...(runtimes !== undefined ? { matbotRuntime: runtimes } : {}),
           });
         }
       } catch { /* no package.json or unreadable */ }
@@ -141,6 +144,34 @@ async function pkgDescriptionFromSpecifier(specifier: string, projectDir: string
     try {
       const pkg = JSON.parse(await readFile(path.join(dir, 'package.json'), 'utf8')) as { description?: string };
       if (pkg.description) return pkg.description;
+    } catch { /* no package.json here, keep walking */ }
+    const parent = path.dirname(dir);
+    if (parent === dir) return undefined;
+    dir = parent;
+  }
+}
+
+function normalizeRuntimes(raw: unknown): Runtime[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  return raw.filter((r): r is Runtime => r === 'node' || r === 'browser');
+}
+
+// Read a plugin's declared `matbotRuntime` off the nearest named package.json walking up from the
+// specifier — the same boundary the node PluginResolver uses, so a declaration on the plugin (not an
+// enclosing monorepo root) wins. Bare npm names aren't resolved here (returns undefined = "not declared").
+async function runtimesFromSpecifier(specifier: string, projectDir: string): Promise<Runtime[] | undefined> {
+  let dir: string;
+  if (specifier.startsWith('file://')) {
+    dir = path.dirname(fileURLToPath((specifier.split('?')[0]) ?? specifier));
+  } else if (specifier.startsWith('./') || specifier.startsWith('../') || path.isAbsolute(specifier)) {
+    dir = path.resolve(projectDir, specifier);
+  } else {
+    return undefined;
+  }
+  while (true) {
+    try {
+      const pkg = JSON.parse(await readFile(path.join(dir, 'package.json'), 'utf8')) as { name?: string; matbotRuntime?: unknown };
+      if (pkg.name) return normalizeRuntimes(pkg.matbotRuntime);
     } catch { /* no package.json here, keep walking */ }
     const parent = path.dirname(dir);
     if (parent === dir) return undefined;
@@ -241,13 +272,17 @@ const executor = {
         [...toolsByPlugin.keys()].filter((k): k is string => k !== undefined),
       );
 
-      const loaded = getRegisteredPlugins().map(p => ({
-        name:        p.name,
-        apiVersion:  p.apiVersion,
-        types:       pluginTypes(p, pluginToolNames),
-        tools:       toolsByPlugin.get(p.name) ?? [],
-        specifier:   p.specifier,
-        ...(p.manifest?.description ? { description: p.manifest.description } : {}),
+      const loaded = await Promise.all(getRegisteredPlugins().map(async p => {
+        const runtimes = await runtimesFromSpecifier(p.specifier, projectDir);
+        return {
+          name:        p.name,
+          apiVersion:  p.apiVersion,
+          types:       pluginTypes(p, pluginToolNames),
+          tools:       toolsByPlugin.get(p.name) ?? [],
+          specifier:   p.specifier,
+          ...(p.manifest?.description ? { description: p.manifest.description } : {}),
+          ...(runtimes !== undefined ? { matbotRuntime: runtimes } : {}),
+        };
       }));
 
       yield {
@@ -451,8 +486,8 @@ export const pluginTool: Tool = {
     'Parameters depend on `action` (TypeScript):\n' +
     '```ts\n' +
     'type PluginAction =\n' +
-    "  | { action: 'list' }                            // configured + loaded plugins, with types and tools\n" +
-    "  | { action: 'discover_local' }                  // scan packages/plugins for installable local plugins\n" +
+    "  | { action: 'list' }                            // configured + loaded plugins, with types, tools, and matbotRuntime\n" +
+    "  | { action: 'discover_local' }                  // scan packages/plugins for installable local plugins (incl. matbotRuntime)\n" +
     "  | { action: 'add';        specifier: string }   // install & activate; specifier = npm name, path, or GitHub shorthand\n" +
     "  | { action: 'remove';     specifier: string }   // deactivate & remove from matbot.yaml\n" +
     "  | { action: 'reload';     specifier: string }   // re-import from disk without restarting\n" +
