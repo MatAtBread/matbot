@@ -12,7 +12,7 @@ import type { SkillDoc } from './types.js';
  */
 export async function setupSkills(services: MatbotServices): Promise<SkillManager> {
   const store   = services.createStore<SkillDoc>('skills') as Store<SkillDoc>;
-  const manager = new SkillManager(store, services.knowledge);
+  const manager = new SkillManager(store, services.KnowledgeIndex);
   await manager.init();
 
   services.tools.register(createSkillTool(manager));

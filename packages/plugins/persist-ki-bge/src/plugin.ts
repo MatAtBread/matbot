@@ -16,7 +16,7 @@ export function createPersistKIBGEPlugin(): MatbotPluginSpec {
 
     async setup(services) {
       const store = services.createStore<KnowledgeEntry>('knowledge') as Store<KnowledgeEntry>;
-      await services.register('knowledge', new PersistBGEKnowledgeIndex(store, services.vault));
+      await services.register('KnowledgeIndex', new PersistBGEKnowledgeIndex(store, services.vault));
     },
   };
 }

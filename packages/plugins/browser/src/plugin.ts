@@ -30,8 +30,8 @@ export const plugin: MatbotPluginSpec = {
 
     // Hot-load path: if we weren't activated by the boot pre-scan, become the backend now so all
     // stores (including the settings store this plugin uses below) land in IndexedDB.
-    if (!(services.storageBackend instanceof BrowserStorageBackend)) {
-      await services.register('storageBackend', await BrowserStorageBackend.open(''));
+    if (!(services.StorageBackend instanceof BrowserStorageBackend)) {
+      await services.register('StorageBackend', await BrowserStorageBackend.open(''));
     }
 
     const settings = services.settings();

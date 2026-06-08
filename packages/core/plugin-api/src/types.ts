@@ -296,7 +296,7 @@ export interface KnowledgeEntry {
 export interface KnowledgeIndex {
   index(entry: KnowledgeEntry): Promise<void>;
   search(terms: Array<{ term: string; context?: string }>, signal: AbortSignal): Promise<KnowledgeEntry[]>;
-  /** Enumerate all indexed entries. When present, register('knowledge', …) drains these into the incoming backend. */
+  /** Enumerate all indexed entries. When present, register('KnowledgeIndex', …) drains these into the incoming backend. */
   entries?(): Iterable<KnowledgeEntry>;
 }
 

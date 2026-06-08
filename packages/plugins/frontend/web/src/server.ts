@@ -19,6 +19,24 @@ export interface WebServerDeps {
   workdir?:       string;
   files?:         FileStore;
   configPath?:    string;
+  /** Derives the security principal for each request. Defaults to {@link defaultWebPrincipal}. */
+  resolvePrincipal?: WebPrincipalResolver;
+}
+
+/**
+ * Derives the security principal for an incoming HTTP request. The default ({@link defaultWebPrincipal})
+ * returns one constant placeholder; a plugin can register its own under `services.WebPrincipalResolver` to
+ * derive a real identity from the request — typically auth headers. It is resolved once at the
+ * request entry and established ambiently via `runAs()` for the whole request, so every downstream
+ * store/file/vault access (and the submitted turn) reads it via `currentPrincipal()`.
+ */
+export type WebPrincipalResolver = (req: IncomingMessage) => Principal | Promise<Principal>;
+
+declare module '@matatbread/matbot-plugin-api' {
+  interface MatbotServices {
+    /** Registered by @matatbread/matbot-frontend-web: derive the per-request principal (default: a constant placeholder). */
+    WebPrincipalResolver?: WebPrincipalResolver;
+  }
 }
 
 interface SubmitBody {
@@ -29,11 +47,13 @@ interface SubmitBody {
   concatQueue?: boolean;      // true (default): merge into the running turn's batch; false: own turn
 }
 
-// Single server-side principal used for all requests until real auth is added.
+// Single server-side placeholder principal used when no resolver derives a real identity.
 const DEFAULT_PRINCIPAL: Principal = {
   id:   'web-user',
   type: 'user',
 };
+
+export const defaultWebPrincipal: WebPrincipalResolver = () => DEFAULT_PRINCIPAL;
 
 async function readBody(req: IncomingMessage, maxBytes = 1_048_576): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -87,6 +107,7 @@ const nonInteractivePrompt: PromptFn = ((p: string | FormField, def?: string) =>
 
 export function createWebServer(deps: WebServerDeps) {
   const origin = deps.cors ?? '*';
+  const resolvePrincipal = deps.resolvePrincipal ?? defaultWebPrincipal;
 
   // Persistent per-session event subscribers (the GET /sessions/:id/events SSE streams). Submits are
   // fire-and-forget — all turn output, and interactive prompts, reach clients over these. Holding one
@@ -157,20 +178,21 @@ export function createWebServer(deps: WebServerDeps) {
     try {
       // Establish the request's security principal at the entry, so every store/file/vault access
       // made while handling it (not just the submitted turn, which pump scopes separately) can read
-      // it via currentPrincipal(). A real auth layer would derive this from a header instead of the
-      // single placeholder principal.
-      await runAs(DEFAULT_PRINCIPAL, () => handleRequest(req, res, method, url));
+      // it via currentPrincipal(). The resolver derives it from the request (default: one constant
+      // placeholder); a plugin can register `services.WebPrincipalResolver` to read real identity off headers.
+      const principal = await resolvePrincipal(req);
+      await runAs(principal, () => handleRequest(req, res, method, url, principal));
     } catch (e) {
       if (!res.headersSent) json(res, 500, { error: String(e) });
       else if (res.writable)  res.end();
     }
   });
 
-  function makeToolCtx(ac: AbortController) {
+  function makeToolCtx(ac: AbortController, principal: Principal) {
     const now = new Date().toISOString();
     const stubSession: Session = {
       id: crypto.randomUUID(), version: crypto.randomUUID(),
-      ownerPrincipalId: DEFAULT_PRINCIPAL.id,
+      ownerPrincipalId: principal.id,
       status: 'active', contexts: [], messages: [],
       createdAt: now, updatedAt: now,
     };
@@ -189,7 +211,7 @@ export function createWebServer(deps: WebServerDeps) {
   }
 
   async function handleRequest(
-    req: IncomingMessage, res: ServerResponse, method: string, url: string,
+    req: IncomingMessage, res: ServerResponse, method: string, url: string, principal: Principal,
   ): Promise<void> {
 
     // --- Static UI ---
@@ -231,7 +253,7 @@ export function createWebServer(deps: WebServerDeps) {
 
     // --- POST /sessions ---
     if (method === 'POST' && url === '/sessions') {
-      const session = createSession({ ownerPrincipal: DEFAULT_PRINCIPAL });
+      const session = createSession({ ownerPrincipal: principal });
       await deps.store.set(session.id, session);
       json(res, 201, { id: session.id });
       return;
@@ -295,7 +317,7 @@ export function createWebServer(deps: WebServerDeps) {
           signal:      isTracker ? trackAc.signal : new AbortController().signal,
           content:     contentArr,
           provider:    body.provider,
-          principal:   DEFAULT_PRINCIPAL,
+          principal,
           prompt:      promptFn,
           traceId,
           concatQueue: body.concatQueue ?? false, // per-submission; conservative default (own turn) when unspecified
@@ -414,7 +436,7 @@ export function createWebServer(deps: WebServerDeps) {
       const ac = new AbortController();
       req.on('close', () => ac.abort());
 
-      const toolCtx = makeToolCtx(ac);
+      const toolCtx = makeToolCtx(ac, principal);
       let stdout = '';
       let stderr = '';
       try {
@@ -466,7 +488,7 @@ export function createWebServer(deps: WebServerDeps) {
       res.write(sseComment('tool stream open'));
 
       try {
-        for await (const ev of tool.executor.execute(input, makeToolCtx(ac))) {
+        for await (const ev of tool.executor.execute(input, makeToolCtx(ac, principal))) {
           if (!res.writable) break;
           res.write(sseEvent(ev.type, ev));
         }

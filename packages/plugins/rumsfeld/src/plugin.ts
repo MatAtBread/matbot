@@ -15,7 +15,7 @@ export function createRumsfeldPlugin(): MatbotPluginSpec {
             return;
           }
 
-          const results = await services.knowledge.search(terms, ctx.signal);
+          const results = await services.KnowledgeIndex.search(terms, ctx.signal);
 
           if (results.length === 0) {
             yield { type: 'error', message: 'There is no skill available for the requested operation.' };

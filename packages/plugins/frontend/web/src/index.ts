@@ -1,3 +1,3 @@
-export { createWebServer } from './server.js';
-export type { WebServerDeps } from './server.js';
+export { createWebServer, defaultWebPrincipal } from './server.js';
+export type { WebServerDeps, WebPrincipalResolver } from './server.js';
 export { plugin } from './plugin.js';

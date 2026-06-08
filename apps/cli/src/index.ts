@@ -16,6 +16,7 @@ import { appendMessage, createMessage,
          unloadPlugin as unloadPluginFn,
          getPluginNameForSpecifier,
          installPrincipalCarrier, enterPrincipal,
+         unifyServices,
          MissingSecretError }              from '@matatbread/matbot-core';
 import type { MatbotServices, PluginSettings, ToolRegistry, Vault, SessionRunner,
               MatbotPlugin, StorageBackend, KnowledgeIndex, PromptFn, FormField } from '@matatbread/matbot-core';
@@ -619,11 +620,11 @@ async function main(): Promise<void> {
   // It must be listed before any plugin whose setup() calls createStore.
   let activeStorageBackend: StorageBackend | undefined;
   let knowledgeImpl: KnowledgeIndex = new LookupKnowledgeIndex();
-  const knowledgeProxy = new Proxy({} as KnowledgeIndex, {
-    get(_t, prop: string | symbol) {
-      return (knowledgeImpl as unknown as Record<string | symbol, unknown>)[prop];
-    },
-  });
+  // Capture-safe service handles (see forwardingProxy): a captured reference — including a destructure
+  // like `const { KnowledgeIndex, StorageBackend } = services` — keeps resolving to the live impl across
+  // a register()-driven swap, instead of pinning whatever was current at capture time.
+  const knowledgeProxy      = forwardingProxy<KnowledgeIndex>(() => knowledgeImpl);
+  const storageBackendProxy = forwardingProxy<StorageBackend>(() => activeStorageBackend);
   for (const spec of allSpecifiers) {
     try {
       const mod  = await import(/* @vite-ignore */ spec) as Record<string, unknown>;
@@ -644,22 +645,41 @@ async function main(): Promise<void> {
 
   // Each Store and FileStore is a forwarding proxy backed by a mutable `current` target.
   // Callers may freely capture references — all method calls route through the proxy to
-  // whichever backend is current. register('storageBackend', …) calls each proxy's swap fn.
+  // whichever backend is current. register('StorageBackend', …) calls each proxy's swap fn.
   type AnyStore = Store<{ id: string; version: string }>;
   type SwapFn<T extends object> = (next: T) => void;
 
-  // Returns [proxy, swap]. The proxy forwards every property access to `current`.
-  // Binding the method to `current` (not the proxy) ensures `this` is always the real store.
+  // A capture-safe forwarding proxy: every trap routes to whatever `getCurrent()` returns *now*, so a
+  // reference captured before a register()-driven swap keeps resolving to the live impl. getPrototypeOf
+  // is forwarded so `instanceof` sees the real impl (the StorageBackend identity checks depend on it);
+  // ownKeys + getOwnPropertyDescriptor keep object spread faithful. Methods bind to the current impl,
+  // not the proxy. A nullish current (an optional service with nothing registered yet) reads as empty.
+  function forwardingProxy<T extends object>(getCurrent: () => T | undefined): T {
+    return new Proxy({} as T, {
+      get(_t, prop) {
+        const cur = getCurrent();
+        if (cur === undefined) return undefined;
+        const val = Reflect.get(cur, prop, cur);
+        return typeof val === 'function' ? (val as (...a: unknown[]) => unknown).bind(cur) : val;
+      },
+      has(_t, prop)    { const cur = getCurrent(); return cur !== undefined && Reflect.has(cur, prop); },
+      getPrototypeOf() { const cur = getCurrent(); return cur === undefined ? null : Reflect.getPrototypeOf(cur); },
+      ownKeys()        { const cur = getCurrent(); return cur === undefined ? [] : Reflect.ownKeys(cur); },
+      getOwnPropertyDescriptor(_t, prop) {
+        const cur = getCurrent();
+        if (cur === undefined) return undefined;
+        const d = Reflect.getOwnPropertyDescriptor(cur, prop);
+        if (d !== undefined) d.configurable = true; // Proxy invariant: props absent from the {} target must be configurable.
+        return d;
+      },
+    });
+  }
+
+  // Returns [proxy, swap]: the Store/FileStore handle plugins capture, plus the fn register() calls to
+  // repoint it at a new backend's store. Built on forwardingProxy so capture-safety is uniform.
   function makeSwappable<T extends object>(initial: T): [T, SwapFn<T>] {
     let current = initial;
-    const proxy = new Proxy({} as T, {
-      get(_, prop) {
-        const val = Reflect.get(current, prop, current);
-        return typeof val === 'function' ? (val as (...a: unknown[]) => unknown).bind(current) : val;
-      },
-      has(_, prop) { return Reflect.has(current, prop); },
-    });
-    return [proxy, (next: T) => { current = next; }];
+    return [forwardingProxy<T>(() => current), (next: T) => { current = next; }];
   }
 
   // One proxy per namespace, including 'sessions'. Keyed by namespace string.
@@ -709,7 +729,7 @@ async function main(): Promise<void> {
   // calling runSession directly.
   let sessionRunner: SessionRunner | undefined;
 
-  const services: MatbotServices = {
+  const baseServices: MatbotServices = {
     // Plugins always receive the plugin-scoped override built in setupPlugin; the base is never the
     // one a plugin calls. Core reads its reserved settings doc via makePluginSettings directly.
     settings(): PluginSettings {
@@ -720,14 +740,14 @@ async function main(): Promise<void> {
 
     get(key) { return serviceRegistry.get(key as string) as never; },
     async register(key, value) {
-      if (key === 'storageBackend') {
+      if (key === 'StorageBackend') {
         const next = value as StorageBackend;
         for (const [ns, [, swap]] of storeProxies) swap(next.createStore(ns));
         swapFiles(next.fileStore);
         const old = activeStorageBackend;
         activeStorageBackend = next;
         await old?.close?.();
-      } else if (key === 'knowledge') {
+      } else if (key === 'KnowledgeIndex') {
         const prev = knowledgeImpl;
         knowledgeImpl = value as KnowledgeIndex;
         if (prev.entries !== undefined) {
@@ -794,7 +814,7 @@ async function main(): Promise<void> {
     },
     resolver:  nodePluginResolver(path.dirname(configPath)),
     providers: matbotConfig.providers,
-    get storageBackend() { return activeStorageBackend; },
+    get StorageBackend() { return activeStorageBackend === undefined ? undefined : storageBackendProxy; },
     sessions:  store,
     get run() { return sessionRunner; },
     files:     fileStore,
@@ -804,8 +824,9 @@ async function main(): Promise<void> {
     systemContext:  systemContextReg,
     workdir:    workDir,
     configPath,
-    knowledge: knowledgeProxy,
+    get KnowledgeIndex() { return knowledgeProxy; },
   };
+  const services: MatbotServices = unifyServices(baseServices);
 
   // resolveProvider reads matbotConfig.providers lazily (per turn), so it sees both the
   // canonicalised module names set below and any live `provider add/remove` edits.

@@ -159,16 +159,20 @@ Plugins may create additional subdirectories (e.g. `files/`, `settings/`) as nee
 
 `MatbotServices` is the runtime environment passed to every plugin's `setup()`. Its core
 members (hooks, tools, complete, settings, vault, sessions) are always present. Optional
-services — custom cognitive subsystems, domain-specific backends, etc. — are advertised and
-consumed through `register` and `get`, both typed against `keyof MatbotServices`:
+services — custom cognitive subsystems, domain-specific backends, etc. — are advertised with
+`register` (keyed by `keyof MatbotServices`) and consumed as **members**. There is one access
+surface: core members and registered services are both reached as `services.InterfaceName`.
 
 ```ts
 // Advertising (in the providing plugin's setup()):
-await services.register('myService', new MyServiceImpl(store));
+await services.register('McpRemoteService', new RemoteMcpManager(store));
 
-// Consuming (in any plugin's setup()):
-const svc = services.get('myService'); // MyService | undefined
+// Consuming (in any plugin's setup()) — member access. The `?` on the augmentation (below) makes
+// the type `McpRemoteService | undefined`, so the optional `?.` is the null-check:
+services.McpRemoteService?.add(...);
 ```
+
+`register` is the only write path; direct assignment (`services.X = …`) throws and points back to it.
 
 Type safety comes from augmenting `MatbotServices` in `@matatbread/matbot-plugin-api`:
 
@@ -176,33 +180,56 @@ Type safety comes from augmenting `MatbotServices` in `@matatbread/matbot-plugin
 // In the providing package (or alongside it):
 declare module '@matatbread/matbot-plugin-api' {
   interface MatbotServices {
-    myService?: MyService;
+    McpRemoteService?: McpRemoteService;
   }
 }
 ```
 
-Any plugin that imports this declaration gets fully-typed `register`/`get` calls. Core
-never references plugin services — they are negotiated at runtime between plugins.
+Any plugin that imports this declaration gets a fully-typed `register` call and fully-typed member
+access (`services.McpRemoteService`). Core never references plugin services — they are negotiated at
+runtime between plugins.
 
-Well-known keys have dedicated behaviour inside `register`:
-- `'storageBackend'` — replaces the active storage backend and re-wires all Store proxies
-- `'knowledge'` — replaces the active KnowledgeIndex, draining entries from the old one
+**The key is the interface name — no translation.** The registry is a registry of *interfaces*;
+the string is only the erasure-time stand-in for type identity (with runtime reflection the name
+would not exist at all). So name the key exactly after the interface it carries — `McpRemoteService`
+holds a `McpRemoteService`, not a role-noun like `mcpRemote` that has to be kept in sync with its
+type. One token: grep finds the augmentation, the `register`, and every read in a single pass.
 
-To introduce a new cognitive subsystem (e.g. `Imagination`):
-1. Declare `imagination?: Imagination` on `MatbotServices` (augment in your package)
-2. Call `await services.register('imagination', new ImaginationImpl(...))` in `setup()`
-3. Core is unchanged; other plugins discover the service via `services.get('imagination')`
+**Two implementations of one interface** is the one case that needs a distinct handle. Mint a
+second type token rather than inventing a role name — an alias preserves structural typing today
+and lets the two diverge later:
+```ts
+type SessionStore = Store<Session>;   // distinct key, same shape now, free to diverge
+type ScratchStore = Store<Session>;
+```
+This is also the tool for when the bare interface name is too *generic* to be a safe global key
+(never register bare `Store`; alias it to a domain-specific handle first).
 
-**Name collision**: the property name becomes the contract identifier. Choose a name
-that is unambiguous within the ecosystem — short but domain-specific beats globally unique.
+A couple of keys are interface-named like the rest but additionally carry **dedicated `register`
+behaviour** and are always-present core members (read as `services.StorageBackend` /
+`services.KnowledgeIndex`). `register` doesn't merely store these — it swaps the live impl and fixes
+up everything pointing at the old one. Each is also handed out as a **capture-safe forwarding proxy**,
+so a reference captured before a swap (`const { KnowledgeIndex } = services`) keeps resolving to the
+current impl rather than pinning the old one:
+- `'StorageBackend'` (a `StorageBackend`) — replaces the active storage backend and re-wires all Store proxies
+- `'KnowledgeIndex'` (a `KnowledgeIndex`) — replaces the active KnowledgeIndex, draining entries from the old one
+
+To introduce a new cognitive subsystem (e.g. an `Imagination` interface):
+1. Declare `Imagination?: Imagination` on `MatbotServices` (augment in your package)
+2. Call `await services.register('Imagination', new ImaginationImpl(...))` in `setup()`
+3. Core is unchanged; other plugins access the service via `services.Imagination`
+
+**Name collision**: the property name becomes the contract identifier. Naming it after the
+interface inherits the interface's own specificity discipline — short but domain-specific beats
+globally unique (which is why a bare `Store` would be a terrible key).
 
 ### Registry discovery vs. direct dependency
 
 The registry is for **negotiation between independent parties**: the consumer neither knows nor
 cares who provides a capability, whether anyone does, or which implementation answers. That
 looseness is the whole point — it buys runtime swappability and graceful absence. Reach for
-`services.get('x')` (and the `x?:` optional on `MatbotServices`) only when that's genuinely true.
-Genuine optional discovery has **no fallback**; it degrades (`if (!svc) return;`).
+`services.x` (and the `x?:` optional on `MatbotServices`) only when that's genuinely true.
+Genuine optional discovery has **no fallback**; it degrades (`if (!services.x) return;`).
 
 When one plugin is a **specialization** of another — "B *is* A, but broader" — that is an `extends`
 relationship, not an unknown-collaborator one. The dependency is named, owned, present by
@@ -211,7 +238,7 @@ dependency. Routing it through the registry there is ceremony around a fact know
 and it has real costs: a second resident plugin, lifecycle split across two `teardown`s (cleanup
 becomes load-order dependent), and capabilities registered only to be immediately overridden.
 
-The tell is the fallback. The moment you write `get(x) ?? loadPlugin(x)`, you've admitted the
+The tell is the fallback. The moment you write `services.x ?? loadPlugin(x)`, you've admitted the
 dependency isn't optional — you're willing to *force* it into existence. That `??` is the seam
 between the two models; reaching for it means you've picked the loose tool for a hard relationship.
 
@@ -219,7 +246,7 @@ The two halves compose and aren't in tension: a specialization may still **adver
 capability on the registry (offering loosely to whoever's out there) while **depending** on its
 base directly. Offer loosely; depend tightly. *(See `packages/plugins/mcp` embedding
 `packages/plugins/mcp-http`'s `RemoteMcpManager` directly, while mcp-http still registers
-`mcpRemote` for standalone use.)*
+`McpRemoteService` for standalone use.)*
 
 ---
 
@@ -236,7 +263,7 @@ Cloudflare BGE reranker for semantic scoring.
 `KnowledgeIndex` when the model encounters an unknown term. This is the primary consumption
 path: the model calls `contextual_search`, gets back the best-matching entry, and continues.
 
-`services.register('knowledge', impl)` swaps the active index at runtime — all subsequent
+`services.register('KnowledgeIndex', impl)` swaps the active index at runtime — all subsequent
 `contextual_search` calls use the new backend immediately.
 
 ---

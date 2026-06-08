@@ -447,6 +447,16 @@ async function loadPlugins() {
   renderPlugins(listResult.loaded ?? [], Array.isArray(localResult) ? localResult : []);
 }
 
+// This frontend serves from the node host; a plugin can run here only if its declared matbotRuntime
+// includes 'node'. An absent/empty declaration means "unknown" — allow it (the backend's load/rollback
+// gate is the real arbiter; we only suppress installs that are guaranteed to fail).
+const HOST_RUNTIME = 'node';
+function runsHere(p) {
+  const rt = p && p.matbotRuntime;
+  if (!Array.isArray(rt) || rt.length === 0) return true;
+  return rt.includes(HOST_RUNTIME);
+}
+
 function renderPlugins(loaded, local) {
   const el = document.getElementById('plugin-list');
   if (!el) return;
@@ -517,22 +527,30 @@ function renderPlugins(loaded, local) {
     if (loadedNames.has(p.name)) continue;
     const row = document.createElement('div');
     row.className = 'plugin-entry-inactive';
-    if (p.description) row.title = p.description;
+    // This is the node-hosted web frontend, so a plugin whose declared matbotRuntime excludes 'node'
+    // can never activate here. Show it struck-through with no add button rather than offering an
+    // install that would only fail (and roll back) on the runtime gate.
+    const compatible = runsHere(p);
+    if (!compatible) row.classList.add('plugin-incompatible');
+    const runtimeNote = !compatible ? `requires runtime: ${(p.matbotRuntime ?? []).join(', ')} — cannot run on this host` : '';
+    if (p.description || runtimeNote) row.title = [p.description, runtimeNote].filter(Boolean).join(' — ');
     row.appendChild(makePluginLabel(p.name));
-    const actions = document.createElement('div');
-    actions.className = 'plugin-actions';
-    const addBtn = document.createElement('button');
-    addBtn.className = 'plugin-action-btn add';
-    addBtn.textContent = '+';
-    addBtn.title = 'Add plugin';
-    addBtn.onclick = (e) => {
-      e.stopPropagation();
-      closeSidebar();
-      // Direct submit so it queues during a turn instead of being blocked by the input.
-      submit(`Add the plugin '${p.specifier}'`);
-    };
-    actions.appendChild(addBtn);
-    row.appendChild(actions);
+    if (compatible) {
+      const actions = document.createElement('div');
+      actions.className = 'plugin-actions';
+      const addBtn = document.createElement('button');
+      addBtn.className = 'plugin-action-btn add';
+      addBtn.textContent = '+';
+      addBtn.title = 'Add plugin';
+      addBtn.onclick = (e) => {
+        e.stopPropagation();
+        closeSidebar();
+        // Direct submit so it queues during a turn instead of being blocked by the input.
+        submit(`Add the plugin '${p.specifier}'`);
+      };
+      actions.appendChild(addBtn);
+      row.appendChild(actions);
+    }
     el.appendChild(row);
   }
 

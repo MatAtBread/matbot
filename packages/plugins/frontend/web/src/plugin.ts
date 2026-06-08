@@ -1,6 +1,6 @@
 import type { MatbotPluginSpec, MatbotServices } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION }                from '@matatbread/matbot-plugin-api';
-import { createWebServer }                   from './server.js';
+import { createWebServer, defaultWebPrincipal } from './server.js';
 import process                               from 'node:process';
 
 let webServer: Awaited<ReturnType<typeof createWebServer>> | undefined;
@@ -31,6 +31,8 @@ export const plugin: MatbotPluginSpec = {
       loadPlugin:    services.loadPlugin.bind(services),
       unloadPlugin:  services.unloadPlugin.bind(services),
       tools:         services.tools,
+      // Look up the resolver per request so an override registered in any load order takes effect.
+      resolvePrincipal: (req) => (services.WebPrincipalResolver ?? defaultWebPrincipal)(req),
       ...(services.workdir    !== undefined ? { workdir:    services.workdir    } : {}),
       ...(services.files      !== undefined ? { files:      services.files      } : {}),
       ...(services.configPath !== undefined ? { configPath: services.configPath } : {}),

@@ -97,9 +97,10 @@ export interface MatbotServices {
   createStore<T extends { id: string; version: string }>(namespace: string): Store<T>;
 
   /**
-   * Register a service under a MatbotServices key. Well-known keys have dedicated behaviour:
-   *   'storageBackend' — replaces the active storage backend and re-wires all Store proxies.
-   *   'knowledge'      — replaces the active KnowledgeIndex, draining entries from the old one.
+   * Register a service under a MatbotServices key (the key is the interface name it carries).
+   * Well-known keys have dedicated behaviour:
+   *   'StorageBackend' — replaces the active storage backend and re-wires all Store proxies.
+   *   'KnowledgeIndex' — replaces the active KnowledgeIndex, draining entries from the old one.
    * All other keys store the value in a per-plugin service registry accessible via get().
    *
    * Third-party plugins advertise novel services by augmenting MatbotServices:
@@ -138,7 +139,7 @@ export interface MatbotServices {
   /** Per-session turn serialiser. Frontends submit and observe through this rather than calling
    *  runSession directly, so concurrent submits queue instead of clobbering the session. */
   readonly run?:            SessionRunner | undefined;
-  readonly storageBackend?: StorageBackend | undefined;
+  readonly StorageBackend?: StorageBackend | undefined;
   readonly files?:          FileStore;
   readonly vault:           Vault;
   readonly hooks:           HookRegistry;
@@ -149,7 +150,34 @@ export interface MatbotServices {
   /** Absolute path to the loaded config file. Plugins that create servers should forward this to tool contexts. */
   readonly configPath?:     string;
 
-  readonly knowledge: KnowledgeIndex;
+  readonly KnowledgeIndex: KnowledgeIndex;
+}
+
+/**
+ * Wrap a services object so every registered service is reachable as a member (`services.InterfaceName`),
+ * not only via `services.get('InterfaceName')` — one access surface for base members and plugin-registered
+ * services alike. A member read of a key the object doesn't carry falls back to its own `get()` (the
+ * registry), so the augmentation that declares `InterfaceName?: InterfaceName` is also the access path;
+ * the optional `?` is the single call-site signal of "may be absent, null-check it". Assignment throws,
+ * directing callers to `register()` (the swap-aware write path). Applied to both the host services object
+ * and the per-plugin scoped object, so plugins see the same surface the host does.
+ */
+export function unifyServices(services: MatbotServices): MatbotServices {
+  return new Proxy(services, {
+    get(target, key, receiver) {
+      if (Reflect.has(target, key)) return Reflect.get(target, key, receiver);
+      return typeof key === 'string' ? target.get(key as keyof MatbotServices) : undefined;
+    },
+    has(target, key) {
+      if (Reflect.has(target, key)) return true;
+      return typeof key === 'string' && target.get(key as keyof MatbotServices) !== undefined;
+    },
+    set(_target, key) {
+      throw new Error(
+        `Cannot assign services.${String(key)} directly — use services.register('${String(key)}', impl) to register or replace a service.`,
+      );
+    },
+  });
 }
 
 // ── Factory types ─────────────────────────────────────────────────────────────

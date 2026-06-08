@@ -3,7 +3,7 @@ import type {
   MatbotPlugin, MatbotServices,
   ProviderAdapterFactory, StoreFactory,
 } from './plugin.js';
-import { PLUGIN_API_VERSION } from './plugin.js';
+import { PLUGIN_API_VERSION, unifyServices } from './plugin.js';
 import { HookRegistry } from './hooks.js';
 import { makePluginSettings } from './settings.js';
 import type { SettingsDoc } from './settings.js';
@@ -158,7 +158,7 @@ export function getRegisteredFrontendPlugins(): ReadonlyMap<string, FrontendInfo
   return state.frontendPlugins;
 }
 
-/** MatbotServices keys a plugin registered at runtime via services.register() (e.g. 'knowledge'). */
+/** MatbotServices keys a plugin registered at runtime via services.register() (e.g. 'KnowledgeIndex'). */
 export function getRegisteredServiceKeys(pluginName: string): readonly string[] {
   return state.serviceKeys.get(pluginName) ?? [];
 }
@@ -214,7 +214,7 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotServices
   // own settings — there is no way to name another's.
   const ownSettings = makePluginSettings(services.createStore<SettingsDoc>('settings'), plugin.name);
 
-  const scopedServices: MatbotServices = {
+  const scopedServices: MatbotServices = unifyServices({
     ...services,
     settings: () => ownSettings,
     self: {
@@ -254,7 +254,7 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotServices
     registerFrontend(info) {
       state.frontendPlugins.set(plugin.name, info);
     },
-  };
+  });
   for (const tool of plugin.tools ?? []) {
     await registerTool(tool);
   }

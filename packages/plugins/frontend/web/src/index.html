@@ -335,6 +335,10 @@
       cursor: default;
     }
     .plugin-entry-inactive:hover { background: #f0f0f2; }
+    /* A discoverable plugin whose matbotRuntime excludes this host can never activate here:
+       strike it through and withhold the add (+) button. The title says why. */
+    .plugin-entry-inactive.plugin-incompatible .plugin-name-label { text-decoration: line-through; }
+    .plugin-entry-inactive.plugin-incompatible { opacity: 0.65; }
     .plugin-actions { display: none; flex-shrink: 0; }
     .plugin-entry > summary:hover .plugin-actions,
     .plugin-entry-inactive:hover .plugin-actions { display: flex; }
