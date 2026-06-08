@@ -1,28 +1,35 @@
 import type { Tool, ToolEvent, ToolContext, MatbotPluginSpec, MatbotServices, PluginSettings } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
-import type { MCPClient, MCPToolDef, McpRemoteService, MCPRemoteConfig } from '@matatbread/matbot-mcp-http';
-import { makeProxyTool, proxyToolName } from '@matatbread/matbot-mcp-http';
+import type { MCPClient, MCPToolDef, MCPRemoteConfig } from '@matatbread/matbot-mcp-http';
+import { makeProxyTool, proxyToolName, RemoteMcpManager } from '@matatbread/matbot-mcp-http';
 import process from 'node:process';
 import type { MCPServerConfigLocal, MCPPersistedLocal } from './types.js';
 import { createStdioClient } from './client.js';
 
 interface ActiveLocal { config: MCPServerConfigLocal; client: MCPClient; tools: MCPToolDef[]; instructions?: string }
 
-// Specifier of the cross-platform remote plugin this one is built on. Resolved via *this* package's
-// node_modules (it's a package.json dependency), so the dependency travels with the plugin — the
-// user configures only the node mcp plugin, never the http one.
-const MCP_HTTP = '@matatbread/matbot-mcp-http';
+// RemoteMcpManager persists under a fixed 'servers' key; scope it beneath ours so the embedded remote
+// store never collides with our local 'servers'. One settings document, two non-overlapping owners.
+function remoteSettings(base: PluginSettings): PluginSettings {
+  const scoped = (key: string): string => `remote:${key}`;
+  return {
+    get:    <T>(key: string) => base.get<T>(scoped(key)),
+    set:    <T>(key: string, value: T) => base.set<T>(scoped(key), value),
+    delete: (key: string) => base.delete(scoped(key)),
+  };
+}
 
 /**
- * The node MCP plugin. It hard-depends on @matatbread/matbot-mcp-http (declared in package.json),
- * pulls it in itself, and *takes over* its `mcp_action` tool with a combined local+remote one of the
- * same shape — handling local (stdio) servers directly and delegating remote (HTTP) ones to the
- * mcpRemote service. One tool, two transports, one implementation of each.
+ * The node MCP plugin. It hard-depends on @matatbread/matbot-mcp-http (declared in package.json) and
+ * embeds its RemoteMcpManager directly — no second plugin load, no service discovery. It exposes one
+ * `mcp_action` tool spanning both transports: local (stdio) servers handled here, remote (HTTP) ones
+ * delegated to the embedded manager. Owning the manager outright keeps its whole lifecycle (connect,
+ * reconnect, teardown) under this plugin, so there is no order-dependent cleanup between two plugins.
  */
 export function createMCPPlugin(): MatbotPluginSpec {
   const localActive = new Map<string, ActiveLocal>();
   let settings: PluginSettings | undefined;
-  let remote:   McpRemoteService | undefined;
+  let remote:   RemoteMcpManager | undefined;
   let registry: MatbotServices['tools'] | undefined;
 
   const resolveLocalClient = (name: string): MCPClient | undefined => localActive.get(name)?.client;
@@ -171,29 +178,26 @@ SHAPE  (TypeScript)
 
   return {
     apiVersion: PLUGIN_API_VERSION,
-    manifest: { description: 'MCP servers (local stdio + remote HTTP). Hard-depends on @matatbread/matbot-mcp-http and takes over its mcp_action.' },
-    // No static tools: we register mcp_action in setup() *after* loading the remote plugin, so our
-    // combined tool deliberately overrides the remote-only one it registered.
+    manifest: { description: 'MCP servers (local stdio + remote HTTP). Embeds @matatbread/matbot-mcp-http\'s remote client directly.' },
+    // No static tools: mcp_action is registered in setup(), once the embedded RemoteMcpManager exists
+    // for its executor to delegate remote work to.
 
     async setup(services) {
       registry = services.tools;
       settings = services.settings();
 
-      // Hard dependency, satisfied by this package — not the user's config. Pull in the remote plugin
-      // (it registers the mcpRemote service + a remote-only mcp_action), then grab its service.
-      remote = services.get('mcpRemote');
-      if (remote === undefined) {
-        await services.loadPlugin(import.meta.resolve(MCP_HTTP));
-        remote = services.get('mcpRemote');
-      }
-      if (remote === undefined) throw new Error(`mcp: required dependency "${MCP_HTTP}" did not register its mcpRemote service`);
-
-      // Take over: register our combined local+remote mcp_action, overriding the remote-only one.
+      // Embed the remote client directly (hard dependency, satisfied by this package's node_modules).
+      // We own it outright — its connect, reconnect, and teardown all run here.
+      remote = new RemoteMcpManager(services, remoteSettings(settings));
       registry.register(mcpActionTool);
 
-      // Reconnect persisted servers. The pre-split plugin stored remote servers under our key too;
-      // hand any such legacy entries to the remote service (which now owns remote) and drop them from
-      // our store, so they reconnect properly instead of being mis-spawned as a local process.
+      // Reconnect remote servers from the manager's own (sub-scoped) store.
+      await remote.reconnectPersisted((name, e) =>
+        process.stderr.write(`[mcp] Failed to reconnect remote "${name}": ${String(e)}\n`));
+
+      // Reconnect locals, and self-heal the pre-split layout where local *and* remote servers shared
+      // our 'servers' key. Remote entries found there are handed to the manager (which re-persists them
+      // under its sub-key) and dropped from this list; locals reconnect and stay.
       type PersistedMixed = { servers: Array<MCPServerConfigLocal | MCPRemoteConfig> };
       const persisted = await settings.get<PersistedMixed>('servers');
       if (persisted?.servers?.length) {
@@ -201,9 +205,6 @@ SHAPE  (TypeScript)
         for (const config of persisted.servers) {
           try {
             if (config.type === 'remote') {
-              // Migrate to the remote service (which now owns remote). If it's already managed there
-              // (e.g. re-added since the refactor), just drop the stale duplicate. Either way it leaves
-              // our store — not kept.
               if (!remote.has(config.name)) {
                 await remote.add({ name: config.name, endpoint: config.endpoint, ...(config.headers !== undefined ? { headers: config.headers } : {}) });
               }
@@ -223,6 +224,7 @@ SHAPE  (TypeScript)
     async teardown() {
       for (const s of localActive.values()) s.client.close();
       localActive.clear();
+      remote?.closeAll();
     },
   };
 }
