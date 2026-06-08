@@ -5,17 +5,11 @@ import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import {
   createSession, resolveProviderFactory, runAs,
 } from '@matatbread/matbot-core';
-import process from 'node:process';
 import { getUpdates, sendChatAction, sendMessage } from './bot.js';
 
 const PLUGIN_NAME = 'frontend-telegram';
 const SETTINGS_KEY_PROVIDER = 'provider';
 const SETTINGS_KEY_KNOWN = 'knownChats';
-
-const PRINCIPAL: Principal = {
-  id:   'telegram-user',
-  type: 'user',
-};
 
 interface ActiveProvider {
   name:   string;
@@ -203,6 +197,7 @@ export const plugin: MatbotPluginSpec = {
       // Snapshot the active provider name so a mid-run switch doesn't affect this call. The runner
       // resolves the adapter from the name, so we no longer build it here.
       const providerName = activeProvider.name;
+      const principal: Principal = { id: `telegram-${senderName ?? chatId}`, type: 'user'};
       try {
         sendChatAction(botToken, chatId, 'typing').catch(() => {});
 
@@ -215,7 +210,7 @@ export const plugin: MatbotPluginSpec = {
         // so a new session is created with the current naming convention
         if (session?.status !== 'active') session = null;
         if (!session) {
-          session = createSession({ ownerPrincipal: PRINCIPAL });
+          session = createSession({ ownerPrincipal: principal });
           // Name the session after the sender so it's identifiable in the web UI
           const name = senderName || 'Telegram';
           session.title = `${name} on Telegram`;
@@ -238,7 +233,7 @@ export const plugin: MatbotPluginSpec = {
             signal:    ac.signal,
             content:   [{ type: 'text', text }],
             provider:  providerName,
-            principal: PRINCIPAL,
+            principal,
             // Stub: auto-accepts the default. A future Telegram plugin could send the question (or
             // FormField) to the chat and resolve with the user's next message — that one change makes
             // both tool prompts and tool-collision prompts interactive here.
@@ -282,7 +277,10 @@ export const plugin: MatbotPluginSpec = {
             if (msg?.text) {
               // Establish this message's principal at the dispatch entry so the session/settings
               // store access inside handleMessage runs under it (the turn itself is scoped by pump).
-              void runAs(PRINCIPAL, () => handleMessage(msg.chat.id, msg.text!, msg.from?.first_name || msg.from?.username));
+              const senderName = msg.from?.first_name || msg.from?.username;
+              const principal: Principal = { id: `telegram-${senderName ?? msg.chat.id}`, type: 'user'};
+              void runAs(principal,
+                () => handleMessage(msg.chat.id, msg.text!, senderName));
             }
           }
         } catch (e) {

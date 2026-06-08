@@ -3,6 +3,8 @@ export type * from './types.js';
 // above would otherwise win and strip its value meaning under verbatimModuleSyntax.
 export { MissingSecretError, PromptCancelledError, IncompatibleRuntimeError } from '@matatbread/matbot-plugin-api';
 export { applyCreateSecret }  from '@matatbread/matbot-plugin-api';
+// unifyServices is a runtime fn; the `export type *` above would otherwise strip its value meaning.
+export { unifyServices }      from '@matatbread/matbot-plugin-api';
 // Ambient security principal: interface is a type (carried by `export type *`); these are the values.
 export {
   installPrincipalCarrier, currentPrincipal, tryCurrentPrincipal,

@@ -178,7 +178,7 @@ function runCommand(cmd: string, args: string[], cwd: string): Promise<string> {
 // A plugin contributes through several channels: static fields on the plugin object
 // (provider, tools, storage, storageBackend, frontend) and runtime registrations made
 // during setup() (tools, hooks, system-context contributors, and MatbotServices keys such
-// as 'knowledge'). Reflect every channel so the reported type list is complete, not just
+// as 'KnowledgeIndex'). Reflect every channel so the reported type list is complete, not just
 // the static ones.
 function pluginTypes(p: MatbotPlugin, registeredToolPlugins: Set<string>): string[] {
   const t: string[] = [];
@@ -187,13 +187,13 @@ function pluginTypes(p: MatbotPlugin, registeredToolPlugins: Set<string>): strin
   if (p.provider !== undefined)                                                   t.push('provider');
   if (p.tools?.length || registeredToolPlugins.has(p.name))                       t.push('tools');
   if (Object.keys(p.storage ?? {}).length || p.storageBackend !== undefined
-      || serviceKeys.includes('storageBackend'))                                  t.push('storage');
+      || serviceKeys.includes('StorageBackend'))                                  t.push('storage');
   if (getRegisteredFrontendPlugins().has(p.name))                                 t.push('frontend');
   if (getHookPlugins().has(p.name))                                               t.push('hooks');
   if (getSystemContextPlugins().has(p.name))                                      t.push('system-context');
 
   // Any other runtime-registered service (custom cognitive subsystems, domain backends).
-  // 'knowledge' and 'storageBackend' are already surfaced as dedicated types above.
+  // 'KnowledgeIndex' and 'StorageBackend' are already surfaced as dedicated types above.
   t.push(...serviceKeys);
 
   if (!t.length) t.push('extension');
