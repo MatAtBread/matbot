@@ -10,8 +10,8 @@
     "check:docs": "node scripts/check-docs.mjs",
     "repl":       "pnpm --filter @matatbread/matbot-cli repl",
     "start":      "pnpm --filter @matatbread/matbot-cli start",
-    "assemble":   "pnpm --filter @matatbread/matbot-web-bundle assemble",
-    "web":        "pnpm --filter @matatbread/matbot-web-bundle serve"
+    "web-build":  "pnpm --filter @matatbread/matbot-web-bundle assemble",
+    "web-server": "pnpm --filter @matatbread/matbot-web-bundle serve"
   },
   "devDependencies": {
     "typescript": "^5.8.0"

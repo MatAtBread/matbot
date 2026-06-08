@@ -15,11 +15,11 @@ merges, use the [branch link](https://raw.githack.com/MatAtBread/matbot/feat/web
 ## Build & run
 
 ```bash
-pnpm --filter @matatbread/matbot-web-bundle assemble   # → dist/matbot.html
-open apps/web-bundle/dist/matbot.html                  # file:// — just works
+pnpm web-build    # → dist/matbot.html
+open apps/web-bundle/dist/matbot.html # file:// — just works
 
 # or, to also exercise runtime *remote* plugin loading (which fetches .ts over http):
-pnpm --filter @matatbread/matbot-web-bundle serve      # → http://localhost:8787/
+pnpm web-serve     # → http://localhost:8787/
 ```
 
 On first launch a setup form asks for the **full provider config** — a name, the adapter type

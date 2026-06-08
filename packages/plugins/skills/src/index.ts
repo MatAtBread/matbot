@@ -1,8 +1,8 @@
 export type { SkillDoc }                    from './types.js';
+export { SkillManager, skillToKnowledgeEntry } from './manager.js';
+export type { SkillSummary }                from './manager.js';
 export { createSkillIndexHook,
          createUserMessageClassifierHook,
-         createAgentMessageClassifierHook }        from './hooks.js';
-export { watchAndImportSkillDir }           from './watcher.js';
-export { createSkillTools }                 from './tools.js';
-export { createSkillsPlugin, plugin }       from './plugin.js';
-export type { SkillsPluginConfig }          from './plugin.js';
+         createAgentMessageClassifierHook }  from './hooks.js';
+export { createSkillTool }                  from './tools.js';
+export { createSkillsPlugin, setupSkills, plugin } from './plugin.js';
