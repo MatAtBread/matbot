@@ -3,7 +3,7 @@ import type {
   MatbotPlugin, Principal, Session, Store, ToolRegistry, FileStore, Vault,
   FormField, PromptFn, SessionRunner,
 } from '@matatbread/matbot-core';
-import { createSession, PromptCancelledError, runAs } from '@matatbread/matbot-core';
+import { createSession, PromptCancelledError, runAs, tryCurrentPrincipal } from '@matatbread/matbot-core';
 import { sseComment, sseEvent } from './sse-writer.js';
 import { html, js, favicon } from './ui.js';
 
@@ -47,13 +47,20 @@ interface SubmitBody {
   concatQueue?: boolean;      // true (default): merge into the running turn's batch; false: own turn
 }
 
-// Single server-side placeholder principal used when no resolver derives a real identity.
-const DEFAULT_PRINCIPAL: Principal = {
+// Last-resort anonymous identity, used only when no boot principal is established and no resolver
+// override is registered (e.g. tests, or a realm with no carrier).
+const ANONYMOUS_WEB_USER: Principal = {
   id:   'web-user',
   type: 'user',
 };
 
-export const defaultWebPrincipal: WebPrincipalResolver = () => DEFAULT_PRINCIPAL;
+// All matbot frontends are single-principal today, so the default request identity is the process
+// boot principal (the pod/sandbox/system identity established at the entry) — keeping web sessions
+// attributed to the same identity as the rest of the app. A multi-user deployment registers a
+// `WebPrincipalResolver` (e.g. deriving identity from headers) which overrides this entirely; that
+// override is deliberately NOT chained to the boot principal, so it never leaks the operator
+// identity to anonymous visitors.
+export const defaultWebPrincipal: WebPrincipalResolver = () => tryCurrentPrincipal() ?? ANONYMOUS_WEB_USER;
 
 async function readBody(req: IncomingMessage, maxBytes = 1_048_576): Promise<string> {
   return new Promise((resolve, reject) => {

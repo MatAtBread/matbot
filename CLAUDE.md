@@ -303,10 +303,32 @@ Passing is the mechanism's job; reject/ignore/branch is the service's.
   in plugin-api). There is only ever one identity, so `run` is a passthrough and no isolation is needed.
 
 **Establishment points (entry-only).** Frontends establish at their entry — the CLI `enterPrincipal`s
-the system principal at boot; the web server `runAs` per HTTP request; telegram `runAs` per message.
-The `SessionRunner`'s `pump` separately wraps each turn in `runAs(submitter)` because it runs detached
-(`void pump`) from the request that enqueued it. In-process delegation is a nested `runAs`; cross-process
-delegation (a spawned worker) re-establishes at its own entry via `enterPrincipal`.
+its resolved **boot principal** at boot (see below); the web server `runAs` per HTTP request; telegram
+`runAs` per message. The `SessionRunner`'s `pump` separately wraps each turn in `runAs(submitter)`
+because it runs detached (`void pump`) from the request that enqueued it. In-process delegation is a
+nested `runAs`; cross-process delegation (a spawned worker) re-establishes at its own entry via
+`enterPrincipal`.
+
+**Specifying the default principal.** Core has no opinion on *who* the boot identity is — it only
+receives whatever `Principal` the entry hands `enterPrincipal`. Sourcing that value is a
+platform-specific entry concern (the only layer allowed to read env / argv / yaml), so `packages/`
+stays neutral:
+- **node boot** — `apps/cli`'s `resolveBootPrincipal`, precedence most-specific first:
+  `--principal <id|json>` flag → `MATBOT_PRINCIPAL` env → `matbot.yaml` `principal:` (a string id, or
+  `{ id, type }`) → `systemPrincipal()`. The flag/env value is a bare id (type `user`) or the JSON
+  `{"id","type"}`.
+- **browser realm** — `BrowserConfig.principal` seeds the constant carrier; absent ⇒ an anonymous
+  `web-user`. A per-tenant bundle bakes the tenant identity here.
+- **web per-request identity** — the web frontend derives a principal per HTTP request from a
+  `WebPrincipalResolver` read off the registry (`services.WebPrincipalResolver`); the default defers to
+  the boot principal, and a plugin can register an override (e.g. header-derived). It is resolved at
+  *request receipt* and frozen into the queued submission, so it must be registered **before** the
+  submit it should affect (a resolver hot-loaded mid-turn won't retro-stamp that turn).
+- **cross-process delegation** — `env` is the identity transport: a spawner serialises `{ id, type }`
+  across the boundary (the `background` plugin writes the creator to the child's `MATBOT_PRINCIPAL`,
+  overriding any inherited deployment value) and the child re-establishes it through the same node-boot
+  resolution. `env` reads stay in `apps/`/`*-node`; the neutral core only ever sees the re-established
+  `Principal`.
 
 `Session` persists `ownerPrincipalId`/`actorPrincipalId` as ownership *data* (set explicitly via
 `createSession`) — that is record-keeping, not the ambient mechanism.

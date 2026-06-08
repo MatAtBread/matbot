@@ -681,6 +681,8 @@ plugin's `setup()`. The replacement takes effect immediately for all subsequent
 | `@matatbread/matbot-provider-anthropic` | provider | Anthropic Messages API (also DeepSeek Anthropic-compat) |
 | `@matatbread/matbot-provider-openai-compat` | provider | OpenAI-compatible chat completions |
 | `@matatbread/matbot-storage-sqlite` | storage backend | SQLite-backed Store + FileStore |
+| `@matatbread/matbot-tool-whoami` | `whoami` · *test/example* | Reports the current `Principal` (`{ id, type }`) via `currentPrincipal()`. A minimal demo of ambient-principal access — little real purpose beyond confirming who a turn is running as. |
+| `@matatbread/matbot-web-principal-user` | service override · *test/example* | Registers a `WebPrincipalResolver` deriving the web request principal from `$USER`. Demonstrates overriding the default web identity; not useful in itself, but the natural skeleton for a *proper* auth/identity plugin (swap `$USER` for header/cookie/token derivation). |
 
 Provider plugins are loaded automatically when their `module` is referenced in a provider
 config entry — they don't need an explicit `plugins:` entry.

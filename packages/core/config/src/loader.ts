@@ -1,4 +1,4 @@
-import type { ModelParameters, ProviderConfig } from '@matatbread/matbot-plugin-api';
+import type { ModelParameters, Principal, ProviderConfig } from '@matatbread/matbot-plugin-api';
 import { parseYaml, type YamlMap, type YamlValue } from './yaml.js';
 
 export interface MatbotConfig {
@@ -11,6 +11,9 @@ export interface MatbotConfig {
   ephemeral?:        boolean;
   /** Provider key to use when none is specified on the CLI. Falls back to the first provider. */
   defaultProvider?:  string;
+  /** Install-default boot identity. The lowest-precedence source for the entry's principal
+   *  (a `--principal` flag or `MATBOT_PRINCIPAL` env override it); absent ⇒ the system principal. */
+  principal?:        Principal;
 }
 
 function asString(v: YamlValue | undefined, label: string): string {
@@ -93,6 +96,7 @@ export function parseConfig(
   const prompt           = typeof doc['prompt']            === 'string' ? doc['prompt']            : undefined;
   const ephemeral        = doc['ephemeral'] === true ? true : undefined;
   const defaultProvider  = typeof doc['default_provider'] === 'string' ? doc['default_provider']  : undefined;
+  const principal        = toPrincipal(doc['principal']);
 
   return {
     plugins,
@@ -100,5 +104,20 @@ export function parseConfig(
     ...(prompt           !== undefined ? { prompt           } : {}),
     ...(ephemeral        !== undefined ? { ephemeral        } : {}),
     ...(defaultProvider  !== undefined ? { defaultProvider  } : {}),
+    ...(principal        !== undefined ? { principal        } : {}),
   };
+}
+
+// principal: either a bare string id (type defaults to 'user') or a mapping { id, type? }.
+function toPrincipal(v: YamlValue | undefined): Principal | undefined {
+  if (v === undefined) return undefined;
+  if (typeof v === 'string') return { id: v, type: 'user' };
+  if (typeof v === 'object' && !Array.isArray(v)) {
+    const id   = (v as YamlMap)['id'];
+    const type = (v as YamlMap)['type'];
+    if (typeof id === 'string' && id !== '') {
+      return { id, type: type === 'agent' || type === 'system' ? type : 'user' };
+    }
+  }
+  throw new Error('Config: "principal" must be a string id or a mapping with a string "id" (and optional "type").');
 }

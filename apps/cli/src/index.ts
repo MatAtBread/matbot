@@ -15,7 +15,7 @@ import { appendMessage, createMessage,
          teardownPlugins,
          unloadPlugin as unloadPluginFn,
          getPluginNameForSpecifier,
-         installPrincipalCarrier, enterPrincipal,
+         installPrincipalCarrier, enterPrincipal, currentPrincipal,
          unifyServices,
          MissingSecretError }              from '@matatbread/matbot-core';
 import type { MatbotServices, PluginSettings, ToolRegistry, Vault, SessionRunner,
@@ -196,6 +196,7 @@ interface CliOpts {
   config:      string;
   promptFile?: string;
   ephemeral:   boolean;
+  principal?:  string;
 }
 
 function parseArgs(argv: string[]): { opts: CliOpts; prompt: string | undefined } {
@@ -211,6 +212,7 @@ function parseArgs(argv: string[]): { opts: CliOpts; prompt: string | undefined 
       case '--system':      { const v = args[++i]; if (v !== undefined) opts.system     = v; } break;
       case '--config':      { const v = args[++i]; if (v !== undefined) opts.config     = v; } break;
       case '--prompt-file': { const v = args[++i]; if (v !== undefined) opts.promptFile = v; } break;
+      case '--principal':   { const v = args[++i]; if (v !== undefined) opts.principal  = v; } break;
       case '--ephemeral':   opts.ephemeral = true; break;
       case '--help': printHelp(); process.exit(0);
       default:
@@ -219,6 +221,44 @@ function parseArgs(argv: string[]): { opts: CliOpts; prompt: string | undefined 
   }
 
   return { opts, prompt: positional.length ? positional.join(' ') : undefined };
+}
+
+// A principal supplied as a CLI flag or env var: either a bare id (type "user") or the JSON
+// `{"id","type"}` that spawners (e.g. the background plugin) write to MATBOT_PRINCIPAL.
+function parsePrincipalArg(raw: string): Principal | undefined {
+  const s = raw.trim();
+  if (s === '') return undefined;
+  if (s.startsWith('{')) {
+    try {
+      const o = JSON.parse(s) as { id?: unknown; type?: unknown };
+      if (typeof o.id === 'string' && o.id !== '' &&
+          (o.type === 'user' || o.type === 'agent' || o.type === 'system')) {
+        return { id: o.id, type: o.type };
+      }
+    } catch { /* fall through to invalid */ }
+    return undefined;
+  }
+  return { id: s, type: 'user' };
+}
+
+// The process boot identity, resolved once at the entry. Precedence, most specific first:
+//   --principal flag  →  MATBOT_PRINCIPAL env  →  config principal:  →  system.
+// The env slot is the cross-process transport: a parent (pod/sandbox, or the background plugin
+// delegating its creator) sets it; the child re-establishes that identity here.
+function resolveBootPrincipal(opts: CliOpts, config: import('./config.js').MatbotConfig): Principal {
+  if (opts.principal !== undefined) {
+    const p = parsePrincipalArg(opts.principal);
+    if (p === undefined) throw new Error(`Invalid --principal "${opts.principal}". Use an id (e.g. "alice") or JSON {"id","type"}.`);
+    return p;
+  }
+  const env = process.env['MATBOT_PRINCIPAL'];
+  if (env !== undefined && env.trim() !== '') {
+    const p = parsePrincipalArg(env);
+    if (p === undefined) throw new Error(`Invalid MATBOT_PRINCIPAL "${env}". Use an id or JSON {"id","type"}.`);
+    return p;
+  }
+  if (config.principal !== undefined) return config.principal;
+  return systemPrincipal();
 }
 
 function printHelp(): void {
@@ -235,6 +275,8 @@ Options:
   --config      <path>      Config file path (default: ./matbot.yaml)
   --prompt-file <path>      Read prompt from file; run single turn and exit
   --ephemeral               Force ephemeral even when --session is given
+  --principal   <id|json>   Boot identity: an id (type "user") or JSON {"id","type"}.
+                            Overrides MATBOT_PRINCIPAL and config principal:.
   --help                    Show this help
 
 Sessions are ephemeral by default (discarded on exit). Use --session create to persist,
@@ -584,10 +626,12 @@ async function main(): Promise<void> {
 
   // Install the ambient security carrier before anything that could read it. The node app uses an
   // AsyncLocalStorage carrier so concurrent turns / frontend requests stay isolated; entering the
-  // system principal here gives the CLI process its identity for any out-of-turn backend access
-  // (frontend handlers and per-turn pumps shadow it with their own principal via runAs).
+  // boot principal here gives the CLI process its identity for any out-of-turn backend access
+  // (frontend handlers and per-turn pumps shadow it with their own principal via runAs). The boot
+  // identity is resolved at this entry — flag → MATBOT_PRINCIPAL → config → system — so a pod or a
+  // delegating parent (the background plugin) can supply it without any shared-package env reads.
   installPrincipalCarrier(createAlsPrincipalCarrier());
-  enterPrincipal(systemPrincipal());
+  enterPrincipal(resolveBootPrincipal(opts, matbotConfig));
 
   const vault = new EnvFileVault(
     path.join(path.dirname(configPath), '.env'),
@@ -941,7 +985,10 @@ async function main(): Promise<void> {
 
   // ── Session ───────────────────────────────────────────────────────────────────
 
-  const principal = systemPrincipal();
+  // The session owner is the boot identity established at the entry, not a fresh system principal —
+  // so a single-turn run launched as a specific user (pod / `--principal` / background delegation)
+  // owns its session as that user.
+  const principal = currentPrincipal();
   let session: Session;
 
   if (opts.session && opts.session !== 'create') {

@@ -1,7 +1,7 @@
 import type {
   MatbotServices, Session, PipelineEvent, MessageContent, FormField, PromptFn, Principal,
 } from '@matatbread/matbot-plugin-api';
-import { createSession, tryCurrentPrincipal, PromptCancelledError } from '@matatbread/matbot-core';
+import { createSession, currentPrincipal, PromptCancelledError } from '@matatbread/matbot-core';
 
 const CSS = `
 .mb-app { display:flex; flex-direction:column; height:100vh; font:14px/1.5 system-ui,sans-serif; color:#1a1a1a; background:#fafafa; }
@@ -135,7 +135,7 @@ export class ChatUI {
   }
 
   private principal(): Principal {
-    return tryCurrentPrincipal() ?? { id: 'web-user', type: 'user' };
+    return currentPrincipal();
   }
 
   // Markdown is a served-mode nicety, not a bundle dependency: only when running over http(s) do we

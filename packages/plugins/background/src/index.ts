@@ -6,9 +6,9 @@ import { pathToFileURL }    from 'node:url';
 import { randomUUID }       from 'node:crypto';
 import type { Readable }    from 'node:stream';
 import type {
-  MatbotPluginSpec, MatbotServices, Tool, ToolEvent, ToolContext, FileStore, Store,
+  MatbotPluginSpec, MatbotServices, Tool, ToolEvent, ToolContext, FileStore, Store, Principal,
 } from '@matatbread/matbot-plugin-api';
-import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, currentPrincipal } from '@matatbread/matbot-plugin-api';
 
 // ── MIME helpers ──────────────────────────────────────────────────────────────
 
@@ -63,6 +63,9 @@ interface Schedule {
   output?:    string;
   lastRun?:   string;
   provider?:  string;
+  // Creator identity, captured at creation and replayed each fire so a recurring job runs as the
+  // user who scheduled it. Absent on legacy rows ⇒ the child falls back to its own boot default.
+  principal?: Principal;
 }
 
 let scheduleStore:   Store<Schedule> | undefined;
@@ -113,7 +116,7 @@ async function* stdoutStream(readable: Readable): AsyncIterable<Uint8Array> {
   for await (const chunk of readable) yield chunk as Uint8Array;
 }
 
-function spawnJob(configPath: string, prompt: string, output?: string, files?: FileStore, provider?: string): ChildProcess | undefined {
+function spawnJob(configPath: string, prompt: string, output?: string, files?: FileStore, provider?: string, principal?: Principal): ChildProcess | undefined {
   const script = argv[1];
   if (script === undefined) return undefined;
 
@@ -124,9 +127,15 @@ function spawnJob(configPath: string, prompt: string, output?: string, files?: F
     {
       detached: DETACH_BACKGROUND_JOBS,
       stdio:    ['pipe', captureOut ? 'pipe' : 'ignore', 'inherit'],
-      // IS_SUB_AGENT prevents the background plugin in the child from
-      // arming its own scheduler loop, which would cascade exponentially.
-      env: { ...process.env, IS_SUB_AGENT: '1' },
+      // The env channel carries process identity/mode; the piped config (stdin) carries the task.
+      // IS_SUB_AGENT prevents the background plugin in the child from arming its own scheduler loop,
+      // which would cascade exponentially. MATBOT_PRINCIPAL delegates the creator's identity so the
+      // job runs as them — overriding any identity this parent inherited (e.g. a pod default).
+      env: {
+        ...process.env,
+        IS_SUB_AGENT: '1',
+        ...(principal !== undefined ? { MATBOT_PRINCIPAL: JSON.stringify(principal) } : {}),
+      },
     },
   );
 
@@ -202,7 +211,7 @@ function armSchedule(sched: Schedule): void {
         continue;
       }
 
-      const child = spawnJob(activeConfigPath!, sched.prompt, sched.output, activeFiles, sched.provider);
+      const child = spawnJob(activeConfigPath!, sched.prompt, sched.output, activeFiles, sched.provider, sched.principal);
       if (child !== undefined) {
         const killChild = () => { child.kill(); };
         ac.signal.addEventListener('abort', killChild, { once: true });
@@ -305,7 +314,7 @@ runs the prompt a single time.`,
           yield { type: 'error', message: 'background requires configPath in context.' };
           return;
         }
-        spawnJob(ctx.configPath, prompt, output, ctx.files, provider);
+        spawnJob(ctx.configPath, prompt, output, ctx.files, provider, currentPrincipal());
         yield { type: 'result', value: { status: 'started', ...(output !== undefined ? { output } : {}) } };
         return;
       }
@@ -324,6 +333,7 @@ runs the prompt a single time.`,
         id, version: now.getTime().toString(), prompt, intervalMs, active: true,
         createdAt: now.toISOString(),
         nextRun:   new Date(now.getTime() + intervalMs).toISOString(),
+        principal: currentPrincipal(),
         ...(name     !== undefined ? { name     } : {}),
         ...(output   !== undefined ? { output   } : {}),
         ...(provider !== undefined ? { provider } : {}),

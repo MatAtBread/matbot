@@ -1,0 +1,21 @@
+{
+  "name": "@matatbread/matbot-web-principal-user",
+  "matbotRuntime": ["node"],
+  "version": "0.1.0",
+  "description": "Override the web frontend's request principal with the host OS user ($USER).",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@matatbread/matbot-plugin-api": "workspace:*",
+    "@matatbread/matbot-frontend-web": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "typescript": "catalog:"
+  }
+}

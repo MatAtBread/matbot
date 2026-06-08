@@ -22,6 +22,9 @@ export interface BrowserConfig {
   /** Adapter types the startup wizard can offer when no provider is configured. */
   availableProviders: AvailableProvider[];
   defaultProvider?: string;
+  /** Boot identity for this single-principal realm. Absent ⇒ the anonymous web user.
+   *  A user-associated bundle (served per-tenant) bakes the tenant's identity here. */
+  principal?: Principal;
 }
 
 const PROVIDERS_KEY = 'matbot.providers';
@@ -93,7 +96,9 @@ export async function boot(env: BootEnv): Promise<void> {
 
   // One identity for the whole realm — the browser is single-principal, so the carrier is constant
   // and `runAs` is a passthrough (no AsyncLocalStorage needed; see CLAUDE.md "Platform split").
-  installPrincipalCarrier(createConstantPrincipalCarrier(WEB_USER));
+  // The realm's identity comes from config (a per-tenant bundle bakes it); WEB_USER is the
+  // anonymous default.
+  installPrincipalCarrier(createConstantPrincipalCarrier(config.principal ?? WEB_USER));
 
   const vault: Vault = new LocalStorageVault();
 
