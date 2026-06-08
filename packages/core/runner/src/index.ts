@@ -1,7 +1,7 @@
 export type * from './types.js';
 // Explicit value re-export: MissingSecretError is a class, so the `export type *`
 // above would otherwise win and strip its value meaning under verbatimModuleSyntax.
-export { MissingSecretError, PromptCancelledError } from '@matatbread/matbot-plugin-api';
+export { MissingSecretError, PromptCancelledError, IncompatibleRuntimeError } from '@matatbread/matbot-plugin-api';
 export { applyCreateSecret }  from '@matatbread/matbot-plugin-api';
 // Ambient security principal: interface is a type (carried by `export type *`); these are the values.
 export {

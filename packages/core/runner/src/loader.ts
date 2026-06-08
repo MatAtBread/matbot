@@ -1,5 +1,6 @@
 import type { MatbotPlugin, MatbotPluginSpec, MatbotServices, PluginSource, Runtime } from './plugin.js';
 import type { PromptFn } from './types.js';
+import { IncompatibleRuntimeError } from '@matatbread/matbot-plugin-api';
 import { registerPlugin, setupPlugin, unloadPlugin } from './registry.js';
 
 /**
@@ -56,12 +57,19 @@ let freshSeq = 0;
  * @param prompt Optional host prompt used by setup() to resolve tool-name collisions
  *   interactively. Omitted by non-interactive hosts, in which case collisions overwrite
  *   silently (the historical default).
+ * @param onIncompatibleRuntime What to do when a plugin's `matbotRuntime` excludes this host.
+ *   `'skip'` (default, the startup batch) warns and moves on — one mis-targeted plugin in the
+ *   config must not abort the process. `'throw'` is for an explicit, single, user-initiated load
+ *   (the `plugin`/`provider` tools via `services.loadPlugin`): the user named *this* plugin, so a
+ *   silent skip would surface only as a confusing empty-result error downstream — fail loudly with
+ *   the reason instead. Both modes share the one gate below; only the mismatch reaction differs.
  */
 export async function loadPlugins(
   specifiers: readonly string[],
   services:   MatbotServices,
   bustCache = false,
   prompt?:    PromptFn,
+  onIncompatibleRuntime: 'skip' | 'throw' = 'skip',
 ): Promise<MatbotPlugin[]> {
   if (bustCache) {
     console.debug(
@@ -86,7 +94,10 @@ export async function loadPlugins(
     const spec = specifiers[i]!;
     const runtimes = declared[i];
     if (runtimes !== undefined && runtimes.length > 0 && !runtimes.includes(CURRENT_RUNTIME)) {
-      console.debug(`[matbot] Skipping plugin "${spec}": declares matbotRuntime [${runtimes.join(', ')}], host runtime is "${CURRENT_RUNTIME}".`);
+      if (onIncompatibleRuntime === 'throw') {
+        throw new IncompatibleRuntimeError(spec, runtimes, CURRENT_RUNTIME);
+      }
+      console.warn(`[matbot] Skipping plugin "${spec}": declares matbotRuntime [${runtimes.join(', ')}], host runtime is "${CURRENT_RUNTIME}".`);
       continue;
     }
     toLoad.push({ spec, importSpec: bustCache ? toFreshUrl(spec) : spec });
