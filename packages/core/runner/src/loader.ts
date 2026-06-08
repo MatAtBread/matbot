@@ -1,6 +1,13 @@
-import type { MatbotPlugin, MatbotPluginSpec, MatbotServices, PluginSource } from './plugin.js';
+import type { MatbotPlugin, MatbotPluginSpec, MatbotServices, PluginSource, Runtime } from './plugin.js';
 import type { PromptFn } from './types.js';
 import { registerPlugin, setupPlugin, unloadPlugin } from './registry.js';
+
+/**
+ * The runtime this process is executing in. Detected the same way the rejected-import branch below
+ * already distinguishes platforms (`typeof window`). Used only for the declarative pre-import gate;
+ * an absent `matbotRuntime` declaration bypasses the gate entirely.
+ */
+const CURRENT_RUNTIME: Runtime = typeof window !== 'undefined' ? 'browser' : 'node';
 
 /**
  * Query-param marker appended to a plugin entry URL when `bustCache` is set.
@@ -62,17 +69,38 @@ export async function loadPlugins(
       `and its first-party imports too IF the node resolve hook is installed (else only the entry).`,
     );
   }
-  const importSpecs = bustCache ? specifiers.map(toFreshUrl) : specifiers;
+  // Declarative pre-import gate. A plugin whose package.json `matbotRuntime` lists runtimes that
+  // exclude this host is skipped *before* import() — its (possibly platform-specific) top-level
+  // code never evaluates here, which is both the quick path and the only safe one for, e.g., a
+  // node-only plugin reached from a browser. An *absent* declaration means "don't know": the
+  // resolver returns undefined and we import it, falling back to the try-load / rollback path
+  // below. Reading the declaration is the host resolver's job (this module stays node-free).
+  const declared = await Promise.all(
+    specifiers.map(spec =>
+      services.resolver?.runtimes !== undefined ? services.resolver.runtimes(spec) : Promise.resolve(undefined),
+    ),
+  );
+
+  const toLoad: { spec: string; importSpec: string }[] = [];
+  for (let i = 0; i < specifiers.length; i++) {
+    const spec = specifiers[i]!;
+    const runtimes = declared[i];
+    if (runtimes !== undefined && runtimes.length > 0 && !runtimes.includes(CURRENT_RUNTIME)) {
+      console.debug(`[matbot] Skipping plugin "${spec}": declares matbotRuntime [${runtimes.join(', ')}], host runtime is "${CURRENT_RUNTIME}".`);
+      continue;
+    }
+    toLoad.push({ spec, importSpec: bustCache ? toFreshUrl(spec) : spec });
+  }
 
   // Imports run in parallel; registration remains sequential to preserve order.
   const results = await Promise.allSettled(
-    importSpecs.map(spec => import(/* @vite-ignore */ spec) as Promise<Record<string, unknown>>),
+    toLoad.map(({ importSpec }) => import(/* @vite-ignore */ importSpec) as Promise<Record<string, unknown>>),
   );
 
   const loaded: MatbotPlugin[] = [];
 
-  for (let i = 0; i < specifiers.length; i++) {
-    const spec   = specifiers[i]!;
+  for (let i = 0; i < toLoad.length; i++) {
+    const spec   = toLoad[i]!.spec;
     const result = results[i]!;
 
     if (result.status === 'rejected') {

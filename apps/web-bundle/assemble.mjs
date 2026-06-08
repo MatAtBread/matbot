@@ -68,7 +68,10 @@ async function entryForPath(rel) {
   const pkg = JSON.parse(await readFile(path.join(dir, 'package.json'), 'utf8'));
   const entry = resolveExportsEntry(pkg.exports);
   if (typeof entry !== 'string') throw new Error(`No exports["."] for ${rel}`);
-  return { id: idOf(path.join(dir, entry)), name: pkg.name ?? rel };
+  const runtimes = Array.isArray(pkg.matbotRuntime)
+    ? pkg.matbotRuntime.filter(r => r === 'node' || r === 'browser')
+    : undefined;
+  return { id: idOf(path.join(dir, entry)), name: pkg.name ?? rel, runtimes };
 }
 
 const SPEC_RE = /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)(['"])([^'"]+)\1/g;
@@ -132,23 +135,31 @@ async function main() {
   // Resolve config plugin + provider paths to entry ids; build synthetic specifiers and name map.
   const SYN = (id) => 'mbmod:' + id;
   const specNames = {};
+  // spec → declared matbotRuntime; the browser resolver reads this so the loader can skip a
+  // node-only plugin before importing it (the build-time analogue of walking package.json on node).
+  const specRuntimes = {};
   const rootIds = [bootstrapId];
 
   const pluginSpecs = [];
   for (const rel of config.plugins) {
-    const { id, name } = await entryForPath(rel);
+    const { id, name, runtimes } = await entryForPath(rel);
+    if (runtimes !== undefined && !runtimes.includes('browser')) {
+      console.warn(`[matbot] assemble: plugin "${rel}" declares matbotRuntime [${runtimes.join(', ')}] — it cannot run in the browser; baking it anyway, but it will be skipped at boot.`);
+    }
     rootIds.push(id);
     const spec = SYN(id);
     pluginSpecs.push(spec);
     specNames[spec] = name;
+    if (runtimes !== undefined) specRuntimes[spec] = runtimes;
   }
 
   const providers = {};
   for (const [pname, cfg] of Object.entries(config.providers ?? {})) {
-    const { id, name } = await entryForPath(cfg.module);
+    const { id, name, runtimes } = await entryForPath(cfg.module);
     rootIds.push(id);
     const spec = SYN(id);
     specNames[spec] = name;
+    if (runtimes !== undefined) specRuntimes[spec] = runtimes;
     providers[pname] = { ...cfg, module: spec };
   }
 
@@ -156,10 +167,11 @@ async function main() {
   // module is present even though no baked provider references it.
   const availableProviders = [];
   for (const pm of config.providerModules ?? []) {
-    const { id, name } = await entryForPath(pm.module);
+    const { id, name, runtimes } = await entryForPath(pm.module);
     rootIds.push(id);
     const spec = SYN(id);
     specNames[spec] = name;
+    if (runtimes !== undefined) specRuntimes[spec] = runtimes;
     availableProviders.push({
       label: pm.label ?? name,
       module: spec,
@@ -189,6 +201,7 @@ async function main() {
     packageEntries,
     entry: bootstrapId,
     specNames,
+    specRuntimes,
     config: {
       plugins:   pluginSpecs,
       providers,

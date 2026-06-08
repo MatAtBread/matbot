@@ -1,5 +1,6 @@
 {
   "name": "@matatbread/matbot-frontend-web",
+  "matbotRuntime": ["node"],
   "version": "0.1.0",
   "description": "HTTP + SSE web UI with session management, serving the chat frontend on a local port.",
   "type": "module",

@@ -8,7 +8,7 @@ import {
 import type {
   MatbotServices, Store, Session, Tool, ProviderConfig, ProviderAdapter,
   PluginSettings, ToolRegistry, Vault, SessionRunner, KnowledgeIndex,
-  PluginResolver, StorageBackend, FileStore, PromptFn, MatbotPlugin, Principal,
+  PluginResolver, StorageBackend, FileStore, PromptFn, MatbotPlugin, Principal, Runtime,
 } from '@matatbread/matbot-plugin-api';
 import { LookupKnowledgeIndex } from '@matatbread/matbot-knowledge';
 import { BrowserStorageBackend, LocalStorageVault } from '@matatbread/matbot-browser';
@@ -57,6 +57,8 @@ export interface BootEnv {
   config:    BrowserConfig;
   /** specifier → canonical plugin name, baked by the assembler so the resolver needn't walk a tree. */
   specNames: Record<string, string>;
+  /** specifier → declared matbotRuntime, baked by the assembler; absent entry means "not declared". */
+  specRuntimes?: Record<string, readonly Runtime[]>;
   loader:    LoaderApi;
 }
 
@@ -87,6 +89,7 @@ async function resolveCredentials(creds: Record<string, string>, vault: Vault): 
 
 export async function boot(env: BootEnv): Promise<void> {
   const { config, specNames, loader } = env;
+  const specRuntimes = env.specRuntimes ?? {};
 
   // One identity for the whole realm — the browser is single-principal, so the carrier is constant
   // and `runAs` is a passthrough (no AsyncLocalStorage needed; see CLAUDE.md "Platform split").
@@ -187,6 +190,11 @@ export async function boot(env: BootEnv): Promise<void> {
       if (specNames[specifier] !== undefined) return specNames[specifier]!;
       const last = (specifier.split('?')[0] ?? specifier).replace(/\/+$/, '').split('/').pop() ?? specifier;
       return last.replace(/\.[^.]+$/, '') || specifier;
+    },
+    // Baked by the assembler from each plugin's package.json; absent means "not declared", so the
+    // loader imports and falls back to load/rollback. A remote .ts added at runtime is undeclared.
+    async runtimes(specifier: string): Promise<readonly Runtime[] | undefined> {
+      return specRuntimes[specifier];
     },
   };
 

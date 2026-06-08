@@ -1,5 +1,6 @@
 {
   "name": "@matatbread/matbot-provider-customer-services",
+  "matbotRuntime": ["node", "browser"],
   "version": "0.1.0",
   "description": "Mock LLM provider for customer services scenarios. Always helpful, never useful.",
   "type": "module",

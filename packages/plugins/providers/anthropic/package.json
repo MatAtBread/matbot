@@ -1,5 +1,6 @@
 {
   "name": "@matatbread/matbot-provider-anthropic",
+  "matbotRuntime": ["node", "browser"],
   "version": "0.1.0",
   "description": "Anthropic Messages API provider adapter with streaming, tool use, and extended thinking; also handles DeepSeek's Anthropic-compatible API.",
   "type": "module",

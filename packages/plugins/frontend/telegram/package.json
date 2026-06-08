@@ -1,5 +1,6 @@
 {
   "name": "@matatbread/matbot-frontend-telegram",
+  "matbotRuntime": ["node"],
   "version": "0.1.0",
   "description": "Telegram bot frontend",
   "type": "module",

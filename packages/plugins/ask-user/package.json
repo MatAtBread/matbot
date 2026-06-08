@@ -1,5 +1,6 @@
 {
   "name": "@matatbread/matbot-tool-ask-user",
+  "matbotRuntime": ["node", "browser"],
   "version": "0.1.0",
   "description": "Ask the user a question with interactive form controls — text, password, select, and confirm.",
   "type": "module",
