@@ -195,6 +195,31 @@ To introduce a new cognitive subsystem (e.g. `Imagination`):
 **Name collision**: the property name becomes the contract identifier. Choose a name
 that is unambiguous within the ecosystem — short but domain-specific beats globally unique.
 
+### Registry discovery vs. direct dependency
+
+The registry is for **negotiation between independent parties**: the consumer neither knows nor
+cares who provides a capability, whether anyone does, or which implementation answers. That
+looseness is the whole point — it buys runtime swappability and graceful absence. Reach for
+`services.get('x')` (and the `x?:` optional on `MatbotServices`) only when that's genuinely true.
+Genuine optional discovery has **no fallback**; it degrades (`if (!svc) return;`).
+
+When one plugin is a **specialization** of another — "B *is* A, but broader" — that is an `extends`
+relationship, not an unknown-collaborator one. The dependency is named, owned, present by
+construction, and singular, so express it as a plain `import` + construct and a hard `package.json`
+dependency. Routing it through the registry there is ceremony around a fact known at author time,
+and it has real costs: a second resident plugin, lifecycle split across two `teardown`s (cleanup
+becomes load-order dependent), and capabilities registered only to be immediately overridden.
+
+The tell is the fallback. The moment you write `get(x) ?? loadPlugin(x)`, you've admitted the
+dependency isn't optional — you're willing to *force* it into existence. That `??` is the seam
+between the two models; reaching for it means you've picked the loose tool for a hard relationship.
+
+The two halves compose and aren't in tension: a specialization may still **advertise** its own
+capability on the registry (offering loosely to whoever's out there) while **depending** on its
+base directly. Offer loosely; depend tightly. *(See `packages/plugins/mcp` embedding
+`packages/plugins/mcp-http`'s `RemoteMcpManager` directly, while mcp-http still registers
+`mcpRemote` for standalone use.)*
+
 ---
 
 ## Knowledge subsystem
