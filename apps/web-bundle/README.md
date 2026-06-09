@@ -19,7 +19,7 @@ pnpm web-build    # → dist/matbot.html
 open apps/web-bundle/dist/matbot.html # file:// — just works
 
 # or, to also exercise runtime *remote* plugin loading (which fetches .ts over http):
-pnpm web-serve     # → http://localhost:8787/
+pnpm web-server    # → http://localhost:8787/
 ```
 
 On first launch a setup form asks for the **full provider config** — a name, the adapter type
@@ -28,27 +28,32 @@ On first launch a setup form asks for the **full provider config** — a name, t
 DeepSeek, Azure, a local server, or anything compatible. The header's provider dropdown has a
 **＋ Add provider…** entry to configure more later.
 
-## How it works — no build step, no bundler
+## How it works — one assemble step, no bundler
 
-The novel part is loading `.ts` plugins in the browser with no compile/bundle pipeline. The mechanism
-is the browser mirror of the node app's `apps/cli/ts-hooks.js`:
+There is a single node assemble step and no bundler: every module stays a separate module, wired
+together by an import map at runtime. The mechanism is the browser mirror of the node app's
+`apps/cli/ts-hooks.js`:
 
 1. **`assemble.mjs`** (the only node step) walks the static import graph from `src/bootstrap.ts` and
-   every configured plugin, slurps each `.ts` file **verbatim** (it transforms nothing), and inlines
-   the sources — plus the TypeScript compiler and the in-page loader — into one HTML file.
-2. **`src/loader.js`** runs first in the browser. It type-strips every module with the inlined
-   `typescript` compiler (`ts.transpileModule`), rewrites each module's **relative** imports to
-   synthetic `mbmod:<id>` specifiers, turns each into a `blob:` URL, and publishes one **import map**
-   mapping every package name and synthetic id to its blob. Bare `@matatbread/*` imports are left
-   untouched so the host and every plugin resolve to the **same module instance** — the singleton
-   boundary that `instanceof` (e.g. `MissingSecretError`) depends on, exactly as `ts-hooks.js`
-   protects in node.
+   every configured plugin, type-strips each `.ts` file with **sucrase** (a pure-JS stripper — no
+   native binary, no postinstall; it transforms `.ts`→`.js` per-module and rewrites nothing else),
+   and inlines the resulting JS modules — plus the in-page loader — into one HTML file. The
+   TypeScript compiler is **not** inlined.
+2. **`src/loader.js`** runs first in the browser. The modules arrive already type-stripped, so it
+   does **no** compiling at boot: it rewrites each module's **relative** imports to synthetic
+   `mbmod:<id>` specifiers, turns each into a `blob:` URL, and publishes one **import map** mapping
+   every package name and synthetic id to its blob. Bare `@matatbread/*` imports are left untouched
+   so the host and every plugin resolve to the **same module instance** — the singleton boundary
+   that `instanceof` (e.g. `MissingSecretError`) depends on, exactly as `ts-hooks.js` protects in
+   node. (Sucrase is lazy-loaded from a CDN only for *runtime* remote `.ts` plugin loading — see the
+   caveat below — never for the baseline boot.)
 3. **`src/bootstrap.ts`** is just another inlined module. It builds `MatbotServices` (the browser
    analogue of `apps/cli/src/index.ts`), installs the constant principal carrier, and runs the real
    `loadPlugins` / resolver / `SessionRunner` unchanged. The whole architecture runs as-is.
 
-Because everything is in-memory (blobs + an injected import map, no service worker, no `fetch`), the
-baseline runs identically from `file://` or any static host.
+Because everything is in-memory (blobs + an injected import map, no service worker, no `fetch`, no
+in-page stripping), the baseline boots instantly and runs identically from `file://` or any static
+host.
 
 ## What's a plugin here (not core)
 
@@ -84,7 +89,8 @@ you don't want the wizard.
 - **`file://` storage**: IndexedDB works; OPFS (used only by `workspace_action`) may be unavailable
   on `file://` in some browsers — serve over http if you need it.
 - **Runtime remote plugin loading** (`plugin add <url>`) requires http (not `file://`) and a recent
-  browser; the inlined baseline has no such requirement.
-- **Size**: ~9 MB, almost entirely the inlined TypeScript compiler. Fine for a local demonstrator;
-  pre-stripping the host at assemble time is the obvious diet if it ever matters.
+  browser; it fetches raw `.ts` and type-strips it in-page, lazy-loading sucrase from a CDN on first
+  use (so that one path needs network). The inlined baseline has neither requirement.
+- **Size**: ~250 KB — the build-time-stripped JS modules and the loader, nothing else. No compiler
+  is inlined.
 - Secrets persist in `localStorage` in plaintext — single-user local use only.

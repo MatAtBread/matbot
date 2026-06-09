@@ -203,7 +203,7 @@ providers:
     endpoint: https://api.deepseek.com/anthropic
     model: deepseek-v4-flash
     credentials:
-      apiKey: ${env:DEEPSEEK_API_KEY}
+      apiKey: ${DEEPSEEK_API_KEY}
     parameters:
       maxTokens: 16384
 ```
@@ -281,7 +281,7 @@ providers:
     endpoint: https://api.anthropic.com
     model: claude-sonnet-4-6
     credentials:
-      apiKey: ${env:ANTHROPIC_API_KEY}
+      apiKey: ${ANTHROPIC_API_KEY}
     parameters:
       maxTokens: 8192
 ```
@@ -296,7 +296,17 @@ pnpm repl
 
 ## Configuration reference
 
+**Everything below is pluggable.** Each facility is exposed through a named `MatbotServices`
+interface, and what's described in each section is only the **default implementation** — it can be
+replaced or augmented by a plugin (`services.register(...)`) without touching the core. The
+interface name is called out at the top of each section so you know what to implement.
+
 ### Provider entry
+
+> **Facility:** `services.complete` (`CompletionRequest → CompletionResponse`). Providers are
+> *adapter plugins* — the `module` below names one. The two shipped adapters (Anthropic-compatible,
+> OpenAI-compatible) are the defaults; a plugin can add any other by implementing the adapter
+> contract. Live add/remove is via the built-in `provider` tool.
 
 ```yaml
 providers:
@@ -305,7 +315,7 @@ providers:
     endpoint:   https://...                       # overrides the default base URL
     model:      <model-id>
     credentials:
-      apiKey:   ${env:VAR} | ${secret:name} | literal
+      apiKey:   ${SECRET_NAME} | literal          # ${NAME} resolved by the Vault (see below)
     parameters:                                   # optional; passed to the API
       maxTokens:      4096
       temperature:    0.7
@@ -315,36 +325,58 @@ providers:
     fallback:   <other-provider-name>             # used on 429 / 5xx
 ```
 
-### Session behaviour
+### CLI options
 
-| CLI option           | Behaviour                                         |
-|----------------------|---------------------------------------------------|
-| *(none)*             | Ephemeral — session discarded on exit             |
-| `--session create`   | New persistent session; saved to the store        |
-| `--session <id>`     | Resume an existing session                        |
-| `--ephemeral`        | Force ephemeral even when `--session` is given    |
+> **Facility:** session persistence is `services.sessions` (`Store<Session>`); the per-session turn
+> loop is `services.run` (`SessionRunner`). Both are pluggable — the default `Store<Session>` lives
+> in whatever `StorageBackend` is active (see *Data directory*).
 
-Setting `ephemeral: true` in `matbot.yaml` is a hard override — it takes effect even if
-`--session` is passed. Background sub-agents set this to avoid leaving session traces.
+| Option                  | Behaviour                                                           |
+|-------------------------|---------------------------------------------------------------------|
+| `[prompt]` (positional) | Single-turn prompt; runs one turn and exits. Omit for an interactive REPL |
+| `--provider <name>`     | Provider key from `matbot.yaml` (default: first in file)            |
+| `--session create`      | New persistent session; saved to the store                          |
+| `--session <id>`        | Resume an existing session                                          |
+| `--ephemeral`           | Force ephemeral even when `--session` is given                      |
+| `--system <text>`       | System prompt injected at session start                             |
+| `--config <path>`       | Config file path (default: `./matbot.yaml`; `-` reads YAML from stdin) |
+| `--prompt-file <path>`  | Read the prompt from a file; runs a single turn and exits           |
+| `--principal <id\|json>` | Boot identity: a bare id (type `user`) or JSON `{"id","type"}`. Overrides `MATBOT_PRINCIPAL` and the config `principal:` |
+| `--help`                | Show help and exit                                                  |
+
+Sessions are **ephemeral by default** (discarded on exit). Setting `ephemeral: true` in
+`matbot.yaml` is a hard override — it takes effect even if `--session` is passed. Background
+sub-agents set this to avoid leaving session traces.
 
 ### Secret resolution
 
-Both placeholder forms are resolved at runtime by the Vault:
+> **Facility:** `services.vault` (the `Vault` interface). The default node implementation is
+> `EnvFileVault` (over `VaultImpl`), which reads/writes a `.env` file next to `matbot.yaml`. The
+> browser build swaps in a WebCrypto + browser-storage vault, and any plugin can register its own
+> (e.g. a cloud secret manager) — there is no `.env` requirement in the contract.
 
-| Syntax           | Resolves to                              |
-|------------------|------------------------------------------|
-| `${env:VAR}`     | `process.env.VAR` (snapshotted at startup) |
-| `${secret:name}` | Entry from the Vault (runtime secret store) |
-| literal string   | Used as-is (avoid for real credentials)  |
+There is **one** placeholder form and **one** flat namespace — no `env:` / `secret:` distinction:
 
-Credentials are resolved at startup and never written to session storage.
+| Syntax         | Resolves to                                                    |
+|----------------|----------------------------------------------------------------|
+| `${NAME}`      | The entry stored under `NAME` in the active Vault              |
+| literal string | Used as-is (avoid for real credentials)                        |
 
-Note: The `Vault` is also a plugin. The default behaviour is to manage the .env, but you can
-override this easily and store them in any way you wish.
+The YAML loader leaves `${NAME}` intact; the Vault substitutes it at runtime (regex `\$\{([^}]+)\}`).
+A missing name throws `MissingSecretError`. Credentials are resolved on use and never written to
+session storage. With the default node vault, `${DEEPSEEK_API_KEY}` resolves against the `.env`
+file — but that's just the default backend, not part of the syntax.
 
 ### Data directory
 
-All runtime state lives in `.data/` next to `matbot.yaml` and is .gitignored:
+> **Facility:** `services.StorageBackend` (the `StorageBackend` interface — `createStore<T>()` plus a
+> `fileStore`) and the `Store<T>` it hands out, with `services.KnowledgeIndex` (the `KnowledgeIndex`
+> interface) for the knowledge store. The default `StorageBackend` is the filesystem one below;
+> `services.register('StorageBackend', …)` swaps it live and re-wires every `Store` proxy. The
+> default `KnowledgeIndex` is the in-memory `LookupKnowledgeIndex`.
+
+With the default filesystem backend, all runtime state lives in `.data/` next to `matbot.yaml` and
+is .gitignored:
 
 ```
 .data/
@@ -356,12 +388,9 @@ All runtime state lives in `.data/` next to `matbot.yaml` and is .gitignored:
   files/       — file store blobs; the workspace namespace holds workspace_action (write) output
 ```
 
-Note: The `Store` is also a plugin. MatBot will persist it's key data, as can plugins, via
-a simple, pluggable storage interface.
-
-The SQLite storage plugin (`@matatbread/matbot-storage-sqlite`) replaces the per-directory
-filesystem stores with a single `.data/matbot.db` file. Plugins may create additional
-subdirectories as needed.
+The SQLite storage plugin (`@matatbread/matbot-storage-sqlite`) is a drop-in replacement
+`StorageBackend` that collapses the per-directory filesystem stores into a single `.data/matbot.db`
+file. Plugins may create additional subdirectories as needed.
 
 ---
 
