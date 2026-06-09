@@ -10,7 +10,7 @@ import path from 'node:path';
 
 const here     = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '../..');
-const port     = Number(process.env.PORT ?? 8787);
+const port     = Number(process.env.PORT ?? 9778);
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',

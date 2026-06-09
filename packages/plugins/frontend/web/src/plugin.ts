@@ -1,10 +1,43 @@
-import type { MatbotPluginSpec, MatbotServices } from '@matatbread/matbot-plugin-api';
+import type { MatbotPluginSpec, MatbotServices, Tool, ToolContext, ToolEvent, ToolRegistry } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION }                from '@matatbread/matbot-plugin-api';
 import { createWebServer, defaultWebPrincipal } from './server.js';
 import process                               from 'node:process';
 
 let webServer: Awaited<ReturnType<typeof createWebServer>> | undefined;
+let toolRegistry: ToolRegistry | undefined;
 const port = Number(process.env['MATBOT_WEB_PORT'] ?? 19778); // 19778 is "MB" in hex, a cute easter egg :)
+
+// Mint a shareable URL for a stored file — but only one this server actually serves: a file marked
+// `allowed` (default-deny). The path mirrors the GET /files/<namespace>/<name> route in server.ts.
+// Registered only when the server is up (below), so the tool is absent when nothing is serving.
+const urlForResourceTool: Tool = {
+  name: 'url_for_resource',
+  description:
+    'Return a shareable HTTP URL for a stored file, or null when it is not publicly viewable. Use this ' +
+    'to hand the user a link to a file (e.g. a workspace artifact) rather than guessing a path. Only files ' +
+    'marked viewable are served — workspace files are (namespace "workspace"); most other namespaces return null.\n\n' +
+    'Parameters: { namespace: string, name: string } — `name` is the file path within the namespace (for a ' +
+    'workspace file, the same path you wrote it under).',
+  inputSchema: {
+    type:     'object',
+    required: ['namespace', 'name'],
+    properties: {
+      namespace: { type: 'string', description: 'The file namespace, e.g. "workspace".' },
+      name:      { type: 'string', description: 'The file path/name within the namespace.' },
+    },
+  },
+  executor: {
+    async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
+      const { namespace, name } = input as { namespace?: string; name?: string };
+      if (!namespace || !name) { yield { type: 'error', message: 'url_for_resource requires "namespace" and "name".' }; return; }
+      if (!ctx.files) { yield { type: 'result', value: { url: null } }; return; }
+      const handle = await ctx.files.getByName(name, namespace);
+      if (!handle || !handle.allowed) { yield { type: 'result', value: { url: null } }; return; }
+      const path = `${encodeURIComponent(namespace)}/${name.split('/').map(encodeURIComponent).join('/')}`;
+      yield { type: 'result', value: { url: `/files/${path}` } };
+    },
+  },
+};
 
 
 export const plugin: MatbotPluginSpec = {
@@ -54,9 +87,14 @@ export const plugin: MatbotPluginSpec = {
         resolve();
       });
     });
+
+    // Only advertise URL minting when a server is actually serving (not on EADDRINUSE).
+    if (webServer) { services.tools.register(urlForResourceTool); toolRegistry = services.tools; }
   },
 
   async teardown() {
+    toolRegistry?.remove('url_for_resource');
+    toolRegistry = undefined;
     if (webServer) await webServer.close();
   },
 };

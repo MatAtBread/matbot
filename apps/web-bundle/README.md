@@ -19,7 +19,7 @@ pnpm web-build    # → dist/matbot.html
 open apps/web-bundle/dist/matbot.html # file:// — just works
 
 # or, to also exercise runtime *remote* plugin loading (which fetches .ts over http):
-pnpm web-server    # → http://localhost:8787/
+pnpm web-server    # → http://localhost:9778/
 ```
 
 On first launch a setup form asks for the **full provider config** — a name, the adapter type

@@ -132,20 +132,21 @@ export function createWebServer(deps: WebServerDeps) {
   // Clients subscribed to server-sent session status events (busy/idle).
   const statusListeners = new Set<ServerResponse>();
 
-  // Clients subscribed to workspace file-change events.
-  const workspaceEventListeners = new Set<ServerResponse>();
-  const fileEventListeners      = new Map<string, Set<ServerResponse>>();
-  const watchAc                 = new AbortController();
+  // Clients subscribed to file-change events. The global set gets every namespace's events (each
+  // carries its `namespace`, so the client routes each to the right panel); the per-file map is
+  // keyed by `<namespace>/<name>` so single-file watchers don't collide across namespaces.
+  const allFileListeners   = new Set<ServerResponse>();
+  const fileEventListeners = new Map<string, Set<ServerResponse>>();
+  const watchAc            = new AbortController();
 
   if (deps.files?.watch) {
     void (async () => {
       for await (const event of deps.files!.watch!(watchAc.signal)) {
-        if (event.namespace !== 'workspace') continue;
         const msg = sseEvent('file-changed', event);
-        for (const res of workspaceEventListeners) {
-          if (res.writable) res.write(msg); else workspaceEventListeners.delete(res);
+        for (const res of allFileListeners) {
+          if (res.writable) res.write(msg); else allFileListeners.delete(res);
         }
-        const subs = fileEventListeners.get(event.name);
+        const subs = fileEventListeners.get(`${event.namespace ?? ''}/${event.name}`);
         if (subs) {
           for (const res of subs) {
             if (res.writable) res.write(msg); else subs.delete(res);
@@ -528,46 +529,48 @@ export function createWebServer(deps: WebServerDeps) {
       return;
     }
 
-    // --- GET /workspace/events --- (SSE: all workspace file-change events)
-    if (method === 'GET' && url === '/workspace/events') {
+    // --- GET /files/events --- (SSE: file-change events across all namespaces; client filters by namespace)
+    if (method === 'GET' && url === '/files/events') {
       if (!deps.files?.watch) { json(res, 404, { error: 'File watch not available' }); return; }
       res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', 'connection': 'keep-alive' });
-      res.write(sseComment('workspace watch stream open'));
-      workspaceEventListeners.add(res);
-      req.on('close', () => workspaceEventListeners.delete(res));
+      res.write(sseComment('file watch stream open'));
+      allFileListeners.add(res);
+      req.on('close', () => allFileListeners.delete(res));
       return;
     }
 
-    // --- GET /workspace/events/<path> --- (SSE: single-file watch)
-    const workspaceEventMatch = /^\/workspace\/events\/(.+)$/.exec(url);
-    if (method === 'GET' && workspaceEventMatch) {
+    // --- GET /files/events/<namespace>/<name> --- (SSE: single-file watch)
+    const fileEventMatch = /^\/files\/events\/([^/]+)\/(.+)$/.exec(url);
+    if (method === 'GET' && fileEventMatch) {
       if (!deps.files?.watch) { json(res, 404, { error: 'File watch not available' }); return; }
-      let watchPath: string;
-      try { watchPath = decodeURIComponent(workspaceEventMatch[1]!); }
+      let key: string;
+      try { key = `${decodeURIComponent(fileEventMatch[1]!)}/${decodeURIComponent(fileEventMatch[2]!)}`; }
       catch { json(res, 400, { error: 'Invalid path encoding' }); return; }
 
       res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', 'connection': 'keep-alive' });
-      res.write(sseComment(`watching ${watchPath}`));
+      res.write(sseComment(`watching ${key}`));
 
-      let subs = fileEventListeners.get(watchPath);
-      if (subs === undefined) { subs = new Set(); fileEventListeners.set(watchPath, subs); }
+      let subs = fileEventListeners.get(key);
+      if (subs === undefined) { subs = new Set(); fileEventListeners.set(key, subs); }
       subs.add(res);
       req.on('close', () => {
-        const s = fileEventListeners.get(watchPath);
-        if (s) { s.delete(res); if (s.size === 0) fileEventListeners.delete(watchPath); }
+        const s = fileEventListeners.get(key);
+        if (s) { s.delete(res); if (s.size === 0) fileEventListeners.delete(key); }
       });
       return;
     }
 
-    // --- GET /workspace/:path --- (read-only static access to the session workspace)
-    const workspaceMatch = /^\/workspace\/(.+)$/.exec(url);
-    if (method === 'GET' && workspaceMatch && deps.files) {
-      let reqPath: string;
-      try { reqPath = decodeURIComponent(workspaceMatch[1]!); }
+    // --- GET /files/<namespace>/<name> --- (read-only static access; only files marked `allowed`)
+    const fileMatch = /^\/files\/([^/]+)\/(.+)$/.exec(url);
+    if (method === 'GET' && fileMatch && deps.files) {
+      let namespace: string, name: string;
+      try { namespace = decodeURIComponent(fileMatch[1]!); name = decodeURIComponent(fileMatch[2]!); }
       catch { json(res, 400, { error: 'Invalid path encoding' }); return; }
 
-      const handle = await deps.files.getByName(reqPath, 'workspace');
-      if (!handle) { json(res, 404, { error: 'Not found' }); return; }
+      // One read serves and gates: the handle we need to stream also carries `allowed`. A file that
+      // isn't servable is reported as missing, not forbidden — don't reveal that the path exists.
+      const handle = await deps.files.getByName(name, namespace);
+      if (!handle || !handle.allowed) { json(res, 404, { error: 'Not found' }); return; }
 
       res.writeHead(200, {
         'content-type':  handle.mimeType,
@@ -596,8 +599,8 @@ export function createWebServer(deps: WebServerDeps) {
 
     // Stop file watcher and close all watch SSE connections.
     watchAc.abort();
-    for (const res of workspaceEventListeners) res.end();
-    workspaceEventListeners.clear();
+    for (const res of allFileListeners) res.end();
+    allFileListeners.clear();
     for (const subs of fileEventListeners.values()) for (const res of subs) res.end();
     fileEventListeners.clear();
 
