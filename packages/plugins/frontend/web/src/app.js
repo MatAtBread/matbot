@@ -842,26 +842,71 @@ function renderSessions(sessions) {
   }
 }
 
+function makeBubble(className, text) {
+  const div = document.createElement('div');
+  div.className = 'message ' + className;
+  const inner = document.createElement('div');
+  inner.className = 'md-body';
+  inner.innerHTML = md(text);
+  div.appendChild(inner);
+  return div;
+}
+
+// Scroll the latest message into view (e.g. the user just sent it). Respect the suppression timer
+// in case they scrolled away earlier.
+function scrollMessagesToBottom() {
+  if (!isScrollSuppressed()) {
+    programmaticScrollTo(() => { messagesEl.scrollTop = messagesEl.scrollHeight; });
+  }
+}
+
 function appendUserBubble(text, msgIdx, pending) {
   messagesEl.querySelector('.empty-state')?.remove();
   if (messagesEl.querySelector('.message')) {
     messagesEl.appendChild(createMsgDivider(msgIdx));
   }
-  const div = document.createElement('div');
-  div.className = 'message user' + (pending ? ' pending' : '');
-  const inner = document.createElement('div');
-  inner.className = 'md-body';
-  inner.innerHTML = md(text);
-  div.appendChild(inner);
+  const div = makeBubble('user' + (pending ? ' pending' : ''), text);
   messagesEl.appendChild(div);
-  // Scroll the user's own message into view (they just sent it).
-  // Respect the suppression timer in case they scrolled away earlier.
-  if (!isScrollSuppressed()) {
-    programmaticScrollTo(() => {
-      messagesEl.scrollTop = messagesEl.scrollHeight;
-    });
-  }
+  scrollMessagesToBottom();
   return div;
+}
+
+// A machine-authored turn (a followup resubmission). Presented agent-side with the robot badge.
+function appendRoboBubble(text, msgIdx) {
+  messagesEl.querySelector('.empty-state')?.remove();
+  if (messagesEl.querySelector('.message')) {
+    messagesEl.appendChild(createMsgDivider(msgIdx));
+  }
+  const div = makeBubble('robo', text);
+  messagesEl.appendChild(div);
+  scrollMessagesToBottom();
+  return div;
+}
+
+// Render one stored user turn, split by block provenance: contiguous human blocks render as the user
+// bubble, contiguous robo blocks (a hook-injected fragment) as an agent-side robo bubble. One stored
+// message can therefore become two bubbles, under a single turn divider. Returns the last bubble.
+function appendUserTurn(content, msgIdx) {
+  const runs = [];
+  for (const c of content) {
+    if (c.type !== 'text' || !c.text) continue;
+    const robo = c.origin === 'robo';
+    const prev = runs[runs.length - 1];
+    if (prev && prev.robo === robo) prev.text += '\n' + c.text;
+    else runs.push({ robo, text: c.text });
+  }
+  if (!runs.length) return null;
+  messagesEl.querySelector('.empty-state')?.remove();
+  if (messagesEl.querySelector('.message')) {
+    messagesEl.appendChild(createMsgDivider(msgIdx));
+  }
+  let last = null;
+  for (const run of runs) {
+    last = makeBubble(run.robo ? 'robo' : 'user', run.text);
+    messagesEl.appendChild(last);
+  }
+  scrollMessagesToBottom();
+  return last;
 }
 
 function createMsgDivider(msgIdx) {
@@ -1213,10 +1258,11 @@ function renderSession(session, startIdx, scrollTarget) {
     const fi = nonSysCount++;
     if (startIdx && fi < startIdx) continue;
     if (msg.role === 'user') {
-      const text = msg.content.filter(c => c.type === 'text').map(c => c.text).join('\n');
       // Stored history is pure committed messages; queued/pending items arrive via the live stream,
-      // not from here.
-      if (text) appendUserBubble(text, origIdx);
+      // not from here. Split by block provenance: genuine user blocks → user bubble, robo blocks
+      // (a hook-injected fragment) → agent-side robo bubble. A wholly-robo turn (followup resubmit)
+      // is just one whose blocks are all robo.
+      appendUserTurn(msg.content, origIdx);
     } else if (msg.role === 'assistant') {
       const wrap = createAssistantWrap('assistant');
       renderContentParts(wrap, msg.content);
@@ -1540,7 +1586,14 @@ async function renderTurn(sid, traceId) {
           // === 0 ⇒ it runs immediately → show loading dots. A content event later promotes it.
           if (!userBubble) {
             const text = (ev.content ?? []).filter(c => c.type === 'text').map(c => c.text).join('\n');
-            if (text) { userBubble = appendUserBubble(text, undefined, ev.queued > 0); userBubbleText = text; }
+            // A robo turn (followup resubmit) arrives all-robo → agent-side bubble. Live submissions
+            // are never mixed (a hook-augmented turn only shows its split on reload, from committed
+            // history), so an all-or-nothing check here is enough.
+            const robo = (ev.content ?? []).some(c => c.type === 'text' && c.origin === 'robo');
+            if (text) {
+              userBubble = robo ? appendRoboBubble(text, undefined) : appendUserBubble(text, undefined, ev.queued > 0);
+              userBubbleText = text;
+            }
           }
           if (ev.queued === 0) markStarted();
           break;

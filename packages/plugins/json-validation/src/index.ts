@@ -1,5 +1,5 @@
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
-import type { MatbotPluginSpec, Hook, ToolHookContext, JSONSchema } from '@matatbread/matbot-plugin-api';
+import type { MatbotPluginSpec, Hook, JSONSchema } from '@matatbread/matbot-plugin-api';
 
 // A deliberately small JSON Schema validator covering the subset matbot tool
 // inputSchemas use: type, properties, required, items, enum, additionalProperties,
@@ -97,11 +97,11 @@ function validate(schema: JSONSchema, value: unknown, path: string, errs: string
   }
 }
 
-function makeValidatorHook(): Hook<ToolHookContext> {
+function makeValidatorHook(): Hook {
   const reported = new Set<string>();
 
   return {
-    point:      'before:tool',
+    on:         'toolcall',
     pluginName: '@matatbread/matbot-tool-json-validation',
     async handler(ctx) {
       const { tool, toolCall } = ctx;
@@ -120,8 +120,7 @@ function makeValidatorHook(): Hook<ToolHookContext> {
       validate(tool.inputSchema, toolCall.input, '', errs);
       if (errs.length === 0) return;
 
-      ctx.rejectTool = { message: `Invalid input for tool "${toolCall.name}": ${errs.join('; ')}` };
-      return ctx;
+      return { rejectTool: { message: `Invalid input for tool "${toolCall.name}": ${errs.join('; ')} [${this.pluginName}]` } };
     },
   };
 }

@@ -67,7 +67,7 @@ export interface ProviderAdapter {
 
 export type MessageRole = 'user' | 'assistant' | 'tool' | 'system' | 'marker';
 
-export type MessageContent =
+export type MessageContent = (
   | { type: 'text';              text: string }
   | { type: 'thinking';          thinking: string; signature: string }
   | { type: 'redacted-thinking'; data: string }
@@ -83,7 +83,18 @@ export type MessageContent =
   | { type: 'form';              fields: FormField[]; submitLabel?: string }
   | { type: 'form-response';     values: Record<string, string> }
   | { type: 'marker';            creator: string; data: unknown }
-  | { type: 'unknown-content';   blockType: string; raw: unknown };
+  | { type: 'unknown-content';   blockType: string; raw: unknown }
+) & {
+  /**
+   * Authorship provenance, for *presentation only* — orthogonal to the message's `role`, which is
+   * the LLM-protocol identity. Absent ⇒ authored per the role (a human for `user`, the model for
+   * `assistant`). `'robo'` ⇒ machine-authored by matbot — a `followup` resubmission, or a hook-
+   * injected fragment inside a human turn. It is still carried to the model as ordinary
+   * role-appropriate content (the model sees a `user` block either way); the flag is OOB metadata
+   * that frontends use to present it agent-side (a robot indicator) rather than as the user's words.
+   */
+  origin?: 'robo';
+};
 
 /**
  * A marker is opaque, durable annotation carried in the message stream: links, status,
@@ -179,14 +190,6 @@ export interface SystemContextRegistry {
 
 // ── Pipeline hooks ────────────────────────────────────────────────────────────
 
-export type HookPoint =
-  | 'before:submit'
-  | 'after:submit'
-  | 'before:response'
-  | 'after:response'
-  | 'before:tool'
-  | 'after:tool';
-
 export interface RunConfig {
   provider:   string;
   persona?:   string;
@@ -194,34 +197,97 @@ export interface RunConfig {
   traceId?:   string;
 }
 
-export interface HookContext {
-  session:   Session;
-  config:    RunConfig;
-  signal:    AbortSignal;
-  abort?:    string;
-  /** Content to emit as a robo-user event so UIs render it as a user bubble. */
-  inject?:   MessageContent[];
-  [key: string]: unknown;
-}
-
 /**
- * Context for `before:tool` / `after:tool` hooks. Carries the resolved tool and the
- * pending call so hooks can inspect or validate it. Setting `rejectTool` makes the
- * runner skip execution and return an error tool-result to the model (which can then
- * self-correct), without aborting the whole turn or breaking tool_use/tool_result pairing.
+ * Hooks are sorted by the *job* they do, not by lifecycle position — the channel name is the
+ * contract. Each channel has a fixed home, cadence, and effect-ceiling (a hook may always do
+ * less: returning nothing makes it a pure observer). The discriminated union on `on` is what
+ * keeps the effects honest — `contribute` hands you a read-only session, `toolcall`/`react` can't
+ * return one at all, so a write that goes nowhere won't type-check.
+ *
+ *   screen      runner, once per turn before the first provider call. The only channel that may
+ *               durably mutate history. Returns any of: a replacement `session` (persisted),
+ *               turn-scoped `ephemeral` context (prepended to this turn's provider calls, never
+ *               persisted), or `abort`. Mix freely. This is where the durable-vs-ephemeral choice
+ *               for incoming user input lives.
+ *   contribute  runner, before *every* provider call. Ephemeral by construction (it re-fires, so a
+ *               durable mutation would accumulate). Returns a transformed copy of `outgoing` — the
+ *               message array about to be sent — and never touches the stored session. Mind prompt
+ *               caching: vary the *tail* (newest turn) freely, but a transform that rewrites the
+ *               cached prefix (system / early history) busts the cache on every call.
+ *   toolcall    runner, before each tool execution. Read-only. Returns `rejectTool` (skip this call,
+ *               feed an error result back so the model self-corrects, without breaking the
+ *               tool_use/tool_result pairing) and/or `abort`.
+ *   toolresult  runner, after each tool execution, before the result is recorded/yielded. Folds the
+ *               result through each hook: return `{ result }` to replace it (hard redaction, truncation),
+ *               or nothing to observe (auditing — the context carries args, result, isError and
+ *               `durationMs`). It owns the LLM-facing + persisted result and the `tool:end` event;
+ *               note it does NOT see the live `tool:stdout/stderr` chunks, which stream before the
+ *               result exists.
+ *   followup    pump, once after a turn commits (post-persist). Read-only. May `resubmit` a robo
+ *               follow-up turn (head-enqueued, so it runs next as its own real turn); `resubmitDepth`
+ *               is the chain length for the hook's own budget — the runner also hard-caps it.
  */
-export interface ToolHookContext extends HookContext {
-  toolCall:    { id: string; name: string; input: unknown };
-  tool:        Tool;
-  rejectTool?: { message: string };
+export type HookPoint = 'screen' | 'contribute' | 'toolcall' | 'toolresult' | 'followup';
+
+export interface ScreenContext {
+  session: Session;
+  config:  RunConfig;
+  signal:  AbortSignal;
+}
+export interface ScreenResult {
+  session?:   Session;
+  ephemeral?: MessageContent[];
+  abort?:     string;
 }
 
-export interface Hook<C extends HookContext = HookContext> {
-  point:       HookPoint;
-  priority?:   number;
-  pluginName?: string;
-  handler(ctx: C): Promise<C | void>;
+export interface ContributeContext {
+  readonly outgoing: readonly Message[];
+  readonly session:  Session;
+  config:  RunConfig;
+  signal:  AbortSignal;
 }
+
+export interface ToolCallContext {
+  readonly session:  Session;
+  readonly toolCall: { id: string; name: string; input: unknown };
+  readonly tool:     Tool;
+  config:  RunConfig;
+  signal:  AbortSignal;
+}
+export interface ToolCallResult {
+  rejectTool?: { message: string };
+  abort?:      string;
+}
+
+export interface ToolResultContext {
+  readonly session:    Session;
+  readonly toolCall:   { id: string; name: string; input: unknown };
+  readonly tool:       Tool;
+  readonly result:     unknown;
+  readonly isError:    boolean;
+  readonly durationMs: number;
+  config:  RunConfig;
+  signal:  AbortSignal;
+}
+// The toolresult hook returns `{ result }` to replace the tool's result, or nothing to leave it
+// (and just observe) — a trivial single-field return, inlined in the Hook union like `contribute`'s.
+
+export interface FollowupContext {
+  readonly session:       Session;
+  readonly resubmitDepth: number;
+  config:  RunConfig;
+  signal:  AbortSignal;
+}
+export interface FollowupResult {
+  resubmit?: { content: MessageContent[] };
+}
+
+export type Hook =
+  | { on: 'screen';     priority?: number; pluginName?: string; handler(ctx: ScreenContext):     ScreenResult | void | Promise<ScreenResult | void> }
+  | { on: 'contribute'; priority?: number; pluginName?: string; handler(ctx: ContributeContext): Message[]    | void | Promise<Message[]    | void> }
+  | { on: 'toolcall';   priority?: number; pluginName?: string; handler(ctx: ToolCallContext):   ToolCallResult | void | Promise<ToolCallResult | void> }
+  | { on: 'toolresult'; priority?: number; pluginName?: string; handler(ctx: ToolResultContext): { result: unknown } | void | Promise<{ result: unknown } | void> }
+  | { on: 'followup';   priority?: number; pluginName?: string; handler(ctx: FollowupContext):   FollowupResult | void | Promise<FollowupResult | void> };
 
 // ── Storage ───────────────────────────────────────────────────────────────────
 
@@ -504,7 +570,7 @@ export type PipelineEvent =
   // of the live "delta" (everything after the last committed message), never from stored state.
   // `queued` is the number of submissions ahead of it (0 ⇒ about to run). Emitted live on enqueue
   // and replayed (in queue order) to anyone subscribing mid-flight.
-  | { type: 'queued';         content: MessageContent[]; queued: number; concatQueue: boolean; traceId: string }
+  | { type: 'queued';         content: MessageContent[]; queued: number; concatQueue: boolean; traceId: string; rootTraceId: string }
   | { type: 'robo-user';      content: MessageContent[]; traceId: string }
   | { type: 'error';          error: string;          traceId: string }
   | { type: 'system-context'; text: string;           traceId: string };

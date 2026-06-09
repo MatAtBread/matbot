@@ -226,34 +226,72 @@ export const plugin: MatbotPluginSpec = {
 
         let responseText = '';
         try {
-          // Concurrent messages for this chat hit the same session, so the runner queues them —
-          // no per-chat lock needed. We only render this submission's turn, hence the traceId filter.
+          // Concurrent messages for this chat hit the same session, so the runner queues them — no
+          // per-chat lock needed. We render only our own turn and its descendants (rootTraceId), so
+          // concurrent submissions don't cross-render.
           const view = await run.open({
             sessionId: session.id,
             signal:    ac.signal,
             content:   [{ type: 'text', text }],
             provider:  providerName,
             principal,
-            // Stub: auto-accepts the default. A future Telegram plugin could send the question (or
-            // FormField) to the chat and resolve with the user's next message — that one change makes
-            // both tool prompts and tool-collision prompts interactive here.
+            // ── Interactive prompts: deliberately NOT implemented ───────────────────────────────
+            // This telegram frontend is a *demonstrator* that stress-tests the frontend API; it does
+            // not do `prompt`. The stub auto-accepts the default, so an `ask_user` (or tool-collision)
+            // prompt resolves *silently* — the model proceeds as if answered while the chat saw no
+            // question. That desync is the one place this frontend lies, and the obvious next build.
+            // Sketch (exercise for the reader):
+            //
+            //   1. A per-chat pending-prompt slot, module-scoped:
+            //        const pending = new Map<number, (answer: string) => void>();
+            //   2. The prompt impl sends the question and parks a resolver (instead of resolving now):
+            //        prompt: (p) => {
+            //          const q = typeof p === 'string' ? p : p.label;   // + render p.options as buttons
+            //          void sendMessage(botToken, chatId, q);
+            //          return new Promise<string>(res => pending.set(chatId, res));
+            //        }
+            //   3. The dispatch loop (below) routes the *next* message for a chat that has a parked
+            //      prompt to its resolver, instead of starting a fresh turn:
+            //        const resolve = pending.get(chatId);
+            //        if (resolve) { pending.delete(chatId); resolve(text); continue; }
+            //
+            // Wrinkles to handle: cancel (`/cancel` → reject with PromptCancelledError + run.cancelTurn),
+            // a timeout (a turn can't hold the pump forever waiting on a human), and FormField `options`
+            // as an inline keyboard. This is the inverse of `followup`: there matbot continues a turn
+            // on its own; here it pauses one to wait on the human.
             prompt:    ((p: string | FormField, def?: string) =>
               Promise.resolve(typeof p === 'string' ? (def ?? '') : (p.default ?? ''))) as PromptFn,
           });
+          // Drain to session idle, not just our own turn's `done`: a `followup` resubmission spawned
+          // by our turn runs as a *later* turn with its own traceId. We adopt the turns descended from
+          // ours (rootTraceId lineage) and ignore any concurrent submission's turns. Each turn's
+          // assistant text is sent when it completes; a turn's machine-authored (robo) content is sent
+          // as its own bot message — Telegram can't echo a user turn, so robo content surfaces "from
+          // the LLM", which is what it is (matbot chose to continue the turn).
+          const owned = new Set<string>([view.traceId!]);
           for await (const event of view.events) {
-            if (event.type === 'idle') continue; // session-level lifecycle signal, not this turn's
-            if (event.traceId !== view.traceId) continue;
+            if (event.type === 'idle') break;
+            if (event.type === 'queued') {
+              if (owned.has(event.rootTraceId)) {
+                owned.add(event.traceId);
+                const roboText = event.content
+                  .filter((c): c is Extract<typeof c, { type: 'text' }> => c.type === 'text' && c.origin === 'robo')
+                  .map(c => c.text).join('\n').trim();
+                if (roboText) await sendMessage(botToken, chatId, `🤖 ${roboText}`);
+              }
+              continue;
+            }
+            if (!owned.has(event.traceId)) continue;
             if (event.type === 'text-delta') responseText += event.delta;
-            if (event.type === 'done' || event.type === 'aborted'
-                || event.type === 'error' || event.type === 'cancelled') break;
-            // Swallow: thinking, usage, tool:start/stdout/stderr/end, robo-user, file
+            else if (event.type === 'done' || event.type === 'aborted'
+                     || event.type === 'error' || event.type === 'cancelled') {
+              if (responseText.trim()) await sendMessage(botToken, chatId, responseText);
+              responseText = '';
+            }
+            // Swallow: thinking, usage, tool:start/stdout/stderr/end, file
           }
         } finally {
           clearInterval(typingInterval);
-        }
-
-        if (responseText.trim()) {
-          await sendMessage(botToken, chatId, responseText);
         }
       } catch (e) {
         if (!ac.signal.aborted) {

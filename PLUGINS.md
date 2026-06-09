@@ -519,51 +519,57 @@ export const plugin: MatbotPlugin = {
 
 ## Pipeline hooks
 
-Plugins register hooks in `setup()` to intercept the processing pipeline:
+Plugins register hooks in `setup()` to intercept the pipeline. Hooks are named by the **job** they
+do, not by lifecycle position — `Hook` is a discriminated union on `on`, so each channel's context
+and return type expose only the effects it honours (a write that goes nowhere won't type-check). A
+handler that returns nothing is a pure observer. `priority?` orders within a channel (lower first,
+default 50).
 
 ```ts
-type HookPoint =
-  | 'before:submit'    // can mutate session or abort
-  | 'after:submit'     // observe final session
-  | 'before:response'  // runs between tool results and next LLM call
-  | 'after:response'   // (reserved)
-  | 'before:tool'      // capability check, rate limiting
-  | 'after:tool';      // audit logging
+type Hook =
+  // screen — once per turn, before the 1st provider call. The only durable-mutate point.
+  | { on: 'screen';     priority?: number; handler(ctx: ScreenContext):     ScreenResult | void | Promise<ScreenResult | void> }
+  // contribute — before every provider call. Transform the outgoing array; ephemeral, never persisted.
+  | { on: 'contribute'; priority?: number; handler(ctx: ContributeContext): Message[] | void | Promise<Message[] | void> }
+  // toolcall — before each tool runs. Reject the call or abort.
+  | { on: 'toolcall';   priority?: number; handler(ctx: ToolCallContext):   ToolCallResult | void | Promise<ToolCallResult | void> }
+  // toolresult — after each tool runs. Transform the result (redaction) or observe it (audit).
+  | { on: 'toolresult'; priority?: number; handler(ctx: ToolResultContext): { result: unknown } | void | Promise<{ result: unknown } | void> }
+  // followup — after the turn commits. Resubmit a robo turn (head-enqueued, runs next).
+  | { on: 'followup';   priority?: number; handler(ctx: FollowupContext):   FollowupResult | void | Promise<FollowupResult | void> };
 
-interface Hook {
-  point:     HookPoint;
-  priority?: number;        // lower runs first (default 50)
-  handler(ctx: HookContext): Promise<HookContext | void>;
-}
-
-interface HookContext {
-  session:   Session;
-  principal: Principal;
-  config:    RunConfig;
-  signal:    AbortSignal;
-  abort?:    string;           // set to cancel the turn
-  inject?:   MessageContent[]; // emit as a synthetic user message
-  [key: string]: unknown;
-}
+interface ScreenResult     { session?: Session; ephemeral?: MessageContent[]; abort?: string }
+interface ToolCallResult   { rejectTool?: { message: string }; abort?: string }
+interface FollowupResult   { resubmit?: { content: MessageContent[] } }
 ```
 
-Example — audit logging after every tool call:
+Each context carries `session`, `config`, `signal`, plus channel specifics — `ToolCallContext`/
+`ToolResultContext` add `toolCall` + `tool` (and `toolresult` also `result`, `isError`, `durationMs`);
+`ContributeContext` adds the read-only `outgoing` array; `FollowupContext` adds `resubmitDepth`. See
+`@matatbread/matbot-hook-logger` for one hook on every channel.
+
+Example — redact key-shaped material from every tool result before the model or storage sees it:
 
 ```ts
 export const plugin: MatbotPlugin = {
-  name:       'audit',
+  name:       'redactor',
   apiVersion: PLUGIN_API_VERSION,
   async setup(services) {
     services.hooks.register({
-      point:   'after:tool',
-      handler: async (ctx) => {
-        console.warn('[audit]', ctx.session.id);
-        return ctx;
+      on: 'toolresult',
+      handler(ctx) {
+        const redacted = scrubKeys(ctx.result);   // your redaction
+        return redacted !== ctx.result ? { result: redacted } : undefined;
       },
     });
   },
 };
 ```
+
+**Authorship vs role.** A `followup` resubmission (and a `screen`-injected fragment) is machine-authored
+but carried as `role: 'user'` so the model responds to it. The per-block `origin?: 'robo'` on
+`MessageContent` records authorship for *presentation only* — it is OOB, never sent to the model.
+Frontends present by author (robo content renders agent-side, 🤖); the LLM operates by role.
 
 ---
 
@@ -673,10 +679,11 @@ plugin's `setup()`. The replacement takes effect immediately for all subsequent
 | `@matatbread/matbot-tool-mcp` | `mcp_action` | Connect to Model Context Protocol servers (add/list/remove via `action`) |
 | `@matatbread/matbot-sessions` | `session_action` | Session lifecycle (list/get/rename/hide via `action` parameter) |
 | `@matatbread/matbot-edit-session` | `session_edit` | Trim, branch, split, and compact sessions to manage context window (cut/fork/split/compact via `action`) |
-| `@matatbread/matbot-skills-node` | hooks + classifier | File-backed skill injection |
+| `@matatbread/matbot-skills-node` | `skill_action` + file watch | Node skills: embeds the cross-runtime skill CRUD, adds local `.md` import/watch |
 | `@matatbread/matbot-rumsfeld-node` | `contextual_search` | Contextual knowledge fault handler — resolves unknown terms via the knowledge index |
 | `@matatbread/matbot-persist-ki-bge-node` | knowledge backend | Persistent KnowledgeIndex with entity search and optional BGE reranker |
-| `@matatbread/matbot-frontend-web` | frontend + hooks | Web UI with session management |
+| `@matatbread/matbot-hook-logger` | diagnostic (all hook channels) | Logs each hook firing; demos durable injection (`screen`), redaction/audit (`toolresult`), resubmit (`followup`) |
+| `@matatbread/matbot-frontend-web` | frontend | Web UI with session management |
 | `@matatbread/matbot-frontend-telegram` | frontend + tools | Telegram bot with `telegram_send`, `telegram_open_door`, `telegram_provider` (get/set) tools |
 | `@matatbread/matbot-provider-anthropic` | provider | Anthropic Messages API (also DeepSeek Anthropic-compat) |
 | `@matatbread/matbot-provider-openai-compat` | provider | OpenAI-compatible chat completions |

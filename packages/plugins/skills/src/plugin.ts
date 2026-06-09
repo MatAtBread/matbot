@@ -3,7 +3,6 @@ import type { MatbotPluginSpec, MatbotServices, Store } from '@matatbread/matbot
 import { SkillManager } from './manager.js';
 import { createSkillTool } from './tools.js';
 import type { SkillDoc } from './types.js';
-// import { createSkillIndexHook, createUserMessageClassifierHook, createAgentMessageClassifierHook } from './hooks.js';
 
 /**
  * Shared wiring: build the {@link SkillManager}, load persisted skills, and register the
@@ -17,11 +16,8 @@ export async function setupSkills(services: MatbotServices): Promise<SkillManage
 
   services.tools.register(createSkillTool(manager));
 
-  // const getSkills       = (): SkillDoc[] => manager.all();
-  // const pluginSettings  = services.settings();
-  // services.hooks.register(createUserMessageClassifierHook(pluginSettings, services.providers, getSkills));
-  // services.hooks.register(createSkillIndexHook(getSkills));
-  // services.hooks.register(createAgentMessageClassifierHook(getSkills, pluginSettings, req => services.complete(req)));
+  // TODO: skill-index / classifier hooks need porting onto the new hook channels (screen/contribute/
+  // react) — the old before:submit/after:response versions were removed with the hook redesign.
 
   return manager;
 }
