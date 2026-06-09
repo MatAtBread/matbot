@@ -69,10 +69,11 @@ packages/
   plugins/
     rumsfeld/      — contextual_search tool; knowledge fault handler (@matatbread/matbot-rumsfeld-node)
     persist-ki-bge/ — persistent KnowledgeIndex with BGE reranker (@matatbread/matbot-persist-ki-bge-node)
-    skills/        — cross-runtime skill CRUD (skill_action) + classifier hooks (@matatbread/matbot-skills)
+    skills/        — cross-runtime skill CRUD (skill_action) (@matatbread/matbot-skills)
     skills-node/   — node specialization: embeds skills, adds local .md filesystem import/watch (@matatbread/matbot-skills-node)
     edit-session/  — session_edit tool (cut/fork/split/compact via action) (@matatbread/matbot-edit-session)
     files/         — file codec and producer registry
+    hook-logger/   — diagnostic: logs every hook channel; demos durable injection + redaction + resubmit (@matatbread/matbot-hook-logger)
     browser/       — OPFS store, WebCrypto vault (browser-only)
     frontend/
       web/         — HTTP + SSE web UI with session management
@@ -337,17 +338,44 @@ stays neutral:
 
 ## Hooks
 
-```
-before:submit   → can mutate session or abort
-after:submit    → observe final session
-before:response → runs between tool results and next LLM call
-after:response  → (reserved)
-before:tool     → capability check, rate limiting
-after:tool      → audit logging
-```
+Hooks are sorted by the **job** they do, not by lifecycle position — the channel name *is* the
+contract. `Hook` is a discriminated union keyed by `on`, so each channel's context and return type
+carry only the effects it honours; a write that goes nowhere won't type-check — there is no shared
+per-call context type and no index-signature escape hatch. Register with `services.hooks.register({ on, handler })`;
+a handler that returns nothing is a pure observer. Five channels:
 
-Hooks receive and return `HookContext`; they may replace `ctx.session` to inject context.
-They may set `ctx.abort` to cancel the turn.
+| `on` | Home | Cadence | Session | Effects (the ceiling) |
+|---|---|---|---|---|
+| `screen`     | runner, top of turn | once, before the 1st provider call | read-write | the only durable-mutate point: replace `session` (persisted), add turn-scoped `ephemeral` context (prepended to this turn's calls, never persisted), and/or `abort` |
+| `contribute` | runner, in the loop | before *every* provider call | read-only | return a transformed copy of `outgoing` (the message array about to be sent) — ephemeral, never persisted |
+| `toolcall`   | runner | before each tool exec | read-only | `rejectTool` (skip; an error result is fed back so the model self-corrects, pairing intact) and/or `abort` |
+| `toolresult` | runner | after each tool exec, pre-record | read-only | return `{ result }` to replace it (hard redaction, truncation) or nothing to observe (audit — ctx carries `toolCall`, `result`, `isError`, `durationMs`) |
+| `followup`   | pump, post-commit | once, after the turn commits | read-only | `resubmit` a robo turn (head-enqueued, runs next as its own real turn); `resubmitDepth` budgets the chain, the runner hard-caps it |
+
+`toolcall` guards the call *in*, `toolresult` the result *out*. `followup` is matbot deciding to
+continue a turn — the inverse of `ask_user`, where it pauses to wait on a human. Cadence dictates
+durability: a once-per-turn point (`screen`) may persist; a per-call/per-tool point must not (it
+re-fires, so a durable write would accumulate) — hence those are read-only or ephemeral. Per-channel
+dispatch lives on `HookRegistry` (`runScreen` / `runContribute` / `runToolCall` / `runToolResult` /
+`runFollowup`); the runner drives the first four, the `SessionRunner` pump the last.
+
+`contribute` is the in-harness cousin of a wrapping ("indirect") provider — both transform the wire
+messages, but `contribute` stacks and doesn't own the HTTP call. Mind **prompt caching** (prefix-
+sensitive): content placed at the *tail* (newest turn) is free, but a transform that varies the cached
+prefix (system / early history) per call busts it. Inject at the tail, or as a stable prefix.
+
+### Authorship (`origin`) vs role
+
+`role` is the LLM-protocol identity (how the model treats a message); **authorship** is who produced
+it, for human presentation — orthogonal, and conflating them is a trap. A `followup` resubmission and
+a `screen`-injected fragment are machine-authored but carried as `role: 'user'` (the model must
+respond to them as input). The per-block `origin?: 'robo'` on `MessageContent` records this: optional,
+and OOB — never sent to the model. **Frontends present by author; the LLM operates by role.** So robo
+content lives in a user-role turn for the model but renders agent-side (a 🤖 indicator) for humans;
+the web splits one stored user message into per-`origin` bubbles, telegram surfaces robo blocks as bot
+messages (adopting its turn's followups via the `queued` event's `rootTraceId` lineage), and a
+text-only frontend that ignores `origin` still renders coherently. A "robo message" is just one whose
+blocks are all `origin: 'robo'`.
 
 ---
 
