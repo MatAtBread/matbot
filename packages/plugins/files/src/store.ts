@@ -10,6 +10,7 @@ interface FileMeta {
   sessionId?: string;
   messageId?: string;
   namespace?: string;
+  allowed?:   boolean;
   // Set on new anonymous entries (UUID id, .data extension).
   // Absent on named entries — data path mirrors the id directly.
   dataFile?:  string;
@@ -43,6 +44,7 @@ async function makeHandle(id: string, meta: FileMeta, dir: string): Promise<File
     ...(meta.sessionId !== undefined ? { sessionId: meta.sessionId } : {}),
     ...(meta.messageId !== undefined ? { messageId: meta.messageId } : {}),
     ...(meta.namespace !== undefined ? { namespace: meta.namespace } : {}),
+    ...(meta.allowed   !== undefined ? { allowed:   meta.allowed   } : {}),
   };
   return {
     ...fileMetaData,
@@ -99,13 +101,14 @@ export class FilesystemFileStore implements FileStore {
     name:     string | undefined,
     mimeType: MimeType,
     data:     AsyncIterable<Uint8Array>,
-    opts?:    { sessionId?: string; messageId?: string; namespace?: string },
+    opts?:    { sessionId?: string; messageId?: string; namespace?: string; allowed?: boolean },
   ): Promise<FileHandle> {
     await this.ensureDir();
     const extras = {
       ...(opts?.sessionId !== undefined ? { sessionId: opts.sessionId } : {}),
       ...(opts?.messageId !== undefined ? { messageId: opts.messageId } : {}),
       ...(opts?.namespace !== undefined ? { namespace: opts.namespace } : {}),
+      ...(opts?.allowed   !== undefined ? { allowed:   opts.allowed   } : {}),
     };
 
     if (name !== undefined) {
@@ -241,7 +244,7 @@ export class FilesystemFileStore implements FileStore {
 
 const META_KEYS: ReadonlyArray<keyof FileMetaData> = [
   'id', 'version', 'name', 'mimeType', 'size', 'createdAt',
-  'sessionId', 'messageId', 'namespace',
+  'sessionId', 'messageId', 'namespace', 'allowed',
 ];
 
 function metaFromHandle(h: FileHandle): FileMetaData {
@@ -255,6 +258,7 @@ function metaFromHandle(h: FileHandle): FileMetaData {
     ...(h.sessionId !== undefined ? { sessionId: h.sessionId } : {}),
     ...(h.messageId !== undefined ? { messageId: h.messageId } : {}),
     ...(h.namespace !== undefined ? { namespace: h.namespace } : {}),
+    ...(h.allowed   !== undefined ? { allowed:   h.allowed   } : {}),
   };
 }
 

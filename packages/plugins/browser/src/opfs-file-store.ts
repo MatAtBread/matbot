@@ -10,6 +10,7 @@ interface OPFSMeta {
   sessionId?:  string;
   messageId?:  string;
   namespace?:  string;
+  allowed?:    boolean;
 }
 
 async function filesDir(): Promise<FileSystemDirectoryHandle> {
@@ -69,7 +70,7 @@ export class OPFSFileStore implements FileStore {
     name:     string | undefined,
     mimeType: MimeType,
     data:     AsyncIterable<Uint8Array>,
-    meta?:    { sessionId?: string; messageId?: string; namespace?: string },
+    meta?:    { sessionId?: string; messageId?: string; namespace?: string; allowed?: boolean },
   ): Promise<FileHandle> {
     const dir = await filesDir();
 
@@ -88,6 +89,7 @@ export class OPFSFileStore implements FileStore {
           ...(meta?.sessionId !== undefined ? { sessionId: meta.sessionId } : {}),
           ...(meta?.messageId !== undefined ? { messageId: meta.messageId } : {}),
           ...(meta?.namespace !== undefined ? { namespace: meta.namespace } : {}),
+          ...(meta?.allowed   !== undefined ? { allowed:   meta.allowed   } : {}),
         };
         await writeMeta(dir, fileMeta);
         return makeHandle(fileMeta, dir);
@@ -107,6 +109,7 @@ export class OPFSFileStore implements FileStore {
       ...(meta?.sessionId !== undefined ? { sessionId: meta.sessionId } : {}),
       ...(meta?.messageId !== undefined ? { messageId: meta.messageId } : {}),
       ...(meta?.namespace !== undefined ? { namespace: meta.namespace } : {}),
+      ...(meta?.allowed   !== undefined ? { allowed:   meta.allowed   } : {}),
     };
     await writeMeta(dir, fileMeta);
 

@@ -350,7 +350,7 @@ function renderFiles(files) {
     div.onclick = () => {
       updatedFiles.delete(f.path);
       div.classList.remove('updated');
-      window.open('/workspace/' + f.path, '_blank');
+      window.open('/files/workspace/' + f.path, '_blank');
     };
     const nameEl = document.createElement('span');
     nameEl.className = 'file-name';
@@ -2043,11 +2043,13 @@ async function init() {
     es.onerror = () => { es.close(); setTimeout(connectStatusStream, 3000); };
   })();
 
-  // Subscribe to workspace file-change events.
+  // Subscribe to file-change events. The stream carries every namespace; this panel shows the
+  // workspace, so ignore events for other namespaces before touching it.
   (function connectFileWatchStream() {
-    const es = new EventSource('/workspace/events');
+    const es = new EventSource('/files/events');
     es.addEventListener('file-changed', e => {
       const event = JSON.parse(e.data);
+      if (event.namespace !== 'workspace') return;
       const { name } = event;
       const el = document.getElementById('file-list');
       const item = el?.querySelector('[data-path="' + CSS.escape(name) + '"]');

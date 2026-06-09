@@ -18,18 +18,21 @@ export class SQLiteFileStore implements FileStore {
       namespace   TEXT,
       session_id  TEXT,
       message_id  TEXT,
+      allowed     INTEGER,
       data        BLOB    NOT NULL
     )`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_${file_table_name}_name      ON ${file_table_name} (name)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_${file_table_name}_namespace ON ${file_table_name} (namespace)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_${file_table_name}_session   ON ${file_table_name} (session_id)`);
+    // Add `allowed` to tables created before this column existed; ignore the error if already present.
+    try { db.exec(`ALTER TABLE ${file_table_name} ADD COLUMN allowed INTEGER`); } catch { /* column exists */ }
   }
 
   async put(
     name:     string | undefined,
     mimeType: MimeType,
     data:     AsyncIterable<Uint8Array>,
-    opts?:    { sessionId?: string; messageId?: string; namespace?: string },
+    opts?:    { sessionId?: string; messageId?: string; namespace?: string; allowed?: boolean },
   ): Promise<FileHandle> {
     const chunks: Uint8Array[] = [];
     for await (const chunk of data) chunks.push(chunk);
@@ -45,10 +48,11 @@ export class SQLiteFileStore implements FileStore {
       prevMeta  = this.db.prepare(META_SELECT + ` WHERE id = ?`).get(id) as unknown as MetaRow | undefined;
       createdAt = prevMeta?.created_at ?? now;
       this.db.prepare(`
-        INSERT OR REPLACE INTO ${file_table_name} (id, name, mime_type, size, created_at, namespace, session_id, message_id, data)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT OR REPLACE INTO ${file_table_name} (id, name, mime_type, size, created_at, namespace, session_id, message_id, allowed, data)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(id, id, mimeType, size, createdAt,
-             opts?.namespace ?? null, opts?.sessionId ?? null, opts?.messageId ?? null, blob);
+             opts?.namespace ?? null, opts?.sessionId ?? null, opts?.messageId ?? null,
+             opts?.allowed ? 1 : null, blob);
       this.db.exec('COMMIT');
     } catch (e) {
       this.db.exec('ROLLBACK');
@@ -60,6 +64,7 @@ export class SQLiteFileStore implements FileStore {
       namespace:  opts?.namespace  ?? null,
       session_id: opts?.sessionId  ?? null,
       message_id: opts?.messageId  ?? null,
+      allowed:    opts?.allowed ? 1 : null,
     };
     const handle = this.buildHandle(nextRow);
     this.emit(buildFileEvent(handle, prevMeta !== undefined ? metaFromRow(prevMeta) : undefined));
@@ -139,6 +144,7 @@ export class SQLiteFileStore implements FileStore {
       ...(row.namespace  !== null ? { namespace:  row.namespace  } : {}),
       ...(row.session_id !== null ? { sessionId:  row.session_id } : {}),
       ...(row.message_id !== null ? { messageId:  row.message_id } : {}),
+      ...(row.allowed                 ? { allowed: true } : {}),
     };
     return {
       ...meta,
@@ -154,11 +160,11 @@ export class SQLiteFileStore implements FileStore {
 }
 
 // Selects all metadata columns except the blob — data is fetched lazily in stream().
-const META_SELECT = `SELECT id, name, mime_type, size, created_at, namespace, session_id, message_id FROM ${file_table_name}`;
+const META_SELECT = `SELECT id, name, mime_type, size, created_at, namespace, session_id, message_id, allowed FROM ${file_table_name}`;
 
 const META_KEYS: ReadonlyArray<keyof FileMetaData> = [
   'id', 'version', 'name', 'mimeType', 'size', 'createdAt',
-  'sessionId', 'messageId', 'namespace',
+  'sessionId', 'messageId', 'namespace', 'allowed',
 ];
 
 interface MetaRow {
@@ -170,6 +176,7 @@ interface MetaRow {
   namespace:  string | null;
   session_id: string | null;
   message_id: string | null;
+  allowed:    number | null;
 }
 
 function metaFromRow(row: MetaRow): FileMetaData {
@@ -183,6 +190,7 @@ function metaFromRow(row: MetaRow): FileMetaData {
     ...(row.namespace  !== null ? { namespace:  row.namespace  } : {}),
     ...(row.session_id !== null ? { sessionId:  row.session_id } : {}),
     ...(row.message_id !== null ? { messageId:  row.message_id } : {}),
+    ...(row.allowed                 ? { allowed: true } : {}),
   };
 }
 
@@ -196,6 +204,7 @@ function buildFileEvent(handle: FileHandle, prev: FileMetaData | undefined): Fil
     namespace:  handle.namespace  ?? null,
     session_id: handle.sessionId  ?? null,
     message_id: handle.messageId  ?? null,
+    allowed:    handle.allowed ? 1 : null,
   });
   const a = meta as unknown as Record<string, unknown>;
   const b = prev as unknown as Record<string, unknown> | undefined;
