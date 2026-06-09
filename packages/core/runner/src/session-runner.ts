@@ -25,12 +25,21 @@ export interface SessionRunnerDeps {
 
 interface QueuedItem {
   traceId:     string;
+  // The originating human turn's traceId, carried down a resubmission chain (a human submit is its
+  // own root). Lets a per-turn frontend (e.g. telegram) adopt the followups *its* turn spawned and
+  // ignore unrelated turns — lineage the bare per-turn traceId can't express.
+  rootTraceId: string;
   content:     MessageContent[];
   provider:    string;
   principal:   Principal;
   concatQueue: boolean;
+  // 0 for an external submission; a `react` resubmission carries its parent's depth + 1. The reactor
+  // budgets against it, and pump hard-caps it (MAX_RESUBMIT_DEPTH) so a misbehaving reactor can't loop.
+  resubmitDepth: number;
   prompt?:     PromptFn;
 }
+
+const MAX_RESUBMIT_DEPTH = 8;
 
 interface SessionState {
   // The queue is deliberately a plain array, drained FIFO. concatQueue is per-submission: a non-concat
@@ -161,8 +170,9 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
         }
 
         // Persist-at-turn-start: the user message only hits the store when its turn begins, never
-        // while queued. That is what stops a mid-turn submit from clobbering session state.
-        session = appendMessage(session, createMessage({ role: 'user', content, traceId: head.traceId }));
+        // while queued. That is what stops a mid-turn submit from clobbering session state. A robo
+        // resubmission's blocks already carry `origin: 'robo'` (stamped where it was enqueued).
+        session = appendMessage(session, createMessage({ role: 'user', content, traceId: head.traceId, providerName: head.provider }));
         await deps.store.set(session.id, session);
 
         const resolved = await deps.resolveProvider(head.provider);
@@ -205,6 +215,42 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
               emit(s, ev);
             }
           });
+
+          // followup — post-commit, in the queue owner. A hook reads the just-committed turn and may
+          // head-enqueue a robo follow-up (its own real turn, running next). Skipped on abort; runs
+          // under the submitter's principal because a reactor may itself call complete() (a classifier).
+          const hooks = deps.hooks;
+          if (!ac.signal.aborted && hooks) {
+            const committed = await deps.store.get(id);
+            if (committed && head.resubmitDepth < MAX_RESUBMIT_DEPTH) {
+              let resubmits: MessageContent[][] = [];
+              await runAs(head.principal, async () => {
+                resubmits = await hooks.runFollowup({
+                  session:       committed,
+                  resubmitDepth: head.resubmitDepth,
+                  config:        { provider: head.provider, traceId: head.traceId },
+                  signal:        ac.signal,
+                });
+              });
+              // unshift in reverse so the hooks' order is preserved at the head of the queue. Stamp
+              // every block `origin: 'robo'` here — once — so it rides into both the live `queued`
+              // event and the persisted user message the pump builds from this item.
+              for (const raw of resubmits.reverse()) {
+                const rt = crypto.randomUUID();
+                const content = raw.map(c => (c.type === 'text' ? { ...c, origin: 'robo' as const } : c));
+                s.queue.unshift({
+                  traceId:       rt,
+                  rootTraceId:   head.rootTraceId,
+                  content,
+                  provider:      head.provider,
+                  principal:     head.principal,
+                  concatQueue:   false,
+                  resubmitDepth: head.resubmitDepth + 1,
+                });
+                notify(s, { type: 'queued', content, queued: 0, concatQueue: false, traceId: rt, rootTraceId: head.rootTraceId });
+              }
+            }
+          }
         } catch (e) {
           emit(s, { type: 'error', error: String(e), traceId: head.traceId });
         } finally {
@@ -241,17 +287,19 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
         const concatQueue = opts.concatQueue ?? false;
         s.queue.push({
           traceId,
-          content:     opts.content,
-          provider:    opts.provider,
-          principal:   opts.principal,
+          rootTraceId:   traceId,
+          content:       opts.content,
+          provider:      opts.provider,
+          principal:     opts.principal,
           concatQueue,
+          resubmitDepth: 0,
           ...(opts.prompt !== undefined ? { prompt: opts.prompt } : {}),
         });
         // Announce the submission on the stream as part of the live delta, before its turn's events.
         // If it runs immediately `queued` is 0 (no wait); otherwise it's how many are ahead. concatQueue
         // tells a frontend whether this submission will merge into the running batch (so it can fold the
         // bubble) or run as its own turn.
-        notify(s, { type: 'queued', content: opts.content, queued: aheadOf(s, s.queue.length - 1), concatQueue, traceId });
+        notify(s, { type: 'queued', content: opts.content, queued: aheadOf(s, s.queue.length - 1), concatQueue, traceId, rootTraceId: traceId });
         void pump(opts.sessionId, s);
       }
 
@@ -275,7 +323,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
             // Replay the in-progress turn, then the pending queue — the delta region, in order.
             for (const ev of st.replay) sink.push(ev);
             st.queue.forEach((item, i) =>
-              sink.push({ type: 'queued', content: item.content, queued: aheadOf(st, i), concatQueue: item.concatQueue, traceId: item.traceId }));
+              sink.push({ type: 'queued', content: item.content, queued: aheadOf(st, i), concatQueue: item.concatQueue, traceId: item.traceId, rootTraceId: item.rootTraceId }));
             if (opts.signal.aborted) { sink.close(); remove(); }
             else opts.signal.addEventListener('abort', () => { sink.close(); remove(); }, { once: true });
             cached = sink.iterable;

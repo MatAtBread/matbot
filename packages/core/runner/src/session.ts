@@ -45,6 +45,7 @@ export function createMessage(opts: {
   content:        MessageContent[];
   traceId:        string;
   providerName?:  string;
+  metadata?:      Record<string, unknown>;
 }): Message {
   return {
     id:        crypto.randomUUID(),
@@ -53,5 +54,6 @@ export function createMessage(opts: {
     createdAt: new Date().toISOString(),
     traceId:   opts.traceId,
     ...(opts.providerName !== undefined ? { providerName: opts.providerName } : {}),
+    ...(opts.metadata     !== undefined ? { metadata:     opts.metadata     } : {}),
   };
 }

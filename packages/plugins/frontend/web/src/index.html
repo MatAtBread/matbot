@@ -587,6 +587,32 @@
       pointer-events: none;
     }
 
+    /* Robo: machine-authored content (a `followup` resubmission, or a hook-injected fragment split
+       out of a human turn). Presented agent-side — "from the LLM, because it was" — but visually its
+       own thing (muted, indigo, like a thinking interjection) with a robot badge top-left. The block's
+       `origin: 'robo'` drives this; the same content still reaches the model as an ordinary turn. */
+    .message.robo {
+      align-self: flex-start;
+      background: #eef2ff;
+      color: #3730a3;
+      padding: 10px 14px;
+      border-radius: 12px 12px 12px 2px;
+      line-height: 1.65;
+      word-break: break-word;
+      position: relative;
+    }
+    .message.robo .md-body code { background: rgba(55,48,163,0.1); }
+    .message.robo::before {
+      content: '🤖';
+      position: absolute;
+      top: -0.3em;
+      left: -0.3em;
+      font-size: 1.2em;
+      line-height: 1;
+      pointer-events: none;
+      font-style: normal;
+    }
+
     /* Assistant: left-aligned, no background */
     .message.assistant { align-self: flex-start; }
 

@@ -1,4 +1,4 @@
-import type { Tool, ToolRegistry, Hook, HookPoint, HookContext, PromptFn, FormField, FrontendInfo } from './types.js';
+import type { Tool, ToolRegistry, Hook, PromptFn, FormField, FrontendInfo } from './types.js';
 import type {
   MatbotPlugin, MatbotServices,
   ProviderAdapterFactory, StoreFactory,
@@ -232,10 +232,9 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotServices
     hooks: {
       register(hook: Hook) {
         state.hookPlugins.add(plugin.name);
-        services.hooks.register({ ...hook, pluginName: plugin.name });
+        services.hooks.register({ ...hook, pluginName: plugin.name } as Hook);
       },
-      removeByPlugin: (name: string)                      => services.hooks.removeByPlugin(name),
-      run:            (point: HookPoint, ctx: HookContext) => services.hooks.run(point, ctx),
+      removeByPlugin: (name: string) => services.hooks.removeByPlugin(name),
     } as unknown as HookRegistry,
     systemContext: {
       register(contributor) {

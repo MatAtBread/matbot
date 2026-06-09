@@ -1,7 +1,7 @@
 import type {
-  Session, MessageContent,
+  Session, Message, MessageContent,
   PipelineEvent, RunConfig, ProviderAdapter, ProviderConfig,
-  Tool, ToolContext, ToolHookContext, Store, FileStore, SystemContextRegistry, Vault, PromptFn, FormField,
+  Tool, ToolContext, Store, FileStore, SystemContextRegistry, Vault, PromptFn, FormField,
 } from './types.js';
 import type { MatbotPlugin } from './plugin.js';
 import { HookRegistry } from './hooks.js';
@@ -46,26 +46,21 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
   };
   const traceId = config.traceId ?? crypto.randomUUID();
 
-  // ── 1. before:submit hooks ─────────────────────────────────────────────────
+  // ── 1. screen — once per turn: shape/abort the incoming submission ──────────
 
-  let session = opts.session;
-
-  let ctx = await hookReg.run('before:submit', {
-    session, config, signal,
-  });
-
-  if (ctx.abort) {
-    const abortedSession = ctx.session as Session;
-    await store.set(abortedSession.id, abortedSession);
-    yield { type: 'aborted', reason: ctx.abort, session: abortedSession, traceId };
+  const screen = await hookReg.runScreen({ session: opts.session, config, signal });
+  if (screen.abort) {
+    await store.set(screen.session.id, screen.session);
+    yield { type: 'aborted', reason: screen.abort, session: screen.session, traceId };
     return;
   }
+  let session = screen.session;
 
-  session = ctx.session as Session;
-
-  if (ctx.inject) {
-    yield { type: 'robo-user', content: ctx.inject, traceId };
-  }
+  // Turn-scoped ephemeral context from screen — prepended to every provider call this turn as a
+  // system block, never persisted. (Lands in the cached prefix; constant within the turn.)
+  const ephemeralMsg: Message[] = screen.ephemeral.length > 0
+    ? [createMessage({ role: 'system', content: screen.ephemeral, traceId: '' })]
+    : [];
 
   // ── 2. System context (built once per submit, never persisted) ─────────────
 
@@ -95,9 +90,15 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
     const assistantParts: MessageContent[] = [];
     let textAcc = '';
 
-    // One provider call — system context prepended here, never written back to session
+    // One provider call. The outgoing array (system context + screen's ephemeral block + history)
+    // is assembled here and handed to `contribute` hooks for a final ephemeral transform — none of
+    // this is written back to the session.
+    const outgoing = await hookReg.runContribute({
+      outgoing: [...systemMsg, ...ephemeralMsg, ...session.messages],
+      session, config, signal,
+    });
     try {
-      for await (const ev of provider.complete([...systemMsg, ...session.messages], providerConfig, [...tools.values()], signal)) {
+      for await (const ev of provider.complete(outgoing, providerConfig, [...tools.values()], signal)) {
         switch (ev.type) {
           case 'text-delta':
             textAcc += ev.delta;
@@ -164,19 +165,6 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
       session = appendMessage(session, assistantMsg);
     }
 
-    const afterRespCtx = await hookReg.run('after:response', {
-      session, config, signal,
-    });
-    if (afterRespCtx.abort) {
-      yield { type: 'aborted', reason: afterRespCtx.abort, session: afterRespCtx.session as Session, traceId };
-      return;
-    }
-    session = afterRespCtx.session as Session;
-
-    if (afterRespCtx.inject) {
-      yield { type: 'robo-user', content: afterRespCtx.inject, traceId };
-    }
-
     // No tool calls → done
     if (pendingCalls.length === 0) break;
 
@@ -195,19 +183,17 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
         continue;
       }
 
-      const toolCtxPre = await hookReg.run('before:tool', {
+      const decision = await hookReg.runToolCall({
         session, config, signal,
         toolCall: { id: tc.id, name: tc.name, input: tc.input },
         tool,
-      }) as ToolHookContext;
-      session = toolCtxPre.session as Session;
-
-      if (toolCtxPre.abort) {
-        yield { type: 'aborted', reason: toolCtxPre.abort, session: toolCtxPre.session as Session, traceId };
+      });
+      if (decision.abort) {
+        yield { type: 'aborted', reason: decision.abort, session, traceId };
         return;
       }
-      if (toolCtxPre.rejectTool) {
-        const err = { error: toolCtxPre.rejectTool.message };
+      if (decision.rejectTool) {
+        const err = { error: decision.rejectTool.message };
         toolResults.push({ type: 'tool-result', id: tc.id, result: err, isError: true });
         yield { type: 'tool:end', callId: tc.id, result: err, isError: true, traceId };
         continue;
@@ -215,6 +201,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
 
       let result: unknown;
       let isError = false;
+      const startedAt = Date.now();
 
       const toolCtx: ToolContext = {
         callId: tc.id, session, signal, vault,
@@ -246,36 +233,27 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
         isError = true;
       }
 
-      const toolCtxPost = await hookReg.run('after:tool', {
+      // toolresult — last chance to transform the result before it's recorded/yielded (hard redaction),
+      // or to observe it (auditing: args + result + timing). Owns the LLM-facing + persisted surfaces.
+      result = await hookReg.runToolResult({
         session, config, signal,
+        toolCall: { id: tc.id, name: tc.name, input: tc.input },
+        tool, result, isError, durationMs: Date.now() - startedAt,
       });
-      session = toolCtxPost.session as Session;
 
       toolResults.push({ type: 'tool-result', id: tc.id, result, isError });
       yield { type: 'tool:end', callId: tc.id, result, isError, traceId };
     }
 
-    // Add tool results message, run before:response hooks, then loop
+    // Add tool results message, then loop for the next provider call.
     const toolMsg = createMessage({ role: 'tool', content: toolResults, traceId });
     session = appendMessage(session, toolMsg);
-
-    ctx = await hookReg.run('before:response', {
-      session, config, signal,
-    });
-    if (ctx.abort) {
-      yield { type: 'aborted', reason: ctx.abort, session: ctx.session as Session, traceId };
-      return;
-    }
-    session = ctx.session as Session;
   }
 
   // ── 4. Persist and finish ──────────────────────────────────────────────────
+  // `react` fires post-commit, in pump (the queue owner) — not here.
 
   await store.set(session.id, session);
-
-  await hookReg.run('after:submit', {
-    session, config, signal,
-  });
 
   yield { type: 'done', session, traceId };
 }
