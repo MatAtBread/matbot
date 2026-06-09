@@ -144,9 +144,9 @@ export class OPFSFileStore implements FileStore {
     const dir = await filesDir();
     // TypeScript DOM lib doesn't expose the async iterator methods on
     // FileSystemDirectoryHandle yet; cast to use the runtime-available protocol.
-    type IterableDir = AsyncIterable<FileSystemHandle>;
-    for await (const handle of dir as unknown as IterableDir) {
-      const name = handle.name;
+    // The default async iterator is entries() — it yields [name, handle] tuples.
+    type IterableDir = AsyncIterable<[string, FileSystemHandle]>;
+    for await (const [name] of dir as unknown as IterableDir) {
       if (!name.endsWith('.meta.json')) continue;
       const id  = name.slice(0, -'.meta.json'.length);
       const fh  = await this.get(id);
