@@ -25,7 +25,7 @@ import { createAlsPrincipalCarrier }       from './principal-als.js';
 import { EnvFileVault }                     from './env-vault.js';
 import { FilesystemStore }                 from '@matatbread/matbot-storage-filesystem';
 import { FilesystemFileStore }             from '@matatbread/matbot-files-node';
-import { createBuiltinTools, createProviderTool } from '@matatbread/matbot-tool-plugin';
+import { createBuiltinTools, createProviderTool, classifySpecifier, materializeRemote } from '@matatbread/matbot-tool-plugin';
 import { LookupKnowledgeIndex }               from '@matatbread/matbot-knowledge';
 import { access, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { createInterface }                 from 'node:readline/promises';
@@ -67,17 +67,35 @@ function resolveExportsEntry(value: unknown): string | undefined {
 /**
  * Resolve plugin specifiers to file: URLs rooted at the config directory.
  *
- * Local paths (./foo or /abs) are checked for a package.json; if found,
- * exports["."] is resolved so matbot.yaml can reference the package folder
- * rather than a deep src/ path.
+ * This is the single funnel for both startup and runtime (`plugin add` / hot-load) resolution, so
+ * the platform-neutral loader only ever sees file: URLs. Per the classifier:
+ *  - local  → resolve package.json exports["."] so matbot.yaml can reference the package folder
+ *             rather than a deep src/ path;
+ *  - remote → fetch the module graph into `.plugins/` (idempotent; a restart loads from cache) and
+ *             point at the cached entry — bare imports then resolve up to the host's node_modules;
+ *  - npm / tarball / git → resolved through the project's module graph (pnpm installs them); a bare
+ *             name passes through if not yet on disk so loadPlugins can emit the warning.
  */
 async function resolvePluginSpecifiers(specifiers: readonly string[], configDir: string): Promise<string[]> {
   const req = createRequire(path.join(configDir, '_'));
+  const dotPlugins = path.join(configDir, '.plugins');
   const results: string[] = [];
 
   for (const spec of specifiers) {
-    if (spec.startsWith('.') || path.isAbsolute(spec)) {
-      const absDir = path.resolve(configDir, spec);
+    const classified = await classifySpecifier(spec, configDir);
+
+    if (classified.kind === 'remote') {
+      try {
+        results.push(pathToFileURL(await materializeRemote(spec, dotPlugins, configDir)).href);
+      } catch (e) {
+        console.warn(`[matbot] Could not fetch remote plugin "${spec}": ${e instanceof Error ? e.message : String(e)}`);
+        results.push(spec);  // let loadPlugins surface the failure
+      }
+      continue;
+    }
+
+    if (classified.kind === 'local' || classified.kind === 'missing-path') {
+      const absDir = classified.kind === 'local' ? classified.dir : classified.resolved;
       try {
         const pkg  = JSON.parse(await readFile(path.join(absDir, 'package.json'), 'utf8')) as Record<string, unknown>;
         const main = resolveExportsEntry(pkg['exports']);
@@ -87,12 +105,14 @@ async function resolvePluginSpecifiers(specifiers: readonly string[], configDir:
         }
       } catch { /* no package.json or unparseable — fall through */ }
       results.push(pathToFileURL(absDir).href);
-    } else {
-      try {
-        results.push(pathToFileURL(req.resolve(spec)).href);
-      } catch {
-        results.push(spec);  // let loadPlugins emit the warning
-      }
+      continue;
+    }
+
+    // npm / pnpm-url: installed in node_modules under the package name (the stored specifier).
+    try {
+      results.push(pathToFileURL(req.resolve(spec)).href);
+    } catch {
+      results.push(spec);  // let loadPlugins emit the warning
     }
   }
 

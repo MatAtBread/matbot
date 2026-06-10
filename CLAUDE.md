@@ -154,6 +154,21 @@ All runtime state lives under `.data/` **next to `matbot.yaml`**, never in the s
 Plugins may create additional subdirectories (e.g. `files/`, `settings/`) as needed.
 `.data/` is gitignored. Source and data are always separate.
 
+### `.plugins/` — fetched remote-plugin cache
+
+A **separate** tree from `.data/`, also next to `matbot.yaml`. When a plugin is installed from an
+HTTP(S) or `github:` raw-source specifier, its module graph is fetched and mirrored here
+(`.plugins/<host>/<path…>`), preserving structure, and imported through the normal Node strip-only
+loader — bare imports resolve up to the host's `node_modules` (the same "singleton boundary" the web
+bundle uses), relative imports resolve to the fetched siblings, so no import rewriting is needed. The
+cache is idempotent and offline-friendly: a restart loads from disk rather than re-fetching.
+
+The split from `.data/` is deliberate and load-bearing: `.data/` is the LLM's read-write runtime
+state, whereas `.plugins/` is **matbot-writes / LLM-reads-only** (e.g. mounted read-only into
+docker-bash) so cached plugin *code* cannot be tampered with by the model. Do not relocate it under
+`.data/`. (Lives in `apps/cli` + `packages/core/tool-plugin`'s `remote-cache.ts`; npm/tarball/git
+installs still go through the package manager into `node_modules`, not here.) `.plugins/` is gitignored.
+
 ---
 
 ## Service registry

@@ -129,11 +129,27 @@ export async function loadPlugins(
     const mod  = result.value;
     const spec_obj = (mod['plugin'] ?? (mod['default'] as Record<string, unknown> | undefined)?.['plugin']) as MatbotPluginSpec | undefined;
 
-    if (spec_obj === undefined || typeof spec_obj !== 'object' || !('apiVersion' in spec_obj)) {
+    // Shape verification: a loaded module is a matbot plugin only if it exports a `plugin` object
+    // carrying `apiVersion`, and any lifecycle members it declares are functions. This is the
+    // post-import half of the install guard (the pre-import half is the package.json matbotRuntime
+    // check) — it is what stops an arbitrary fetched/installed module from being treated as a plugin.
+    if (spec_obj === undefined || typeof spec_obj !== 'object') {
       throw new Error(
-        `Plugin module "${spec}" does not export a \`plugin\` object. ` +
+        `Plugin module "${spec}" does not export a \`plugin\` object — it is not a matbot plugin. ` +
         `Expected: export const plugin: MatbotPluginSpec`,
       );
+    }
+    if (!('apiVersion' in spec_obj)) {
+      throw new Error(
+        `Plugin module "${spec}" exports a \`plugin\` object with no \`apiVersion\` — it is not a valid matbot plugin.`,
+      );
+    }
+    const lifecycle = spec_obj as { setup?: unknown; teardown?: unknown; installationMessage?: unknown };
+    for (const fn of ['setup', 'teardown', 'installationMessage'] as const) {
+      const v = lifecycle[fn];
+      if (v !== undefined && typeof v !== 'function') {
+        throw new Error(`Plugin module "${spec}" exports \`plugin.${fn}\` that is not a function (got ${typeof v}).`);
+      }
     }
 
     // The single boundary where an author's spec becomes a loaded plugin: identity is stamped here,

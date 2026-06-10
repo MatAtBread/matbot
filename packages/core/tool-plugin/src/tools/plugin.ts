@@ -1,4 +1,4 @@
-import type { Tool, ToolEvent, ToolContext, MatbotPlugin, FormField, Runtime } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolEvent, ToolContext, MatbotPlugin, FormField, Runtime, PluginSource } from '@matatbread/matbot-plugin-api';
 import { CONFIRM_YES, CONFIRM_NO, IncompatibleRuntimeError } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins, getRegisteredTools, getRegisteredFrontendPlugins,
          getRegisteredServiceKeys, getHookPlugins, getSystemContextPlugins } from '@matatbread/matbot-core';
@@ -7,6 +7,7 @@ import { spawn }                             from 'node:child_process';
 import { pathToFileURL, fileURLToPath }       from 'node:url';
 import path                                  from 'node:path';
 import process                               from 'node:process';
+import { classifySpecifier, fetchRemoteManifest } from '../remote-cache.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -67,62 +68,108 @@ function resolveExportsMain(exports: unknown): string | undefined {
   return undefined;
 }
 
+interface DiscoveredPlugin {
+  specifier: string;
+  name:      string;
+  description: string;
+  // `type` categorises the origin; `uri` is the concrete source location as a scheme-qualified URI —
+  // `file://…` on disk for a local plugin, the `https://…` it was fetched from for a cached one.
+  source:    { type: PluginSource; uri: string };
+  matbotRuntime?: Runtime[];
+}
+
+// Inspect one candidate directory: it is a plugin only if its package.json depends on the plugin
+// API. Returns the discovery entry (with the caller-supplied specifier + source), or null.
+async function inspectPluginDir(sub: string, specifier: string, source: { type: PluginSource; uri: string }): Promise<DiscoveredPlugin | null> {
+  let pkg: { name?: string; description?: string; dependencies?: Record<string, string>; exports?: unknown; matbotRuntime?: unknown };
+  try {
+    pkg = JSON.parse(await readFile(path.join(sub, 'package.json'), 'utf8')) as typeof pkg;
+  } catch {
+    return null;
+  }
+  if (pkg.dependencies?.['@matatbread/matbot-plugin-api'] === undefined) return null;
+
+  // Prefer manifest.description (runtime source of truth) over package.json description. Resolve the
+  // explicit entry from exports["."] so we import the .ts file directly rather than the directory.
+  let description = pkg.description ?? '';
+  const exportsMain = resolveExportsMain(pkg.exports);
+  if (exportsMain) {
+    try {
+      const mod = await import(pathToFileURL(path.join(sub, exportsMain)).href) as Record<string, unknown>;
+      const p = (mod['plugin'] ?? (mod['default'] as Record<string, unknown> | undefined)?.['plugin']) as MatbotPlugin | undefined;
+      if (p?.manifest?.description) description = p.manifest.description;
+    } catch { /* leave description as-is */ }
+  }
+
+  const runtimes = normalizeRuntimes(pkg.matbotRuntime);
+  return {
+    specifier,
+    name:        pkg.name ?? path.basename(sub),
+    description,
+    source,
+    ...(runtimes !== undefined ? { matbotRuntime: runtimes } : {}),
+  };
+}
+
 // TODO: This is a convenience shim for end users in monorepo setups and is
 // intentionally narrow. It should eventually be replaced with a proper
 // discovery interface — registry lookup, repo scanning, or a plugin marketplace.
-async function discoverLocalPlugins(
-  projectDir: string,
-): Promise<Array<{ specifier: string; name: string; description: string; matbotRuntime?: Runtime[] }>> {
-  const pluginsDir = path.join(projectDir, 'packages', 'plugins');
-  try { await access(pluginsDir); } catch { return []; }
+//
+// Two roots are scanned: the monorepo's `packages/plugins` (source: local) and, if present, the
+// `.plugins/` remote-plugin cache (source: github for raw.githubusercontent.com, else cdn) — so a
+// previously-fetched remote plugin is rediscoverable and re-installable by its original URL.
+async function discoverLocalPlugins(projectDir: string): Promise<DiscoveredPlugin[]> {
+  const results: DiscoveredPlugin[] = [];
 
-  const results: Array<{ specifier: string; name: string; description: string; matbotRuntime?: Runtime[] }> = [];
-
-  const scan = async (dir: string, depth: number): Promise<void> => {
+  const scanLocal = async (dir: string, depth: number): Promise<void> => {
     let entries;
     try { entries = await readdir(dir, { withFileTypes: true }); } catch { return; }
-
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       const sub = path.join(dir, entry.name);
-      try {
-        const pkg = JSON.parse(await readFile(path.join(sub, 'package.json'), 'utf8')) as {
-          name?: string;
-          description?: string;
-          dependencies?: Record<string, string>;
-          matbotRuntime?: unknown;
-        };
-        if (pkg.dependencies?.['@matatbread/matbot-plugin-api'] !== undefined) {
-          // Prefer manifest.description (runtime source of truth) over package.json description.
-          let description = pkg.description ?? '';
-          // Resolve the explicit entry file from exports["."] so we import the .ts file
-          // directly rather than the directory (directory import requires the loader to
-          // handle exports-field resolution for .ts files, which is unreliable).
-          const exportsMain = resolveExportsMain((pkg as { exports?: unknown }).exports);
-          if (exportsMain) {
-            try {
-              const entryUrl = pathToFileURL(path.join(sub, exportsMain)).href;
-              const mod = await import(entryUrl) as Record<string, unknown>;
-              const p = (mod['plugin'] ?? (mod['default'] as Record<string, unknown> | undefined)?.['plugin']) as MatbotPlugin | undefined;
-              if (p?.manifest?.description) description = p.manifest.description;
-            } catch { /* leave description as-is */ }
-          }
-
-          const runtimes = normalizeRuntimes(pkg.matbotRuntime);
-          results.push({
-            specifier:   `./${path.relative(projectDir, sub).replace(/\\/g, '/')}`,
-            name:        pkg.name ?? entry.name,
-            description,
-            ...(runtimes !== undefined ? { matbotRuntime: runtimes } : {}),
-          });
-        }
-      } catch { /* no package.json or unreadable */ }
-      if (depth < 2) await scan(sub, depth + 1);
+      const specifier = `./${path.relative(projectDir, sub).replace(/\\/g, '/')}`;
+      const found = await inspectPluginDir(sub, specifier, { type: 'local', uri: pathToFileURL(sub).href });
+      if (found) results.push(found);
+      if (depth < 2) await scanLocal(sub, depth + 1);
     }
   };
 
-  await scan(pluginsDir, 1);
+  const pluginsDir = path.join(projectDir, 'packages', 'plugins');
+  try { await access(pluginsDir); await scanLocal(pluginsDir, 1); } catch { /* no monorepo plugins dir */ }
+
+  await scanCacheDir(path.join(projectDir, '.plugins'), results);
   return results;
+}
+
+// Walk the `.plugins/<host>/<path…>` cache, reconstructing each cached package's original URL
+// specifier. Descent stops at the first package.json found on a branch (that is the package — its
+// sources live below and are not separately installable); the symlink farm at `.plugins/node_modules`
+// is skipped (those are host packages, not cached plugins).
+async function scanCacheDir(dotPlugins: string, results: DiscoveredPlugin[]): Promise<void> {
+  try { await access(dotPlugins); } catch { return; }
+
+  const walk = async (dir: string): Promise<void> => {
+    let entries;
+    try { entries = await readdir(dir, { withFileTypes: true }); } catch { return; }
+
+    let isPackage = false;
+    try { await access(path.join(dir, 'package.json')); isPackage = true; } catch { /* not a package root */ }
+    if (isPackage && dir !== dotPlugins) {
+      const rel    = path.relative(dotPlugins, dir).split(path.sep);
+      const host   = rel[0] ?? '';
+      const url    = `https://${host}/${rel.slice(1).join('/')}`;
+      const type: PluginSource = host === 'raw.githubusercontent.com' ? 'github' : 'cdn';
+      const found  = await inspectPluginDir(dir, url, { type, uri: url });
+      if (found) { results.push(found); return; } // a real plugin root — don't descend into its sources
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name === 'node_modules') continue;
+      await walk(path.join(dir, entry.name));
+    }
+  };
+
+  await walk(dotPlugins);
 }
 
 // Read the plugin's package.json description without importing the module — the
@@ -202,6 +249,40 @@ function runCommand(cmd: string, args: string[], cwd: string): Promise<string> {
       else reject(new Error(`${cmd} exited with code ${String(code)}\n${chunks.join('')}`));
     });
   });
+}
+
+// The dependency names recorded in the project package.json — used to discover what a pnpm/npm
+// install of a tarball/git URL actually added (a URL is not a loadable specifier on restart, but
+// the installed package name is). dependencies + optionalDependencies cover what `add` writes.
+async function readDependencyNames(projectDir: string): Promise<Set<string>> {
+  try {
+    const pkg = JSON.parse(await readFile(path.join(projectDir, 'package.json'), 'utf8')) as {
+      dependencies?: Record<string, string>; optionalDependencies?: Record<string, string>;
+    };
+    return new Set([...Object.keys(pkg.dependencies ?? {}), ...Object.keys(pkg.optionalDependencies ?? {})]);
+  } catch {
+    return new Set();
+  }
+}
+
+async function addedDependencyName(projectDir: string, before: Set<string>): Promise<string | undefined> {
+  const after = [...await readDependencyNames(projectDir)].filter(n => !before.has(n));
+  return after.length === 1 ? after[0] : undefined;
+}
+
+// Turn a raw package-manager failure into an actionable message: name the intent and translate the
+// two signatures users actually hit (workspace-only source packages; registry 404s) instead of
+// dumping the exit code and stderr alone.
+function describeInstallFailure(specifier: string, pm: string, e: unknown): string {
+  const raw = e instanceof Error ? e.message : String(e);
+  let hint = '';
+  if (/workspace:|catalog:/i.test(raw)) {
+    hint = ' This looks like a workspace-internal source package (it uses the workspace:/catalog: protocol) ' +
+           'and cannot be installed standalone — install the published package, or point at its raw source via a URL / github: specifier.';
+  } else if (/\b404\b|not found|No matching version/i.test(raw)) {
+    hint = ' The package or version was not found in the configured registry (check the name, or the registry in your .npmrc).';
+  }
+  return `Could not install "${specifier}" with ${pm}:${hint}\n${raw}`;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -348,11 +429,51 @@ const executor = {
         return;
       }
 
+      // Classification is grounded in what is actually on disk (a stat), not just the string shape:
+      // a bare `packages/plugins/foo` is local iff it exists, and a `./`-/`/`-shaped path with no
+      // package.json is reported rather than silently mis-installed.
+      const classified = await classifySpecifier(specifier, projectDir);
+      if (classified.kind === 'missing-path') {
+        yield { type: 'error', message:
+          `"${specifier}" looks like a local path but no package.json was found at "${classified.resolved}" ` +
+          `or any parent directory. Check the path, or pass an npm name, URL, or github: specifier.` };
+        return;
+      }
+
+      // Pre-fetch verification for remote (raw-source) plugins: confirm the package.json declares
+      // matbotRuntime including "node" BEFORE downloading or executing any code, so a stray URL
+      // cannot be installed. (npm / tarball / git installs are verified after install by the
+      // loader's runtime gate + the post-import shape check.)
+      let description: string | undefined;
+      if (classified.kind === 'remote') {
+        try {
+          const manifest = await fetchRemoteManifest(specifier);
+          const rt = manifest.runtimes;
+          if (rt === undefined) {
+            yield { type: 'error', message:
+              `Refusing to install "${specifier}": its package.json has no "matbotRuntime" field, ` +
+              `so it cannot be verified as a matbot plugin.` };
+            return;
+          }
+          if (!rt.includes('node')) {
+            yield { type: 'error', message:
+              `Refusing to install "${specifier}": it declares matbotRuntime [${rt.join(', ')}], which excludes the "node" host.` };
+            return;
+          }
+          const d = manifest.pkg['description'];
+          if (typeof d === 'string') description = d;
+        } catch (e) {
+          yield { type: 'error', message: `Could not install "${specifier}": ${e instanceof Error ? e.message : String(e)}.` };
+          return;
+        }
+      } else {
+        description = await pkgDescriptionFromSpecifier(specifier, projectDir);
+      }
+
       // confirmAction rather than a `confirmed` input parameter: plugin installation is a
       // privileged operation. Breaking the LLM's execution chain and requiring an
       // out-of-band human response prevents prompt injection or a malicious plugin
       // from auto-installing further plugins by simply passing confirmed:true.
-      const description = await pkgDescriptionFromSpecifier(specifier, projectDir);
       const confirmed = await confirmAction(
         ctx,
         `Install plugin **"${specifier}"**?${description !== undefined ? `\n_${description}_` : ''}`,
@@ -362,29 +483,38 @@ const executor = {
         return;
       }
 
-      const isLocalPath = specifier.startsWith('./') || specifier.startsWith('../') || path.isAbsolute(specifier);
-      if (!isLocalPath) {
+      // The specifier written to matbot.yaml is usually the one given, but a tarball/git URL is not
+      // a loadable specifier on restart — record the installed package name instead.
+      let configSpecifier = specifier;
+
+      if (classified.kind === 'npm' || classified.kind === 'pnpm-url') {
         const pm = await detectPackageManager(projectDir);
         yield { type: 'stdout', chunk: `Installing "${specifier}" with ${pm}...\n` };
+        const before = await readDependencyNames(projectDir);
         try {
           const out = await runCommand(pm, ['add', specifier], projectDir);
           if (out) yield { type: 'stdout', chunk: out };
         } catch (e) {
-          yield { type: 'error', message: String(e) };
+          yield { type: 'error', message: describeInstallFailure(specifier, pm, e) };
           return;
+        }
+        if (classified.kind === 'pnpm-url') {
+          const installedName = await addedDependencyName(projectDir, before);
+          if (installedName !== undefined) configSpecifier = installedName;
         }
       }
 
-      await addPlugin(configPath, specifier);
+      await addPlugin(configPath, configSpecifier);
 
-      yield { type: 'stdout', chunk: `Activating "${specifier}"...\n` };
+      // For a remote specifier, loadPlugin materialises the module graph into .plugins/ first.
+      yield { type: 'stdout', chunk: `Activating "${configSpecifier}"...\n` };
       try {
-        const loaded  = await ctx.loadPlugin(specifier);
+        const loaded  = await ctx.loadPlugin(configSpecifier);
         const welcome = await loaded.installationMessage?.();
         yield {
           type:  'result',
           value: {
-            message: `"${specifier}" installed and is now active.`,
+            message: `"${configSpecifier}" installed and is now active.`,
             ...(welcome !== undefined ? { installationMessage: welcome } : {}),
           },
         };
@@ -393,11 +523,11 @@ const executor = {
         // back out of matbot.yaml so the config never carries a plugin that can never activate here.
         // Other activation failures (e.g. a missing secret) are left in config to fix and retry.
         if (e instanceof IncompatibleRuntimeError) {
-          await removePlugin(configPath, specifier);
+          await removePlugin(configPath, configSpecifier);
           yield { type: 'error', message: e.message };
           return;
         }
-        yield { type: 'result', value: { message: `"${specifier}" added to config but activation failed: ${String(e)}.` } };
+        yield { type: 'result', value: { message: `"${configSpecifier}" added to config but activation failed: ${String(e)}.` } };
       }
       return;
     }
@@ -487,12 +617,32 @@ export const pluginTool: Tool = {
     '```ts\n' +
     'type PluginAction =\n' +
     "  | { action: 'list' }                            // configured + loaded plugins, with types, tools, and matbotRuntime\n" +
-    "  | { action: 'discover_local' }                  // scan packages/plugins for installable local plugins (incl. matbotRuntime)\n" +
-    "  | { action: 'add';        specifier: string }   // install & activate; specifier = npm name, path, or GitHub shorthand\n" +
+    "  | { action: 'discover_local' }                  // scan packages/plugins + the .plugins cache; each result carries source {type: local|github|cdn, uri} + matbotRuntime\n" +
+    "  | { action: 'add';        specifier: string }   // install & activate (see Specifier below)\n" +
     "  | { action: 'remove';     specifier: string }   // deactivate & remove from matbot.yaml\n" +
     "  | { action: 'reload';     specifier: string }   // re-import from disk without restarting\n" +
     "  | { action: 'store-key';  key: string };        // store a secret a plugin/provider needs; value entered out-of-band\n" +
-    '```',
+    '```\n\n' +
+    'A `specifier` (for add/remove/reload) is EXACTLY ONE of these forms — pass a concrete string, ' +
+    'not a fuzzy name (run `discover_local` first to find the exact specifier):\n' +
+    '```ts\n' +
+    'type Specifier =\n' +
+    '  // npm registry — published packages; resolves via your .npmrc (npmjs, verdaccio, or private)\n' +
+    '  | "<name>" | "@<scope>/<name>"            // e.g. "@matatbread/matbot-persist-ki-bge-node"\n' +
+    '  | "<name>@<version|tag|range>"            // e.g. "foo@1.2.3", "@scope/foo@^0.1", "foo@latest"\n' +
+    '  // local filesystem — resolved against the project dir; a package.json MUST exist at/above it.\n' +
+    '  //   The leading "./" is optional: a bare path is local IFF it exists, else it is read as npm.\n' +
+    '  | "./<dir>" | "../<dir>" | "/<abs-dir>" | "file:///<abs-dir>" | "<dir>/<subdir>"\n' +
+    '  // HTTP(S) — raw source (a directory, a package.json, or a code entry) fetched & cached into\n' +
+    '  //   .plugins/; OR a .tgz tarball (installed via your package manager).\n' +
+    '  | "https://<host>/<path>/" | "https://<host>/<path>/package.json"\n' +
+    '  | "https://<host>/<path>/<entry>.ts" | "https://<host>/<path>/<pkg>.tgz"\n' +
+    '  // GitHub — raw source is fetched & cached; "#path:" / git URLs install via the package manager\n' +
+    '  | "github:<owner>/<repo>" | "github:<owner>/<repo>#<ref>" | "github:<owner>/<repo>/<subdir>"\n' +
+    '  | "github:<owner>/<repo>#path:/<subdir>" | "git+https://<host>/<owner>/<repo>.git";\n' +
+    '```\n' +
+    'Raw-source (HTTP/github) installs require the package.json to declare `matbotRuntime` including ' +
+    '"node"; it is refused otherwise. Cached code lives read-only under `.plugins/`.',
   inputSchema: {
     type:       'object',
     required:   ['action'],
@@ -500,11 +650,13 @@ export const pluginTool: Tool = {
       action: {
         type:        'string',
         enum:        ['list', 'add', 'remove', 'reload', 'discover_local', 'store-key'],
-        description: 'list: show configured plugins. add: install and register a plugin. remove: deregister and optionally uninstall. reload: unload and re-import from disk (picks up code changes without restarting). discover_local: scan packages/plugins for available local plugins. store-key: supply a secret (e.g. an API key) that a plugin or provider reported missing — you provide only the key name; the value is entered out-of-band.',
+        description: 'list: show configured plugins. add: install and register a plugin. remove: deregister and optionally uninstall. reload: unload and re-import from disk (picks up code changes without restarting). discover_local: scan packages/plugins and the .plugins cache for installable plugins (each result reports its source). store-key: supply a secret (e.g. an API key) that a plugin or provider reported missing — you provide only the key name; the value is entered out-of-band.',
       },
       specifier: {
         type:        'string',
-        description: 'npm package name, file path, or GitHub shorthand (required for add/remove/reload).',
+        description: 'Required for add/remove/reload. Exactly one of: an npm name ("@scope/name", optionally "@version"); ' +
+                     'a local path ("./dir", "/abs", "file://…", or a bare existing path); an HTTP(S) URL (raw source dir/package.json/.ts, or a .tgz); ' +
+                     'or a github: / git+ specifier. See the tool description for the full grammar.',
       },
       key: {
         type:        'string',
