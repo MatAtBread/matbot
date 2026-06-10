@@ -7,6 +7,8 @@ dist/
 .env.*
 !.env.example
 .data*
+# Fetched remote-plugin cache (matbot-writes / LLM-reads-only); regenerated on demand
+.plugins/
 .claude/settings.local.json
 matbot.yaml
 matbot.*.yaml
