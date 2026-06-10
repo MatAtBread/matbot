@@ -226,6 +226,12 @@ async function main() {
     if (name) packageEntries[name] = id;
   }
 
+  // A baked module is importable by BOTH its synthetic id (specNames above) and its package name
+  // (via the import map). identify() must resolve either to the canonical name — otherwise loading a
+  // bundled plugin BY PACKAGE NAME (availablePlugins[].specifier) misses specNames and the resolver
+  // falls back to path-munging, which strips the @scope and yields a naked, node-divergent name.
+  for (const name of Object.keys(packageEntries)) specNames[name] ??= name;
+
   // Raw UI assets (e.g. the web frontend's index.html scaffold + app.js) baked verbatim for an
   // in-process frontend to inject. NOT type-stripped — they're already HTML/JS; the whole payload is
   // guarded against `</script>` below, which covers any inside these strings.
