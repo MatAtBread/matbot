@@ -1,10 +1,12 @@
 import type { Tool, ToolEvent, ToolContext, MatbotPlugin, FormField, Runtime, PluginSource } from '@matatbread/matbot-plugin-api';
 import { CONFIRM_YES, CONFIRM_NO, IncompatibleRuntimeError } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins, getRegisteredTools, getRegisteredFrontendPlugins,
-         getRegisteredServiceKeys, getHookPlugins, getSystemContextPlugins } from '@matatbread/matbot-core';
+         getRegisteredServiceKeys, getHookPlugins, getSystemContextPlugins,
+         getSpecifierForPlugin } from '@matatbread/matbot-core';
 import { readFile, writeFile, access, readdir } from 'node:fs/promises';
 import { spawn }                             from 'node:child_process';
 import { pathToFileURL, fileURLToPath }       from 'node:url';
+import { createRequire }                     from 'node:module';
 import path                                  from 'node:path';
 import process                               from 'node:process';
 import { classifySpecifier, fetchRemoteManifest } from '../remote-cache.js';
@@ -198,27 +200,41 @@ async function pkgDescriptionFromSpecifier(specifier: string, projectDir: string
   }
 }
 
+// Resolve a user-supplied handle to the loadable specifier recorded in matbot.yaml. A loaded plugin
+// records its config entry as `plugin.specifier`, so the canonical package `name` maps straight to it
+// via getSpecifierForPlugin — that's the stable, preferred handle. The literal config entry also works
+// (it is its own specifier); anything else falls through unchanged so a direct specifier still loads.
+function toConfigSpecifier(handle: string): string {
+  const byName = getSpecifierForPlugin(handle);
+  return byName ?? handle;
+}
+
 function normalizeRuntimes(raw: unknown): Runtime[] | undefined {
   if (!Array.isArray(raw)) return undefined;
   return raw.filter((r): r is Runtime => r === 'node' || r === 'browser');
 }
 
-// Read a plugin's declared `matbotRuntime` off the nearest named package.json walking up from the
-// specifier — the same boundary the node PluginResolver uses, so a declaration on the plugin (not an
-// enclosing monorepo root) wins. Bare npm names aren't resolved here (returns undefined = "not declared").
-async function runtimesFromSpecifier(specifier: string, projectDir: string): Promise<Runtime[] | undefined> {
+// Read a plugin's canonical package.json `name` by walking up from the specifier — the same boundary
+// the node PluginResolver uses, so a declaration on the plugin (not an enclosing monorepo root) wins.
+// file://, paths, and (once installed) bare npm names resolve; a remote github:/https URL does not
+// (→ undefined; callers holding a fetched manifest read its name directly).
+async function nameFromSpecifier(specifier: string, projectDir: string): Promise<string | undefined> {
   let dir: string;
   if (specifier.startsWith('file://')) {
     dir = path.dirname(fileURLToPath((specifier.split('?')[0]) ?? specifier));
   } else if (specifier.startsWith('./') || specifier.startsWith('../') || path.isAbsolute(specifier)) {
     dir = path.resolve(projectDir, specifier);
   } else {
-    return undefined;
+    try {
+      dir = path.dirname(createRequire(path.join(projectDir, '_')).resolve(specifier));
+    } catch {
+      return undefined;
+    }
   }
   while (true) {
     try {
-      const pkg = JSON.parse(await readFile(path.join(dir, 'package.json'), 'utf8')) as { name?: string; matbotRuntime?: unknown };
-      if (pkg.name) return normalizeRuntimes(pkg.matbotRuntime);
+      const pkg = JSON.parse(await readFile(path.join(dir, 'package.json'), 'utf8')) as { name?: string };
+      if (pkg.name) return pkg.name;
     } catch { /* no package.json here, keep walking */ }
     const parent = path.dirname(dir);
     if (parent === dir) return undefined;
@@ -353,17 +369,14 @@ const executor = {
         [...toolsByPlugin.keys()].filter((k): k is string => k !== undefined),
       );
 
-      const loaded = await Promise.all(getRegisteredPlugins().map(async p => {
-        const runtimes = await runtimesFromSpecifier(p.specifier, projectDir);
-        return {
-          name:        p.name,
-          apiVersion:  p.apiVersion,
-          types:       pluginTypes(p, pluginToolNames),
-          tools:       toolsByPlugin.get(p.name) ?? [],
-          specifier:   p.specifier,
-          ...(p.manifest?.description ? { description: p.manifest.description } : {}),
-          ...(runtimes !== undefined ? { matbotRuntime: runtimes } : {}),
-        };
+      const loaded = getRegisteredPlugins().map(p => ({
+        name:        p.name,
+        apiVersion:  p.apiVersion,
+        types:       pluginTypes(p, pluginToolNames),
+        tools:       toolsByPlugin.get(p.name) ?? [],
+        specifier:   p.specifier,
+        ...(p.manifest?.description ? { description: p.manifest.description } : {}),
+        ...(p.matbotRuntime !== undefined ? { matbotRuntime: p.matbotRuntime } : {}),
       }));
 
       yield {
@@ -445,6 +458,7 @@ const executor = {
       // cannot be installed. (npm / tarball / git installs are verified after install by the
       // loader's runtime gate + the post-import shape check.)
       let description: string | undefined;
+      let remoteName: string | undefined;
       if (classified.kind === 'remote') {
         try {
           const manifest = await fetchRemoteManifest(specifier);
@@ -462,6 +476,7 @@ const executor = {
           }
           const d = manifest.pkg['description'];
           if (typeof d === 'string') description = d;
+          if (typeof manifest.pkg['name'] === 'string') remoteName = manifest.pkg['name'];
         } catch (e) {
           yield { type: 'error', message: `Could not install "${specifier}": ${e instanceof Error ? e.message : String(e)}.` };
           return;
@@ -504,6 +519,23 @@ const executor = {
         }
       }
 
+      // Duplicate-name guard: a plugin's canonical package.json `name` is its identity (and the handle
+      // remove/reload address it by), and the registry forbids two loaded plugins sharing one. Reject a
+      // collision *before* writing config — otherwise the load below fails (the registry throw is
+      // swallowed by loadPlugins) and leaves a dangling matbot.yaml entry. Almost always the same
+      // package added by two specifiers: a config error, not something to silently double-install.
+      const pluginName = remoteName ?? await nameFromSpecifier(configSpecifier, projectDir);
+      if (pluginName !== undefined) {
+        const clash = getRegisteredPlugins().find(p => p.name === pluginName);
+        if (clash !== undefined) {
+          yield { type: 'error', message:
+            `A plugin named "${pluginName}" is already installed (from "${clash.specifier}"). ` +
+            `Remove it first, or — if this is the same package via a different specifier — drop one. ` +
+            `Nothing was added to ${path.basename(configPath)}.` };
+          return;
+        }
+      }
+
       await addPlugin(configPath, configSpecifier);
 
       // For a remote specifier, loadPlugin materialises the module graph into .plugins/ first.
@@ -535,26 +567,28 @@ const executor = {
     // ── remove ───────────────────────────────────────────────────────────────
     if (action === 'remove') {
       const existing = await readPluginsList(configPath);
-      if (!existing.includes(specifier)) {
-        yield { type: 'result', value: { message: `"${specifier}" is not in the plugins list.` } };
+      // Address a plugin by its canonical package name (preferred) or its exact matbot.yaml entry.
+      const entry = toConfigSpecifier(specifier);
+      if (!existing.includes(entry)) {
+        yield { type: 'result', value: { message: `"${specifier}" is not an installed plugin — pass its package name or its matbot.yaml entry (see \`plugin list\`).` } };
         return;
       }
 
       // Same security rationale as add: out-of-band prompt, not a confirmable parameter.
-      if (!await confirmAction(ctx, `Remove plugin **"${specifier}"**?`)) {
+      if (!await confirmAction(ctx, `Remove plugin **"${entry}"**?`)) {
         yield { type: 'result', value: { message: 'Cancelled.' } };
         return;
       }
 
-      const removed = await removePlugin(configPath, specifier);
+      const removed = await removePlugin(configPath, entry);
       if (!removed) {
-        yield { type: 'error', message: `Failed to remove "${specifier}" from ${path.basename(configPath)}.` };
+        yield { type: 'error', message: `Failed to remove "${entry}" from ${path.basename(configPath)}.` };
         return;
       }
 
-      yield { type: 'stdout', chunk: `Deactivating "${specifier}"...\n` };
+      yield { type: 'stdout', chunk: `Deactivating "${entry}"...\n` };
       try {
-        await ctx.unloadPlugin(specifier);
+        await ctx.unloadPlugin(entry);
       } catch (e) {
         yield { type: 'stderr', chunk: `Deactivation failed: ${String(e)}\n` };
       }
@@ -562,23 +596,26 @@ const executor = {
       if (await confirmAction(ctx, 'Also uninstall the npm package?')) {
         const pm = await detectPackageManager(projectDir);
         try {
-          const out = await runCommand(pm, ['remove', specifier], projectDir);
+          const out = await runCommand(pm, ['remove', entry], projectDir);
           if (out) yield { type: 'stdout', chunk: out };
         } catch (e) {
           yield { type: 'stderr', chunk: `Uninstall failed: ${String(e)}\n` };
         }
       }
 
-      yield { type: 'result', value: { message: `"${specifier}" removed and deactivated.` } };
+      yield { type: 'result', value: { message: `"${entry}" removed and deactivated.` } };
     }
 
     // ── reload ────────────────────────────────────────────────────────────────
     if (action === 'reload') {
-      yield { type: 'stdout', chunk: `Reloading "${specifier}"...\n` };
+      // Accept the canonical package name or the matbot.yaml entry; a not-yet-loaded direct specifier
+      // falls through unchanged (the first-time-load path below).
+      const entry = toConfigSpecifier(specifier);
+      yield { type: 'stdout', chunk: `Reloading "${entry}"...\n` };
 
       let wasLoaded: boolean;
       try {
-        wasLoaded = await ctx.unloadPlugin(specifier);
+        wasLoaded = await ctx.unloadPlugin(entry);
       } catch (e) {
         // teardown() failed (e.g. timeout) — the plugin was resident, so this is still a
         // genuine reload of already-trusted code; surface the error but proceed.
@@ -589,13 +626,13 @@ const executor = {
       // Reloading a resident plugin needs no confirmation — the user already trusts it. But if
       // nothing was unloaded, "reload" is really a first-time load of code they haven't consented
       // to, so gate it with the same confirmation as add/remove.
-      if (!wasLoaded && !await confirmAction(ctx, `Plugin **"${specifier}"** is not currently loaded — load it now?`)) {
+      if (!wasLoaded && !await confirmAction(ctx, `Plugin **"${entry}"** is not currently loaded — load it now?`)) {
         yield { type: 'result', value: { message: 'Cancelled.' } };
         return;
       }
 
-      const reloaded = await ctx.loadPlugin(specifier);
-      const result = reloaded.installationMessage?.() || `"${specifier}" reloaded successfully.`;
+      const reloaded = await ctx.loadPlugin(entry);
+      const result = await reloaded.installationMessage?.() || `"${entry}" reloaded successfully.`;
 
       if (result !== null) {
         yield { type: 'result', value: { message: result } };
@@ -618,9 +655,9 @@ export const pluginTool: Tool = {
     'type PluginAction =\n' +
     "  | { action: 'list' }                            // configured + loaded plugins, with types, tools, and matbotRuntime\n" +
     "  | { action: 'discover_local' }                  // scan packages/plugins + the .plugins cache; each result carries source {type: local|github|cdn, uri} + matbotRuntime\n" +
-    "  | { action: 'add';        specifier: string }   // install & activate (see Specifier below)\n" +
-    "  | { action: 'remove';     specifier: string }   // deactivate & remove from matbot.yaml\n" +
-    "  | { action: 'reload';     specifier: string }   // re-import from disk without restarting\n" +
+    "  | { action: 'add';        specifier: string }   // install & activate (specifier = a Specifier, below)\n" +
+    "  | { action: 'remove';     specifier: string }   // deactivate & remove (specifier = package name, preferred — or its matbot.yaml entry)\n" +
+    "  | { action: 'reload';     specifier: string }   // re-import without restarting (specifier = package name, preferred — or its matbot.yaml entry)\n" +
     "  | { action: 'store-key';  key: string };        // store a secret a plugin/provider needs; value entered out-of-band\n" +
     '```\n\n' +
     'A `specifier` (for add/remove/reload) is EXACTLY ONE of these forms — pass a concrete string, ' +
@@ -633,16 +670,23 @@ export const pluginTool: Tool = {
     '  // local filesystem — resolved against the project dir; a package.json MUST exist at/above it.\n' +
     '  //   The leading "./" is optional: a bare path is local IFF it exists, else it is read as npm.\n' +
     '  | "./<dir>" | "../<dir>" | "/<abs-dir>" | "file:///<abs-dir>" | "<dir>/<subdir>"\n' +
-    '  // HTTP(S) — raw source (a directory, a package.json, or a code entry) fetched & cached into\n' +
-    '  //   .plugins/; OR a .tgz tarball (installed via your package manager).\n' +
+    '  // HTTP(S) — raw source fetched & cached into .plugins/; OR a .tgz tarball (installed via your\n' +
+    '  //   package manager). Raw source MUST resolve a package.json: the URL is one, OR points at a\n' +
+    '  //   directory containing one, OR is a code entry with a package.json as its DIRECT SIBLING.\n' +
     '  | "https://<host>/<path>/" | "https://<host>/<path>/package.json"\n' +
     '  | "https://<host>/<path>/<entry>.ts" | "https://<host>/<path>/<pkg>.tgz"\n' +
     '  // GitHub — raw source is fetched & cached; "#path:" / git URLs install via the package manager\n' +
     '  | "github:<owner>/<repo>" | "github:<owner>/<repo>#<ref>" | "github:<owner>/<repo>/<subdir>"\n' +
     '  | "github:<owner>/<repo>#path:/<subdir>" | "git+https://<host>/<owner>/<repo>.git";\n' +
     '```\n' +
-    'Raw-source (HTTP/github) installs require the package.json to declare `matbotRuntime` including ' +
-    '"node"; it is refused otherwise. Cached code lives read-only under `.plugins/`.',
+    'Raw-source (HTTP/github) installs are packages: a package.json must resolve (the URL itself, a ' +
+    'directory containing one, or — for a code-entry URL — its direct sibling), it must declare a "name", ' +
+    'and its `matbotRuntime` must include "node"; the install is refused otherwise. ' +
+    'Cached code lives read-only under `.plugins/`.\n\n' +
+    'For remove/reload, prefer the plugin\'s canonical package.json **name** (the stable identity shown ' +
+    'as `name` by `list`) — the exact matbot.yaml entry also works, but the resolved `specifier` shown ' +
+    'under `loaded` may be a file: URL and is NOT the handle. A plugin name is unique, so addressing by ' +
+    'name is unambiguous; `add` refuses a second plugin with a name already installed.',
   inputSchema: {
     type:       'object',
     required:   ['action'],
@@ -654,9 +698,12 @@ export const pluginTool: Tool = {
       },
       specifier: {
         type:        'string',
-        description: 'Required for add/remove/reload. Exactly one of: an npm name ("@scope/name", optionally "@version"); ' +
-                     'a local path ("./dir", "/abs", "file://…", or a bare existing path); an HTTP(S) URL (raw source dir/package.json/.ts, or a .tgz); ' +
-                     'or a github: / git+ specifier. See the tool description for the full grammar.',
+        description: 'For remove/reload: the plugin\'s canonical package.json name (preferred — the `name` from `list`), ' +
+                     'or its exact matbot.yaml entry. For add: a load specifier — exactly one of: an npm name ' +
+                     '("@scope/name", optionally "@version"); a local path ("./dir", "/abs", "file://…", or a bare existing ' +
+                     'path); an HTTP(S) URL to raw source (a package.json, a directory containing one, or a code entry with a ' +
+                     'sibling package.json) or a .tgz; or a github: / git+ specifier. A raw-source package.json must declare a ' +
+                     '"name". See the tool description for the full grammar.',
       },
       key: {
         type:        'string',

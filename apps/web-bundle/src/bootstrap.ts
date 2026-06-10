@@ -55,8 +55,9 @@ function removePersistedProvider(name: string): void {
 
 /** Host services the in-page loader provides to the bootstrap (see loader.js / __mbLoader). */
 export interface LoaderApi {
-  /** Fetch a remote .ts plugin, type-strip it, and return a specifier importable right now. */
-  loadRemote(url: string): Promise<{ spec: string; name: string }>;
+  /** Fetch a remote .ts plugin, type-strip it, and return a specifier importable right now, plus the
+   *  name and declared matbotRuntime read from its sibling package.json. */
+  loadRemote(url: string): Promise<{ spec: string; name: string; runtimes?: readonly Runtime[] }>;
 }
 
 export interface BootEnv {
@@ -278,19 +279,24 @@ export async function boot(env: BootEnv): Promise<void> {
     },
 
     async loadPlugin(specifier: string, prompt?: PromptFn): Promise<MatbotPlugin> {
-      let spec = specifier;
       // A runtime add of a remote .ts (URL or root-absolute path) is fetched and type-stripped by the
-      // in-page loader; baked baseline specifiers are already importable via the import map.
+      // in-page loader into an ephemeral blob: URL; baked baseline specifiers are already importable
+      // via the import map. For a remote, we import the blob but record the *source* URL as the
+      // plugin's specifier (via { spec, importSpec }) — the blob is per-load and meaningless across
+      // reloads, whereas the source URL is what `plugin list` should show and reload/remove address.
+      let req: string | { spec: string; importSpec: string; runtimes?: readonly Runtime[] } = specifier;
       if (/^https?:\/\//.test(specifier) || (specifier.startsWith('/') && !specifier.startsWith('mbmod:'))) {
         const remote = await loader.loadRemote(specifier);
-        spec = remote.spec;
-        specNames[spec] = remote.name;
+        specNames[specifier] = remote.name;   // identify()/unload resolve by the source URL (= spec)
+        // Carry the declared matbotRuntime so the loader can gate a node-only remote before import and
+        // stamp plugin.matbotRuntime (which `list` reports — a blob: importSpec can't be re-read later).
+        req = { spec: specifier, importSpec: remote.spec, ...(remote.runtimes !== undefined ? { runtimes: remote.runtimes } : {}) };
       }
       // bustCache=false: the in-browser loader has no disk to re-read, and the query stamp toFreshUrl
       // appends would corrupt a blob:/mbmod: specifier (those don't take query strings) — making the
       // import reject. A remote spec is a freshly fetched blob, so it's already fresh; baked specs
       // re-import their existing blob. (True reload in the browser is a realm reload, by design.)
-      const loaded = await loadPlugins([spec], services, /* bustCache */ false, prompt, /* onIncompatibleRuntime */ 'throw');
+      const loaded = await loadPlugins([req], services, /* bustCache */ false, prompt, /* onIncompatibleRuntime */ 'throw');
       const plugin = loaded[0];
       if (plugin === undefined) throw new Error(`No plugin loaded for specifier "${specifier}"`);
       return plugin;

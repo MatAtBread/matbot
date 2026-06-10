@@ -243,4 +243,9 @@ export interface MatbotPlugin extends MatbotPluginSpec {
   readonly name:      string;   // resolver.identify(specifier)
   readonly specifier: string;   // how it was loaded
   readonly source?:   PluginSource;
+  // The package.json `matbotRuntime`, captured at load from the same value used for the pre-import
+  // gate (the host reads it once; downstream just reads this). Absent ⇒ undeclared. Stored rather
+  // than re-derived so `list` can report it offline and for remote plugins, whose config-entry
+  // specifier (a github:/https URL) can't be resolved back to a package.json after the fact.
+  readonly matbotRuntime?: readonly Runtime[];
 }

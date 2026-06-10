@@ -33,12 +33,12 @@ export function createRumsfeldPlugin(): MatbotPluginSpec {
 
       Examples:
         - Is <unknown> currently working?
-        - Tell me about <unknown>.
+        - Tell me about <unknown>'s <unknown>.
         - Use your skill about <unknown>.
         - <unknown> said to <unknown> that <unknown> is broken.
         - The <unknown> is arriving for <unknown>'s birthday.
 
-      Use when you encounter an "unknown" concept, system, term, entity or domain you lack specific context about — a named system you haven't
+      Use when you encounter an "unknown" concept, system, term, entity, person or domain you lack specific context about — a named system you haven't
       been trained on, user-specific preferences, personal information, a specialised topic or other subject the user assumes you know about.
 
       Use this tool early and as a higher priority than external searches as it is more likely to yield domain specific results than a general search.
@@ -50,7 +50,8 @@ export function createRumsfeldPlugin(): MatbotPluginSpec {
       - words that are clearly novel proper nouns or nouns used in a non-standard or domain-specific way, for example "the Xmit system" or "What does Xmit say?".
       - when the user directly uses the term 'skill' in their query, for example "Use your skill about <unknown> to do <unknown>".
 
-      List the unknown terms you need more information about, together with the contextual phrase or sentence they were mentioned in.`,
+      List one or more unknown terms you need more information about (without any qualifiers, demonstratives or possessives), together with the contextual phrase or sentence they were mentioned in.
+      If the qualifiers are specific, for example "Fred's car", include "Fred" and "car" as separate terms.`,
         inputSchema: {
           type:     'object',
           required: ['terms'],

@@ -89,7 +89,7 @@ export async function classifySpecifier(spec: string, projectDir: string): Promi
 
 export interface RemoteManifest {
   pkg:      Record<string, unknown>;
-  pkgUrl:   string | undefined; // the package.json URL, if one was found
+  pkgUrl:   string;             // the governing package.json URL (always resolved — its absence is an error)
   entryUrl: string;             // absolute URL of the module entry to import
   runtimes: readonly string[] | undefined; // package.json `matbotRuntime`, if declared
 }
@@ -143,13 +143,13 @@ export async function fetchRemoteManifest(spec: string): Promise<RemoteManifest>
 
   let url = spec.startsWith('github:') ? expandGithub(spec) : spec;
 
-  // A direct entry URL (…/index.ts): import it directly; look for a sibling package.json for the
-  // runtime/description gate, but tolerate its absence (fall back to the post-import shape check).
+  // A direct entry URL (…/index.ts): import that entry, but the plugin is still a *package*, so a
+  // sibling package.json bearing the mandatory "name" (plus optional description / matbotRuntime gate)
+  // must sit next to it. pkgUrl is set to that manifest so materialize mirrors it to disk beside the
+  // entry, where the resolver's walk-up finds it.
   if (CODE_EXT.test((url.split('?')[0]) ?? url)) {
-    const pkgUrl = new URL('./package.json', url).href;
-    const r = await fetchText(pkgUrl);
-    const pkg = r.ok ? safeJson(r.text, pkgUrl) : {};
-    const manifest: RemoteManifest = { pkg, pkgUrl: r.ok ? pkgUrl : undefined, entryUrl: url, runtimes: runtimesOf(pkg) };
+    const { url: pkgUrl, pkg } = await findEntryManifest(url);
+    const manifest: RemoteManifest = { pkg, pkgUrl, entryUrl: url, runtimes: runtimesOf(pkg) };
     manifestCache.set(spec, manifest);
     return manifest;
   }
@@ -163,6 +163,9 @@ export async function fetchRemoteManifest(spec: string): Promise<RemoteManifest>
     throw new Error(`could not fetch package.json (HTTP ${r.status}) at ${url}`);
   }
   const pkg = safeJson(r.text, url);
+  if (typeof pkg['name'] !== 'string') {
+    throw new Error(`package.json at ${url} declares no "name" (a remote plugin must be a named package)`);
+  }
   const entryRel = resolveExportsEntry(pkg['exports']) ?? pkg['module'] ?? pkg['main'];
   if (typeof entryRel !== 'string') {
     throw new Error(`package.json at ${url} declares no "exports", "module", or "main" entry to load`);
@@ -185,6 +188,20 @@ function safeJson(text: string, url: string): Record<string, unknown> {
 function runtimesOf(pkg: Record<string, unknown>): readonly string[] | undefined {
   const raw = pkg['matbotRuntime'];
   return Array.isArray(raw) ? raw.filter((r): r is string => typeof r === 'string') : undefined;
+}
+
+// matbot's remote-plugin contract: a plugin is a package, so a direct entry URL (…/index.ts) must
+// sit beside its package.json — we check the sibling only, never fish up ancestors or down subdirs
+// (a URL pointing into a tree could otherwise pick up an unrelated/monorepo manifest). Its absence,
+// or a missing "name", is a hard error: point at the package dir or its package.json instead.
+async function findEntryManifest(entryUrl: string): Promise<{ url: string; pkg: Record<string, unknown> }> {
+  const url = new URL('./package.json', entryUrl).href;
+  const r = await fetchText(url);
+  if (r.ok) {
+    const pkg = safeJson(r.text, url);
+    if (typeof pkg['name'] === 'string') return { url, pkg };
+  }
+  throw new Error(`a remote plugin must be a named package: no sibling package.json with a "name" at ${url} (point at the package directory or its package.json instead)`);
 }
 
 // ── Materialisation (fetch the module graph onto disk) ───────────────────────────
@@ -249,9 +266,7 @@ function scanImports(code: string): { relative: string[]; bare: string[] } {
 export async function materializeRemote(spec: string, dotPlugins: string, resolveBase: string): Promise<string> {
   const manifest = await fetchRemoteManifest(spec);
 
-  if (manifest.pkgUrl !== undefined) {
-    await writeCached(urlToCachePath(manifest.pkgUrl, dotPlugins), JSON.stringify(manifest.pkg, null, 2));
-  }
+  await writeCached(urlToCachePath(manifest.pkgUrl, dotPlugins), JSON.stringify(manifest.pkg, null, 2));
 
   const { entryLocal, bare } = await crawl(manifest.entryUrl, dotPlugins);
   await linkHostPackages(bare, dotPlugins, resolveBase);

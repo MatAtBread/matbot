@@ -34,7 +34,7 @@ core and the browser-safe plugins, type-stripped and wired together in-page, loa
 `file://` URL or any static host. The same UI is shared with the Node web frontend — one client,
 two transports (HTTP+SSE when served, in-process when bundled).
 
-- **Try it live:** [open the web build](https://raw.githack.com/MatAtBread/matbot/main/apps/web-bundle/dist/matbot.html)
+- **Try it live:** [open the web build](https://matatbread.github.io/matbot/apps/web-bundle/dist/matbot.html)
   — on first launch it asks for any OpenAI- or Anthropic-compatible provider (endpoint, model, key;
   e.g. DeepSeek), then you're chatting.
 - **Architecture & usage:** [WEB-BUNDLE.md](docs/WEB-BUNDLE.md) — the unified UI/transport model, the

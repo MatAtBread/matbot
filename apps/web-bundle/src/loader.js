@@ -135,31 +135,30 @@
     return undefined;
   };
 
-  // Recover the real package name behind a direct entry URL (…/src/index.ts) by walking up for a
-  // package.json — mirroring the node resolver, which finds it on disk one level above src/. Without
-  // this the name falls back to the munged filename ("index"). Bounded + best-effort: a missing or
-  // anonymous package.json (or any fetch error) returns undefined and the caller munges instead.
-  const findRemotePackageName = async (entryUrl) => {
-    let dir = new URL('.', entryUrl).href;          // directory containing the entry
-    for (let i = 0; i < 4; i++) {                   // entry dir + 3 ancestors
-      try {
-        const res = await fetch(new URL('package.json', dir).href);
-        if (res.ok) {
-          const pkg = JSON.parse(await res.text());
-          if (pkg.name) return pkg.name;
-        }
-      } catch { /* network/parse error — keep walking up */ }
-      const parent = new URL('..', dir).href;
-      if (parent === dir) break;                    // origin root reached
-      dir = parent;
+  const runtimesOf = (pkg) => Array.isArray(pkg.matbotRuntime)
+    ? pkg.matbotRuntime.filter(r => typeof r === 'string')
+    : undefined;
+
+  // matbot's remote-plugin contract: a plugin IS a package, so a direct entry URL (…/index.ts) must
+  // sit beside its package.json — we check the sibling only, never fish up ancestors or down subdirs
+  // (a URL into a tree could otherwise pick up an unrelated/monorepo manifest). Absence, or a missing
+  // "name", is a hard error: point at the package directory or its package.json instead. Returns the
+  // name plus the declared matbotRuntime (so the host can gate / record it).
+  const readSiblingManifest = async (entryUrl) => {
+    const url = new URL('./package.json', entryUrl).href;
+    let res;
+    try { res = await fetch(url); } catch { res = undefined; }
+    if (res?.ok) {
+      const pkg = JSON.parse(await res.text());
+      if (pkg.name) return { name: pkg.name, runtimes: runtimesOf(pkg) };
     }
-    return undefined;
+    throw new Error(`matbot: remote plugin "${entryUrl}" has no sibling package.json with a "name" at ${url} (a plugin must be a named package — point at the package directory or its package.json instead)`);
   };
 
   const loader = {
     async loadRemote(specifier) {
       let absUrl = new URL(specifier, globalThis.location?.href ?? 'http://localhost/').href;
-      let name;
+      let name, runtimes;
 
       // Accept a package directory or a package.json URL: resolve exports["."] to the real entry,
       // mirroring how the node loader resolves a plugin path to its module.
@@ -170,20 +169,18 @@
         const pkg   = JSON.parse(await res.text());
         const entry = resolveExportsEntry(pkg.exports) ?? pkg.module ?? pkg.main;
         if (!entry) throw new Error(`matbot: "${absUrl}" has no exports["."], module, or main entry`);
-        name   = pkg.name;
-        absUrl = new URL(entry, absUrl).href;
+        if (!pkg.name) throw new Error(`matbot: package.json at "${absUrl}" has no "name" (a remote plugin must be a named package)`);
+        name     = pkg.name;
+        runtimes = runtimesOf(pkg);
+        absUrl   = new URL(entry, absUrl).href;
       } else {
-        // A direct entry URL: recover the real package name from a nearby package.json before
-        // falling back to munging the filename (which yields "index" for …/src/index.ts).
-        name = await findRemotePackageName(absUrl);
+        // A direct entry URL: the package.json contract still holds — read the sibling manifest for
+        // the name and declared runtimes. Throws if none is reachable.
+        ({ name, runtimes } = await readSiblingManifest(absUrl));
       }
 
       const spec = await loadRemoteModule(absUrl, []);
-      if (name === undefined) {
-        const base = (specifier.split('?')[0] || specifier).replace(/\/+$/, '').split('/').pop() || specifier;
-        name = base.replace(/\.[^.]+$/, '') || base;
-      }
-      return { spec, name };
+      return { spec, name, ...(runtimes !== undefined ? { runtimes } : {}) };
     },
   };
 

@@ -3,7 +3,19 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { loadPlugins } from '@matatbread/matbot-core';
-import type { MatbotPlugin, PluginManifest, MatbotServices, PromptFn } from '@matatbread/matbot-core';
+import type { MatbotPlugin, PluginManifest, MatbotServices, PromptFn, Runtime } from '@matatbread/matbot-core';
+
+/**
+ * A fully host-resolved plugin load request. The CLI resolves a config/human specifier (`spec`) to
+ * the URL it actually imports (`importSpec`) and reads the resolved package.json for `name`/`runtimes`,
+ * so the loader records `spec` as `plugin.specifier` (matching matbot.yaml) while importing `importSpec`.
+ */
+export interface PluginLoadRequest {
+  spec:       string;
+  importSpec: string;
+  name?:      string;
+  runtimes?:  readonly Runtime[];
+}
 
 // Where to begin the upward package.json search for a load specifier. Specifiers that
 // reach the runtime are file: URLs (resolved by the CLI before registration); install-time
@@ -37,6 +49,31 @@ async function descriptionFromPackageJson(specifier: string, baseDir: string): P
   }
 }
 
+/**
+ * Read the canonical name (+ optional matbotRuntime) from the package.json governing a resolved
+ * import URL — the node analogue of the web assembler's specNames. Walks up to the first package.json
+ * carrying a `name` (a nameless intermediate is not the plugin's manifest), so the CLI can hand the
+ * loader a precomputed identity and `plugin.specifier` can stay the human/config specifier.
+ */
+export async function readPluginMeta(specifier: string, baseDir: string): Promise<{ name?: string; runtimes?: Runtime[] }> {
+  let dir = startDir(specifier, baseDir);
+  if (dir === undefined) return {};
+  while (true) {
+    try {
+      const pkg = JSON.parse(await readFile(path.join(dir, 'package.json'), 'utf8')) as { name?: string; matbotRuntime?: unknown };
+      if (typeof pkg.name === 'string') {
+        const runtimes = Array.isArray(pkg.matbotRuntime)
+          ? pkg.matbotRuntime.filter((r): r is Runtime => typeof r === 'string')
+          : undefined;
+        return { name: pkg.name, ...(runtimes !== undefined ? { runtimes } : {}) };
+      }
+    } catch { /* no package.json here, keep walking up */ }
+    const parent = path.dirname(dir);
+    if (parent === dir) return {};
+    dir = parent;
+  }
+}
+
 // Fill in plugin.manifest.description from the plugin's package.json, unless the plugin
 // already declares a description. Presence is checked with `in` so a getter (a description
 // computed at read time from some condition) counts as declared and is left untouched —
@@ -61,16 +98,18 @@ export async function backfillPluginDescription(
 // loaded plugin always has its package.json description folded into its manifest. baseDir is
 // the project directory (where package.json paths and node_modules resolve from).
 export async function loadPluginsWithDescriptions(
-  specifiers: readonly string[],
+  requests:   readonly PluginLoadRequest[],
   services:   MatbotServices,
   baseDir:    string,
   bustCache = false,
   prompt?:    PromptFn,
   onIncompatibleRuntime: 'skip' | 'throw' = 'skip',
 ): Promise<MatbotPlugin[]> {
-  const plugins = await loadPlugins(specifiers, services, bustCache, prompt, onIncompatibleRuntime);
+  const plugins = await loadPlugins(requests, services, bustCache, prompt, onIncompatibleRuntime);
+  // plugin.specifier is the config-level `spec`; the package.json lives at the resolved importSpec.
+  const importByCfg = new Map(requests.map(r => [r.spec, r.importSpec]));
   for (const plugin of plugins) {
-    await backfillPluginDescription(plugin, plugin.specifier, baseDir);
+    await backfillPluginDescription(plugin, importByCfg.get(plugin.specifier) ?? plugin.specifier, baseDir);
   }
   return plugins;
 }

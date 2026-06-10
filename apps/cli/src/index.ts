@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { loadConfig, loadConfigFromText, loadDotEnv } from './config.js';
 import { installPlugin }                    from './install.js';
-import { loadPluginsWithDescriptions }      from './plugin-description.js';
+import { loadPluginsWithDescriptions, readPluginMeta, type PluginLoadRequest } from './plugin-description.js';
 import { nodePluginResolver }               from './plugin-resolver.js';
 import type { Principal, ProviderAdapter,
               ProviderConfig, Session,
@@ -14,7 +14,7 @@ import { appendMessage, createMessage,
          resolveProviderFactory,
          teardownPlugins,
          unloadPlugin as unloadPluginFn,
-         getPluginNameForSpecifier,
+         getPluginNameForSpecifier, getRegisteredPlugins,
          installPrincipalCarrier, enterPrincipal, currentPrincipal,
          unifyServices,
          MissingSecretError }              from '@matatbread/matbot-core';
@@ -65,55 +65,61 @@ function resolveExportsEntry(value: unknown): string | undefined {
 }
 
 /**
- * Resolve plugin specifiers to file: URLs rooted at the config directory.
- *
- * This is the single funnel for both startup and runtime (`plugin add` / hot-load) resolution, so
- * the platform-neutral loader only ever sees file: URLs. Per the classifier:
+ * Resolve config/human plugin specifiers into fully-formed load requests for the platform-neutral
+ * loader. Each request keeps the original `spec` (recorded as `plugin.specifier`, so it matches the
+ * matbot.yaml entry the user added) alongside the `importSpec` (a file: URL the loader actually
+ * imports) and the `name`/`runtimes` read from the resolved package.json. Per the classifier:
  *  - local  → resolve package.json exports["."] so matbot.yaml can reference the package folder
  *             rather than a deep src/ path;
  *  - remote → fetch the module graph into `.plugins/` (idempotent; a restart loads from cache) and
  *             point at the cached entry — bare imports then resolve up to the host's node_modules;
  *  - npm / tarball / git → resolved through the project's module graph (pnpm installs them); a bare
  *             name passes through if not yet on disk so loadPlugins can emit the warning.
+ *
+ * This is the single funnel for both startup and runtime (`plugin add` / hot-load) resolution.
  */
-async function resolvePluginSpecifiers(specifiers: readonly string[], configDir: string): Promise<string[]> {
+async function resolvePluginSpecifiers(specifiers: readonly string[], configDir: string): Promise<PluginLoadRequest[]> {
   const req = createRequire(path.join(configDir, '_'));
   const dotPlugins = path.join(configDir, '.plugins');
-  const results: string[] = [];
+  const results: PluginLoadRequest[] = [];
 
   for (const spec of specifiers) {
     const classified = await classifySpecifier(spec, configDir);
+    let importSpec: string;
 
     if (classified.kind === 'remote') {
       try {
-        results.push(pathToFileURL(await materializeRemote(spec, dotPlugins, configDir)).href);
+        importSpec = pathToFileURL(await materializeRemote(spec, dotPlugins, configDir)).href;
       } catch (e) {
         console.warn(`[matbot] Could not fetch remote plugin "${spec}": ${e instanceof Error ? e.message : String(e)}`);
-        results.push(spec);  // let loadPlugins surface the failure
+        results.push({ spec, importSpec: spec });  // unresolved — let loadPlugins surface the failure
+        continue;
       }
-      continue;
-    }
-
-    if (classified.kind === 'local' || classified.kind === 'missing-path') {
+    } else if (classified.kind === 'local' || classified.kind === 'missing-path') {
       const absDir = classified.kind === 'local' ? classified.dir : classified.resolved;
+      importSpec = pathToFileURL(absDir).href;
       try {
         const pkg  = JSON.parse(await readFile(path.join(absDir, 'package.json'), 'utf8')) as Record<string, unknown>;
         const main = resolveExportsEntry(pkg['exports']);
-        if (typeof main === 'string') {
-          results.push(pathToFileURL(path.resolve(absDir, main)).href);
-          continue;
-        }
-      } catch { /* no package.json or unparseable — fall through */ }
-      results.push(pathToFileURL(absDir).href);
-      continue;
+        if (typeof main === 'string') importSpec = pathToFileURL(path.resolve(absDir, main)).href;
+      } catch { /* no package.json or unparseable — import the directory */ }
+    } else {
+      // npm / pnpm-url: installed in node_modules under the package name (the stored specifier).
+      try {
+        importSpec = pathToFileURL(req.resolve(spec)).href;
+      } catch {
+        results.push({ spec, importSpec: spec });  // not on disk — let loadPlugins emit the warning
+        continue;
+      }
     }
 
-    // npm / pnpm-url: installed in node_modules under the package name (the stored specifier).
-    try {
-      results.push(pathToFileURL(req.resolve(spec)).href);
-    } catch {
-      results.push(spec);  // let loadPlugins emit the warning
-    }
+    const meta = await readPluginMeta(importSpec, configDir);
+    results.push({
+      spec,
+      importSpec,
+      ...(meta.name     !== undefined ? { name:     meta.name }     : {}),
+      ...(meta.runtimes !== undefined ? { runtimes: meta.runtimes } : {}),
+    });
   }
 
   return results;
@@ -689,9 +695,9 @@ async function main(): Promise<void> {
   // a register()-driven swap, instead of pinning whatever was current at capture time.
   const knowledgeProxy      = forwardingProxy<KnowledgeIndex>(() => knowledgeImpl);
   const storageBackendProxy = forwardingProxy<StorageBackend>(() => activeStorageBackend);
-  for (const spec of allSpecifiers) {
+  for (const { importSpec } of allSpecifiers) {
     try {
-      const mod  = await import(/* @vite-ignore */ spec) as Record<string, unknown>;
+      const mod  = await import(/* @vite-ignore */ importSpec) as Record<string, unknown>;
       const plug = (mod['plugin'] ?? (mod['default'] as Record<string, unknown> | undefined)?.['plugin']) as MatbotPlugin | undefined;
       if (plug?.storageBackend !== undefined) {
         activeStorageBackend = await plug.storageBackend.open(dotData);
@@ -866,12 +872,12 @@ async function main(): Promise<void> {
       return plugin;
     },
     async unloadPlugin(specifier: string): Promise<boolean> {
-      const resolved = await resolvePluginSpecifiers([specifier], path.dirname(configPath));
-      const spec     = resolved[0];
-      if (spec === undefined) return false;
-      const name = getPluginNameForSpecifier(spec);
+      // A loaded plugin records its config-level specifier (= the matbot.yaml entry) and its canonical
+      // name; accept either. (No re-resolution needed — `plugin.specifier` is the original specifier.)
+      const name = getPluginNameForSpecifier(specifier)
+        ?? (getRegisteredPlugins().some(p => p.name === specifier) ? specifier : undefined);
       if (name === undefined) {
-        console.warn(`[matbot] No loaded plugin found for specifier "${specifier}"`);
+        console.warn(`[matbot] No loaded plugin found for "${specifier}"`);
         return false;
       }
       return unloadPluginFn(name, services);
@@ -932,9 +938,8 @@ async function main(): Promise<void> {
   // resolveProviderFactory() (keyed by plugin.name) finds the factory regardless of
   // whether the config used an npm name, a relative path, or a file URL.
   for (const [key, cfg] of matbotConfig.providers) {
-    const idx        = providerModules.indexOf(cfg.module);
-    const resolved   = idx !== -1 ? resolvedProviderMods[idx] : undefined;
-    const pluginName = resolved !== undefined ? getPluginNameForSpecifier(resolved) : undefined;
+    // A loaded plugin records its config specifier (= cfg.module) as plugin.specifier.
+    const pluginName = getPluginNameForSpecifier(cfg.module);
     if (pluginName !== undefined && pluginName !== cfg.module) {
       matbotConfig.providers.set(key, { ...cfg, module: pluginName });
     }
@@ -945,23 +950,21 @@ async function main(): Promise<void> {
   // specifiers, and so `provider add` writes a path the loader can resolve — never
   // the bare package name of a local plugin, which crashes startup.
   const pluginNameToOrigPath = new Map<string, string>();
-  const recordOrigPaths = (origs: readonly string[], resolved: readonly string[]): void => {
-    for (let i = 0; i < origs.length; i++) {
-      const orig = origs[i];
-      const res  = resolved[i];
-      if (orig === undefined || res === undefined) continue;
-      const name = getPluginNameForSpecifier(res);
+  const recordOrigPaths = (origs: readonly string[]): void => {
+    // plugin.specifier === the original config entry, so look up the name by that entry directly.
+    for (const orig of origs) {
+      const name = getPluginNameForSpecifier(orig);
       if (name !== undefined && !pluginNameToOrigPath.has(name)) pluginNameToOrigPath.set(name, orig);
     }
   };
-  recordOrigPaths(providerModules, resolvedProviderMods);
+  recordOrigPaths(providerModules);
 
   await loadPluginsWithDescriptions(resolvedPluginMods, services, path.dirname(configPath));
 
   // A provider adapter may be loaded via the plugins list (as a path) rather than a
   // provider config. Record those too, so the provider tool knows the YAML-valid path
   // for every loaded adapter, not just ones already referenced by a provider profile.
-  recordOrigPaths(matbotConfig.plugins, resolvedPluginMods);
+  recordOrigPaths(matbotConfig.plugins);
 
   // Register the provider management tool now that all adapter plugins are loaded and
   // their YAML specifiers are recorded — createProviderTool reads getRegisteredPlugins()

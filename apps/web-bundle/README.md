@@ -12,9 +12,8 @@ build on.
 > plugin model — see **[WEB-BUNDLE.md](../../docs/WEB-BUNDLE.md)**. This README covers the package-level
 > build mechanics and caveats.
 
-**Try it live (no checkout needed):** [open the latest build](https://raw.githack.com/MatAtBread/matbot/main/apps/web-bundle/dist/matbot.html)
-— served from the committed `dist/matbot.html` via githack. (Points at `main`; until `feat/web-bundle`
-merges, use the [branch link](https://raw.githack.com/MatAtBread/matbot/feat/web-bundle/apps/web-bundle/dist/matbot.html).)
+**Try it live (no checkout needed):** [open the latest build](https://matatbread.github.io/matbot/apps/web-bundle/dist/matbot.html)
+— served from the committed `dist/matbot.html`
 
 ## Build & run
 

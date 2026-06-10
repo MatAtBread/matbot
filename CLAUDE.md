@@ -67,7 +67,7 @@ packages/
     tool-plugin/   — built-in plugin and provider management tools (@matatbread/matbot-tool-plugin)
 
   plugins/
-    rumsfeld/      — contextual_search tool; knowledge fault handler (@matatbread/matbot-rumsfeld-node)
+    rumsfeld/      — contextual_search tool; knowledge fault handler (@matatbread/matbot-rumsfeld; cross-runtime)
     persist-ki-bge/ — persistent KnowledgeIndex with BGE reranker (@matatbread/matbot-persist-ki-bge; cross-runtime)
     skills/        — cross-runtime skill CRUD (skill_action) (@matatbread/matbot-skills)
     skills-node/   — node specialization: embeds skills, adds local .md filesystem import/watch (@matatbread/matbot-skills-node)

@@ -1,7 +1,8 @@
 import type { Tool, ToolEvent, ToolContext, MatbotPlugin, FormField } from '@matatbread/matbot-plugin-api';
 import { CONFIRM_YES, CONFIRM_NO } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins, getRegisteredTools, getRegisteredFrontendPlugins,
-         getRegisteredServiceKeys, getHookPlugins, getSystemContextPlugins } from '@matatbread/matbot-core';
+         getRegisteredServiceKeys, getHookPlugins, getSystemContextPlugins,
+         getSpecifierForPlugin } from '@matatbread/matbot-core';
 
 /**
  * Persistence of user-added plugin specifiers across realm reloads. The browser has no matbot.yaml,
@@ -85,6 +86,7 @@ export function createBrowserPluginTool(extras: ExtraPlugins): Tool {
           tools:      toolsByPlugin.get(p.name) ?? [],
           specifier:  p.specifier,
           ...(p.manifest?.description ? { description: p.manifest.description } : {}),
+          ...(p.matbotRuntime !== undefined ? { matbotRuntime: p.matbotRuntime } : {}),
         }));
         yield {
           type:  'result',
@@ -133,6 +135,14 @@ export function createBrowserPluginTool(extras: ExtraPlugins): Tool {
           yield { type: 'result', value: { message: `"${specifier}" is already configured.` } };
           return;
         }
+        // Duplicate-name guard: a package.json name is a plugin's identity (and the handle remove/reload
+        // use), and the registry forbids two loaded plugins sharing one. Catch the common "add by a name
+        // already active" up front with a clear message (a same-package-via-different-URL collision still
+        // surfaces, less prettily, as the load error below — persistence only happens after a clean load).
+        if (getRegisteredPlugins().some(p => p.name === specifier)) {
+          yield { type: 'result', value: { message: `A plugin named "${specifier}" is already active.` } };
+          return;
+        }
         // Out-of-band confirmation — same security rationale as the node tool: a privileged action
         // must break the LLM's execution chain so a malicious prompt cannot self-install plugins.
         if (!await confirmAction(ctx, `Install plugin **"${specifier}"**?`)) {
@@ -167,42 +177,46 @@ export function createBrowserPluginTool(extras: ExtraPlugins): Tool {
         return;
       }
 
+      // A loaded plugin records its configured/extras specifier, so the canonical package name maps to
+      // it via getSpecifierForPlugin — accept the name (preferred) or the literal configured specifier.
+      const entry = getSpecifierForPlugin(specifier) ?? specifier;
+
       if (action === 'remove') {
-        if (!(await extras.list()).includes(specifier)) {
-          yield { type: 'result', value: { message: `"${specifier}" is not in the configured set.` } };
+        if (!(await extras.list()).includes(entry)) {
+          yield { type: 'result', value: { message: `"${specifier}" is not an installed plugin — pass its package name or its configured specifier (see \`plugin list\`).` } };
           return;
         }
-        if (!await confirmAction(ctx, `Remove plugin **"${specifier}"**?`)) {
+        if (!await confirmAction(ctx, `Remove plugin **"${entry}"**?`)) {
           yield { type: 'result', value: { message: 'Cancelled.' } };
           return;
         }
-        yield { type: 'stdout', chunk: `Deactivating "${specifier}"...\n` };
+        yield { type: 'stdout', chunk: `Deactivating "${entry}"...\n` };
         try {
-          await ctx.unloadPlugin(specifier);
+          await ctx.unloadPlugin(entry);
         } catch (e) {
           yield { type: 'stderr', chunk: `Deactivation failed: ${String(e)}\n` };
         }
-        await extras.remove(specifier);
-        yield { type: 'result', value: { message: `"${specifier}" removed and deactivated.` } };
+        await extras.remove(entry);
+        yield { type: 'result', value: { message: `"${entry}" removed and deactivated.` } };
         return;
       }
 
       if (action === 'reload') {
-        yield { type: 'stdout', chunk: `Reloading "${specifier}"...\n` };
+        yield { type: 'stdout', chunk: `Reloading "${entry}"...\n` };
         let wasLoaded: boolean;
         try {
-          wasLoaded = await ctx.unloadPlugin(specifier);
+          wasLoaded = await ctx.unloadPlugin(entry);
         } catch (e) {
           yield { type: 'stderr', chunk: `${String(e)}\n` };
           wasLoaded = true;
         }
-        if (!wasLoaded && !await confirmAction(ctx, `Plugin **"${specifier}"** is not currently loaded — load it now?`)) {
+        if (!wasLoaded && !await confirmAction(ctx, `Plugin **"${entry}"** is not currently loaded — load it now?`)) {
           yield { type: 'result', value: { message: 'Cancelled.' } };
           return;
         }
-        const reloaded = await ctx.loadPlugin(specifier);
+        const reloaded = await ctx.loadPlugin(entry);
         const welcome  = await reloaded.installationMessage?.();
-        yield { type: 'result', value: { message: welcome ?? `"${specifier}" reloaded successfully.` } };
+        yield { type: 'result', value: { message: welcome ?? `"${entry}" reloaded successfully.` } };
         return;
       }
 
@@ -225,16 +239,22 @@ export function createBrowserPluginTool(extras: ExtraPlugins): Tool {
       "  | { action: 'list' }                           // configured + loaded plugins, with types and tools\n" +
       "  | { action: 'discover_local' }                 // plugins bundled in this build but not yet loaded; add by the package name they report\n" +
       "  | { action: 'add';        specifier: string }  // activate a plugin (a bundled package name, or a URL to fetch)\n" +
-      "  | { action: 'remove';     specifier: string }  // deactivate and forget\n" +
-      "  | { action: 'reload';     specifier: string }  // re-import to pick up code changes\n" +
+      "  | { action: 'remove';     specifier: string }  // deactivate & forget (specifier = package name, preferred — or its configured specifier)\n" +
+      "  | { action: 'reload';     specifier: string }  // re-import (specifier = package name, preferred — or its configured specifier)\n" +
       "  | { action: 'store-key';  key: string };       // store a secret a plugin/provider needs; value entered out-of-band\n" +
-      '```',
+      '```\n\n' +
+      'For add, a URL specifier is fetched as raw source and MUST resolve a package.json: the URL is one, ' +
+      'OR points at a directory containing one, OR is a code entry (…/index.ts) with a package.json as its ' +
+      'direct sibling. The package.json must declare a "name"; absence is a hard error.\n\n' +
+      'For remove/reload, prefer the plugin\'s canonical package.json **name** (the `name` from `list`) — ' +
+      'the configured specifier also works. A name is unique, so it is unambiguous; `add` refuses a second ' +
+      'plugin with a name already active.',
     inputSchema: {
       type:     'object',
       required: ['action'],
       properties: {
         action:    { type: 'string', enum: ['list', 'discover_local', 'add', 'remove', 'reload', 'store-key'] },
-        specifier: { type: 'string', description: 'URL path or synthetic id (required for add/remove/reload).' },
+        specifier: { type: 'string', description: 'For remove/reload: the plugin\'s package.json name (preferred — the `name` from `list`) or its configured specifier. For add: a bundled package name, an inlined synthetic id, or a URL to raw source (a package.json, a directory containing one, or a code entry with a sibling package.json that declares a "name").' },
         key:       { type: 'string', description: 'Name of the secret to store (required for store-key); value prompted separately.' },
       },
     },

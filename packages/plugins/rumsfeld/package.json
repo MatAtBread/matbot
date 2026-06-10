@@ -1,5 +1,5 @@
 {
-  "name": "@matatbread/matbot-rumsfeld-node",
+  "name": "@matatbread/matbot-rumsfeld",
   "matbotRuntime": ["node", "browser"],
   "version": "0.1.0",
   "description": "Contextual knowledge fault handler — looks up the knowledge index when the model encounters an unknown term.",
@@ -14,7 +14,6 @@
     "@matatbread/matbot-plugin-api": "workspace:*"
   },
   "devDependencies": {
-    "@types/node": "catalog:",
     "typescript":  "catalog:"
   }
 }

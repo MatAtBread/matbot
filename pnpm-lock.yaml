@@ -418,9 +418,6 @@ importers:
         specifier: workspace:*
         version: link:../../core/plugin-api
     devDependencies:
-      '@types/node':
-        specifier: 'catalog:'
-        version: 22.19.19
       typescript:
         specifier: 'catalog:'
         version: 5.9.3

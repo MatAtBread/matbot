@@ -46,6 +46,22 @@ let freshSeq = 0;
  *   export const plugin: MatbotPlugin  (named export, preferred)
  *   export default { plugin: MatbotPlugin }  (default export)
  *
+ * A specifier is normally a string that is both imported and recorded as the plugin's
+ * `specifier`. The object form decouples those concerns for a host that has already done its
+ * own resolution:
+ *   - `spec` — recorded as the plugin's `specifier` (the human/config-level identity).
+ *   - `importSpec` — the URL actually imported, when it differs from `spec`. The browser
+ *     fetches a remote plugin, type-strips it, and imports the resulting ephemeral `blob:`
+ *     URL while recording the original source URL as `spec`; node imports a resolved
+ *     `file://` path while recording the original `matbot.yaml` entry. (With `importSpec`
+ *     set, `bustCache` does not apply — the caller owns that URL, and a `blob:` cannot carry
+ *     a `${FRESH_PARAM}` stamp.) Defaults to `spec`.
+ *   - `name` — the canonical plugin name, when the host has already derived it (e.g. by
+ *     reading the resolved package.json). Bypasses `resolver.identify(spec)` — necessary
+ *     because `spec` (a remote URL, a versioned npm range) may not itself identify the name.
+ *   - `runtimes` — the package.json `matbotRuntime`, when the host has already read it; used
+ *     for the pre-import gate in place of `resolver.runtimes(spec)`.
+ *
  * @param bustCache When true, each specifier is resolved to a file URL and a
  *   unique `${FRESH_PARAM}` query stamp is appended before importing. This forces
  *   the JS engine to bypass its module cache and re-evaluate the entry from disk.
@@ -65,12 +81,13 @@ let freshSeq = 0;
  *   the reason instead. Both modes share the one gate below; only the mismatch reaction differs.
  */
 export async function loadPlugins(
-  specifiers: readonly string[],
+  specifiers: readonly (string | { spec: string; importSpec?: string; name?: string; runtimes?: readonly Runtime[] })[],
   services:   MatbotServices,
   bustCache = false,
   prompt?:    PromptFn,
   onIncompatibleRuntime: 'skip' | 'throw' = 'skip',
 ): Promise<MatbotPlugin[]> {
+  const reqs = specifiers.map(s => (typeof s === 'string' ? { spec: s } : s) as { spec: string; importSpec?: string; name?: string; runtimes?: readonly Runtime[] });
   if (bustCache) {
     console.debug(
       `[matbot] cache-bust requested for ${specifiers.length} plugin(s); the entry is re-evaluated, ` +
@@ -84,14 +101,16 @@ export async function loadPlugins(
   // resolver returns undefined and we import it, falling back to the try-load / rollback path
   // below. Reading the declaration is the host resolver's job (this module stays node-free).
   const declared = await Promise.all(
-    specifiers.map(spec =>
-      services.resolver?.runtimes !== undefined ? services.resolver.runtimes(spec) : Promise.resolve(undefined),
+    reqs.map(({ spec, runtimes }) =>
+      runtimes !== undefined                     ? Promise.resolve(runtimes)
+      : services.resolver?.runtimes !== undefined ? services.resolver.runtimes(spec)
+      :                                             Promise.resolve(undefined),
     ),
   );
 
-  const toLoad: { spec: string; importSpec: string }[] = [];
-  for (let i = 0; i < specifiers.length; i++) {
-    const spec = specifiers[i]!;
+  const toLoad: { spec: string; importSpec: string; name?: string; runtimes?: readonly Runtime[] }[] = [];
+  for (let i = 0; i < reqs.length; i++) {
+    const { spec, importSpec, name } = reqs[i]!;
     const runtimes = declared[i];
     if (runtimes !== undefined && runtimes.length > 0 && !runtimes.includes(CURRENT_RUNTIME)) {
       if (onIncompatibleRuntime === 'throw') {
@@ -100,7 +119,12 @@ export async function loadPlugins(
       console.warn(`[matbot] Skipping plugin "${spec}": declares matbotRuntime [${runtimes.join(', ')}], host runtime is "${CURRENT_RUNTIME}".`);
       continue;
     }
-    toLoad.push({ spec, importSpec: bustCache ? toFreshUrl(spec) : spec });
+    toLoad.push({
+      spec,
+      importSpec: importSpec ?? (bustCache ? toFreshUrl(spec) : spec),
+      ...(name     !== undefined ? { name }     : {}),
+      ...(runtimes !== undefined ? { runtimes } : {}),
+    });
   }
 
   // Imports run in parallel; registration remains sequential to preserve order.
@@ -155,13 +179,15 @@ export async function loadPlugins(
     // The single boundary where an author's spec becomes a loaded plugin: identity is stamped here,
     // never declared by the author. The host-injected resolver derives the canonical name; absent a
     // resolver (e.g. a bare host) we fall back to platform-neutral string munging.
-    const name   = services.resolver !== undefined ? await services.resolver.identify(spec) : defaultIdentify(spec);
-    const source = sourceOf(spec);
+    const name     = toLoad[i]!.name ?? (services.resolver !== undefined ? await services.resolver.identify(spec) : defaultIdentify(spec));
+    const source   = sourceOf(spec);
+    const runtimes = toLoad[i]!.runtimes;
     const plugin: MatbotPlugin = {
       ...spec_obj,
       name,
       specifier: spec,
-      ...(source !== undefined ? { source } : {}),
+      ...(source   !== undefined ? { source }                 : {}),
+      ...(runtimes !== undefined ? { matbotRuntime: runtimes } : {}),
     };
 
     // registered gates the rollback: only an attempt that *itself* registered the
