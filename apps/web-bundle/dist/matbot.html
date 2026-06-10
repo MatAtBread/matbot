@@ -107,7 +107,7 @@
     "@matatbread/matbot-mcp-http": "/packages/plugins/mcp-http/src/index.ts",
     "@matatbread/matbot-tool-whoami": "/packages/plugins/whoami/src/index.ts",
     "@matatbread/matbot-hook-logger": "/packages/plugins/hook-logger/src/index.ts",
-    "@matatbread/matbot-persist-ki-bge-node": "/packages/plugins/persist-ki-bge/src/index.ts",
+    "@matatbread/matbot-persist-ki-bge": "/packages/plugins/persist-ki-bge/src/index.ts",
     "@matatbread/matbot-tool-json-validation": "/packages/plugins/json-validation/src/index.ts"
   },
   "entry": "/apps/web-bundle/src/bootstrap.ts",
@@ -124,7 +124,7 @@
     "mbmod:/packages/plugins/mcp-http/src/index.ts": "@matatbread/matbot-mcp-http",
     "mbmod:/packages/plugins/whoami/src/index.ts": "@matatbread/matbot-tool-whoami",
     "mbmod:/packages/plugins/hook-logger/src/index.ts": "@matatbread/matbot-hook-logger",
-    "mbmod:/packages/plugins/persist-ki-bge/src/index.ts": "@matatbread/matbot-persist-ki-bge-node",
+    "mbmod:/packages/plugins/persist-ki-bge/src/index.ts": "@matatbread/matbot-persist-ki-bge",
     "mbmod:/packages/plugins/json-validation/src/index.ts": "@matatbread/matbot-tool-json-validation",
     "mbmod:/packages/plugins/providers/anthropic/src/index.ts": "@matatbread/matbot-provider-anthropic",
     "mbmod:/packages/plugins/providers/openai-compat/src/index.ts": "@matatbread/matbot-provider-openai-compat",
@@ -321,8 +321,8 @@
         "description": "Diagnostic plugin: registers a hook on every channel (screen/contribute/toolcall/toolresult/followup) and console.logs when each fires. For exercising and debugging the hook pipeline."
       },
       {
-        "name": "@matatbread/matbot-persist-ki-bge-node",
-        "specifier": "@matatbread/matbot-persist-ki-bge-node",
+        "name": "@matatbread/matbot-persist-ki-bge",
+        "specifier": "@matatbread/matbot-persist-ki-bge",
         "matbotRuntime": [
           "node",
           "browser"

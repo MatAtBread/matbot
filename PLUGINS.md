@@ -652,7 +652,7 @@ and returns the best-matching entry. This lets the model resolve domain-specific
 
 ### Persistent BGE knowledge index
 
-`@matatbread/matbot-persist-ki-bge-node` replaces the default in-memory index with one
+`@matatbread/matbot-persist-ki-bge` replaces the default in-memory index with one
 backed by a `Store<KnowledgeEntry>`, with entity/heading search and an optional Cloudflare
 BGE reranker for semantic scoring. Credentials: `SKILL_RANK_API_KEY`,
 `CLOUDFLARE_ACCOUNT_ID`.
@@ -681,7 +681,7 @@ plugin's `setup()`. The replacement takes effect immediately for all subsequent
 | `@matatbread/matbot-edit-session` | `session_edit` | Trim, branch, split, and compact sessions to manage context window (cut/fork/split/compact via `action`) |
 | `@matatbread/matbot-skills-node` | `skill_action` + file watch | Node skills: embeds the cross-runtime skill CRUD, adds local `.md` import/watch |
 | `@matatbread/matbot-rumsfeld-node` | `contextual_search` | Contextual knowledge fault handler — resolves unknown terms via the knowledge index |
-| `@matatbread/matbot-persist-ki-bge-node` | knowledge backend | Persistent KnowledgeIndex with entity search and optional BGE reranker |
+| `@matatbread/matbot-persist-ki-bge` | knowledge backend | Persistent KnowledgeIndex with entity search and optional BGE reranker |
 | `@matatbread/matbot-hook-logger` | diagnostic (all hook channels) | Logs each hook firing; demos durable injection (`screen`), redaction/audit (`toolresult`), resubmit (`followup`) |
 | `@matatbread/matbot-frontend-web` | frontend | Web UI with session management |
 | `@matatbread/matbot-frontend-telegram` | frontend + tools | Telegram bot with `telegram_send`, `telegram_open_door`, `telegram_provider` (get/set) tools |

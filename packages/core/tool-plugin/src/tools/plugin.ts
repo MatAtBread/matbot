@@ -628,7 +628,7 @@ export const pluginTool: Tool = {
     '```ts\n' +
     'type Specifier =\n' +
     '  // npm registry — published packages; resolves via your .npmrc (npmjs, verdaccio, or private)\n' +
-    '  | "<name>" | "@<scope>/<name>"            // e.g. "@matatbread/matbot-persist-ki-bge-node"\n' +
+    '  | "<name>" | "@<scope>/<name>"            // e.g. "@matatbread/matbot-persist-ki-bge"\n' +
     '  | "<name>@<version|tag|range>"            // e.g. "foo@1.2.3", "@scope/foo@^0.1", "foo@latest"\n' +
     '  // local filesystem — resolved against the project dir; a package.json MUST exist at/above it.\n' +
     '  //   The leading "./" is optional: a bare path is local IFF it exists, else it is read as npm.\n' +
