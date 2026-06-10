@@ -1,0 +1,158 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1450 940" font-family="Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f8fafc"/><stop offset="1" stop-color="#eef2ff"/></linearGradient>
+    <filter id="shadow"><feDropShadow dx="0" dy="7" stdDeviation="8" flood-color="#0f172a" flood-opacity=".14"/></filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#334155"/></marker>
+    <marker id="arrowBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#2563eb"/></marker>
+    <style>
+      .title{font-size:31px;font-weight:850;fill:#0f172a}.subtitle{font-size:15px;fill:#475569}.boxTitle{font-size:15px;font-weight:850;fill:#0f172a}.whiteTitle{font-size:15px;font-weight:850;fill:#fff}.text{font-size:12px;fill:#475569}.whiteText{font-size:12px;fill:#e2e8f0}.tiny{font-size:10.5px;fill:#64748b}.num{font-size:13px;font-weight:850;fill:#fff}.label{font-size:12px;font-weight:850;fill:#475569;letter-spacing:1.3px}.line{stroke:#334155;stroke-width:2.5;fill:none;marker-end:url(#arrow)}.blue{stroke:#2563eb;stroke-width:3;fill:none;marker-end:url(#arrowBlue)}.dash{stroke:#94a3b8;stroke-width:2;fill:none;stroke-dasharray:6 6;marker-end:url(#arrow)}
+    </style>
+  </defs>
+  <rect width="1450" height="940" fill="url(#bg)"/>
+  <text x="725" y="45" text-anchor="middle" class="title">matbot turn flow: user → LLM → core services/tools → LLM → frontend</text>
+  <text x="725" y="72" text-anchor="middle" class="subtitle">SessionRunner serializes submissions per session; runSession loops until the provider stops requesting tools.</text>
+
+  <!-- top actors -->
+  <g transform="translate(50,125)">
+    <rect width="185" height="90" rx="18" fill="#fff" stroke="#cbd5e1" filter="url(#shadow)"/>
+    <text x="92" y="32" text-anchor="middle" class="boxTitle">User</text>
+    <text x="92" y="55" text-anchor="middle" class="text">human / agent / system</text>
+    <text x="92" y="72" text-anchor="middle" class="tiny">Principal identity</text>
+  </g>
+  <g transform="translate(285,125)">
+    <rect width="215" height="90" rx="18" fill="#ffedd5" stroke="#fb923c" filter="url(#shadow)"/>
+    <text x="107" y="32" text-anchor="middle" class="boxTitle">Frontend</text>
+    <text x="107" y="55" text-anchor="middle" class="text">CLI / web / Telegram</text>
+    <text x="107" y="72" text-anchor="middle" class="tiny">owns UI + prompt controls</text>
+  </g>
+  <g transform="translate(550,120)">
+    <rect width="350" height="105" rx="20" fill="#1e293b" stroke="#64748b" filter="url(#shadow)"/>
+    <text x="175" y="32" text-anchor="middle" class="whiteTitle">SessionRunner</text>
+    <text x="175" y="55" text-anchor="middle" class="whiteText">open / submit / observe / abort</text>
+    <text x="175" y="73" text-anchor="middle" class="whiteText">FIFO queue; concat batching; runAs(principal)</text>
+    <text x="175" y="91" text-anchor="middle" class="tiny">persists user message only when its turn begins</text>
+  </g>
+  <g transform="translate(955,125)">
+    <rect width="220" height="90" rx="18" fill="#dbeafe" stroke="#60a5fa" filter="url(#shadow)"/>
+    <text x="110" y="32" text-anchor="middle" class="boxTitle">ProviderAdapter</text>
+    <text x="110" y="55" text-anchor="middle" class="text">Anthropic / OpenAI compat</text>
+    <text x="110" y="72" text-anchor="middle" class="tiny">streams CompletionEvents</text>
+  </g>
+  <g transform="translate(1230,125)">
+    <rect width="170" height="90" rx="18" fill="#fce7f3" stroke="#f472b6" filter="url(#shadow)"/>
+    <text x="85" y="32" text-anchor="middle" class="boxTitle">LLM API</text>
+    <text x="85" y="55" text-anchor="middle" class="text">model</text>
+    <text x="85" y="72" text-anchor="middle" class="tiny">text + tool calls</text>
+  </g>
+
+  <path class="blue" d="M235 170 L285 170"/>
+  <path class="blue" d="M500 170 L550 170"/>
+  <path class="blue" d="M900 170 L955 170"/>
+  <path class="blue" d="M1175 170 L1230 170"/>
+  <path class="blue" d="M1230 198 C1125 265 1045 252 955 210"/>
+  <text x="1095" y="260" text-anchor="middle" class="tiny">streaming deltas, thinking, usage, tool-call events</text>
+
+  <!-- runner internals -->
+  <rect x="185" y="290" width="1080" height="405" rx="24" fill="#fff" stroke="#cbd5e1" filter="url(#shadow)"/>
+  <text x="725" y="323" text-anchor="middle" class="label">INSIDE runSession()</text>
+
+  <g transform="translate(225,355)">
+    <circle cx="17" cy="17" r="17" fill="#2563eb"/><text x="17" y="22" text-anchor="middle" class="num">1</text>
+    <rect x="45" y="0" width="210" height="86" rx="14" fill="#dbeafe" stroke="#60a5fa"/>
+    <text x="150" y="27" text-anchor="middle" class="boxTitle">screen hooks</text>
+    <text x="150" y="50" text-anchor="middle" class="text">may mutate/abort session</text>
+    <text x="150" y="67" text-anchor="middle" class="text">or add turn-ephemeral context</text>
+  </g>
+  <g transform="translate(510,355)">
+    <circle cx="17" cy="17" r="17" fill="#2563eb"/><text x="17" y="22" text-anchor="middle" class="num">2</text>
+    <rect x="45" y="0" width="210" height="86" rx="14" fill="#dcfce7" stroke="#4ade80"/>
+    <text x="150" y="27" text-anchor="middle" class="boxTitle">system context</text>
+    <text x="150" y="50" text-anchor="middle" class="text">systemContext.build()</text>
+    <text x="150" y="67" text-anchor="middle" class="text">contributor plugins join text</text>
+  </g>
+  <g transform="translate(795,355)">
+    <circle cx="17" cy="17" r="17" fill="#2563eb"/><text x="17" y="22" text-anchor="middle" class="num">3</text>
+    <rect x="45" y="0" width="210" height="86" rx="14" fill="#ede9fe" stroke="#a78bfa"/>
+    <text x="150" y="27" text-anchor="middle" class="boxTitle">contribute hooks</text>
+    <text x="150" y="50" text-anchor="middle" class="text">transform outgoing copy</text>
+    <text x="150" y="67" text-anchor="middle" class="text">never persist changes</text>
+  </g>
+
+  <g transform="translate(270,525)">
+    <circle cx="17" cy="17" r="17" fill="#2563eb"/><text x="17" y="22" text-anchor="middle" class="num">4</text>
+    <rect x="45" y="0" width="255" height="95" rx="14" fill="#fef3c7" stroke="#fbbf24"/>
+    <text x="172" y="27" text-anchor="middle" class="boxTitle">provider call</text>
+    <text x="172" y="51" text-anchor="middle" class="text">system + ephemeral + history</text>
+    <text x="172" y="68" text-anchor="middle" class="text">plus current Tool list</text>
+    <text x="172" y="85" text-anchor="middle" class="tiny">text-delta events stream to frontend</text>
+  </g>
+  <g transform="translate(615,525)">
+    <circle cx="17" cy="17" r="17" fill="#2563eb"/><text x="17" y="22" text-anchor="middle" class="num">5</text>
+    <rect x="45" y="0" width="255" height="95" rx="14" fill="#fee2e2" stroke="#f87171"/>
+    <text x="172" y="27" text-anchor="middle" class="boxTitle">assistant message</text>
+    <text x="172" y="51" text-anchor="middle" class="text">append text/thinking/tool-calls</text>
+    <text x="172" y="68" text-anchor="middle" class="text">to Session store</text>
+    <text x="172" y="85" text-anchor="middle" class="tiny">if no tool calls: done</text>
+  </g>
+  <g transform="translate(960,525)">
+    <circle cx="17" cy="17" r="17" fill="#2563eb"/><text x="17" y="22" text-anchor="middle" class="num">6</text>
+    <rect x="45" y="0" width="210" height="95" rx="14" fill="#ccfbf1" stroke="#2dd4bf"/>
+    <text x="150" y="27" text-anchor="middle" class="boxTitle">tool execution</text>
+    <text x="150" y="51" text-anchor="middle" class="text">toolcall hook gates</text>
+    <text x="150" y="68" text-anchor="middle" class="text">ToolContext exposes services</text>
+    <text x="150" y="85" text-anchor="middle" class="tiny">stdout/stderr stream live</text>
+  </g>
+
+  <path class="line" d="M480 398 L555 398"/>
+  <path class="line" d="M765 398 L840 398"/>
+  <path class="line" d="M945 440 C835 500 650 505 527 540"/>
+  <path class="line" d="M570 572 L660 572"/>
+  <path class="line" d="M915 572 L1005 572"/>
+  <path class="line" d="M1105 525 C1040 465 695 465 445 525"/>
+  <text x="775" y="492" text-anchor="middle" class="tiny">loop repeats while the model emits tool calls</text>
+
+  <!-- core services accessed by tools -->
+  <rect x="185" y="735" width="1080" height="130" rx="22" fill="#0f172a" stroke="#334155" filter="url(#shadow)"/>
+  <text x="725" y="765" text-anchor="middle" class="whiteTitle">Core services available to tools/plugins</text>
+  <g transform="translate(230,788)">
+    <rect width="150" height="52" rx="10" fill="#0e7490"/><text x="75" y="22" text-anchor="middle" class="whiteText">Store&lt;T&gt;</text><text x="75" y="39" text-anchor="middle" class="tiny">sessions/settings/jobs</text>
+  </g>
+  <g transform="translate(410,788)">
+    <rect width="150" height="52" rx="10" fill="#0e7490"/><text x="75" y="22" text-anchor="middle" class="whiteText">FileStore</text><text x="75" y="39" text-anchor="middle" class="tiny">workspace/artifacts</text>
+  </g>
+  <g transform="translate(590,788)">
+    <rect width="150" height="52" rx="10" fill="#15803d"/><text x="75" y="22" text-anchor="middle" class="whiteText">KnowledgeIndex</text><text x="75" y="39" text-anchor="middle" class="tiny">skills/rumsfeld</text>
+  </g>
+  <g transform="translate(770,788)">
+    <rect width="150" height="52" rx="10" fill="#7c3aed"/><text x="75" y="22" text-anchor="middle" class="whiteText">Vault</text><text x="75" y="39" text-anchor="middle" class="tiny">resolve/scrub secrets</text>
+  </g>
+  <g transform="translate(950,788)">
+    <rect width="150" height="52" rx="10" fill="#b45309"/><text x="75" y="22" text-anchor="middle" class="whiteText">loadPlugin()</text><text x="75" y="39" text-anchor="middle" class="tiny">hot add/remove</text>
+  </g>
+  <path class="dash" d="M1095 620 C1120 690 1070 735 1025 788"/>
+  <path class="dash" d="M1040 620 C955 710 710 720 665 788"/>
+  <path class="dash" d="M1015 620 C900 700 520 715 485 788"/>
+
+  <!-- return to frontend -->
+  <path class="blue" d="M550 205 C450 250 390 285 360 355"/>
+  <text x="365" y="280" class="tiny">submit content</text>
+  <path class="blue" d="M615 225 C520 255 450 285 390 355"/>
+  <text x="460" y="248" class="tiny">queued / started events</text>
+  <path class="blue" d="M900 205 C970 240 1030 295 1050 355"/>
+  <text x="1012" y="276" class="tiny">provider stream</text>
+  <path class="blue" d="M550 185 C460 220 390 230 345 215"/>
+  <text x="435" y="218" class="tiny">observe async events</text>
+  <path class="blue" d="M285 153 C238 125 190 125 145 153"/>
+  <text x="210" y="118" text-anchor="middle" class="tiny">render result / prompts / tool status</text>
+
+  <!-- followup -->
+  <g transform="translate(1115,350)">
+    <rect width="115" height="70" rx="14" fill="#f1f5f9" stroke="#cbd5e1"/>
+    <text x="57" y="25" text-anchor="middle" class="boxTitle">followup</text>
+    <text x="57" y="47" text-anchor="middle" class="text">hooks may</text>
+    <text x="57" y="62" text-anchor="middle" class="text">resubmit</text>
+  </g>
+  <path class="dash" d="M1115 385 C985 330 725 325 725 225"/>
+
+  <text x="725" y="910" text-anchor="middle" class="tiny">Committed history is the source of truth. Ephemeral context and contribute transforms affect only the provider call currently in flight.</text>
+</svg>

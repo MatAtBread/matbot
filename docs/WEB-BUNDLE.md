@@ -7,8 +7,8 @@ LLM directly over `fetch`; there is no Node server in the loop.
 
 This document covers the **architecture and usage** of the web build. For the package-level build
 mechanics (the assembler, the in-page loader, try-it-live link, CORS/storage caveats) see
-[apps/web-bundle/README.md](apps/web-bundle/README.md). For the project-wide design principles see
-[CLAUDE.md](CLAUDE.md).
+[apps/web-bundle/README.md](../apps/web-bundle/README.md). For the project-wide design principles see
+[CLAUDE.md](../CLAUDE.md).
 
 ---
 
@@ -16,7 +16,7 @@ mechanics (the assembler, the in-page loader, try-it-live link, CORS/storage cav
 
 The headline: **the same client UI runs unchanged whether it's served from Node over HTTP+SSE or
 hosted entirely in the browser in-process.** There is one `index.html` + one `app.js`
-([packages/plugins/frontend/web/src/](packages/plugins/frontend/web/src/)) — byte-identical in both
+([packages/plugins/frontend/web/src/](../packages/plugins/frontend/web/src/)) — byte-identical in both
 modes — and every server touch-point is routed through a single runtime global:
 
 ```js
@@ -32,10 +32,10 @@ satisfy one contract:
 | **`http-transport.js`** | Node-served (`frontend/web` server entry) | `fetch` + SSE to `server.ts` |
 | **`browser.js`** | baked into the bundle (`frontend/web` browser entry) | drives `services.run` / `services.tools` **in-process**, no wire |
 
-The contract (read it in [http-transport.js](packages/plugins/frontend/web/src/http-transport.js)):
+The contract (read it in [http-transport.js](../packages/plugins/frontend/web/src/http-transport.js)):
 `hostRuntime`, `callTool`, `createSession`, `sessionBusy`, `submit`, `sessionEvents`,
 `answerPrompt`, `abort`, `statusEvents`, `fileEvents`, `openFile`. The in-process side
-([browser.js](packages/plugins/frontend/web/src/browser.js)) is essentially `server.ts`'s
+([browser.js](../packages/plugins/frontend/web/src/browser.js)) is essentially `server.ts`'s
 coordination — the busy tracker, prompt parking, per-session subscribe, the buffered tool-call
 context — re-expressed without HTTP. Streaming is the same `AsyncIterable<PipelineEvent>` the runner
 emits natively; in-process is simply that iterable, HTTP demuxes it back out of one SSE stream.
@@ -43,7 +43,7 @@ emits natively; in-process is simply that iterable, HTTP demuxes it back out of 
 ### The `browser` export condition
 
 `frontend/web` is one package that answers to both runtimes via a standard export condition
-([package.json](packages/plugins/frontend/web/package.json)):
+([package.json](../packages/plugins/frontend/web/package.json)):
 
 ```jsonc
 "exports": { ".": { "browser": "./src/browser.js", "import": "./src/index.ts" } }
@@ -62,7 +62,7 @@ the baked scaffold + `app.js`, and mounts.
 ## Two bundles
 
 `pnpm web-build` produces both artifacts (each from its own config in
-[apps/web-bundle/](apps/web-bundle/)):
+[apps/web-bundle/](../apps/web-bundle/)):
 
 | Output | Config | Frontend | Purpose |
 |---|---|---|---|
@@ -112,7 +112,7 @@ layers differ sharply:
 So the `browser` plugin tool **canonicalizes what it persists**: after a successful load, if the
 plugin is baked (its name is a key in the bundle's `packageEntries`), it persists the **package
 name**; only genuinely remote plugins keep their URL
-([plugin-tool.ts](packages/plugins/browser/src/plugin-tool.ts)). The package name is also the one
+([plugin-tool.ts](../packages/plugins/browser/src/plugin-tool.ts)). The package name is also the one
 specifier common to Node and the browser. Net effect: enable a bundled plugin once, and it sticks
 across reloads.
 
@@ -125,7 +125,7 @@ ever want runtime opt-out.)
 
 ### Adding / trimming plugins
 
-Edit [matbot.web.json](apps/web-bundle/matbot.web.json) and re-run `pnpm web-build`:
+Edit [matbot.web.json](../apps/web-bundle/matbot.web.json) and re-run `pnpm web-build`:
 
 - Move a plugin between `plugins` (auto-load) and `bundledPlugins` (baked-but-idle).
 - Drop it from both to shrink the bundle — it can still be added at runtime from a URL.
@@ -138,18 +138,18 @@ Edit [matbot.web.json](apps/web-bundle/matbot.web.json) and re-run `pnpm web-bui
 A single Node step, no bundler — every module stays a module, wired by an import map at runtime
 (the browser mirror of Node's `apps/cli/ts-hooks.js`):
 
-1. **[assemble.mjs](apps/web-bundle/assemble.mjs)** walks the static import graph from
+1. **[assemble.mjs](../apps/web-bundle/assemble.mjs)** walks the static import graph from
    `bootstrap.ts` + the configured plugins, type-strips each `.ts` with **sucrase**, and inlines the
    resulting JS modules + the loader into one HTML. It also:
    - prefers each package's **`browser`** export condition (so `frontend/web` → `browser.js`);
    - bakes `bundledPlugins` as graph roots and adds their **package names to `packageEntries`** (so
      the import map carries them) without auto-loading them, emitting them as `config.availablePlugins`;
    - bakes raw **`assets`** (the `index.html` scaffold + `app.js`) verbatim for `browser.js` to inject.
-2. **[loader.js](apps/web-bundle/src/loader.js)** runs first in the browser: rewrites relative
+2. **[loader.js](../apps/web-bundle/src/loader.js)** runs first in the browser: rewrites relative
    imports to `mbmod:` ids, blob-ifies each module, and publishes one import map mapping **every
    package name and every synthetic id** to its blob. Bare `@matatbread/*` imports are left untouched
    so host and plugins share one module instance (the `instanceof` singleton boundary).
-3. **[bootstrap.ts](apps/web-bundle/src/bootstrap.ts)** is just another inlined module: it builds
+3. **[bootstrap.ts](../apps/web-bundle/src/bootstrap.ts)** is just another inlined module: it builds
    `MatbotServices`, installs the constant principal carrier, and runs the real `loadPlugins` /
    resolver / `SessionRunner` unchanged.
 
@@ -162,7 +162,7 @@ lazy-loaded from a CDN only for *runtime remote* `.ts` plugin loading — never 
 ## Caveats
 
 A demonstrator, not a hardened product. The key ones (full list in
-[apps/web-bundle/README.md](apps/web-bundle/README.md)):
+[apps/web-bundle/README.md](../apps/web-bundle/README.md)):
 
 - **CORS** — the browser calls the LLM endpoint directly; pick a provider that allows browser
   access (DeepSeek, Azure, a local/proxied endpoint) or front it with a CORS-enabled gateway.

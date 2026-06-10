@@ -9,7 +9,7 @@ This exists to stress-test the core architecture, not to be a product. It is an 
 build on.
 
 > For the architecture — the unified UI/transport model, the two bundles, and the baked-but-idle
-> plugin model — see **[WEB-BUNDLE.md](../../WEB-BUNDLE.md)**. This README covers the package-level
+> plugin model — see **[WEB-BUNDLE.md](../../docs/WEB-BUNDLE.md)**. This README covers the package-level
 > build mechanics and caveats.
 
 **Try it live (no checkout needed):** [open the latest build](https://raw.githack.com/MatAtBread/matbot/main/apps/web-bundle/dist/matbot.html)
@@ -81,7 +81,7 @@ wizard offers with no endpoint or API key required (zero-config first run). Node
 (`bash`, `docker-bash`, `mcp`, `skills-node`,
 the node web frontend's server entry) are omitted — they need Node primitives. (The base `skills`
 plugin is cross-runtime and *is* bundled; only its `skills-node` filesystem specialization is
-Node-only.) See [WEB-BUNDLE.md](../../WEB-BUNDLE.md) for the three-layer plugin model.
+Node-only.) See [WEB-BUNDLE.md](../../docs/WEB-BUNDLE.md) for the three-layer plugin model.
 
 Built-in tools `plugin` (list/add/remove/store-key) and `provider` (list/add/remove) are present too,
 so the model can manage plugins and provider profiles at runtime. These are browser-native

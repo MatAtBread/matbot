@@ -22,7 +22,7 @@ and frontends. Not a product; infrastructure.
 
 A clean, TypeScript API encourages you to write your own plugins to get the bot you want. Your own UI, your own memory system, your own persistent storage, your own tools or new concepts like imagination, dreaming, LLM routing - all are supported via hot-loaded npm modules.
 
-To find out more about what makes MatBot special, take a look at the [Design ethos and developer notes](CLAUDE.md)
+For a visual tour of how it all fits together — core, plugins, and the turn flow — see [ARCHITECTURE.md](docs/ARCHITECTURE.md). To find out more about what makes MatBot special, take a look at the [Design ethos and developer notes](CLAUDE.md)
 
 ---
 
@@ -37,7 +37,7 @@ two transports (HTTP+SSE when served, in-process when bundled).
 - **Try it live:** [open the web build](https://raw.githack.com/MatAtBread/matbot/main/apps/web-bundle/dist/matbot.html)
   — on first launch it asks for any OpenAI- or Anthropic-compatible provider (endpoint, model, key;
   e.g. DeepSeek), then you're chatting.
-- **Architecture & usage:** [WEB-BUNDLE.md](WEB-BUNDLE.md) — the unified UI/transport model, the
+- **Architecture & usage:** [WEB-BUNDLE.md](docs/WEB-BUNDLE.md) — the unified UI/transport model, the
   two bundles (`matbot.html` and the minimal `matbot-demo.html`), and the baked-but-idle plugin model.
 - **Package-level build mechanics:** [apps/web-bundle/README.md](apps/web-bundle/README.md).
 
@@ -399,7 +399,7 @@ file. Plugins may create additional subdirectories as needed.
 
 ## Writing your own plugin
 
-See [PLUGINS.md](PLUGINS.md) for the full plugin API reference. I recommend checking the [design ethos and developer notes](CLAUDE.md) too.
+See [PLUGINS.md](docs/PLUGINS.md) for the full plugin API reference. I recommend checking the [design ethos and developer notes](CLAUDE.md) too.
 
 Plugins can provide tools, frontends, LLM providers (try the 'customer-services' "LLM" - my personal
 favourite - it's free and runs without GPU support or an API key!)
