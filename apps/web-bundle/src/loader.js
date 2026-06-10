@@ -135,6 +135,27 @@
     return undefined;
   };
 
+  // Recover the real package name behind a direct entry URL (…/src/index.ts) by walking up for a
+  // package.json — mirroring the node resolver, which finds it on disk one level above src/. Without
+  // this the name falls back to the munged filename ("index"). Bounded + best-effort: a missing or
+  // anonymous package.json (or any fetch error) returns undefined and the caller munges instead.
+  const findRemotePackageName = async (entryUrl) => {
+    let dir = new URL('.', entryUrl).href;          // directory containing the entry
+    for (let i = 0; i < 4; i++) {                   // entry dir + 3 ancestors
+      try {
+        const res = await fetch(new URL('package.json', dir).href);
+        if (res.ok) {
+          const pkg = JSON.parse(await res.text());
+          if (pkg.name) return pkg.name;
+        }
+      } catch { /* network/parse error — keep walking up */ }
+      const parent = new URL('..', dir).href;
+      if (parent === dir) break;                    // origin root reached
+      dir = parent;
+    }
+    return undefined;
+  };
+
   const loader = {
     async loadRemote(specifier) {
       let absUrl = new URL(specifier, globalThis.location?.href ?? 'http://localhost/').href;
@@ -151,6 +172,10 @@
         if (!entry) throw new Error(`matbot: "${absUrl}" has no exports["."], module, or main entry`);
         name   = pkg.name;
         absUrl = new URL(entry, absUrl).href;
+      } else {
+        // A direct entry URL: recover the real package name from a nearby package.json before
+        // falling back to munging the filename (which yields "index" for …/src/index.ts).
+        name = await findRemotePackageName(absUrl);
       }
 
       const spec = await loadRemoteModule(absUrl, []);
