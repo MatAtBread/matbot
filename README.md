@@ -31,12 +31,15 @@ To find out more about what makes MatBot special, take a look at the [Design eth
 matbot also ships as a **single self-contained `matbot.html`** that runs the whole runtime
 client-side — no server, calling the LLM directly from your browser. It's the same platform-neutral
 core and the browser-safe plugins, type-stripped and wired together in-page, loadable from a
-`file://` URL or any static host.
+`file://` URL or any static host. The same UI is shared with the Node web frontend — one client,
+two transports (HTTP+SSE when served, in-process when bundled).
 
 - **Try it live:** [open the web build](https://raw.githack.com/MatAtBread/matbot/main/apps/web-bundle/dist/matbot.html)
   — on first launch it asks for any OpenAI- or Anthropic-compatible provider (endpoint, model, key;
   e.g. DeepSeek), then you're chatting.
-- **How it works and how to build it:** [apps/web-bundle/README.md](apps/web-bundle/README.md).
+- **Architecture & usage:** [WEB-BUNDLE.md](WEB-BUNDLE.md) — the unified UI/transport model, the
+  two bundles (`matbot.html` and the minimal `matbot-demo.html`), and the baked-but-idle plugin model.
+- **Package-level build mechanics:** [apps/web-bundle/README.md](apps/web-bundle/README.md).
 
 ---
 

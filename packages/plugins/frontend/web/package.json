@@ -1,11 +1,15 @@
 {
   "name": "@matatbread/matbot-frontend-web",
-  "matbotRuntime": ["node"],
+  "matbotRuntime": ["node", "browser"],
   "version": "0.1.0",
-  "description": "HTTP + SSE web UI with session management, serving the chat frontend on a local port.",
+  "description": "Web UI with session management. Node entry serves it over HTTP+SSE; browser entry mounts the same UI in-process. Both share index.html + app.js.",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "browser": "./src/browser.js",
+      "import": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
   },
   "scripts": {
     "typecheck": "tsc --noEmit"

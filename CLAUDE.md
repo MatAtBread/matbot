@@ -76,7 +76,8 @@ packages/
     hook-logger/   — diagnostic: logs every hook channel; demos durable injection + redaction + resubmit (@matatbread/matbot-hook-logger)
     browser/       — OPFS store, WebCrypto vault (browser-only)
     frontend/
-      web/         — HTTP + SSE web UI with session management
+      web/         — web UI: HTTP+SSE server entry (node) + in-process mount entry (browser bundle), one shared client; see WEB-BUNDLE.md
+      dom/         — minimal in-process browser chat (demonstrator; the matbot-demo.html bundle)
       telegram/    — Telegram bot frontend (@matatbread/matbot-frontend-telegram)
     providers/
       anthropic/   — Anthropic Messages API adapter (also handles DeepSeek Anthropic-compat)
@@ -90,6 +91,7 @@ packages/
 
 apps/
   cli/             — interactive REPL + single-turn mode
+  web-bundle/      — assembles the browser-only single-file matbot.html (see WEB-BUNDLE.md)
 ```
 
 ### Package naming
