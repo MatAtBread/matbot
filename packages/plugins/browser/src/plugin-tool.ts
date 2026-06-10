@@ -17,10 +17,19 @@ export interface ExtraPlugins {
 
 type PluginInput =
   | { action: 'list' }
+  | { action: 'discover_local' }
   | { action: 'add';       specifier: string }
   | { action: 'remove';    specifier: string }
   | { action: 'reload';    specifier: string }
   | { action: 'store-key'; key: string };
+
+// Baked-but-idle plugins the assembler inlined (config.availablePlugins): present in the artifact +
+// import map but not auto-loaded. The browser analogue of node's on-disk `packages/plugins` scan.
+interface AvailablePlugin { name: string; specifier: string; matbotRuntime?: string[]; description?: string }
+function bakedAvailablePlugins(): AvailablePlugin[] {
+  const mb = (globalThis as unknown as { __MB__?: { config?: { availablePlugins?: AvailablePlugin[] } } }).__MB__;
+  return mb?.config?.availablePlugins ?? [];
+}
 
 async function confirmAction(ctx: ToolContext, label: string): Promise<boolean> {
   const field: FormField = { name: 'confirm', label, type: 'confirm', default: CONFIRM_NO };
@@ -88,6 +97,15 @@ export function createBrowserPluginTool(extras: ExtraPlugins): Tool {
         return;
       }
 
+      if (action === 'discover_local') {
+        // Baked-but-idle plugins that aren't already loaded — offered for on-demand activation. Their
+        // specifier is the package name, which resolves through the import map to the baked blob (no
+        // network) and persists across reloads. Mirrors the node tool's discover_local result shape.
+        const loadedNames = new Set(getRegisteredPlugins().map(p => p.name));
+        yield { type: 'result', value: bakedAvailablePlugins().filter(p => !loadedNames.has(p.name)) };
+        return;
+      }
+
       if (action === 'store-key') {
         const { key } = input as { action: 'store-key'; key: string };
         if (!key || !key.trim()) {
@@ -124,7 +142,17 @@ export function createBrowserPluginTool(extras: ExtraPlugins): Tool {
         yield { type: 'stdout', chunk: `Activating "${specifier}"...\n` };
         try {
           const loaded  = await ctx.loadPlugin(specifier);
-          await extras.add(specifier);
+          // Persist a refresh-stable specifier. A plugin baked into the bundle re-resolves by package
+          // name through the import map on *every* boot — and the name is the one specifier common to
+          // node and the browser. The raw add specifier may instead be an ephemeral synthetic id
+          // (mbmod:, backed by a per-load blob) or an http-only local path, neither of which survives
+          // a reload cleanly. So when the loaded plugin's canonical name is itself baked, persist that;
+          // otherwise keep the original specifier (a genuinely remote plugin's name isn't baked, so
+          // only its URL resolves). Reads the web-bundle payload defensively — absent ⇒ no rewrite.
+          const baked = (globalThis as unknown as { __MB__?: { packageEntries?: Record<string, unknown> } })
+            .__MB__?.packageEntries ?? {};
+          const persistSpec = (loaded.name && baked[loaded.name] !== undefined) ? loaded.name : specifier;
+          await extras.add(persistSpec);
           const welcome = await loaded.installationMessage?.();
           yield {
             type:  'result',
@@ -195,7 +223,8 @@ export function createBrowserPluginTool(extras: ExtraPlugins): Tool {
       '```ts\n' +
       'type PluginAction =\n' +
       "  | { action: 'list' }                           // configured + loaded plugins, with types and tools\n" +
-      "  | { action: 'add';        specifier: string }  // fetch, type-strip, and activate a plugin\n" +
+      "  | { action: 'discover_local' }                 // plugins bundled in this build but not yet loaded; add by the package name they report\n" +
+      "  | { action: 'add';        specifier: string }  // activate a plugin (a bundled package name, or a URL to fetch)\n" +
       "  | { action: 'remove';     specifier: string }  // deactivate and forget\n" +
       "  | { action: 'reload';     specifier: string }  // re-import to pick up code changes\n" +
       "  | { action: 'store-key';  key: string };       // store a secret a plugin/provider needs; value entered out-of-band\n" +
@@ -204,7 +233,7 @@ export function createBrowserPluginTool(extras: ExtraPlugins): Tool {
       type:     'object',
       required: ['action'],
       properties: {
-        action:    { type: 'string', enum: ['list', 'add', 'remove', 'reload', 'store-key'] },
+        action:    { type: 'string', enum: ['list', 'discover_local', 'add', 'remove', 'reload', 'store-key'] },
         specifier: { type: 'string', description: 'URL path or synthetic id (required for add/remove/reload).' },
         key:       { type: 'string', description: 'Name of the secret to store (required for store-key); value prompted separately.' },
       },

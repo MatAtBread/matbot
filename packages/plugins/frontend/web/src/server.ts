@@ -5,7 +5,7 @@ import type {
 } from '@matatbread/matbot-core';
 import { createSession, PromptCancelledError, runAs, tryCurrentPrincipal } from '@matatbread/matbot-core';
 import { sseComment, sseEvent } from './sse-writer.js';
-import { html, js, favicon } from './ui.js';
+import { favicon, html, httpTransport, js  } from './ui.js';
 
 export interface WebServerDeps {
   store:          Store<Session>;
@@ -225,6 +225,7 @@ export function createWebServer(deps: WebServerDeps) {
     // --- Static UI ---
     if (method === 'GET' && url === '/')       { static200(res, 'text/html; charset=utf-8',              await html()); return; }
     if (method === 'GET' && url === '/app.js') { static200(res, 'application/javascript; charset=utf-8', await js());   return; }
+    if (method === 'GET' && url === '/http-transport.js') { static200(res, 'application/javascript; charset=utf-8', await httpTransport()); return; }
     if (method === 'GET' && url === '/favicon.ico') { static200(res, 'image/svg+xml', await favicon()); return; }
 
     // --- GET /health ---

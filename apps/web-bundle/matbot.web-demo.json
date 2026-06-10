@@ -1,0 +1,36 @@
+{
+  "_comment": "Demo browser bundle: the minimal 455-line frontend/dom demonstrator (kept untouched). Built via `npm run assemble:demo` -> dist/matbot-demo.html. The rich, full-featured UI is the default matbot.web.json instead.",
+
+  "output": "matbot-demo.html",
+
+  "plugins": [
+    "packages/plugins/browser",
+    "packages/plugins/frontend/dom",
+    "packages/plugins/http",
+    "packages/plugins/ask-user",
+    "packages/plugins/sessions",
+    "packages/plugins/edit-session",
+    "packages/plugins/workspace",
+    "packages/plugins/rumsfeld",
+    "packages/plugins/json-validation"
+  ],
+
+  "providers": {},
+
+  "providerModules": [
+    {
+      "label": "Anthropic Messages API (Claude, DeepSeek /anthropic)",
+      "module": "packages/plugins/providers/anthropic",
+      "endpointHint": "https://api.deepseek.com/anthropic",
+      "modelHint": "deepseek-chat"
+    },
+    {
+      "label": "OpenAI-compatible chat completions (GPT, DeepSeek, Azure, local)",
+      "module": "packages/plugins/providers/openai-compat",
+      "endpointHint": "https://api.deepseek.com/v1/chat/completions",
+      "modelHint": "deepseek-chat"
+    }
+  ],
+
+  "defaultProvider": null
+}

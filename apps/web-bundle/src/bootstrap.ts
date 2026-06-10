@@ -21,6 +21,9 @@ export interface BrowserConfig {
   providers: Record<string, Omit<ProviderConfig, 'name'>>; // module is already an importable specifier
   /** Adapter types the startup wizard can offer when no provider is configured. */
   availableProviders: AvailableProvider[];
+  /** Baked-but-idle plugins (the browser analogue of node's on-disk packages): present in the
+   *  artifact + import map but not auto-loaded, offered for on-demand load by package name. */
+  availablePlugins?: { name: string; specifier: string; matbotRuntime?: readonly Runtime[]; description?: string }[];
   defaultProvider?: string;
   /** Boot identity for this single-principal realm. Absent ⇒ the anonymous web user.
    *  A user-associated bundle (served per-tenant) bakes the tenant's identity here. */

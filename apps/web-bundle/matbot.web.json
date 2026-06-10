@@ -1,9 +1,19 @@
 {
-  "_comment": "Browser matbot config (the matbot.yaml analogue, as JSON so the node assembler needs no YAML parser). Plugin entries are repo-relative package paths; the assembler resolves them to inlined modules. `providers` is intentionally empty — the browser asks for the full provider config (name, adapter, URL, model, key) at first startup and persists it. `providerModules` are the adapters that wizard offers. Only browser-safe plugins are listed — bash/docker/mcp/skills and the node web frontend require Node and are omitted.",
+  "_comment": "Browser matbot config (the matbot.yaml analogue, as JSON so the node assembler needs no YAML parser). Plugin entries are repo-relative package paths; the assembler resolves them to inlined modules (preferring each package's `browser` export condition). `plugins` is the AUTO-LOAD core (loaded at boot) — kept minimal, mirroring node where only configured plugins load. `bundledPlugins` are baked into the artifact and the import map but NOT auto-loaded: they're offered via the browser `plugin` tool's discover and loaded on demand by package name, which (being baked) persists across reloads with no network. `providers` is intentionally empty — the browser asks for the full provider config at first startup and persists it. `providerModules` are the adapters the wizard offers. `assets` are raw files baked verbatim for the in-process frontend to inject. This is the default, full-featured UI (frontend/web's browser entry, sharing index.html + app.js with the Node server); the minimal demonstrator is matbot.web-demo.json.",
+
+  "output": "matbot.html",
+
+  "assets": {
+    "scaffold": "packages/plugins/frontend/web/src/index.html",
+    "appJs": "packages/plugins/frontend/web/src/app.js"
+  },
 
   "plugins": [
     "packages/plugins/browser",
-    "packages/plugins/frontend/dom",
+    "packages/plugins/frontend/web"
+  ],
+
+  "bundledPlugins": [
     "packages/plugins/http",
     "packages/plugins/ask-user",
     "packages/plugins/sessions",

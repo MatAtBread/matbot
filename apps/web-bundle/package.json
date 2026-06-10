@@ -7,6 +7,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "assemble": "node assemble.mjs",
+    "assemble:demo": "node assemble.mjs matbot.web-demo.json",
     "serve": "node serve.mjs"
   },
   "dependencies": {

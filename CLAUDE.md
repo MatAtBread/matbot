@@ -76,7 +76,8 @@ packages/
     hook-logger/   — diagnostic: logs every hook channel; demos durable injection + redaction + resubmit (@matatbread/matbot-hook-logger)
     browser/       — OPFS store, WebCrypto vault (browser-only)
     frontend/
-      web/         — HTTP + SSE web UI with session management
+      web/         — web UI: HTTP+SSE server entry (node) + in-process mount entry (browser bundle), one shared client; see WEB-BUNDLE.md
+      dom/         — minimal in-process browser chat (demonstrator; the matbot-demo.html bundle)
       telegram/    — Telegram bot frontend (@matatbread/matbot-frontend-telegram)
     providers/
       anthropic/   — Anthropic Messages API adapter (also handles DeepSeek Anthropic-compat)
@@ -90,6 +91,7 @@ packages/
 
 apps/
   cli/             — interactive REPL + single-turn mode
+  web-bundle/      — assembles the browser-only single-file matbot.html (see WEB-BUNDLE.md)
 ```
 
 ### Package naming
@@ -153,6 +155,21 @@ All runtime state lives under `.data/` **next to `matbot.yaml`**, never in the s
 
 Plugins may create additional subdirectories (e.g. `files/`, `settings/`) as needed.
 `.data/` is gitignored. Source and data are always separate.
+
+### `.plugins/` — fetched remote-plugin cache
+
+A **separate** tree from `.data/`, also next to `matbot.yaml`. When a plugin is installed from an
+HTTP(S) or `github:` raw-source specifier, its module graph is fetched and mirrored here
+(`.plugins/<host>/<path…>`), preserving structure, and imported through the normal Node strip-only
+loader — bare imports resolve up to the host's `node_modules` (the same "singleton boundary" the web
+bundle uses), relative imports resolve to the fetched siblings, so no import rewriting is needed. The
+cache is idempotent and offline-friendly: a restart loads from disk rather than re-fetching.
+
+The split from `.data/` is deliberate and load-bearing: `.data/` is the LLM's read-write runtime
+state, whereas `.plugins/` is **matbot-writes / LLM-reads-only** (e.g. mounted read-only into
+docker-bash) so cached plugin *code* cannot be tampered with by the model. Do not relocate it under
+`.data/`. (Lives in `apps/cli` + `packages/core/tool-plugin`'s `remote-cache.ts`; npm/tarball/git
+installs still go through the package manager into `node_modules`, not here.) `.plugins/` is gitignored.
 
 ---
 

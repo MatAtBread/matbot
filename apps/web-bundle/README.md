@@ -8,6 +8,10 @@ serve it from any static host — once loaded, the page *is* matbot. It talks to
 This exists to stress-test the core architecture, not to be a product. It is an MVP someone could
 build on.
 
+> For the architecture — the unified UI/transport model, the two bundles, and the baked-but-idle
+> plugin model — see **[WEB-BUNDLE.md](../../WEB-BUNDLE.md)**. This README covers the package-level
+> build mechanics and caveats.
+
 **Try it live (no checkout needed):** [open the latest build](https://raw.githack.com/MatAtBread/matbot/main/apps/web-bundle/dist/matbot.html)
 — served from the committed `dist/matbot.html` via githack. (Points at `main`; until `feat/web-bundle`
 merges, use the [branch link](https://raw.githack.com/MatAtBread/matbot/feat/web-bundle/apps/web-bundle/dist/matbot.html).)
@@ -15,7 +19,7 @@ merges, use the [branch link](https://raw.githack.com/MatAtBread/matbot/feat/web
 ## Build & run
 
 ```bash
-pnpm web-build    # → dist/matbot.html
+pnpm web-build    # → dist/matbot.html (rich UI) + dist/matbot-demo.html (minimal dom demonstrator)
 open apps/web-bundle/dist/matbot.html # file:// — just works
 
 # or, to also exercise runtime *remote* plugin loading (which fetches .ts over http):
@@ -57,19 +61,24 @@ host.
 
 ## What's a plugin here (not core)
 
-The web defaults are plugins, never core packages:
+The web defaults are plugins, never core packages. The **auto-load core** (`matbot.web.json` →
+`plugins`) is kept minimal — just two:
 
 - **`@matatbread/matbot-browser`** — the storage backend (IndexedDB `Store`s + OPFS `FileStore`),
   the `LocalStorageVault`, and the browser `plugin` management tool. It also persists user-added
   plugins and replays them on reload.
-- **`@matatbread/matbot-frontend-dom`** — an in-process chat UI that drives `services.run` directly
-  (the same contract a remote frontend uses over SSE, minus the wire).
+- **`@matatbread/matbot-frontend-web`** (browser entry) — the full-featured in-process UI: the same
+  `index.html` + `app.js` the Node server serves, mounted with no wire. (The `matbot-demo.html`
+  bundle swaps this for **`@matatbread/matbot-frontend-dom`**, a minimal ~450-line demonstrator.)
 
-Configured (browser-safe) plugins: `http`, `ask_user`, `session_action`, `session_edit`,
-`workspace_action`, `contextual_search`, and json-validation. The provider adapters (anthropic /
-openai-compat — pure `fetch`) are inlined as wizard-selectable *types* rather than pre-configured
-providers. Node-only plugins (`bash`, `docker-bash`, `mcp`, `skills`, the node web frontend) are
-omitted — they need Node primitives.
+Everything else browser-safe — `http`, `ask_user`, `session_action`, `session_edit`,
+`workspace_action`, `contextual_search`, json-validation — is **baked-but-idle** (`bundledPlugins`):
+in the artifact and the import map but not auto-loaded, offered via the `plugin` tool's
+`discover_local` and loaded on demand by package name (which persists across reloads). The provider
+adapters (anthropic / openai-compat — pure `fetch`) are inlined as wizard-selectable *types* rather
+than pre-configured providers. Node-only plugins (`bash`, `docker-bash`, `mcp`, `skills`, the node
+web frontend's server entry) are omitted — they need Node primitives. See
+[WEB-BUNDLE.md](../../WEB-BUNDLE.md) for the three-layer plugin model.
 
 Built-in tools `plugin` (list/add/remove/store-key) and `provider` (list/add/remove) are present too,
 so the model can manage plugins and provider profiles at runtime. These are browser-native

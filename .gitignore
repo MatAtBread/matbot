@@ -7,17 +7,20 @@ dist/
 .env.*
 !.env.example
 .data*
+# Fetched remote-plugin cache (matbot-writes / LLM-reads-only); regenerated on demand
+.plugins/
 .claude/settings.local.json
 matbot.yaml
 matbot.*.yaml
 # macOS
 .DS_Store
 
-# The web bundle is a shippable, self-contained artifact — keep it tracked even
+# The web bundles are shippable, self-contained artifacts — keep them tracked even
 # though dist/ is ignored everywhere else. Re-including the directory is required
-# before the file (per gitignore precedence), but on its own it un-ignores the
+# before the files (per gitignore precedence), but on its own it un-ignores the
 # directory's *entire* contents; re-ignore them with the wildcard, then carve out
-# just the shipped html.
+# just the shipped html (the rich UI and the dom demonstrator).
 !apps/web-bundle/dist/
 apps/web-bundle/dist/*
 !apps/web-bundle/dist/matbot.html
+!apps/web-bundle/dist/matbot-demo.html

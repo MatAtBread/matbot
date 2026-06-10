@@ -225,23 +225,13 @@ function md(text) {
   return result.replace(/<a /g, '<a target=\"_blank\" rel=\"noopener noreferrer\" ');
 }
 
-// ── SSE parser ────────────────────────────────────────────────────────────────
-
-function parseSSEChunk(text) {
-  const events    = [];
-  const blocks    = text.split('\n\n');
-  const remaining = blocks.pop() ?? '';
-  for (const block of blocks) {
-    let data = '';
-    for (const line of block.split('\n')) {
-      if (line.startsWith('data: ')) data = line.slice(6);
-    }
-    if (data) {
-      try { events.push(JSON.parse(data)); } catch { /* skip malformed */ }
-    }
-  }
-  return { events, remaining };
-}
+// ── Transport ───────────────────────────────────────────────────────────────
+//
+// All server I/O goes through window.matbotTransport, set up before this script runs:
+//   - http-transport.js  (Node-served: fetch + SSE to server.ts)
+//   - browser.js         (in-process bundle: drives services.run directly)
+// This file is byte-identical in both modes; only the transport behind T differs.
+const T = window.matbotTransport;
 
 // ── API ───────────────────────────────────────────────────────────────────────
 
@@ -256,7 +246,7 @@ async function apiListSessions() {
   }
 }
 async function apiGetSession(id)  { try { return await callTool('session_action', { action: 'get', sessionId: id }); } catch { return null; } }
-async function apiSessionBusy(id) { try { const r = await fetch('/sessions/' + id); return r.ok ? (await r.json()).busy : false; } catch { return false; } }
+async function apiSessionBusy(id) { return T.sessionBusy(id); }
 async function apiListProviders() { try { return (await callTool('provider', { action: 'list' })).providers.map(p => p.name); } catch { return []; } }
 
 async function refreshProviderSelect() {
@@ -275,14 +265,7 @@ async function refreshProviderSelect() {
 // ── Tool API ──────────────────────────────────────────────────────────────────
 
 async function callTool(toolName, input) {
-  const res = await fetch('/tools/' + toolName, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(input),
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error('HTTP ' + res.status + (data.error ?? ''));
-  return data;
+  return T.callTool(toolName, input);
 }
 
 // Join an in-progress server run for sessionId. renderedCount is the number of
@@ -319,8 +302,7 @@ async function hideSession(id) {
 }
 
 async function apiNewSession() {
-  const r = await fetch('/sessions', { method: 'POST' });
-  return r.json();
+  return T.createSession();
 }
 
 // ── Workspace files ───────────────────────────────────────────────────────────
@@ -350,7 +332,7 @@ function renderFiles(files) {
     div.onclick = () => {
       updatedFiles.delete(f.path);
       div.classList.remove('updated');
-      window.open('/files/workspace/' + f.path, '_blank');
+      T.openFile('workspace', f.path);
     };
     const nameEl = document.createElement('span');
     nameEl.className = 'file-name';
@@ -447,10 +429,11 @@ async function loadPlugins() {
   renderPlugins(listResult.loaded ?? [], Array.isArray(localResult) ? localResult : []);
 }
 
-// This frontend serves from the node host; a plugin can run here only if its declared matbotRuntime
-// includes 'node'. An absent/empty declaration means "unknown" — allow it (the backend's load/rollback
-// gate is the real arbiter; we only suppress installs that are guaranteed to fail).
-const HOST_RUNTIME = 'node';
+// A plugin can run here only if its declared matbotRuntime includes the host runtime. The transport
+// reports it ('node' when served over HTTP, 'browser' for the in-process bundle); default 'node'.
+// An absent/empty declaration means "unknown" — allow it (the backend's load/rollback gate is the
+// real arbiter; we only suppress installs that are guaranteed to fail).
+const HOST_RUNTIME = T.hostRuntime || 'node';
 function runsHere(p) {
   const rt = p && p.matbotRuntime;
   if (!Array.isArray(rt) || rt.length === 0) return true;
@@ -658,6 +641,13 @@ async function openSkillEditor(name) {
   skillEditorError.textContent = '';
   skillEditorTitle.textContent = name;
   skillEditorOverlay.classList.add('open');
+  // The editor needs TinyMDE (CDN, http(s) only). On an offline file:// bundle it never loaded —
+  // degrade with a message rather than throwing on `new TinyMDE.Editor`.
+  if (typeof TinyMDE === 'undefined') {
+    skillEditorError.textContent = 'Markdown editor unavailable offline (TinyMDE failed to load).';
+    skillEditorSave.disabled = true;
+    return;
+  }
   const editor = ensureSkillEditor();
   editor.setContent('Loading…');
   skillEditorSave.disabled = true;
@@ -1417,27 +1407,15 @@ async function connectSessionStream(sid) {
   activeBatchHead = null;
   foldedTraces.clear();
   const ac = streamAc;
-  while (!ac.signal.aborted && sid === currentSessionId) {
-    try {
-      const res = await fetch('/sessions/' + sid + '/events', { signal: ac.signal });
-      if (!res.ok || !res.body) break;
-      const reader = res.body.getReader();
-      const dec = new TextDecoder();
-      let buf = '';
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (ac.signal.aborted || sid !== currentSessionId) { reader.cancel(); break; }
-        buf += dec.decode(value, { stream: true });
-        const parsed = parseSSEChunk(buf);
-        buf = parsed.remaining;
-        for (const ev of parsed.events) pushTurnEvent(ev);
-      }
-    } catch (e) {
-      if (ac.signal.aborted) return;
+  // The transport owns the wire (reconnect, parsing); we just demux each turn event. Switching
+  // sessions aborts ac (above), which ends the prior stream.
+  try {
+    for await (const ev of T.sessionEvents(sid, ac.signal)) {
+      if (ac.signal.aborted || sid !== currentSessionId) break;
+      pushTurnEvent(ev);
     }
-    if (ac.signal.aborted || sid !== currentSessionId) return;
-    await new Promise(r => setTimeout(r, 1000)); // reconnect backoff
+  } catch {
+    /* aborted or stream torn down */
   }
 }
 
@@ -1481,18 +1459,9 @@ async function postSubmit(sid, content, concat = false) {
   const provider = providerSel.value;
   if (!provider) return;
   try {
-    const res = await fetch('/sessions/' + sid + '/submit', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ content, provider, concatQueue: concat }),
-      signal: AbortSignal.timeout(20000),
-    });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      showSubmitError(content, data.error || ('HTTP ' + res.status));
-    }
+    await T.submit(sid, { content, provider, concatQueue: concat });
   } catch (e) {
-    showSubmitError(content, e.name === 'TimeoutError' ? 'submit timed out (no response)' : String(e));
+    showSubmitError(content, e.name === 'TimeoutError' ? 'submit timed out (no response)' : (e.message || String(e)));
   }
 }
 
@@ -1815,11 +1784,7 @@ async function renderTurn(sid, traceId) {
               inp.focus();
             }
           });
-          await fetch('/sessions/' + sid + '/prompt', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify(result.cancelled ? { cancel: true } : { answer: result.answer }),
-          });
+          await T.answerPrompt(sid, result.cancelled ? { cancel: true } : { answer: result.answer });
           break;
         }
 
@@ -1949,9 +1914,9 @@ function requestStop() {
   const target = currentSessionId;
   if (!target) return;
   stopBtn.disabled = true;
-  // Server-side this aborts the running turn AND drops everything still queued for the session;
-  // the resulting aborted/cancelled events tidy the rendered turns over the persistent stream.
-  fetch('/sessions/' + target + '/abort', { method: 'POST' })
+  // Aborts the running turn AND drops everything still queued for the session; the resulting
+  // aborted/cancelled events tidy the rendered turns over the persistent stream.
+  Promise.resolve(T.abort(target))
     .catch(() => {})
     .finally(() => { stopBtn.disabled = false; });
 }
@@ -2018,11 +1983,9 @@ async function init() {
     localStorage.setItem(LS_PROVIDER, providerSel.value);
   });
 
-  // Subscribe to server-pushed session busy/idle events.
-  (function connectStatusStream() {
-    const es = new EventSource('/sessions/events');
-    es.addEventListener('session-busy', e => {
-      const { sessionId, busy } = JSON.parse(e.data);
+  // Subscribe to session busy/idle transitions (the transport owns the wire + reconnect).
+  (async function connectStatusStream() {
+    for await (const { sessionId, busy } of T.statusEvents(new AbortController().signal)) {
       const item = sessionListEl.querySelector('[data-sid="' + sessionId + '"]');
       if (busy) {
         busySessions.add(sessionId);
@@ -2039,17 +2002,14 @@ async function init() {
       }
       // Drive the Stop button + the busy flag for the session currently in view.
       if (sessionId === currentSessionId) { sending = busy; setStop(busy); }
-    });
-    es.onerror = () => { es.close(); setTimeout(connectStatusStream, 3000); };
+    }
   })();
 
   // Subscribe to file-change events. The stream carries every namespace; this panel shows the
   // workspace, so ignore events for other namespaces before touching it.
-  (function connectFileWatchStream() {
-    const es = new EventSource('/files/events');
-    es.addEventListener('file-changed', e => {
-      const event = JSON.parse(e.data);
-      if (event.namespace !== 'workspace') return;
+  (async function connectFileWatchStream() {
+    for await (const event of T.fileEvents(new AbortController().signal)) {
+      if (event.namespace !== 'workspace') continue;
       const { name } = event;
       const el = document.getElementById('file-list');
       const item = el?.querySelector('[data-path="' + CSS.escape(name) + '"]');
@@ -2064,8 +2024,7 @@ async function init() {
         updatedFiles.add(name);
         loadFiles();
       }
-    });
-    es.onerror = () => { es.close(); setTimeout(connectFileWatchStream, 3000); };
+    }
   })();
 
   renderSessions(sessions);

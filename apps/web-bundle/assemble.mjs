@@ -29,7 +29,10 @@ function resolveExportsEntry(value) {
   if (typeof value === 'string') return value;
   if (typeof value !== 'object' || value === null) return undefined;
   if ('.' in value) return resolveExportsEntry(value['.']);
-  for (const key of ['import', 'default', ...Object.keys(value)]) {
+  // This builder only ever produces browser bundles, so a `browser` condition always wins — that is
+  // how a dual-runtime package (e.g. frontend/web) routes us to its browser entry while Node keeps
+  // resolving `import`/`node` to its server entry.
+  for (const key of ['browser', 'import', 'default', ...Object.keys(value)]) {
     if (key in value) return resolveExportsEntry(value[key]);
   }
   return undefined;
@@ -71,7 +74,7 @@ async function entryForPath(rel) {
   const runtimes = Array.isArray(pkg.matbotRuntime)
     ? pkg.matbotRuntime.filter(r => r === 'node' || r === 'browser')
     : undefined;
-  return { id: idOf(path.join(dir, entry)), name: pkg.name ?? rel, runtimes };
+  return { id: idOf(path.join(dir, entry)), name: pkg.name ?? rel, runtimes, description: pkg.description };
 }
 
 const SPEC_RE = /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)(['"])([^'"]+)\1/g;
@@ -127,7 +130,9 @@ async function collect(rootIds, nameMap) {
 const guard = (s) => s.replace(/<\/(script)/gi, '<\\/$1');
 
 async function main() {
-  const config = JSON.parse(await readFile(path.join(here, 'matbot.web.json'), 'utf8'));
+  const configFile = process.argv[2] ?? 'matbot.web.json';
+  const config = JSON.parse(await readFile(path.join(here, configFile), 'utf8'));
+  const outputName = config.output ?? 'matbot.html';
   const nameMap = await buildNameMap();
 
   const bootstrapId = idOf(path.join(here, 'src/bootstrap.ts'));
@@ -163,6 +168,30 @@ async function main() {
     providers[pname] = { ...cfg, module: spec };
   }
 
+  // Baked-but-idle plugins: inlined as graph roots (so their modules + import-map entries exist) but
+  // NOT added to pluginSpecs, so they don't auto-load at boot. They're offered via the browser
+  // `plugin` tool's discover and loaded on demand BY PACKAGE NAME — which, being baked, resolves
+  // through the import map with no network and persists across reloads (no ephemeral blob/path).
+  const bundledSpecs = [];
+  const availablePlugins = [];
+  for (const rel of config.bundledPlugins ?? []) {
+    const { id, name, runtimes, description } = await entryForPath(rel);
+    if (runtimes !== undefined && !runtimes.includes('browser')) {
+      console.warn(`[matbot] assemble: bundled plugin "${rel}" declares matbotRuntime [${runtimes.join(', ')}] — it cannot run in the browser; baking it anyway, but it will fail to load.`);
+    }
+    rootIds.push(id);
+    const spec = SYN(id);
+    bundledSpecs.push(spec);
+    specNames[spec] = name;
+    if (runtimes !== undefined) specRuntimes[spec] = runtimes;
+    availablePlugins.push({
+      name,
+      specifier: name,                 // load by package name → import map → baked blob → persists
+      ...(runtimes    !== undefined ? { matbotRuntime: runtimes } : {}),
+      ...(description !== undefined ? { description } : {}),
+    });
+  }
+
   // Adapter types the startup wizard offers. Inlined as graph roots so a wizard-configured provider's
   // module is present even though no baked provider references it.
   const availableProviders = [];
@@ -190,10 +219,18 @@ async function main() {
   // packageEntries: every workspace package whose entry was pulled into the graph (so the import map
   // can map its bare name → blob), plus the ones referenced by config even if only dynamically.
   const packageEntries = { ...usedNames };
-  for (const spec of [...pluginSpecs, ...Object.values(providers).map(p => p.module)]) {
+  for (const spec of [...pluginSpecs, ...bundledSpecs, ...Object.values(providers).map(p => p.module)]) {
     const id = spec.slice('mbmod:'.length);
     const name = specNames[spec];
     if (name) packageEntries[name] = id;
+  }
+
+  // Raw UI assets (e.g. the web frontend's index.html scaffold + app.js) baked verbatim for an
+  // in-process frontend to inject. NOT type-stripped — they're already HTML/JS; the whole payload is
+  // guarded against `</script>` below, which covers any inside these strings.
+  const assets = {};
+  for (const [key, rel] of Object.entries(config.assets ?? {})) {
+    assets[key] = await readFile(path.join(repoRoot, rel), 'utf8');
   }
 
   const payload = {
@@ -202,10 +239,12 @@ async function main() {
     entry: bootstrapId,
     specNames,
     specRuntimes,
+    assets,
     config: {
       plugins:   pluginSpecs,
       providers,
       availableProviders,
+      availablePlugins,
       ...(config.defaultProvider ? { defaultProvider: config.defaultProvider } : {}),
     },
   };
@@ -221,7 +260,7 @@ async function main() {
 
   const outDir = path.join(here, 'dist');
   await mkdir(outDir, { recursive: true });
-  const outFile = path.join(outDir, 'matbot.html');
+  const outFile = path.join(outDir, outputName);
   await writeFile(outFile, html, 'utf8');
 
   const bytes = Buffer.byteLength(html, 'utf8');
