@@ -204,8 +204,9 @@ async function main() {
     availableProviders.push({
       label: pm.label ?? name,
       module: spec,
-      ...(pm.endpointHint !== undefined ? { endpointHint: pm.endpointHint } : {}),
-      ...(pm.modelHint    !== undefined ? { modelHint:    pm.modelHint    } : {}),
+      ...(pm.endpointHint  !== undefined ? { endpointHint:  pm.endpointHint  } : {}),
+      ...(pm.modelHint     !== undefined ? { modelHint:     pm.modelHint     } : {}),
+      ...(pm.selfContained !== undefined ? { selfContained: pm.selfContained } : {}),
     });
   }
 

@@ -72,13 +72,16 @@ The web defaults are plugins, never core packages. The **auto-load core** (`matb
   bundle swaps this for **`@matatbread/matbot-frontend-dom`**, a minimal ~450-line demonstrator.)
 
 Everything else browser-safe — `http`, `ask_user`, `session_action`, `session_edit`,
-`workspace_action`, `contextual_search`, json-validation — is **baked-but-idle** (`bundledPlugins`):
-in the artifact and the import map but not auto-loaded, offered via the `plugin` tool's
-`discover_local` and loaded on demand by package name (which persists across reloads). The provider
-adapters (anthropic / openai-compat — pure `fetch`) are inlined as wizard-selectable *types* rather
-than pre-configured providers. Node-only plugins (`bash`, `docker-bash`, `mcp`, `skills`, the node
-web frontend's server entry) are omitted — they need Node primitives. See
-[WEB-BUNDLE.md](../../WEB-BUNDLE.md) for the three-layer plugin model.
+`workspace_action`, `contextual_search`, `skill_action`, json-validation — is **baked-but-idle**
+(`bundledPlugins`): in the artifact and the import map but not auto-loaded, offered via the `plugin`
+tool's `discover_local` and loaded on demand by package name (which persists across reloads). The
+provider adapters (anthropic / openai-compat — pure `fetch`) are inlined as wizard-selectable *types*
+rather than pre-configured providers — including **customer-services**, a free self-contained demo LLM the
+wizard offers with no endpoint or API key required (zero-config first run). Node-only plugins
+(`bash`, `docker-bash`, `mcp`, `skills-node`,
+the node web frontend's server entry) are omitted — they need Node primitives. (The base `skills`
+plugin is cross-runtime and *is* bundled; only its `skills-node` filesystem specialization is
+Node-only.) See [WEB-BUNDLE.md](../../WEB-BUNDLE.md) for the three-layer plugin model.
 
 Built-in tools `plugin` (list/add/remove/store-key) and `provider` (list/add/remove) are present too,
 so the model can manage plugins and provider profiles at runtime. These are browser-native

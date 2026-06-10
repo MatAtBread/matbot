@@ -106,16 +106,21 @@ export async function boot(env: BootEnv): Promise<void> {
   const vault: Vault = new LocalStorageVault();
 
   // Store a wizard draft: key in the vault under a derived name, persist the config (with a ${ref},
-  // never the raw key) to localStorage, and return the runnable config.
+  // never the raw key) to localStorage, and return the runnable config. A self-contained provider
+  // (no endpoint/key — e.g. a local demo adapter) persists neither: only model + module.
   const persistDraft = async (draft: ProviderDraft): Promise<ProviderConfig> => {
-    const keyName = 'APIKEY_' + draft.name.toUpperCase().replace(/[^A-Z0-9]/g, '_');
-    await vault.writeSecret(keyName, draft.apiKey);
+    let credentials: Record<string, string> | undefined;
+    if (draft.apiKey) {
+      const keyName = 'APIKEY_' + draft.name.toUpperCase().replace(/[^A-Z0-9]/g, '_');
+      await vault.writeSecret(keyName, draft.apiKey);
+      credentials = { apiKey: '${' + keyName + '}' };
+    }
     const cfg: ProviderConfig = {
-      name:        draft.name,
-      module:      draft.module,
-      model:       draft.model,
-      endpoint:    draft.endpoint,
-      credentials: { apiKey: '${' + keyName + '}' },
+      name:   draft.name,
+      module: draft.module,
+      model:  draft.model,
+      ...(draft.endpoint ? { endpoint: draft.endpoint } : {}),
+      ...(credentials    ? { credentials }              : {}),
     };
     savePersistedProvider(cfg);
     return cfg;

@@ -4,6 +4,9 @@ export interface AvailableProvider {
   module:        string;   // importable specifier of the adapter plugin
   endpointHint?: string;
   modelHint?:    string;
+  /** A provider that needs no endpoint/model/API key (e.g. a self-contained local adapter). The
+   *  wizard hides those fields and submits with just a name; `modelHint` (if any) is used as model. */
+  selfContained?: boolean;
 }
 
 /** Everything the user supplies for one provider — the browser equivalent of the CLI setup wizard. */
@@ -85,8 +88,15 @@ export function runProviderSetup(
     apiKey.type = 'password';
     apiKey.placeholder = 'sk-…';
 
+    const endpointField = field('Endpoint URL', endpoint);
+    const modelField    = field('Model', model);
+    const apiKeyField   = field('API key', apiKey);
+
     const applyHints = (): void => {
       const a = available[Number(type.value)];
+      // A self-contained adapter (e.g. a local demo LLM) needs no endpoint/model/key — hide them.
+      const sc = !!a?.selfContained;
+      for (const f of [endpointField, modelField, apiKeyField]) f.style.display = sc ? 'none' : '';
       endpoint.placeholder = a?.endpointHint ?? 'https://…';
       model.placeholder    = a?.modelHint ?? 'model-name';
     };
@@ -104,18 +114,21 @@ export function runProviderSetup(
 
     const submit = (): void => {
       const a = available[Number(type.value)];
+      const sc = !!a?.selfContained;
       const draft: ProviderDraft = {
         name:     name.value.trim(),
         module:   a?.module ?? '',
-        endpoint: endpoint.value.trim(),
-        model:    model.value.trim(),
-        apiKey:   apiKey.value.trim(),
+        endpoint: sc ? '' : endpoint.value.trim(),
+        model:    sc ? (a?.modelHint ?? a?.label ?? '') : model.value.trim(),
+        apiKey:   sc ? '' : apiKey.value.trim(),
       };
       if (!draft.name)   { err.textContent = 'A name is required.';     return; }
       if (!draft.module) { err.textContent = 'Pick an adapter type.';   return; }
-      if (!draft.endpoint) { err.textContent = 'An endpoint URL is required.'; return; }
-      if (!draft.model)  { err.textContent = 'A model name is required.'; return; }
-      if (!draft.apiKey) { err.textContent = 'An API key is required.';  return; }
+      if (!sc) {
+        if (!draft.endpoint) { err.textContent = 'An endpoint URL is required.'; return; }
+        if (!draft.model)  { err.textContent = 'A model name is required.'; return; }
+        if (!draft.apiKey) { err.textContent = 'An API key is required.';  return; }
+      }
       overlay.remove();
       resolve(draft);
     };
@@ -135,9 +148,9 @@ export function runProviderSetup(
       h, sub,
       field('Name', name),
       field('Adapter', type),
-      field('Endpoint URL', endpoint),
-      field('Model', model),
-      field('API key', apiKey),
+      endpointField,
+      modelField,
+      apiKeyField,
       err, row,
     );
     overlay.appendChild(card);

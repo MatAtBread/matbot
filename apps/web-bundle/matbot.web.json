@@ -20,6 +20,11 @@
     "packages/plugins/edit-session",
     "packages/plugins/workspace",
     "packages/plugins/rumsfeld",
+    "packages/plugins/skills",
+    "packages/plugins/mcp-http",
+    "packages/plugins/whoami",
+    "packages/plugins/hook-logger",
+    "packages/plugins/persist-ki-bge",
     "packages/plugins/json-validation"
   ],
 
@@ -37,6 +42,12 @@
       "module": "packages/plugins/providers/openai-compat",
       "endpointHint": "https://api.deepseek.com/v1/chat/completions",
       "modelHint": "deepseek-chat"
+    },
+    {
+      "label": "Customer Services (free demo LLM — no endpoint or API key needed)",
+      "module": "packages/plugins/providers/customer-services",
+      "modelHint": "customer-services",
+      "selfContained": true
     }
   ],
 
