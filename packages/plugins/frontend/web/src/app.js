@@ -616,8 +616,97 @@ const skillEditorText    = document.getElementById('skill-editor-text');
 const skillEditorTitle   = document.getElementById('skill-editor-title');
 const skillEditorError   = document.getElementById('skill-editor-error');
 const skillEditorSave    = document.getElementById('skill-editor-save');
+const skillEditorRoot    = document.getElementById('skill-editor');
+const skillTriggerList   = document.getElementById('skill-trigger-list');
+const TRIGGER_PHASES = ['agent', 'user', 'system'];
 let editingSkillName = null;
-let skillEditor = null; // TinyMDE.Editor, created lazily on first open
+let skillEditor = null;   // TinyMDE.Editor, created lazily on first open
+let loadedTriggers = [];  // originals from skill_triggers `get`, for save-time reconciliation
+
+function setSkillTab(tab) {
+  for (const btn of document.querySelectorAll('.skill-tab')) btn.classList.toggle('active', btn.dataset.tab === tab);
+  document.getElementById('skill-editor-pane-content').classList.toggle('active', tab === 'content');
+  document.getElementById('skill-editor-pane-triggers').classList.toggle('active', tab === 'triggers');
+  skillEditorRoot.classList.toggle('tab-triggers', tab === 'triggers');
+}
+
+// One trigger row: a phase <select> + the rubric <textarea>, both disabled (read-only) until ✎ is
+// clicked; × removes the row. New rows (no `t`) start editable. Nothing is persisted until Save,
+// which diffs the live rows against `loadedTriggers`.
+function makeTriggerRow(t) {
+  const editable = !t || !t.id;
+  const row = document.createElement('div');
+  row.className = 'trigger-row';
+  if (t && t.id) row.dataset.id = t.id;
+
+  const sel = document.createElement('select');
+  sel.className = 'trigger-phase';
+  for (const p of TRIGGER_PHASES) {
+    const o = document.createElement('option');
+    o.value = p; o.textContent = p;
+    sel.appendChild(o);
+  }
+  sel.value = t?.phase ?? 'agent';
+  sel.disabled = !editable;
+
+  const txt = document.createElement('textarea');
+  txt.className = 'trigger-text';
+  txt.rows = 2;
+  txt.value = t?.trigger ?? '';
+  txt.disabled = !editable;
+  txt.placeholder = 'agent/user: "MATCH if …; DO NOT MATCH if …"   ·   system: a one-line catalogue summary';
+
+  const editBtn = document.createElement('button');
+  editBtn.className = 'trigger-edit';
+  editBtn.title = 'Edit';
+  editBtn.textContent = '✎';
+  editBtn.classList.toggle('editing', editable);
+  editBtn.onclick = () => {
+    const enable = txt.disabled;
+    txt.disabled = sel.disabled = !enable;
+    editBtn.classList.toggle('editing', enable);
+    if (enable) txt.focus();
+  };
+
+  const delBtn = document.createElement('button');
+  delBtn.className = 'trigger-del';
+  delBtn.title = 'Remove';
+  delBtn.textContent = '×';
+  delBtn.onclick = () => row.remove();
+
+  row.append(sel, txt, editBtn, delBtn);
+  return row;
+}
+
+function renderTriggers(triggers) {
+  skillTriggerList.innerHTML = '';
+  for (const t of triggers) skillTriggerList.appendChild(makeTriggerRow(t));
+}
+
+// Diff the live rows against the loaded originals and emit the minimal add/update/remove calls.
+async function saveTriggers(name) {
+  const present = new Set();
+  for (const row of skillTriggerList.querySelectorAll('.trigger-row')) {
+    const id = row.dataset.id || '';
+    const phase = row.querySelector('.trigger-phase').value;
+    const trigger = row.querySelector('.trigger-text').value.trim();
+    if (!trigger) continue; // an empty row is a no-op, not a delete
+    if (!id) {
+      await callTool('skill_triggers', { action: 'add', name, phase, trigger });
+    } else {
+      present.add(id);
+      const orig = loadedTriggers.find(o => o.id === id);
+      if (orig && (orig.phase !== phase || orig.trigger !== trigger)) {
+        await callTool('skill_triggers', { action: 'update', name, id, phase, trigger });
+      }
+    }
+  }
+  for (const orig of loadedTriggers) {
+    if (orig.id && !present.has(orig.id)) {
+      await callTool('skill_triggers', { action: 'remove', name, id: orig.id });
+    }
+  }
+}
 
 function ensureSkillEditor() {
   if (!skillEditor) {
@@ -640,7 +729,14 @@ async function openSkillEditor(name) {
   editingSkillName = name;
   skillEditorError.textContent = '';
   skillEditorTitle.textContent = name;
+  loadedTriggers = [];
+  renderTriggers([]);
+  setSkillTab('content');
   skillEditorOverlay.classList.add('open');
+  // Triggers are independent of the markdown editor, so load them even if TinyMDE is absent.
+  callTool('skill_triggers', { action: 'get', name })
+    .then((tr) => { loadedTriggers = Array.isArray(tr?.triggers) ? tr.triggers : []; renderTriggers(loadedTriggers); })
+    .catch(() => { /* skill_triggers tool not loaded — leave the triggers tab empty. */ });
   // The editor needs TinyMDE (CDN, http(s) only). On an offline file:// bundle it never loaded —
   // degrade with a message rather than throwing on `new TinyMDE.Editor`.
   if (typeof TinyMDE === 'undefined') {
@@ -673,12 +769,19 @@ if (skillEditorOverlay) {
   });
   document.getElementById('skill-editor-close').onclick  = closeSkillEditor;
   document.getElementById('skill-editor-cancel').onclick = closeSkillEditor;
+  for (const btn of document.querySelectorAll('.skill-tab')) btn.onclick = () => setSkillTab(btn.dataset.tab);
+  document.getElementById('skill-trigger-add').onclick = () => {
+    const row = makeTriggerRow();
+    skillTriggerList.appendChild(row);
+    row.querySelector('.trigger-text').focus();
+  };
   skillEditorSave.onclick = async () => {
     if (editingSkillName === null) return;
     skillEditorSave.disabled = true;
     skillEditorError.textContent = '';
     try {
-      await callTool('skill_action', { action: 'save', name: editingSkillName, content: skillEditor.getContent() });
+      if (skillEditor) await callTool('skill_action', { action: 'save', name: editingSkillName, content: skillEditor.getContent() });
+      await saveTriggers(editingSkillName);
     } catch (err) {
       skillEditorError.textContent = 'Failed to save: ' + (err?.message ?? err);
       skillEditorSave.disabled = false;

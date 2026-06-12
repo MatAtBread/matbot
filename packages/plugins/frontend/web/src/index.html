@@ -423,6 +423,80 @@
       padding: 0 4px;
     }
     #skill-editor-close:hover { color: #111; }
+    #skill-editor-tabs { display: flex; gap: 4px; }
+    .skill-tab {
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 0.85em;
+      color: #6b7280;
+      padding: 4px 10px;
+    }
+    .skill-tab:hover { color: #111; }
+    .skill-tab.active { color: #2563eb; border-bottom-color: #2563eb; font-weight: 600; }
+    #skill-editor-body { flex: 1; min-height: 0; display: flex; }
+    .skill-pane { display: none; flex: 1; min-height: 0; flex-direction: column; }
+    .skill-pane.active { display: flex; }
+    /* The markdown toolbar (in the footer) is only meaningful on the content tab. */
+    #skill-editor.tab-triggers #skill-editor-toolbar { display: none; }
+    #skill-editor-pane-triggers { padding: 16px; }
+    #skill-trigger-list { flex: 1; min-height: 0; overflow-y: auto; }
+    #skill-trigger-add { align-self: flex-start; margin-top: 10px; }
+    #skill-trigger-list:empty::after {
+      content: 'No triggers. Most skills need none — search surfaces them by content.';
+      color: #9ca3af;
+      font-size: 0.82em;
+    }
+    .trigger-row {
+      display: flex;
+      gap: 8px;
+      align-items: flex-start;
+      margin-bottom: 10px;
+    }
+    .trigger-row .trigger-phase {
+      flex: 0 0 84px;
+      font-family: inherit;
+      font-size: 0.82em;
+      padding: 5px 4px;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      background: #fff;
+    }
+    .trigger-row .trigger-text {
+      flex: 1;
+      min-width: 0;
+      resize: vertical;
+      font-family: inherit;
+      font-size: 0.82em;
+      line-height: 1.5;
+      padding: 5px 8px;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      color: #1f2937;
+    }
+    .trigger-row .trigger-phase:disabled,
+    .trigger-row .trigger-text:disabled {
+      background: #f9fafb;
+      color: #4b5563;
+      cursor: pointer;
+    }
+    .trigger-row .trigger-edit,
+    .trigger-row .trigger-del {
+      flex: 0 0 auto;
+      background: none;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.9em;
+      line-height: 1;
+      padding: 6px 8px;
+      color: #6b7280;
+    }
+    .trigger-row .trigger-edit:hover,
+    .trigger-row .trigger-del:hover { background: #f3f4f6; color: #111; }
+    .trigger-row .trigger-edit.editing { background: #2563eb; border-color: #2563eb; color: #fff; }
     #skill-editor-text {
       flex: 1;
       min-height: 0;
@@ -1471,9 +1545,21 @@
     <div id="skill-editor">
       <div id="skill-editor-header">
         <span id="skill-editor-title"></span>
+        <div id="skill-editor-tabs">
+          <button class="skill-tab active" data-tab="content">Content</button>
+          <button class="skill-tab" data-tab="triggers">Triggers</button>
+        </div>
         <button id="skill-editor-close" title="Close">&times;</button>
       </div>
-      <textarea id="skill-editor-text" spellcheck="false" placeholder="Skill content (markdown)…"></textarea>
+      <div id="skill-editor-body">
+        <div id="skill-editor-pane-content" class="skill-pane active">
+          <textarea id="skill-editor-text" spellcheck="false" placeholder="Skill content (markdown)…"></textarea>
+        </div>
+        <div id="skill-editor-pane-triggers" class="skill-pane">
+          <div id="skill-trigger-list"></div>
+          <button id="skill-trigger-add" class="skill-editor-btn">+ Add trigger</button>
+        </div>
+      </div>
       <div id="skill-editor-footer">
         <div id="skill-editor-toolbar"></div>
         <span id="skill-editor-error"></span>
