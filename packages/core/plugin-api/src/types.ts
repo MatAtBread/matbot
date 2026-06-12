@@ -113,7 +113,12 @@ export type MessageContent = (
  * Unregistered creators fall back to `data: unknown`. The base `MessageContent` member stays
  * loose (`creator: string`) so the union and its exhaustive switches are unaffected.
  */
-export interface MarkerData {}
+export interface MarkerData {
+  /** Emitted by the hook dispatcher when a hook handler threw: the hook was skipped (treated as a
+   *  no-op) and this records it once, so a misconfigured/throwing hook degrades visibly instead of
+   *  bricking the turn. `channel` is the hook point, `pluginName` the owning plugin if known. */
+  'matbot-hooks': { channel: HookPoint; pluginName?: string; message: string };
+}
 
 export type Marker<K extends string = string> = {
   type:    'marker';
@@ -233,6 +238,8 @@ export interface ScreenContext {
   session: Session;
   config:  RunConfig;
   signal:  AbortSignal;
+  /** Unregister the hook currently running. For one-shot hooks that should fire at most once. */
+  removeHook(): void;
 }
 export interface ScreenResult {
   session?:   Session;
@@ -245,6 +252,8 @@ export interface ContributeContext {
   readonly session:  Session;
   config:  RunConfig;
   signal:  AbortSignal;
+  /** Unregister the hook currently running. For one-shot hooks that should fire at most once. */
+  removeHook(): void;
 }
 
 export interface ToolCallContext {
@@ -253,6 +262,8 @@ export interface ToolCallContext {
   readonly tool:     Tool;
   config:  RunConfig;
   signal:  AbortSignal;
+  /** Unregister the hook currently running. For one-shot hooks that should fire at most once. */
+  removeHook(): void;
 }
 export interface ToolCallResult {
   rejectTool?: { message: string };
@@ -268,6 +279,8 @@ export interface ToolResultContext {
   readonly durationMs: number;
   config:  RunConfig;
   signal:  AbortSignal;
+  /** Unregister the hook currently running. For one-shot hooks that should fire at most once. */
+  removeHook(): void;
 }
 // The toolresult hook returns `{ result }` to replace the tool's result, or nothing to leave it
 // (and just observe) — a trivial single-field return, inlined in the Hook union like `contribute`'s.
@@ -277,6 +290,8 @@ export interface FollowupContext {
   readonly resubmitDepth: number;
   config:  RunConfig;
   signal:  AbortSignal;
+  /** Unregister the hook currently running. For one-shot hooks that should fire at most once. */
+  removeHook(): void;
 }
 export interface FollowupResult {
   resubmit?: { content: MessageContent[] };
@@ -576,6 +591,10 @@ export type PipelineEvent =
   // and replayed (in queue order) to anyone subscribing mid-flight.
   | { type: 'queued';         content: MessageContent[]; queued: number; concatQueue: boolean; traceId: string; rootTraceId: string }
   | { type: 'robo-user';      content: MessageContent[]; traceId: string }
+  // Marker blocks appended to the session this turn (e.g. the dispatcher's record of a hook that
+  // threw), carried live so a frontend renders them without waiting for a session reload. The blocks
+  // are already persisted in the session; this event is purely the live-delivery channel.
+  | { type: 'marker';         content: MessageContent[]; traceId: string }
   | { type: 'error';          error: string;          traceId: string }
   | { type: 'system-context'; text: string;           traceId: string };
 

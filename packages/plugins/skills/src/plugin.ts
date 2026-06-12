@@ -4,6 +4,14 @@ import { SkillManager } from './manager.js';
 import { createSkillTool, createSkillTriggersTool, createSingleTurnTool, singleTurn } from './tools.js';
 import type { SkillDoc } from './types.js';
 
+declare module '@matatbread/matbot-plugin-api' {
+  interface MatbotServices {
+    /** The live skill set. Registered by setupSkills; consumed by plugins that ship built-in
+     *  skills (e.g. cognition). Its presence is also the "skills already wired this process" signal. */
+    SkillManager?: SkillManager;
+  }
+}
+
 const CLASSIFIER_PROVIDER = 'skills-classifier';
 const MAX_MSG_CHARS = 1500;
 
@@ -23,8 +31,11 @@ function skillBlock(matched: SkillDoc[]): string {
 
 /**
  * LLM-judge the `agent`/`user` triggers of `phase` against the current turn and return the distinct
- * skills whose trigger fired. `subject` is the message the condition is about; `context` is the other
- * side of the turn, supplied only so relational clauses ("…unless the user asked") can be honoured.
+ * skills whose trigger fired. Both sides of the exchange are passed, clearly delineated: `subject` is
+ * the message the triggers are evaluated against, and `context` is the opposing message it is paired
+ * with (what `subject` responds to, or what prompted it). `context` is a first-class input, not a
+ * footnote, because many triggers are relational — "the user disputes the previous answer", "the
+ * assistant asserted a cause the user never asked for" — and can only be judged from the pair.
  * Makes no LLM call when there are no candidate triggers. (`system` triggers are NOT conditions —
  * they are injected as a catalogue, not evaluated here.)
  */
@@ -47,13 +58,16 @@ async function matchedSkills(
     provider: CLASSIFIER_PROVIDER,
     signal,
     system:
-      `You are a trigger classifier. Each trigger below is a condition on the ${subject.label}. ` +
-      `The ${context.label} is provided ONLY as context — consult it solely for clauses that explicitly ` +
-      `reference it. Fire a trigger only when the ${subject.label} itself satisfies it. Return ONLY a ` +
-      'JSON object mapping each trigger id (the bracketed value) to true or false. No other text.',
+      'You are a trigger classifier for a conversational assistant. Below is the current exchange — ' +
+      'the user message and the assistant message, in chronological order and clearly labelled — ' +
+      `followed by a list of triggers. Evaluate each trigger against the "${subject.label}". The ` +
+      `"${context.label}" is the message it is paired with; use it fully whenever a trigger is ` +
+      'relational (refers to what was asked, answered, disputed, or repeated). Fire a trigger when, ' +
+      `reading the "${subject.label}" in light of the "${context.label}", its condition holds. Return ` +
+      'ONLY a JSON object mapping each trigger id (the bracketed value) to true or false. No other text.',
     prompt:
-      `${context.label}:\n${clip(context.text)}\n\n` +
-      `${subject.label}:\n${clip(subject.text)}\n\n` +
+      `${context.label} (earlier):\n${context.text === '' ? '(none)' : clip(context.text)}\n\n` +
+      `${subject.label} (later — evaluate the triggers against THIS):\n${clip(subject.text)}\n\n` +
       `Triggers:\n${candidates.map(c => `[${c.id}] ${c.trigger}`).join('\n')}`,
   });
 
@@ -66,11 +80,13 @@ async function matchedSkills(
     return [];
   }
 
-  console.group(`[skills] ${phase}-trigger eval`);
-  for (const c of candidates) {
-    console.log(verdicts[c.id] === true ? 'FIRE' : '  - ', c.skill, c.id, c.trigger.slice(0, 60));
+  if (Object.values(verdicts).some(v => v)) {
+    console.group(`[skills] ${phase}-trigger eval`);
+    for (const c of candidates) {
+      if (verdicts[c.id] === true) console.log(verdicts[c.id] === true ? 'FIRE' : '  - ', c.skill, c.id, c.trigger.slice(0, 60));
+    }
+    console.groupEnd();
   }
-  console.groupEnd();
 
   const fired = candidates.filter(c => verdicts[c.id] === true);
   return [...new Set(fired.map(c => c.skill))]
@@ -93,9 +109,16 @@ async function matchedSkills(
  * Uses only web-platform APIs.
  */
 export async function setupSkills(services: MatbotServices): Promise<SkillManager> {
+  // Idempotency keyed on the registered service entry, not a module-scoped flag: a re-import would
+  // reset such a flag, but the registry persists across this process. So a second setupSkills (base
+  // + node both configured, or any re-entry) is a benign no-op that hands back the live manager —
+  // letting a specialization (skills-node) attach its watcher to the same one rather than a duplicate.
+  if (services.SkillManager) return services.SkillManager;
+
   const store = services.createStore<SkillDoc>('skills') as Store<SkillDoc>;
   const manager = new SkillManager(store, services.KnowledgeIndex);
   await manager.init();
+  await services.register('SkillManager', manager);
 
   services.tools.register(createSkillTool(manager));
   services.tools.register(createSkillTriggersTool(manager));
@@ -127,8 +150,8 @@ export async function setupSkills(services: MatbotServices): Promise<SkillManage
 
       const matched = await matchedSkills(
         services, manager, 'user',
-        { label: 'user message', text: textOf(lastUser) },
-        { label: 'recent conversation', text: textOf(ctx.session.messages.findLast(
+        { label: 'latest user message', text: textOf(lastUser) },
+        { label: 'preceding assistant message', text: textOf(ctx.session.messages.findLast(
           l => l.role === 'assistant' && l.content.some(c => c.type === 'text'),
         )) },
         ctx.signal,
@@ -145,8 +168,9 @@ export async function setupSkills(services: MatbotServices): Promise<SkillManage
     },
   });
 
-  // agent phase — post-commit. Judges the assistant's response; the user message is context only
-  // (so it fires on the response, not the user's words). Loads matched skills via a robo resubmit.
+  // agent phase — post-commit. The triggers are evaluated against the assistant's response (so they
+  // fire on the response, not the user's words), with the preceding user message as relational
+  // context (e.g. "asserted a cause the user never asked for"). Loads matched skills via a robo resubmit.
   services.hooks.register({
     on: 'followup',
     async handler(ctx) {
@@ -161,22 +185,22 @@ export async function setupSkills(services: MatbotServices): Promise<SkillManage
         { label: 'assistant response', text: textOf(ctx.session.messages.findLast(
           l => l.role === 'assistant' && l.content.some(c => c.type === 'text'),
         )) },
-        { label: 'user message', text: textOf(ctx.session.messages.findLast(l => l.role === 'user')) },
+        { label: 'preceding user message', text: textOf(ctx.session.messages.findLast(l => l.role === 'user')) },
         ctx.signal,
       );
       if (matched.length === 0) return;
 
-      // Load each matched skill by resubmitting a robo turn that carries its content, so the model
-      // applies the playbook to the response that triggered it.
-      // TODO(refinement, once eval is solid): reference the skill by name ("use the XXX skill")
-      // rather than inlining content, and scan ctx.session.messages to skip re-injecting a skill
-      // already loaded this session — the model needn't re-read what it already holds in context.
+      // Name the matched skills and let the model pull them via skill_action — don't inline content.
+      // This is a resubmit, so it commits to history; inlining the full playbook(s) every fire is
+      // expensive and permanent, and pointless when the content is often already upthread. The model
+      // loads only what it doesn't already hold in context (or skips the load entirely).
+      const names = matched.map(s => s.name).join(', ');
       return {
         resubmit: {
           content: [{
             type:   'text',
             origin: 'robo',
-            text:   'Your previous response matched the following skill(s). Apply them to that response now.\n\n' + skillBlock(matched),
+            text:   `Use the skill${names.length>1 ? 's':''}}: ${names}`,
           }],
         },
       };
@@ -199,6 +223,13 @@ export function createSkillsPlugin(): MatbotPluginSpec {
     apiVersion: PLUGIN_API_VERSION,
     manifest: {
       description: 'Skills (named markdown playbooks) with content CRUD via skill_action and trigger CRUD via skill_triggers. Cross-runtime (node + browser).',
+    },
+
+    async installationMessage() {
+      return 'Skills are active (skill_action / skill_triggers). Their `agent`/`user` triggers are ' +
+        'evaluated by an LLM classifier, which needs a provider named "skills-classifier" — until ' +
+        'one is configured, triggers simply never fire (skills still work when loaded by name). ' +
+        'Add it with the `provider` tool, pointing it at a small, fast model. Offer to do this now.';
     },
 
     async setup(services) {

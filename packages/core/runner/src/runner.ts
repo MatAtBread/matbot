@@ -49,6 +49,11 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
   // ── 1. screen — once per turn: shape/abort the incoming submission ──────────
 
   const screen = await hookReg.runScreen({ session: opts.session, config, signal });
+  // Hook-failure (and any other screen-injected) markers, carried live so the UI shows them this turn
+  // rather than only on a later session reload. They are already persisted in screen.session.
+  if (screen.markers.length > 0) {
+    yield { type: 'marker', content: screen.markers, traceId };
+  }
   if (screen.abort) {
     await store.set(screen.session.id, screen.session);
     yield { type: 'aborted', reason: screen.abort, session: screen.session, traceId };

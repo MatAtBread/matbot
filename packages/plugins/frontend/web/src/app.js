@@ -1214,6 +1214,21 @@ function renderMarker(part) {
     return note;
   }
 
+  // A hook threw and was skipped — surface it as a warning so a misconfigured hook (e.g. a provider
+  // with an unresolved secret) is visible rather than silently degrading.
+  if (part.creator === 'matbot-hooks') {
+    note.classList.add('marker-warn');
+    const icon = document.createElement('span');
+    icon.className = 'marker-icon';
+    icon.textContent = '⚠️';
+    note.appendChild(icon);
+    const text = document.createElement('span');
+    const who = data.pluginName ? ` (${data.pluginName})` : '';
+    text.textContent = `A ${data.channel || 'hook'} hook${who} failed and was skipped: ${data.message || 'unknown error'}`;
+    note.appendChild(text);
+    return note;
+  }
+
   const icon = document.createElement('span');
   icon.className = 'marker-icon';
   icon.textContent = '🔖';
@@ -1897,6 +1912,14 @@ async function renderTurn(sid, traceId) {
             .map(c => c.text)
             .join('\n');
           if (text) appendUserBubble(text); // index filled in by 'done' handler below
+          break;
+        }
+
+        case 'marker': {
+          // A marker appended to the session this turn (e.g. a hook that threw). Render it inline now;
+          // on a later reload it comes back through renderSession's role==='marker' path identically.
+          removeLoading();
+          appendMarker(ev.content ?? []);
           break;
         }
 

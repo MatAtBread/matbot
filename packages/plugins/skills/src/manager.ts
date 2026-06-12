@@ -1,5 +1,5 @@
 import type { Store, KnowledgeIndex, KnowledgeEntry } from '@matatbread/matbot-plugin-api';
-import type { SkillDoc, TriggerPhase } from './types.js';
+import type { SkillDoc, SkillTrigger, TriggerPhase } from './types.js';
 
 export function skillToKnowledgeEntry(doc: SkillDoc): KnowledgeEntry {
   const nameLower  = doc.name.toLowerCase();
@@ -141,10 +141,15 @@ export class SkillManager {
 
   /**
    * Import-only create: once a skill exists, the store owns it and the import is a no-op.
-   * Used by the node filesystem watcher to seed `.md` files without clobbering edits.
-   * Returns `true` if a new skill was imported.
+   * Used by the node filesystem watcher to seed `.md` files without clobbering edits, and by
+   * plugins that ship built-in skills (e.g. cognition) — hence the optional `triggers`, each of
+   * which is minted a fresh id here. Returns `true` if a new skill was imported.
    */
-  async importIfAbsent(name: string, content: string): Promise<boolean> {
+  async importIfAbsent(
+    name:     string,
+    content:  string,
+    triggers: readonly Omit<SkillTrigger, 'id'>[] = [],
+  ): Promise<boolean> {
     const key = name.toLowerCase();
     if (this.skills.has(key)) return false;
     const now = new Date().toISOString();
@@ -153,7 +158,7 @@ export class SkillManager {
       version:   Date.now().toString(),
       name,
       content,
-      triggers:  [],
+      triggers:  triggers.map(t => ({ id: crypto.randomUUID(), phase: t.phase, trigger: t.trigger })),
       createdAt: now,
       updatedAt: now,
     };

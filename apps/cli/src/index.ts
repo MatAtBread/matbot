@@ -47,6 +47,22 @@ for (const level of ['log', 'warn', 'error'] as const) {
 }
 const write = isBackground ? (text: string) => {} : (text: string) => process.stderr.write(text);
 
+// Colour only when writing to an interactive terminal — piped/background output stays clean.
+const useColor = !isBackground && process.stderr.isTTY === true;
+const yellow = (s: string): string => (useColor ? `\x1b[33m${s}\x1b[0m` : s);
+const dim    = (s: string): string => (useColor ? `\x1b[2m${s}\x1b[0m`  : s);
+
+// One marker block → a human-facing line. The dispatcher's hook-failure marker is a warning
+// (amber); any other marker is shown dimmed and generic.
+function formatMarker(part: Extract<MessageContent, { type: 'marker' }>): string {
+  if (part.creator === 'matbot-hooks') {
+    const data = (part.data ?? {}) as { channel?: string; pluginName?: string; message?: string };
+    const who  = data.pluginName !== undefined ? ` (${data.pluginName})` : '';
+    return yellow(`⚠  ${data.channel ?? 'hook'} hook${who} failed and was skipped: ${data.message ?? 'unknown error'}`);
+  }
+  return dim(`🔖 ${part.creator}: ${JSON.stringify(part.data)}`);
+}
+
 /**
  * Given a package exports field (or any nested value), return the first
  * string entry point, preferring "import" > "default" > first value.
@@ -406,6 +422,13 @@ async function runTurn(
             }
           } else {
             process.stderr.write(`\n[aborted: ${ev.reason}]\n`);
+          }
+          break;
+        }
+        case 'marker': {
+          clearThinking();
+          for (const part of ev.content) {
+            if (part.type === 'marker') write(`\n${formatMarker(part)}\n`);
           }
           break;
         }

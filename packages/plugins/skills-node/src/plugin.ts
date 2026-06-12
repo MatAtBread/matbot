@@ -27,6 +27,14 @@ export function createSkillsNodePlugin(config: SkillsNodePluginConfig): MatbotPl
       description: 'Node skills: embeds @matatbread/matbot-skills CRUD and adds a local filesystem (.md) import + watch.',
     },
 
+    async installationMessage() {
+      return 'Skills are active (skill_action / skill_triggers, plus a local .md import + watch). ' +
+        'Their `agent`/`user` triggers are evaluated by an LLM classifier, which needs a provider ' +
+        'named "skills-classifier" — until one is configured, triggers simply never fire (skills ' +
+        'still work when loaded by name). Add it with the `provider` tool, pointing it at a small, ' +
+        'fast model. Offer to do this now.';
+    },
+
     async setup(services) {
       const manager = await setupSkills(services);
       clear = () => manager.clear();
