@@ -80,13 +80,15 @@ async function matchedSkills(
     return [];
   }
 
+  /* Debug
   if (Object.values(verdicts).some(v => v)) {
     console.group(`[skills] ${phase}-trigger eval`);
     for (const c of candidates) {
-      if (verdicts[c.id] === true) console.log(verdicts[c.id] === true ? 'FIRE' : '  - ', c.skill, c.id, c.trigger.slice(0, 60));
+      if (verdicts[c.id] === true) console.log("FIRE", c.skill, c.trigger.slice(0, 60), subject, context);
     }
     console.groupEnd();
   }
+  */
 
   const fired = candidates.filter(c => verdicts[c.id] === true);
   return [...new Set(fired.map(c => c.skill))]
@@ -116,7 +118,7 @@ export async function setupSkills(services: MatbotServices): Promise<SkillManage
   if (services.SkillManager) return services.SkillManager;
 
   const store = services.createStore<SkillDoc>('skills') as Store<SkillDoc>;
-  const manager = new SkillManager(store, services.KnowledgeIndex);
+  const manager = new SkillManager(store, services, CLASSIFIER_PROVIDER);
   await manager.init();
   await services.register('SkillManager', manager);
 
