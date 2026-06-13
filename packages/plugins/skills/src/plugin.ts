@@ -202,7 +202,7 @@ export async function setupSkills(services: MatbotServices): Promise<SkillManage
           content: [{
             type:   'text',
             origin: 'robo',
-            text:   `Use the skill${names.length>1 ? 's':''}}: ${names}`,
+            text:   `Use the skill${names.length>1 ? 's':''}: ${names}`,
           }],
         },
       };

@@ -46,9 +46,10 @@ const TRIGGER_GUIDANCE =
 // discriminated union — which LLMs read accurately — as the source of truth. The executor enforces it.
 type SkillInput =
   | { action: 'list' }
-  | { action: 'load';   name: string }
-  | { action: 'save';   name: string; content: string }
-  | { action: 'delete'; name: string };
+  | { action: 'load';     name: string }
+  | { action: 'metadata'; name: string }
+  | { action: 'save';     name: string; content: string }
+  | { action: 'delete';   name: string };
 
 export function createSkillTool(manager: SkillManager): Tool {
   const executor: ToolExecutor = {
@@ -67,6 +68,16 @@ export function createSkillTool(manager: SkillManager): Tool {
           const doc = manager.get(name);
           if (!doc) { yield { type: 'error', message: `Skill not found: "${name}"` }; return; }
           yield { type: 'result', value: { id: doc.id, name: doc.name, content: doc.content } };
+          return;
+        }
+
+        case 'metadata': {
+          const { name } = args as Extract<SkillInput, { action: 'metadata' }>;
+          if (!name) { yield { type: 'error', message: 'action "metadata" requires "name".' }; return; }
+          const doc = manager.get(name);
+          if (!doc) { yield { type: 'error', message: `Skill not found: "${name}"` }; return; }
+          // Derived LLM analysis; absent until the background analysis has run and cached it.
+          yield { type: 'result', value: { id: doc.id, name: doc.name, knowledge: doc.knowledge ?? null } };
           return;
         }
 
@@ -100,7 +111,7 @@ export function createSkillTool(manager: SkillManager): Tool {
       'Manage skills — named, reusable markdown playbooks (procedures, conventions, reference ' +
       'notes) the assistant stores and recalls on demand. A skill is keyed by name (case-insensitive) ' +
       'and holds markdown content. Use this tool to list skills, load one (its content, for use), ' +
-      'create or update one, or delete one.\n\n' +
+      'read its derived metadata (summary/entities/tags), create or update one, or delete one.\n\n' +
       'A skill\'s triggers (the conditions for when it fires) are created and edited ONLY via the ' +
       'skill_triggers tool — never here — and are deliberately NOT returned by load. Most skills need ' +
       'NO triggers (search surfaces them by content); add one only for a genuine behavioural condition. ' +
@@ -109,15 +120,16 @@ export function createSkillTool(manager: SkillManager): Tool {
       '```ts\n' +
       'type SkillAction =\n' +
       "  | { action: 'list' }                            // -> { skills: [{ id, name, toolBinding? }] }\n" +
-      "  | { action: 'load';   name: string }            // -> { id, name, content }\n" +
-      "  | { action: 'save';   name: string; content: string }  // create or update -> { id, name }\n" +
-      "  | { action: 'delete'; name: string };           // -> { id, name }\n" +
+      "  | { action: 'load';     name: string }          // -> { id, name, content }\n" +
+      "  | { action: 'metadata'; name: string }          // derived analysis -> { id, name, knowledge: { summary, entities, tags } | null }\n" +
+      "  | { action: 'save';     name: string; content: string }  // create or update -> { id, name }\n" +
+      "  | { action: 'delete';   name: string };         // -> { id, name }\n" +
       '```',
     inputSchema: {
       type:       'object',
       required:   ['action'],
       properties: {
-        action:   { type: 'string', enum: ['list', 'load', 'save', 'delete'], description: 'The operation to perform.' },
+        action:   { type: 'string', enum: ['list', 'load', 'metadata', 'save', 'delete'], description: 'The operation to perform.' },
         name:     { type: 'string', description: 'Skill name (case-insensitive). Required for load/save/delete.' },
         content:  { type: 'string', description: 'Skill content in markdown — required for action "save".' },
       },

@@ -627,7 +627,66 @@ function setSkillTab(tab) {
   for (const btn of document.querySelectorAll('.skill-tab')) btn.classList.toggle('active', btn.dataset.tab === tab);
   document.getElementById('skill-editor-pane-content').classList.toggle('active', tab === 'content');
   document.getElementById('skill-editor-pane-triggers').classList.toggle('active', tab === 'triggers');
+  document.getElementById('skill-editor-pane-metadata').classList.toggle('active', tab === 'metadata');
   skillEditorRoot.classList.toggle('tab-triggers', tab === 'triggers');
+  skillEditorRoot.classList.toggle('tab-metadata', tab === 'metadata');
+}
+
+// Read-only render of a skill's derived LLM analysis. `knowledge` is null until the background
+// analysis has run and cached it (see SkillManager) — show a note rather than empty sections.
+function renderSkillMetadata(knowledge) {
+  const el = document.getElementById('skill-metadata');
+  el.innerHTML = '';
+  if (!knowledge) {
+    const note = document.createElement('div');
+    note.className = 'meta-note';
+    note.textContent = 'No analysis yet. Metadata (summary, entities, tags) is generated in the background after a skill is saved.';
+    el.appendChild(note);
+    return;
+  }
+
+  const section = (label, build) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'meta-section';
+    const lbl = document.createElement('div');
+    lbl.className = 'meta-label';
+    lbl.textContent = label;
+    wrap.appendChild(lbl);
+    wrap.appendChild(build());
+    el.appendChild(wrap);
+  };
+
+  const chips = (items, cls) => {
+    if (!Array.isArray(items) || items.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'meta-empty';
+      empty.textContent = '(none)';
+      return empty;
+    }
+    const row = document.createElement('div');
+    row.className = 'meta-chips';
+    for (const item of items) {
+      const chip = document.createElement('span');
+      chip.className = 'meta-chip ' + cls;
+      chip.textContent = item;
+      row.appendChild(chip);
+    }
+    return row;
+  };
+
+  section('Summary', () => {
+    const p = document.createElement('div');
+    if (knowledge.summary) {
+      p.className = 'meta-summary';
+      p.textContent = knowledge.summary;
+    } else {
+      p.className = 'meta-empty';
+      p.textContent = '(none)';
+    }
+    return p;
+  });
+  section('Entities', () => chips(knowledge.entities, 'entity'));
+  section('Tags', () => chips(knowledge.tags, 'tag'));
 }
 
 // One trigger row: a phase <select> + the rubric <textarea>, both disabled (read-only) until ✎ is
@@ -731,12 +790,17 @@ async function openSkillEditor(name) {
   skillEditorTitle.textContent = name;
   loadedTriggers = [];
   renderTriggers([]);
+  renderSkillMetadata(null);
   setSkillTab('content');
   skillEditorOverlay.classList.add('open');
   // Triggers are independent of the markdown editor, so load them even if TinyMDE is absent.
   callTool('skill_triggers', { action: 'get', name })
     .then((tr) => { loadedTriggers = Array.isArray(tr?.triggers) ? tr.triggers : []; renderTriggers(loadedTriggers); })
     .catch(() => { /* skill_triggers tool not loaded — leave the triggers tab empty. */ });
+  // Derived analysis, likewise independent of TinyMDE; absent until the background pass has cached it.
+  callTool('skill_action', { action: 'metadata', name })
+    .then((meta) => renderSkillMetadata(meta?.knowledge ?? null))
+    .catch(() => { /* old skills plugin without the metadata action — leave the note. */ });
   // The editor needs TinyMDE (CDN, http(s) only). On an offline file:// bundle it never loaded —
   // degrade with a message rather than throwing on `new TinyMDE.Editor`.
   if (typeof TinyMDE === 'undefined') {
