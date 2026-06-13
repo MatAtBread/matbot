@@ -196,13 +196,12 @@ export async function setupSkills(services: MatbotServices): Promise<SkillManage
       // This is a resubmit, so it commits to history; inlining the full playbook(s) every fire is
       // expensive and permanent, and pointless when the content is often already upthread. The model
       // loads only what it doesn't already hold in context (or skips the load entirely).
-      const names = matched.map(s => s.name).join(', ');
       return {
         resubmit: {
           content: [{
             type:   'text',
             origin: 'robo',
-            text:   `Use the skill${names.length>1 ? 's':''}: ${names}`,
+            text:   `Use the skill${matched.length > 1 ? 's':''} ${matched.map(n => `"${n.name}"`).join(', ')}`,
           }],
         },
       };
