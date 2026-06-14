@@ -27,7 +27,7 @@ const ANALYSIS_SYSTEM =
 
 1. **summary**: A concise summary of what the skill covers, MAXIMUM 300 CHARACTERS. This will be searched against, so include key topics and terms someone might use to find this skill. Be tight — every word must earn its place.
 
-2. **entities**: An array of important proper nouns, key terms, and concepts mentioned in the content — people, places, technologies, domain concepts. These are used for matching. Aim for 5-15 entities. Single words or short multi-word phrases. Include aliases where relevant.
+2. **entities**: An array of important proper nouns, key terms, and concepts mentioned in the content — people, places, technologies, domain concepts. These are used for matching, so prioritize entities that are central to what the skill is about. Aim for 5-25 entities. Single words or short multi-word phrases. Include aliases where relevant.
 
 3. **tags**: An array of broad category tags that describe the domain or topic area. Think of these as high-level classifiers. Aim for 5-12 tags. Examples: "home", "travel", "technology", "personal", "project", "reference", "automation", "France", "family", "architecture".
 
