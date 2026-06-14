@@ -231,6 +231,9 @@ importers:
       '@matatbread/matbot-skills':
         specifier: workspace:*
         version: link:../skills
+      '@matatbread/matbot-tool-store':
+        specifier: workspace:*
+        version: link:../tool-store
     devDependencies:
       typescript:
         specifier: 'catalog:'
@@ -483,6 +486,16 @@ importers:
       '@types/node':
         specifier: 'catalog:'
         version: 22.19.19
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
+
+  packages/plugins/tool-store:
+    dependencies:
+      '@matatbread/matbot-plugin-api':
+        specifier: workspace:*
+        version: link:../../core/plugin-api
+    devDependencies:
       typescript:
         specifier: 'catalog:'
         version: 5.9.3
