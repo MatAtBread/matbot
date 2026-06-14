@@ -70,7 +70,7 @@ interface ActionInput {
 // with set doubling as upsert. Loose schema (action + the union of every action's optional fields);
 // the executor enforces per-action requirements, matching the multi-action convention in CLAUDE.md.
 function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Store<StoreRecord>): Tool {
-  const typeGuess = def.shape.match(/(interface|type\s*=)\s+(\w+)/)?.[1] ?? 'Record<string, unknown>';
+  const typeGuess = def.shape.match(/(interface|type\s*=)\s+(\w+)/)?.[2] ?? 'Record<string, unknown>';
   return {
     name: actionToolName(def.namespace),
     ...(pluginName !== undefined ? { pluginName } : {}),
