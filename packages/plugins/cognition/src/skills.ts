@@ -28,7 +28,26 @@ export const INNER_VOICE: SeedSkill = {
 
 export const REMEMBER_THIS: SeedSkill = {
   "name": "Remember this",
-  "content": "# Remember this\n\nWhen this skill is triggered:\n\n1. Acknowledge to the user that you've noted it.\n2. Use the `skill_action` tool with action `\"load\"` and name `\"Things to remember\"` to fetch the current contents of the \"Things to remember\" skill.\n3. Append the new fact(s) to the content, keeping existing entries intact.\n4. Use the `skill_action` tool with action `\"save\"`, name `\"Things to remember\"`, and the updated content to persist the change.\n\nAlso proactively use this skill whenever the user shares personal details, preferences, or information they may want recalled in future conversations.\n",
+  "content": `# Remember this
+
+When this skill is triggered:
+
+1. **Fetch the current session** using \`session_action\` with \`action: "get"\` and the session
+   ID from the current context. Extract the last user message's \`id\` and \`createdAt\` — these
+   are the provenance reference.
+2. **Store the fact** using \`remembered_facts_action\` with \`action: "set"\` and a document
+   shaped like:
+   \`\`\`json
+   {
+     "fact": "<the fact or information to remember>",
+     "sessionId": "<the current session ID>",
+     "messageId": "<the last user message ID>",
+     "createdAt": "<the last user message createdAt timestamp>",
+     "dreamSkill"?: "<the name of the skill this fact was assigned to>"
+   }\`\`\`
+
+   Each fact gets its own document — do not batch unrelated facts into one document. If the user shares multiple distinct facts in the same message, create a separate document for each.
+   `,
   "triggers": [
     {
       "phase": "user",
@@ -45,6 +64,10 @@ export const REMEMBER_THIS: SeedSkill = {
     {
       "phase": "agent",
       "trigger": "MATCH when the assistant explicitly promises to remember a specific fact or correction (\"I've noted that X is Y\", \"I'll remember that the table name is Z\"). Exclude: generic acknowledgements (\"Good\", \"OK\", \"Noted\") used as conversation transitions, and confirmations of completed tasks."
+    },
+    {
+      "phase": "agent",
+      "trigger": "MATCH when the assistant explicitly takes responsibility for a mistake, error, or oversight — phrases like \"my fault\", \"my mistake\", \"I was wrong\", \"that's on me\", \"I shouldn't have assumed\", \"I missed that\", or any clear admission that the assistant made an avoidable error.\n\nDO NOT MATCH: generic politeness (\"sorry about that\" as a filler), apologies for system latency, or apologies for the user's inconvenience rather than the assistant's own error.\n\nWhen this fires, the mistake itself (the correct fact or behaviour the assistant should have known) should be the thing remembered, not the apology."
     }
   ]
 };

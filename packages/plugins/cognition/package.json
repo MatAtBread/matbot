@@ -12,7 +12,8 @@
   },
   "dependencies": {
     "@matatbread/matbot-plugin-api": "workspace:*",
-    "@matatbread/matbot-skills":     "workspace:*"
+    "@matatbread/matbot-skills":     "workspace:*",
+    "@matatbread/matbot-tool-store":  "workspace:*"
   },
   "devDependencies": {
     "typescript": "catalog:"

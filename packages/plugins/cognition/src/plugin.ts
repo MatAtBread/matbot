@@ -1,6 +1,7 @@
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import type { MatbotPluginSpec, MatbotServices } from '@matatbread/matbot-plugin-api';
 import { COGNITION_SKILLS } from './skills.js';
+import { defineStore } from '@matatbread/matbot-tool-store';
 
 async function seedSkills(skills: NonNullable<MatbotServices['SkillManager']>): Promise<void> {
   // Create-if-absent: an install that already holds a skill of the same name keeps its own copy.
@@ -38,15 +39,42 @@ export function createCognitionPlugin(): MatbotPluginSpec {
     },
 
     async installationMessage() {
-      return 'Cognition is active. It seeds built-in skills (Inner voice, Remember this) into the ' +
-        'skills service — if no skills service is configured yet, they are seeded automatically once ' +
-        'one is. The Inner voice skill consults a second, different-lineage model via the single_turn ' +
-        'tool, which needs a provider named "inner-voice"; until one is configured the skill still ' +
-        'fires but its single_turn call errors back with no critique. Add it with the `provider` tool, ' +
-        'choosing a model from a different training lineage than your main one. Offer to do this now.';
+      return `Cognition is active. It seeds built-in skills (Inner voice, Remember this) into the
+skills service — if no skills service is configured yet, they are seeded automatically once
+one is.
+
+The **Inner voice skill** consults a second, model via the single_turn tool, which needs a provider named "inner-voice";
+until one is configured the skill still fires but its single_turn call errors back with no critique. Add it with the
+\`provider\` tool, choosing a model from a different training lineage than your main one. Offer to do this now.
+
+The **Remember this skill** fires when new information is provided and uses a remembered_facts store and its \`remembered_facts_action\` tool to capture user-provided facts,
+personal details, preferences, and other information the user wants remembered across conversations. Each fact is captured with
+provenance showing which session and message it came from.
+
+It also seeds a remembered_facts store and its \`remembered_facts_action\` tool, used by the Remember this skill.
+The store is idempotent: a re-seed on restart keeps the existing data.
+`;
     },
 
     async setup(services) {
+      // Seed the remembered_facts store and its `remembered_facts_action` tool (used by the
+      // Remember this skill). Idempotent — a re-seed on restart keeps the existing store's data.
+      await defineStore(services, {
+        namespace:   'remembered_facts',
+        description:
+          'Stores user-provided facts, personal details, preferences, and other information the ' +
+          'user wants remembered across conversations. Each fact is captured with provenance ' +
+          'showing which session and message it came from.',
+        shape:
+          `interface RememberedFact {
+            fact: string;
+            sessionId: string;
+            messageId: string;
+            createdAt: string;
+            dreamSkill?: string;
+          }`,
+      });
+
       if (services.SkillManager) {
         await seedSkills(services.SkillManager);
         return;
