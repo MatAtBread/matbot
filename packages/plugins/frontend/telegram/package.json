@@ -1,6 +1,6 @@
 {
   "name": "@matatbread/matbot-frontend-telegram",
-  "matbotRuntime": ["node"],
+  "matbotRuntime": ["node", "browser"],
   "version": "0.1.0",
   "description": "Telegram bot frontend",
   "type": "module",
@@ -15,7 +15,6 @@
     "@matatbread/matbot-plugin-api": "workspace:*"
   },
   "devDependencies": {
-    "@types/node": "catalog:",
     "typescript":  "catalog:"
   }
 }
