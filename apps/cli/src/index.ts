@@ -917,6 +917,7 @@ async function main(): Promise<void> {
     systemContext:  systemContextReg,
     workdir:    workDir,
     configPath,
+    isSubAgent: () => isBackground,
     get KnowledgeIndex() { return knowledgeProxy; },
   };
   const services: MatbotServices = unifyServices(baseServices);
