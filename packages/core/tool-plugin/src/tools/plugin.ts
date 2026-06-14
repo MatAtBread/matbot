@@ -356,12 +356,12 @@ const executor = {
       const configured = await readPluginsList(configPath);
       const allTools   = getRegisteredTools();
 
-      // Group tool names by owning plugin (undefined = built-in / unattributed)
-      const toolsByPlugin = new Map<string | undefined, string[]>();
+      // Group tools by owning plugin (undefined = built-in / unattributed)
+      const toolsByPlugin = new Map<string | undefined, { name: string; description: string }[]>();
       for (const t of allTools) {
         const key  = t.pluginName;
         const list = toolsByPlugin.get(key) ?? [];
-        list.push(t.name);
+        list.push({ name: t.name, description: t.description });
         toolsByPlugin.set(key, list);
       }
 

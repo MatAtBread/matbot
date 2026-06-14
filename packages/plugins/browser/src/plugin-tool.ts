@@ -70,10 +70,10 @@ export function createBrowserPluginTool(extras: ExtraPlugins): Tool {
       if (action === 'list') {
         const configured = await extras.list();
         const allTools   = getRegisteredTools();
-        const toolsByPlugin = new Map<string | undefined, string[]>();
+        const toolsByPlugin = new Map<string | undefined, { name: string; description: string }[]>();
         for (const tl of allTools) {
           const list = toolsByPlugin.get(tl.pluginName) ?? [];
-          list.push(tl.name);
+          list.push({ name: tl.name, description: tl.description });
           toolsByPlugin.set(tl.pluginName, list);
         }
         const pluginToolNames = new Set(
