@@ -570,7 +570,13 @@ function renderSkills(skills) {
     const row = document.createElement('div');
     row.className = 'skill-entry';
     row.onclick = () => openSkillEditor(s.name);
-    row.appendChild(makePluginLabel(s.name));
+
+    // Skill names are short phrases, not long unbreakable identifiers — place them
+    // plainly rather than reusing the plugin-name prefix/suffix split.
+    const label = document.createElement('span');
+    label.className = 'skill-name-label';
+    label.textContent = s.name;
+    row.appendChild(label);
 
     const actions = document.createElement('div');
     actions.className = 'plugin-actions';
