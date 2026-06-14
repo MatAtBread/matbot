@@ -210,6 +210,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
 
       const toolCtx: ToolContext = {
         callId: tc.id, session, signal, vault,
+        provider:     config.provider,
         prompt:       promptFn,
         loadPlugin:   (specifier: string) => opts.loadPlugin(specifier, promptFn),
         unloadPlugin: opts.unloadPlugin,

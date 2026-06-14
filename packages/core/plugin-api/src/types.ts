@@ -420,6 +420,9 @@ export interface ToolContext {
   session:     Session;
   signal:      AbortSignal;
   vault:       Vault;
+  /** The provider key driving the current turn (`RunConfig.provider`). A tool that spawns further
+   *  work should default to this so the child inherits the same model rather than the config default. */
+  provider?:   string;
   workdir?:    string;
   configPath?: string;
   files?:      FileStore;
