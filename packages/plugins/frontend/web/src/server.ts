@@ -571,7 +571,8 @@ export function createWebServer(deps: WebServerDeps) {
       // One read serves and gates: the handle we need to stream also carries `allowed`. A file that
       // isn't servable is reported as missing, not forbidden — don't reveal that the path exists.
       const handle = await deps.files.getByName(name, namespace);
-      if (!handle || !handle.allowed) { json(res, 404, { error: 'Not found' }); return; }
+      if (!handle) { json(res, 404, { error: 'Not found' }); return; }
+      if (!handle.allowed) { json(res, 403, { error: 'Not allowed' }); return; }
 
       res.writeHead(200, {
         'content-type':  handle.mimeType,

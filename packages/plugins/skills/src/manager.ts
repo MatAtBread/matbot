@@ -1,6 +1,5 @@
 import type { Store, KnowledgeIndex, KnowledgeEntry, MatbotServices } from '@matatbread/matbot-plugin-api';
 import type { SkillDoc, SkillTrigger, TriggerPhase } from './types.js';
-import { singleTurn } from './tools.js';
 
 type SkillAnalysis  = { entities: string[]; tags: string[]; summary: string };
 type SkillKnowledge = NonNullable<SkillDoc['knowledge']>;
@@ -43,7 +42,7 @@ async function analyseSkill(
 ): Promise<SkillAnalysis | undefined> {
   if (!services.providers.has(provider)) return undefined;
   try {
-    const res = await singleTurn(services, {
+    const res = await services.singleTurn({
       provider,
       system: ANALYSIS_SYSTEM,
       prompt: doc.content,

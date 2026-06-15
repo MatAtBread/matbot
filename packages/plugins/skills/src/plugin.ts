@@ -1,7 +1,7 @@
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import type { MatbotPluginSpec, MatbotServices, Store, Message } from '@matatbread/matbot-plugin-api';
 import { SkillManager } from './manager.js';
-import { createSkillTool, createSkillTriggersTool, createSingleTurnTool, singleTurn } from './tools.js';
+import { createSkillTool, createSkillTriggersTool, createSingleTurnTool } from './tools.js';
 import type { SkillDoc } from './types.js';
 
 declare module '@matatbread/matbot-plugin-api' {
@@ -54,7 +54,7 @@ async function matchedSkills(
   );
   if (candidates.length === 0 || subject.text === '') return [];
 
-  const res = await singleTurn(services, {
+  const res = await services.singleTurn({
     provider: CLASSIFIER_PROVIDER,
     signal,
     system:

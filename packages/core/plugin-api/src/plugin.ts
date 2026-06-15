@@ -22,6 +22,13 @@ export interface CompletionResponse {
   usage: { inputTokens: number; outputTokens: number };
 }
 
+export interface SingleTurnRequest {
+  provider: string;
+  prompt:   string;
+  system?:  string;
+  signal?:  AbortSignal;
+}
+
 // ── Plugin settings ───────────────────────────────────────────────────────────
 
 /** Scoped key-value store for a single plugin's runtime settings. */
@@ -71,6 +78,13 @@ export interface PluginSelf {
 
 export interface MatbotServices {
   complete(req: CompletionRequest): Promise<CompletionResponse>;
+
+  /**
+   * Thin convenience over {@link complete}: send a single `prompt` (and optional `system`) to a
+   * named provider and get the response, hiding the otherwise-mandatory and meaningless `Message`
+   * fields (id/traceId/createdAt) that an out-of-band one-shot call has no use for.
+   */
+  singleTurn(req: SingleTurnRequest): Promise<CompletionResponse>;
 
   /** The calling plugin's own settings store. Scoped to the plugin — it cannot reach another's. */
   settings(): PluginSettings;
@@ -188,6 +202,64 @@ export function unifyServices(services: MatbotServices): MatbotServices {
       );
     },
   });
+}
+
+// ── Capture-safe swap proxies ───────────────────────────────────────────────────
+
+export type SwapFn<T extends object> = (next: T) => void;
+
+/**
+ * A capture-safe forwarding proxy: every trap routes to whatever `getCurrent()` returns *now*, so a
+ * reference captured before a register()-driven swap keeps resolving to the live impl. getPrototypeOf
+ * is forwarded so `instanceof` sees the real impl (the StorageBackend identity checks depend on it);
+ * ownKeys + getOwnPropertyDescriptor keep object spread faithful. Methods bind to the current impl,
+ * not the proxy. A nullish current (an optional service with nothing registered yet) reads as empty.
+ */
+export function forwardingProxy<T extends object>(getCurrent: () => T | undefined): T {
+  return new Proxy({} as T, {
+    get(_t, prop) {
+      const cur = getCurrent();
+      if (cur === undefined) return undefined;
+      const val = Reflect.get(cur, prop, cur);
+      return typeof val === 'function' ? (val as (...a: unknown[]) => unknown).bind(cur) : val;
+    },
+    has(_t, prop)    { const cur = getCurrent(); return cur !== undefined && Reflect.has(cur, prop); },
+    getPrototypeOf() { const cur = getCurrent(); return cur === undefined ? null : Reflect.getPrototypeOf(cur); },
+    ownKeys()        { const cur = getCurrent(); return cur === undefined ? [] : Reflect.ownKeys(cur); },
+    getOwnPropertyDescriptor(_t, prop) {
+      const cur = getCurrent();
+      if (cur === undefined) return undefined;
+      const d = Reflect.getOwnPropertyDescriptor(cur, prop);
+      if (d !== undefined) d.configurable = true; // Proxy invariant: props absent from the {} target must be configurable.
+      return d;
+    },
+  });
+}
+
+/**
+ * Returns [proxy, swap]: the Store/FileStore handle plugins capture, plus the fn register() calls to
+ * repoint it at a new backend's store. Built on forwardingProxy so capture-safety is uniform.
+ */
+export function makeSwappable<T extends object>(initial: T): [T, SwapFn<T>] {
+  let current = initial;
+  return [forwardingProxy<T>(() => current), (next: T) => { current = next; }];
+}
+
+/**
+ * Build the one-message CompletionRequest for a {@link MatbotServices.singleTurn} call, hiding the
+ * otherwise-mandatory and meaningless Message fields (id/traceId/createdAt) an out-of-band one-shot
+ * has no use for. Pure; the host invokes its own complete() with the result.
+ */
+export function singleTurnRequest(req: SingleTurnRequest): CompletionRequest {
+  return {
+    provider: req.provider,
+    messages: [{
+      id: '', traceId: '', createdAt: new Date().toISOString(), role: 'user',
+      content: [{ type: 'text', text: req.prompt }],
+    }],
+    ...(req.system !== undefined ? { system: req.system } : {}),
+    ...(req.signal !== undefined ? { signal: req.signal } : {}),
+  };
 }
 
 // ── Factory types ─────────────────────────────────────────────────────────────
