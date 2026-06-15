@@ -25,7 +25,9 @@
     "packages/plugins/whoami",
     "packages/plugins/hook-logger",
     "packages/plugins/persist-ki-bge",
-    "packages/plugins/json-validation"
+    "packages/plugins/json-validation",
+    "packages/plugins/tool-store",
+    "packages/plugins/cognition"
   ],
 
   "providers": {},
