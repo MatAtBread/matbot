@@ -1,7 +1,7 @@
 import type {
   Session, Message, MessageContent,
   PipelineEvent, RunConfig, ProviderAdapter, ProviderConfig,
-  Tool, ToolContext, Store, FileStore, SystemContextRegistry, Vault, PromptFn, FormField,
+  Tool, ToolRegistry, ToolContext, Store, FileStore, SystemContextRegistry, Vault, PromptFn, FormField,
 } from './types.js';
 import type { MatbotPlugin } from './plugin.js';
 import { HookRegistry } from './hooks.js';
@@ -13,6 +13,16 @@ export interface RunSessionOpts {
   provider:       ProviderAdapter;
   providerConfig: ProviderConfig;
   tools?:         ReadonlyMap<string, Tool>;
+  /**
+   * Live registry consulted to *resolve the executor* at call time. The `tools` map above is a
+   * turn-start snapshot — the stable menu advertised to the model for the whole turn — but a tool
+   * that mutates the registry mid-turn (`plugin reload`/`add`/`remove`) must take effect for any
+   * call later in the *same* turn, so execution resolves against this live registry rather than the
+   * snapshot. Present ⇒ authoritative (a tool removed mid-turn resolves to null ⇒ "Unknown tool",
+   * which is correct); absent ⇒ falls back to the snapshot (direct callers / tests that pass only
+   * `tools`).
+   */
+  toolRegistry?:  ToolRegistry;
   store:          Store<Session>;
   hooks?:         HookRegistry;
   systemContext?: SystemContextRegistry;
@@ -180,7 +190,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
     for (const tc of pendingCalls) {
       yield { type: 'tool:start', callId: tc.id, name: tc.name, input: tc.input, traceId };
 
-      const tool = tools.get(tc.name);
+      const tool = opts.toolRegistry !== undefined ? opts.toolRegistry.resolve(tc.name) : tools.get(tc.name);
       if (!tool) {
         const err = { error: `Unknown tool: ${tc.name}` };
         toolResults.push({ type: 'tool-result', id: tc.id, result: err, isError: true });
