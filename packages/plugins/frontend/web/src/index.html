@@ -1116,12 +1116,12 @@
 
     /* ── Input area ────────────────────────────────────────────── */
 
-    #input-area { border-top: 1px solid #e5e7eb; padding: 12px 28px 20px; }
+    #input-area { border-top: 1px solid #e5e7eb; padding: 8px 12px 12px; }
     #input-meta {
       display: flex;
       align-items: center;
       gap: 6px;
-      margin-bottom: 8px;
+      margin-bottom: 4px;
       font-size: 0.86em;
       color: #9ca3af;
     }
@@ -1138,9 +1138,9 @@
     #provider-select:hover { color: #374151; }
     #input-row {
       display: flex;
-      gap: 8px;
+      gap: 6px;
       align-items: flex-end;
-      max-width: 700px;
+      max-width: 720px;
     }
     #input {
       flex: 1;
@@ -1172,6 +1172,10 @@
       height: 1.5em;
       width: 1.5em;
       line-height: 1em;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
     }
     #send-btn:hover              { background: #374151; }
     #send-btn:disabled           { background: #d1d5db; cursor: not-allowed; }
@@ -1195,6 +1199,10 @@
       height: 1.5em;
       width: 1.5em;
       line-height: 1em;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
     }
     #stop-btn:hover    { background: #b91c1c; }
     #stop-btn:disabled { background: #fca5a5; cursor: not-allowed; }
@@ -1370,8 +1378,11 @@
       line-height: 1;
       padding: 0;
       display: none;
+      align-items: center;
+      justify-content: center;
       transition: opacity 0.15s, background 0.1s;
     }
+    #scroll-down-btn svg { width: 0.9em; height: 0.9em; display: block; }
     #scroll-down-btn:hover { background: #1d4ed8; }
 
     ::-webkit-scrollbar { width: 5px; height: 5px; }
@@ -1430,9 +1441,9 @@
       }
       #messages    { padding-left: 16px; padding-right: 16px; }
       #input-area  {
-        padding-left: 16px;
-        padding-right: 16px;
-        padding-bottom: max(20px, env(safe-area-inset-bottom, 0px));
+        padding-left: 8px;
+        padding-right: 8px;
+        padding-bottom: max(12px, env(safe-area-inset-bottom, 0px));
       }
       .session-actions { display: flex; }
     }
@@ -1641,11 +1652,11 @@
       </div>
       <div id="input-row">
         <textarea id="input" rows="1" placeholder="Shift+⬅️ to send, ⬅️ for newline"></textarea>
-        <button id="send-btn">▶</button>
-        <button id="stop-btn" style="visibility:hidden" title="Stop the running turn and drop anything queued">&#9209;</button>
+        <button id="send-btn" aria-label="Send"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg></button>
+        <button id="stop-btn" style="visibility:hidden" title="Stop the running turn and drop anything queued" aria-label="Stop"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg></button>
       </div>
     </div>
-    <button id="scroll-down-btn" style="display:none" title="Scroll to bottom">▼</button>
+    <button id="scroll-down-btn" style="display:none" title="Scroll to bottom" aria-label="Scroll to bottom"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
   </main>
 
   <script src="/http-transport.js"></script>

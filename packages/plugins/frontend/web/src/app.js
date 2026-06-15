@@ -81,14 +81,20 @@ function isMessagesBottomVisible() {
   return fits || atBottom;
 }
 
-// Morph the send button into a ▼ scroll-down button. Stop is now its own button, and the input
+// Send-button glyphs (SVG, so they render identically across platforms instead of relying on
+// font-dependent unicode). Play triangle for send; down-chevron when the button morphs into a
+// scroll-to-bottom control.
+const ICON_SEND   = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>';
+const ICON_SCROLL = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>';
+
+// Morph the send button into a scroll-down button. Stop is now its own button, and the input
 // stays enabled while a turn runs (so you can type-ahead and queue), so neither is touched here.
 function showScrollDownButton() {
-  sendBtn.textContent = '▼';   // ▼
+  sendBtn.innerHTML = ICON_SCROLL;
   sendBtn.classList.add('scroll-down-mode');
 }
 
-// Scroll to the very bottom of the messages pane and restore the ▶ send button. The Stop button's
+// Scroll to the very bottom of the messages pane and restore the send button. The Stop button's
 // visibility is driven independently by the server's busy status, so we don't reason about it here.
 function scrollToBottomAndReset() {
   messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -96,9 +102,9 @@ function scrollToBottomAndReset() {
   inputEl.focus();
 }
 
-// Restore the send button to its normal ▶ state.
+// Restore the send button to its normal (play) state.
 function resetSendButton() {
-  sendBtn.textContent = '▶';
+  sendBtn.innerHTML = ICON_SEND;
   sendBtn.classList.remove('scroll-down-mode', 'stop-mode');
   sendBtn.disabled = false;
 }
@@ -116,7 +122,7 @@ function updateScrollDownButton() {
   if (isMessagesBottomVisible()) {
     scrollDownBtn.style.display = 'none';
   } else {
-    scrollDownBtn.style.display = 'block';
+    scrollDownBtn.style.display = 'flex';
   }
 }
 
