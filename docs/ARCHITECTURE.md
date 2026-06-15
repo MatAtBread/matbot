@@ -3,7 +3,7 @@
 A visual tour of how matbot fits together, in three views: the platform-neutral **core**,
 the **plugins** that extend it through well-defined seams, and the **turn flow** that ties them
 together at runtime. For the authoritative design principles behind these diagrams, see
-[CLAUDE.md](../CLAUDE.md); for the plugin API reference, [PLUGINS.md](PLUGINS.md).
+[CLAUDE.md](../CLAUDE.md); for the plugin API reference, [DEVELOPING.md](DEVELOPING.md).
 
 ---
 
