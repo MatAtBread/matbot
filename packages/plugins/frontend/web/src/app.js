@@ -84,7 +84,7 @@ function isMessagesBottomVisible() {
 // Send-button glyphs (SVG, so they render identically across platforms instead of relying on
 // font-dependent unicode). Play triangle for send; down-chevron when the button morphs into a
 // scroll-to-bottom control.
-const ICON_SEND   = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>';
+const ICON_SEND   = '<svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" aria-hidden="true"><path d="M9 6v12l9-6z"/></svg>';
 const ICON_SCROLL = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>';
 
 // Morph the send button into a scroll-down button. Stop is now its own button, and the input
