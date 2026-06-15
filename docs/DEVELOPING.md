@@ -432,12 +432,24 @@ interface Store<T extends { id: string; version: string }> {
   set(id: string, value: T): Promise<void>;
   cas(id: string, expected: string, next: T): Promise<CASResult<T>>;
   delete(id: string, expectedVersion?: string): Promise<boolean>;
-  query(q: StoreQuery<T>): Promise<QueryResult<T>>;
+  query(q: StoreQuery): Promise<QueryResult<T>>;
 }
 ```
 
-`StoreQuery` supports filters, full-text search, vector search, sorting, pagination, and
-field projection. See `FilterExpr`, `SortSpec`, and `VectorQuery` in the API types.
+`StoreQuery` is a deliberately minimal grammar designed to translate to a real backend (SQL
+`WHERE`, Elasticsearch `bool`, Mongo `find`, IndexedDB cursor) rather than be interpreted by an
+embedded engine: a closed `Filter` AST (a union discriminated by `op` — `eq/neq/lt/lte/gt/gte`,
+`in/nin`, `exists`, `stringContains`, `arrayContains`, composed with `and/or/not`), `sort`,
+`limit`, and an opaque `cursor`. The cursor is **self-contained** — it carries the query, sort,
+page size, and position, so a caller pages by sending only a previous result's `cursor` back; this
+is what makes consecutive pages a disjoint cover (each page re-applies the same sort, so the total
+order never shifts under you). A present `cursor` means more pages follow; an absent one means done.
+Comparisons are type-strict; null and absent are a single
+"missing" state queried only via `exists`. The in-memory reference evaluator (`executeQuery` in
+`@matatbread/matbot-storage-base`) compiles the AST to a composed-closure predicate; a backend may
+instead compile the same AST to its native query. Full-text and vector search are **not** part of
+`Store` — they live on `KnowledgeIndex`. See `Filter`, `StoreQuery`, and `StoreQueryError` in the
+API types (`packages/core/plugin-api/src/store-query.ts`).
 
 ---
 

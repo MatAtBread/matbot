@@ -365,7 +365,7 @@ async function setActive(id: string, active: boolean): Promise<boolean> {
 async function setActiveAll(active: boolean): Promise<string[]> {
   const result = await scheduleStore?.query({});
   const ids: string[] = [];
-  for (const { doc } of result?.items ?? []) {
+  for (const doc of result?.items ?? []) {
     if ((doc.active !== false) === active) continue; // already in the target state
     await scheduleStore?.set(doc.id, { ...doc, active, version: Date.now().toString() });
     wakeSchedule(doc.id);
@@ -415,7 +415,7 @@ id "*" to act on ALL schedules at once. cancel requires a specific id — "*" is
       switch (act.action) {
         case 'list': {
           const result = await scheduleStore?.query({});
-          const schedules = result?.items.map(i => i.doc) ?? [];
+          const schedules = result?.items ?? [];
           yield {
             type:  'result',
             value: schedules.map((s: Schedule) => ({
@@ -482,7 +482,7 @@ export const plugin: MatbotPluginSpec = {
     scheduleStore    = services.createStore<Schedule>('schedules');
     pluginAc         = new AbortController();
     const result     = await scheduleStore.query({});
-    for (const { doc } of result.items) armSchedule(doc);
+    for (const doc of result.items) armSchedule(doc);
   },
 
   async teardown() {

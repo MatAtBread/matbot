@@ -1,8 +1,8 @@
 import type { MatbotPlugin } from './plugin.js';
+import type { StoreQuery, QueryResult } from './store-query.js';
 
 // ── Primitives ────────────────────────────────────────────────────────────────
 
-export type Scalar  = string | number | boolean | null;
 export type ISODate = string;
 export type MimeType = string;
 export type JSONSchema = Record<string, unknown>;
@@ -305,57 +305,18 @@ export type Hook =
   | { on: 'followup';   priority?: number; pluginName?: string; handler(ctx: FollowupContext):   FollowupResult | void | Promise<FollowupResult | void> };
 
 // ── Storage ───────────────────────────────────────────────────────────────────
-
-export type FilterExpr =
-  | { field: string; op: 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte'; value: Scalar }
-  | { field: string; op: 'in';       value: Scalar[] }
-  | { field: string; op: 'exists' }
-  | { field: string; op: 'contains'; value: string }
-  | { field: string; op: 'range';    gte?: Scalar; lte?: Scalar }
-  | { and: FilterExpr[] }
-  | { or:  FilterExpr[] }
-  | { not: FilterExpr };
-
-export interface VectorQuery {
-  embedding?:  number[];
-  text?:       string;
-  topK:        number;
-  minScore?:   number;
-  preFilter?:  FilterExpr;
-}
-
-export interface SortSpec<T = unknown> {
-  field:     (keyof T & string) | '_score' | '_recency';
-  direction: 'asc' | 'desc';
-}
-
-export interface StoreQuery<T = unknown> {
-  filter?:   FilterExpr;
-  fullText?: string;
-  vector?:   VectorQuery;
-  sort?:     SortSpec<T>[];
-  limit?:    number;
-  offset?:   number;
-  fields?:   (keyof T & string)[];
-  explain?:  boolean;
-}
+// The query grammar (Filter AST, StoreQuery, QueryResult, StoreQueryError) lives in ./store-query.
 
 export type CASResult<T> =
   | { ok: true;  doc: T }
   | { ok: false; current: T | null };
-
-export interface QueryResult<T> {
-  items:   Array<{ doc: T; score?: number; explanation?: string }>;
-  total:   number;
-  cursor?: string;
-}
 
 export interface Store<T extends { id: string; version: string }> {
   get(id: string): Promise<T | null>;
   set(id: string, value: T): Promise<void>;
   cas(id: string, expected: string, next: T): Promise<CASResult<T>>;
   delete(id: string, expectedVersion?: string): Promise<boolean>;
-  query(q: StoreQuery<T>): Promise<QueryResult<T>>;
+  query(q: StoreQuery): Promise<QueryResult<T>>;
 }
 
 // ── Knowledge index ───────────────────────────────────────────────────────────

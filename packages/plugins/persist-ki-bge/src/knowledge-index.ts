@@ -98,8 +98,7 @@ export class PersistBGEKnowledgeIndex implements KnowledgeIndex {
     terms:  Array<{ term: string; context?: string }>,
     signal: AbortSignal,
   ): Promise<KnowledgeEntry[]> {
-    const { items } = await this.store.query({});
-    const all = items.map(({ doc }) => doc);
+    const { items: all } = await this.store.query({});
     if (terms.length === 0 || all.length === 0) return [];
 
     // Step 1: alphanum-normalised entity match — single hit wins immediately

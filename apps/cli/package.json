@@ -14,6 +14,7 @@
     "@matatbread/matbot-knowledge":           "workspace:*",
     "@matatbread/matbot-files-node":          "workspace:*",
     "@matatbread/matbot-security":            "workspace:*",
+    "@matatbread/matbot-storage-base":        "workspace:*",
     "@matatbread/matbot-storage-filesystem":  "workspace:*",
     "@matatbread/matbot-tool-plugin":          "workspace:*"
   },

@@ -38,6 +38,9 @@ importers:
       '@matatbread/matbot-security':
         specifier: workspace:*
         version: link:../../packages/core/security
+      '@matatbread/matbot-storage-base':
+        specifier: workspace:*
+        version: link:../../packages/core/storage/_base
       '@matatbread/matbot-storage-filesystem':
         specifier: workspace:*
         version: link:../../packages/core/storage/filesystem

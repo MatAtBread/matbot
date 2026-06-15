@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import type { Store, StoreQuery, QueryResult, CASResult } from '@matatbread/matbot-plugin-api';
-import { matchFilter, applySort, cosineSimilarity } from '@matatbread/matbot-storage-base';
+import { executeQuery } from '@matatbread/matbot-storage-base';
 
 export class SQLiteStore<T extends { id: string; version: string }> implements Store<T> {
   private readonly db:    DatabaseSync;
@@ -66,48 +66,8 @@ export class SQLiteStore<T extends { id: string; version: string }> implements S
     return result.changes > 0;
   }
 
-  async query(q: StoreQuery<T>): Promise<QueryResult<T>> {
-    const rows    = this.db.prepare(`SELECT doc FROM "${this.table}"`).all() as unknown as Array<{ doc: string }>;
-    let pool      = rows.map(r => JSON.parse(r.doc) as T);
-    let filtered  = q.filter !== undefined ? pool.filter(d => matchFilter(d, q.filter!)) : pool;
-
-    if (q.fullText !== undefined) {
-      const term = q.fullText.toLowerCase();
-      filtered = filtered.filter(d => JSON.stringify(d).toLowerCase().includes(term));
-    }
-
-    type Item = QueryResult<T>['items'][number];
-    let page:  Item[];
-    let total: number;
-
-    if (q.vector?.embedding !== undefined) {
-      const { embedding, topK, minScore = 0, preFilter } = q.vector;
-      const candidates = preFilter !== undefined ? filtered.filter(d => matchFilter(d, preFilter)) : filtered;
-      const ranked = candidates
-        .map(doc => ({ doc, score: cosineSimilarity(embedding, extractEmbedding(doc)) }))
-        .filter(({ score }) => score >= minScore)
-        .sort((a, b) => b.score - a.score)
-        .slice(0, topK);
-      total       = ranked.length;
-      const off   = q.offset ?? 0;
-      const slice = q.limit !== undefined ? ranked.slice(off, off + q.limit) : ranked.slice(off);
-      page = slice.map(({ doc, score }): Item => ({ doc, score }));
-    } else {
-      if (q.sort !== undefined && q.sort.length > 0) filtered = applySort(filtered, q.sort);
-      total       = filtered.length;
-      const off   = q.offset ?? 0;
-      const slice = q.limit !== undefined ? filtered.slice(off, off + q.limit) : filtered.slice(off);
-      page = slice.map((doc): Item => ({ doc }));
-    }
-
-    return { items: page, total };
+  async query(q: StoreQuery): Promise<QueryResult<T>> {
+    const rows = this.db.prepare(`SELECT doc FROM "${this.table}"`).all() as unknown as Array<{ doc: string }>;
+    return executeQuery(rows.map(r => JSON.parse(r.doc) as T), q);
   }
-}
-
-function extractEmbedding(doc: unknown): number[] {
-  if (doc !== null && typeof doc === 'object') {
-    const e = (doc as Record<string, unknown>)['embedding'];
-    if (Array.isArray(e)) return e as number[];
-  }
-  return [];
 }
