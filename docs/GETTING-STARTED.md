@@ -68,7 +68,7 @@ Configuration written to ~/matbot/matbot.yaml
 
 > **No API key?** Try option 2 — `customer-services` is a free built-in provider that
 > needs no endpoint or API key. It's not a real LLM, but it's useful for testing your
-> setup and exploring the plugin system.
+> setup.
 
 Once a provider is configured, use the built-in `plugin` tool to discover and add
 capabilities without ever editing the config file:
@@ -150,7 +150,8 @@ providers:
 
 Credentials use a single placeholder syntax — `${NAME}` — resolved by the active Vault
 at runtime. The default Node vault reads from a `.env` file next to `matbot.yaml`; the
-browser build uses a WebCrypto-backed browser vault. Either way:
+browser build uses a `localStorage` vault, which of course you can replace with your
+own plugin. Either way:
 
 | Syntax         | Resolves to                                          |
 |----------------|------------------------------------------------------|
