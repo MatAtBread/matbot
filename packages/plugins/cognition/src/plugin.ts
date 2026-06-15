@@ -2,12 +2,46 @@ import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import type { MatbotPluginSpec, MatbotServices } from '@matatbread/matbot-plugin-api';
 import { COGNITION_SKILLS } from './skills.js';
 import { defineStore } from '@matatbread/matbot-tool-store';
+import { createDreamTimeTool } from './dream/tool.js';
+import type { DreamRun } from './dream/types.js';
+
+console.warn('[cognition] MARKER-A: module imported (top of plugin.ts)');
 
 async function seedSkills(skills: NonNullable<MatbotServices['SkillManager']>): Promise<void> {
   // Create-if-absent: an install that already holds a skill of the same name keeps its own copy.
   for (const skill of COGNITION_SKILLS) {
     await skills.importIfAbsent(skill.name, skill.content, skill.triggers);
   }
+}
+
+async function seedDreamRunsStore(services: MatbotServices): Promise<void> {
+  console.warn('[cognition] MARKER-B: seedDreamRunsStore called');
+  // The `dream_runs` store backs the `dream_time` tool's observability story: every pass writes a
+  // structured record here (outcome, primary fact, routed-to skill, contradictions, timings) so
+  // "what did dream-time do, and why" is queryable rather than having to be parsed out of stdout.
+  // Idempotent — a re-seed on restart preserves the existing run history.
+  await defineStore(services, {
+    namespace:   'dream_runs',
+    description:
+      'Records one row per `dream_time` consolidation pass: which fact was processed, which ' +
+      'skill it was routed into (if any), what was merged, any contradictions flagged, and ' +
+      'per-call telemetry. Queryable for "how is dream-time behaving over time" reporting.',
+    shape:
+      `interface DreamRun {
+        id:                  string;
+        version:             string;
+        startedAt:           string;
+        endedAt:             string;
+        outcome:             'no-facts' | 'no-match' | 'merged' | 'error';
+        primaryFact?:        { id: string; preview: string };
+        routedTo?:           { skill: string; decision: 'strong'|'weak'|'none'; score: number; reasoning: string };
+        mergedFactIds:       string[];
+        contradictions:      { skill: string; location: string; note: string }[];
+        unassignedRemaining: number;
+        judgementCalls:      { role: 'rank'|'merge'; inputSize: number; ms: number }[];
+        error?:              string;
+      }`,
+  });
 }
 
 /**
@@ -39,6 +73,7 @@ export function createCognitionPlugin(): MatbotPluginSpec {
     },
 
     async installationMessage() {
+      console.warn('[cognition] MARKER-F: installationMessage() called (NEW build)');
       return `Cognition is active. It seeds built-in skills (Inner voice, Remember this, Dream time)
 into the skills service — if no skills service is configured yet, they are seeded automatically once
 one is.
@@ -51,10 +86,13 @@ The **Remember this skill** fires when new information is provided and uses a re
 personal details, preferences, and other information the user wants remembered across conversations. Each fact is captured with
 provenance showing which session and message it came from.
 
-The **Dream time skill** is a background consolidation pass: run via the \`background\` tool (never inline),
-it takes one unassigned fact from the remembered_facts store, finds the best existing skill to merge it
-into, flags any contradictions for human review, and marks the fact processed (a \`dreamSkill\` field).
-One fact per pass keeps each cycle short and cheap; it has no automatic triggers, so schedule it yourself.
+The **\`dream_time\` tool** runs one pass of background memory consolidation. It is a deterministic
+TypeScript pipeline: it picks the oldest unassigned fact from the remembered_facts store, scores it against
+every existing skill via two narrow LLM judgement calls (rank and merge) using the active provider, and —
+if a skill clears the configured threshold — splices the fact in and marks it processed (a \`dreamSkill\`
+field). Each pass writes a structured \`DreamRun\` record to the \`dream_runs\` store. Intended to be
+invoked via the \`background\` tool on a schedule, never inline. One pass at a time is enforced by a
+process-local mutex.
 
 It also seeds a remembered_facts store and its \`remembered_facts_action\` tool, used by the Remember this skill.
 The store is idempotent: a re-seed on restart keeps the existing data.
@@ -62,6 +100,7 @@ The store is idempotent: a re-seed on restart keeps the existing data.
     },
 
     async setup(services) {
+      console.warn('[cognition] MARKER-C: setup() entered (NEW dream-time build)');
       // Seed the remembered_facts store and its `remembered_facts_action` tool (used by the
       // Remember this skill). Idempotent — a re-seed on restart keeps the existing store's data.
       await defineStore(services, {
@@ -79,6 +118,17 @@ The store is idempotent: a re-seed on restart keeps the existing data.
             dreamSkill?: string;
           }`,
       });
+
+      // Seed the dream_runs store (used by the dream_time tool) alongside remembered_facts.
+      // Both stores are seeded unconditionally — they don't require a SkillManager to exist.
+      await seedDreamRunsStore(services);
+      console.warn('[cognition] MARKER-D: about to register dream_time tool');
+
+      // Register the dream_time tool. It doesn't need SkillManager at REGISTRATION time (it looks
+      // it up per-call), so we register it unconditionally too — the tool surfaces in catalogues
+      // immediately, and if a SkillManager isn't present at invocation it errors cleanly.
+      services.tools.register(createDreamTimeTool(services));
+      console.warn('[cognition] MARKER-E: dream_time tool registered OK');
 
       if (services.SkillManager) {
         await seedSkills(services.SkillManager);
