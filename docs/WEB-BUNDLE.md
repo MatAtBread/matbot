@@ -46,7 +46,7 @@ emits natively; in-process is simply that iterable, HTTP demuxes it back out of 
 ([package.json](../packages/plugins/frontend/web/package.json)):
 
 ```jsonc
-"exports": { ".": { "browser": "./src/browser.js", "import": "./src/index.ts" } }
+"exports": { ".": { "browser": "./src/browser.js", "import": "./src/index.ts", "default": "./src/index.ts" } }
 ```
 
 - **Node** resolves `["node","import"]` → `index.ts` → `server.ts` (the HTTP server). Unchanged.

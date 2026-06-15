@@ -113,7 +113,7 @@ skills, workspace files, and provider config all persist in browser storage acro
 - Provider management: add and switch LLM profiles live
 - Principal carrier: ambient identity threaded through every layer
 - Vault: secret resolution with `${NAME}` placeholders
-- Basic implementatins for storage (files) and UI (CLI) are created by "apps" like the CLI.
+- Basic implementations for storage (files) and UI (CLI) are created by "apps" like the CLI.
 
 ### Plugins (all optional - install and try out as you please)
 
@@ -123,13 +123,14 @@ skills, workspace files, and provider config all persist in browser storage acro
 | | `docker-bash` | Run commands in a sandboxed Docker container |
 | | `http` | Make HTTP requests to any web API |
 | | `workspace` | Read/write files; browser build serves them as downloads |
-| | `mcp` | Connect stdio MCP servers (Node) or HTTP/SSE MCP servers (browser + Node) |
-| | `json-validation` | Validate tool inputs against schema; LLM self-corrects on mismatch |
+| | `mcp` | Connect stdio (local) MCP servers; `mcp-http` adds HTTP/SSE servers (browser + Node) |
 | | `edit-session` | Cut, fork, and compact sessions to manage context window size |
+| | `ask-user` | Ask the user a question mid-turn (`ask_user`) |
+| **Hooks** | `json-validation` | Validate tool inputs against schema (a `toolcall` hook); LLM self-corrects on mismatch |
 | **Knowledge** | `rumsfeld` | Look up the knowledge index when the LLM encounters an unknown term |
 | | `persist-ki-bge` | Persistent knowledge index with optional BGE reranker |
 | | `skills` | Named markdown playbooks, injected on demand by a classifier |
-| | `cognition` | Inner Voice (second-model critique), Remember This, Dream Time |
+| | `cognition` | Seeds skills (Inner Voice critique, Remember This, Dream Time) and a remembered-facts store |
 | **Frontends** | `frontend/web` | HTTP + SSE web UI with session management |
 | | `frontend/telegram` | Telegram bot frontend |
 | **Storage** | `storage/sqlite` | SQLite backend (Node); browser uses IndexedDB |
@@ -171,7 +172,7 @@ For evaluating or just basic personal use, the browser build is the right starti
 The plugin API is a TypeScript interface. A minimal tool plugin:
 
 ```ts
-import type { MatbotPlugin, Tool } from '@matatbread/matbot-plugin-api';
+import type { MatbotPluginSpec, Tool } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 
 const myTool: Tool = {
@@ -190,8 +191,7 @@ const myTool: Tool = {
   },
 };
 
-export const plugin: MatbotPlugin = {
-  name: 'hello',
+export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,
   tools: [myTool],
 };
