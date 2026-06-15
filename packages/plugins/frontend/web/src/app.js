@@ -1577,7 +1577,13 @@ function pushTurnEvent(ev) {
         return;
       }
     }
-    activeBatchHead = { traceId: ev.traceId, concat: ev.concatQueue === true };
+    // Only a head still waiting behind a running turn (queued > 0) can absorb later concat
+    // submissions: it sits in the runner's queue long enough for them to land behind it. A head that
+    // runs immediately (queued === 0) is dequeued and its batch sealed by pump *synchronously* — before
+    // any follower's submit POST can reach the queue — so it never merges one. Opening a foldable batch
+    // for it would fold a quickly-queued next message into its bubble even though the runner ran it as
+    // its own separate turn (visible only as the live/reload mismatch this guards against).
+    activeBatchHead = ev.queued > 0 ? { traceId: ev.traceId, concat: ev.concatQueue === true } : null;
   } else if (activeBatchHead !== null && ev.traceId === activeBatchHead.traceId) {
     activeBatchHead = null;   // head turn has started responding → next submission opens a new batch
   }
