@@ -144,7 +144,7 @@ function spawnJob(configPath: string, prompt: string, output?: string, files?: F
   child.stdin.end();
 
   if (captureOut && child.stdout !== null && output !== undefined && files !== undefined) {
-    files.put(output, mimeFromName(output), stdoutStream(child.stdout), { namespace: 'workspace' })
+    files.put(output, mimeFromName(output), stdoutStream(child.stdout), { namespace: 'workspace', allowed: true })
       .catch((err: unknown) => process.stderr.write(
         `[background] output capture failed for "${output}": ${err instanceof Error ? err.message : String(err)}\n`,
       ));
