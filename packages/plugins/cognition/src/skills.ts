@@ -72,4 +72,114 @@ When this skill is triggered:
   ]
 };
 
-export const COGNITION_SKILLS: readonly SeedSkill[] = [INNER_VOICE, REMEMBER_THIS];
+export const DREAM_TIME: SeedSkill = {
+  "name": "Dream time",
+  "content": `# Dream time
+
+## Concept
+
+A background consolidation process. Takes a single unassigned fact from the \`remembered_facts_action\` store, finds the best home for it among existing skills, merges it in, and flags any contradictions for human review. Only one fact per pass — keeps each cycle short, cheap, and safe.
+
+**Design principle**: This skill runs via the \`background\` tool. Never inline during a conversation. The output file (set via the background tool's \`output\` parameter) captures everything written to stdout — so this skill simply prints its report at the end.
+
+---
+
+## Workflow
+
+### 1. Fetch one unassigned fact
+
+Call \`remembered_facts_action({ action: "query" })\` — returns all stored facts.
+
+**Select the fact to process:**
+- Filter to facts that do **not** already have a \`dreamSkill\` field set (they haven't been processed yet). A fresh fact from "Remember this" stores \`{ fact, sessionId, messageId, createdAt }\` — no \`dreamSkill\`.
+- Among unassigned facts, pick the **oldest** one (by \`createdAt\`)
+- If there are no unassigned facts, stop — nothing to do.
+
+### 2. Gather candidate skills with their metadata
+
+Call \`skill_action({ action: "list" })\` to get all skill names, then fetch enriched metadata for each via \`skill_action({ action: "metadata", name: "<skill>" })\`.
+
+The metadata returns \`{ summary, entities, tags }\` for each skill.
+
+### 3. Evaluate best match
+
+With the fact and all candidate skills' metadata, decide:
+
+- **Strong match** — the fact clearly belongs in this skill
+- **Weak match** — some overlap but it's a stretch
+- **No match** — none fit
+
+**Routing heuristics:**
+
+| Kind of fact | Likely home |
+|---|---|
+| Family/personal info about the user or relatives | User Profile |
+| System architecture, implementation details, tool quirks | Implementation Notes |
+| Assistant behaviour, process rules, guidelines | Assistant Operating Procedures |
+| A location or place description | That place's skill (e.g. Barthalé → Matt's Barthalé House) |
+| Hardware, devices, home setup | Home Automation |
+| The Inner Voice or bicameral mind design | Inner voice |
+| Anything else not fitting above | Leave unassigned |
+
+**A note on "procedural" skills (Remember this, Dream time, Assistant Operating Procedures):**
+- Only merge a fact into a procedural skill if the fact is **about the skill itself or its behaviour**. Do NOT merge into them just because the fact's topic overlaps with what the skill processes.
+
+If **strong match**:
+1. Load the full skill: \`skill_action({ action: "load", name: "<skill name>" })\`
+2. Identify which section the fact belongs in.
+3. Merge the fact into the skill content, keeping the existing structure:
+   - Add it as a new subsection under the relevant heading
+   - If no relevant heading exists, add one
+   - Preserve all existing content — never delete or overwrite
+4. **Check for contradictions** (see Phase 4)
+5. Save the updated skill: \`skill_action({ action: "save", name: "<skill name>", content: "<updated>" })\`
+6. **Mark the fact as processed**: Read the current fact with \`remembered_facts_action({ action: "get", id: "<fact id>" })\`, then write it back with \`dreamSkill\` added.
+
+**While you have the skill loaded, also check for other unassigned facts that relate to the same skill.** Scan through the remaining unassigned facts. If any clearly belong to the same skill (same topic, same person, same domain), merge them in the same pass and mark all of them as processed too. This avoids separate cycles re-doing the same work.
+
+If **weak match** or **no match**: Leave the fact in the store for future clustering.
+
+### 4. Check for contradictions
+
+As you merge the fact into the skill, compare the new information against existing content. If they conflict, flag it inline:
+
+\`\`\`
+(!) Note: The new fact says "[summary of new]",
+but existing content says "[summary of existing]".
+May need human review to reconcile.
+\`\`\`
+
+These markers don't block the merge — the fact is processed — but they flag areas needing attention.
+
+### 5. Report
+
+Output a report to stdout (which is captured by the background tool's \`output\` parameter). Include:
+- Which fact was the primary focus (first 80 chars)
+- The fact's ID
+- How many total facts were merged (primary + related, with their IDs)
+- Which skill they went into
+- Whether any contradiction notes were added
+- How many unassigned facts remain
+
+---
+
+## Design notes
+
+### Why one fact at a time (with related-batch optimisation)
+
+The primary fact drives the cycle. But if other unassigned facts clearly belong to the same skill, processing them together saves cycles and avoids partial updates.
+
+### What counts as "assigned"
+
+A fact is "assigned" if it has a \`dreamSkill\` field set. Fresh facts from "Remember this" do NOT have this — it's added by dream time when it writes back.
+
+### Post-processing: splitting bloated skills
+
+If a skill grows very large, consider splitting along a natural axis with mutual cross-references. This is a separate, less frequent maintenance pass.
+`,
+  // No automatic triggers: Dream time is a background consolidation pass invoked deliberately via the
+  // `background` tool, never fired inline during a conversation.
+  "triggers": []
+};
+
+export const COGNITION_SKILLS: readonly SeedSkill[] = [INNER_VOICE, REMEMBER_THIS, DREAM_TIME];

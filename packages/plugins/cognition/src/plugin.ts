@@ -11,8 +11,8 @@ async function seedSkills(skills: NonNullable<MatbotServices['SkillManager']>): 
 }
 
 /**
- * Cognitive services. Today it seeds its built-in skills (Inner voice, Remember this) into the
- * active skills service; it is the intended home for further cognitive skills and tools.
+ * Cognitive services. Today it seeds its built-in skills (Inner voice, Remember this, Dream time)
+ * into the active skills service; it is the intended home for further cognitive skills and tools.
  *
  * It does not set skills up itself — it is a *consumer* of the skills capability, not a
  * specialization of it — so it discovers the live {@link SkillManager} off the registry rather than
@@ -35,12 +35,12 @@ export function createCognitionPlugin(): MatbotPluginSpec {
   return {
     apiVersion: PLUGIN_API_VERSION,
     manifest: {
-      description: 'Cognitive services: seeds built-in cognition skills (Inner voice, Remember this) and is the home for further cognitive skills and tools.',
+      description: 'Cognitive services: seeds built-in cognition skills (Inner voice, Remember this, Dream time) and is the home for further cognitive skills and tools.',
     },
 
     async installationMessage() {
-      return `Cognition is active. It seeds built-in skills (Inner voice, Remember this) into the
-skills service — if no skills service is configured yet, they are seeded automatically once
+      return `Cognition is active. It seeds built-in skills (Inner voice, Remember this, Dream time)
+into the skills service — if no skills service is configured yet, they are seeded automatically once
 one is.
 
 The **Inner voice skill** consults a second, model via the single_turn tool, which needs a provider named "inner-voice";
@@ -50,6 +50,11 @@ until one is configured the skill still fires but its single_turn call errors ba
 The **Remember this skill** fires when new information is provided and uses a remembered_facts store and its \`remembered_facts_action\` tool to capture user-provided facts,
 personal details, preferences, and other information the user wants remembered across conversations. Each fact is captured with
 provenance showing which session and message it came from.
+
+The **Dream time skill** is a background consolidation pass: run via the \`background\` tool (never inline),
+it takes one unassigned fact from the remembered_facts store, finds the best existing skill to merge it
+into, flags any contradictions for human review, and marks the fact processed (a \`dreamSkill\` field).
+One fact per pass keeps each cycle short and cheap; it has no automatic triggers, so schedule it yourself.
 
 It also seeds a remembered_facts store and its \`remembered_facts_action\` tool, used by the Remember this skill.
 The store is idempotent: a re-seed on restart keeps the existing data.

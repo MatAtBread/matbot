@@ -2,7 +2,7 @@
   "name": "@matatbread/matbot-cognition",
   "matbotRuntime": ["node", "browser"],
   "version": "0.1.0",
-  "description": "Cognitive services: seeds built-in cognition skills (Inner voice, Remember this) into the active skills service. A home for further cognitive skills and tools.",
+  "description": "Cognitive services: seeds built-in cognition skills (Inner voice, Remember this, Dream time) into the active skills service. A home for further cognitive skills and tools.",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
