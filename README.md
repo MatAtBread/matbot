@@ -1,418 +1,182 @@
 # matbot
 
-A TypeScript AI harness — a thin, composable runtime that connects language models to tools
-and frontends. Not a product; infrastructure.
+> *A thin, composable runtime that connects language models to tools and frontends.*
+
+Most LLM frameworks make choices for you. matbot doesn't. It's infrastructure: a minimal
+agentic loop, a plugin system, and the conviction that everything else — tools, storage,
+frontends, memory, identity — should be composable, hot-loadable, and replaceable without
+touching the core.
+
+**[Try it live in your browser →](https://matatbread.github.io/matbot/apps/web-bundle/dist/matbot.html)**
+*(No install. Just bring an API key.)*
 
 ---
 
-## Core features
+## Why matbot?
 
-- **LLM-independent** — works with Anthropic Claude, any OpenAI-compatible API (GPT-4o,
-  DeepSeek, Ollama, Mistral, …), or your own provider adapter; switch models mid-session
-- **Minimal core** — built-in agentic loop, plugin management, and interactive CLI; no
-  extras required for basic conversational use
-- **Hot-loaded plugins** — extend at runtime without restart:
-  - **Tools** — bash, HTTP, workspace files, sandboxed Docker bash, MCP server bridge, background jobs
-  - **Skills** — reusable system-context fragments injected on demand via a classifier
-  - **Knowledge** — semantic knowledge index for domain-specific context (Rumsfeld + optional BGE reranker)
-  - **Session editing** — cut, fork, and compact sessions to control context window size
-  - **Frontends** — web UI with session management, Telegram bot
-  - **Storage backends** — filesystem (default) or SQLite
-  - **Providers** — add and remove LLM profiles live via the built-in `provider` tool
+**It's a TypeScript-first node v24 service**, with no build-step, no config setup.
+All you need is an LLM (OpenAI, Anthropic, DeepSeek, your own local LLM) with an API key.
 
-A clean, TypeScript API encourages you to write your own plugins to get the bot you want. Your own UI, your own memory system, your own persistent storage, your own tools or new concepts like imagination, dreaming, LLM routing - all are supported via hot-loaded npm modules.
+**It also runs entirely in the browser.** matbot ships as a single self-contained HTML file —
+no server, no build step, no backend. The full runtime runs client-side, calling your LLM
+directly. Same core, same plugins, same UI as the Node build. This isn't a demo mode:
+it's a deliberate design choice that makes the browser a first-class, sandboxed deployment
+target.
 
-For a visual tour of how it all fits together — core, plugins, and the turn flow — see [ARCHITECTURE.md](docs/ARCHITECTURE.md). To find out more about what makes MatBot special, take a look at the [Design ethos and developer notes](CLAUDE.md)
+**Everything is a plugin.** Tools, frontends, storage backends, LLM providers, knowledge
+indexes, session editors — all plugins. None of them are hardcoded. The core is genuinely
+minimal: an agentic loop, plugin management, and a principal carrier. Everything else is
+optional. A basic set of plugins for file access is bundled so you can get started
+immediately, but every one can be replaced with your preferred setup.
 
----
+**Plugins are hot-loaded.** Add, remove, or reload a plugin at runtime without
+restarting. The built-in `plugin` tool lets the LLM manage its own capabilities
+mid-session. You can go from a bare conversational bot to one with bash execution, a web
+UI, and a Telegram frontend without ever touching a config file.
 
-## Run it entirely in the browser
-
-matbot also ships as a **single self-contained `matbot.html`** that runs the whole runtime
-client-side — no server, calling the LLM directly from your browser. It's the same platform-neutral
-core and the browser-safe plugins, type-stripped and wired together in-page, loadable from a
-`file://` URL or any static host. The same UI is shared with the Node web frontend — one client,
-two transports (HTTP+SSE when served, in-process when bundled).
-
-- **Try it live:** [open the web build](https://matatbread.github.io/matbot/apps/web-bundle/dist/matbot.html)
-  — on first launch it asks for any OpenAI- or Anthropic-compatible provider (endpoint, model, key;
-  e.g. DeepSeek), then you're chatting.
-- **Architecture & usage:** [WEB-BUNDLE.md](docs/WEB-BUNDLE.md) — the unified UI/transport model, the
-  two bundles (`matbot.html` and the minimal `matbot-demo.html`), and the baked-but-idle plugin model.
-- **Package-level build mechanics:** [apps/web-bundle/README.md](apps/web-bundle/README.md).
+**Security is a first-class concern.** The principal carrier threads identity through
+every layer — tools, storage, knowledge index — without it needing to be in every
+signature. Credentials are resolved at runtime and never written to session storage. In
+the browser, the sandbox means even an overenthusiastic LLM can't touch your filesystem.
 
 ---
 
-## Requirements
-
-- Node 24+
-- pnpm 9+
-
----
-
-## Quick start
+## Quick start (Node)
 
 ```sh
 git clone https://github.com/MatAtBread/matbot
 cd matbot
 pnpm install
-pnpm repl   # ephemeral REPL — session discarded on exit
+pnpm repl
 ```
 
-The REPL starts with no config file needed. Use the built-in `plugin` tool to discover and
-install providers and plugins interactively, or drop a `matbot.yaml` next to your working
-directory (see examples below).
+No config file needed. On first run matbot will walk you through setting up a provider.
+Once that's done, use the built-in `plugin` tool to add capabilities as you go:
 
-## Auto-configuration
-
-**_You don't actually need to worry about configuration files. Matbot comes with a `plugin` tool that can discover and install plugins that provide new tools, LLM providers, front-ends and more_**. If it has nothing to go on, it will just ask you the basics to get your favourite
-LLM up and running.
-
-
-```text
-$ pnpm repl
-
-No providers configured. Let's set one up.
-
-Available provider types:
-  1. anthropic  (@matatbread/matbot-provider-anthropic)
-  2. customer-services  (@matatbread/matbot-provider-customer-services)
-  3. openai-compat  (@matatbread/matbot-provider-openai-compat)
-
-Choose a type [1-3]: 1
-Provider name (how this LLM key is named in ~/git/matbot/matbot.yaml and presented to you): deepseek
-Model name: deepseek-v4-flash
-Endpoint URL: https://api.deepseek.com/anthropic
-API key: ************************************
-
-Configuration written to ~/git/matbot/matbot.yaml
-
-[2026-06-05T17:34:49.488Z 1153628] provider: deepseek  (ephemeral)
-
+```
 you: got any cool plugins?
-[thinking… ×23]
-Let me check what we've got!
-⚙  plugin {"action":"list"}
-
-
-⚙  plugin {"action":"discover_local"}
-[2026-06-05T17:35:13.813Z 1153628] (node:1153628) ExperimentalWarning: SQLite is an experimental feature and might change at any time
-(Use `node --trace-warnings ...` to show where the warning was created)
-
-[thinking… ×22]
-Oh yeah, there's a ton of cool stuff available! Here's the lineup of discoverable plugins you can add:
-
----
-
-### 🔧 **Tool Plugins** (give me new abilities)
-| Plugin | What it does |
-|--------|-------------|
-| **`bash`** | Run bash scripts right in the workspace — I can execute code, install packages, etc. |
-| **`docker-bash`** | Same but inside a persistent Docker container — sandboxed! Project root is read-only, `.data` is read-write. |
-| **`workspace`** | Read, write, and list files in the workspace. With the web UI, files are downloadable too. |
-| **`http`** | Make HTTP requests to any web API or remote resource. |
-| **`mcp`** | Connect MCP (Model Context Protocol) servers and expose their tools — huge for extending capabilities! |
-| **`json-validation`** | Auto-validates my tool call inputs against schemas so I self-correct on mismatches. |
-| **`edit-session`** | Cut messages, fork sessions into branches, compact history — power editing for convos. |
-
-### 🧠 **Knowledge & Skills**
-| Plugin | What it does |
-|--------|-------------|
-| **`persist-ki-bge`** | Persistent KnowledgeIndex with entity/heading search + optional BGE reranker. |
-| **`rumsfeld`** | "Unknowns unknown" handler — looks up knowledge index when I hit a term I don't know. |
-| **`skills`** | Inject skill documents into sessions on demand. |
-
-### 🖥️ **Frontends** (ways to interact)
-| Plugin | What it does |
-|--------|-------------|
-| **`frontend/web`** | HTTP + SSE web UI with session management — serves a chat UI on a local port. |
-| **`frontend/telegram`** | Run this whole setup as a Telegram bot! |
-
-### 🗄️ **Storage & Sessions**
-| Plugin | What it does |
-|--------|-------------|
-| **`storage/sqlite`** | Persistent SQLite backend (WAL mode) for all runtime state. |
-| **`sessions`** | List, get, rename, hide conversations. |
-
-### ⏰ **Background Automation**
-| Plugin | What it does |
-|--------|-------------|
-| **`background`** | Run prompts in detached background processes + schedule recurring prompts (cron-style). |
-
----
-
-Wanna **add** any of these? Some highlights I'd personally recommend:
-- **`bash`** + **`workspace`** → I can actually code, write files, and execute things
-- **`http`** → I can hit APIs, fetch data, etc.
-- **`mcp`** → Opens up the whole MCP ecosystem
-- **`frontend/web`** → Gives you a slick web UI
-- **`docker-bash`** → If you want a sandboxed execution environment
-
-Just say the word and I'll install whichever ones sound fun! 🚀
-[↑2130 ↓779 tokens]
 ```
-```
-you: install the local plugin for the web frontend
-```
-```
-[thinking… ×24]
-Let me first discover what local plugins are available.
-⚙  plugin {"action":"discover_local"}
 
-[thinking… ×45]
-I found a local web frontend plugin: `@matatbread/matbot-frontend-web` located at `./packages/plugins/frontend/web`. Let me install it.
-⚙  plugin {"action":"add","specifier":"./packages/plugins/frontend/web"}
-Install plugin "./packages/plugins/frontend/web"? [y/N] [N] y
-Activating "./packages/plugins/frontend/web"...
+```
+[thinking…]
+Sure! Here's what's available locally:
+
+| Plugin           | What it does                                      |
+|------------------|---------------------------------------------------|
+| bash             | Run shell commands; stream stdout/stderr          |
+| docker-bash      | Same, but sandboxed inside Docker                 |
+| http             | Make HTTP requests to any web API                 |
+| workspace        | Read/write files; served as downloads in the UI   |
+| mcp              | Connect Model Context Protocol servers            |
+| frontend/web     | Browser-accessible chat UI with session sidebar   |
+| frontend/telegram| Run matbot as a Telegram bot                      |
+| skills           | Named markdown playbooks, injected automatically  |
+| cognition        | Memory, inner-voice critique, dream consolidation |
+| …and more        |                                                   |
+
+Want me to add any of these?
+
+you: install the web frontend
+
+⚙  plugin { "action": "add", "specifier": "./packages/plugins/frontend/web" }
+Install plugin "./packages/plugins/frontend/web"? [y/N] y
+
 [frontend-web] http://localhost:19778
 
-[thinking… ×19]
-The web frontend plugin has been successfully installed and is now active. Let me verify by listing the configured plugins.
-⚙  plugin {"action":"list"}
-
-[thinking… ×24]
-The web frontend plugin (`@matatbread/matbot-frontend-web`) has been successfully installed and is now active. You can see it listed under both configured and loaded plugins:
-
-- **Configured**: `./packages/plugins/frontend/web`
-- **Loaded**: `frontend-web` (type: `frontend`, API version: `0.1`)
-
-The plugin is ready to use!
-[↑1021 ↓424 tokens]
+The web frontend is live — open http://localhost:19778 in your browser.
+Your current session continues there; no restart needed.
 ```
 
-The built-in `plugin` tool installs the package, updates `matbot.yaml`, and hot-loads it
-immediately — no restart needed.
+That last bit is the point: the plugin hot-loads, prints a URL, and you move seamlessly
+from the terminal into the web UI — same session, no interruption.
 
-Ask it what other plugins there are:
-
-```
-you: what other local plugins do you have?
-```
-> Of course, now the web front-end is loaded, you could have opened your browser
-and done this from the web UI if you wanted
+> **No API key?** The `customer-services` provider is free, needs no key, and runs
+> without GPU support. It's not a real LLM, but it's useful for testing your setup
 
 ---
 
-## Example 1 — A basic bot (no tools, just the CLI)
+## Quick start (Browser)
 
-Minimum configuration: one provider, no plugins, purely conversational.
-
-### `matbot.yaml`
-
-```yaml
-providers:
-  deepseek-v4-flash:
-    module: ./packages/plugins/providers/anthropic
-    endpoint: https://api.deepseek.com/anthropic
-    model: deepseek-v4-flash
-    credentials:
-      apiKey: ${DEEPSEEK_API_KEY}
-    parameters:
-      maxTokens: 16384
-```
-
-### `.env` (same directory as `matbot.yaml`, .gitignored)
-
-```sh
-DEEPSEEK_API_KEY=sk-...
-```
-
-### Run
-
-```sh
-# Interactive REPL (ephemeral — session discarded on exit)
-pnpm repl
-
-# Single turn
-pnpm repl "What is the capital of France?"
-
-# New persistent session (prints a resume command on exit)
-pnpm repl --session create
-
-# Resume an existing session
-pnpm repl --session <id>
-
-# Server mode — headless, waits for a frontend plugin to handle requests
-pnpm start
-```
-
-Sessions are **ephemeral by default**. Nothing is written to disk unless you pass
-`--session create` (or `--session <id>` to resume). On exit a persistent session prints
-a `--session <id>` resume command. You can change the storage via plugins. The default is local files under `.data` (`.gitignored`)
+Open [matbot.html](https://matatbread.github.io/matbot/apps/web-bundle/dist/matbot.html)
+in any modern browser. On first launch it asks for a provider (endpoint, model, API key —
+DeepSeek, Anthropic, OpenAI, or anything compatible). Then you're chatting. Sessions,
+skills, workspace files, and provider config all persist in browser storage across reloads.
 
 ---
 
-## Example 2 — A bot with tools and a web UI
+## What's in the box
 
-Adds bash execution, HTTP requests, workspace file tools, and a browser-accessible chat
-interface.
+### Core
 
-### `matbot.yaml`
+- Agentic loop with tool-call / tool-result handling
+- Plugin lifecycle: add, remove, reload, discover local plugins
+- Provider management: add and switch LLM profiles live
+- Principal carrier: ambient identity threaded through every layer
+- Vault: secret resolution with `${NAME}` placeholders
+- Basic implementations for storage (files) and UI (CLI) are created by "apps" like the CLI.
 
-In the monorepo, reference packages by relative path (no install step needed):
+### Plugins (all optional - install and try out as you please)
 
-```yaml
-plugins:
-  - ./packages/plugins/bash
-  - ./packages/plugins/http
-  - ./packages/plugins/workspace
-  - ./packages/plugins/frontend/web
-```
+| Category | Plugin | What it does |
+|---|---|---|
+| **Tools** | `bash` | Run shell commands on the host |
+| | `docker-bash` | Run commands in a sandboxed Docker container |
+| | `http` | Make HTTP requests to any web API |
+| | `workspace` | Read/write files; browser build serves them as downloads |
+| | `mcp` | Connect stdio (local) MCP servers; `mcp-http` adds HTTP/SSE servers (browser + Node) |
+| | `edit-session` | Cut, fork, and compact sessions to manage context window size |
+| | `ask-user` | Ask the user a question mid-turn (`ask_user`) |
+| **Hooks** | `json-validation` | Validate tool inputs against schema (a `toolcall` hook); LLM self-corrects on mismatch |
+| **Knowledge** | `rumsfeld` | Look up the knowledge index when the LLM encounters an unknown term |
+| | `persist-ki-bge` | Persistent knowledge index with optional BGE reranker |
+| | `skills` | Named markdown playbooks, injected on demand by a classifier |
+| | `cognition` | Seeds skills (Inner Voice critique, Remember This, Dream Time) and a remembered-facts store |
+| **Frontends** | `frontend/web` | HTTP + SSE web UI with session management |
+| | `frontend/telegram` | Telegram bot frontend |
+| **Storage** | `storage/sqlite` | SQLite backend (Node); browser uses IndexedDB |
+| **Background** | `background` | Detached background jobs and cron-style scheduling |
 
-When consuming from npm:
-
-```yaml
-plugins:
-  - @matatbread/matbot-tool-bash
-  - @matatbread/matbot-tool-http
-  - @matatbread/matbot-tool-workspace
-  - @matatbread/matbot-frontend-web
-```
-
-Full example with provider:
-
-```yaml
-plugins:
-  - ./packages/plugins/bash
-  - ./packages/plugins/http
-  - ./packages/plugins/workspace
-  - ./packages/plugins/frontend/web
-
-providers:
-  claude:
-    module: ./packages/plugins/providers/anthropic
-    endpoint: https://api.anthropic.com
-    model: claude-sonnet-4-6
-    credentials:
-      apiKey: ${ANTHROPIC_API_KEY}
-    parameters:
-      maxTokens: 8192
-```
-
-### Run
-
-```sh
-pnpm repl
-```
+Note: plugins are scoped to a run-time. Not all plugins (eg bash) are available in all run-times (eg the browser).
 
 ---
 
-## Configuration reference
+## The browser build
 
-**Everything below is pluggable.** Each facility is exposed through a named `MatbotServices`
-interface, and what's described in each section is only the **default implementation** — it can be
-replaced or augmented by a plugin (`services.register(...)`) without touching the core. The
-interface name is called out at the top of each section so you know what to implement.
+The browser build deserves its own section because it's not a cut-down version — it's a
+deliberate deployment target.
 
-### Provider entry
+matbot's platform-neutral core and browser-safe plugins are type-stripped and bundled
+into a single `matbot.html`. It runs entirely in-page: no server, no CORS proxy, no
+service worker. The same web UI used by the Node web frontend is reused here, with an
+in-process transport instead of HTTP+SSE.
 
-> **Facility:** `services.complete` (`CompletionRequest → CompletionResponse`). Providers are
-> *adapter plugins* — the `module` below names one. The two shipped adapters (Anthropic-compatible,
-> OpenAI-compatible) are the defaults; a plugin can add any other by implementing the adapter
-> contract. Live add/remove is via the built-in `provider` tool.
+**What the browser build gives you:**
+- **Zero install** — open a URL, bring an API key, start working
+- **Sandboxed by default** — browser security restrictions limit blast radius if your LLM goes rogue
+- **Persistent** — sessions, skills, provider config, and workspace files survive page reloads
+- **Portable** — loadable from a `file://` URL or any static host
 
-```yaml
-providers:
-  <name>:
-    module:     <npm-package | ./relative/path>   # adapter module
-    endpoint:   https://...                       # overrides the default base URL
-    model:      <model-id>
-    credentials:
-      apiKey:   ${SECRET_NAME} | literal          # ${NAME} resolved by the Vault (see below)
-    parameters:                                   # optional; passed to the API
-      maxTokens:      4096
-      temperature:    0.7
-      thinking:                                   # Anthropic extended thinking
-        type:         enabled
-        budgetTokens: 2000
-    fallback:   <other-provider-name>             # used on 429 / 5xx
-```
+**What it doesn't have (since they require Node specific interfaces):**
+- Bash / Docker execution
+- Stdio MCP servers
+- SQLite storage
+- Telegram frontend
+- Filesystem-backed skills with file watching
 
-### CLI options
-
-> **Facility:** session persistence is `services.sessions` (`Store<Session>`); the per-session turn
-> loop is `services.run` (`SessionRunner`). Both are pluggable — the default `Store<Session>` lives
-> in whatever `StorageBackend` is active (see *Data directory*).
-
-| Option                  | Behaviour                                                           |
-|-------------------------|---------------------------------------------------------------------|
-| `[prompt]` (positional) | Single-turn prompt; runs one turn and exits. Omit for an interactive REPL |
-| `--provider <name>`     | Provider key from `matbot.yaml` (default: first in file)            |
-| `--session create`      | New persistent session; saved to the store                          |
-| `--session <id>`        | Resume an existing session                                          |
-| `--ephemeral`           | Force ephemeral even when `--session` is given                      |
-| `--system <text>`       | System prompt injected at session start                             |
-| `--config <path>`       | Config file path (default: `./matbot.yaml`; `-` reads YAML from stdin) |
-| `--prompt-file <path>`  | Read the prompt from a file; runs a single turn and exits           |
-| `--principal <id\|json>` | Boot identity: a bare id (type `user`) or JSON `{"id","type"}`. Overrides `MATBOT_PRINCIPAL` and the config `principal:` |
-| `--help`                | Show help and exit                                                  |
-
-Sessions are **ephemeral by default** (discarded on exit). Setting `ephemeral: true` in
-`matbot.yaml` is a hard override — it takes effect even if `--session` is passed. Background
-sub-agents set this to avoid leaving session traces.
-
-### Secret resolution
-
-> **Facility:** `services.vault` (the `Vault` interface). The default node implementation is
-> `EnvFileVault` (over `VaultImpl`), which reads/writes a `.env` file next to `matbot.yaml`. The
-> browser build swaps in a WebCrypto + browser-storage vault, and any plugin can register its own
-> (e.g. a cloud secret manager) — there is no `.env` requirement in the contract.
-
-There is **one** placeholder form and **one** flat namespace — no `env:` / `secret:` distinction:
-
-| Syntax         | Resolves to                                                    |
-|----------------|----------------------------------------------------------------|
-| `${NAME}`      | The entry stored under `NAME` in the active Vault              |
-| literal string | Used as-is (avoid for real credentials)                        |
-
-The YAML loader leaves `${NAME}` intact; the Vault substitutes it at runtime (regex `\$\{([^}]+)\}`).
-A missing name throws `MissingSecretError`. Credentials are resolved on use and never written to
-session storage. With the default node vault, `${DEEPSEEK_API_KEY}` resolves against the `.env`
-file — but that's just the default backend, not part of the syntax.
-
-### Data directory
-
-> **Facility:** `services.StorageBackend` (the `StorageBackend` interface — `createStore<T>()` plus a
-> `fileStore`) and the `Store<T>` it hands out, with `services.KnowledgeIndex` (the `KnowledgeIndex`
-> interface) for the knowledge store. The default `StorageBackend` is the filesystem one below;
-> `services.register('StorageBackend', …)` swaps it live and re-wires every `Store` proxy. The
-> default `KnowledgeIndex` is the in-memory `LookupKnowledgeIndex`.
-
-With the default filesystem backend, all runtime state lives in `.data/` next to `matbot.yaml` and
-is .gitignored:
-
-```
-.data/
-  sessions/    — session store (only created when persistence is active)
-  settings/    — per-plugin key-value settings
-  schedules/   — recurring background job definitions (background plugin)
-  knowledge/   — KnowledgeIndex entries (persist-ki-bge plugin)
-  bash-cwd/    — default working directory for bash tool execution
-  files/       — file store blobs; the workspace namespace holds workspace_action (write) output
-```
-
-The SQLite storage plugin (`@matatbread/matbot-storage-sqlite`) is a drop-in replacement
-`StorageBackend` that collapses the per-directory filesystem stores into a single `.data/matbot.db`
-file. Plugins may create additional subdirectories as needed.
+For evaluating or just basic personal use, the browser build is the right starting point.
 
 ---
 
-## Writing your own plugin
+## Writing a plugin
 
-See [PLUGINS.md](docs/PLUGINS.md) for the full plugin API reference. I recommend checking the [design ethos and developer notes](CLAUDE.md) too.
-
-Plugins can provide tools, frontends, LLM providers (try the 'customer-services' "LLM" - my personal
-favourite - it's free and runs without GPU support or an API key!)
-
-Quick start:
+The plugin API is a TypeScript interface. A minimal tool plugin:
 
 ```ts
-// my-plugin/src/index.ts
-import type { MatbotPlugin, Tool, ToolEvent, ToolContext } from '@matatbread/matbot-plugin-api';
+import type { MatbotPluginSpec, Tool } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 
 const myTool: Tool = {
-  name:        'hello',
+  name: 'hello',
   description: 'Greet someone.',
   inputSchema: {
     type: 'object',
@@ -420,27 +184,50 @@ const myTool: Tool = {
     properties: { name: { type: 'string' } },
   },
   executor: {
-    async *execute(input, _ctx): AsyncIterable<ToolEvent> {
+    async *execute(input) {
       const { name } = input as { name: string };
       yield { type: 'result', value: `Hello, ${name}!` };
     },
   },
 };
 
-export const plugin: MatbotPlugin = {
-  name:       'hello',
+export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,
-  tools:      [myTool],
+  tools: [myTool],
 };
 ```
 
-Add it to your config:
+Add it to your config — or just tell the LLM:
 
-```yaml
-plugins:
-  - ./my-plugin
-```
-...or ask MatBot to do it in the repl or web-frontend
 ```
 Add the local plugin called my-plugin
 ```
+
+Plugins can provide tools, frontends, LLM adapters, storage backends, knowledge indexes,
+hooks, or entirely new concepts (memory systems, LLM routing, background cognition — all
+shipped as first-party plugins in this repo).
+
+---
+
+## More about matbot
+
+| Document | What's in it |
+|---|---|
+| [GETTING-STARTED.md](docs/GETTING-STARTED.md) | Installation, full CLI reference, config reference, worked examples |
+| [DEVELOPING.md](docs/DEVELOPING.md) | Full plugin API — tools, providers, storage, frontends, hooks, the browser bundle |
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Visual tour of the core, plugin seams, and turn flow |
+| [CLAUDE.md](CLAUDE.md) | Design ethos, hard rules, and architectural intent — written for AI assistants working on the codebase, but essential reading for any contributor |
+
+---
+
+## Requirements
+
+- Node 24+
+- pnpm 9+
+- An LLM API key (Anthropic, OpenAI-compatible, DeepSeek, Ollama, …)
+
+---
+
+## Licence
+
+Apache 2.0

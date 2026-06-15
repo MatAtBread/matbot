@@ -3,7 +3,7 @@
 A visual tour of how matbot fits together, in three views: the platform-neutral **core**,
 the **plugins** that extend it through well-defined seams, and the **turn flow** that ties them
 together at runtime. For the authoritative design principles behind these diagrams, see
-[CLAUDE.md](../CLAUDE.md); for the plugin API reference, [PLUGINS.md](PLUGINS.md).
+[CLAUDE.md](../CLAUDE.md); for the plugin API reference, [DEVELOPING.md](DEVELOPING.md).
 
 ---
 
@@ -48,7 +48,8 @@ is built and contributor plugins join in; `contribute` hooks transform the outgo
 persisting; the provider is called with system + ephemeral + history plus the current tool list; the
 assistant message (text, thinking, tool calls) is appended to the session store; and if the model
 emitted tool calls, they execute (gated by the `toolcall` hook, with stdout/stderr streaming live)
-and the loop repeats. Throughout, tools and plugins reach the core services — `Store`, `FileStore`,
-`KnowledgeIndex`, `Vault`, and `loadPlugin()` — via the `ToolContext`.
+and the loop repeats. Throughout, a tool reaches the services on its `ToolContext` — `Vault`,
+`FileStore`, and `loadPlugin()`/`unloadPlugin()`; the broader `MatbotServices` surface (`Store`s via
+`createStore`, `KnowledgeIndex`, `complete`, the registry) is what a plugin captures in its `setup()`.
 
 ![matbot turn flow: user → LLM → core services/tools → LLM → frontend](architecture-3-flow.svg)

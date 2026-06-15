@@ -70,19 +70,21 @@ The web defaults are plugins, never core packages. The **auto-load core** (`matb
   `index.html` + `app.js` the Node server serves, mounted with no wire. (The `matbot-demo.html`
   bundle swaps this for **`@matatbread/matbot-frontend-dom`**, a minimal ~450-line demonstrator.)
 
-Everything else browser-safe — `http`, `ask_user`, `session_action`, `session_edit`,
-`workspace_action`, `contextual_search`, `skill_action`, json-validation — is **baked-but-idle**
-(`bundledPlugins`): in the artifact and the import map but not auto-loaded, offered via the `plugin`
-tool's `discover_local` and loaded on demand by package name (which persists across reloads). The
-provider adapters (anthropic / openai-compat — pure `fetch`) are inlined as wizard-selectable *types*
-rather than pre-configured providers — including **customer-services**, a free self-contained demo LLM the
-wizard offers with no endpoint or API key required (zero-config first run). Node-only plugins
-(`bash`, `docker-bash`, `mcp`, `skills-node`,
-the node web frontend's server entry) are omitted — they need Node primitives. (The base `skills`
-plugin is cross-runtime and *is* bundled; only its `skills-node` filesystem specialization is
-Node-only.) See [WEB-BUNDLE.md](../../docs/WEB-BUNDLE.md) for the three-layer plugin model.
+Everything else browser-safe — `http`, `ask-user`, `sessions`, `edit-session`, `workspace`,
+`rumsfeld`, `skills`, `mcp-http`, `whoami`, `hook-logger`, `persist-ki-bge`, `json-validation`,
+`tool-store`, and `cognition` — is **baked-but-idle** (`bundledPlugins`): in the artifact and the
+import map but not auto-loaded, offered via the `plugin` tool's `discover_local` and loaded on demand
+by package name (which persists across reloads). The provider adapters (anthropic / openai-compat —
+pure `fetch`) are inlined as wizard-selectable *types* rather than pre-configured providers —
+including **customer-services**, a free self-contained demo LLM the wizard offers with no endpoint or
+API key required (zero-config first run). Node-only plugins (`bash`, `docker-bash`, the stdio `mcp`
+plugin, `skills-node`, the node web frontend's server entry) are omitted — they need Node primitives.
+Note the MCP split: the stdio `@matatbread/matbot-tool-mcp` is Node-only, but the cross-runtime
+`@matatbread/matbot-mcp-http` (HTTP/SSE servers) *is* bundled. Likewise the base `skills` plugin is
+cross-runtime and bundled; only its `skills-node` filesystem specialization is Node-only. See
+[WEB-BUNDLE.md](../../docs/WEB-BUNDLE.md) for the three-layer plugin model.
 
-Built-in tools `plugin` (list/add/remove/store-key) and `provider` (list/add/remove) are present too,
+Built-in tools `plugin` (list/add/remove/reload/discover_local/store-key) and `provider` (list/add/remove) are present too,
 so the model can manage plugins and provider profiles at runtime. These are browser-native
 reimplementations: the node versions edit `matbot.yaml` via `node:fs`, so they couldn't be reused —
 the browser ones drive the same store/vault/localStorage persistence instead (the *capability* is
@@ -102,6 +104,6 @@ you don't want the wizard.
 - **Runtime remote plugin loading** (`plugin add <url>`) requires http (not `file://`) and a recent
   browser; it fetches raw `.ts` and type-strips it in-page, lazy-loading sucrase from a CDN on first
   use (so that one path needs network). The inlined baseline has neither requirement.
-- **Size**: ~250 KB — the build-time-stripped JS modules and the loader, nothing else. No compiler
-  is inlined.
+- **Size**: ~530 KB for the full UI (`matbot.html`), ~270 KB for the minimal `matbot-demo.html` —
+  the build-time-stripped JS modules and the loader, nothing else. No compiler is inlined.
 - Secrets persist in `localStorage` in plaintext — single-user local use only.

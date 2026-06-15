@@ -26,7 +26,15 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 
-const DOCS = ['README.md', 'CLAUDE.md', 'PLUGINS.md'];
+const DOCS = [
+  'README.md',
+  'CLAUDE.md',
+  'docs/ARCHITECTURE.md',
+  'docs/DEVELOPING.md',
+  'docs/GETTING-STARTED.md',
+  'docs/WEB-BUNDLE.md',
+  'apps/web-bundle/README.md',
+];
 
 const argv = process.argv.slice(2);
 const bump = argv.includes('--bump');
