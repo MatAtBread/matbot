@@ -82,7 +82,7 @@ const workspaceTool: Tool = {
     'type WorkspaceAction =\n' +
     "  | { action: 'read';   path: string; encoding?: 'utf8' | 'base64' }              // -> file contents\n" +
     "  | { action: 'write';  path: string; content: string; encoding?: 'utf8' | 'base64' } // -> { path, bytes }\n" +
-    "  | { action: 'list';   path?: string; recursive?: boolean }                      // -> [{ path, size }]\n" +
+    "  | { action: 'list';   path?: string; recursive?: boolean }                      // -> [{ path, size }] NOTE: `path` is a filename prefix - \".\" and \"/\" won't work.\n" +
     "  | { action: 'delete'; path: string };                                           // -> { path }\n" +
     '```\n' +
     "Use encoding 'base64' for binary files (images, PDFs, zips); 'utf8' (the default) for text.",

@@ -281,7 +281,11 @@ task has started (and the output filename, if any); they will check the result t
     | { prompt: string; interval: string; name?: string; output?: string; provider?: string } // repeat every <interval>
 
 interval is a duration like "30s", "5m", "1h", "24h". Omitting it — or passing "once" or null —
-runs the prompt a single time.`,
+runs the prompt a single time.
+
+When running a task in the background, don't wait for the result - the user will be notified. If they
+wanted to see the result, they would have asked for it in the foreground.
+`,
   inputSchema: {
     type:       'object',
     required:   ['prompt'],
@@ -301,20 +305,23 @@ runs the prompt a single time.`,
       },
       provider: {
         type:        'string',
-        description: 'Provider key to use (e.g. "claude-sonnet-4-6"). Defaults to the config default_provider or the first provider.',
+        description: 'Provider key to use (e.g. "claude-sonnet-4-6"). Defaults to the provider of the current turn.',
       },
     },
   },
   executor: {
     async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
       const { prompt, interval, name, output, provider } = input as BackgroundInput;
+      // Default to the provider driving this turn, not the config default — a background task
+      // inherits the model that spawned it unless the tool call names one explicitly.
+      const effectiveProvider = provider ?? ctx.provider;
 
       if (isRunOnce(interval)) {
         if (!ctx.configPath) {
           yield { type: 'error', message: 'background requires configPath in context.' };
           return;
         }
-        spawnJob(ctx.configPath, prompt, output, ctx.files, provider, currentPrincipal());
+        spawnJob(ctx.configPath, prompt, output, ctx.files, effectiveProvider, currentPrincipal());
         yield { type: 'result', value: { status: 'started', ...(output !== undefined ? { output } : {}) } };
         return;
       }
@@ -334,9 +341,9 @@ runs the prompt a single time.`,
         createdAt: now.toISOString(),
         nextRun:   new Date(now.getTime() + intervalMs).toISOString(),
         principal: currentPrincipal(),
-        ...(name     !== undefined ? { name     } : {}),
-        ...(output   !== undefined ? { output   } : {}),
-        ...(provider !== undefined ? { provider } : {}),
+        ...(name              !== undefined ? { name              } : {}),
+        ...(output            !== undefined ? { output            } : {}),
+        ...(effectiveProvider !== undefined ? { provider: effectiveProvider } : {}),
       };
       await scheduleStore.set(sched.id, sched);
       armSchedule(sched);
@@ -469,7 +476,7 @@ export const plugin: MatbotPluginSpec = {
   async setup(services: MatbotServices) {
     if (!services.configPath) return;
     // A spawned background job must not arm its own scheduler — that would cascade.
-    if (process.env['IS_SUB_AGENT'] === '1') return;
+    if (services.isSubAgent()) return;
     activeConfigPath = services.configPath;
     activeFiles      = services.files;
     scheduleStore    = services.createStore<Schedule>('schedules');

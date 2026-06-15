@@ -152,6 +152,14 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
         }
         const content = batch.flatMap(i => i.content);
         s.replay = [];
+        // Seed replay with the running turn's user message as a single merged `queued`, mirroring the
+        // message persisted just below. notify() (in open()) reaches only subscribers that are live at
+        // enqueue time; a GET /sessions/:id/events that connects after this synchronous preamble — the
+        // common case when the submit POST wins the race against the events stream — would otherwise
+        // find an empty queue and a cleared replay, and never render the user bubble. One merged event
+        // (not one per batch item) matches both stored history on reload and the live fold, so a late
+        // subscriber reconstructs exactly one bubble.
+        s.replay.push({ type: 'queued', content, queued: 0, concatQueue: false, traceId: head.traceId, rootTraceId: head.rootTraceId });
 
         let session = await deps.store.get(id);
         if (session === null) {

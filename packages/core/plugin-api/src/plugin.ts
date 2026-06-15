@@ -151,6 +151,16 @@ export interface MatbotServices {
   readonly configPath?:     string;
 
   readonly KnowledgeIndex: KnowledgeIndex;
+
+  /**
+   * Whether this process is a background sub-agent (spawned by another matbot, not a top-level
+   * interactive run). The signal is platform-sourced — the node entry reads it from the environment,
+   * the browser realm has no sub-agent notion and returns false (a future WebWorker realm could
+   * return true). Plugins use it to suppress work that must be singular per bot identity: e.g. a
+   * frontend's long-poll loop, which would otherwise contend with the foreground process on the
+   * same upstream connection.
+   */
+  isSubAgent(): boolean;
 }
 
 /**

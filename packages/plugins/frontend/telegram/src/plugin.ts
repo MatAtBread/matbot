@@ -303,6 +303,14 @@ export const plugin: MatbotPluginSpec = {
       }
     }
 
+    // Background sub-agent runs share the bot token with the foreground process; two concurrent
+    // getUpdates long-polls on the same token make Telegram return 409 Conflict. So a sub-agent
+    // skips polling (the foreground owner keeps it) but still has a live setup() — it can send.
+    if (services.isSubAgent()) {
+      console.warn(`[frontend-telegram] Bot started in send-only mode (sub-agent; polling skipped)\n`);
+      return;
+    }
+
     // Long-poll loop — runs until teardown.
     void (async () => {
       let offset = 0;

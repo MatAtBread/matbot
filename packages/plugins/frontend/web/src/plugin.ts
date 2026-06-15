@@ -48,7 +48,7 @@ export const plugin: MatbotPluginSpec = {
   },
 
   async setup(services: MatbotServices) {
-    if (process.env['IS_SUB_AGENT'] === '1') return;
+    if (services.isSubAgent()) return;
 
     services.registerFrontend({ name: 'frontend-web' });
 

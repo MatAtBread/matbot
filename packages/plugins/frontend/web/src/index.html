@@ -371,7 +371,7 @@
     }
     .skill-entry { cursor: pointer; }
     .skill-entry:hover { background: #f0f0f2; color: #111; }
-    .skill-entry .plugin-name-label { flex: 1; min-width: 0; }
+    .skill-entry .skill-name-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .skill-entry .plugin-actions { display: none; }
     .skill-entry:hover .plugin-actions { display: flex; }
 
@@ -440,7 +440,8 @@
     .skill-pane { display: none; flex: 1; min-height: 0; flex-direction: column; }
     .skill-pane.active { display: flex; }
     /* The markdown toolbar (in the footer) is only meaningful on the content tab. */
-    #skill-editor.tab-triggers #skill-editor-toolbar { display: none; }
+    #skill-editor.tab-triggers #skill-editor-toolbar,
+    #skill-editor.tab-metadata #skill-editor-toolbar { display: none; }
     #skill-editor-pane-triggers { padding: 16px; }
     #skill-trigger-list { flex: 1; min-height: 0; overflow-y: auto; }
     #skill-trigger-add { align-self: flex-start; margin-top: 10px; }
@@ -497,6 +498,45 @@
     .trigger-row .trigger-edit:hover,
     .trigger-row .trigger-del:hover { background: #f3f4f6; color: #111; }
     .trigger-row .trigger-edit.editing { background: #2563eb; border-color: #2563eb; color: #fff; }
+
+    /* ── Skill metadata pane ────────────────────────────────────── */
+    /* Read-only view of the skill's derived LLM analysis (summary / entities / tags). */
+    #skill-editor-pane-metadata { padding: 16px; overflow-y: auto; }
+    #skill-metadata { font-family: system-ui, -apple-system, sans-serif; }
+    .meta-section { margin-bottom: 18px; }
+    .meta-section:last-child { margin-bottom: 0; }
+    .meta-label {
+      font-size: 0.74em;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #9ca3af;
+      margin-bottom: 6px;
+    }
+    .meta-summary {
+      font-size: 0.92em;
+      line-height: 1.6;
+      color: #1f2937;
+    }
+    .meta-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .meta-chip {
+      font-size: 0.8em;
+      line-height: 1.5;
+      padding: 1px 9px;
+      border-radius: 999px;
+      background: #f3f4f6;
+      color: #4b5563;
+      white-space: nowrap;
+    }
+    .meta-chip.entity { background: #ede9fe; color: #5b21b6; }
+    .meta-chip.tag    { background: #dbeafe; color: #1e40af; }
+    .meta-empty { font-size: 0.85em; color: #9ca3af; font-style: italic; }
+    .meta-note {
+      font-size: 0.82em;
+      color: #9ca3af;
+      line-height: 1.5;
+      padding: 4px 0;
+    }
     #skill-editor-text {
       flex: 1;
       min-height: 0;
@@ -669,11 +709,17 @@
       align-self: flex-start;
       background: #eef2ff;
       color: #3730a3;
-      padding: 10px 14px;
-      border-radius: 12px 12px 12px 2px;
+      padding: 6px 12px;
+      border-radius: 6px;
       line-height: 1.65;
       word-break: break-word;
       position: relative;
+      border: 1px solid #c7d2fe;
+    }
+    .message.robo .md-body {
+      font-size: 0.86em;
+      font-weight: 500;
+      color: #4338ca;
     }
     .message.robo .md-body code { background: rgba(55,48,163,0.1); }
     .message.robo::before {
@@ -707,6 +753,13 @@
     .marker-note .marker-icon { font-size: 1.05em; line-height: 1; }
     .marker-note a { color: #4f46e5; font-weight: 600; text-decoration: none; cursor: pointer; }
     .marker-note a:hover { text-decoration: underline; }
+    .marker-note.marker-warn {
+      max-width: 720px;
+      background: #fef3c7;
+      border-color: #fcd34d;
+      color: #92400e;
+      border-radius: 10px;
+    }
 
     .msg-label {
       font-size: 0.79em;
@@ -1548,6 +1601,7 @@
         <div id="skill-editor-tabs">
           <button class="skill-tab active" data-tab="content">Content</button>
           <button class="skill-tab" data-tab="triggers">Triggers</button>
+          <button class="skill-tab" data-tab="metadata">Metadata</button>
         </div>
         <button id="skill-editor-close" title="Close">&times;</button>
       </div>
@@ -1558,6 +1612,9 @@
         <div id="skill-editor-pane-triggers" class="skill-pane">
           <div id="skill-trigger-list"></div>
           <button id="skill-trigger-add" class="skill-editor-btn">+ Add trigger</button>
+        </div>
+        <div id="skill-editor-pane-metadata" class="skill-pane">
+          <div id="skill-metadata"></div>
         </div>
       </div>
       <div id="skill-editor-footer">

@@ -1,8 +1,8 @@
 {
-  "name": "@matatbread/matbot-frontend-telegram",
+  "name": "@matatbread/matbot-tool-store",
   "matbotRuntime": ["node", "browser"],
   "version": "0.1.0",
-  "description": "Telegram bot frontend",
+  "description": "Define named stores and expose generated CRUD tools over them via store_action. Cross-runtime (node + browser).",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
@@ -11,10 +11,9 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@matatbread/matbot-core":       "workspace:*",
     "@matatbread/matbot-plugin-api": "workspace:*"
   },
   "devDependencies": {
-    "typescript":  "catalog:"
+    "typescript": "catalog:"
   }
 }

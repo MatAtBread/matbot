@@ -359,7 +359,19 @@ Hooks are sorted by the **job** they do, not by lifecycle position — the chann
 contract. `Hook` is a discriminated union keyed by `on`, so each channel's context and return type
 carry only the effects it honours; a write that goes nowhere won't type-check — there is no shared
 per-call context type and no index-signature escape hatch. Register with `services.hooks.register({ on, handler })`;
-a handler that returns nothing is a pure observer. Five channels:
+a handler that returns nothing is a pure observer. Every channel's `ctx` carries `removeHook()`, which
+unregisters the hook *currently running* — the clean primitive for a one-shot hook (it fires, does its
+job, and removes itself), with no need to know the plugin name or to use the coarser `removeByPlugin`.
+
+A handler that **throws** is isolated by the dispatcher, never propagated: the throw is caught, logged,
+and treated as "the hook returned nothing" (skipped), so one misbehaving hook can't brick the turn —
+this matters because a `screen` hook runs before the model does, so a throw there (e.g. a hook calling a
+provider whose secret is unresolved) would otherwise kill every turn with no way to recover from inside
+the chat. An intentional stop is a *return value* (`abort` / `rejectTool`), not a throw. Each throwing
+hook is recorded once and surfaced as a `matbot-hooks` marker (drained into the session by the next
+`runScreen`), so the failure degrades *visibly* rather than silently.
+
+Five channels:
 
 | `on` | Home | Cadence | Session | Effects (the ceiling) |
 |---|---|---|---|---|

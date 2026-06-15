@@ -317,6 +317,7 @@ export async function boot(env: BootEnv): Promise<void> {
     hooks:         hookReg,
     tools:         toolReg,
     systemContext: systemContextReg,
+    isSubAgent: () => false,
     get KnowledgeIndex() { return knowledgeProxy; },
   };
   const services: MatbotServices = unifyServices(baseServices);
