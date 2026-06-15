@@ -295,6 +295,7 @@ async function hideSession(id) {
       currentSessionId = sessions[0]?.id ?? null;
       if (currentSessionId) { await openSession(currentSessionId); return; }
       showEmpty();
+      setBusyState(false);
       if (chatHeaderEl) chatTitleEl.textContent = '';
     }
     renderSessions(sessions);
@@ -1023,24 +1024,26 @@ function scrollMessagesToBottom() {
   }
 }
 
-function appendUserBubble(text, msgIdx, pending) {
+function appendUserBubble(text, msgIdx, pending, traceId) {
   messagesEl.querySelector('.empty-state')?.remove();
   if (messagesEl.querySelector('.message')) {
     messagesEl.appendChild(createMsgDivider(msgIdx));
   }
   const div = makeBubble('user' + (pending ? ' pending' : ''), text);
+  if (traceId) div.dataset.trace = traceId;
   messagesEl.appendChild(div);
   scrollMessagesToBottom();
   return div;
 }
 
 // A machine-authored turn (a followup resubmission). Presented agent-side with the robot badge.
-function appendRoboBubble(text, msgIdx) {
+function appendRoboBubble(text, msgIdx, traceId) {
   messagesEl.querySelector('.empty-state')?.remove();
   if (messagesEl.querySelector('.message')) {
     messagesEl.appendChild(createMsgDivider(msgIdx));
   }
   const div = makeBubble('robo', text);
+  if (traceId) div.dataset.trace = traceId;
   messagesEl.appendChild(div);
   scrollMessagesToBottom();
   return div;
@@ -1049,7 +1052,7 @@ function appendRoboBubble(text, msgIdx) {
 // Render one stored user turn, split by block provenance: contiguous human blocks render as the user
 // bubble, contiguous robo blocks (a hook-injected fragment) as an agent-side robo bubble. One stored
 // message can therefore become two bubbles, under a single turn divider. Returns the last bubble.
-function appendUserTurn(content, msgIdx) {
+function appendUserTurn(content, msgIdx, traceId) {
   const runs = [];
   for (const c of content) {
     if (c.type !== 'text' || !c.text) continue;
@@ -1066,6 +1069,9 @@ function appendUserTurn(content, msgIdx) {
   let last = null;
   for (const run of runs) {
     last = makeBubble(run.robo ? 'robo' : 'user', run.text);
+    // Tag with the turn's traceId so a replayed `queued` for this still-running turn adopts the
+    // existing bubble (renderTurn) instead of drawing a second one.
+    if (traceId) last.dataset.trace = traceId;
     messagesEl.appendChild(last);
   }
   scrollMessagesToBottom();
@@ -1234,10 +1240,11 @@ function createAssistantWrap(labelText, anchorAfter) {
   messagesEl.querySelector('.empty-state')?.remove();
   const wrap = document.createElement('div');
   wrap.className = 'message assistant';
-  const label = document.createElement('div');
-  label.className = 'msg-label';
-  label.textContent = labelText || 'assistant';
-  wrap.appendChild(label);
+  // Not sure we like the label in the UI — it takes up space and is redundant with the robot badge. Keep it commented out for now.
+  // const label = document.createElement('div');
+  // label.className = 'msg-label';
+  // label.textContent = labelText || 'assistant';
+  // wrap.appendChild(label);
   if (anchorAfter && anchorAfter.parentNode === messagesEl) {
     messagesEl.insertBefore(wrap, anchorAfter.nextSibling);
   } else {
@@ -1440,7 +1447,7 @@ function renderSession(session, startIdx, scrollTarget) {
       // not from here. Split by block provenance: genuine user blocks → user bubble, robo blocks
       // (a hook-injected fragment) → agent-side robo bubble. A wholly-robo turn (followup resubmit)
       // is just one whose blocks are all robo.
-      appendUserTurn(msg.content, origIdx);
+      appendUserTurn(msg.content, origIdx, msg.traceId);
     } else if (msg.role === 'assistant') {
       const wrap = createAssistantWrap('assistant');
       renderContentParts(wrap, msg.content);
@@ -1474,8 +1481,7 @@ async function openSession(id, scrollTarget) {
     renderSession(session, undefined, scrollTarget);
     if (chatHeaderEl) chatTitleEl.textContent = session.title ?? '';
   }
-  sending = busy;
-  setStop(busy);
+  setBusyState(busy);
   // One persistent stream for this session; it replays any in-progress turn and carries all future
   // turns. Renders happen via renderTurn() keyed by traceId.
   connectSessionStream(id);
@@ -1491,6 +1497,7 @@ async function handleNewSession() {
     currentSessionId = id;
     location.hash = id;
     showEmpty();
+    setBusyState(false); // a brand-new session is idle; clear any Stop carried over from the last view
     if (chatHeaderEl) chatTitleEl.textContent = '';
     const sessions = await apiListSessions();
     renderSessions(sessions);
@@ -1743,12 +1750,20 @@ async function renderTurn(sid, traceId) {
           // === 0 ⇒ it runs immediately → show loading dots. A content event later promotes it.
           if (!userBubble) {
             const text = (ev.content ?? []).filter(c => c.type === 'text').map(c => c.text).join('\n');
-            // A robo turn (followup resubmit) arrives all-robo → agent-side bubble. Live submissions
-            // are never mixed (a hook-augmented turn only shows its split on reload, from committed
-            // history), so an all-or-nothing check here is enough.
-            const robo = (ev.content ?? []).some(c => c.type === 'text' && c.origin === 'robo');
-            if (text) {
-              userBubble = robo ? appendRoboBubble(text, undefined) : appendUserBubble(text, undefined, ev.queued > 0);
+            // Adopt an already-rendered bubble for this turn rather than draw a second one: on reload /
+            // navigate-back the running turn's user message is in committed history (renderSession drew
+            // it, tagged with traceId), and the server now also seeds this turn's replay with a `queued`
+            // so a late-connecting stream still gets the bubble. Idempotent: whichever arrived first wins.
+            const existing = messagesEl.querySelector(`.message[data-trace="${traceId}"]`);
+            if (existing) {
+              userBubble = existing;
+              userBubbleText = existing.querySelector('.md-body')?.textContent ?? text;
+            } else if (text) {
+              // A robo turn (followup resubmit) arrives all-robo → agent-side bubble. Live submissions
+              // are never mixed (a hook-augmented turn only shows its split on reload, from committed
+              // history), so an all-or-nothing check here is enough.
+              const robo = (ev.content ?? []).some(c => c.type === 'text' && c.origin === 'robo');
+              userBubble = robo ? appendRoboBubble(text, undefined, traceId) : appendUserBubble(text, undefined, ev.queued > 0, traceId);
               userBubbleText = text;
             }
           }
@@ -2106,6 +2121,14 @@ function setStop(visible) {
   if (visible) stopBtn.disabled = false;
 }
 
+// Sync every send/stop affordance to a session's busy state. Called from each path that changes which
+// session is in view (open/new/hide) and from the live status stream, so the buttons always reflect the
+// session on screen — never a stale state carried over from the previously-viewed session.
+function setBusyState(busy) {
+  sending = busy;
+  setStop(busy);
+}
+
 function requestStop() {
   const target = currentSessionId;
   if (!target) return;
@@ -2197,7 +2220,7 @@ async function init() {
         }
       }
       // Drive the Stop button + the busy flag for the session currently in view.
-      if (sessionId === currentSessionId) { sending = busy; setStop(busy); }
+      if (sessionId === currentSessionId) setBusyState(busy);
     }
   })();
 
@@ -2242,6 +2265,7 @@ async function init() {
     await openSession(startId, fragmentNav?.msg);
   } else {
     showEmpty();
+    setBusyState(false);
   }
   loadFiles();
   loadPlugins();
