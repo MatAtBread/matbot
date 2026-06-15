@@ -16,10 +16,10 @@ import { appendMessage, createMessage,
          unloadPlugin as unloadPluginFn,
          getPluginNameForSpecifier, getRegisteredPlugins,
          installPrincipalCarrier, enterPrincipal, currentPrincipal,
-         unifyServices,
+         unifyServices, forwardingProxy, makeSwappable, singleTurnRequest,
          MissingSecretError }              from '@matatbread/matbot-core';
 import type { MatbotServices, PluginSettings, ToolRegistry, Vault, SessionRunner,
-              MatbotPlugin, StorageBackend, KnowledgeIndex, PromptFn, FormField } from '@matatbread/matbot-core';
+              MatbotPlugin, StorageBackend, KnowledgeIndex, PromptFn, FormField, SwapFn } from '@matatbread/matbot-core';
 import { systemPrincipal }                 from '@matatbread/matbot-security';
 import { createAlsPrincipalCarrier }       from './principal-als.js';
 import { EnvFileVault }                     from './env-vault.js';
@@ -736,44 +736,11 @@ async function main(): Promise<void> {
     await Promise.all(mkdirs);
   }
 
-  // Each Store and FileStore is a forwarding proxy backed by a mutable `current` target.
-  // Callers may freely capture references — all method calls route through the proxy to
-  // whichever backend is current. register('StorageBackend', …) calls each proxy's swap fn.
+  // Each Store and FileStore is a forwarding proxy (forwardingProxy/makeSwappable, shared with the
+  // web bundle) backed by a mutable `current` target. Callers may freely capture references — all
+  // method calls route through the proxy to whichever backend is current. register('StorageBackend',
+  // …) calls each proxy's swap fn.
   type AnyStore = Store<{ id: string; version: string }>;
-  type SwapFn<T extends object> = (next: T) => void;
-
-  // A capture-safe forwarding proxy: every trap routes to whatever `getCurrent()` returns *now*, so a
-  // reference captured before a register()-driven swap keeps resolving to the live impl. getPrototypeOf
-  // is forwarded so `instanceof` sees the real impl (the StorageBackend identity checks depend on it);
-  // ownKeys + getOwnPropertyDescriptor keep object spread faithful. Methods bind to the current impl,
-  // not the proxy. A nullish current (an optional service with nothing registered yet) reads as empty.
-  function forwardingProxy<T extends object>(getCurrent: () => T | undefined): T {
-    return new Proxy({} as T, {
-      get(_t, prop) {
-        const cur = getCurrent();
-        if (cur === undefined) return undefined;
-        const val = Reflect.get(cur, prop, cur);
-        return typeof val === 'function' ? (val as (...a: unknown[]) => unknown).bind(cur) : val;
-      },
-      has(_t, prop)    { const cur = getCurrent(); return cur !== undefined && Reflect.has(cur, prop); },
-      getPrototypeOf() { const cur = getCurrent(); return cur === undefined ? null : Reflect.getPrototypeOf(cur); },
-      ownKeys()        { const cur = getCurrent(); return cur === undefined ? [] : Reflect.ownKeys(cur); },
-      getOwnPropertyDescriptor(_t, prop) {
-        const cur = getCurrent();
-        if (cur === undefined) return undefined;
-        const d = Reflect.getOwnPropertyDescriptor(cur, prop);
-        if (d !== undefined) d.configurable = true; // Proxy invariant: props absent from the {} target must be configurable.
-        return d;
-      },
-    });
-  }
-
-  // Returns [proxy, swap]: the Store/FileStore handle plugins capture, plus the fn register() calls to
-  // repoint it at a new backend's store. Built on forwardingProxy so capture-safety is uniform.
-  function makeSwappable<T extends object>(initial: T): [T, SwapFn<T>] {
-    let current = initial;
-    return [forwardingProxy<T>(() => current), (next: T) => { current = next; }];
-  }
 
   // One proxy per namespace, including 'sessions'. Keyed by namespace string.
   const storeProxies = new Map<string, [AnyStore, SwapFn<AnyStore>]>();
@@ -886,6 +853,9 @@ async function main(): Promise<void> {
         if (ev.type === 'usage') { inputTokens = ev.inputTokens; outputTokens = ev.outputTokens; }
       }
       return { text, usage: { inputTokens, outputTokens } };
+    },
+    async singleTurn(req) {
+      return this.complete(singleTurnRequest(req));
     },
     async loadPlugin(specifier: string, prompt?: PromptFn) {
       const resolved = await resolvePluginSpecifiers([specifier], path.dirname(configPath));

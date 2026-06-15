@@ -1,26 +1,6 @@
-import type { Tool, ToolExecutor, ToolContext, ToolEvent, MatbotServices, CompletionResponse } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolContext, ToolEvent, MatbotServices } from '@matatbread/matbot-plugin-api';
 import type { SkillManager } from './manager.js';
 import type { TriggerPhase } from './types.js';
-
-/**
- * Thin convenience over {@link MatbotServices.complete}: send a single `prompt` (and optional
- * `system`) to a named provider and get the response, hiding the otherwise-mandatory and meaningless
- * `Message` fields (id/traceId/createdAt) that an out-of-band one-shot call has no use for.
- */
-export async function singleTurn(
-  services: MatbotServices,
-  opts:     { provider: string; prompt: string; system?: string; signal?: AbortSignal },
-): Promise<CompletionResponse> {
-  return services.complete({
-    provider: opts.provider,
-    messages: [{
-      id: '', traceId: '', createdAt: new Date().toISOString(), role: 'user',
-      content: [{ type: 'text', text: opts.prompt }],
-    }],
-    ...(opts.system !== undefined ? { system: opts.system } : {}),
-    ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
-  });
-}
 
 const PHASES: readonly TriggerPhase[] = ['agent', 'user', 'system'];
 const isPhase = (x: unknown): x is TriggerPhase => typeof x === 'string' && (PHASES as readonly string[]).includes(x);
@@ -241,7 +221,7 @@ export function createSkillTriggersTool(manager: SkillManager): Tool {
 }
 
 /**
- * Exposes {@link singleTurn} to the model: a one-shot call to a SEPARATE configured provider. The
+ * Exposes {@link MatbotServices.singleTurn} to the model: a one-shot call to a SEPARATE configured provider. The
  * intended use is consulting another model (e.g. a different-lineage critic of the current draft)
  * with a well-defined interface, rather than the model improvising a bash/curl call. Lives in the
  * skills toolset for now; may move to a more general home later.
@@ -257,7 +237,7 @@ export function createSingleTurnTool(services: MatbotServices): Tool {
         yield { type: 'error', message: `Unknown provider "${args.provider}". Configured providers: ${known}.` };
         return;
       }
-      const res = await singleTurn(services, {
+      const res = await services.singleTurn({
         provider: args.provider,
         prompt:   args.prompt,
         signal:   ctx.signal,

@@ -5,6 +5,8 @@ export { MissingSecretError, PromptCancelledError, IncompatibleRuntimeError } fr
 export { applyCreateSecret }  from '@matatbread/matbot-plugin-api';
 // unifyServices is a runtime fn; the `export type *` above would otherwise strip its value meaning.
 export { unifyServices }      from '@matatbread/matbot-plugin-api';
+// Same: pure runtime helpers that would otherwise be stripped to type-only by `export type *`.
+export { forwardingProxy, makeSwappable, singleTurnRequest } from '@matatbread/matbot-plugin-api';
 // Ambient security principal: interface is a type (carried by `export type *`); these are the values.
 export {
   installPrincipalCarrier, currentPrincipal, tryCurrentPrincipal,
