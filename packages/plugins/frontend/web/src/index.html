@@ -770,16 +770,17 @@
       margin-bottom: 6px;
     }
 
-    /* Loading dots while waiting for first token */
+    /* Loading dots while waiting for first token. These now stand alone as the busy indicator
+       (the "ASSISTANT" label is gone), so they're a legible gray rather than near-white. */
     .msg-loading::after {
       content: '●●●';
       letter-spacing: 4px;
-      font-size: 0.64em;
-      color: #d1d5db;
+      font-size: 0.8em;
+      color: #9ca3af;
       animation: blink 1.1s ease-in-out infinite;
     }
     @keyframes blink {
-      0%, 100% { opacity: 0.25; }
+      0%, 100% { opacity: 0.35; }
       50%       { opacity: 1; }
     }
 

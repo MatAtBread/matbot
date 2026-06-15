@@ -1691,6 +1691,9 @@ async function renderTurn(sid, traceId) {
     loadingEl = document.createElement('div');
     loadingEl.className = 'msg-loading';
     turnWrap.appendChild(loadingEl);
+    // The dots sit below the just-appended user bubble, so the bubble's own scroll-to-bottom (which
+    // ran before the dots existed) left them under the fold. Re-pin to the bottom now they're in the DOM.
+    scrollMessagesToBottom();
   }
   function removeLoading() { markStarted(); if (loadingEl) { loadingEl.remove(); loadingEl = null; } }
 
