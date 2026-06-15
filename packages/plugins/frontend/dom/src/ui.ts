@@ -187,7 +187,7 @@ export class ChatUI {
   private async refreshSessionList(): Promise<void> {
     const store = this.services.sessions;
     if (store === undefined) return;
-    const { items } = await store.query({ sort: [{ field: 'updatedAt', direction: 'desc' }], limit: 50 });
+    const { items } = await store.query({ sort: [{ field: 'updatedAt', dir: 'desc' }], limit: 50 });
     this.sessionSel.replaceChildren();
 
     const makeOption = (doc: Session): HTMLOptionElement => {
@@ -198,16 +198,16 @@ export class ChatUI {
     };
 
     // Unarchived (active/pinned) first, most-recent first.
-    for (const { doc } of items) if (doc.status !== 'archived') this.sessionSel.appendChild(makeOption(doc));
+    for (const doc of items) if (doc.status !== 'archived') this.sessionSel.appendChild(makeOption(doc));
 
     // Archived sink to the bottom under a labelled group. Native <select> popups ignore `color` on
     // <option> (esp. on macOS), so the grey class alone is invisible there; the <optgroup> label is
     // always rendered by the OS, which is what actually separates and de-emphasises them.
-    const archived = items.filter(({ doc }) => doc.status === 'archived');
+    const archived = items.filter(doc => doc.status === 'archived');
     if (archived.length > 0) {
       const group = el('optgroup');
       group.label = 'Archived';
-      for (const { doc } of archived) {
+      for (const doc of archived) {
         const o = makeOption(doc);
         o.classList.add('mb-archived');
         group.appendChild(o);

@@ -57,7 +57,7 @@
     <rect width="250" height="112" rx="12" fill="#0e7490" stroke="#67e8f9"/>
     <text x="125" y="25" text-anchor="middle" class="boxTitle">storage</text>
     <text x="125" y="47" text-anchor="middle" class="boxText">Store&lt;T&gt; query/CAS contract</text>
-    <text x="125" y="64" text-anchor="middle" class="boxText">FilterExpr · vector · sorting</text>
+    <text x="125" y="64" text-anchor="middle" class="boxText">Filter AST · sort · cursor</text>
     <text x="125" y="81" text-anchor="middle" class="boxText">FilesystemStore default in Node</text>
     <text x="125" y="99" text-anchor="middle" class="pkg">_base + filesystem</text>
   </g>

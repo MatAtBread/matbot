@@ -150,7 +150,7 @@ export class SkillManager {
   /** Load persisted skills into memory and index each one. */
   async init(): Promise<void> {
     const { items } = await this.store.query({});
-    for (const { doc } of items) this.commit(doc, true);
+    for (const doc of items) this.commit(doc, true);
   }
 
   all(): SkillDoc[] {

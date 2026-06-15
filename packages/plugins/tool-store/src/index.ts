@@ -13,7 +13,7 @@ function actionToolName(namespace: string): string { return `${namespace}_action
 
 async function listDefs(meta: Store<StoreDef>): Promise<StoreDef[]> {
   const res = await meta.query({});
-  return res.items.map(i => i.doc);
+  return res.items;
 }
 
 function registerStoreTool(services: MatbotServices, def: StoreDef): void {
@@ -53,7 +53,7 @@ export async function defineStore(
 async function storeHasData(services: MatbotServices, namespace: string): Promise<boolean> {
   const store = services.createStore<StoreRecord>(namespace);
   const res = await store.query({ limit: 1 });
-  return res.total > 0;
+  return res.items.length > 0;
 }
 
 // ── generated per-store tool: actions map directly onto Store<T> ─────────────────
@@ -63,7 +63,7 @@ interface ActionInput {
   id?:       string;
   data?:     Record<string, unknown>;
   expected?: string;
-  query?:    StoreQuery<StoreRecord>;
+  query?:    StoreQuery;
 }
 
 // A tool over one managed store whose verbs are the Store<T> interface (get/set/cas/delete/query),
@@ -85,8 +85,29 @@ function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Sto
       "  | { action: 'set';    id?: string; data: " + typeGuess + " }                  // upsert; id omitted ⇒ created\n" +
       "  | { action: 'cas';    id: string; expected: string; data: " + typeGuess + " } // compare-and-swap on version\n" +
       "  | { action: 'delete'; id: string; expected?: string }\n" +
-      "  | { action: 'query';  query?: StoreQuery };\n" +
+      "  | { action: 'query';  query?: StoreQuery };  // omit query ⇒ match all\n" +
       '```\n\n' +
+      'The `query` grammar:\n' +
+      '```ts\n' +
+      "type FieldPath = string | string[];  // a bare string is ONE key (never split on '.'); use an array for a nested path\n" +
+      'type StoreQuery = {\n' +
+      '  where?:  Filter;\n' +
+      "  sort?:   { field: FieldPath; dir: 'asc' | 'desc' }[];\n" +
+      '  limit?:  number;\n' +
+      '  cursor?: string;  // opaque & self-contained — to page, send back ONLY a previous result’s `cursor` (it already carries where/sort/limit/position); anything passed alongside it is ignored\n' +
+      '};\n' +
+      'type Filter =\n' +
+      "  | { op: 'eq' | 'neq';                field: FieldPath; value: string | number | boolean }\n" +
+      "  | { op: 'lt' | 'lte' | 'gt' | 'gte'; field: FieldPath; value: string | number }\n" +
+      "  | { op: 'in' | 'nin';                field: FieldPath; value: (string | number | boolean)[] }\n" +
+      "  | { op: 'exists';                    field: FieldPath; value: boolean }                    // true = present & non-null; false = absent or null\n" +
+      "  | { op: 'stringContains';            field: FieldPath; value: string }                     // substring of a string field\n" +
+      "  | { op: 'arrayContains';             field: FieldPath; value: string | number | boolean }  // element of an array field\n" +
+      "  | { op: 'and' | 'or';                clauses: Filter[] }\n" +
+      "  | { op: 'not';                       clause: Filter };\n" +
+      '```\n' +
+      'Comparisons are type-strict (5 ≠ "5"); null/absent match nothing except `{op:\'exists\',value:false}` — never compare to null. ' +
+      '`query` returns `{ items, cursor?, total? }`.\n\n' +
       '`version` is managed for you (a fresh one is minted on every set/cas) — never set it yourself; ' +
       'pass the value you last read as `expected` to cas/delete for safe concurrent updates.',
     inputSchema: {
@@ -134,7 +155,7 @@ function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Sto
           }
           case 'query': {
             const res = await store.query(input.query ?? {});
-            yield { type: 'result', value: { items: res.items.map(i => i.doc), total: res.total, ...(res.cursor !== undefined ? { cursor: res.cursor } : {}) } };
+            yield { type: 'result', value: { items: res.items, ...(res.total !== undefined ? { total: res.total } : {}), ...(res.cursor !== undefined ? { cursor: res.cursor } : {}) } };
             return;
           }
           default:

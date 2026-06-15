@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import type { Store, StoreQuery, QueryResult, CASResult } from '@matatbread/matbot-core';
-import { matchFilter, applySort, cosineSimilarity, getNestedField } from '@matatbread/matbot-storage-base';
+import { executeQuery } from '@matatbread/matbot-storage-base';
 
 export class FilesystemStore<T extends { id: string; version: string }> implements Store<T> {
   private initPromise: Promise<void> | undefined;
@@ -88,7 +88,7 @@ export class FilesystemStore<T extends { id: string; version: string }> implemen
     });
   }
 
-  async query(q: StoreQuery<T>): Promise<QueryResult<T>> {
+  async query(q: StoreQuery): Promise<QueryResult<T>> {
     await this.init();
 
     let entries: string[];
@@ -110,46 +110,6 @@ export class FilesystemStore<T extends { id: string; version: string }> implemen
         }),
     );
 
-    let filtered = q.filter ? pool.filter(d => matchFilter(d, q.filter!)) : pool;
-
-    if (q.fullText) {
-      const term = q.fullText.toLowerCase();
-      filtered = filtered.filter(d => JSON.stringify(d).toLowerCase().includes(term));
-    }
-
-    type Item = QueryResult<T>['items'][number];
-
-    let page: Item[];
-    let total: number;
-
-    if (q.vector?.embedding) {
-      const { embedding, topK, minScore = 0, preFilter } = q.vector;
-      const candidates = preFilter ? filtered.filter(d => matchFilter(d, preFilter)) : filtered;
-      const ranked = candidates
-        .map(doc => ({ doc, score: cosineSimilarity(embedding, extractEmbedding(doc)) }))
-        .filter(({ score }) => score >= minScore)
-        .sort((a, b) => b.score - a.score)
-        .slice(0, topK);
-      total = ranked.length;
-      const offset = q.offset ?? 0;
-      const slice = q.limit !== undefined ? ranked.slice(offset, offset + q.limit) : ranked.slice(offset);
-      page = slice.map(({ doc, score }): Item => ({ doc, score }));
-    } else {
-      if (q.sort?.length) filtered = applySort(filtered, q.sort);
-      total = filtered.length;
-      const offset = q.offset ?? 0;
-      const slice = q.limit !== undefined ? filtered.slice(offset, offset + q.limit) : filtered.slice(offset);
-      page = slice.map((doc): Item => ({ doc }));
-    }
-
-    return { items: page, total };
+    return executeQuery(pool, q);
   }
-}
-
-function extractEmbedding(doc: unknown): number[] {
-  if (doc !== null && typeof doc === 'object') {
-    const e = (doc as Record<string, unknown>)['embedding'];
-    if (Array.isArray(e)) return e as number[];
-  }
-  return [];
 }

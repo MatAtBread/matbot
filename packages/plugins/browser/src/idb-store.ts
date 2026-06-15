@@ -1,6 +1,5 @@
 import type { CASResult, QueryResult, Store, StoreQuery } from '@matatbread/matbot-core';
-import { matchFilter } from '@matatbread/matbot-storage-base';
-import { applySort }   from '@matatbread/matbot-storage-base';
+import { executeQuery } from '@matatbread/matbot-storage-base';
 
 /** Promisify an IDBRequest. */
 function idbPromise<T>(req: IDBRequest<T>): Promise<T> {
@@ -22,8 +21,8 @@ function openDB(dbName: string, storeName: string): Promise<IDBDatabase> {
 }
 
 /**
- * `Store<T>` backed by IndexedDB.  Suitable for browser environments.
- * Vector search and full-text search fall back to in-memory filtering.
+ * `Store<T>` backed by IndexedDB.  Suitable for browser environments. Loads all documents and
+ * delegates filtering/sorting/paging to the shared in-memory query engine.
  */
 export class IDBStore<T extends { id: string; version: string }> implements Store<T> {
   private dbp: Promise<IDBDatabase>;
@@ -75,27 +74,9 @@ export class IDBStore<T extends { id: string; version: string }> implements Stor
     return true;
   }
 
-  async query(q: StoreQuery<T>): Promise<QueryResult<T>> {
+  async query(q: StoreQuery): Promise<QueryResult<T>> {
     const store = await this.tx('readonly');
     const all: T[] = await idbPromise(store.getAll() as IDBRequest<T[]>);
-
-    let items = all;
-    if (q.filter) {
-      items = items.filter(doc => matchFilter(doc, q.filter!));
-    }
-
-    if (q.sort) {
-      items = applySort(items, q.sort);
-    }
-
-    const total  = items.length;
-    const offset = q.offset ?? 0;
-    const limit  = q.limit  ?? 100;
-    const page   = items.slice(offset, offset + limit);
-
-    return {
-      items: page.map(doc => ({ doc })),
-      total,
-    };
+    return executeQuery(all, q);
   }
 }

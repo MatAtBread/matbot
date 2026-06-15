@@ -55,12 +55,12 @@ function makeSessionActionTool(store: Store<Session>): Tool {
           case 'list': {
             const { includeArchived } = args as Extract<SessionInput, { action: 'list' }>;
             const { items } = await store.query(
-              includeArchived ? {} : { filter: { field: 'status', op: 'neq', value: 'archived' } },
+              includeArchived ? {} : { where: { op: 'neq', field: 'status', value: 'archived' } },
             );
-            const sorted = items.slice().sort((a, b) => b.doc.updatedAt.localeCompare(a.doc.updatedAt));
+            const sorted = items.slice().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
             yield {
               type:  'result',
-              value: sorted.map(({ doc: s }) => ({
+              value: sorted.map(s => ({
                 id:        s.id,
                 title:     s.title,
                 preview:   sessionPreview(s),

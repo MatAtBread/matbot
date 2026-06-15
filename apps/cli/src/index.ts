@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { loadConfig, loadConfigFromText, loadDotEnv } from './config.js';
 import { installPlugin }                    from './install.js';
+import { executeQuery }                     from '@matatbread/matbot-storage-base';
 import { loadPluginsWithDescriptions, readPluginMeta, type PluginLoadRequest } from './plugin-description.js';
 import { nodePluginResolver }               from './plugin-resolver.js';
 import type { Principal, ProviderAdapter,
@@ -223,9 +224,8 @@ class MemoryStore<T extends { id: string; version: string }> implements Store<T>
     return this.items.delete(id);
   }
 
-  async query(_q: StoreQuery<T>): Promise<QueryResult<T>> {
-    const items = [...this.items.values()].map(doc => ({ doc }));
-    return { items, total: items.length };
+  async query(q: StoreQuery): Promise<QueryResult<T>> {
+    return executeQuery([...this.items.values()], q);
   }
 }
 
