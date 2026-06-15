@@ -212,6 +212,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
               loadPlugin:     deps.loadPlugin,
               unloadPlugin:   deps.unloadPlugin,
               ...(toolMap            !== undefined ? { tools:         toolMap            } : {}),
+              ...(deps.tools         !== undefined ? { toolRegistry:  deps.tools         } : {}),
               ...(deps.hooks         !== undefined ? { hooks:         deps.hooks         } : {}),
               ...(deps.systemContext !== undefined ? { systemContext: deps.systemContext } : {}),
               ...(deps.workdir       !== undefined ? { workdir:       deps.workdir       } : {}),

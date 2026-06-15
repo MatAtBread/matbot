@@ -53,23 +53,30 @@ let freshSeq = 0;
  *   - `importSpec` — the URL actually imported, when it differs from `spec`. The browser
  *     fetches a remote plugin, type-strips it, and imports the resulting ephemeral `blob:`
  *     URL while recording the original source URL as `spec`; node imports a resolved
- *     `file://` path while recording the original `matbot.yaml` entry. (With `importSpec`
- *     set, `bustCache` does not apply — the caller owns that URL, and a `blob:` cannot carry
- *     a `${FRESH_PARAM}` stamp.) Defaults to `spec`.
+ *     `file://` path while recording the original `matbot.yaml` entry. Defaults to `spec`.
+ *     `bustCache` still applies to a pre-set `importSpec`: a `file:` URL is stamped in place
+ *     (the host owns resolution — re-resolving `spec` here would fail for `./…`-relative or
+ *     remote specifiers — but the loader owns the freshness stamp). A `blob:` URL is left
+ *     untouched (a `?${FRESH_PARAM}` query does not resolve to the blob, and the browser busts
+ *     by reloading the whole realm anyway); any other scheme is passed through unstamped.
  *   - `name` — the canonical plugin name, when the host has already derived it (e.g. by
  *     reading the resolved package.json). Bypasses `resolver.identify(spec)` — necessary
  *     because `spec` (a remote URL, a versioned npm range) may not itself identify the name.
  *   - `runtimes` — the package.json `matbotRuntime`, when the host has already read it; used
  *     for the pre-import gate in place of `resolver.runtimes(spec)`.
  *
- * @param bustCache When true, each specifier is resolved to a file URL and a
- *   unique `${FRESH_PARAM}` query stamp is appended before importing. This forces
- *   the JS engine to bypass its module cache and re-evaluate the entry from disk.
- *   With the companion node resolve hook installed (apps/cli/ts-hooks.js) the
- *   stamp propagates to the plugin's first-party imports too, so the entire
- *   subtree re-evaluates — necessary when reloading a plugin whose code, or whose
- *   own modules' code, changed since startup. Has no effect if import.meta.resolve
- *   is unavailable; falls back to the original specifier (and logs a warning).
+ * @param bustCache When true, the URL imported for each specifier gets a unique
+ *   `${FRESH_PARAM}` query stamp appended before importing — either a host-pre-resolved
+ *   `file:` `importSpec` stamped in place, or, absent one, the bare `spec` resolved via
+ *   `import.meta.resolve` and then stamped. This forces the JS engine to bypass its module
+ *   cache and re-evaluate the entry from disk. With the companion node resolve hook installed
+ *   (apps/cli/ts-hooks.js) the stamp propagates to the plugin's first-party imports too, so the
+ *   entire subtree re-evaluates — necessary when reloading a plugin whose code, or whose own
+ *   modules' code, changed since startup. When resolution is needed but `import.meta.resolve`
+ *   is unavailable (or throws), it falls back to the original specifier — re-importing the
+ *   cached module — and logs a warning. (Because the single-funnel node host always supplies a
+ *   pre-resolved `importSpec`, forgetting to stamp it silently neuters every node reload —
+ *   hence the stamp is applied here, in the loader, not left to the caller.)
  * @param prompt Optional host prompt used by setup() to resolve tool-name collisions
  *   interactively. Omitted by non-interactive hosts, in which case collisions overwrite
  *   silently (the historical default).
@@ -121,7 +128,7 @@ export async function loadPlugins(
     }
     toLoad.push({
       spec,
-      importSpec: importSpec ?? (bustCache ? toFreshUrl(spec) : spec),
+      importSpec: freshImportSpec(spec, importSpec, bustCache),
       ...(name     !== undefined ? { name }     : {}),
       ...(runtimes !== undefined ? { runtimes } : {}),
     });
@@ -264,11 +271,42 @@ function defaultIdentify(spec: string): string {
   return last.replace(/\.[^.]+$/, '') || noQuery;
 }
 
+/**
+ * Pick the URL to actually import, honouring a host-pre-resolved `importSpec` while still
+ * applying the cache-bust stamp when requested.
+ *
+ * The host (apps/cli's resolvePluginSpecifiers) is the *only* place that can resolve a config
+ * specifier (`./packages/…`, a bare name, a remote URL) to an absolute file: URL — it reads the
+ * package.json `exports`, materialises remotes into `.plugins/`, and resolves through node_modules.
+ * So when an `importSpec` is supplied we must keep it (re-resolving the bare `spec` here against
+ * *this* module's URL would fail). But "keep it" used to mean "skip the stamp entirely", which
+ * silently neutered every node-side reload (the pre-set importSpec is never undefined under the
+ * single-funnel host). We now stamp the pre-resolved file: URL directly.
+ *
+ * Carve-out: a `blob:` importSpec (the browser bundle's import-map entries) is left untouched — a
+ * `?query` on a blob URL does not resolve to the blob, and the browser busts by reloading the whole
+ * realm anyway. Any non-file:, non-blob: scheme is also passed through unstamped.
+ */
+function freshImportSpec(spec: string, importSpec: string | undefined, bustCache: boolean): string {
+  if (!bustCache) return importSpec ?? spec;
+  if (importSpec === undefined) return toFreshUrl(spec);
+  if (importSpec.startsWith('file:')) {
+    const fresh = stampFresh(importSpec);
+    console.debug(`[matbot] cache-bust: "${spec}" -> ${fresh}`);
+    return fresh;
+  }
+  return importSpec;
+}
+
+function stampFresh(url: string): string {
+  const u = new URL(url);
+  u.searchParams.set(FRESH_PARAM, `${Date.now()}.${++freshSeq}`);
+  return u.href;
+}
+
 function toFreshUrl(spec: string): string {
   try {
-    const url = new URL(import.meta.resolve(spec));
-    url.searchParams.set(FRESH_PARAM, `${Date.now()}.${++freshSeq}`);
-    const fresh = url.href;
+    const fresh = stampFresh(import.meta.resolve(spec));
     console.debug(`[matbot] cache-bust: "${spec}" -> ${fresh}`);
     return fresh;
   } catch (err) {
