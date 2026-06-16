@@ -32,6 +32,7 @@ const DOCS = [
   'docs/ARCHITECTURE.md',
   'docs/DEVELOPING.md',
   'docs/GETTING-STARTED.md',
+  'docs/PER-USER-PLUGINS.md',
   'docs/WEB-BUNDLE.md',
   'apps/web-bundle/README.md',
 ];
