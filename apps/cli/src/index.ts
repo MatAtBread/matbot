@@ -682,10 +682,14 @@ async function main(): Promise<void> {
   installPrincipalCarrier(createAlsPrincipalCarrier());
   enterPrincipal(resolveBootPrincipal(opts, matbotConfig));
 
-  const vault = new EnvFileVault(
+  // The vault is a capture-safe forwarding proxy over a swappable backend (mirrors StorageBackend):
+  // EnvFileVault by default, replaced when a plugin calls register('Vault', impl). References to
+  // `services.vault` / `ctx.vault` captured before the swap keep resolving to the live impl.
+  let activeVault: Vault = new EnvFileVault(
     path.join(path.dirname(configPath), '.env'),
     process.env as Record<string, string | undefined>,
   );
+  const vault: Vault = forwardingProxy<Vault>(() => activeVault);
 
   // ── Stores (created early so plugins like frontend-web can use them) ──────────
 
@@ -813,6 +817,9 @@ async function main(): Promise<void> {
         if (prev.entries !== undefined) {
           for (const entry of prev.entries()) void (value as KnowledgeIndex).index(entry);
         }
+      } else if (key === 'Vault') {
+        // Swap the backend behind the capture-safe vault proxy; no entries to drain.
+        activeVault = value as Vault;
       } else {
         serviceRegistry.set(key as string, value);
       }
