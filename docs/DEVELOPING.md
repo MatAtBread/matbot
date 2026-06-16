@@ -7,7 +7,9 @@ assistants working on the codebase, but it's also the best single source of etho
 architectural intent for any contributor.
 
 For the project overview see [README.md](../README.md); for installation and configuration
-see [GETTING-STARTED.md](GETTING-STARTED.md).
+see [GETTING-STARTED.md](GETTING-STARTED.md). For building multi-user deployments — per-user
+gating, the bootstrap-plugin pattern, and the global tool-visibility ceiling — see
+[PER-USER-PLUGINS.md](PER-USER-PLUGINS.md).
 
 ---
 
@@ -472,6 +474,11 @@ export const plugin: MatbotPluginSpec = {
 
 Multiple frontends may run simultaneously. A frontend is auto-unregistered when its
 plugin unloads.
+
+> **Security note:** the `toolcall` hook gates only the *runner* path (model-driven turns).
+> A frontend that executes tools directly — e.g. a `POST /tools` endpoint — bypasses it and
+> **must re-enforce any per-user gating itself** (`currentPrincipal()` is available on that
+> path). See [PER-USER-PLUGINS.md](PER-USER-PLUGINS.md) for the full multi-user model.
 
 ---
 

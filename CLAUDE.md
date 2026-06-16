@@ -32,6 +32,9 @@ all other per-install configuration goes through plugin `Settings`. Both are abs
 with swappable backends (`.env` is merely the default node `Vault`; the browser build uses
 WebCrypto + browser storage and has no `.env` or `matbot.yaml`), so a plugin reaching for
 `process.env` directly is not portable. (TODO: enforce with a lint rule once eslint lands.)
+The node realm picks its `Vault` at boot, but a plugin can also swap it at runtime via
+`services.register('Vault', impl)` — see the Service registry section (e.g. an encrypted,
+per-user, DB-backed secret store in place of `.env`).
 
 ### AsyncIterators, not callbacks
 Streaming events flow through `AsyncIterable<T>`. Never use `EventEmitter` or raw callbacks
@@ -223,14 +226,23 @@ type ScratchStore = Store<Session>;
 This is also the tool for when the bare interface name is too *generic* to be a safe global key
 (never register bare `Store`; alias it to a domain-specific handle first).
 
-A couple of keys are interface-named like the rest but additionally carry **dedicated `register`
+A few keys are interface-named like the rest but additionally carry **dedicated `register`
 behaviour** and are always-present core members (read as `services.StorageBackend` /
-`services.KnowledgeIndex`). `register` doesn't merely store these — it swaps the live impl and fixes
-up everything pointing at the old one. Each is also handed out as a **capture-safe forwarding proxy**,
-so a reference captured before a swap (`const { KnowledgeIndex } = services`) keeps resolving to the
-current impl rather than pinning the old one:
+`services.KnowledgeIndex` / `services.vault`). `register` doesn't merely store these — it swaps the
+live impl and fixes up everything pointing at the old one. Each is also handed out as a **capture-safe
+forwarding proxy**, so a reference captured before a swap (`const { KnowledgeIndex } = services`) keeps
+resolving to the current impl rather than pinning the old one:
 - `'StorageBackend'` (a `StorageBackend`) — replaces the active storage backend and re-wires all Store proxies
 - `'KnowledgeIndex'` (a `KnowledgeIndex`) — replaces the active KnowledgeIndex, draining entries from the old one
+- `'Vault'` (a `Vault`) — replaces the active vault backend behind the proxy; nothing is drained (unlike
+  `KnowledgeIndex`, secrets are not migrated from the old vault). Read path asymmetry: the live vault is
+  read as the lowercase `services.vault` (the pre-existing accessor); the capitalised `'Vault'` is the
+  swap *handle* used only with `register` — it has no separate getter. Because credential/endpoint
+  resolution is lazy (per-turn, through the proxy) and nothing captures the concrete impl, a plugin's
+  `register('Vault', impl)` is picked up by all subsequent resolution — including providers declared in
+  `matbot.yaml` — provided the vault plugin loads before any plugin that resolves secrets through the
+  vault during its own `setup()`. (A vault plugin's own bootstrap secret still comes from the default
+  `.env` vault, since it loads before registering itself.)
 
 To introduce a new cognitive subsystem (e.g. an `Imagination` interface):
 1. Declare `Imagination?: Imagination` on `MatbotServices` (augment in your package)

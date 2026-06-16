@@ -84,7 +84,7 @@ function isMessagesBottomVisible() {
 // Send-button glyphs (SVG, so they render identically across platforms instead of relying on
 // font-dependent unicode). Play triangle for send; down-chevron when the button morphs into a
 // scroll-to-bottom control.
-const ICON_SEND   = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>';
+const ICON_SEND   = '<svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" aria-hidden="true"><path d="M9 6v12l9-6z"/></svg>';
 const ICON_SCROLL = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>';
 
 // Morph the send button into a scroll-down button. Stop is now its own button, and the input
@@ -1577,7 +1577,13 @@ function pushTurnEvent(ev) {
         return;
       }
     }
-    activeBatchHead = { traceId: ev.traceId, concat: ev.concatQueue === true };
+    // Only a head still waiting behind a running turn (queued > 0) can absorb later concat
+    // submissions: it sits in the runner's queue long enough for them to land behind it. A head that
+    // runs immediately (queued === 0) is dequeued and its batch sealed by pump *synchronously* — before
+    // any follower's submit POST can reach the queue — so it never merges one. Opening a foldable batch
+    // for it would fold a quickly-queued next message into its bubble even though the runner ran it as
+    // its own separate turn (visible only as the live/reload mismatch this guards against).
+    activeBatchHead = ev.queued > 0 ? { traceId: ev.traceId, concat: ev.concatQueue === true } : null;
   } else if (activeBatchHead !== null && ev.traceId === activeBatchHead.traceId) {
     activeBatchHead = null;   // head turn has started responding → next submission opens a new batch
   }

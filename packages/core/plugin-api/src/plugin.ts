@@ -115,6 +115,8 @@ export interface MatbotServices {
    * Well-known keys have dedicated behaviour:
    *   'StorageBackend' — replaces the active storage backend and re-wires all Store proxies.
    *   'KnowledgeIndex' — replaces the active KnowledgeIndex, draining entries from the old one.
+   *   'Vault' — replaces the active vault backend and re-points the capture-safe vault proxy, so
+   *             references to `services.vault` / `ctx.vault` keep resolving to the live impl.
    * All other keys store the value in a per-plugin service registry accessible via get().
    *
    * Third-party plugins advertise novel services by augmenting MatbotServices:
@@ -155,7 +157,11 @@ export interface MatbotServices {
   readonly run?:            SessionRunner | undefined;
   readonly StorageBackend?: StorageBackend | undefined;
   readonly files?:          FileStore;
+  /** The live vault (a capture-safe proxy). Read as `services.vault`. The capitalised `Vault`
+   *  key below is the dedicated `register('Vault', impl)` swap handle (no separate accessor). */
   readonly vault:           Vault;
+  /** @see register — registering under 'Vault' swaps the active vault backend behind `vault`. */
+  readonly Vault?:          Vault | undefined;
   readonly hooks:           HookRegistry;
   readonly tools:           ToolRegistry;
   readonly systemContext:   SystemContextRegistry;
