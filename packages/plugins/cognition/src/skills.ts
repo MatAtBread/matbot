@@ -184,4 +184,12 @@ If a skill grows very large, consider splitting along a natural axis with mutual
   "triggers": []
 };
 
-export const COGNITION_SKILLS: readonly SeedSkill[] = [INNER_VOICE, REMEMBER_THIS, DREAM_TIME];
+// "Remember this" is no longer seeded as a skill — it has been compiled by hand into the
+// `remember_fact` direct tool. REMEMBER_THIS is kept above as the canonical source document (the
+// compiler investigation's reference input); only its conditions live on now, as the trigger that
+// invokes remember_fact instead of loading a skill.
+export const COGNITION_SKILLS: readonly SeedSkill[] = [INNER_VOICE, DREAM_TIME];
+
+/** The conditions under which a durable fact should be captured — the trigger half of the retired
+ *  "Remember this" skill, now firing the `remember_fact` tool rather than a skill load. */
+export const REMEMBER_CONDITIONS = REMEMBER_THIS.triggers.map(t => ({ phase: t.phase, rule: t.trigger }));

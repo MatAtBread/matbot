@@ -1,8 +1,9 @@
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import type { MatbotPluginSpec, MatbotServices } from '@matatbread/matbot-plugin-api';
-import { COGNITION_SKILLS } from './skills.js';
+import { COGNITION_SKILLS, REMEMBER_CONDITIONS } from './skills.js';
 import { defineStore } from '@matatbread/matbot-tool-store';
 import { createDreamTimeTool } from './dream/tool.js';
+import { createRememberFactTool } from './remember/tool.js';
 // These type imports also bring the `SkillManager` / `Triggers` augmentations of MatbotServices into
 // cognition's compilation, since cognition is a consumer of both capabilities (discovered, not owned).
 import type { SkillManager } from '@matatbread/matbot-skills';
@@ -22,6 +23,19 @@ async function seedCognition(services: MatbotServices): Promise<void> {
         conditions: skill.triggers.map(t => ({ phase: t.phase, rule: t.trigger })),
         invoke:     { tool: 'skill_action', params: { action: 'load', name: skill.name } },
       });
+    }
+  }
+
+  // "Remember this" is compiled into the `remember_fact` direct tool. Ensure exactly one trigger
+  // invokes it with the canonical conditions — repointing any legacy trigger that still loads the
+  // retired "Remember this" skill (so an install seeded under the old model converts in place rather
+  // than ending up with both a skill-load trigger and a remember_fact trigger firing in parallel).
+  if (triggers) {
+    const legacy = triggers.query({ tool: 'skill_action', params: { action: 'load', name: 'Remember this' } });
+    if (legacy.length > 0) {
+      for (const t of legacy) await triggers.update(t.id, { invoke: { tool: 'remember_fact' }, conditions: REMEMBER_CONDITIONS });
+    } else {
+      await triggers.importIfAbsent({ conditions: REMEMBER_CONDITIONS, invoke: { tool: 'remember_fact' } });
     }
   }
 }
@@ -57,8 +71,9 @@ async function seedDreamRunsStore(services: MatbotServices): Promise<void> {
 }
 
 /**
- * Cognitive services. Today it seeds its built-in skills (Inner voice, Remember this, Dream time)
- * into the active skills service; it is the intended home for further cognitive skills and tools.
+ * Cognitive services. It seeds the Inner voice and Dream time skills into the active skills service,
+ * registers the remember_fact and dream_time tools, and wires remember_fact's trigger; it is the
+ * intended home for further cognitive skills and tools.
  *
  * It does not set skills up itself — it is a *consumer* of the skills capability, not a
  * specialization of it — so it discovers the live {@link SkillManager} off the registry rather than
@@ -81,22 +96,25 @@ export function createCognitionPlugin(): MatbotPluginSpec {
   return {
     apiVersion: PLUGIN_API_VERSION,
     manifest: {
-      description: 'Cognitive services: seeds built-in cognition skills (Inner voice, Remember this, Dream time) and is the home for further cognitive skills and tools.',
+      description: 'Cognitive services: seeds the Inner voice and Dream time skills, the remember_fact tool (with its trigger), and the dream_time tool. Home for further cognitive skills and tools.',
     },
 
     async installationMessage() {
       console.warn('[cognition] MARKER-F: installationMessage() called (NEW build)');
-      return `Cognition is active. It seeds built-in skills (Inner voice, Remember this, Dream time)
-into the skills service — if no skills service is configured yet, they are seeded automatically once
-one is.
+      return `Cognition is active. It seeds the Inner voice and Dream time skills into the skills
+service — if no skills service is configured yet, they are seeded automatically once one is — and
+registers the remember_fact and dream_time tools.
 
 The **Inner voice skill** consults a second, model via the single_turn tool, which needs a provider named "inner-voice";
 until one is configured the skill still fires but its single_turn call errors back with no critique. Add it with the
 \`provider\` tool, choosing a model from a different training lineage than your main one. Offer to do this now.
 
-The **Remember this skill** fires when new information is provided and uses a remembered_facts store and its \`remembered_facts_action\` tool to capture user-provided facts,
-personal details, preferences, and other information the user wants remembered across conversations. Each fact is captured with
-provenance showing which session and message it came from.
+The **\`remember_fact\` tool** captures user-provided facts, personal details, and preferences worth
+remembering across conversations. It is fired by a trigger (the conditions of the former "Remember this"
+skill) and runs as a silent side-effect: it reads the latest user message and its provenance from
+context, makes one LLM call to extract and normalise the fact(s), and writes each to the
+remembered_facts store — no extra conversation turns. The model is not woken. (Needs the triggers
+plugin for its trigger; needs a classifier provider named "skills-classifier" to evaluate it.)
 
 The **\`dream_time\` tool** runs one pass of background memory consolidation. It is a deterministic
 TypeScript pipeline: it picks the oldest unassigned fact from the remembered_facts store, scores it against
@@ -106,15 +124,15 @@ field). Each pass writes a structured \`DreamRun\` record to the \`dream_runs\` 
 invoked via the \`background\` tool on a schedule, never inline. One pass at a time is enforced by a
 process-local mutex.
 
-It also seeds a remembered_facts store and its \`remembered_facts_action\` tool, used by the Remember this skill.
+It also seeds a remembered_facts store and its \`remembered_facts_action\` tool, written to by remember_fact.
 The store is idempotent: a re-seed on restart keeps the existing data.
 `;
     },
 
     async setup(services) {
       console.warn('[cognition] MARKER-C: setup() entered (NEW dream-time build)');
-      // Seed the remembered_facts store and its `remembered_facts_action` tool (used by the
-      // Remember this skill). Idempotent — a re-seed on restart keeps the existing store's data.
+      // Seed the remembered_facts store and its `remembered_facts_action` tool (written to by the
+      // remember_fact tool). Idempotent — a re-seed on restart keeps the existing store's data.
       await defineStore(services, {
         namespace:   'remembered_facts',
         description:
@@ -141,6 +159,10 @@ The store is idempotent: a re-seed on restart keeps the existing data.
       // immediately, and if a SkillManager isn't present at invocation it errors cleanly.
       services.tools.register(createDreamTimeTool(services));
       console.warn('[cognition] MARKER-E: dream_time tool registered OK');
+
+      // remember_fact: the compiled "Remember this" tool. Like dream_time, it resolves what it needs
+      // per-call, so register unconditionally; its trigger is wired in seedCognition.
+      services.tools.register(createRememberFactTool(services));
 
       if (services.SkillManager) {
         await seedCognition(services);
