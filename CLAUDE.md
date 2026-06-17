@@ -544,3 +544,30 @@ re-evaluate it. The mechanism is split so the platform-neutral core stays node-f
 - Validate only at system boundaries (user input, HTTP responses, file reads)
 - `types: ["node"]` must be explicit in any `tsconfig.json` that uses Node APIs — the base config
   does not include it because shared packages must be platform-neutral
+
+---
+
+## Changelog maintenance
+
+`CHANGELOG.md` (project root) records **functional** changes only. Omit purely stylistic or
+non-functional work: CSS, refactoring, code tidying, and docs-only merges.
+
+**Sections (in this order):**
+- `## Unreleased` — changes since the last update. Within it, four categories *in this order*:
+  1. **Breaking changes** — `core` contract changes that can upset consumers
+  2. **API gaps filled** — new `core` API surface (with a short note on *how* it was filled)
+  3. **Bug fixes** — `core` fixes
+  4. **Optional** — new or updated plugins/frontends/apps (feature *or* fix), grouped by plugin.
+     These churn more and don't affect consumers who don't use them, so they sit below the `core`
+     categories. The first three categories are reserved for `packages/core` + `plugin-api`.
+- `## Previously` — everything from prior updates, same category structure. Omit empty categories.
+
+**When the user says "Update the changelog":**
+1. Find merges to `main` since the last documented batch (`git log main --merges --oneline`; the
+   already-documented merges are recoverable from the existing entries). Inspect each merge's branch
+   commits (`git log <merge>^1..<merge>^2`) and their bodies to classify the changes.
+2. Move the current `## Unreleased` content down into `## Previously` (merging by category), then
+   write the new merges into a fresh `## Unreleased`.
+3. Classify each change into the four categories above; skip non-functional/docs-only changes.
+
+This will eventually be synchronised with releases (versioned headings replacing `Unreleased`).
