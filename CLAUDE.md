@@ -72,7 +72,8 @@ packages/
   plugins/
     rumsfeld/      — contextual_search tool; knowledge fault handler (@matatbread/matbot-rumsfeld; cross-runtime)
     persist-ki-bge/ — persistent KnowledgeIndex with BGE reranker (@matatbread/matbot-persist-ki-bge; cross-runtime)
-    skills/        — cross-runtime skill CRUD (skill_action) (@matatbread/matbot-skills)
+    triggers/      — data-driven hooks: stored conditions that invoke a tool (trigger_action) (@matatbread/matbot-triggers; cross-runtime)
+    skills/        — cross-runtime skill content CRUD + catalogue (skill_action) (@matatbread/matbot-skills)
     skills-node/   — node specialization: embeds skills, adds local .md filesystem import/watch (@matatbread/matbot-skills-node)
     edit-session/  — session_edit tool (cut/fork/split/compact via action) (@matatbread/matbot-edit-session)
     files/         — file codec and producer registry
@@ -149,6 +150,7 @@ All runtime state lives under `.data/` **next to `matbot.yaml`**, never in the s
   sessions/    — Store<Session>
   settings/    — Store<SettingsDoc> (plugin key-value settings)
   skills/      — Store<SkillDoc>
+  triggers/    — Store<Trigger> (triggers plugin: data-driven hooks)
   schedules/   — Store<Schedule> (background plugin recurring jobs)
   knowledge/   — Store<KnowledgeEntry> (persist-ki-bge plugin)
   bash-cwd/    — default working directory for bash tool execution (created lazily)
@@ -417,6 +419,60 @@ the web splits one stored user message into per-`origin` bubbles, telegram surfa
 messages (adopting its turn's followups via the `queued` event's `rootTraceId` lineage), and a
 text-only frontend that ignores `origin` still renders coherently. A "robo message" is just one whose
 blocks are all `origin: 'robo'`.
+
+---
+
+## Triggers (data-driven hooks)
+
+`@matatbread/matbot-triggers` turns the hard-coded "fire a skill on a condition" wiring into
+**data**. A `Trigger` is a stored document:
+
+```ts
+interface Trigger {
+  id; version;
+  conditions: { phase: 'user' | 'agent'; rule: string }[];   // the OR — many ways to recognise
+  invoke:     { tool: string; params?: unknown };            // the one consequence
+  enabled?: boolean; createdAt; updatedAt;
+}
+```
+
+**The load-bearing idea: a trigger names a *tool*, not a skill.** Firing a skill is just
+`invoke: skill_action({ action: 'load', … })` — one tool call among many, not a special case. This
+collapses the old `tool → skill → tool` indirection (where a robo message asked the model to *load*
+a skill that then told it to *call* a tool) into `condition → tool`. "Load a skill" is the
+specialization; "call a tool" is the general case.
+
+**Conditions are the OR, `invoke` is the consequence.** Any matching condition fires the trigger
+once. Each condition is an LLM-judged rubric ("MATCH if …; DO NOT MATCH if …") on the *form/sentiment*
+of a message (not its topic — topical relevance is search's job). `phase` picks the surface and the
+hook: `user` is judged in a `screen` hook (pre-response) and injected **ephemerally**; `agent` is
+judged in a `followup` hook (post-commit) and **resubmitted** as a robo turn. So triggers are exactly
+*data-driven hooks* — they ride the existing `screen`/`followup` channels, carrying config where there
+used to be plugin code.
+
+**Observational dispatch decides whether the model wakes — the tool's *output* is the signal.** The
+dispatcher invokes the tool and looks at what it yields: a `result` is model-facing → inject it
+(ephemeral for `user`, robo resubmit for `agent`); **no** result → a silent side-effect, the model
+never wakes (`direct`). Nothing declares "direct vs inject" — `skill_action(load)` yields content so
+it injects; a future `remember_fact` yields nothing so it runs silent. (`ToolEvent` has no `marker`
+variant yet, so a *visible* silent side-effect — a 🧠 breadcrumb — isn't expressible; that's the next
+piece. Today "no result" simply means "no wake".)
+
+**Fails soft, everywhere.** An `invoke` naming an absent tool does nothing until the tool is present
+(no referential integrity, no cascade — the same graceful-degradation rule as a stale `skill_action`
+load id). Conditions are evaluated by a classifier provider (named `skills-classifier`, kept for
+config compatibility); with none configured, triggers simply never fire.
+
+**Surfaces.** A `Triggers` service (CRUD + `importIfAbsent`, which dedupes by invocation since
+triggers carry no name — the key for idempotent seeding) and a `trigger_action` tool
+(`list`/`query`/`get`/`add`/`update`/`remove`; `query` filters by invoke target, e.g. "the trigger
+that loads skill X"). cognition seeds its built-in skills' triggers through the service; the web skill
+editor edits a skill's load-trigger conditions through `trigger_action query`.
+
+**Orthogonal to skills.** Triggers and skills don't import each other. Skills own content and the
+system-prompt catalogue (`SkillDoc.catalogSummary`, the former `system`-phase — advertisement, not a
+condition); triggers own conditions and firing. A skill is fired only by a trigger whose `invoke`
+loads it.
 
 ---
 

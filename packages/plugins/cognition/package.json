@@ -13,6 +13,7 @@
   "dependencies": {
     "@matatbread/matbot-plugin-api": "workspace:*",
     "@matatbread/matbot-skills":     "workspace:*",
+    "@matatbread/matbot-triggers":   "workspace:*",
     "@matatbread/matbot-tool-store":  "workspace:*"
   },
   "devDependencies": {

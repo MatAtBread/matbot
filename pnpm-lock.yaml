@@ -237,6 +237,9 @@ importers:
       '@matatbread/matbot-tool-store':
         specifier: workspace:*
         version: link:../tool-store
+      '@matatbread/matbot-triggers':
+        specifier: workspace:*
+        version: link:../triggers
     devDependencies:
       typescript:
         specifier: 'catalog:'
@@ -491,6 +494,16 @@ importers:
         version: 5.9.3
 
   packages/plugins/tool-store:
+    dependencies:
+      '@matatbread/matbot-plugin-api':
+        specifier: workspace:*
+        version: link:../../core/plugin-api
+    devDependencies:
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
+
+  packages/plugins/triggers:
     dependencies:
       '@matatbread/matbot-plugin-api':
         specifier: workspace:*

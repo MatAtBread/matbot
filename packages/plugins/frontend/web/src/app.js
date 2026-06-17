@@ -631,10 +631,13 @@ const skillEditorError   = document.getElementById('skill-editor-error');
 const skillEditorSave    = document.getElementById('skill-editor-save');
 const skillEditorRoot    = document.getElementById('skill-editor');
 const skillTriggerList   = document.getElementById('skill-trigger-list');
-const TRIGGER_PHASES = ['agent', 'user', 'system'];
+const TRIGGER_PHASES = ['agent', 'user'];
 let editingSkillName = null;
 let skillEditor = null;   // TinyMDE.Editor, created lazily on first open
-let loadedTriggers = [];  // originals from skill_triggers `get`, for save-time reconciliation
+// A skill is fired by (at most) one Trigger whose invoke is skill_action(load, {name}); its
+// `conditions` are what the Triggers tab edits. `editingTriggerId` is that trigger's id (null when
+// the skill has no trigger yet — we create one on save if conditions are added).
+let editingTriggerId = null;
 
 function setSkillTab(tab) {
   for (const btn of document.querySelectorAll('.skill-tab')) btn.classList.toggle('active', btn.dataset.tab === tab);
@@ -702,14 +705,13 @@ function renderSkillMetadata(knowledge) {
   section('Tags', () => chips(knowledge.tags, 'tag'));
 }
 
-// One trigger row: a phase <select> + the rubric <textarea>, both disabled (read-only) until ✎ is
-// clicked; × removes the row. New rows (no `t`) start editable. Nothing is persisted until Save,
-// which diffs the live rows against `loadedTriggers`.
-function makeTriggerRow(t) {
-  const editable = !t || !t.id;
+// One condition row: a phase <select> + the rubric <textarea>, both disabled (read-only) until ✎ is
+// clicked; × removes the row. New rows (no `c`) start editable. Nothing is persisted until Save,
+// which replaces the skill's trigger conditions wholesale (conditions have no stable id).
+function makeTriggerRow(c) {
+  const editable = !c;
   const row = document.createElement('div');
   row.className = 'trigger-row';
-  if (t && t.id) row.dataset.id = t.id;
 
   const sel = document.createElement('select');
   sel.className = 'trigger-phase';
@@ -718,15 +720,15 @@ function makeTriggerRow(t) {
     o.value = p; o.textContent = p;
     sel.appendChild(o);
   }
-  sel.value = t?.phase ?? 'agent';
+  sel.value = c?.phase ?? 'agent';
   sel.disabled = !editable;
 
   const txt = document.createElement('textarea');
   txt.className = 'trigger-text';
   txt.rows = 2;
-  txt.value = t?.trigger ?? '';
+  txt.value = c?.rule ?? '';
   txt.disabled = !editable;
-  txt.placeholder = 'agent/user: "MATCH if …; DO NOT MATCH if …"   ·   system: a one-line catalogue summary';
+  txt.placeholder = '"MATCH if the message is …; DO NOT MATCH if …" — judged against the latest turn';
 
   const editBtn = document.createElement('button');
   editBtn.className = 'trigger-edit';
@@ -750,33 +752,35 @@ function makeTriggerRow(t) {
   return row;
 }
 
-function renderTriggers(triggers) {
+function renderTriggers(conditions) {
   skillTriggerList.innerHTML = '';
-  for (const t of triggers) skillTriggerList.appendChild(makeTriggerRow(t));
+  for (const c of conditions) skillTriggerList.appendChild(makeTriggerRow(c));
 }
 
-// Diff the live rows against the loaded originals and emit the minimal add/update/remove calls.
+// Collect the live rows into a `conditions` array and reconcile the skill's single load-trigger:
+// update it (or create it if absent) when there are conditions, remove it when the last one is
+// cleared. Conditions have no stable id, so this is a wholesale replace, not a per-row diff.
 async function saveTriggers(name) {
-  const present = new Set();
+  const conditions = [];
   for (const row of skillTriggerList.querySelectorAll('.trigger-row')) {
-    const id = row.dataset.id || '';
     const phase = row.querySelector('.trigger-phase').value;
-    const trigger = row.querySelector('.trigger-text').value.trim();
-    if (!trigger) continue; // an empty row is a no-op, not a delete
-    if (!id) {
-      await callTool('skill_triggers', { action: 'add', name, phase, trigger });
-    } else {
-      present.add(id);
-      const orig = loadedTriggers.find(o => o.id === id);
-      if (orig && (orig.phase !== phase || orig.trigger !== trigger)) {
-        await callTool('skill_triggers', { action: 'update', name, id, phase, trigger });
-      }
-    }
+    const rule  = row.querySelector('.trigger-text').value.trim();
+    if (!rule) continue; // an empty row is a no-op, not a delete
+    conditions.push({ phase, rule });
   }
-  for (const orig of loadedTriggers) {
-    if (orig.id && !present.has(orig.id)) {
-      await callTool('skill_triggers', { action: 'remove', name, id: orig.id });
+
+  if (editingTriggerId) {
+    if (conditions.length) {
+      await callTool('trigger_action', { action: 'update', id: editingTriggerId, conditions });
+    } else {
+      await callTool('trigger_action', { action: 'remove', id: editingTriggerId });
+      editingTriggerId = null;
     }
+  } else if (conditions.length) {
+    const res = await callTool('trigger_action', {
+      action: 'add', conditions, tool: 'skill_action', params: { action: 'load', name },
+    });
+    editingTriggerId = res?.id ?? null;
   }
 }
 
@@ -801,15 +805,20 @@ async function openSkillEditor(name) {
   editingSkillName = name;
   skillEditorError.textContent = '';
   skillEditorTitle.textContent = name;
-  loadedTriggers = [];
+  editingTriggerId = null;
   renderTriggers([]);
   renderSkillMetadata(null);
   setSkillTab('content');
   skillEditorOverlay.classList.add('open');
-  // Triggers are independent of the markdown editor, so load them even if TinyMDE is absent.
-  callTool('skill_triggers', { action: 'get', name })
-    .then((tr) => { loadedTriggers = Array.isArray(tr?.triggers) ? tr.triggers : []; renderTriggers(loadedTriggers); })
-    .catch(() => { /* skill_triggers tool not loaded — leave the triggers tab empty. */ });
+  // Triggers live in their own store now, keyed by the tool they invoke — find the one that loads
+  // this skill. Independent of the markdown editor, so load it even if TinyMDE is absent.
+  callTool('trigger_action', { action: 'query', tool: 'skill_action', params: { action: 'load', name } })
+    .then((res) => {
+      const trig = Array.isArray(res?.triggers) ? res.triggers[0] : undefined;
+      editingTriggerId = trig?.id ?? null;
+      renderTriggers(Array.isArray(trig?.conditions) ? trig.conditions : []);
+    })
+    .catch(() => { /* triggers plugin not loaded — leave the triggers tab empty. */ });
   // Derived analysis, likewise independent of TinyMDE; absent until the background pass has cached it.
   callTool('skill_action', { action: 'metadata', name })
     .then((meta) => renderSkillMetadata(meta?.knowledge ?? null))

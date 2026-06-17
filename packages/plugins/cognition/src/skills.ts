@@ -1,9 +1,11 @@
-import type { TriggerPhase } from "@matatbread/matbot-skills";
+import type { TriggerPhase } from "@matatbread/matbot-triggers";
 
 /**
  * Built-in cognition skills, seeded create-if-absent into the active SkillManager at setup. The
- * literal content/triggers here are the canonical source; an install that already has a skill of the
- * same name keeps its own copy untouched. Captured verbatim from the originating skill documents.
+ * literal content here is the canonical source; an install that already has a skill of the same name
+ * keeps its own copy untouched. The `triggers` are the conditions on which the skill should load —
+ * seeded into the Triggers service as a trigger whose invoke is `skill_action(load)`. Captured
+ * verbatim from the originating skill documents.
  */
 export interface SeedSkill {
   name:     string;

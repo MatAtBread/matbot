@@ -1,24 +1,17 @@
-export type TriggerPhase = 'agent' | 'user' | 'system';
-
-/**
- * A single trigger embedded in a skill. `id` is the stable identity (a UUID minted on write if
- * absent and preserved across updates) — never the text, never the array position — so a client
- * can address one trigger reliably across separate operations (telegram edit, HTTP form POST).
- */
-export interface SkillTrigger {
-  id?:     string;
-  phase:   TriggerPhase;
-  trigger: string;
-}
-
 export interface SkillDoc {
   id:           string;
   version:      string;
   name:         string;
   content:      string;
-  triggers?:    SkillTrigger[];
   tags?:        string[];
   toolBinding?: string;
+  /**
+   * A one-line summary injected into the always-on skills catalogue in the system prompt, so the
+   * model knows the skill exists and can reach for it (e.g. "Load before any data-source skill for
+   * questions about traffic, page views, referrers, revenue…"). This is skill advertisement, not a
+   * condition — the firing of skills on conditions is the triggers subsystem's concern, not skills'.
+   */
+  catalogSummary?: string;
   createdAt:    string;
   updatedAt:    string;
   /**

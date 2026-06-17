@@ -1,5 +1,5 @@
 import type { Store, KnowledgeIndex, KnowledgeEntry, MatbotServices } from '@matatbread/matbot-plugin-api';
-import type { SkillDoc, SkillTrigger, TriggerPhase } from './types.js';
+import type { SkillDoc } from './types.js';
 
 type SkillAnalysis  = { entities: string[]; tags: string[]; summary: string };
 type SkillKnowledge = NonNullable<SkillDoc['knowledge']>;
@@ -123,10 +123,9 @@ export interface SkillSummary {
  * (which feeds it filesystem `.md` imports) share one source of truth. Constructed only
  * with web-platform primitives — no Node APIs — so it runs in the browser too.
  *
- * Triggers are embedded in the {@link SkillDoc}, so they version, persist, and delete with
- * their owning skill (referential integrity is structural). But they are managed *separately*
- * from content — `save` never touches triggers, and trigger mutations skip knowledge
- * re-indexing — because content is consumed by the model and triggers are not.
+ * Skills own content and catalogue advertisement only. The firing of a skill on a condition is the
+ * triggers subsystem's concern (@matatbread/matbot-triggers): a trigger invokes `skill_action(load)`
+ * like any other tool, so skills carry no trigger data of their own.
  */
 export class SkillManager {
   private readonly skills = new Map<string, SkillDoc>();
@@ -169,7 +168,7 @@ export class SkillManager {
     return this.skills.get(name.toLowerCase());
   }
 
-  /** Create a new skill or update an existing one's content by name. Leaves triggers untouched. */
+  /** Create a new skill or update an existing one's content by name. */
   async save(name: string, content: string): Promise<SkillDoc> {
     const now = new Date().toISOString();
     const key = name.toLowerCase();
@@ -181,7 +180,6 @@ export class SkillManager {
         version:   Date.now().toString(),
         name,
         content,
-        triggers:  [],
         createdAt: now,
         updatedAt: now,
       };
@@ -193,7 +191,7 @@ export class SkillManager {
     return this.casMutate(doc, cur => this.bump({ ...cur, content }), true);
   }
 
-  /** Delete a skill (and its embedded triggers) by name. Returns the removed doc, or `undefined`. */
+  /** Delete a skill by name. Returns the removed doc, or `undefined`. */
   async delete(name: string): Promise<SkillDoc | undefined> {
     const key = name.toLowerCase();
     const doc = this.skills.get(key);
@@ -205,54 +203,16 @@ export class SkillManager {
     return doc;
   }
 
-  /** Append one trigger; mints and returns its id. `undefined` if the skill does not exist. */
-  async addTrigger(name: string, phase: TriggerPhase, trigger: string): Promise<{ doc: SkillDoc; id: string } | undefined> {
-    const doc = this.get(name);
-    if (doc === undefined) return undefined;
-    const id = crypto.randomUUID();
-    const updated = await this.casMutate(doc, cur => this.bump({
-      ...cur,
-      triggers: [...(cur.triggers ?? []), { id, phase, trigger }],
-    }), false);
-    return { doc: updated, id };
-  }
-
-  /** Edit one trigger by id. `'no-trigger'` if the id is absent, `undefined` if the skill is. */
-  async updateTrigger(
-    name: string,
-    id:   string,
-    patch: { trigger?: string; phase?: TriggerPhase },
-  ): Promise<SkillDoc | undefined | 'no-trigger'> {
-    const doc = this.get(name);
-    if (doc === undefined) return undefined;
-    if (!(doc.triggers ?? []).some(t => t.id === id)) return 'no-trigger';
-    return this.casMutate(doc, cur => this.bump({
-      ...cur,
-      triggers: (cur.triggers ?? []).map(t => t.id === id ? { ...t, ...patch } : t),
-    }), false);
-  }
-
-  /** Remove one trigger by id. `'no-trigger'` if the id is absent, `undefined` if the skill is. */
-  async removeTrigger(name: string, id: string): Promise<SkillDoc | undefined | 'no-trigger'> {
-    const doc = this.get(name);
-    if (doc === undefined) return undefined;
-    if (!(doc.triggers ?? []).some(t => t.id === id)) return 'no-trigger';
-    return this.casMutate(doc, cur => this.bump({
-      ...cur,
-      triggers: (cur.triggers ?? []).filter(t => t.id !== id),
-    }), false);
-  }
-
   /**
    * Import-only create: once a skill exists, the store owns it and the import is a no-op.
    * Used by the node filesystem watcher to seed `.md` files without clobbering edits, and by
-   * plugins that ship built-in skills (e.g. cognition) — hence the optional `triggers`, each of
-   * which is minted a fresh id here. Returns `true` if a new skill was imported.
+   * plugins that ship built-in skills (e.g. cognition) — hence the optional `catalogSummary`.
+   * Returns `true` if a new skill was imported.
    */
   async importIfAbsent(
-    name:     string,
-    content:  string,
-    triggers: readonly Omit<SkillTrigger, 'id'>[] = [],
+    name:           string,
+    content:        string,
+    catalogSummary?: string,
   ): Promise<boolean> {
     const key = name.toLowerCase();
     if (this.skills.has(key)) return false;
@@ -262,7 +222,7 @@ export class SkillManager {
       version:   Date.now().toString(),
       name,
       content,
-      triggers:  triggers.map(t => ({ id: crypto.randomUUID(), phase: t.phase, trigger: t.trigger })),
+      ...(catalogSummary !== undefined ? { catalogSummary } : {}),
       createdAt: now,
       updatedAt: now,
     };

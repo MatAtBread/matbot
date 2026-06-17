@@ -68,6 +68,37 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Optional
 
+- **triggers** (new, `@matatbread/matbot-triggers`, cross-runtime) — a data-driven
+  hooks subsystem. A `Trigger` is a stored
+  `{ conditions: { phase: 'user'|'agent'; rule }[]; invoke: { tool; params? } }`
+  document; when an LLM classifier judges any condition matched against the current
+  turn, the named tool is invoked. The tool's *output* decides what the model sees:
+  a tool that yields a result is injected (ephemerally on `user` via `screen`, as a
+  robo resubmit on `agent` via `followup`); a tool that yields none runs as a silent
+  side-effect. This generalises skill-firing — "load skill X" is just
+  `invoke: skill_action(load)`, no longer special-cased. Exposes a `Triggers` service
+  (CRUD + `importIfAbsent`, idempotent by invocation) and a `trigger_action` tool
+  (`list`/`query`/`get`/`add`/`update`/`remove`; `query` filters by invoke target). An
+  absent target tool degrades soft (does nothing until present).
+
+- **skills** — trigger ownership moved out to `@matatbread/matbot-triggers`. Removed the
+  `skill_triggers` tool, the embedded `SkillDoc.triggers` array, and the two
+  trigger-evaluation hooks. The former `system`-phase trigger (the system-prompt skills
+  catalogue) is now a `SkillDoc.catalogSummary` field. Skills are content + catalogue
+  only; firing on a condition is a trigger whose `invoke` is `skill_action(load)`.
+  Breaking for skills-*package* consumers: dropped exports `SkillTrigger`,
+  `TriggerPhase`, `createSkillTriggersTool`. (Existing installs: embedded `triggers`
+  arrays in stored skill docs go dormant; a one-off offline migration moves them into
+  the triggers store and `catalogSummary`.)
+
+- **cognition** — seeds its built-in skills' triggers into the `Triggers` service (one
+  load-trigger per skill, conditions grouped) instead of embedding them, discovering
+  `Triggers` off the registry the same way it discovers `SkillManager`.
+
+- **frontend/web** — skill editor's Triggers tab rewired to the triggers store: it finds
+  the skill's load-trigger via `trigger_action query` and edits that trigger's conditions
+  (a wholesale replace on save), dropping the removed `system` phase.
+
 - **frontend/web** — queued-message UI no longer folds a quickly-queued message into
   the wrong bubble: only a head still waiting behind a running turn (`queued > 0`)
   opens a foldable batch; a head that runs immediately (`queued === 0`) is sealed

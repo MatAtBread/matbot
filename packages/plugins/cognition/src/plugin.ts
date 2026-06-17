@@ -3,14 +3,26 @@ import type { MatbotPluginSpec, MatbotServices } from '@matatbread/matbot-plugin
 import { COGNITION_SKILLS } from './skills.js';
 import { defineStore } from '@matatbread/matbot-tool-store';
 import { createDreamTimeTool } from './dream/tool.js';
-import type { DreamRun } from './dream/types.js';
+// These type imports also bring the `SkillManager` / `Triggers` augmentations of MatbotServices into
+// cognition's compilation, since cognition is a consumer of both capabilities (discovered, not owned).
+import type { SkillManager } from '@matatbread/matbot-skills';
+import type { Triggers } from '@matatbread/matbot-triggers';
 
-console.warn('[cognition] MARKER-A: module imported (top of plugin.ts)');
-
-async function seedSkills(skills: NonNullable<MatbotServices['SkillManager']>): Promise<void> {
-  // Create-if-absent: an install that already holds a skill of the same name keeps its own copy.
+async function seedCognition(services: MatbotServices): Promise<void> {
+  const skills: SkillManager | undefined = services.SkillManager;
+  if (!skills) return;
+  // Triggers are seeded separately, now that they are no longer embedded in the skill. A built-in
+  // skill's `triggers` become one Trigger whose invoke loads that skill via `skill_action(load)`.
+  // Both imports are create-if-absent, so an install that already holds them keeps its own copy.
+  const triggers: Triggers | undefined = services.Triggers;
   for (const skill of COGNITION_SKILLS) {
-    await skills.importIfAbsent(skill.name, skill.content, skill.triggers);
+    await skills.importIfAbsent(skill.name, skill.content);
+    if (triggers && skill.triggers.length > 0) {
+      await triggers.importIfAbsent({
+        conditions: skill.triggers.map(t => ({ phase: t.phase, rule: t.trigger })),
+        invoke:     { tool: 'skill_action', params: { action: 'load', name: skill.name } },
+      });
+    }
   }
 }
 
@@ -131,11 +143,13 @@ The store is idempotent: a re-seed on restart keeps the existing data.
       console.warn('[cognition] MARKER-E: dream_time tool registered OK');
 
       if (services.SkillManager) {
-        await seedSkills(services.SkillManager);
+        await seedCognition(services);
         return;
       }
 
       // No skills service yet — defer. Seed on the first turn it appears, then unregister this hook.
+      // (Triggers are seeded opportunistically in the same pass: if the Triggers service is present
+      // by then it gets the load-triggers too, otherwise the skills still seed without them.)
       console.warn(
         '[cognition] No skills service present at setup; built-in skills will be seeded on the first ' +
         'turn after a skills service (e.g. @matatbread/matbot-skills) is loaded.',
@@ -146,7 +160,7 @@ The store is idempotent: a re-seed on restart keeps the existing data.
         async handler(ctx) {
           if (seeded || !services.SkillManager) return;
           seeded = true;
-          await seedSkills(services.SkillManager);
+          await seedCognition(services);
           ctx.removeHook();
         },
       });

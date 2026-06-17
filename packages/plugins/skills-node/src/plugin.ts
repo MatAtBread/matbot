@@ -28,11 +28,10 @@ export function createSkillsNodePlugin(config: SkillsNodePluginConfig): MatbotPl
     },
 
     async installationMessage() {
-      return 'Skills are active (skill_action / skill_triggers, plus a local .md import + watch). ' +
-        'Their `agent`/`user` triggers are evaluated by an LLM classifier, which needs a provider ' +
-        'named "skills-classifier" — until one is configured, triggers simply never fire (skills ' +
-        'still work when loaded by name). Add it with the `provider` tool, pointing it at a small, ' +
-        'fast model. Offer to do this now.';
+      return 'Skills are active (skill_action, plus a local .md import + watch). A skill is loaded on ' +
+        'demand by name; to make one load automatically on a behavioural condition, add a trigger ' +
+        '(trigger_action) whose invoke is skill_action with { action: "load", name } — install ' +
+        '@matatbread/matbot-triggers for that.';
     },
 
     async setup(services) {

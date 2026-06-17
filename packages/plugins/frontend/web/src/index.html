@@ -446,7 +446,7 @@
     #skill-trigger-list { flex: 1; min-height: 0; overflow-y: auto; }
     #skill-trigger-add { align-self: flex-start; margin-top: 10px; }
     #skill-trigger-list:empty::after {
-      content: 'No triggers. Most skills need none — search surfaces them by content.';
+      content: 'No trigger conditions. Most skills need none — search surfaces them by content. Add one to load this skill when it matches.';
       color: #9ca3af;
       font-size: 0.82em;
     }
@@ -1623,7 +1623,7 @@
         </div>
         <div id="skill-editor-pane-triggers" class="skill-pane">
           <div id="skill-trigger-list"></div>
-          <button id="skill-trigger-add" class="skill-editor-btn">+ Add trigger</button>
+          <button id="skill-trigger-add" class="skill-editor-btn">+ Add condition</button>
         </div>
         <div id="skill-editor-pane-metadata" class="skill-pane">
           <div id="skill-metadata"></div>
