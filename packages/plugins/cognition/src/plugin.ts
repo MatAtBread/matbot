@@ -21,7 +21,9 @@ async function seedCognition(services: MatbotServices): Promise<void> {
     if (triggers && skill.triggers.length > 0) {
       await triggers.importIfAbsent({
         conditions: skill.triggers.map(t => ({ phase: t.phase, rule: t.trigger })),
-        invoke:     { tool: 'skill_action', params: { action: 'load', name: skill.name } },
+        // `use`, not `load`: a fired trigger should make the skill take effect (its content as a
+        // directive), not just surface the raw text.
+        invoke:     { tool: 'skill_action', params: { action: 'use', name: skill.name } },
       });
     }
   }

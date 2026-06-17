@@ -389,16 +389,19 @@ Five channels:
 
 | `on` | Home | Cadence | Session | Effects (the ceiling) |
 |---|---|---|---|---|
-| `screen`     | runner, top of turn | once, before the 1st provider call | read-write | the only durable-mutate point: replace `session` (persisted), add turn-scoped `ephemeral` context (prepended to this turn's calls, never persisted), and/or `abort` |
+| `screen`     | runner, top of turn | once, before the 1st provider call | read-write | the primary durable-mutate point: replace `session` (persisted), add turn-scoped `ephemeral` context (appended to the tail of this turn's outgoing messages — freshest, most salient, cache-prefix-stable — never persisted), append durable `markers` (persisted + emitted live), and/or `abort` |
 | `contribute` | runner, in the loop | before *every* provider call | read-only | return a transformed copy of `outgoing` (the message array about to be sent) — ephemeral, never persisted |
 | `toolcall`   | runner | before each tool exec | read-only | `rejectTool` (skip; an error result is fed back so the model self-corrects, pairing intact) and/or `abort` |
 | `toolresult` | runner | after each tool exec, pre-record | read-only | return `{ result }` to replace it (hard redaction, truncation) or nothing to observe (audit — ctx carries `toolCall`, `result`, `isError`, `durationMs`) |
-| `followup`   | pump, post-commit | once, after the turn commits | read-only | `resubmit` a robo turn (head-enqueued, runs next as its own real turn); `resubmitDepth` budgets the chain, the runner hard-caps it |
+| `followup`   | pump, post-commit | once, after the turn commits | read + durable-marker | `resubmit` a robo turn (head-enqueued, runs next as its own real turn; `resubmitDepth` budgets the chain, the runner hard-caps it), and/or append durable `markers` to the committed session (LLM-invisible; the pump persists them and emits them live) |
 
 `toolcall` guards the call *in*, `toolresult` the result *out*. `followup` is matbot deciding to
 continue a turn — the inverse of `ask_user`, where it pauses to wait on a human. Cadence dictates
-durability: a once-per-turn point (`screen`) may persist; a per-call/per-tool point must not (it
-re-fires, so a durable write would accumulate) — hence those are read-only or ephemeral. Per-channel
+durability: a once-per-turn point may persist; a per-call/per-tool point must not (it re-fires, so a
+durable write would accumulate) — hence the per-call channels are read-only or ephemeral. **Both**
+once-per-turn points may write durably: `screen` replaces the whole `session` (it runs before the
+turn), while `followup` may only *append* `markers` to the committed session (it runs after) — never
+rewriting history, only annotating it, which is why the narrower capability is safe there. Per-channel
 dispatch lives on `HookRegistry` (`runScreen` / `runContribute` / `runToolCall` / `runToolResult` /
 `runFollowup`); the runner drives the first four, the `SessionRunner` pump the last.
 
@@ -437,10 +440,12 @@ interface Trigger {
 ```
 
 **The load-bearing idea: a trigger names a *tool*, not a skill.** Firing a skill is just
-`invoke: skill_action({ action: 'load', … })` — one tool call among many, not a special case. This
+`invoke: skill_action({ action: 'use', … })` — one tool call among many, not a special case. This
 collapses the old `tool → skill → tool` indirection (where a robo message asked the model to *load*
-a skill that then told it to *call* a tool) into `condition → tool`. "Load a skill" is the
-specialization; "call a tool" is the general case.
+a skill that then told it to *call* a tool) into `condition → tool`. "Apply a skill" is the
+specialization; "call a tool" is the general case. (`skill_action` has both `load` — raw content,
+for reading/editing — and `use` — the content wrapped as a directive to apply now; a trigger uses
+`use`, which is where the old "Use the skill X" imperative lives, content inlined so no round-trip.)
 
 **Conditions are the OR, `invoke` is the consequence.** Any matching condition fires the trigger
 once. Each condition is an LLM-judged rubric ("MATCH if …; DO NOT MATCH if …") on the *form/sentiment*
@@ -453,10 +458,12 @@ used to be plugin code.
 **Observational dispatch decides whether the model wakes — the tool's *output* is the signal.** The
 dispatcher invokes the tool and looks at what it yields: a `result` is model-facing → inject it
 (ephemeral for `user`, robo resubmit for `agent`); **no** result → a silent side-effect, the model
-never wakes (`direct`). Nothing declares "direct vs inject" — `skill_action(load)` yields content so
-it injects; a future `remember_fact` yields nothing so it runs silent. (`ToolEvent` has no `marker`
-variant yet, so a *visible* silent side-effect — a 🧠 breadcrumb — isn't expressible; that's the next
-piece. Today "no result" simply means "no wake".)
+never wakes (`direct`). Nothing declares "direct vs inject" — `skill_action(use)` yields content so
+it injects; `remember_fact` yields no result (only a `marker`) so it runs silent. The dispatcher is a
+dumb transport: it injects whatever result a tool yields, with no framing of its own — a tool that
+wants its result *acted on* frames it itself (`use` returns content already wrapped as "follow these
+instructions"). A `marker` a tool yields is collected and persisted regardless (the silent-side-effect
+trace; see Markers).
 
 **Fails soft, everywhere.** An `invoke` naming an absent tool does nothing until the tool is present
 (no referential integrity, no cascade — the same graceful-degradation rule as a stale `skill_action`
@@ -466,13 +473,13 @@ config compatibility); with none configured, triggers simply never fire.
 **Surfaces.** A `Triggers` service (CRUD + `importIfAbsent`, which dedupes by invocation since
 triggers carry no name — the key for idempotent seeding) and a `trigger_action` tool
 (`list`/`query`/`get`/`add`/`update`/`remove`; `query` filters by invoke target, e.g. "the trigger
-that loads skill X"). cognition seeds its built-in skills' triggers through the service; the web skill
-editor edits a skill's load-trigger conditions through `trigger_action query`.
+that uses skill X"). cognition seeds its built-in skills' triggers through the service; the web skill
+editor edits a skill's use-trigger conditions through `trigger_action query`.
 
 **Orthogonal to skills.** Triggers and skills don't import each other. Skills own content and the
 system-prompt catalogue (`SkillDoc.catalogSummary`, the former `system`-phase — advertisement, not a
 condition); triggers own conditions and firing. A skill is fired only by a trigger whose `invoke`
-loads it.
+uses it.
 
 ---
 
@@ -538,6 +545,15 @@ session). For per-creator type safety, augment the `MarkerData` registry and rea
 `MessageContent` member stays loose so exhaustive switches are unaffected. Any code with session
 access may emit a marker — interpreting and rendering it is the creator's and the frontend's
 concern, never the core's.
+
+A **tool** emits one by yielding a `marker` `ToolEvent` (`{ type: 'marker', creator, data }`),
+independent of its `result`. In the normal loop the runner appends it as a marker-role message and
+carries it live; when a tool is invoked by a trigger (outside the loop), the triggers dispatcher
+collects it and persists it via the `screen` session or the `followup` `markers` path. This is the
+trace mechanism for silent side-effects: a trigger-fired tool that yields no result (so the model
+never wakes) can still leave a durable, LLM-invisible record of what it did — and the dispatcher
+adds an error marker of its own if the tool errors or throws, so a swallowed failure is auditable
+post-mortem rather than lost to a log line.
 
 ---
 

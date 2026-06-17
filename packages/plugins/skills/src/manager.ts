@@ -124,7 +124,7 @@ export interface SkillSummary {
  * with web-platform primitives — no Node APIs — so it runs in the browser too.
  *
  * Skills own content and catalogue advertisement only. The firing of a skill on a condition is the
- * triggers subsystem's concern (@matatbread/matbot-triggers): a trigger invokes `skill_action(load)`
+ * triggers subsystem's concern (@matatbread/matbot-triggers): a trigger invokes `skill_action(use)`
  * like any other tool, so skills carry no trigger data of their own.
  */
 export class SkillManager {

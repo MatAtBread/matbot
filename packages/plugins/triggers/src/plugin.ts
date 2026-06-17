@@ -1,5 +1,5 @@
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
-import type { MatbotPluginSpec, MatbotServices, Store, Message } from '@matatbread/matbot-plugin-api';
+import type { MatbotPluginSpec, MatbotServices, Store, Message, MessageContent } from '@matatbread/matbot-plugin-api';
 import { TriggerManager } from './manager.js';
 import { dispatchTrigger, renderResult } from './dispatch.js';
 import { createTriggerActionTool } from './tools.js';
@@ -17,10 +17,10 @@ declare module '@matatbread/matbot-plugin-api' {
 // `matbot.yaml` configs keep working without a rename. It points at a small, fast model.
 const CLASSIFIER_PROVIDER = 'skills-classifier';
 
-const FRAME_USER =
-  'The following is relevant to the user\'s latest message — apply it in your response:\n\n';
-const FRAME_AGENT =
-  'The following is relevant to your previous response — apply it in a follow-up:\n\n';
+// No framing here: the dispatcher is a transport. A tool that wants its result acted on frames it
+// itself (e.g. `skill_action(use)` returns content already wrapped as "follow these instructions").
+// Multiple fired triggers' results are joined with a separator.
+const JOIN = '\n\n---\n\n';
 
 function textOf(msg: Message | undefined): string {
   return msg?.content.filter(c => c.type === 'text').map(c => c.text).join('\n') ?? '';
@@ -72,14 +72,21 @@ export async function setupTriggers(services: MatbotServices): Promise<TriggerMa
       );
       if (fired.length === 0) return;
 
-      const bodies: string[] = [];
+      const bodies:  string[]         = [];
+      const markers: MessageContent[] = [];
       for (const t of fired) {
-        const value = await dispatchTrigger(services, t, { session: ctx.session, signal: ctx.signal, provider: ctx.config.provider });
-        if (value !== undefined) bodies.push(renderResult(value));
+        const out = await dispatchTrigger(services, t, { session: ctx.session, signal: ctx.signal, provider: ctx.config.provider, ...(ctx.prompt !== undefined ? { prompt: ctx.prompt } : {}) });
+        if (out.hadResult) bodies.push(renderResult(out.result));
+        markers.push(...out.markers);
       }
-      if (bodies.length === 0) return;
+      console.warn(`[triggers] screen: fired=${fired.length} bodies=${bodies.length} markers=${markers.length} -> ${bodies.length > 0 ? 'inject ephemeral' : 'no ephemeral'}`);
+      if (bodies.length === 0 && markers.length === 0) return;
 
-      return { ephemeral: [{ type: 'text', text: FRAME_USER + bodies.join('\n\n---\n\n') }] };
+      return {
+        // The dispatcher appends these to the session AND emits them live (consistent draw/reload).
+        ...(markers.length > 0 ? { markers } : {}),
+        ...(bodies.length  > 0 ? { ephemeral: [{ type: 'text', text: bodies.join(JOIN) }] } : {}),
+      };
     },
   });
 
@@ -100,17 +107,22 @@ export async function setupTriggers(services: MatbotServices): Promise<TriggerMa
         { label: 'preceding user message', text: textOf(ctx.session.messages.findLast(l => l.role === 'user')) },
         ctx.signal,
       );
+      console.warn(`[triggers] followup: agent-phase evaluated, fired=${fired.length}`);
       if (fired.length === 0) return;
 
-      const bodies: string[] = [];
+      const bodies:  string[]         = [];
+      const markers: MessageContent[] = [];
       for (const t of fired) {
-        const value = await dispatchTrigger(services, t, { session: ctx.session, signal: ctx.signal, provider: ctx.config.provider });
-        if (value !== undefined) bodies.push(renderResult(value));
+        const out = await dispatchTrigger(services, t, { session: ctx.session, signal: ctx.signal, provider: ctx.config.provider, ...(ctx.prompt !== undefined ? { prompt: ctx.prompt } : {}) });
+        if (out.hadResult) bodies.push(renderResult(out.result));
+        markers.push(...out.markers);
       }
-      if (bodies.length === 0) return;
+      if (bodies.length === 0 && markers.length === 0) return;
 
       return {
-        resubmit: { content: [{ type: 'text', origin: 'robo', text: FRAME_AGENT + bodies.join('\n\n---\n\n') }] },
+        ...(bodies.length  > 0 ? { resubmit: { content: [{ type: 'text', origin: 'robo', text: bodies.join(JOIN) }] } } : {}),
+        // Markers append durably to the committed session via the pump (the followup durable-write point).
+        ...(markers.length > 0 ? { markers } : {}),
       };
     },
   });

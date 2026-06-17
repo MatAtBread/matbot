@@ -23,7 +23,7 @@ const ANALYSIS_PROVIDER = 'skills-classifier';
  * so the model knows the skill exists and can load it on demand.
  *
  * Skills no longer evaluate conditions or fire themselves: that is the triggers subsystem's job
- * (@matatbread/matbot-triggers), reached by a trigger whose `invoke` is `skill_action(load)`.
+ * (@matatbread/matbot-triggers), reached by a trigger whose `invoke` is `skill_action(use)`.
  *
  * Returns the manager so a specialization (e.g. the node plugin) can attach a filesystem watch.
  * Uses only web-platform APIs.
@@ -51,7 +51,7 @@ export async function setupSkills(services: MatbotServices): Promise<SkillManage
       .map(s => `- ${s.name}: ${s.catalogSummary}`);
     return lines.length === 0
       ? null
-      : 'Available skills — load the relevant one with the skill_action tool (action "load") when its ' +
+      : 'Available skills — apply the relevant one with the skill_action tool (action "use") when its ' +
         'description applies:\n' + lines.join('\n');
   });
 
@@ -73,9 +73,9 @@ export function createSkillsPlugin(): MatbotPluginSpec {
     },
 
     async installationMessage() {
-      return 'Skills are active (skill_action). A skill is loaded on demand by name; to make one load ' +
+      return 'Skills are active (skill_action). A skill is loaded on demand by name; to make one apply ' +
         'automatically on a behavioural condition, add a trigger (trigger_action) whose invoke is ' +
-        'skill_action with { action: "load", name } — install @matatbread/matbot-triggers for that.';
+        'skill_action with { action: "use", name } — install @matatbread/matbot-triggers for that.';
     },
 
     async setup(services) {

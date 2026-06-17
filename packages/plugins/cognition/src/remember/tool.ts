@@ -16,16 +16,28 @@ import type { MatbotServices, Tool, ToolExecutor, ToolContext, ToolEvent, Messag
 import type { RememberedFact } from '../dream/types.js';
 
 const EXTRACT_SYSTEM =
-`You extract durable facts worth remembering across conversations from a single message.
+`You capture durable facts a user has EXPLICITLY asserted about themselves or their world, from a
+single message, for recall in future conversations.
 
-Return ONLY a JSON array of strings — each element one self-contained fact, normalised to refer to
-the user in the third person where relevant (e.g. "my neighbours are X" -> "The user's neighbours
-are X"). Split multiple distinct facts into separate elements.
+Be conservative. Extract only what the message plainly states — never infer, embellish, or read
+between the lines. Most messages contain nothing durable; an empty array [] is the common, correct
+answer. When in doubt, leave it out.
 
-Include: specific names, numbers, dates, locations, relationships, preferences, and domain details
-that are not general knowledge. Exclude: greetings, opinions without factual content, questions, and
-task instructions ("remember to restart the server"). If there is nothing worth remembering, return
-an empty array [].`;
+Rules:
+- A correction IS a durable fact — record what the user asserts is actually true. This covers
+  correcting the assistant's mistaken assumption (assistant assumed "Viz the software"; user says
+  "I meant the comic" -> "The user was referring to Viz the comic") and the user correcting their own
+  earlier statement ("actually it's Tuesday, not Monday"). Capture the corrected content itself, not
+  the claim it replaced.
+- Record only what is explicitly stated. Never infer feelings, preferences, or opinions that were not
+  stated outright: "I meant the comic" is NOT "the user likes the comic"; a correction is not an
+  endorsement. This inference is the main thing to avoid.
+- Exclude greetings, questions, opinions without factual content, task instructions ("remember to
+  restart the server"), and anything about the assistant or this conversation itself.
+
+Output ONLY a JSON array of strings — each one self-contained fact, normalised to the third person
+about the user where relevant ("my neighbours are X" -> "The user's neighbours are X"). Split
+distinct facts into separate elements. Nothing durable -> [].`;
 
 function textOf(msg: Message | undefined): string {
   return msg?.content.filter(c => c.type === 'text').map(c => c.text).join('\n') ?? '';
@@ -50,7 +62,9 @@ export function createRememberFactTool(services: MatbotServices): Tool {
         const parsed = m ? JSON.parse(m[0]) : [];
         facts = Array.isArray(parsed) ? parsed.filter((f): f is string => typeof f === 'string' && f.trim() !== '') : [];
       } catch (e) {
-        console.warn('[remember_fact] extraction failed:', (e as Error).message ?? e);
+        const msg = e instanceof Error ? e.message : String(e);
+        console.warn('[remember_fact] extraction failed:', msg);
+        yield { type: 'error', message: `remember_fact extraction failed: ${msg}` };
         return;
       }
 
@@ -74,7 +88,10 @@ export function createRememberFactTool(services: MatbotServices): Tool {
 
       console.warn(`[remember_fact] stored ${facts.length} fact(s) from message ${msg.id} (session ${ctx.session.id}):`);
       for (const f of facts) console.warn(`  • ${f}`);
-      // No result event: the model is not woken. Silent side-effect (direct).
+
+      // A durable, LLM-invisible trace of what was captured — so a silent firing is auditable
+      // post-mortem (which message, which facts). No `result` event: the model is not woken.
+      yield { type: 'marker', creator: 'remember_fact', data: { messageId: msg.id, sessionId: ctx.session.id, facts } };
     },
   };
 

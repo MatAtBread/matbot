@@ -778,7 +778,7 @@ async function saveTriggers(name) {
     }
   } else if (conditions.length) {
     const res = await callTool('trigger_action', {
-      action: 'add', conditions, tool: 'skill_action', params: { action: 'load', name },
+      action: 'add', conditions, tool: 'skill_action', params: { action: 'use', name },
     });
     editingTriggerId = res?.id ?? null;
   }
@@ -812,7 +812,7 @@ async function openSkillEditor(name) {
   skillEditorOverlay.classList.add('open');
   // Triggers live in their own store now, keyed by the tool they invoke — find the one that loads
   // this skill. Independent of the markdown editor, so load it even if TinyMDE is absent.
-  callTool('trigger_action', { action: 'query', tool: 'skill_action', params: { action: 'load', name } })
+  callTool('trigger_action', { action: 'query', tool: 'skill_action', params: { action: 'use', name } })
     .then((res) => {
       const trig = Array.isArray(res?.triggers) ? res.triggers[0] : undefined;
       editingTriggerId = trig?.id ?? null;
@@ -1321,14 +1321,26 @@ function renderMarker(part) {
     return note;
   }
 
-  const icon = document.createElement('span');
-  icon.className = 'marker-icon';
-  icon.textContent = '🔖';
-  note.appendChild(icon);
-  const text = document.createElement('span');
-  text.textContent = part.creator + ': ' + JSON.stringify(data);
-  note.appendChild(text);
-  return note;
+  // Everything else: render like a tool block — a collapsible whose title is the creator and whose
+  // body is the marker's JSON data. Generic, so any creator (remember_fact, triggers, future ones)
+  // gets a useful surface with no per-creator UI. Wrapped in an assistant-style container so it
+  // inherits the same width/alignment a tool block has *inside a turn* — a bare .tool-block dropped
+  // at the message-list top level full-bleeds and its overflow:hidden clips the content. The
+  // `marker-block` class on the wrapper makes it easy to restyle or suppress later.
+  const wrap = document.createElement('div');
+  wrap.className = 'message assistant marker-block';
+  const det = document.createElement('details');
+  det.className = 'tool-block';
+  const sum = document.createElement('summary');
+  sum.className = 'tool-header';
+  sum.textContent = '🔖 ' + part.creator;
+  det.appendChild(sum);
+  const pre = document.createElement('pre');
+  pre.className = 'tool-args';
+  pre.textContent = JSON.stringify(data, null, 2);
+  det.appendChild(pre);
+  wrap.appendChild(det);
+  return wrap;
 }
 
 // Populate a wrapper from historical message content parts
@@ -1572,6 +1584,14 @@ function wake(q) { if (q.wake) { const w = q.wake; q.wake = null; w(); } }
 
 function pushTurnEvent(ev) {
   if (foldedTraces.has(ev.traceId)) return;   // a folded submission's later events (incl. cancelled) are noise
+
+  // Markers can arrive after a turn's terminal event (e.g. a followup hook's, emitted post-commit).
+  // If the turn's queue is gone/finished, render directly rather than re-spawning a renderTurn for a
+  // done traceId; otherwise let it flow through the queue so it renders inline at the right spot.
+  if (ev.type === 'marker') {
+    const q = turnQueues.get(ev.traceId);
+    if (!q || q.done) { appendMarker(ev.content ?? []); return; }
+  }
 
   if (ev.type === 'queued') {
     // Fold a follower into the head only when BOTH the head and this submission are concat — mirroring

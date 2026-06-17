@@ -7,6 +7,7 @@ import type { SkillManager } from './manager.js';
 type SkillInput =
   | { action: 'list' }
   | { action: 'load';     name: string }
+  | { action: 'use';      name: string }
   | { action: 'metadata'; name: string }
   | { action: 'save';     name: string; content: string }
   | { action: 'delete';   name: string };
@@ -28,6 +29,24 @@ export function createSkillTool(manager: SkillManager): Tool {
           const doc = manager.get(name);
           if (!doc) { yield { type: 'error', message: `Skill not found: "${name}"` }; return; }
           yield { type: 'result', value: { id: doc.id, name: doc.name, content: doc.content } };
+          return;
+        }
+
+        case 'use': {
+          // Like load, but the content is wrapped as a directive — "apply this skill now" — rather
+          // than returned as raw reference text. This is what a firing trigger (or the model, when it
+          // means to *act* on a skill rather than read it) wants: it carries the imperative the old
+          // "Use the skill X" resubmit had, with the content inlined so there's no second round-trip.
+          const { name } = args as Extract<SkillInput, { action: 'use' }>;
+          if (!name) { yield { type: 'error', message: 'action "use" requires "name".' }; return; }
+          const doc = manager.get(name);
+          if (!doc) { yield { type: 'error', message: `Skill not found: "${name}"` }; return; }
+          yield { type: 'result', value: {
+            id:      doc.id,
+            name:    doc.name,
+            content: `Follow the instructions in the skill "${doc.name}" in your reply. Apply them now — ` +
+                     `they take precedence over brevity or staying on the prior topic.\n\n${doc.content}`,
+          } };
           return;
         }
 
@@ -60,7 +79,7 @@ export function createSkillTool(manager: SkillManager): Tool {
         }
 
         default:
-          yield { type: 'error', message: `Unknown action "${String(args.action)}". Expected one of: list, load, save, delete.` };
+          yield { type: 'error', message: `Unknown action "${String(args.action)}". Expected one of: list, load, use, metadata, save, delete.` };
       }
     },
   };
@@ -70,16 +89,21 @@ export function createSkillTool(manager: SkillManager): Tool {
     description:
       'Manage skills — named, reusable markdown playbooks (procedures, conventions, reference ' +
       'notes) the assistant stores and recalls on demand. A skill is keyed by name (case-insensitive) ' +
-      'and holds markdown content. Use this tool to list skills, load one (its content, for use), ' +
-      'read its derived metadata (summary/entities/tags), create or update one, or delete one.\n\n' +
-      'Most skills are surfaced by content search; to make one load automatically on a behavioural ' +
+      'and holds markdown content. Use this tool to list skills, load one (raw content, for reading or ' +
+      'editing), use one (its content as a directive, to apply now), read its derived metadata, create ' +
+      'or update one, or delete one.\n\n' +
+      '`load` vs `use`: load returns the raw markdown (for inspection or editing); use returns the same ' +
+      'content wrapped as an instruction to follow it now. A trigger that should make a skill take ' +
+      'effect invokes `use`; tooling that reads a skill invokes `load`.\n\n' +
+      'Most skills are surfaced by content search; to make one apply automatically on a behavioural ' +
       'condition, create a trigger with the `trigger_action` tool whose `invoke` is this tool with ' +
-      '`{ action: "load", name }`.\n\n' +
+      '`{ action: "use", name }`.\n\n' +
       'Parameters depend on `action` (TypeScript):\n' +
       '```ts\n' +
       'type SkillAction =\n' +
       "  | { action: 'list' }                            // -> { skills: [{ id, name, toolBinding? }] }\n" +
-      "  | { action: 'load';     name: string }          // -> { id, name, content }\n" +
+      "  | { action: 'load';     name: string }          // raw content -> { id, name, content }\n" +
+      "  | { action: 'use';      name: string }          // content as a directive to apply now -> { id, name, content }\n" +
       "  | { action: 'metadata'; name: string }          // derived analysis -> { id, name, knowledge: { summary, entities, tags } | null }\n" +
       "  | { action: 'save';     name: string; content: string }  // create or update -> { id, name }\n" +
       "  | { action: 'delete';   name: string };         // -> { id, name }\n" +
@@ -88,8 +112,8 @@ export function createSkillTool(manager: SkillManager): Tool {
       type:       'object',
       required:   ['action'],
       properties: {
-        action:   { type: 'string', enum: ['list', 'load', 'metadata', 'save', 'delete'], description: 'The operation to perform.' },
-        name:     { type: 'string', description: 'Skill name (case-insensitive). Required for load/save/delete.' },
+        action:   { type: 'string', enum: ['list', 'load', 'use', 'metadata', 'save', 'delete'], description: 'The operation to perform.' },
+        name:     { type: 'string', description: 'Skill name (case-insensitive). Required for load/use/metadata/save/delete.' },
         content:  { type: 'string', description: 'Skill content in markdown — required for action "save".' },
       },
     },

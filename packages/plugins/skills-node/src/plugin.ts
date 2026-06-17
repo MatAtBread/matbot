@@ -29,8 +29,8 @@ export function createSkillsNodePlugin(config: SkillsNodePluginConfig): MatbotPl
 
     async installationMessage() {
       return 'Skills are active (skill_action, plus a local .md import + watch). A skill is loaded on ' +
-        'demand by name; to make one load automatically on a behavioural condition, add a trigger ' +
-        '(trigger_action) whose invoke is skill_action with { action: "load", name } — install ' +
+        'demand by name; to make one apply automatically on a behavioural condition, add a trigger ' +
+        '(trigger_action) whose invoke is skill_action with { action: "use", name } — install ' +
         '@matatbread/matbot-triggers for that.';
     },
 

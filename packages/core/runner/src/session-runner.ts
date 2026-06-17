@@ -232,15 +232,36 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
           if (!ac.signal.aborted && hooks) {
             const committed = await deps.store.get(id);
             if (committed && head.resubmitDepth < MAX_RESUBMIT_DEPTH) {
-              let resubmits: MessageContent[][] = [];
+              let followup: { resubmits: MessageContent[][]; markers: MessageContent[] } = { resubmits: [], markers: [] };
               await runAs(head.principal, async () => {
-                resubmits = await hooks.runFollowup({
+                followup = await hooks.runFollowup({
                   session:       committed,
                   resubmitDepth: head.resubmitDepth,
                   config:        { provider: head.provider, traceId: head.traceId },
                   signal:        ac.signal,
+                  ...(head.prompt !== undefined ? { prompt: head.prompt } : {}),
                 });
               });
+              const resubmits = followup.resubmits;
+
+              // Durable markers a followup hook returned (e.g. a fired trigger's silent tool tracing
+              // what it did). Append-only to the just-committed session; the pump is the sole writer
+              // post-commit, so an unconditional set is safe. Emitted live too (post-`done`, like a
+              // `queued` event) so a live draw matches a reload — the engine surfaces everything it
+              // persists; a frontend filters if it wants to.
+              if (followup.markers.length > 0) {
+                await deps.store.set(id, {
+                  ...committed,
+                  messages: [...committed.messages, {
+                    id:        crypto.randomUUID(),
+                    role:      'marker',
+                    createdAt: new Date().toISOString(),
+                    traceId:   head.traceId,
+                    content:   followup.markers,
+                  }],
+                });
+                notify(s, { type: 'marker', content: followup.markers, traceId: head.traceId });
+              }
               // unshift in reverse so the hooks' order is preserved at the head of the queue. Stamp
               // every block `origin: 'robo'` here — once — so it rides into both the live `queued`
               // event and the persisted user message the pump builds from this item.
