@@ -148,15 +148,18 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
         }
       }
     } catch (e: any) {
+      // Persist whatever the LLM streamed before the failure, plus every step already
+      // committed earlier this turn, so neither an abort nor a provider/network error
+      // discards the in-flight turn whole. Only text is accumulated at this point (tool-call
+      // blocks are appended after the try), so the saved tail stays well-paired.
+      if (textAcc) assistantParts.push({ type: 'text', text: textAcc });
+      if (assistantParts.length > 0) {
+        session = appendMessage(session, createMessage({
+          role: 'assistant', content: assistantParts, traceId, providerName: config.provider,
+        }));
+      }
+      await store.set(session.id, session);
       if (signal.aborted) {
-        // Save whatever the LLM streamed before the abort hit.
-        if (textAcc) assistantParts.push({ type: 'text', text: textAcc });
-        if (assistantParts.length > 0) {
-          session = appendMessage(session, createMessage({
-            role: 'assistant', content: assistantParts, traceId, providerName: config.provider,
-          }));
-        }
-        await store.set(session.id, session);
         yield { type: 'aborted', reason: typeof signal.reason === 'string' ? signal.reason : 'user-abort', session, traceId };
         return;
       }
@@ -264,6 +267,10 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
     // Add tool results message, then loop for the next provider call.
     const toolMsg = createMessage({ role: 'tool', content: toolResults, traceId });
     session = appendMessage(session, toolMsg);
+    // Commit the assistant tool-call message together with its tool results, atomically:
+    // disk never holds a tool_use without its matching tool_result, so an interruption while
+    // the model produces the next step can't poison the session, yet completed steps survive.
+    await store.set(session.id, session);
   }
 
   // ── 4. Persist and finish ──────────────────────────────────────────────────
