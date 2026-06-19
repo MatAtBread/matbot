@@ -28,7 +28,8 @@
     "packages/plugins/persist-ki-bge",
     "packages/plugins/json-validation",
     "packages/plugins/tool-store",
-    "packages/plugins/cognition"
+    "packages/plugins/cognition",
+    "packages/plugins/storage/google-drive"
   ],
 
   "providers": {},

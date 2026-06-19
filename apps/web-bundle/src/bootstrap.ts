@@ -105,7 +105,12 @@ export async function boot(env: BootEnv): Promise<void> {
   // anonymous default.
   installPrincipalCarrier(createConstantPrincipalCarrier(config.principal ?? WEB_USER));
 
-  const vault: Vault = new LocalStorageVault();
+  // Vault behind a capture-safe proxy (like StorageBackend/KnowledgeIndex): a plugin may
+  // `register('Vault', impl)` to swap in a different secret store (e.g. a Drive-backed one), and
+  // every captured reference — complete(), resolveProvider(), the session runner — follows the swap
+  // because resolution is lazy/per-turn through the proxy. The default boots from localStorage.
+  let activeVault: Vault = new LocalStorageVault();
+  const vault = forwardingProxy<Vault>(() => activeVault);
 
   // Store a wizard draft: key in the vault under a derived name, persist the config (with a ${ref},
   // never the raw key) to localStorage, and return the runnable config. A self-contained provider
@@ -222,6 +227,10 @@ export async function boot(env: BootEnv): Promise<void> {
         const prev = knowledgeImpl;
         knowledgeImpl = value as KnowledgeIndex;
         if (prev.entries !== undefined) for (const e of prev.entries()) void (value as KnowledgeIndex).index(e);
+      } else if (key === 'Vault') {
+        // Swap the live vault behind the proxy. Nothing is migrated (secrets aren't drained from the
+        // old vault) — mirrors the CLI's Vault swap; a new backend seeds itself as it sees fit.
+        activeVault = value as Vault;
       } else {
         serviceRegistry.set(key as string, value);
       }
