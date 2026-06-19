@@ -1,25 +1,33 @@
 import type { Tool, ToolExecutor, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
 import type { TriggerManager } from './manager.js';
-import type { TriggerCondition, TriggerPhase } from './types.js';
+import type { TriggerCondition, TriggerKind } from './types.js';
 
-const PHASES: readonly TriggerPhase[] = ['agent', 'user'];
-const isPhase = (x: unknown): x is TriggerPhase => typeof x === 'string' && (PHASES as readonly string[]).includes(x);
+const KINDS: readonly TriggerKind[] = ['augment', 'retract', 'followup'];
+const isKind = (x: unknown): x is TriggerKind => typeof x === 'string' && (KINDS as readonly string[]).includes(x);
 
 const GUIDANCE =
   'A trigger is a data-driven hook: a list of `conditions` and the single tool call (`invoke`) to ' +
   'make when ANY condition matches. The conditions are the OR — different ways to recognise the ' +
   'situation — and the invocation is the one consequence.\n\n' +
-  'Each condition has a `phase` and a `rule`:\n' +
+  'Each condition has a `kind` and a `rule`:\n' +
   '• The `rule` is a CONDITION on the FORM or SENTIMENT of a message, NOT its topic (topical ' +
   'relevance is found by search, so keyword/entity rules are redundant noise — do not write them). ' +
   'Phrase it as a single LLM-judged rubric "MATCH if the message is …; DO NOT MATCH if …".\n' +
-  '• `phase: "agent"` judges the ASSISTANT RESPONSE (e.g. it stated a cause as fact without ' +
-  'verifying); `phase: "user"` judges the USER MESSAGE (e.g. frustration, correction, a fact worth ' +
-  'remembering).\n\n' +
+  '• `kind` fixes WHAT is judged and WHAT happens when it matches:\n' +
+  '   - "augment": judge the USER MESSAGE (e.g. frustration, a fact worth remembering); run the tool ' +
+  'and inject its output into the response about to be written.\n' +
+  '   - "retract": judge the ASSISTANT RESPONSE; the response is WRONG, so discard it and regenerate ' +
+  'the turn with the output as context (e.g. a corrected field name invalidates everything downstream).\n' +
+  '   - "followup": judge the ASSISTANT RESPONSE; the response STANDS but needs a steer or ' +
+  'verification, so keep it and add a follow-up turn carrying the output (e.g. critique/verify the ' +
+  'existing answer — it must remain in context). Choose retract vs followup by whether a match means ' +
+  '"this is wrong" vs "look at this again".\n\n' +
   '`invoke` names a tool and its params, run verbatim when the trigger fires. If the tool produces ' +
   'a result, the model is woken with it; a pure side-effect tool (no result) runs silently. An ' +
   'invoke naming a tool that is not present fails soft — the trigger simply does nothing until it ' +
-  'is. To make a skill load on a condition, invoke `skill_action` with `{ action: "load", name }`.';
+  'is. To fire a skill on a condition, invoke `skill_action` with `{ action: "use", name }` — `use` ' +
+  'applies the skill as a directive (the firing case). (`{ action: "load" }` returns raw content for ' +
+  'reading/editing, not for firing — a `load` result is bare text the model may misread as the user speaking.)';
 
 type TriggerActionInput =
   | { action: 'list' }
@@ -29,9 +37,11 @@ type TriggerActionInput =
   | { action: 'update'; id: string; conditions?: TriggerCondition[]; tool?: string; params?: unknown; enabled?: boolean }
   | { action: 'remove'; id: string };
 
+// A condition is valid if it has a recognised `kind` and a string `rule`.
 function validConditions(x: unknown): x is TriggerCondition[] {
   return Array.isArray(x) && x.every(c =>
-    c !== null && typeof c === 'object' && isPhase((c as { phase?: unknown }).phase) &&
+    c !== null && typeof c === 'object' &&
+    isKind((c as { kind?: unknown }).kind) &&
     typeof (c as { rule?: unknown }).rule === 'string');
 }
 
@@ -66,7 +76,7 @@ export function createTriggerActionTool(manager: TriggerManager): Tool {
 
         case 'add': {
           const a = args as Extract<TriggerActionInput, { action: 'add' }>;
-          if (!validConditions(a.conditions)) { yield { type: 'error', message: `action "add" requires "conditions": [{ phase: ${PHASES.join('|')}, rule: string }].` }; return; }
+          if (!validConditions(a.conditions)) { yield { type: 'error', message: `action "add" requires "conditions": [{ kind: ${KINDS.join('|')}, rule: string }].` }; return; }
           if (a.conditions.length === 0)      { yield { type: 'error', message: 'action "add" requires at least one condition.' }; return; }
           if (typeof a.tool !== 'string')     { yield { type: 'error', message: 'action "add" requires a string "tool" to invoke.' }; return; }
           const t = await manager.add({
@@ -81,7 +91,7 @@ export function createTriggerActionTool(manager: TriggerManager): Tool {
         case 'update': {
           const a = args as Extract<TriggerActionInput, { action: 'update' }>;
           if (!a.id) { yield { type: 'error', message: 'action "update" requires "id".' }; return; }
-          if (a.conditions !== undefined && !validConditions(a.conditions)) { yield { type: 'error', message: '"conditions" must be [{ phase, rule }].' }; return; }
+          if (a.conditions !== undefined && !validConditions(a.conditions)) { yield { type: 'error', message: '"conditions" must be [{ kind, rule }].' }; return; }
           if (a.tool !== undefined && typeof a.tool !== 'string')           { yield { type: 'error', message: '"tool" must be a string.' }; return; }
           const t = await manager.update(a.id, {
             ...(a.conditions !== undefined ? { conditions: a.conditions } : {}),
@@ -121,8 +131,8 @@ export function createTriggerActionTool(manager: TriggerManager): Tool {
       '"get" or "list" first to read the id, then "update" by id.\n\n' +
       'Parameters depend on `action` (TypeScript):\n' +
       '```ts\n' +
-      "type TriggerPhase = 'agent' | 'user';\n" +
-      'type TriggerCondition = { phase: TriggerPhase; rule: string };\n' +
+      "type TriggerKind = 'augment' | 'retract' | 'followup';  // augment=judge user msg+inject; retract=wrong, redo; followup=stands, add steer turn\n" +
+      'type TriggerCondition = { kind: TriggerKind; rule: string };\n' +
       'type TriggerAction =\n' +
       "  | { action: 'list' }                                                              // -> { triggers: [...] }\n" +
       "  | { action: 'query';  tool?: string; params?: object }                            // triggers invoking that tool -> { triggers: [...] }\n" +
@@ -137,8 +147,8 @@ export function createTriggerActionTool(manager: TriggerManager): Tool {
       properties: {
         action:     { type: 'string', enum: ['list', 'query', 'get', 'add', 'update', 'remove'], description: 'The operation to perform.' },
         id:         { type: 'string', description: 'Trigger id. Required for get/update/remove.' },
-        conditions: { type: 'array', description: 'Conditions [{ phase: "agent"|"user", rule: string }]. Required for add.',
-          items: { type: 'object', properties: { phase: { type: 'string', enum: ['agent', 'user'] }, rule: { type: 'string' } } } },
+        conditions: { type: 'array', description: 'Conditions [{ kind: "augment"|"retract"|"followup", rule: string }]. Required for add.',
+          items: { type: 'object', properties: { kind: { type: 'string', enum: ['augment', 'retract', 'followup'] }, rule: { type: 'string' } } } },
         tool:       { type: 'string', description: 'Name of the tool to invoke when a condition matches. Required for add.' },
         params:     { type: 'object', description: 'Params passed verbatim as the invoked tool\'s input.' },
         enabled:    { type: 'boolean', description: 'Set false to keep but disable the trigger.' },

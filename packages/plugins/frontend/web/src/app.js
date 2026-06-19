@@ -631,10 +631,10 @@ const skillEditorError   = document.getElementById('skill-editor-error');
 const skillEditorSave    = document.getElementById('skill-editor-save');
 const skillEditorRoot    = document.getElementById('skill-editor');
 const skillTriggerList   = document.getElementById('skill-trigger-list');
-const TRIGGER_PHASES = ['agent', 'user'];
+const TRIGGER_KINDS = ['augment', 'retract', 'followup'];
 let editingSkillName = null;
 let skillEditor = null;   // TinyMDE.Editor, created lazily on first open
-// A skill is fired by (at most) one Trigger whose invoke is skill_action(load, {name}); its
+// A skill is fired by (at most) one Trigger whose invoke is skill_action(use, {name}); its
 // `conditions` are what the Triggers tab edits. `editingTriggerId` is that trigger's id (null when
 // the skill has no trigger yet — we create one on save if conditions are added).
 let editingTriggerId = null;
@@ -714,13 +714,15 @@ function makeTriggerRow(c) {
   row.className = 'trigger-row';
 
   const sel = document.createElement('select');
-  sel.className = 'trigger-phase';
-  for (const p of TRIGGER_PHASES) {
+  sel.className = 'trigger-kind';
+  for (const k of TRIGGER_KINDS) {
     const o = document.createElement('option');
-    o.value = p; o.textContent = p;
+    o.value = k; o.textContent = k;
     sel.appendChild(o);
   }
-  sel.value = c?.phase ?? 'agent';
+  // augment = fire on the user message (route the skill in); retract/followup = fire on the
+  // assistant response (discard+redo / keep+steer). Most skill triggers route on user input.
+  sel.value = c?.kind ?? 'augment';
   sel.disabled = !editable;
 
   const txt = document.createElement('textarea');
@@ -763,10 +765,10 @@ function renderTriggers(conditions) {
 async function saveTriggers(name) {
   const conditions = [];
   for (const row of skillTriggerList.querySelectorAll('.trigger-row')) {
-    const phase = row.querySelector('.trigger-phase').value;
-    const rule  = row.querySelector('.trigger-text').value.trim();
+    const kind = row.querySelector('.trigger-kind').value;
+    const rule = row.querySelector('.trigger-text').value.trim();
     if (!rule) continue; // an empty row is a no-op, not a delete
-    conditions.push({ phase, rule });
+    conditions.push({ kind, rule });
   }
 
   if (editingTriggerId) {
@@ -1270,10 +1272,17 @@ function createAssistantWrap(labelText, anchorAfter) {
 
 // Render marker blocks as centered cross-thread notices. Markers are opaque to the LLM; the UI
 // is free to interpret known creators. Unknown creators get a generic, non-navigating chip.
-function appendMarker(content) {
+function appendMarker(content, traceId) {
   messagesEl.querySelector('.empty-state')?.remove();
   for (const part of content) {
     if (part.type !== 'marker') continue;
+    // A retraction supersedes the turn's original response: drop that response from the live view so
+    // the thread matches what a refresh shows (the original is popped from the session and survives
+    // only inside this marker). Idempotent — a no-op on reload, where the original was never rendered
+    // (renderSession doesn't tag assistant wraps with a traceId).
+    if (part.creator === 'matbot-retraction' && traceId) {
+      messagesEl.querySelectorAll(`.message.assistant[data-trace="${traceId}"]`).forEach(el => el.remove());
+    }
     messagesEl.appendChild(renderMarker(part));
   }
 }
@@ -1304,6 +1313,25 @@ function renderMarker(part) {
     link.addEventListener('click', (e) => { e.preventDefault(); openSession(data.peerSessionId, hasTarget ? data.targetMsg : undefined); });
     note.appendChild(link);
     return note;
+  }
+
+  // A retract-and-rerun: show a collapsed, thinking-styled block titled "Retraction" holding ONLY the
+  // final text of the superseded response (no thinking/tool blocks). The response itself was removed
+  // from the thread (see appendMarker), so this is the sole, de-emphasised trace of what was said.
+  if (part.creator === 'matbot-retraction') {
+    const retracted = Array.isArray(data.retracted) ? data.retracted : [];
+    const text = retracted
+      .flatMap(m => (m.content || []).filter(c => c.type === 'text').map(c => c.text))
+      .join('\n\n').trim();
+    const wrap = document.createElement('div');
+    wrap.className = 'message assistant marker-block retraction';
+    const { details, content: body } = makeThinkingBlock('↩️ Retraction', false);
+    details.classList.add('retraction-block');
+    body.classList.add('md-body');
+    body.style.whiteSpace = 'normal';   // thinking-content defaults to pre-wrap; rendered markdown needs normal flow
+    body.innerHTML = md(text || '_(no text content)_');
+    wrap.appendChild(details);
+    return wrap;
   }
 
   // A hook threw and was skipped — surface it as a warning so a misconfigured hook (e.g. a provider
@@ -1483,7 +1511,7 @@ function renderSession(session, startIdx, scrollTarget) {
       const dummy = document.createDocumentFragment();
       renderContentParts(dummy, msg.content);
     } else if (msg.role === 'marker') {
-      appendMarker(msg.content);
+      appendMarker(msg.content, msg.traceId);
     }
   }
   if (scrollTarget !== undefined) {
@@ -1590,7 +1618,7 @@ function pushTurnEvent(ev) {
   // done traceId; otherwise let it flow through the queue so it renders inline at the right spot.
   if (ev.type === 'marker') {
     const q = turnQueues.get(ev.traceId);
-    if (!q || q.done) { appendMarker(ev.content ?? []); return; }
+    if (!q || q.done) { appendMarker(ev.content ?? [], ev.traceId); return; }
   }
 
   if (ev.type === 'queued') {
@@ -1729,6 +1757,7 @@ async function renderTurn(sid, traceId) {
     started = true;
     if (userBubble) userBubble.classList.remove('pending');
     turnWrap = createAssistantWrap('assistant', userBubble);
+    turnWrap.dataset.trace = traceId;   // so a retraction marker for this turn can drop this wrap live
     loadingEl = document.createElement('div');
     loadingEl.className = 'msg-loading';
     turnWrap.appendChild(loadingEl);
@@ -2048,7 +2077,7 @@ async function renderTurn(sid, traceId) {
           // A marker appended to the session this turn (e.g. a hook that threw). Render it inline now;
           // on a later reload it comes back through renderSession's role==='marker' path identically.
           removeLoading();
-          appendMarker(ev.content ?? []);
+          appendMarker(ev.content ?? [], ev.traceId);
           break;
         }
 

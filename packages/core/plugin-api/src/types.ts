@@ -232,9 +232,11 @@ export interface RunConfig {
  *               result exists.
  *   followup    pump, once after a turn commits (post-persist). May `resubmit` a robo follow-up turn
  *               (head-enqueued, so it runs next as its own real turn; `resubmitDepth` is the chain
- *               length for the hook's own budget — the runner also hard-caps it), and/or append
- *               durable `markers` to the committed session (LLM-invisible annotations — the second
- *               durable-write point after `screen`, safe because it too fires once per turn).
+ *               length for the hook's own budget — the runner also hard-caps it), `retractAndRerun`
+ *               (pop the committed turn into a marker and re-run the originating user turn with
+ *               ephemeral context — supersede rather than follow), and/or append durable `markers`
+ *               to the committed session (LLM-invisible annotations — the second durable-write point
+ *               after `screen`, safe because it too fires once per turn).
  */
 export type HookPoint = 'screen' | 'contribute' | 'toolcall' | 'toolresult' | 'followup';
 
@@ -319,6 +321,19 @@ export interface FollowupContext {
 }
 export interface FollowupResult {
   resubmit?: { content: MessageContent[] };
+  /**
+   * Retract-and-rerun: supersede the just-committed turn instead of following it. The pump pops the
+   * committed turn back to (and excluding) the last user message, stashes the popped content in a
+   * durable retraction marker (LLM-elided like every marker, so a frontend can render it
+   * struck-through and a post-mortem can audit it), then re-runs that same user turn with `context`
+   * injected EPHEMERALLY (tail-folded, never persisted) — agent-phase injection time-shifted onto a
+   * committed turn. This is the inverse of `resubmit`, which leaves the response in place and appends
+   * a new robo turn after it. Self-terminating by design: a well-formed trigger fires on a *curable*
+   * defect that the injected context dissolves on the redo, so it won't re-fire; `resubmitDepth` (a
+   * redo carries parent+1) caps an ill-formed one. `resubmit` and `retractAndRerun` are independent
+   * capabilities — a single turn returning both is not expected, but both head-enqueue if it does.
+   */
+  retractAndRerun?: { context: MessageContent[] };
   /**
    * Durable `marker` blocks to append to the just-committed session (LLM-invisible; for tracing /
    * cross-references). The second durable-write capability after `screen` — safe here for the same

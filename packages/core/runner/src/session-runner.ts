@@ -36,10 +36,20 @@ interface QueuedItem {
   // 0 for an external submission; a `react` resubmission carries its parent's depth + 1. The reactor
   // budgets against it, and pump hard-caps it (MAX_RESUBMIT_DEPTH) so a misbehaving reactor can't loop.
   resubmitDepth: number;
+  // Present ⇒ this item RE-RUNS an already-committed user turn (an agent-phase retract-redo) rather
+  // than introducing a new user message: the pump skips the persist-at-turn-start append (the user
+  // message already exists) and hands `ephemeral` (the trigger tool's output) to runSession, which
+  // tail-folds it for this run only. `content` is empty for such an item — there is no new bubble.
+  redo?: { ephemeral: MessageContent[] };
   prompt?:     PromptFn;
 }
 
 const MAX_RESUBMIT_DEPTH = 8;
+
+// Marker creator for a retract-and-rerun: its `data.retracted` carries the popped (superseded) turn
+// messages so a frontend can render them struck-through and a post-mortem can audit them. Core-owned
+// because the pop is a pump operation, not a plugin's.
+const RETRACTION_CREATOR = 'matbot-retraction';
 
 interface SessionState {
   // The queue is deliberately a plain array, drained FIFO. concatQueue is per-submission: a non-concat
@@ -158,8 +168,11 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
         // common case when the submit POST wins the race against the events stream — would otherwise
         // find an empty queue and a cleared replay, and never render the user bubble. One merged event
         // (not one per batch item) matches both stored history on reload and the live fold, so a late
-        // subscriber reconstructs exactly one bubble.
-        s.replay.push({ type: 'queued', content, queued: 0, concatQueue: false, traceId: head.traceId, rootTraceId: head.rootTraceId });
+        // subscriber reconstructs exactly one bubble. A redo carries no new user message (and no
+        // content), so it seeds nothing — its retraction marker already went out at enqueue time.
+        if (head.redo === undefined) {
+          s.replay.push({ type: 'queued', content, queued: 0, concatQueue: false, traceId: head.traceId, rootTraceId: head.rootTraceId });
+        }
 
         let session = await deps.store.get(id);
         if (session === null) {
@@ -167,21 +180,24 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
           continue;
         }
 
-        if (!session.title && !session.messages.some(m => m.role === 'user')) {
-          const text = content
-            .filter((c): c is Extract<MessageContent, { type: 'text' }> => c.type === 'text')
-            .map(c => c.text).join(' ').trim();
-          if (text) {
-            const words = text.split(/\s+/).slice(0, 8).join(' ');
-            session = { ...session, title: words.length > 60 ? `${words.slice(0, 60)}…` : words };
+        // A redo re-runs the existing committed user turn — no title derivation, no new user message.
+        if (head.redo === undefined) {
+          if (!session.title && !session.messages.some(m => m.role === 'user')) {
+            const text = content
+              .filter((c): c is Extract<MessageContent, { type: 'text' }> => c.type === 'text')
+              .map(c => c.text).join(' ').trim();
+            if (text) {
+              const words = text.split(/\s+/).slice(0, 8).join(' ');
+              session = { ...session, title: words.length > 60 ? `${words.slice(0, 60)}…` : words };
+            }
           }
-        }
 
-        // Persist-at-turn-start: the user message only hits the store when its turn begins, never
-        // while queued. That is what stops a mid-turn submit from clobbering session state. A robo
-        // resubmission's blocks already carry `origin: 'robo'` (stamped where it was enqueued).
-        session = appendMessage(session, createMessage({ role: 'user', content, traceId: head.traceId, providerName: head.provider }));
-        await deps.store.set(session.id, session);
+          // Persist-at-turn-start: the user message only hits the store when its turn begins, never
+          // while queued. That is what stops a mid-turn submit from clobbering session state. A robo
+          // resubmission's blocks already carry `origin: 'robo'` (stamped where it was enqueued).
+          session = appendMessage(session, createMessage({ role: 'user', content, traceId: head.traceId, providerName: head.provider }));
+          await deps.store.set(session.id, session);
+        }
 
         const resolved = await deps.resolveProvider(head.provider);
         if (resolved === null) {
@@ -220,6 +236,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
               ...(deps.configPath    !== undefined ? { configPath:    deps.configPath    } : {}),
               ...(deps.vault         !== undefined ? { vault:         deps.vault         } : {}),
               ...(head.prompt        !== undefined ? { prompt:        head.prompt        } : {}),
+              ...(head.redo          !== undefined ? { injectedEphemeral: head.redo.ephemeral } : {}),
             })) {
               emit(s, ev);
             }
@@ -232,7 +249,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
           if (!ac.signal.aborted && hooks) {
             const committed = await deps.store.get(id);
             if (committed && head.resubmitDepth < MAX_RESUBMIT_DEPTH) {
-              let followup: { resubmits: MessageContent[][]; markers: MessageContent[] } = { resubmits: [], markers: [] };
+              let followup: { resubmits: MessageContent[][]; markers: MessageContent[]; retract?: { context: MessageContent[] } } = { resubmits: [], markers: [] };
               await runAs(head.principal, async () => {
                 followup = await hooks.runFollowup({
                   session:       committed,
@@ -248,8 +265,10 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
               // what it did). Append-only to the just-committed session; the pump is the sole writer
               // post-commit, so an unconditional set is safe. Emitted live too (post-`done`, like a
               // `queued` event) so a live draw matches a reload — the engine surfaces everything it
-              // persists; a frontend filters if it wants to.
-              if (followup.markers.length > 0) {
+              // persists; a frontend filters if it wants to. Skipped when retracting: the pop rewrites
+              // the message tail, so these markers are folded into that single write instead (below)
+              // to keep ordering sane (a separate append here would be sliced into the popped region).
+              if (followup.markers.length > 0 && !followup.retract) {
                 await deps.store.set(id, {
                   ...committed,
                   messages: [...committed.messages, {
@@ -278,6 +297,49 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
                   resubmitDepth: head.resubmitDepth + 1,
                 });
                 notify(s, { type: 'queued', content, queued: 0, concatQueue: false, traceId: rt, rootTraceId: head.rootTraceId });
+              }
+
+              // retract-and-rerun: pop the just-committed turn back to (and excluding) the last user
+              // message, stash the popped messages in a durable retraction marker (LLM-elided like any
+              // marker — so the model never re-reads its superseded answer — but carried in `data` for
+              // a strike-through render and audit), then re-enqueue a redo of that same user turn at the
+              // head, delivering the trigger tool's output as ephemeral context. Unshifted last so it
+              // sits at the very head (runs next) even if a resubmit was also queued above.
+              if (followup.retract) {
+                const lastUserIdx = committed.messages.findLastIndex(m => m.role === 'user');
+                const popped = lastUserIdx >= 0 ? committed.messages.slice(lastUserIdx + 1) : [];
+                const kept   = lastUserIdx >= 0 ? committed.messages.slice(0, lastUserIdx + 1) : committed.messages;
+                const retractionMsg: Message = {
+                  id:        crypto.randomUUID(),
+                  role:      'marker',
+                  createdAt: new Date().toISOString(),
+                  traceId:   head.traceId,
+                  // `retracted` is what was popped (the superseded answer); `injected` is the ephemeral
+                  // context fed to the redo — neither is otherwise persisted, so the pair fully traces
+                  // the swap for a post-mortem (and a frontend can render the strike-through + the cause).
+                  content:   [{ type: 'marker', creator: RETRACTION_CREATOR, data: { retracted: popped, injected: followup.retract.context, traceId: head.traceId } }],
+                };
+                // Any followup markers ride along as a trailing marker message (not folded into the
+                // retraction marker) so each creator's trace stays its own block.
+                const trailing: Message[] = followup.markers.length > 0
+                  ? [{ id: crypto.randomUUID(), role: 'marker', createdAt: new Date().toISOString(), traceId: head.traceId, content: followup.markers }]
+                  : [];
+                await deps.store.set(id, { ...committed, messages: [...kept, retractionMsg, ...trailing] });
+                notify(s, { type: 'marker', content: retractionMsg.content, traceId: head.traceId });
+                if (trailing.length > 0) notify(s, { type: 'marker', content: followup.markers, traceId: head.traceId });
+
+                const rt = crypto.randomUUID();
+                s.queue.unshift({
+                  traceId:       rt,
+                  rootTraceId:   head.rootTraceId,
+                  content:       [],
+                  provider:      head.provider,
+                  principal:     head.principal,
+                  concatQueue:   false,
+                  resubmitDepth: head.resubmitDepth + 1,
+                  redo:          { ephemeral: followup.retract.context },
+                  ...(head.prompt !== undefined ? { prompt: head.prompt } : {}),
+                });
               }
             }
           }

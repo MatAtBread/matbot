@@ -13,14 +13,15 @@ async function seedCognition(services: MatbotServices): Promise<void> {
   const skills: SkillManager | undefined = services.SkillManager;
   if (!skills) return;
   // Triggers are seeded separately, now that they are no longer embedded in the skill. A built-in
-  // skill's `triggers` become one Trigger whose invoke loads that skill via `skill_action(load)`.
-  // Both imports are create-if-absent, so an install that already holds them keeps its own copy.
+  // skill's `triggers` become one Trigger whose invoke fires that skill via `skill_action(use)` (see
+  // the `use`-not-`load` note below). Both imports are create-if-absent, so an install that already
+  // holds them keeps its own copy.
   const triggers: Triggers | undefined = services.Triggers;
   for (const skill of COGNITION_SKILLS) {
     await skills.importIfAbsent(skill.name, skill.content);
     if (triggers && skill.triggers.length > 0) {
       await triggers.importIfAbsent({
-        conditions: skill.triggers.map(t => ({ phase: t.phase, rule: t.trigger })),
+        conditions: skill.triggers.map(t => ({ kind: t.kind, rule: t.trigger })),
         // `use`, not `load`: a fired trigger should make the skill take effect (its content as a
         // directive), not just surface the raw text.
         invoke:     { tool: 'skill_action', params: { action: 'use', name: skill.name } },
@@ -102,7 +103,6 @@ export function createCognitionPlugin(): MatbotPluginSpec {
     },
 
     async installationMessage() {
-      console.warn('[cognition] MARKER-F: installationMessage() called (NEW build)');
       return `Cognition is active. It seeds the Inner voice and Dream time skills into the skills
 service — if no skills service is configured yet, they are seeded automatically once one is — and
 registers the remember_fact and dream_time tools.

@@ -151,16 +151,20 @@ export class HookRegistry {
   }
 
   // followup runs every hook and collects their resubmissions (each becomes its own head-enqueued
-  // turn) and any durable markers (appended to the committed session by the pump).
-  async runFollowup(ctx: Omit<FollowupContext, 'removeHook'>): Promise<{ resubmits: MessageContent[][]; markers: MessageContent[] }> {
+  // turn), any durable markers (appended to the committed session by the pump), and any
+  // retract-and-rerun requests. A turn can be popped only once, so multiple hooks' retraction
+  // contexts merge into a single redo (in practice only one fires); `retract` is omitted when none did.
+  async runFollowup(ctx: Omit<FollowupContext, 'removeHook'>): Promise<{ resubmits: MessageContent[][]; markers: MessageContent[]; retract?: { context: MessageContent[] } }> {
     const resubmits: MessageContent[][] = [];
     const markers:   MessageContent[]   = [];
+    const retract:   MessageContent[]   = [];
     for (const hook of this.hooks.get('followup') ?? []) {
       if (hook.on !== 'followup') continue;
       const r = await this.invoke(hook, () => hook.handler({ ...ctx, removeHook: () => this.removeOne('followup', hook) }));
-      if (r?.resubmit) resubmits.push(r.resubmit.content);
-      if (r?.markers)  markers.push(...r.markers);
+      if (r?.resubmit)        resubmits.push(r.resubmit.content);
+      if (r?.retractAndRerun) retract.push(...r.retractAndRerun.context);
+      if (r?.markers)         markers.push(...r.markers);
     }
-    return { resubmits, markers };
+    return { resubmits, markers, ...(retract.length > 0 ? { retract: { context: retract } } : {}) };
   }
 }

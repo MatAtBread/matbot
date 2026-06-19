@@ -1,23 +1,43 @@
 /**
- * The `remember_fact` tool: the "Remember this" skill, compiled by hand into a direct side-effect.
+ * The `remember_fact` tool: the "Remember this" skill, **compiled by hand into a direct tool**. This
+ * IS the skill's body — the prose skill has been retired (it no longer exists as a `SkillDoc`). The
+ * trigger *conditions* that used to live in the skill now live in cognition's `REMEMBER_CONDITIONS`
+ * (skills.ts) as data, firing this tool. This is the discretion-reduction gradient in miniature: a
+ * procedure the model used to follow in English (fetch session → copy provenance → write a doc, four
+ * turns of attention-rent for one fact) is now deterministic TS, with the one irreducibly-judgement
+ * step — "what durable fact, if any, is in this message?" — kept as a single low-context `singleTurn`.
  *
- * Where the skill made the model hand-copy provenance it had to go *fetch* (session get/list/get,
- * then a store write — four turns for one fact), this reads the triggering message and its
- * provenance straight off `ctx.session` (zero round-trips), makes ONE `singleTurn` to extract and
- * normalise the durable fact(s) — the single irreducibly-judgement step — and writes them to the
- * remembered_facts store. It yields NO result, so when a trigger fires it the model never wakes: a
- * silent side-effect. (It is also a normal tool the model may call directly to capture the turn.)
+ * Where the skill made the model hand-copy provenance it had to go *fetch*, this reads the triggering
+ * message and its provenance straight off `ctx.session` (zero round-trips), makes ONE `singleTurn` to
+ * extract and normalise the durable fact(s), and writes them to the remembered_facts store. It yields
+ * NO result, so a trigger firing it never wakes the model: a silent side-effect. (It is also a normal
+ * tool the model may call directly to capture the current turn.)
  *
- * Silent for now — the only trace is a console line. A visible breadcrumb needs a `marker` ToolEvent
- * (a separate, general primitive); see the slice notes.
+ * **Which message it reads.** It captures from the latest genuine (non-robo) user *or assistant*
+ * message — i.e. whichever fired it, because the trigger surface dictates the tail of the session at
+ * firing time: an `augment` condition fires in the pre-response `screen` hook, so the tail is the
+ * incoming USER message; a `followup` condition fires post-commit, so the tail is the ASSISTANT
+ * response (e.g. "I'll remember that X is Y" / owning a mistake). A direct mid-turn model call sees
+ * the user message as the tail. Reading the tail therefore always lands on the message the condition
+ * judged — without the tool needing to be told the surface.
+ *
+ * De-duplication is deliberately NOT done here: a user repeating a fact is a strong importance signal,
+ * and consolidation/merge is the dream-time process's concern, not this tool's.
+ *
+ * Silent for now — the durable trace is a `marker` (yielded below); a frontend may surface it.
  */
 
 import type { MatbotServices, Tool, ToolExecutor, ToolContext, ToolEvent, Message } from '@matatbread/matbot-plugin-api';
 import type { RememberedFact } from '../dream/types.js';
 
 const EXTRACT_SYSTEM =
-`You capture durable facts a user has EXPLICITLY asserted about themselves or their world, from a
-single message, for recall in future conversations.
+`You capture durable facts EXPLICITLY asserted about the user or their world, from a single message,
+for recall in future conversations.
+
+The message is usually the user's, but may be the ASSISTANT's own — when the assistant promises to
+remember something ("I'll remember the table is pgdwell") or owns a mistake ("I was wrong; the field
+is X"), extract the underlying fact it is committing to (here: "The table is pgdwell" / "The field is
+X"), NOT the meta-statement about remembering or apologising.
 
 Be conservative. Extract only what the message plainly states — never infer, embellish, or read
 between the lines. Most messages contain nothing durable; an empty array [] is the common, correct
@@ -46,9 +66,12 @@ function textOf(msg: Message | undefined): string {
 export function createRememberFactTool(services: MatbotServices): Tool {
   const executor: ToolExecutor = {
     async *execute(_input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
-      // The fact lives in the latest genuine (non-robo) user message; its id/createdAt are the
-      // provenance, ctx.session.id the session. All ambient — nothing to fetch.
-      const msg  = ctx.session.messages.findLast(m => m.role === 'user' && !m.content.every(c => c.origin === 'robo'));
+      // The fact lives in the message that fired this — the latest genuine (non-robo) user OR
+      // assistant message (see the header: augment→user tail, followup→assistant tail, direct→user
+      // tail). Its id/createdAt are the provenance, ctx.session.id the session. All ambient — nothing
+      // to fetch.
+      const msg  = ctx.session.messages.findLast(m =>
+        (m.role === 'user' || m.role === 'assistant') && !m.content.every(c => c.origin === 'robo'));
       const text = textOf(msg);
       if (ctx.provider === undefined || msg === undefined || text.trim() === '') {
         console.warn('[remember_fact] nothing to remember (no provider, or no user message in context).');

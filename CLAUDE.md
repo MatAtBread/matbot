@@ -393,15 +393,18 @@ Five channels:
 | `contribute` | runner, in the loop | before *every* provider call | read-only | return a transformed copy of `outgoing` (the message array about to be sent) — ephemeral, never persisted |
 | `toolcall`   | runner | before each tool exec | read-only | `rejectTool` (skip; an error result is fed back so the model self-corrects, pairing intact) and/or `abort` |
 | `toolresult` | runner | after each tool exec, pre-record | read-only | return `{ result }` to replace it (hard redaction, truncation) or nothing to observe (audit — ctx carries `toolCall`, `result`, `isError`, `durationMs`) |
-| `followup`   | pump, post-commit | once, after the turn commits | read + durable-marker | `resubmit` a robo turn (head-enqueued, runs next as its own real turn; `resubmitDepth` budgets the chain, the runner hard-caps it), and/or append durable `markers` to the committed session (LLM-invisible; the pump persists them and emits them live) |
+| `followup`   | pump, post-commit | once, after the turn commits | read + durable-marker | `resubmit` a robo turn (head-enqueued, runs next as its own real turn; `resubmitDepth` budgets the chain, the runner hard-caps it), `retractAndRerun` (pop the committed turn back to the last user message into a retraction marker, then re-run that user turn with ephemeral `context` injected — supersede the response rather than follow it), and/or append durable `markers` to the committed session (LLM-invisible; the pump persists them and emits them live) |
 
 `toolcall` guards the call *in*, `toolresult` the result *out*. `followup` is matbot deciding to
 continue a turn — the inverse of `ask_user`, where it pauses to wait on a human. Cadence dictates
 durability: a once-per-turn point may persist; a per-call/per-tool point must not (it re-fires, so a
 durable write would accumulate) — hence the per-call channels are read-only or ephemeral. **Both**
 once-per-turn points may write durably: `screen` replaces the whole `session` (it runs before the
-turn), while `followup` may only *append* `markers` to the committed session (it runs after) — never
-rewriting history, only annotating it, which is why the narrower capability is safe there. Per-channel
+turn), while `followup` *appends* `markers` to the committed session (it runs after) — annotating, not
+rewriting. The one exception is `retractAndRerun`, a controlled rewrite: it pops the committed turn
+back to the last user message and re-runs, but loses nothing — the popped content is relocated verbatim
+into a retraction marker (LLM-invisible, audit-preserved) and the re-run is `resubmitDepth`-capped, so
+it supersedes rather than erases. Per-channel
 dispatch lives on `HookRegistry` (`runScreen` / `runContribute` / `runToolCall` / `runToolResult` /
 `runFollowup`); the runner drives the first four, the `SessionRunner` pump the last.
 
@@ -427,13 +430,16 @@ blocks are all `origin: 'robo'`.
 
 ## Triggers (data-driven hooks)
 
+*(For the **why** — the discretion-reduction gradient, JIT delivery, skills-as-tools, and the skills
+compiler endgame — see `docs/TRIGGERS-RATIONALE.md`. This section is the mechanics.)*
+
 `@matatbread/matbot-triggers` turns the hard-coded "fire a skill on a condition" wiring into
 **data**. A `Trigger` is a stored document:
 
 ```ts
 interface Trigger {
   id; version;
-  conditions: { phase: 'user' | 'agent'; rule: string }[];   // the OR — many ways to recognise
+  conditions: { kind: 'augment' | 'retract' | 'followup'; rule: string }[];  // the OR — many ways to recognise
   invoke:     { tool: string; params?: unknown };            // the one consequence
   enabled?: boolean; createdAt; updatedAt;
 }
@@ -449,16 +455,30 @@ for reading/editing — and `use` — the content wrapped as a directive to appl
 
 **Conditions are the OR, `invoke` is the consequence.** Any matching condition fires the trigger
 once. Each condition is an LLM-judged rubric ("MATCH if …; DO NOT MATCH if …") on the *form/sentiment*
-of a message (not its topic — topical relevance is search's job). `phase` picks the surface and the
-hook: `user` is judged in a `screen` hook (pre-response) and injected **ephemerally**; `agent` is
-judged in a `followup` hook (post-commit) and **resubmitted** as a robo turn. So triggers are exactly
-*data-driven hooks* — they ride the existing `screen`/`followup` channels, carrying config where there
-used to be plugin code.
+of a message (not its topic — topical relevance is search's job). A condition's **`kind`** is a single
+discriminator — it fixes the surface judged, the hook, *and* how the consequence lands, because those
+aren't independent (delivery determines surface):
+- **`augment`** — judge the user message in a `screen` hook (pre-response); inject the output
+  **ephemerally** into the turn about to run.
+- **`retract`** — judge the assistant response in a `followup` hook (post-commit); the response was
+  *wrong*, so pop it into a retraction marker and re-run the user turn with the output injected.
+- **`followup`** — judge the assistant response in a `followup` hook; the response *stands* but needs a
+  steer, so keep it and resubmit the output as a robo turn (it stays in context for the steer to land).
+
+The author picks the kind because only they know whether a match means "read this first" / "this is
+wrong" (`pgdwell` not `dwell` — every downstream conclusion void) / "look again" (Inner Voice / Verify
+Assumptions / Bicameral — critiques *of* the standing answer). The three are disjoint and exhaustive,
+which is why `kind` is one field, not a `(phase × delivery)` matrix with dead cells — the surface a
+condition is judged on (user message vs assistant response) is *derived* from `kind`
+(`surfaceOfKind`), not stored. Injected payloads are **fenced** as system-supplied context, not a user
+utterance (the dispatcher stays a dumb transport; the fence is the plugin's own framing). So triggers
+are exactly *data-driven hooks* — they ride the existing `screen`/`followup` channels, carrying config
+where there used to be plugin code.
 
 **Observational dispatch decides whether the model wakes — the tool's *output* is the signal.** The
 dispatcher invokes the tool and looks at what it yields: a `result` is model-facing → inject it
-(ephemeral for `user`, robo resubmit for `agent`); **no** result → a silent side-effect, the model
-never wakes (`direct`). Nothing declares "direct vs inject" — `skill_action(use)` yields content so
+(ephemeral for `augment`, retract-and-rerun for `retract`, robo resubmit for `followup`); **no** result
+→ a silent side-effect, the model never wakes (`direct`). Nothing declares "direct vs inject" — `skill_action(use)` yields content so
 it injects; `remember_fact` yields no result (only a `marker`) so it runs silent. The dispatcher is a
 dumb transport: it injects whatever result a tool yields, with no framing of its own — a tool that
 wants its result *acted on* frames it itself (`use` returns content already wrapped as "follow these

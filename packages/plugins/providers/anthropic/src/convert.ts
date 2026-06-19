@@ -57,8 +57,11 @@ export function toAnthropicMessages(messages: Message[]): AnthropicMessage[] {
         case 'tool-call':
           return [{ type: 'tool_use', id: c.id, name: c.name, input: c.input as unknown }];
         case 'tool-result':
+          // `?? null` so a no-result tool (e.g. remember_fact, which yields only a marker) becomes
+          // the string "null" rather than JSON.stringify(undefined) → undefined; a tool_result must
+          // carry content.
           return [{ type: 'tool_result', tool_use_id: c.id,
-            content: JSON.stringify(c.result),
+            content: JSON.stringify(c.result ?? null),
             ...(c.isError ? { is_error: true } : {}),
           }];
         case 'file-ref':

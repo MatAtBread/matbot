@@ -48,7 +48,10 @@ export function toOAIMessages(messages: Message[]): OAIMessage[] {
           result.push({
             role:         'tool',
             tool_call_id: c.id,
-            content:      JSON.stringify(c.result),
+            // `?? null` so a no-result tool (e.g. remember_fact, which yields only a marker) becomes
+            // the string "null" rather than `JSON.stringify(undefined)` → undefined (a non-string the
+            // API rejects). Every tool message must carry a string content.
+            content:      JSON.stringify(c.result ?? null),
           });
         }
       }
@@ -81,7 +84,7 @@ export function toOAIMessages(messages: Message[]): OAIMessage[] {
       }
     });
 
-    let content: string | OAIContentPart[] | null = null;
+    let content: string | OAIContentPart[] | undefined;
     const first = contentParts[0];
     if (contentParts.length === 1 && first !== undefined && first.type === 'text') {
       content = first.text;  // plain string for text-only messages
@@ -89,7 +92,12 @@ export function toOAIMessages(messages: Message[]): OAIMessage[] {
       content = contentParts;
     }
 
-    const oaiMsg: OAIMessage = { role: msg.role, content };
+    // Set `content` only when there is some — never an explicit `null`. The spec makes `content`
+    // optional once `tool_calls` is present, and stricter validators (e.g. gpt-5.x) reject
+    // `"content": null` with "expected a string, got null". So an assistant tool-call turn with no
+    // text is sent as `{ role, tool_calls }`, content omitted.
+    const oaiMsg: OAIMessage = { role: msg.role };
+    if (content !== undefined) oaiMsg.content = content;
 
     if (toolCalls.length > 0) {
       oaiMsg.tool_calls = toolCalls.map(c => {
@@ -102,11 +110,9 @@ export function toOAIMessages(messages: Message[]): OAIMessage[] {
       }).filter(Boolean);
     }
 
-    // Provider-specific reasoning/thinking blocks are intentionally stripped
-    // above. If that leaves a message with no OpenAI-compatible payload, drop
-    // it rather than sending an assistant/user message with null content and no
-    // tool calls, which some OpenAI-compatible providers reject.
-    if (content === null && (oaiMsg.tool_calls?.length ?? 0) === 0) continue;
+    // Provider-specific reasoning/thinking blocks are intentionally stripped above. If that leaves a
+    // message with neither content nor tool calls, drop it rather than send an empty one.
+    if (oaiMsg.content === undefined && (oaiMsg.tool_calls?.length ?? 0) === 0) continue;
 
     result.push(oaiMsg);
   }

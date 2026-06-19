@@ -456,7 +456,7 @@
       align-items: flex-start;
       margin-bottom: 10px;
     }
-    .trigger-row .trigger-phase {
+    .trigger-row .trigger-kind {
       flex: 0 0 84px;
       font-family: inherit;
       font-size: 0.82em;
@@ -477,7 +477,7 @@
       border-radius: 6px;
       color: #1f2937;
     }
-    .trigger-row .trigger-phase:disabled,
+    .trigger-row .trigger-kind:disabled,
     .trigger-row .trigger-text:disabled {
       background: #f9fafb;
       color: #4b5563;
@@ -871,6 +871,17 @@
       color: #9ca3af;
       font-style: italic;
       margin-bottom: 6px;
+    }
+
+    /* Retraction marker (renderMarker): reuses the thinking-block look. These hooks are intentionally
+       near-empty — a place to style the retracted-response block distinctly from thinking when wanted.
+       `.retraction` is the assistant-aligned wrapper; `.retraction-block` is the <details>. The inert
+       custom property is just a placeholder so the ruleset isn't empty (no rendering effect). */
+    .retraction       { --retraction-tweak: 0; }
+    .retraction-block { --retraction-tweak: 0; }
+    .retraction-block > div {
+      text-decoration: line-through;
+      opacity: 0.6;
     }
 
     /* ── Tool blocks ───────────────────────────────────────────── */

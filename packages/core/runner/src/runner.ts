@@ -33,6 +33,13 @@ export interface RunSessionOpts {
   files?:         FileStore;
   /** Supply a prompt implementation to allow tools to ask interactive questions. */
   prompt?:        PromptFn;
+  /**
+   * Turn-scoped context to inject ephemerally, exactly like a `screen` hook's `ephemeral` (tail-folded
+   * onto the freshest non-marker message, never persisted) — merged ahead of whatever `screen` adds.
+   * The pump supplies this for an agent-phase retract-redo: the trigger tool's output rides into the
+   * re-run of the originating user turn. Empty/absent for an ordinary turn.
+   */
+  injectedEphemeral?: MessageContent[];
   loadPlugin:     (specifier: string, prompt?: PromptFn) => Promise<MatbotPlugin>;
   unloadPlugin:   (specifier: string) => Promise<boolean>;
 }
@@ -81,7 +88,9 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
   // role-alternation hazards and survives both adapters (Anthropic folds system→system=; OpenAI
   // drops non-result content from tool-role messages — a separate trailing message would break on
   // one or the other).
-  const ephemeral = screen.ephemeral;
+  // injectedEphemeral (a pump-supplied retract-redo's context) leads, then screen's own — both share
+  // the identical tail-fold path below.
+  const ephemeral = [...(opts.injectedEphemeral ?? []), ...screen.ephemeral];
 
   // ── 2. System context (built once per submit, never persisted) ─────────────
 
@@ -114,9 +123,13 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
     // One provider call. The outgoing array (system context + history, with screen's ephemeral
     // blocks appended onto the tail message) is assembled here and handed to `contribute` hooks for
     // a final ephemeral transform — none of this is written back to the session.
-    const history = ephemeral.length > 0 && session.messages.length > 0
+    // Fold onto the last NON-marker message: markers are elided from the wire, so the literal last
+    // message can be a marker (e.g. a retract-redo leaves the retraction marker as the tail) — folding
+    // there would drop the ephemeral with it. -1 ⇒ nothing to fold onto (no non-marker history).
+    const foldIdx = ephemeral.length > 0 ? session.messages.findLastIndex(m => m.role !== 'marker') : -1;
+    const history = foldIdx >= 0
       ? session.messages.map((m, i) =>
-          i === session.messages.length - 1 ? { ...m, content: [...m.content, ...ephemeral] } : m)
+          i === foldIdx ? { ...m, content: [...m.content, ...ephemeral] } : m)
       : session.messages;
     const outgoing = await hookReg.runContribute({
       outgoing: [...systemMsg, ...history],
@@ -191,8 +204,8 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
     } else {
       // Diagnostic: the provider returned no text, no tool calls, no thinking — a genuinely empty
       // completion. The turn will end with no assistant message, which reads as "the agent never
-      // replied". Logged here so a silent no-reply turn is traceable. (textAcc length shown to
-      // distinguish "empty stream" from "whitespace-only".)
+      // replied". Logged here so a silent no-reply turn is traceable. (textAcc length is shown to
+      // tell a truly empty stream apart from one that was only whitespace.)
       console.warn(`[runner] empty completion (no assistant content) on traceId ${traceId}; textAcc=${textAcc.length} chars, provider=${config.provider}`);
     }
 
