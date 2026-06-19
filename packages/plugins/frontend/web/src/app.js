@@ -648,11 +648,30 @@ function setSkillTab(tab) {
   skillEditorRoot.classList.toggle('tab-metadata', tab === 'metadata');
 }
 
-// Read-only render of a skill's derived LLM analysis. `knowledge` is null until the background
-// analysis has run and cached it (see SkillManager) — show a note rather than empty sections.
-function renderSkillMetadata(knowledge) {
+// Render the skill's metadata pane: the "system skill" toggle (always), then the read-only derived
+// LLM analysis. `knowledge` is null until the background analysis has run and cached it (see
+// SkillManager) — show a note rather than empty sections. `catalogue` is the current advertise flag.
+function renderSkillMetadata(catalogue, knowledge) {
   const el = document.getElementById('skill-metadata');
   el.innerHTML = '';
+
+  // System-skill toggle — advertise this skill in the system prompt (using its summary). Independent
+  // of whether analysis has run; the editor persists it (with content + triggers) on Save.
+  const sysRow = document.createElement('label');
+  sysRow.className = 'meta-system';
+  const cb = document.createElement('input');
+  cb.type = 'checkbox';
+  cb.id = 'skill-system-checkbox';
+  cb.checked = catalogue === true;
+  const sysLbl = document.createElement('span');
+  sysLbl.textContent = 'This is a system skill';
+  sysRow.append(cb, sysLbl);
+  el.appendChild(sysRow);
+  const sysHint = document.createElement('div');
+  sysHint.className = 'meta-note';
+  sysHint.textContent = 'When set, the skill is advertised in the system prompt using the generated summary below.';
+  el.appendChild(sysHint);
+
   if (!knowledge) {
     const note = document.createElement('div');
     note.className = 'meta-note';
@@ -809,7 +828,7 @@ async function openSkillEditor(name) {
   skillEditorTitle.textContent = name;
   editingTriggerId = null;
   renderTriggers([]);
-  renderSkillMetadata(null);
+  renderSkillMetadata(false, null);
   setSkillTab('content');
   skillEditorOverlay.classList.add('open');
   // Triggers live in their own store now, keyed by the tool they invoke — find the one that loads
@@ -823,7 +842,7 @@ async function openSkillEditor(name) {
     .catch(() => { /* triggers plugin not loaded — leave the triggers tab empty. */ });
   // Derived analysis, likewise independent of TinyMDE; absent until the background pass has cached it.
   callTool('skill_action', { action: 'metadata', name })
-    .then((meta) => renderSkillMetadata(meta?.knowledge ?? null))
+    .then((meta) => renderSkillMetadata(meta?.catalogue ?? false, meta?.knowledge ?? null))
     .catch(() => { /* old skills plugin without the metadata action — leave the note. */ });
   // The editor needs TinyMDE (CDN, http(s) only). On an offline file:// bundle it never loaded —
   // degrade with a message rather than throwing on `new TinyMDE.Editor`.
@@ -868,7 +887,13 @@ if (skillEditorOverlay) {
     skillEditorSave.disabled = true;
     skillEditorError.textContent = '';
     try {
-      if (skillEditor) await callTool('skill_action', { action: 'save', name: editingSkillName, content: skillEditor.getContent() });
+      if (skillEditor) {
+        const sysCb = document.getElementById('skill-system-checkbox');
+        await callTool('skill_action', {
+          action: 'save', name: editingSkillName, content: skillEditor.getContent(),
+          ...(sysCb ? { catalogue: sysCb.checked } : {}),
+        });
+      }
       await saveTriggers(editingSkillName);
     } catch (err) {
       skillEditorError.textContent = 'Failed to save: ' + (err?.message ?? err);

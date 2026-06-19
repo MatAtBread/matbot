@@ -9,7 +9,7 @@ type SkillInput =
   | { action: 'load';     name: string }
   | { action: 'use';      name: string }
   | { action: 'metadata'; name: string }
-  | { action: 'save';     name: string; content: string }
+  | { action: 'save';     name: string; content: string; catalogue?: boolean }
   | { action: 'delete';   name: string };
 
 export function createSkillTool(manager: SkillManager): Tool {
@@ -55,16 +55,18 @@ export function createSkillTool(manager: SkillManager): Tool {
           if (!name) { yield { type: 'error', message: 'action "metadata" requires "name".' }; return; }
           const doc = manager.get(name);
           if (!doc) { yield { type: 'error', message: `Skill not found: "${name}"` }; return; }
-          // Derived LLM analysis; absent until the background analysis has run and cached it.
-          yield { type: 'result', value: { id: doc.id, name: doc.name, knowledge: doc.knowledge ?? null } };
+          // Derived LLM analysis (absent until the background analysis has run and cached it), plus
+          // `catalogue` — whether the skill is advertised in the system prompt.
+          yield { type: 'result', value: { id: doc.id, name: doc.name, knowledge: doc.knowledge ?? null, catalogue: doc.catalogue ?? false } };
           return;
         }
 
         case 'save': {
-          const { name, content } = args as Extract<SkillInput, { action: 'save' }>;
+          const { name, content, catalogue } = args as Extract<SkillInput, { action: 'save' }>;
           if (!name) { yield { type: 'error', message: 'action "save" requires "name".' }; return; }
           if (content === undefined) { yield { type: 'error', message: 'action "save" requires "content".' }; return; }
-          const doc = await manager.save(name, content);
+          if (catalogue !== undefined && typeof catalogue !== 'boolean') { yield { type: 'error', message: '"catalogue" must be a boolean.' }; return; }
+          const doc = await manager.save(name, content, catalogue);
           yield { type: 'result', value: { id: doc.id, name: doc.name } };
           return;
         }
@@ -104,17 +106,18 @@ export function createSkillTool(manager: SkillManager): Tool {
       "  | { action: 'list' }                            // -> { skills: [{ id, name, toolBinding? }] }\n" +
       "  | { action: 'load';     name: string }          // raw content -> { id, name, content }\n" +
       "  | { action: 'use';      name: string }          // content as a directive to apply now -> { id, name, content }\n" +
-      "  | { action: 'metadata'; name: string }          // derived analysis -> { id, name, knowledge: { summary, entities, tags } | null }\n" +
-      "  | { action: 'save';     name: string; content: string }  // create or update -> { id, name }\n" +
+      "  | { action: 'metadata'; name: string }          // derived analysis -> { id, name, knowledge: { summary, entities, tags } | null, catalogue: boolean }\n" +
+      "  | { action: 'save';     name: string; content: string; catalogue?: boolean }  // create or update -> { id, name }; `catalogue` advertises the skill in the system prompt (omit to leave unchanged)\n" +
       "  | { action: 'delete';   name: string };         // -> { id, name }\n" +
       '```',
     inputSchema: {
       type:       'object',
       required:   ['action'],
       properties: {
-        action:   { type: 'string', enum: ['list', 'load', 'use', 'metadata', 'save', 'delete'], description: 'The operation to perform.' },
-        name:     { type: 'string', description: 'Skill name (case-insensitive). Required for load/use/metadata/save/delete.' },
-        content:  { type: 'string', description: 'Skill content in markdown — required for action "save".' },
+        action:    { type: 'string', enum: ['list', 'load', 'use', 'metadata', 'save', 'delete'], description: 'The operation to perform.' },
+        name:      { type: 'string', description: 'Skill name (case-insensitive). Required for load/use/metadata/save/delete.' },
+        content:   { type: 'string', description: 'Skill content in markdown — required for action "save".' },
+        catalogue: { type: 'boolean', description: 'Optional for "save": advertise this skill in the system prompt (using its generated summary). Omit to leave unchanged.' },
       },
     },
     executor,

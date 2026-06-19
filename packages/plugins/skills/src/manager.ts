@@ -169,7 +169,10 @@ export class SkillManager {
   }
 
   /** Create a new skill or update an existing one's content by name. */
-  async save(name: string, content: string): Promise<SkillDoc> {
+  // `catalogue` (the system-prompt advertisement flag) is optional: omitted ⇒ left unchanged (the
+  // common content-only save), present ⇒ set. It rides on `save` so the editor persists content,
+  // triggers, and the flag in one action.
+  async save(name: string, content: string, catalogue?: boolean): Promise<SkillDoc> {
     const now = new Date().toISOString();
     const key = name.toLowerCase();
     const doc = this.skills.get(key);
@@ -180,6 +183,7 @@ export class SkillManager {
         version:   Date.now().toString(),
         name,
         content,
+        ...(catalogue !== undefined ? { catalogue } : {}),
         createdAt: now,
         updatedAt: now,
       };
@@ -188,7 +192,7 @@ export class SkillManager {
       return newDoc;
     }
 
-    return this.casMutate(doc, cur => this.bump({ ...cur, content }), true);
+    return this.casMutate(doc, cur => this.bump({ ...cur, content, ...(catalogue !== undefined ? { catalogue } : {}) }), true);
   }
 
   /** Delete a skill by name. Returns the removed doc, or `undefined`. */

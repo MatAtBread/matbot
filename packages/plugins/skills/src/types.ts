@@ -6,10 +6,16 @@ export interface SkillDoc {
   tags?:        string[];
   toolBinding?: string;
   /**
-   * A one-line summary injected into the always-on skills catalogue in the system prompt, so the
-   * model knows the skill exists and can reach for it (e.g. "Load before any data-source skill for
-   * questions about traffic, page views, referrers, revenue…"). This is skill advertisement, not a
-   * condition — the firing of skills on conditions is the triggers subsystem's concern, not skills'.
+   * Whether this skill is advertised in the always-on skills catalogue in the system prompt (so the
+   * model knows it exists and can reach for it). This is skill *advertisement*, not a condition — the
+   * firing of skills on conditions is the triggers subsystem's concern, not skills'. The advertised
+   * text is `catalogSummary` if set, else the generated `knowledge.summary` (see the contributor).
+   */
+  catalogue?: boolean;
+  /**
+   * Optional hand-written one-line catalogue blurb. When `catalogue` is set this overrides the
+   * generated `knowledge.summary` as the advertised text. Currently has no editing UI — the generated
+   * summary fills the blank — but the field is here so authoring it later needs no schema change.
    */
   catalogSummary?: string;
   createdAt:    string;

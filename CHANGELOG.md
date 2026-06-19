@@ -65,6 +65,15 @@ churn and less likely to affect a consumer who doesn't use them.
   `query` filters by invoke target). An absent target tool degrades soft (does nothing
   until present). (See `docs/TRIGGERS-RATIONALE.md` for the *why*.)
 
+- **skills** — a skill can be flagged a **system skill** (`SkillDoc.catalogue: boolean`): when set,
+  it's advertised in the always-on system-prompt catalogue, using its generated `knowledge.summary`
+  (or the optional hand-written `catalogSummary` override, when present). `skill_action(save)` takes
+  an optional `catalogue` boolean (omit to leave unchanged) and `metadata` returns the current flag;
+  the always-on contributor now advertises only `catalogue === true` skills (skipping any without a
+  summary yet). The web skill editor's metadata pane gains a "This is a system skill" checkbox,
+  persisted on save (the summary itself isn't hand-editable yet — the generated one fills the blank).
+  This is how the former `system`-phase trigger's catalogue role lives on, as data rather than a trigger.
+
 - **skills** — trigger ownership moved out to `@matatbread/matbot-triggers`. Removed the
   `skill_triggers` tool, the embedded `SkillDoc.triggers` array, and the two
   trigger-evaluation hooks. The former `system`-phase trigger (the system-prompt skills

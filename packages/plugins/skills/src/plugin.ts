@@ -42,13 +42,17 @@ export async function setupSkills(services: MatbotServices): Promise<SkillManage
   services.tools.register(createSkillTool(manager));
   services.tools.register(createSingleTurnTool(services));
 
-  // Always-injected skills catalogue. Tiny (a handful of router/index skills carry a catalogSummary),
-  // so it is a stable system-prompt prefix rather than the whole catalogue. Rebuilt each turn, so it
-  // reflects live add/remove. No LLM, no condition — pure advertisement.
+  // Always-injected skills catalogue. Tiny (only skills explicitly flagged `catalogue` appear), so it
+  // is a stable system-prompt prefix rather than the whole catalogue. Rebuilt each turn, so it reflects
+  // live add/remove. No LLM, no condition — pure advertisement. The advertised text is the skill's
+  // `catalogSummary` (a hand-written override, when set) else its generated `knowledge.summary`; a
+  // flagged skill with neither yet (analysis still pending) is simply skipped until it has one.
   services.systemContext.register(() => {
     const lines = manager.all()
-      .filter(s => s.catalogSummary !== undefined && s.catalogSummary.trim() !== '')
-      .map(s => `- ${s.name}: ${s.catalogSummary}`);
+      .filter(s => s.catalogue === true)
+      .map(s => ({ name: s.name, summary: (s.catalogSummary?.trim() || s.knowledge?.summary?.trim() || '') }))
+      .filter(s => s.summary !== '')
+      .map(s => `- ${s.name}: ${s.summary}`);
     return lines.length === 0
       ? null
       : 'Available skills — apply the relevant one with the skill_action tool (action "use") when its ' +
