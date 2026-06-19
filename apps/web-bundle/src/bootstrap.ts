@@ -118,8 +118,12 @@ export async function boot(env: BootEnv): Promise<void> {
   const persistDraft = async (draft: ProviderDraft): Promise<ProviderConfig> => {
     let credentials: Record<string, string> | undefined;
     if (draft.apiKey) {
-      const keyName = 'APIKEY_' + draft.name.toUpperCase().replace(/[^A-Z0-9]/g, '_');
-      await vault.writeSecret(keyName, draft.apiKey);
+      const varName = 'APIKEY_' + draft.name.toUpperCase().replace(/[^A-Z0-9]/g, '_');
+      // createSecret, not writeSecret: the entered value may already be a key name (a vault
+      // substitution the user typed instead of the secret) or a value already stored under another
+      // name — reference whatever name it canonicalises to, only minting APIKEY_<NAME> for a genuinely
+      // new value. Mirrors the node `provider` tool.
+      const keyName = await vault.createSecret(varName, draft.apiKey);
       credentials = { apiKey: '${' + keyName + '}' };
     }
     const cfg: ProviderConfig = {
