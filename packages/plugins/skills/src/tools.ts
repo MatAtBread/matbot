@@ -1,25 +1,5 @@
 import type { Tool, ToolExecutor, ToolContext, ToolEvent, MatbotServices } from '@matatbread/matbot-plugin-api';
 import type { SkillManager } from './manager.js';
-import type { TriggerPhase } from './types.js';
-
-const PHASES: readonly TriggerPhase[] = ['agent', 'user', 'system'];
-const isPhase = (x: unknown): x is TriggerPhase => typeof x === 'string' && (PHASES as readonly string[]).includes(x);
-
-// Shared so skill_action (where the model first decides whether to add triggers) and skill_triggers
-// (where it writes them) teach the same definition and can't drift.
-const TRIGGER_GUIDANCE =
-  "A trigger's meaning depends on its `phase`:\n" +
-  '• agent / user — a CONDITION on the FORM or SENTIMENT of a message, NOT its topic (topical ' +
-  'relevance is found automatically by search, so keyword/entity conditions like "France" or "RTA" ' +
-  'are redundant noise; do NOT create them, and do NOT split one condition into many fragments). ' +
-  'Write it as a single LLM-judged rubric "MATCH if the message is …; DO NOT MATCH if the message ' +
-  'is …", judged against the current turn. `agent` tests the ASSISTANT RESPONSE (e.g. it stated a ' +
-  'cause as fact without verifying it); `user` tests the USER MESSAGE (e.g. frustration, repetition, ' +
-  'correction, a change of direction).\n' +
-  '• system — NOT a condition. A one-line SUMMARY of what the skill is for and when to load it, ' +
-  'always injected into a top-level skills catalogue so the model knows the skill exists and reaches ' +
-  'for it (e.g. "Load before any data-source skill for questions about traffic, page views, ' +
-  'referrers, revenue, …"). Use for always-available router/index skills.';
 
 // The precise per-action contract. JSON Schema can't express "content required only for save"
 // without an awkward oneOf, so the schema stays loose and the description carries this TypeScript
@@ -27,8 +7,9 @@ const TRIGGER_GUIDANCE =
 type SkillInput =
   | { action: 'list' }
   | { action: 'load';     name: string }
+  | { action: 'use';      name: string }
   | { action: 'metadata'; name: string }
-  | { action: 'save';     name: string; content: string }
+  | { action: 'save';     name: string; content: string; catalogue?: boolean }
   | { action: 'delete';   name: string };
 
 export function createSkillTool(manager: SkillManager): Tool {
@@ -51,21 +32,41 @@ export function createSkillTool(manager: SkillManager): Tool {
           return;
         }
 
+        case 'use': {
+          // Like load, but the content is wrapped as a directive — "apply this skill now" — rather
+          // than returned as raw reference text. This is what a firing trigger (or the model, when it
+          // means to *act* on a skill rather than read it) wants: it carries the imperative the old
+          // "Use the skill X" resubmit had, with the content inlined so there's no second round-trip.
+          const { name } = args as Extract<SkillInput, { action: 'use' }>;
+          if (!name) { yield { type: 'error', message: 'action "use" requires "name".' }; return; }
+          const doc = manager.get(name);
+          if (!doc) { yield { type: 'error', message: `Skill not found: "${name}"` }; return; }
+          yield { type: 'result', value: {
+            id:      doc.id,
+            name:    doc.name,
+            content: `Follow the instructions in the skill "${doc.name}" in your reply. Apply them now — ` +
+                     `they take precedence over brevity or staying on the prior topic.\n\n${doc.content}`,
+          } };
+          return;
+        }
+
         case 'metadata': {
           const { name } = args as Extract<SkillInput, { action: 'metadata' }>;
           if (!name) { yield { type: 'error', message: 'action "metadata" requires "name".' }; return; }
           const doc = manager.get(name);
           if (!doc) { yield { type: 'error', message: `Skill not found: "${name}"` }; return; }
-          // Derived LLM analysis; absent until the background analysis has run and cached it.
-          yield { type: 'result', value: { id: doc.id, name: doc.name, knowledge: doc.knowledge ?? null } };
+          // Derived LLM analysis (absent until the background analysis has run and cached it), plus
+          // `catalogue` — whether the skill is advertised in the system prompt.
+          yield { type: 'result', value: { id: doc.id, name: doc.name, knowledge: doc.knowledge ?? null, catalogue: doc.catalogue ?? false } };
           return;
         }
 
         case 'save': {
-          const { name, content } = args as Extract<SkillInput, { action: 'save' }>;
+          const { name, content, catalogue } = args as Extract<SkillInput, { action: 'save' }>;
           if (!name) { yield { type: 'error', message: 'action "save" requires "name".' }; return; }
           if (content === undefined) { yield { type: 'error', message: 'action "save" requires "content".' }; return; }
-          const doc = await manager.save(name, content);
+          if (catalogue !== undefined && typeof catalogue !== 'boolean') { yield { type: 'error', message: '"catalogue" must be a boolean.' }; return; }
+          const doc = await manager.save(name, content, catalogue);
           yield { type: 'result', value: { id: doc.id, name: doc.name } };
           return;
         }
@@ -80,7 +81,7 @@ export function createSkillTool(manager: SkillManager): Tool {
         }
 
         default:
-          yield { type: 'error', message: `Unknown action "${String(args.action)}". Expected one of: list, load, save, delete.` };
+          yield { type: 'error', message: `Unknown action "${String(args.action)}". Expected one of: list, load, use, metadata, save, delete.` };
       }
     },
   };
@@ -90,130 +91,33 @@ export function createSkillTool(manager: SkillManager): Tool {
     description:
       'Manage skills — named, reusable markdown playbooks (procedures, conventions, reference ' +
       'notes) the assistant stores and recalls on demand. A skill is keyed by name (case-insensitive) ' +
-      'and holds markdown content. Use this tool to list skills, load one (its content, for use), ' +
-      'read its derived metadata (summary/entities/tags), create or update one, or delete one.\n\n' +
-      'A skill\'s triggers (the conditions for when it fires) are created and edited ONLY via the ' +
-      'skill_triggers tool — never here — and are deliberately NOT returned by load. Most skills need ' +
-      'NO triggers (search surfaces them by content); add one only for a genuine behavioural condition. ' +
-      TRIGGER_GUIDANCE + '\n\n' +
+      'and holds markdown content. Use this tool to list skills, load one (raw content, for reading or ' +
+      'editing), use one (its content as a directive, to apply now), read its derived metadata, create ' +
+      'or update one, or delete one.\n\n' +
+      '`load` vs `use`: load returns the raw markdown (for inspection or editing); use returns the same ' +
+      'content wrapped as an instruction to follow it now. A trigger that should make a skill take ' +
+      'effect invokes `use`; tooling that reads a skill invokes `load`.\n\n' +
+      'Most skills are surfaced by content search; to make one apply automatically on a behavioural ' +
+      'condition, create a trigger with the `trigger_action` tool whose `invoke` is this tool with ' +
+      '`{ action: "use", name }`.\n\n' +
       'Parameters depend on `action` (TypeScript):\n' +
       '```ts\n' +
       'type SkillAction =\n' +
       "  | { action: 'list' }                            // -> { skills: [{ id, name, toolBinding? }] }\n" +
-      "  | { action: 'load';     name: string }          // -> { id, name, content }\n" +
-      "  | { action: 'metadata'; name: string }          // derived analysis -> { id, name, knowledge: { summary, entities, tags } | null }\n" +
-      "  | { action: 'save';     name: string; content: string }  // create or update -> { id, name }\n" +
+      "  | { action: 'load';     name: string }          // raw content -> { id, name, content }\n" +
+      "  | { action: 'use';      name: string }          // content as a directive to apply now -> { id, name, content }\n" +
+      "  | { action: 'metadata'; name: string }          // derived analysis -> { id, name, knowledge: { summary, entities, tags } | null, catalogue: boolean }\n" +
+      "  | { action: 'save';     name: string; content: string; catalogue?: boolean }  // create or update -> { id, name }; `catalogue` advertises the skill in the system prompt (omit to leave unchanged)\n" +
       "  | { action: 'delete';   name: string };         // -> { id, name }\n" +
       '```',
     inputSchema: {
       type:       'object',
       required:   ['action'],
       properties: {
-        action:   { type: 'string', enum: ['list', 'load', 'metadata', 'save', 'delete'], description: 'The operation to perform.' },
-        name:     { type: 'string', description: 'Skill name (case-insensitive). Required for load/save/delete.' },
-        content:  { type: 'string', description: 'Skill content in markdown — required for action "save".' },
-      },
-    },
-    executor,
-  };
-}
-
-type SkillTriggersInput =
-  | { action: 'get';    name: string }
-  | { action: 'add';    name: string; phase: TriggerPhase; trigger: string }
-  | { action: 'update'; name: string; id: string; trigger?: string; phase?: TriggerPhase }
-  | { action: 'remove'; name: string; id: string };
-
-/**
- * Trigger CRUD, separate from skill_action because triggers are addressed individually by a stable
- * `id` and the verbs differ. Flat scalar params (name/id/phase/trigger) map directly onto an HTTP
- * form's fields and onto an LLM's id-targeted edit; identity is always the id, never the text.
- */
-export function createSkillTriggersTool(manager: SkillManager): Tool {
-  const executor: ToolExecutor = {
-    async *execute(input: unknown, _ctx: ToolContext): AsyncIterable<ToolEvent> {
-      const args = input as Partial<SkillTriggersInput> & { action?: string; name?: string; id?: string; phase?: string; trigger?: string };
-
-      if (!args.name) { yield { type: 'error', message: 'skill_triggers requires "name".' }; return; }
-
-      switch (args.action) {
-        case 'get': {
-          const doc = manager.get(args.name);
-          if (!doc) { yield { type: 'error', message: `Skill not found: "${args.name}"` }; return; }
-          yield { type: 'result', value: { skillId: doc.id, name: doc.name, triggers: doc.triggers ?? [] } };
-          return;
-        }
-
-        case 'add': {
-          if (!isPhase(args.phase)) { yield { type: 'error', message: `action "add" requires "phase" — one of: ${PHASES.join(', ')}.` }; return; }
-          if (typeof args.trigger !== 'string') { yield { type: 'error', message: 'action "add" requires a string "trigger".' }; return; }
-          const r = await manager.addTrigger(args.name, args.phase, args.trigger);
-          if (!r) { yield { type: 'error', message: `Skill not found: "${args.name}"` }; return; }
-          yield { type: 'result', value: { skillId: r.doc.id, name: r.doc.name, id: r.id } };
-          return;
-        }
-
-        case 'update': {
-          if (!args.id) { yield { type: 'error', message: 'action "update" requires the trigger "id".' }; return; }
-          if (args.phase !== undefined && !isPhase(args.phase)) { yield { type: 'error', message: `"phase" must be one of: ${PHASES.join(', ')}.` }; return; }
-          if (args.trigger !== undefined && typeof args.trigger !== 'string') { yield { type: 'error', message: '"trigger" must be a string.' }; return; }
-          const patch = {
-            ...(args.trigger !== undefined ? { trigger: args.trigger } : {}),
-            ...(args.phase   !== undefined ? { phase: args.phase }     : {}),
-          };
-          const r = await manager.updateTrigger(args.name, args.id, patch);
-          if (r === undefined)    { yield { type: 'error', message: `Skill not found: "${args.name}"` }; return; }
-          if (r === 'no-trigger') { yield { type: 'error', message: `Trigger id not found on "${args.name}": "${args.id}"` }; return; }
-          yield { type: 'result', value: { skillId: r.id, name: r.name, triggers: r.triggers ?? [] } };
-          return;
-        }
-
-        case 'remove': {
-          if (!args.id) { yield { type: 'error', message: 'action "remove" requires the trigger "id".' }; return; }
-          const r = await manager.removeTrigger(args.name, args.id);
-          if (r === undefined)    { yield { type: 'error', message: `Skill not found: "${args.name}"` }; return; }
-          if (r === 'no-trigger') { yield { type: 'error', message: `Trigger id not found on "${args.name}": "${args.id}"` }; return; }
-          yield { type: 'result', value: { skillId: r.id, name: r.name, triggers: r.triggers ?? [] } };
-          return;
-        }
-
-        default:
-          yield { type: 'error', message: `Unknown action "${String(args.action)}". Expected one of: get, add, update, remove.` };
-      }
-    },
-  };
-
-  return {
-    name: 'skill_triggers',
-    description:
-      'Read and edit the triggers of a skill.\n\n' +
-      TRIGGER_GUIDANCE + '\n\nExamples:\n' +
-      '  agent:  "MATCH if the agent states a cause or diagnosis as fact without a tool call to verify ' +
-      'it; DO NOT MATCH if it ends by asking the user for clarification."\n' +
-      '  user:   "MATCH if the user states a specific, non-general-knowledge fact worth remembering; ' +
-      'DO NOT MATCH greetings, opinions without facts, or questions."\n' +
-      '  system: "Load before any data-source skill for questions about traffic, page views, ' +
-      'referrers, revenue, unique users, geo/platform breakdowns, or analytics depending on site traffic."\n\n' +
-      'A trigger has a stable `id` — address it by that, never by its text. To change one, "get" first ' +
-      'to read each id, then "update" by id.\n\n' +
-      'Parameters depend on `action` (TypeScript):\n' +
-      '```ts\n' +
-      "type TriggerPhase = 'agent' | 'user' | 'system';\n" +
-      'type SkillTriggersAction =\n' +
-      "  | { action: 'get';    name: string }                                          // -> { skillId, name, triggers: [{ id, phase, trigger }] }\n" +
-      "  | { action: 'add';    name: string; phase: TriggerPhase; trigger: string }    // -> { skillId, name, id }\n" +
-      "  | { action: 'update'; name: string; id: string; trigger?: string; phase?: TriggerPhase }  // edit one by id\n" +
-      "  | { action: 'remove'; name: string; id: string };                             // delete one by id\n" +
-      '```',
-    inputSchema: {
-      type:       'object',
-      required:   ['action', 'name'],
-      properties: {
-        action:  { type: 'string', enum: ['get', 'add', 'update', 'remove'], description: 'The operation to perform.' },
-        name:    { type: 'string', description: 'Skill name (case-insensitive).' },
-        id:      { type: 'string', description: 'Trigger id. Required for update/remove.' },
-        phase:   { type: 'string', enum: ['agent', 'user', 'system'], description: 'Trigger phase. Required for add; optional for update.' },
-        trigger: { type: 'string', description: 'Trigger text. Required for add; optional for update.' },
+        action:    { type: 'string', enum: ['list', 'load', 'use', 'metadata', 'save', 'delete'], description: 'The operation to perform.' },
+        name:      { type: 'string', description: 'Skill name (case-insensitive). Required for load/use/metadata/save/delete.' },
+        content:   { type: 'string', description: 'Skill content in markdown — required for action "save".' },
+        catalogue: { type: 'boolean', description: 'Optional for "save": advertise this skill in the system prompt (using its generated summary). Omit to leave unchanged.' },
       },
     },
     executor,

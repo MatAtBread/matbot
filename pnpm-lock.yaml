@@ -237,6 +237,9 @@ importers:
       '@matatbread/matbot-tool-store':
         specifier: workspace:*
         version: link:../tool-store
+      '@matatbread/matbot-triggers':
+        specifier: workspace:*
+        version: link:../triggers
     devDependencies:
       typescript:
         specifier: 'catalog:'
@@ -474,6 +477,25 @@ importers:
         specifier: 'catalog:'
         version: 5.9.3
 
+  packages/plugins/storage/google-drive:
+    dependencies:
+      '@matatbread/matbot-browser':
+        specifier: workspace:*
+        version: link:../../browser
+      '@matatbread/matbot-core':
+        specifier: workspace:*
+        version: link:../../../core/runner
+      '@matatbread/matbot-plugin-api':
+        specifier: workspace:*
+        version: link:../../../core/plugin-api
+      '@matatbread/matbot-storage-base':
+        specifier: workspace:*
+        version: link:../../../core/storage/_base
+    devDependencies:
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
+
   packages/plugins/storage/sqlite:
     dependencies:
       '@matatbread/matbot-plugin-api':
@@ -491,6 +513,16 @@ importers:
         version: 5.9.3
 
   packages/plugins/tool-store:
+    dependencies:
+      '@matatbread/matbot-plugin-api':
+        specifier: workspace:*
+        version: link:../../core/plugin-api
+    devDependencies:
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
+
+  packages/plugins/triggers:
     dependencies:
       '@matatbread/matbot-plugin-api':
         specifier: workspace:*

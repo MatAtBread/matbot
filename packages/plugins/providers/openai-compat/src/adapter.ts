@@ -97,6 +97,11 @@ export class OpenAICompatAdapter implements ProviderAdapter {
     // Accumulate streaming tool call arguments and reasoning per index
     const toolAccum    = new Map<number, { id: string; name: string; args: string }>();
     let reasoningAcc = '';
+    // Diagnostic state: did the model emit anything, and how did it finish? Used to surface a
+    // genuinely empty completion (e.g. an Azure content filter, or a provider returning a bare stop)
+    // rather than letting it vanish into a no-reply turn.
+    let sawAny     = false;
+    let lastFinish: string | null | undefined;
 
     for await (const line of parseSSE(res.body)) {
       let chunk: OAIChunk;
@@ -116,13 +121,18 @@ export class OpenAICompatAdapter implements ProviderAdapter {
 
       const delta = choice.delta ?? {};
 
+      if (choice.finish_reason) lastFinish = choice.finish_reason;
+
       if (delta.reasoning_content) {
+        sawAny = true;
         reasoningAcc += delta.reasoning_content;
         yield { type: 'thinking', delta: delta.reasoning_content };
       }
       if (delta.content) {
+        sawAny = true;
         yield { type: 'text-delta', delta: delta.content };
       }
+      if ((delta.tool_calls?.length ?? 0) > 0) sawAny = true;
 
       for (const tc of delta.tool_calls ?? []) {
         const acc = toolAccum.get(tc.index);
@@ -186,6 +196,13 @@ export class OpenAICompatAdapter implements ProviderAdapter {
           `before the stream ended. The provider returned malformed or truncated tool arguments.`,
         );
       }
+    }
+
+    if (!sawAny) {
+      console.warn(
+        `[openai-compat] empty completion: finish_reason=${lastFinish ?? '(none)'}; sent ${messages.length} messages ` +
+        `(roles: ${messages.map(m => m.role).join(',')}). A 'content_filter' finish_reason means the endpoint blocked it.`,
+      );
     }
     yield { type: 'done' };
   }

@@ -1,5 +1,5 @@
 import type {
-  Session, Message, MessageContent,
+  Session, MessageContent,
   PipelineEvent, RunConfig, ProviderAdapter, ProviderConfig,
   Tool, ToolRegistry, ToolContext, Store, FileStore, SystemContextRegistry, Vault, PromptFn, FormField,
 } from './types.js';
@@ -33,6 +33,13 @@ export interface RunSessionOpts {
   files?:         FileStore;
   /** Supply a prompt implementation to allow tools to ask interactive questions. */
   prompt?:        PromptFn;
+  /**
+   * Turn-scoped context to inject ephemerally, exactly like a `screen` hook's `ephemeral` (tail-folded
+   * onto the freshest non-marker message, never persisted) — merged ahead of whatever `screen` adds.
+   * The pump supplies this for an agent-phase retract-redo: the trigger tool's output rides into the
+   * re-run of the originating user turn. Empty/absent for an ordinary turn.
+   */
+  injectedEphemeral?: MessageContent[];
   loadPlugin:     (specifier: string, prompt?: PromptFn) => Promise<MatbotPlugin>;
   unloadPlugin:   (specifier: string) => Promise<boolean>;
 }
@@ -58,7 +65,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
 
   // ── 1. screen — once per turn: shape/abort the incoming submission ──────────
 
-  const screen = await hookReg.runScreen({ session: opts.session, config, signal });
+  const screen = await hookReg.runScreen({ session: opts.session, config, signal, prompt: promptFn });
   // Hook-failure (and any other screen-injected) markers, carried live so the UI shows them this turn
   // rather than only on a later session reload. They are already persisted in screen.session.
   if (screen.markers.length > 0) {
@@ -71,11 +78,19 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
   }
   let session = screen.session;
 
-  // Turn-scoped ephemeral context from screen — prepended to every provider call this turn as a
-  // system block, never persisted. (Lands in the cached prefix; constant within the turn.)
-  const ephemeralMsg: Message[] = screen.ephemeral.length > 0
-    ? [createMessage({ role: 'system', content: screen.ephemeral, traceId: '' })]
-    : [];
+  // Turn-scoped ephemeral context from screen — appended to the TAIL of the outgoing messages
+  // (onto the content of the freshest history message, preserving its role), never persisted.
+  // At the tail, not as a system prefix, because (a) a "do X now" directive needs the salience of
+  // being the last thing the model reads — a system-block prefix sits above the whole history and
+  // reads as stale once the turn has any momentum — and (b) per-turn content in the prefix would
+  // bust the cached system/history prefix every turn; appended at the tail it leaves the prefix
+  // byte-stable. Folding into the last message (rather than adding a trailing message) avoids
+  // role-alternation hazards and survives both adapters (Anthropic folds system→system=; OpenAI
+  // drops non-result content from tool-role messages — a separate trailing message would break on
+  // one or the other).
+  // injectedEphemeral (a pump-supplied retract-redo's context) leads, then screen's own — both share
+  // the identical tail-fold path below.
+  const ephemeral = [...(opts.injectedEphemeral ?? []), ...screen.ephemeral];
 
   // ── 2. System context (built once per submit, never persisted) ─────────────
 
@@ -105,11 +120,19 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
     const assistantParts: MessageContent[] = [];
     let textAcc = '';
 
-    // One provider call. The outgoing array (system context + screen's ephemeral block + history)
-    // is assembled here and handed to `contribute` hooks for a final ephemeral transform — none of
-    // this is written back to the session.
+    // One provider call. The outgoing array (system context + history, with screen's ephemeral
+    // blocks appended onto the tail message) is assembled here and handed to `contribute` hooks for
+    // a final ephemeral transform — none of this is written back to the session.
+    // Fold onto the last NON-marker message: markers are elided from the wire, so the literal last
+    // message can be a marker (e.g. a retract-redo leaves the retraction marker as the tail) — folding
+    // there would drop the ephemeral with it. -1 ⇒ nothing to fold onto (no non-marker history).
+    const foldIdx = ephemeral.length > 0 ? session.messages.findLastIndex(m => m.role !== 'marker') : -1;
+    const history = foldIdx >= 0
+      ? session.messages.map((m, i) =>
+          i === foldIdx ? { ...m, content: [...m.content, ...ephemeral] } : m)
+      : session.messages;
     const outgoing = await hookReg.runContribute({
-      outgoing: [...systemMsg, ...ephemeralMsg, ...session.messages],
+      outgoing: [...systemMsg, ...history],
       session, config, signal,
     });
     try {
@@ -178,6 +201,12 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
         providerName: config.provider,
       });
       session = appendMessage(session, assistantMsg);
+    } else {
+      // Diagnostic: the provider returned no text, no tool calls, no thinking — a genuinely empty
+      // completion. The turn will end with no assistant message, which reads as "the agent never
+      // replied". Logged here so a silent no-reply turn is traceable. (textAcc length is shown to
+      // tell a truly empty stream apart from one that was only whitespace.)
+      console.warn(`[runner] empty completion (no assistant content) on traceId ${traceId}; textAcc=${textAcc.length} chars, provider=${config.provider}`);
     }
 
     // No tool calls → done
@@ -186,6 +215,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
     // ── 3. Execute tool calls ────────────────────────────────────────────────
 
     const toolResults: MessageContent[] = [];
+    const toolMarkers: MessageContent[] = [];
 
     for (const tc of pendingCalls) {
       yield { type: 'tool:start', callId: tc.id, name: tc.name, input: tc.input, traceId };
@@ -236,6 +266,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
             case 'stderr':   yield { type: 'tool:stderr', callId: tc.id, chunk: toolEv.chunk, traceId }; break;
             case 'file':     yield { type: 'file', handle: toolEv.handle, traceId }; break;
             case 'result':   result = toolEv.value; break;
+            case 'marker':   toolMarkers.push({ type: 'marker', creator: toolEv.creator, data: toolEv.data }); break;
             case 'progress': break;
             case 'error':    result = {
               error: toolEv.message,
@@ -264,6 +295,13 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
     // Add tool results message, then loop for the next provider call.
     const toolMsg = createMessage({ role: 'tool', content: toolResults, traceId });
     session = appendMessage(session, toolMsg);
+
+    // Markers a tool emitted while running: persist as their own marker-role message (elided from
+    // provider submission) and carry live so a frontend can render them without a reload.
+    if (toolMarkers.length > 0) {
+      session = appendMessage(session, createMessage({ role: 'marker', content: toolMarkers, traceId }));
+      yield { type: 'marker', content: toolMarkers, traceId };
+    }
   }
 
   // ── 4. Persist and finish ──────────────────────────────────────────────────

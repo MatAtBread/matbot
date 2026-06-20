@@ -1,5 +1,5 @@
 import {
-  createSessionRunner, HookRegistry, SystemContextRegistryImpl,
+  createSessionRunner, HookRegistry, SystemContextRegistryImpl, ToolRegistryImpl,
   resolveProviderFactory, getPluginNameForSpecifier,
   installPrincipalCarrier, createConstantPrincipalCarrier,
   createMessage, MissingSecretError, loadPlugins,
@@ -7,8 +7,8 @@ import {
   forwardingProxy, makeSwappable, singleTurnRequest,
 } from '@matatbread/matbot-core';
 import type {
-  MatbotServices, Store, Session, Tool, ProviderConfig, ProviderAdapter,
-  PluginSettings, ToolRegistry, Vault, SessionRunner, KnowledgeIndex,
+  MatbotServices, Store, Session, ProviderConfig, ProviderAdapter,
+  PluginSettings, Vault, SessionRunner, KnowledgeIndex,
   PluginResolver, StorageBackend, FileStore, PromptFn, MatbotPlugin, Principal, Runtime, SwapFn,
 } from '@matatbread/matbot-plugin-api';
 import { LookupKnowledgeIndex } from '@matatbread/matbot-knowledge';
@@ -105,7 +105,12 @@ export async function boot(env: BootEnv): Promise<void> {
   // anonymous default.
   installPrincipalCarrier(createConstantPrincipalCarrier(config.principal ?? WEB_USER));
 
-  const vault: Vault = new LocalStorageVault();
+  // Vault behind a capture-safe proxy (like StorageBackend/KnowledgeIndex): a plugin may
+  // `register('Vault', impl)` to swap in a different secret store (e.g. a Drive-backed one), and
+  // every captured reference — complete(), resolveProvider(), the session runner — follows the swap
+  // because resolution is lazy/per-turn through the proxy. The default boots from localStorage.
+  let activeVault: Vault = new LocalStorageVault();
+  const vault = forwardingProxy<Vault>(() => activeVault);
 
   // Store a wizard draft: key in the vault under a derived name, persist the config (with a ${ref},
   // never the raw key) to localStorage, and return the runnable config. A self-contained provider
@@ -113,8 +118,12 @@ export async function boot(env: BootEnv): Promise<void> {
   const persistDraft = async (draft: ProviderDraft): Promise<ProviderConfig> => {
     let credentials: Record<string, string> | undefined;
     if (draft.apiKey) {
-      const keyName = 'APIKEY_' + draft.name.toUpperCase().replace(/[^A-Z0-9]/g, '_');
-      await vault.writeSecret(keyName, draft.apiKey);
+      const varName = 'APIKEY_' + draft.name.toUpperCase().replace(/[^A-Z0-9]/g, '_');
+      // createSecret, not writeSecret: the entered value may already be a key name (a vault
+      // substitution the user typed instead of the secret) or a value already stored under another
+      // name — reference whatever name it canonicalises to, only minting APIKEY_<NAME> for a genuinely
+      // new value. Mirrors the node `provider` tool.
+      const keyName = await vault.createSecret(varName, draft.apiKey);
       credentials = { apiKey: '${' + keyName + '}' };
     }
     const cfg: ProviderConfig = {
@@ -169,16 +178,7 @@ export async function boot(env: BootEnv): Promise<void> {
   const [fileStore, swapFiles] = makeSwappable<FileStore>(activeStorageBackend.fileStore);
 
   // ── Registries ────────────────────────────────────────────────────────────────────────────
-  const toolMap = new Map<string, Tool>();
-  const toolReg: ToolRegistry = {
-    register: (t: Tool) => { toolMap.set(t.name, t); },
-    remove:   (n: string) => { toolMap.delete(n); },
-    resolve:  (n) => toolMap.get(n) ?? null,
-    list:     () => [...toolMap.values()],
-    removeByPlugin: (pluginName: string) => {
-      for (const [name, tool] of toolMap) if (tool.pluginName === pluginName) toolMap.delete(name);
-    },
-  };
+  const toolReg          = new ToolRegistryImpl();
   const hookReg          = new HookRegistry();
   const systemContextReg = new SystemContextRegistryImpl();
   const serviceRegistry  = new Map<string, unknown>();
@@ -222,6 +222,10 @@ export async function boot(env: BootEnv): Promise<void> {
         const prev = knowledgeImpl;
         knowledgeImpl = value as KnowledgeIndex;
         if (prev.entries !== undefined) for (const e of prev.entries()) void (value as KnowledgeIndex).index(e);
+      } else if (key === 'Vault') {
+        // Swap the live vault behind the proxy. Nothing is migrated (secrets aren't drained from the
+        // old vault) — mirrors the CLI's Vault swap; a new backend seeds itself as it sees fit.
+        activeVault = value as Vault;
       } else {
         serviceRegistry.set(key as string, value);
       }

@@ -1,5 +1,6 @@
-import type { MatbotPluginSpec, MatbotServices } from '@matatbread/matbot-plugin-api';
+import type { MatbotPluginSpec, MatbotServices, PluginSettings } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
+import { makePluginSettings, type SettingsDoc } from '@matatbread/matbot-core';
 import { BrowserStorageBackend, assertBrowserRealm } from './storage-backend.js';
 import { createBrowserPluginTool, type ExtraPlugins } from './plugin-tool.js';
 
@@ -34,7 +35,19 @@ export const plugin: MatbotPluginSpec = {
       await services.register('StorageBackend', await BrowserStorageBackend.open(''));
     }
 
-    const settings = services.settings();
+    // Bind the extras list to the backend that is active *now* (the local IndexedDB default), captured
+    // concretely so it survives a later StorageBackend swap. `services.settings()` goes through the
+    // swappable store proxy, so if a plugin swaps the backend during its own load (e.g. the Google
+    // Drive backend, mid-`add`), the post-load write would land in the *new* backend while boot reads
+    // the default and never finds it — that plugin would silently fail to persist itself into the
+    // auto-load list, and `remove` would write to the wrong store too. Capturing the concrete store
+    // (BrowserStorageBackend caches per namespace, so this is the very same IndexedDB store/doc the
+    // proxy used — no migration, no data move) pins the list to local storage regardless of swaps.
+    // The namespace is this plugin's name, matching what `services.settings()` used before.
+    const backend = services.StorageBackend;
+    const settings: PluginSettings = backend !== undefined
+      ? makePluginSettings(backend.createStore<SettingsDoc>('settings'), services.self?.name ?? 'matbot-browser')
+      : services.settings();
     const extras: ExtraPlugins = {
       async list() {
         return (await settings.get<string[]>(EXTRA_KEY)) ?? [];

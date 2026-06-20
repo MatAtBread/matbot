@@ -1,5 +1,6 @@
 import type { MatbotPluginSpec, MatbotServices, Tool, ToolContext, ToolEvent, ToolRegistry } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION }                from '@matatbread/matbot-plugin-api';
+import { watchPlugins }                      from '@matatbread/matbot-core';
 import { createWebServer, defaultWebPrincipal } from './server.js';
 import process                               from 'node:process';
 
@@ -63,6 +64,7 @@ export const plugin: MatbotPluginSpec = {
       vault: services.vault,
       loadPlugin:    services.loadPlugin.bind(services),
       unloadPlugin:  services.unloadPlugin.bind(services),
+      watchPlugins,
       tools:         services.tools,
       // Look up the resolver per request so an override registered in any load order takes effect.
       resolvePrincipal: (req) => (services.WebPrincipalResolver ?? defaultWebPrincipal)(req),

@@ -1,4 +1,5 @@
-import type { Tool, ToolRegistry, Hook, PromptFn, FormField, FrontendInfo } from './types.js';
+import type { Tool, ToolRegistry, Hook, PromptFn, FormField, FrontendInfo, PluginRegistryEvent } from './types.js';
+import { createBroadcaster } from './broadcast.js';
 import type {
   MatbotPlugin, MatbotServices,
   ProviderAdapterFactory, StoreFactory,
@@ -22,6 +23,15 @@ const state = {
   systemContextPlugins: new Set<string>(),       // plugins that registered a system-context contributor
   overwriteAllTools: undefined as boolean | undefined,  // persisted "overwrite on collision, this install" choice, loaded lazily
 };
+
+// Read-only observation of plugin load/unload, for consumers that key off plugin presence (e.g. the
+// web plugins panel refreshing live when a backend restores a plugin set out of band). Module-level,
+// not in `state` — it owns subscribers across the registry's lifetime, not per-plugin data.
+const pluginEvents = createBroadcaster<PluginRegistryEvent>();
+
+export function watchPlugins(signal?: AbortSignal): AsyncIterable<PluginRegistryEvent> {
+  return pluginEvents.subscribe(signal);
+}
 
 // Settings namespace + key under which the user's "overwrite all colliding tools" choice
 // is persisted for the installation. The namespace doubles as a Store document id, so it must
@@ -129,6 +139,8 @@ export function registerPlugin(plugin: MatbotPlugin): void {
   for (const [type, factory] of Object.entries(plugin.storage ?? {})) {
     state.storage.set(type, factory);
   }
+
+  pluginEvents.emit({ type: 'loaded', name: plugin.name });
 }
 
 // ── Resolution ────────────────────────────────────────────────────────────────
@@ -228,6 +240,7 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotServices
       resolve:       (name: string) => services.tools.resolve(name),
       list:          ()             => services.tools.list(),
       removeByPlugin:(name: string) => services.tools.removeByPlugin(name),
+      watch:         (signal?: AbortSignal) => services.tools.watch(signal),
     },
     hooks: {
       register(hook: Hook) {
@@ -286,6 +299,7 @@ export async function unloadPlugin(pluginName: string, services: MatbotServices)
   state.frontendPlugins.delete(pluginName);
 
   state.plugins.splice(idx, 1);
+  pluginEvents.emit({ type: 'unloaded', name: pluginName });
   await Promise.race([
     plugin.teardown?.(),
     new Promise<void>((_, reject) => setTimeout(() => reject(new Error(`Teardown timeout for plugin ${pluginName}`)), 10000))
