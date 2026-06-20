@@ -74,7 +74,7 @@ async function seedDreamRunsStore(services: MatbotServices): Promise<void> {
 }
 
 /**
- * Cognitive services. It seeds the Inner voice and Dream time skills into the active skills service,
+ * Cognitive services. It seeds the Inner voice skill and dream_time tool into the active skills service,
  * registers the remember_fact and dream_time tools, and wires remember_fact's trigger; it is the
  * intended home for further cognitive skills and tools.
  *
@@ -122,11 +122,11 @@ export function createCognitionPlugin(): MatbotPluginSpec {
   return {
     apiVersion: PLUGIN_API_VERSION,
     manifest: {
-      description: 'Cognitive services: seeds the Inner voice and Dream time skills, the remember_fact tool (with its trigger), and the dream_time tool. Home for further cognitive skills and tools.',
+      description: 'Cognitive services: seeds the Inner voice skill and dream_time tool, the remember_fact tool (with its trigger), and the dream_time tool. Home for further cognitive skills and tools.',
     },
 
     async installationMessage() {
-      return `Cognition is active. It seeds the Inner voice and Dream time skills into the skills
+      return `Cognition is active. It seeds the Inner voice skill and dream_time tool into the skills
 service — if no skills service is configured yet, they are seeded automatically once one is — and
 registers the remember_fact and dream_time tools.
 

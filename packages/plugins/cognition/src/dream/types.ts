@@ -177,8 +177,8 @@ export const DREAM_SKILL_NONE = '__none__';
  *   weakThreshold   — minimum score to record as a weak match (default 0.5); below this, "none".
  *                      Must be <= strongThreshold or the pipeline will reject the settings.
  *   maxClusterSize  — cap on facts merged in one pass, including the primary (default 5).
- *   blocklist       — skill names never offered to the ranker (default ["Remember this",
- *                     "Dream time"]). Case-sensitive exact match on `SkillDoc.name`.
+ *   blocklist       — skill names never offered to the ranker (default ["Inner voice"]. 
+ *                     Case-sensitive exact match on `SkillDoc.name`.
  */
 export interface DreamSettings {
   strongThreshold: number;
@@ -191,5 +191,5 @@ export const DEFAULT_DREAM_SETTINGS: DreamSettings = {
   strongThreshold: 0.75,
   weakThreshold:   0.5,
   maxClusterSize:  5,
-  blocklist:       ['Remember this', 'Dream time'],
+  blocklist:       ['Inner voice'],
 };
