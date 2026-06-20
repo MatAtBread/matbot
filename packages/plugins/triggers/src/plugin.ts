@@ -147,7 +147,6 @@ export async function setupTriggers(services: MatbotServices): Promise<TriggerMa
       // original attempt, so re-firing here double-applies them. Hold off, and record why (suppression
       // is never silent). The redo still gets the retract correction via the injected context.
       if (isRetractRedo(ctx.session.messages)) {
-        console.warn('[triggers] screen: retract-redo — augment held off (already processed this turn)');
         return { markers: [suppressedMarker('augment-redo', 'augment held off: retract-redo (user message already processed on the original attempt)', [])] };
       }
 
@@ -169,7 +168,6 @@ export async function setupTriggers(services: MatbotServices): Promise<TriggerMa
         if (out.hadResult) { bodies.push(renderResult(out.result)); sources.push(trigger.id); }
         markers.push(...out.markers);
       }
-      console.warn(`[triggers] screen: fired=${fired.length} bodies=${bodies.length} markers=${markers.length} -> ${bodies.length > 0 ? 'inject ephemeral' : 'no ephemeral'}`);
       // Trace the ephemeral injection durably (the injected text itself is never persisted).
       if (bodies.length > 0) markers.push(injectionMarker(sources, bodies.join(JOIN)));
       if (bodies.length === 0 && markers.length === 0) return;
@@ -202,7 +200,6 @@ export async function setupTriggers(services: MatbotServices): Promise<TriggerMa
         { label: 'preceding user message', text: textOf(ctx.session.messages.findLast(l => l.role === 'user')) },
         ctx.signal,
       );
-      console.warn(`[triggers] followup: agent-phase evaluated, fired=${fired.length}`);
       if (fired.length === 0) return;
 
       // Convergence guard: a retract rule that already retracted on the PREVIOUS turn and is about to
@@ -231,7 +228,6 @@ export async function setupTriggers(services: MatbotServices): Promise<TriggerMa
       }
       // Suppression is never silent — record which rules were held off and why.
       if (suppressed.length > 0) {
-        console.warn(`[triggers] followup: ${suppressed.length} retract(s) held off — active on the previous turn without converging`);
         markers.push(suppressedMarker('retract-convergence', 'retract held off: this rule was active on the previous turn and is still matching (non-converging)', suppressed));
       }
 
@@ -243,7 +239,6 @@ export async function setupTriggers(services: MatbotServices): Promise<TriggerMa
       // convergence guard see this firing.
       if (retractBodies.length > 0) {
         if (followupBodies.length > 0) {
-          console.warn(`[triggers] followup: ${followupBodies.length} steer(s) skipped — a retract supersedes the response they referenced`);
           markers.push(suppressedMarker('followup-shadowed', 'followup steer skipped: a retract on the same turn supersedes the response it would critique', followupSources));
         }
         markers.push(retractFiredMarker(retractSources));

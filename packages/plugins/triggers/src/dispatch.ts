@@ -82,7 +82,6 @@ export async function dispatchTrigger(
     fail(e instanceof Error ? e.message : String(e));
   }
 
-  console.warn(`[triggers] dispatched "${trigger.invoke.tool}" ${JSON.stringify(trigger.invoke.params ?? {})}: hadResult=${hadResult}, markers=${markers.length}`);
   return { hadResult, result, markers };
 }
 

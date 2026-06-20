@@ -44,7 +44,6 @@ async function seedCognition(services: MatbotServices): Promise<void> {
 }
 
 async function seedDreamRunsStore(services: MatbotServices): Promise<void> {
-  console.warn('[cognition] MARKER-B: seedDreamRunsStore called');
   // The `dream_runs` store backs the `dream_time` tool's observability story: every pass writes a
   // structured record here (outcome, primary fact, routed-to skill, contradictions, timings) so
   // "what did dream-time do, and why" is queryable rather than having to be parsed out of stdout.
@@ -132,7 +131,6 @@ The store is idempotent: a re-seed on restart keeps the existing data.
     },
 
     async setup(services) {
-      console.warn('[cognition] MARKER-C: setup() entered (NEW dream-time build)');
       // Seed the remembered_facts store and its `remembered_facts_action` tool (written to by the
       // remember_fact tool). Idempotent — a re-seed on restart keeps the existing store's data.
       await defineStore(services, {
@@ -154,13 +152,11 @@ The store is idempotent: a re-seed on restart keeps the existing data.
       // Seed the dream_runs store (used by the dream_time tool) alongside remembered_facts.
       // Both stores are seeded unconditionally — they don't require a SkillManager to exist.
       await seedDreamRunsStore(services);
-      console.warn('[cognition] MARKER-D: about to register dream_time tool');
 
       // Register the dream_time tool. It doesn't need SkillManager at REGISTRATION time (it looks
       // it up per-call), so we register it unconditionally too — the tool surfaces in catalogues
       // immediately, and if a SkillManager isn't present at invocation it errors cleanly.
       services.tools.register(createDreamTimeTool(services));
-      console.warn('[cognition] MARKER-E: dream_time tool registered OK');
 
       // remember_fact: the compiled "Remember this" tool. Like dream_time, it resolves what it needs
       // per-call, so register unconditionally; its trigger is wired in seedCognition.
