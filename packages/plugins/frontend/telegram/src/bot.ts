@@ -8,6 +8,7 @@ export interface TelegramMessage {
   chat: { id: number; type: string };
   from?: { id: number; first_name?: string; username?: string };
   text?: string;
+  voice?: { file_id: string; duration?: number; mime_type?: string };
 }
 
 const API = 'https://api.telegram.org';
@@ -59,6 +60,26 @@ export async function getUpdates(
   const data = await res.json() as { ok: boolean; result: TelegramUpdate[] };
   if (!data.ok) throw new Error('Telegram getUpdates returned ok=false');
   return data.result;
+}
+
+// Download a Telegram file (e.g. a voice note) into memory: resolve its CDN path via getFile, then
+// fetch the bytes. Returns null on any failure so the caller can degrade gracefully. The file stays
+// on Telegram's CDN — nothing is written to disk.
+export async function downloadFile(
+  botToken: string,
+  fileId: string,
+  signal?: AbortSignal,
+): Promise<{ bytes: Uint8Array; mime: string } | null> {
+  const metaRes = await fetch(`${API}/bot${botToken}/getFile?file_id=${encodeURIComponent(fileId)}`, signal ? { signal } : {});
+  if (!metaRes.ok) return null;
+  const meta = await metaRes.json() as { ok: boolean; result?: { file_path?: string } };
+  const path = meta.ok ? meta.result?.file_path : undefined;
+  if (!path) return null;
+  const fileRes = await fetch(`${API}/file/bot${botToken}/${path}`, signal ? { signal } : {});
+  if (!fileRes.ok) return null;
+  const buf = await fileRes.arrayBuffer();
+  const mime = fileRes.headers.get('content-type') ?? 'audio/ogg';
+  return { bytes: new Uint8Array(buf), mime };
 }
 
 // Telegram limits messages to 4096 UTF-16 code units.

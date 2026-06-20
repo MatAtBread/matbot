@@ -5,7 +5,7 @@ import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import {
   createSession, resolveProviderFactory, runAs,
 } from '@matatbread/matbot-core';
-import { getUpdates, sendChatAction, sendMessage } from './bot.js';
+import { downloadFile, getUpdates, sendChatAction, sendMessage } from './bot.js';
 
 const PLUGIN_NAME = 'frontend-telegram';
 const SETTINGS_KEY_PROVIDER = 'provider';
@@ -311,6 +311,17 @@ export const plugin: MatbotPluginSpec = {
       return;
     }
 
+    // Transcribe a voice note via the optional Transcribe service (@eidandev/transcribe). Narrowed
+    // here so this plugin keeps no hard dependency on it — returns null when STT isn't configured.
+    async function transcribeVoice(fileId: string): Promise<string | null> {
+      const tr = (services as { Transcribe?: { available(): boolean; transcribe(a: Uint8Array, o: { mime: string; filename: string }): Promise<string> } }).Transcribe;
+      if (!tr?.available()) return null;
+      const file = await downloadFile(botToken, fileId, ac.signal);
+      if (!file) return null;
+      const text = await tr.transcribe(file.bytes, { mime: file.mime || 'audio/ogg', filename: 'voice.ogg' });
+      return text || null;
+    }
+
     // Long-poll loop — runs until teardown.
     void (async () => {
       let offset = 0;
@@ -320,13 +331,25 @@ export const plugin: MatbotPluginSpec = {
           for (const update of updates) {
             offset = update.update_id + 1;
             const msg = update.message;
-            if (msg?.text) {
-              // Establish this message's principal at the dispatch entry so the session/settings
-              // store access inside handleMessage runs under it (the turn itself is scoped by pump).
-              const senderName = msg.from?.first_name || msg.from?.username;
-              const principal: Principal = { id: `telegram-${senderName ?? msg.chat.id}`, type: 'user'};
-              void runAs(principal,
-                () => handleMessage(msg.chat.id, msg.text!, senderName));
+            if (!msg) continue;
+            // Establish this message's principal at the dispatch entry so the session/settings store
+            // access inside handleMessage runs under it (the turn itself is scoped by pump).
+            const senderName = msg.from?.first_name || msg.from?.username;
+            const principal: Principal = { id: `telegram-${senderName ?? msg.chat.id}`, type: 'user'};
+            if (msg.text) {
+              void runAs(principal, () => handleMessage(msg.chat.id, msg.text!, senderName));
+            } else if (msg.voice) {
+              // Voice note → transcribe, then treat the transcript as the message text.
+              const fileId = msg.voice.file_id;
+              const chatId = msg.chat.id;
+              void runAs(principal, async () => {
+                const transcript = await transcribeVoice(fileId).catch(() => null);
+                if (!transcript) {
+                  await sendMessage(botToken, chatId, '🎙️ Could not transcribe that voice message — please type it instead.').catch(() => {});
+                  return;
+                }
+                await handleMessage(chatId, transcript, senderName);
+              });
             }
           }
         } catch (e) {
