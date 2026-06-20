@@ -134,16 +134,25 @@ export class SkillManager {
   private readonly inflight = new Map<string, AbortController>();
   private readonly store:    Store<SkillDoc>;
   private readonly services: MatbotServices;
-  private readonly analysisProvider: string;
 
   // Read live so a runtime register('KnowledgeIndex', …) swap is honoured (the member is a
   // capture-safe forwarding proxy, but resolving it per call keeps that guarantee explicit).
   private get knowledge(): KnowledgeIndex { return this.services.KnowledgeIndex; }
 
-  constructor(store: Store<SkillDoc>, services: MatbotServices, analysisProvider: string) {
-    this.store            = store;
-    this.services         = services;
-    this.analysisProvider = analysisProvider;
+  constructor(store: Store<SkillDoc>, services: MatbotServices) {
+    this.store    = store;
+    this.services = services;
+  }
+
+  // The provider used to derive a skill's catalogue summary / knowledge analysis. The user pins one
+  // via the `analysisProvider` setting (skills_config); absent (or stale), it falls back to the first
+  // configured provider — there is always at least one — so analysis works with zero config. Resolved
+  // per reindex, not cached, so a skills_config change takes effect on the next analysis without reload.
+  // (analyseSkill degrades to a heuristic if this resolves to nothing, e.g. no providers at all.)
+  async resolveAnalysisProvider(): Promise<string> {
+    const pinned = await this.services.settings().get<string>('analysisProvider');
+    if (pinned !== undefined && this.services.providers.has(pinned)) return pinned;
+    return [...this.services.providers.keys()][0] ?? '';
   }
 
   /** Load persisted skills into memory and index each one. */
@@ -260,7 +269,7 @@ export class SkillManager {
     // Analysis should be quick; cap it so a hung provider can't pin the entry forever.
     const signal = AbortSignal.any([ac.signal, AbortSignal.timeout(ANALYSIS_TIMEOUT_MS)]);
     try {
-      const { entry, cache } = await skillToKnowledgeEntry(doc, this.services, this.analysisProvider, signal);
+      const { entry, cache } = await skillToKnowledgeEntry(doc, this.services, await this.resolveAnalysisProvider(), signal);
       if (ac.signal.aborted) return;      // superseded/deleted mid-analysis — a newer pass (or none) wins
       // Timeout (not supersession): the entry fell back to the heuristic. Index it so the skill is
       // still findable, but it stays uncached so a later pass can retry the analysis. (Future: mark

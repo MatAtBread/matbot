@@ -487,8 +487,13 @@ trace; see Markers).
 
 **Fails soft, everywhere.** An `invoke` naming an absent tool does nothing until the tool is present
 (no referential integrity, no cascade — the same graceful-degradation rule as a stale `skill_action`
-load id). Conditions are evaluated by a classifier provider (named `skills-classifier`, kept for
-config compatibility); with none configured, triggers simply never fire.
+load id). Conditions are evaluated by a classifier provider, resolved live per turn: the
+`classifierProvider` setting (set via the `triggers_config` tool) if present, else a legacy provider
+named `skills-classifier` if one is configured (back-compat), else the current turn's own provider —
+so triggers work with zero config. The provider name is an *alias* for one of the already-configured
+providers, chosen via Settings, not a separate profile to stand up. (Each consuming plugin follows the
+same pattern: skills' analysis provider via `skills_config`, the inner-voice provider via
+`cognition_config`; all fall back to the turn provider / first provider when unset.)
 
 **Surfaces.** A `Triggers` service (CRUD + `importIfAbsent`, which dedupes by invocation since
 triggers carry no name — the key for idempotent seeding) and a `trigger_action` tool

@@ -4,6 +4,7 @@ import { COGNITION_SKILLS, REMEMBER_CONDITIONS } from './skills.js';
 import { defineStore } from '@matatbread/matbot-tool-store';
 import { createDreamTimeTool } from './dream/tool.js';
 import { createRememberFactTool } from './remember/tool.js';
+import { createAskInnerVoiceTool, createCognitionConfigTool, INNER_VOICE_PROVIDER_KEY } from './inner-voice/tool.js';
 // These type imports also bring the `SkillManager` / `Triggers` augmentations of MatbotServices into
 // cognition's compilation, since cognition is a consumer of both capabilities (discovered, not owned).
 import type { SkillManager } from '@matatbread/matbot-skills';
@@ -91,10 +92,33 @@ async function seedDreamRunsStore(services: MatbotServices): Promise<void> {
  * one-time job is done. Throwing in setup() was the alternative, but it rolls the plugin back — a
  * later skills load would then require re-adding and reloading cognition.
  *
- * The inner-voice provider the Inner voice skill references is likewise not required: without it the
- * skill still fires, and its single_turn call simply errors back to the model at use time.
+ * The inner-voice provider is likewise not required: the Inner voice skill calls cognition's own
+ * `ask_inner_voice` tool, which falls back to the current turn's model when none is pinned via
+ * `cognition_config` (a same-lineage self-critique — degraded, but it still fires).
  */
+/** The inner-voice paragraph of installationMessage, reflecting whether a provider is pinned and, if so,
+ *  whether it responds to a test prompt. The probe runs only here (install/reload), never on the hot path. */
+async function innerVoiceStatus(services: MatbotServices | undefined): Promise<string> {
+  if (!services) return 'It uses the current turn\'s model unless you pin a different one with the cognition_config tool.';
+  const pinned    = await services.settings().get<string>(INNER_VOICE_PROVIDER_KEY);
+  const available = [...services.providers.keys()];
+  if (pinned === undefined) {
+    return 'No inner-voice provider is pinned, so it uses the current turn\'s model — functional, but the ' +
+      'value of a second voice is a *different* training lineage. Pin one with the cognition_config tool ' +
+      `(action "set"). Available providers: ${available.join(', ') || '(none)'}.`;
+  }
+  let ok = false, error = '';
+  try {
+    await services.singleTurn({ provider: pinned, prompt: 'Reply with "ok".', signal: AbortSignal.timeout(15000) });
+    ok = true;
+  } catch (e) { error = e instanceof Error ? e.message : String(e); }
+  return `The inner voice is pinned to "${pinned}" (cognition_config), which ` +
+    (ok ? 'responded to a test prompt.' : `did NOT respond: ${error}. It falls back to the turn's own model until fixed.`);
+}
+
 export function createCognitionPlugin(): MatbotPluginSpec {
+  let captured: MatbotServices | undefined;   // captured in setup() so installationMessage() can probe
+
   return {
     apiVersion: PLUGIN_API_VERSION,
     manifest: {
@@ -106,16 +130,15 @@ export function createCognitionPlugin(): MatbotPluginSpec {
 service — if no skills service is configured yet, they are seeded automatically once one is — and
 registers the remember_fact and dream_time tools.
 
-The **Inner voice skill** consults a second, model via the single_turn tool, which needs a provider named "inner-voice";
-until one is configured the skill still fires but its single_turn call errors back with no critique. Add it with the
-\`provider\` tool, choosing a model from a different training lineage than your main one. Offer to do this now.
+The **Inner voice skill** consults a second model via the \`ask_inner_voice\` tool. ${await innerVoiceStatus(captured)}
 
 The **\`remember_fact\` tool** captures user-provided facts, personal details, and preferences worth
 remembering across conversations. It is fired by a trigger (the conditions of the former "Remember this"
 skill) and runs as a silent side-effect: it reads the latest user message and its provenance from
 context, makes one LLM call to extract and normalise the fact(s), and writes each to the
 remembered_facts store — no extra conversation turns. The model is not woken. (Needs the triggers
-plugin for its trigger; needs a classifier provider named "skills-classifier" to evaluate it.)
+plugin for its trigger; the trigger's conditions are judged by the triggers classifier — pin which
+provider via the triggers_config tool, else it uses the turn's own provider.)
 
 The **\`dream_time\` tool** runs one pass of background memory consolidation. It is a deterministic
 TypeScript pipeline: it picks the oldest unassigned fact from the remembered_facts store, scores it against
@@ -131,6 +154,7 @@ The store is idempotent: a re-seed on restart keeps the existing data.
     },
 
     async setup(services) {
+      captured = services;
       // Seed the remembered_facts store and its `remembered_facts_action` tool (written to by the
       // remember_fact tool). Idempotent — a re-seed on restart keeps the existing store's data.
       await defineStore(services, {
@@ -161,6 +185,12 @@ The store is idempotent: a re-seed on restart keeps the existing data.
       // remember_fact: the compiled "Remember this" tool. Like dream_time, it resolves what it needs
       // per-call, so register unconditionally; its trigger is wired in seedCognition.
       services.tools.register(createRememberFactTool(services));
+
+      // ask_inner_voice (the Inner voice skill's critic call) and cognition_config (which provider it
+      // uses). Both resolve per-call, so register unconditionally — the Inner voice skill calls
+      // ask_inner_voice rather than the generic single_turn, so cognition owns its own provider alias.
+      services.tools.register(createAskInnerVoiceTool(services));
+      services.tools.register(createCognitionConfigTool(services));
 
       if (services.SkillManager) {
         await seedCognition(services);

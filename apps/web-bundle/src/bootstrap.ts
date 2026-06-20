@@ -4,7 +4,7 @@ import {
   installPrincipalCarrier, createConstantPrincipalCarrier,
   createMessage, MissingSecretError, loadPlugins,
   unloadPlugin as unloadPluginFn, unifyServices,
-  forwardingProxy, makeSwappable, singleTurnRequest,
+  forwardingProxy, makeSwappable, singleTurnRequest, createSingleTurnTool,
 } from '@matatbread/matbot-core';
 import type {
   MatbotServices, Store, Session, ProviderConfig, ProviderAdapter,
@@ -363,6 +363,11 @@ export async function boot(env: BootEnv): Promise<void> {
     add:    applyDraft,
     remove: removeProvider,
   }));
+
+  // single_turn: the same core tool the node app registers — a one-shot completion against any
+  // configured provider (or the current turn's, when omitted). Pure (services only), so it runs
+  // identically in the browser realm.
+  toolReg.register(createSingleTurnTool(services));
 
   // Let the frontend offer "add another provider" from the UI (runs the wizard form).
   (globalThis as unknown as Record<string, unknown>).__mbProviders = {

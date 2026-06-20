@@ -1,8 +1,19 @@
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import type { MatbotPluginSpec, MatbotServices, Store } from '@matatbread/matbot-plugin-api';
 import { SkillManager } from './manager.js';
-import { createSkillTool, createSingleTurnTool } from './tools.js';
+import { createSkillTool, createSkillsConfigTool } from './tools.js';
 import type { SkillDoc } from './types.js';
+
+/** One-shot reachability probe for a pinned provider, used only when forming installationMessage
+ *  (install/reload) — never on the hot path. Fails soft: a thrown error becomes `{ ok: false }`. */
+async function testProvider(services: MatbotServices, provider: string): Promise<{ ok: boolean; error?: string }> {
+  try {
+    await services.singleTurn({ provider, prompt: 'Reply with "ok".', signal: AbortSignal.timeout(15000) });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
 
 declare module '@matatbread/matbot-plugin-api' {
   interface MatbotServices {
@@ -12,13 +23,9 @@ declare module '@matatbread/matbot-plugin-api' {
   }
 }
 
-// The provider name used to derive a skill's catalogue summary / knowledge analysis when one isn't
-// cached. Kept distinct from any trigger-classifier provider — skills no longer evaluate conditions.
-const ANALYSIS_PROVIDER = 'skills-classifier';
-
 /**
  * Shared wiring: build the {@link SkillManager}, load persisted skills, register the `skill_action`
- * (content CRUD) and `single_turn` tools, and install the always-on skills catalogue — a
+ * (content CRUD) and `skills_config` tools, and install the always-on skills catalogue — a
  * SystemContextContributor that injects each skill's `catalogSummary` (when set) as a one-line entry
  * so the model knows the skill exists and can load it on demand.
  *
@@ -35,12 +42,12 @@ export async function setupSkills(services: MatbotServices): Promise<SkillManage
   if (services.SkillManager) return services.SkillManager;
 
   const store = services.createStore<SkillDoc>('skills') as Store<SkillDoc>;
-  const manager = new SkillManager(store, services, ANALYSIS_PROVIDER);
+  const manager = new SkillManager(store, services);
   await manager.init();
   await services.register('SkillManager', manager);
 
   services.tools.register(createSkillTool(manager));
-  services.tools.register(createSingleTurnTool(services));
+  services.tools.register(createSkillsConfigTool(services));
 
   // Always-injected skills catalogue. Tiny (only skills explicitly flagged `catalogue` appear), so it
   // is a stable system-prompt prefix rather than the whole catalogue. Rebuilt each turn, so it reflects
@@ -64,11 +71,17 @@ export async function setupSkills(services: MatbotServices): Promise<SkillManage
 
 /**
  * The cross-runtime base skills plugin: content CRUD via `skill_action`, persisted through the active
- * storage backend and indexed into the knowledge subsystem, plus a `single_turn` tool. Runs in both
+ * storage backend and indexed into the knowledge subsystem, plus a `skills_config` tool. Runs in both
  * Node and the browser. It has no filesystem watch — that lives in @matatbread/matbot-skills-node.
  */
 export function createSkillsPlugin(): MatbotPluginSpec {
-  let manager: SkillManager | undefined;
+  let manager:  SkillManager   | undefined;
+  let captured: MatbotServices | undefined;   // captured in setup() so installationMessage() can probe
+
+  const base =
+    'Skills are active (skill_action). A skill is loaded on demand by name; to make one apply ' +
+    'automatically on a behavioural condition, add a trigger (trigger_action) whose invoke is ' +
+    'skill_action with { action: "use", name } — install @matatbread/matbot-triggers for that.';
 
   return {
     apiVersion: PLUGIN_API_VERSION,
@@ -77,13 +90,26 @@ export function createSkillsPlugin(): MatbotPluginSpec {
     },
 
     async installationMessage() {
-      return 'Skills are active (skill_action). A skill is loaded on demand by name; to make one apply ' +
-        'automatically on a behavioural condition, add a trigger (trigger_action) whose invoke is ' +
-        'skill_action with { action: "use", name } — install @matatbread/matbot-triggers for that.';
+      if (!captured) return base;
+      const pinned    = await captured.settings().get<string>('analysisProvider');
+      const available = [...captured.providers.keys()];
+      if (pinned === undefined) {
+        return base +
+          `\n\nSkill content analysis (summary/entities/tags for search) will use "${available[0] ?? '(no provider configured)'}" — ` +
+          'the first configured provider. To pin a small/fast model instead, use the skills_config tool ' +
+          `(action "set"). Available providers: ${available.join(', ') || '(none)'}.`;
+      }
+      const probe = await testProvider(captured, pinned);
+      return base +
+        `\n\nSkill content analysis is pinned to "${pinned}" (skills_config), which ` +
+        (probe.ok
+          ? 'responded to a test prompt.'
+          : `did NOT respond: ${probe.error}. It falls back to the first configured provider until fixed.`);
     },
 
     async setup(services) {
-      manager = await setupSkills(services);
+      captured = services;
+      manager  = await setupSkills(services);
     },
 
     async teardown() {

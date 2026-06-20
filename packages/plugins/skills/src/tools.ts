@@ -125,53 +125,69 @@ export function createSkillTool(manager: SkillManager): Tool {
 }
 
 /**
- * Exposes {@link MatbotServices.singleTurn} to the model: a one-shot call to a SEPARATE configured provider. The
- * intended use is consulting another model (e.g. a different-lineage critic of the current draft)
- * with a well-defined interface, rather than the model improvising a bash/curl call. Lives in the
- * skills toolset for now; may move to a more general home later.
+ * Get/set which provider skills uses to analyse a skill's content — deriving its catalogue summary,
+ * entities, and tags for semantic search. The provider is an alias for one of the already-configured
+ * providers, not a new one: unset, analysis falls back to the first configured provider (so it works
+ * with zero config); set it to pin a specific — e.g. cheap, fast — model. Resolved per analysis, so a
+ * change takes effect on the next reindex without a restart.
  */
-export function createSingleTurnTool(services: MatbotServices): Tool {
+export function createSkillsConfigTool(services: MatbotServices): Tool {
+  const KEY = 'analysisProvider';
   const executor: ToolExecutor = {
-    async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
-      const args = input as { provider?: string; prompt?: string; system?: string };
-      if (!args.provider)                  { yield { type: 'error', message: 'single_turn requires "provider".' }; return; }
-      if (typeof args.prompt !== 'string') { yield { type: 'error', message: 'single_turn requires a string "prompt".' }; return; }
-      if (!services.providers.has(args.provider)) {
-        const known = [...services.providers.keys()].join(', ') || '(none configured)';
-        yield { type: 'error', message: `Unknown provider "${args.provider}". Configured providers: ${known}.` };
-        return;
+    async *execute(input: unknown, _ctx: ToolContext): AsyncIterable<ToolEvent> {
+      const args      = input as { action?: string; provider?: string };
+      const settings  = services.settings();
+      const available = [...services.providers.keys()];
+      const fallback  = available[0] ?? null;
+      switch (args.action) {
+        case 'get': {
+          const pinned = await settings.get<string>(KEY);
+          yield { type: 'result', value: { analysisProvider: pinned ?? null, fallback, available } };
+          return;
+        }
+        case 'set': {
+          if (!args.provider) { yield { type: 'error', message: 'action "set" requires "provider".' }; return; }
+          if (!services.providers.has(args.provider)) {
+            yield { type: 'error', message: `Unknown provider "${args.provider}". Configured providers: ${available.join(', ') || '(none)'}.` };
+            return;
+          }
+          await settings.set(KEY, args.provider);
+          yield { type: 'result', value: { analysisProvider: args.provider } };
+          return;
+        }
+        case 'clear': {
+          await settings.delete(KEY);
+          yield { type: 'result', value: { analysisProvider: null, fallback } };
+          return;
+        }
+        default:
+          yield { type: 'error', message: `Unknown action "${String(args.action)}". Expected one of: get, set, clear.` };
       }
-      const res = await services.singleTurn({
-        provider: args.provider,
-        prompt:   args.prompt,
-        signal:   ctx.signal,
-        ...(typeof args.system === 'string' ? { system: args.system } : {}),
-      });
-      yield { type: 'result', value: { text: res.text, usage: res.usage } };
     },
   };
 
   return {
-    name: 'single_turn',
+    name: 'skills_config',
     description:
-      'Run a single-turn completion against another configured provider and return its reply. This is ' +
-      'a one-shot call to a SEPARATE model — not your own response: you send one `prompt` (and optional ' +
-      '`system`) to the named `provider`, and get back its text and token usage. Use it to consult a ' +
-      'different model — e.g. a second, different-lineage model critiquing your draft, or any generation ' +
-      'that should run on a specific provider rather than the current conversation\'s model. The ' +
-      '`provider` must already be configured in this install (list or add providers with the provider ' +
-      'tool).\n\n' +
+      'Configure the skills subsystem. Currently one setting: `analysisProvider` — which configured ' +
+      'provider analyses skill content (summary/entities/tags for search). It is an alias for an ' +
+      'existing provider, not a new one. Unset, analysis uses the first configured provider; set it to ' +
+      'pin a small/fast model. `get` reports the current pin, the fallback, and the available provider ' +
+      'names; `set` pins one (it must already be configured — see the provider tool); `clear` reverts ' +
+      'to the fallback.\n\n' +
       'Parameters (TypeScript):\n' +
       '```ts\n' +
-      '{ provider: string; prompt: string; system?: string }  // -> { text, usage: { inputTokens, outputTokens } }\n' +
+      "type SkillsConfig =\n" +
+      "  | { action: 'get' }                       // -> { analysisProvider: string | null, fallback, available }\n" +
+      "  | { action: 'set'; provider: string }     // pin a provider -> { analysisProvider }\n" +
+      "  | { action: 'clear' };                     // revert to fallback -> { analysisProvider: null, fallback }\n" +
       '```',
     inputSchema: {
       type:       'object',
-      required:   ['provider', 'prompt'],
+      required:   ['action'],
       properties: {
-        provider: { type: 'string', description: 'Name of a configured provider to run the completion against.' },
-        prompt:   { type: 'string', description: 'The user message to send to that provider.' },
-        system:   { type: 'string', description: 'Optional system prompt for the call.' },
+        action:   { type: 'string', enum: ['get', 'set', 'clear'], description: 'The operation to perform.' },
+        provider: { type: 'string', description: 'Name of an already-configured provider — required for "set".' },
       },
     },
     executor,

@@ -1,4 +1,4 @@
-import type { Tool, ToolExecutor, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolContext, ToolEvent, MatbotServices } from '@matatbread/matbot-plugin-api';
 import type { TriggerManager } from './manager.js';
 import type { TriggerCondition, TriggerKind } from './types.js';
 
@@ -152,6 +152,73 @@ export function createTriggerActionTool(manager: TriggerManager): Tool {
         tool:       { type: 'string', description: 'Name of the tool to invoke when a condition matches. Required for add.' },
         params:     { type: 'object', description: 'Params passed verbatim as the invoked tool\'s input.' },
         enabled:    { type: 'boolean', description: 'Set false to keep but disable the trigger.' },
+      },
+    },
+    executor,
+  };
+}
+
+/**
+ * Get/set which provider the trigger classifier uses to judge conditions. The provider is an alias for
+ * one of the already-configured providers, not a new one: unset, the classifier uses the current turn's
+ * own provider (so triggers work with zero config); set it to pin a small/fast model. Resolved per
+ * evaluation, so a change takes effect on the next turn without a restart.
+ */
+export function createTriggersConfigTool(services: MatbotServices): Tool {
+  const KEY = 'classifierProvider';
+  const executor: ToolExecutor = {
+    async *execute(input: unknown, _ctx: ToolContext): AsyncIterable<ToolEvent> {
+      const args      = input as { action?: string; provider?: string };
+      const settings  = services.settings();
+      const available = [...services.providers.keys()];
+      switch (args.action) {
+        case 'get': {
+          const pinned = await settings.get<string>(KEY);
+          yield { type: 'result', value: { classifierProvider: pinned ?? null, available } };
+          return;
+        }
+        case 'set': {
+          if (!args.provider) { yield { type: 'error', message: 'action "set" requires "provider".' }; return; }
+          if (!services.providers.has(args.provider)) {
+            yield { type: 'error', message: `Unknown provider "${args.provider}". Configured providers: ${available.join(', ') || '(none)'}.` };
+            return;
+          }
+          await settings.set(KEY, args.provider);
+          yield { type: 'result', value: { classifierProvider: args.provider } };
+          return;
+        }
+        case 'clear': {
+          await settings.delete(KEY);
+          yield { type: 'result', value: { classifierProvider: null } };
+          return;
+        }
+        default:
+          yield { type: 'error', message: `Unknown action "${String(args.action)}". Expected one of: get, set, clear.` };
+      }
+    },
+  };
+
+  return {
+    name: 'triggers_config',
+    description:
+      'Configure the triggers subsystem. Currently one setting: `classifierProvider` — which configured ' +
+      'provider judges trigger conditions. It is an alias for an existing provider, not a new one. Unset, ' +
+      "the classifier uses the current turn's own provider; set it to pin a small/fast model. `get` " +
+      'reports the current pin and the available provider names; `set` pins one (it must already be ' +
+      'configured — see the provider tool); `clear` reverts to the turn provider.\n\n' +
+      'Parameters (TypeScript):\n' +
+      '```ts\n' +
+      "type TriggersConfig =\n" +
+      "  | { action: 'get' }                       // -> { classifierProvider: string | null, available }\n" +
+      "  | { action: 'set'; provider: string }     // pin a provider -> { classifierProvider }\n" +
+      "  | { action: 'clear' };                     // revert to the turn provider -> { classifierProvider: null }\n" +
+      '```',
+    inputSchema: {
+      type:       'object',
+      required:   ['action'],
+      properties: {
+        action:   { type: 'string', enum: ['get', 'set', 'clear'], description: 'The operation to perform.' },
+        provider: { type: 'string', description: 'Name of an already-configured provider — required for "set".' },
       },
     },
     executor,

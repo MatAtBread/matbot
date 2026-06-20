@@ -4,6 +4,11 @@ import { surfaceOfKind } from './types.js';
 
 const MAX_MSG_CHARS = 1500;
 
+// Back-compat default: installs that configured a provider literally named "skills-classifier" (the
+// former hard-coded classifier name) keep working with no migration. A `classifierProvider` setting
+// overrides it; absent both, the classifier falls back to the turn's own provider.
+const LEGACY_CLASSIFIER = 'skills-classifier';
+
 function clip(text: string): string {
   if (text.length <= MAX_MSG_CHARS) return text;
   const half = Math.floor((MAX_MSG_CHARS - 3) / 2);
@@ -25,12 +30,21 @@ export class TriggerManager implements Triggers {
   private readonly triggers = new Map<string, Trigger>();
   private readonly store:    Store<Trigger>;
   private readonly services: MatbotServices;
-  private readonly classifierProvider: string;
 
-  constructor(store: Store<Trigger>, services: MatbotServices, classifierProvider: string) {
-    this.store              = store;
-    this.services           = services;
-    this.classifierProvider = classifierProvider;
+  constructor(store: Store<Trigger>, services: MatbotServices) {
+    this.store    = store;
+    this.services = services;
+  }
+
+  // The classifier provider, resolved live per evaluation (so a triggers_config change takes effect on
+  // the next turn): the `classifierProvider` setting if set and valid, else the legacy "skills-classifier"
+  // provider if present, else the current turn's own provider. There is always a turn provider to fall
+  // back to, so the classifier always has a model — triggers work with zero config.
+  async resolveClassifierProvider(turnProvider: string): Promise<string> {
+    const pinned = await this.services.settings().get<string>('classifierProvider');
+    if (pinned !== undefined && this.services.providers.has(pinned)) return pinned;
+    if (this.services.providers.has(LEGACY_CLASSIFIER)) return LEGACY_CLASSIFIER;
+    return turnProvider;
   }
 
   async init(): Promise<void> {
@@ -109,10 +123,11 @@ export class TriggerManager implements Triggers {
    * or the subject is empty.
    */
   async evaluate(
-    surface: TriggerSurface,
-    subject: { label: string; text: string },
-    context: { label: string; text: string },
-    signal:  AbortSignal,
+    surface:      TriggerSurface,
+    subject:      { label: string; text: string },
+    context:      { label: string; text: string },
+    signal:       AbortSignal,
+    turnProvider: string,
   ): Promise<{ trigger: Trigger; kinds: TriggerKind[] }[]> {
     // Candidate key is `${triggerId}#${conditionIndex}` — addressing conditions by index is fine
     // because evaluation is per-turn and the trigger set is stable for its duration. The surface a
@@ -125,7 +140,7 @@ export class TriggerManager implements Triggers {
     if (candidates.length === 0 || subject.text === '') return [];
 
     const res = await this.services.singleTurn({
-      provider: this.classifierProvider,
+      provider: await this.resolveClassifierProvider(turnProvider),
       signal,
       system:
         'You are a trigger classifier for a conversational assistant. Below is the current exchange — ' +
