@@ -1607,7 +1607,7 @@ async function submitFormResponse(sessionId, values) {
 
 // ── Per-session event stream (one persistent connection; submits are fire-and-forget) ──────────
 //
-// A single GET /sessions/:id/events SSE carries ALL turns for the session. Events are demuxed by
+// A single GET /events/sessions/:id SSE carries ALL turns for the session. Events are demuxed by
 // traceId into per-turn queues, each drained by renderTurn(). One connection per session (not per
 // submission) is what keeps queued submits off the browser's ~6-socket-per-host limit — the cause
 // of both the missing-queued-badge and the prompt-stall bugs.
@@ -1800,7 +1800,6 @@ async function renderTurn(sid, traceId) {
   let thinkingAccum   = '';
   let currentTool     = null;
   let providerToolPending = false;
-  let pluginToolPending   = false;
   let turnIn          = 0;
   let turnOut         = 0;
   let turnCost        = 0;
@@ -1912,7 +1911,6 @@ async function renderTurn(sid, traceId) {
         case 'tool:start': {
           removeLoading();
           if (ev.name === 'provider') providerToolPending = true;
-          if (ev.name === 'plugin')   pluginToolPending   = true;
           currentTool = makeToolBlock(ev.name, ev.input, ev.callId);
           currentTool.open = true;
           turnWrap.appendChild(currentTool);
@@ -1949,7 +1947,6 @@ async function renderTurn(sid, traceId) {
           textElFinalised = true;
           textAccum = '';
           if (providerToolPending && !ev.isError) { providerToolPending = false; refreshProviderSelect(); }
-          if (pluginToolPending   && !ev.isError) { pluginToolPending   = false; loadPlugins(); }
           break;
         }
 
@@ -2341,6 +2338,29 @@ async function init() {
         updatedFiles.add(name);
         loadFiles();
       }
+    }
+  })();
+
+  // Tool-registry CRUD → refresh the skills panel (skills are tools; a skill_action registered out
+  // of band — e.g. the Drive backend restoring matbot-skills at boot, after this UI's one-shot loads
+  // — surfaces here). Debounced: one plugin load fires many tool-changed events, want one re-query.
+  (async function connectToolWatchStream() {
+    if (!T.toolEvents) return;
+    let timer = null;
+    for await (const _event of T.toolEvents(new AbortController().signal)) {
+      if (timer) continue;
+      timer = setTimeout(() => { timer = null; loadSkills(); }, 150);
+    }
+  })();
+
+  // Plugin load/unload → refresh the plugins panel. Catches tool-less plugins the tool stream can't
+  // see (pure provider/hook/storage), and supersedes the old poll-on-`plugin`-tool-success refresh.
+  (async function connectPluginWatchStream() {
+    if (!T.pluginEvents) return;
+    let timer = null;
+    for await (const _event of T.pluginEvents(new AbortController().signal)) {
+      if (timer) continue;
+      timer = setTimeout(() => { timer = null; loadPlugins(); }, 150);
     }
   })();
 

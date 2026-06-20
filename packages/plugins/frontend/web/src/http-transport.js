@@ -74,12 +74,12 @@
     return res.json().catch(() => ({}));
   }
 
-  // One persistent GET /sessions/:id/events carrying ALL turns for the session, demuxed by the
+  // One persistent GET /events/sessions/:id carrying ALL turns for the session, demuxed by the
   // caller. Reconnects with a 1s backoff until `signal` aborts.
   async function* sessionEvents(sid, signal) {
     while (!signal.aborted) {
       try {
-        const res = await fetch('/sessions/' + sid + '/events', { signal });
+        const res = await fetch('/events/sessions/' + sid, { signal });
         if (!res.ok || !res.body) break;
         const reader = res.body.getReader();
         const dec = new TextDecoder();
@@ -141,8 +141,10 @@
     })();
   }
 
-  function statusEvents(signal) { return eventStream('/sessions/events', 'session-busy', signal); }
-  function fileEvents(signal)   { return eventStream('/files/events',    'file-changed', signal); }
+  function statusEvents(signal) { return eventStream('/events/sessions', 'session-busy',   signal); }
+  function fileEvents(signal)   { return eventStream('/events/files',    'file-changed',   signal); }
+  function toolEvents(signal)   { return eventStream('/events/tools',    'tool-changed',   signal); }
+  function pluginEvents(signal) { return eventStream('/events/plugins',  'plugin-changed', signal); }
 
   function openFile(namespace, path) {
     window.open('/files/' + namespace + '/' + path, '_blank');
@@ -151,6 +153,6 @@
   window.matbotTransport = {
     hostRuntime: 'node',
     callTool, createSession, sessionBusy, submit,
-    sessionEvents, answerPrompt, abort, statusEvents, fileEvents, openFile,
+    sessionEvents, answerPrompt, abort, statusEvents, fileEvents, toolEvents, pluginEvents, openFile,
   };
 })();

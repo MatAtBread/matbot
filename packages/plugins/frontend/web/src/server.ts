@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type {
   MatbotPlugin, Principal, Session, Store, ToolRegistry, FileStore, Vault,
-  FormField, PromptFn, SessionRunner,
+  FormField, PromptFn, SessionRunner, PluginRegistryEvent,
 } from '@matatbread/matbot-core';
 import { createSession, PromptCancelledError, runAs, tryCurrentPrincipal } from '@matatbread/matbot-core';
 import { sseComment, sseEvent } from './sse-writer.js';
@@ -14,6 +14,7 @@ export interface WebServerDeps {
   vault:          Vault;
   loadPlugin:     (specifier: string) => Promise<MatbotPlugin>;
   unloadPlugin:   (specifier: string) => Promise<boolean>;
+  watchPlugins?:  (signal?: AbortSignal) => AsyncIterable<PluginRegistryEvent>;
   tools?:         ToolRegistry;
   cors?:          string;  // Access-Control-Allow-Origin value, default '*'
   workdir?:       string;
@@ -116,7 +117,7 @@ export function createWebServer(deps: WebServerDeps) {
   const origin = deps.cors ?? '*';
   const resolvePrincipal = deps.resolvePrincipal ?? defaultWebPrincipal;
 
-  // Persistent per-session event subscribers (the GET /sessions/:id/events SSE streams). Submits are
+  // Persistent per-session event subscribers (the GET /events/sessions/:id SSE streams). Submits are
   // fire-and-forget — all turn output, and interactive prompts, reach clients over these. Holding one
   // connection per session (not per submission) is what keeps queued submits off the browser's
   // ~6-socket-per-host limit, which otherwise starved both the `queued` signal and POST /prompt.
@@ -151,6 +152,37 @@ export function createWebServer(deps: WebServerDeps) {
           for (const res of subs) {
             if (res.writable) res.write(msg); else subs.delete(res);
           }
+        }
+      }
+    })();
+  }
+
+  // Clients subscribed to tool-registry CRUD (a tool registered/removed — e.g. a plugin loaded at
+  // runtime adds its tools). Lets panels keyed off tool presence (skills, plugins) refresh live
+  // rather than only on a local action.
+  const toolListeners = new Set<ServerResponse>();
+
+  if (deps.tools) {
+    void (async () => {
+      for await (const event of deps.tools!.watch(watchAc.signal)) {
+        const msg = sseEvent('tool-changed', event);
+        for (const res of toolListeners) {
+          if (res.writable) res.write(msg); else toolListeners.delete(res);
+        }
+      }
+    })();
+  }
+
+  // Clients subscribed to plugin load/unload. Covers tool-less plugins (pure provider/hook/storage —
+  // e.g. the storage backend itself) that the tool-changed stream can't see.
+  const pluginListeners = new Set<ServerResponse>();
+
+  if (deps.watchPlugins) {
+    void (async () => {
+      for await (const event of deps.watchPlugins!(watchAc.signal)) {
+        const msg = sseEvent('plugin-changed', event);
+        for (const res of pluginListeners) {
+          if (res.writable) res.write(msg); else pluginListeners.delete(res);
         }
       }
     })();
@@ -233,8 +265,8 @@ export function createWebServer(deps: WebServerDeps) {
       json(res, 200, { status: 'ok' }); return;
     }
 
-    // --- GET /sessions/events --- (SSE stream for session busy/idle status changes)
-    if (method === 'GET' && url === '/sessions/events') {
+    // --- GET /events/sessions --- (SSE stream for session busy/idle status changes)
+    if (method === 'GET' && url === '/events/sessions') {
       res.writeHead(200, {
         'content-type':  'text/event-stream',
         'cache-control': 'no-cache',
@@ -295,7 +327,7 @@ export function createWebServer(deps: WebServerDeps) {
         : [body.content];
 
       // Fire-and-forget: we enqueue and return immediately. The turn's output — and this prompt —
-      // reach the client over its persistent GET /sessions/:id/events stream, not this request.
+      // reach the client over its persistent GET /events/sessions/:id stream, not this request.
       // Answered via POST /sessions/:id/prompt. (Only one prompt is outstanding per session, since
       // turns are serialised.)
       const promptFn = ((p: string | FormField, defaultValue?: string): Promise<string> =>
@@ -335,7 +367,7 @@ export function createWebServer(deps: WebServerDeps) {
         json(res, 200, { queued: view.queued, traceId: view.traceId });
 
         // Server-owned busy tracker. The busy:false broadcast requires *someone* draining this
-        // session's stream when the turn ends — but a client's GET /sessions/:id/events consumer may
+        // session's stream when the turn ends — but a client's GET /events/sessions/:id consumer may
         // not be attached (user switched away). So whoever turns busy ON owns turning it OFF: drain
         // this submission's own view until the runner's deterministic `idle` event, driving updateBusy.
         // The view was subscribed (the `events` getter) before pump can run, so it can't miss even a
@@ -363,8 +395,8 @@ export function createWebServer(deps: WebServerDeps) {
       return;
     }
 
-    // --- GET /sessions/:id/events --- (persistent per-session SSE: ALL turn output for the session)
-    const eventsMatch = /^\/sessions\/([^/]+)\/events$/.exec(url);
+    // --- GET /events/sessions/:id --- (persistent per-session SSE: ALL turn output for the session)
+    const eventsMatch = /^\/events\/sessions\/([^/]+)$/.exec(url);
     if (method === 'GET' && eventsMatch) {
       const sId = eventsMatch[1]!;
       res.writeHead(200, {
@@ -530,8 +562,28 @@ export function createWebServer(deps: WebServerDeps) {
       return;
     }
 
-    // --- GET /files/events --- (SSE: file-change events across all namespaces; client filters by namespace)
-    if (method === 'GET' && url === '/files/events') {
+    // --- GET /events/tools --- (SSE: tool-registry CRUD; panels keyed off tool presence refresh live)
+    if (method === 'GET' && url === '/events/tools') {
+      if (!deps.tools) { json(res, 404, { error: 'Tool registry not available' }); return; }
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', 'connection': 'keep-alive' });
+      res.write(sseComment('tool watch stream open'));
+      toolListeners.add(res);
+      req.on('close', () => toolListeners.delete(res));
+      return;
+    }
+
+    // --- GET /events/plugins --- (SSE: plugin load/unload; catches tool-less plugins)
+    if (method === 'GET' && url === '/events/plugins') {
+      if (!deps.watchPlugins) { json(res, 404, { error: 'Plugin watch not available' }); return; }
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', 'connection': 'keep-alive' });
+      res.write(sseComment('plugin watch stream open'));
+      pluginListeners.add(res);
+      req.on('close', () => pluginListeners.delete(res));
+      return;
+    }
+
+    // --- GET /events/files --- (SSE: file-change events across all namespaces; client filters by namespace)
+    if (method === 'GET' && url === '/events/files') {
       if (!deps.files?.watch) { json(res, 404, { error: 'File watch not available' }); return; }
       res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', 'connection': 'keep-alive' });
       res.write(sseComment('file watch stream open'));
@@ -540,8 +592,8 @@ export function createWebServer(deps: WebServerDeps) {
       return;
     }
 
-    // --- GET /files/events/<namespace>/<name> --- (SSE: single-file watch)
-    const fileEventMatch = /^\/files\/events\/([^/]+)\/(.+)$/.exec(url);
+    // --- GET /events/files/<namespace>/<name> --- (SSE: single-file watch)
+    const fileEventMatch = /^\/events\/files\/([^/]+)\/(.+)$/.exec(url);
     if (method === 'GET' && fileEventMatch) {
       if (!deps.files?.watch) { json(res, 404, { error: 'File watch not available' }); return; }
       let key: string;

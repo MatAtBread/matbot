@@ -11,7 +11,7 @@
 // The in-process transport is server.ts re-expressed without HTTP: per-session subscribe, the busy
 // tracker, prompt parking, and the buffered tool-call ctx, all ported faithfully.
 
-import { createSession, currentPrincipal, PromptCancelledError } from '@matatbread/matbot-core';
+import { createSession, currentPrincipal, PromptCancelledError, watchPlugins } from '@matatbread/matbot-core';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 
 // ── In-process transport ──────────────────────────────────────────────────────
@@ -161,7 +161,7 @@ function makeInProcessTransport(services) {
     }
   }
 
-  // One persistent per-session stream carrying ALL turn output, exactly like GET /sessions/:id/events:
+  // One persistent per-session stream carrying ALL turn output, exactly like GET /events/sessions/:id:
   // the runner's events merged with the synthetic `prompt` events promptFn injects. `idle` is runner
   // bookkeeping (drives busy) and is not forwarded — app.js has no case for it.
   async function* sessionEvents(sid, signal) {
@@ -255,6 +255,14 @@ function makeInProcessTransport(services) {
     for await (const event of services.files.watch(signal)) yield event;
   }
 
+  async function* toolEvents(signal) {
+    for await (const event of services.tools.watch(signal)) yield event;
+  }
+
+  async function* pluginEvents(signal) {
+    for await (const event of watchPlugins(signal)) yield event;
+  }
+
   // No HTTP file route in-process, so materialise the bytes into a blob: URL (mirror the dom
   // frontend's url_for_resource). Default-deny: only files marked `allowed` get a URL.
   async function openFile(namespace, name) {
@@ -272,7 +280,7 @@ function makeInProcessTransport(services) {
   return {
     hostRuntime: 'browser',
     callTool, createSession: createSessionFn, sessionBusy, submit,
-    sessionEvents, answerPrompt, abort, statusEvents, fileEvents, openFile,
+    sessionEvents, answerPrompt, abort, statusEvents, fileEvents, toolEvents, pluginEvents, openFile,
   };
 }
 

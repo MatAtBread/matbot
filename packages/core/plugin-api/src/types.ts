@@ -568,13 +568,24 @@ export type HealthStatus =
 
 // ── Registries ────────────────────────────────────────────────────────────────
 
+export type ToolRegistryEvent =
+  | { type: 'registered'; name: string; pluginName?: string }
+  | { type: 'removed';    name: string };
+
 export interface ToolRegistry {
   register(tool: Tool): void;
   remove(name: string): void;
   resolve(name: string): Tool | null;
   list(): readonly Tool[];
   removeByPlugin(pluginName: string): void;
+  /** Observe tool CRUD as it happens. Read-only — observers cannot veto a registration. One event
+   *  per tool (removeByPlugin emits a `removed` per matched tool). The stream ends when `signal` aborts. */
+  watch(signal?: AbortSignal): AsyncIterable<ToolRegistryEvent>;
 }
+
+export type PluginRegistryEvent =
+  | { type: 'loaded';   name: string }
+  | { type: 'unloaded'; name: string };
 
 // ── Pipeline events ─────────────────────────────────────────────────────────────
 

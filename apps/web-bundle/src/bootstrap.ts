@@ -1,5 +1,5 @@
 import {
-  createSessionRunner, HookRegistry, SystemContextRegistryImpl,
+  createSessionRunner, HookRegistry, SystemContextRegistryImpl, ToolRegistryImpl,
   resolveProviderFactory, getPluginNameForSpecifier,
   installPrincipalCarrier, createConstantPrincipalCarrier,
   createMessage, MissingSecretError, loadPlugins,
@@ -7,8 +7,8 @@ import {
   forwardingProxy, makeSwappable, singleTurnRequest,
 } from '@matatbread/matbot-core';
 import type {
-  MatbotServices, Store, Session, Tool, ProviderConfig, ProviderAdapter,
-  PluginSettings, ToolRegistry, Vault, SessionRunner, KnowledgeIndex,
+  MatbotServices, Store, Session, ProviderConfig, ProviderAdapter,
+  PluginSettings, Vault, SessionRunner, KnowledgeIndex,
   PluginResolver, StorageBackend, FileStore, PromptFn, MatbotPlugin, Principal, Runtime, SwapFn,
 } from '@matatbread/matbot-plugin-api';
 import { LookupKnowledgeIndex } from '@matatbread/matbot-knowledge';
@@ -178,16 +178,7 @@ export async function boot(env: BootEnv): Promise<void> {
   const [fileStore, swapFiles] = makeSwappable<FileStore>(activeStorageBackend.fileStore);
 
   // ── Registries ────────────────────────────────────────────────────────────────────────────
-  const toolMap = new Map<string, Tool>();
-  const toolReg: ToolRegistry = {
-    register: (t: Tool) => { toolMap.set(t.name, t); },
-    remove:   (n: string) => { toolMap.delete(n); },
-    resolve:  (n) => toolMap.get(n) ?? null,
-    list:     () => [...toolMap.values()],
-    removeByPlugin: (pluginName: string) => {
-      for (const [name, tool] of toolMap) if (tool.pluginName === pluginName) toolMap.delete(name);
-    },
-  };
+  const toolReg          = new ToolRegistryImpl();
   const hookReg          = new HookRegistry();
   const systemContextReg = new SystemContextRegistryImpl();
   const serviceRegistry  = new Map<string, unknown>();
