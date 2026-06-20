@@ -674,7 +674,7 @@
 
     /* ── Message types ─────────────────────────────────────────── */
 
-    .message { max-width: min(700px, 95%); }
+    .message { max-width: min(1000px, 90%); }
 
     /* User: right-aligned dark bubble */
     .message.user {
@@ -744,8 +744,14 @@
       font-style: normal;
     }
 
-    /* Assistant: left-aligned, no background */
-    .message.assistant { align-self: flex-start; }
+    /* Assistant: left-aligned */
+    .message.assistant {
+      align-self: flex-start;
+      background: #0044ff08;
+      border-radius: 8px 8px 8px 0px;
+      padding: 04px;
+      border: 1px solid #ebf0ff;
+    }
 
     /* Marker: centered cross-thread link notice */
     .marker-note {

@@ -1,53 +1,26 @@
 # matbot — Design Principles
 
-This file is the authoritative guide for anyone (human or LLM) working on this codebase.
-Read it before making any structural decisions.
+Authoritative guide for anyone (human or LLM) working on this codebase.
 
 ---
 
 ## What matbot is
 
-A TypeScript AI harness — a thin, composable runtime that connects language models to tools
-and frontends. It is not a product; it is infrastructure.
+A TypeScript AI harness — a thin, composable runtime connecting language models to tools and frontends. Infrastructure, not a product.
 
 ---
 
 ## Hard constraints
 
-### No provider SDKs
-All LLM communication is plain HTTP using the web-platform `fetch` API.
-Never import `@anthropic-ai/sdk`, `openai`, or any other provider SDK.
-Use the HTTP endpoints directly; stream via SSE parsed with `parseSSE` from `@matatbread/matbot-providers-base`.
+**No provider SDKs.** All LLM communication uses `fetch` with SSE parsed via `parseSSE` from `@matatbread/matbot-providers-base`. Never import `@anthropic-ai/sdk`, `openai`, or equivalents.
 
-### No Node-specific primitives in shared packages
-Packages under `packages/` (except those explicitly suffixed `-node`) must run in both Node and
-the browser. Use web-platform APIs: `fetch`, `crypto.randomUUID()`, `AbortController`,
-`AbortSignal`, `TextDecoder`, `ReadableStream`, `SubtleCrypto`. Never use `require`,
-`Buffer`, `EventEmitter`, `fs`, `path`, `child_process`, or `os` in shared packages.
-Node-only code lives in packages named `*-node` or in `apps/`.
+**No Node primitives in shared packages.** Packages under `packages/` (except those suffixed `-node`) must run in Node and browser. Use `fetch`, `crypto.randomUUID()`, `AbortController`, `ReadableStream`, `TextDecoder`, `SubtleCrypto`. Never use `require`, `Buffer`, `EventEmitter`, `fs`, `path`, `child_process`, `os`, or `process.env`.
 
-Also avoid `process.env`: it is an anti-pattern in matbot. Secrets and key substitution
-go through the `Vault` (`${NAME}` placeholders resolved at runtime against one flat namespace);
-all other per-install configuration goes through plugin `Settings`. Both are abstractions
-with swappable backends (`.env` is merely the default node `Vault`; the browser build uses
-WebCrypto + browser storage and has no `.env` or `matbot.yaml`), so a plugin reaching for
-`process.env` directly is not portable. (TODO: enforce with a lint rule once eslint lands.)
-The node realm picks its `Vault` at boot, but a plugin can also swap it at runtime via
-`services.register('Vault', impl)` — see the Service registry section (e.g. an encrypted,
-per-user, DB-backed secret store in place of `.env`).
+Secrets and configuration go through the `Vault` (`${NAME}` placeholders) or plugin `Settings` — both have swappable backends. Reaching for `process.env` directly is non-portable.
 
-### AsyncIterators, not callbacks
-Streaming events flow through `AsyncIterable<T>`. Never use `EventEmitter` or raw callbacks
-for inter-layer communication. All provider adapters return `AsyncIterable<CompletionEvent>`,
-all tool executors return `AsyncIterable<ToolEvent>`, and the runner emits `AsyncIterable<PipelineEvent>`.
+**AsyncIterators, not callbacks.** Streaming flows through `AsyncIterable<T>`. Never `EventEmitter` or raw callbacks for inter-layer communication.
 
-### Strict TypeScript everywhere
-`strict`, `exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`, `verbatimModuleSyntax`.
-Consequences:
-- Optional fields require conditional spreads: `...(val !== undefined ? { key: val } : {})`
-- Array/map indexing returns `T | undefined` — always guard or assert
-- `process.exit(1)` does not narrow types unless `@types/node` is loaded; prefer `throw new Error()`
-- `switch` exhaustiveness on discriminated unions silences "lacks return statement" errors
+**Strict TypeScript.** `strict`, `exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`, `verbatimModuleSyntax`. Optional fields require conditional spreads; array/map indexing returns `T | undefined`; prefer `throw` over `process.exit(1)`; use `switch` exhaustiveness on discriminated unions.
 
 ---
 
@@ -57,62 +30,53 @@ Consequences:
 ```
 packages/
   core/
-    runner/        — agentic loop, hook dispatch, plugin loader (@matatbread/matbot-core)
-    plugin-api/    — MatbotPlugin, MatbotServices, all shared types (@matatbread/matbot-plugin-api)
-    config/        — YAML loading, .env parsing
-    security/      — VaultImpl, principal (origin of operations); resolves ${NAME} placeholders
-    knowledge/     — LookupKnowledgeIndex (default in-memory KnowledgeIndex implementation)
+    runner/        — agentic loop, hook dispatch, plugin loader
+    plugin-api/    — MatbotPlugin, MatbotServices, shared types
+    config/        — YAML + .env loading
+    security/      — VaultImpl, Principal origin
+    knowledge/     — LookupKnowledgeIndex (default in-memory)
     storage/
-      _base/       — filter/sort engine shared by all Store implementations
+      _base/       — filter/sort engine
       filesystem/  — FilesystemStore<T> (Node, CAS-safe)
     providers/
-      _base/       — SSE parser, shared HTTP helpers
-    tool-plugin/   — built-in plugin and provider management tools (@matatbread/matbot-tool-plugin)
-
+      _base/       — SSE parser, HTTP helpers
+    tool-plugin/   — built-in provider management tools
   plugins/
-    rumsfeld/      — contextual_search tool; knowledge fault handler (@matatbread/matbot-rumsfeld; cross-runtime)
-    persist-ki-bge/ — persistent KnowledgeIndex with BGE reranker (@matatbread/matbot-persist-ki-bge; cross-runtime)
-    triggers/      — data-driven hooks: stored conditions that invoke a tool (trigger_action) (@matatbread/matbot-triggers; cross-runtime)
-    skills/        — cross-runtime skill content CRUD + catalogue (skill_action) (@matatbread/matbot-skills)
-    skills-node/   — node specialization: embeds skills, adds local .md filesystem import/watch (@matatbread/matbot-skills-node)
-    edit-session/  — session_edit tool (cut/fork/split/compact via action) (@matatbread/matbot-edit-session)
+    rumsfeld/      — contextual_search tool; knowledge fault handler
+    persist-ki-bge/— persistent KnowledgeIndex + BGE reranker
+    triggers/      — data-driven hooks (condition → tool invocation)
+    skills/        — skill CRUD + catalogue (cross-runtime)
+    skills-node/   — node specialization: .md import/watch
+    edit-session/  — session_edit tool (cut/fork/split/compact)
     files/         — file codec and producer registry
-    hook-logger/   — diagnostic: logs every hook channel; demos durable injection + redaction + resubmit (@matatbread/matbot-hook-logger)
-    browser/       — OPFS store, WebCrypto vault (browser-only)
+    hook-logger/   — diagnostic: logs every hook channel
+    browser/       — OPFS store, WebCrypto vault
     frontend/
-      web/         — web UI: HTTP+SSE server entry (node) + in-process mount entry (browser bundle), one shared client; see docs/WEB-BUNDLE.md
-      dom/         — minimal in-process browser chat (demonstrator; the matbot-demo.html bundle)
-      telegram/    — Telegram bot frontend (@matatbread/matbot-frontend-telegram)
+      web/         — HTTP+SSE server (node) + in-process (browser)
+      dom/         — minimal in-process browser chat
+      telegram/    — Telegram bot frontend
     providers/
-      anthropic/   — Anthropic Messages API adapter (also handles DeepSeek Anthropic-compat)
-      openai-compat/ — OpenAI-compatible chat completions adapter
+      anthropic/   — Anthropic Messages API adapter
+      openai-compat/— OpenAI-compatible adapter
     tools/
-      bash/        — exec tool (@matatbread/matbot-tool-bash)
-      docker-bash/ — sandboxed exec inside Docker
-      http/        — HTTP request tool
-      schedule/    — timer/delay tool
-      workspace/   — workspace file tools
-
+      bash/, docker-bash/, http/, schedule/, workspace/
 apps/
-  cli/             — interactive REPL + single-turn mode
-  web-bundle/      — assembles the browser-only single-file matbot.html (see docs/WEB-BUNDLE.md)
+  cli/             — interactive REPL + single-turn
+  web-bundle/      — browser-only matbot.html
 ```
 
-### Package naming
-- `@matatbread/matbot-foo` for packages with a single implementation
-- `@matatbread/matbot-foo-types` for interface-only packages (no implementation; augments `MatbotServices`)
-- `@matatbread/matbot-foo-node` / `@matatbread/matbot-foo-browser` for platform-specific implementations
+**Dependency direction:** `apps` → `packages/plugins/*-node` → `packages/plugins/*` → `packages/core/plugin-api`. `packages/core/runner` → `packages/core/plugin-api`. Nothing in `packages/` may depend on `apps/`.
 
-### Dependency direction
-`apps` → `packages/plugins/*-node` → `packages/plugins/*-types` → `packages/core/plugin-api`
-`packages/core/runner` → `packages/core/plugin-api`
-Nothing in `packages/` may depend on `apps/`.
+### Package naming
+- `@matatbread/matbot-foo` — single implementation
+- `@matatbread/matbot-foo-types` — interface-only (augments `MatbotServices`)
+- `@matatbread/matbot-foo-node` / `-browser` — platform-specific
 
 ---
 
 ## Provider model
 
-Providers are named LLM configurations in `matbot.yaml`. Each name is **fully self-contained**:
+Named LLM configurations in `matbot.yaml`, fully self-contained:
 
 ```yaml
 providers:
@@ -126,81 +90,43 @@ providers:
       maxTokens: 4096
 ```
 
-- Prefer duplication over references — five similar provider blocks is fine
-- `${NAME}` placeholders are resolved at runtime by the `Vault`; the YAML loader leaves them intact.
-  There is no env/secret distinction — a name resolves against one flat namespace (`.env` is just
-  the default node backend). `createSecret` returns the canonical key name to reference (it may
-  differ from the requested name — see the `Vault` interface); `writeSecret` stores verbatim
-- Credentials never appear in source code
-- `module` is the npm package name or relative path of the provider plugin; `endpoint` overrides
-  the base URL
-- The built-in `provider` tool can add and remove profiles live — no restart needed
+- Prefer duplication over references — five similar blocks is fine
+- `${NAME}` resolved by `Vault` at runtime (flat namespace; `.env` is default node backend)
+- Credentials never in source code
+- Built-in `provider` tool adds/removes profiles live
 
 ---
 
 ## Data layout
 
-When using the built-in filesystem storage. Other storage providers will differ (for example
-the optional SQLite plugin stores all data in a local SQLite DB)
-
-All runtime state lives under `.data/` **next to `matbot.yaml`**, never in the source tree:
+All runtime state under `.data/` **next to `matbot.yaml`**, never in source:
 
 ```
 .data/
-  sessions/    — Store<Session>
-  settings/    — Store<SettingsDoc> (plugin key-value settings)
-  skills/      — Store<SkillDoc>
-  triggers/    — Store<Trigger> (triggers plugin: data-driven hooks)
-  schedules/   — Store<Schedule> (background plugin recurring jobs)
-  knowledge/   — Store<KnowledgeEntry> (persist-ki-bge plugin)
-  bash-cwd/    — default working directory for bash tool execution (created lazily)
-  files/       — FileStore blobs (MIME-typed, served by frontend); the 'workspace' namespace
-               within files/ holds files written by workspace_action (write)
+  sessions/, settings/, skills/, triggers/, schedules/
+  knowledge/, bash-cwd/, files/
 ```
 
-Plugins may create additional subdirectories (e.g. `files/`, `settings/`) as needed.
-`.data/` is gitignored. Source and data are always separate.
+`.data/` is gitignored. Plugins may add subdirectories. Other storage providers (e.g. SQLite) differ.
 
-### `.plugins/` — fetched remote-plugin cache
-
-A **separate** tree from `.data/`, also next to `matbot.yaml`. When a plugin is installed from an
-HTTP(S) or `github:` raw-source specifier, its module graph is fetched and mirrored here
-(`.plugins/<host>/<path…>`), preserving structure, and imported through the normal Node strip-only
-loader — bare imports resolve up to the host's `node_modules` (the same "singleton boundary" the web
-bundle uses), relative imports resolve to the fetched siblings, so no import rewriting is needed. The
-cache is idempotent and offline-friendly: a restart loads from disk rather than re-fetching.
-
-The split from `.data/` is deliberate and load-bearing: `.data/` is the LLM's read-write runtime
-state, whereas `.plugins/` is **matbot-writes / LLM-reads-only** (e.g. mounted read-only into
-docker-bash) so cached plugin *code* cannot be tampered with by the model. Do not relocate it under
-`.data/`. (Lives in `apps/cli` + `packages/core/tool-plugin`'s `remote-cache.ts`; npm/tarball/git
-installs still go through the package manager into `node_modules`, not here.) `.plugins/` is gitignored.
+**`.plugins/`** — fetched remote-plugin cache, **separate** from `.data/`. `.data/` is LLM read-write runtime state; `.plugins/` is matbot-writes / LLM-reads-only (mounted read-only into docker-bash). Never relocate it. Gitignored.
 
 ---
 
 ## Service registry
 
-`MatbotServices` is the runtime environment passed to every plugin's `setup()`. Its core
-members (hooks, tools, complete, settings, vault, sessions) are always present. Optional
-services — custom cognitive subsystems, domain-specific backends, etc. — are advertised with
-`register` (keyed by `keyof MatbotServices`) and consumed as **members**. There is one access
-surface: core members and registered services are both reached as `services.InterfaceName`.
+`MatbotServices` is the runtime environment passed to every plugin's `setup()`. Core members (hooks, tools, complete, settings, vault, sessions) are always present. Optional services advertised with `register` and consumed as **members** — one access surface:
 
 ```ts
-// Advertising (in the providing plugin's setup()):
+// Providing:
 await services.register('McpRemoteService', new RemoteMcpManager(store));
 
-// Consuming (in any plugin's setup()) — member access. The `?` on the augmentation (below) makes
-// the type `McpRemoteService | undefined`, so the optional `?.` is the null-check:
+// Consuming:
 services.McpRemoteService?.add(...);
 ```
 
-`register` is the only write path; direct assignment (`services.X = …`) throws and points back to it.
-
-Type safety comes from augmenting `MatbotServices` in `@matatbread/matbot-plugin-api`:
-
+Type safety via augmentation:
 ```ts
-// In the providing package (or alongside it):
 declare module '@matatbread/matbot-plugin-api' {
   interface MatbotServices {
     McpRemoteService?: McpRemoteService;
@@ -208,463 +134,161 @@ declare module '@matatbread/matbot-plugin-api' {
 }
 ```
 
-Any plugin that imports this declaration gets a fully-typed `register` call and fully-typed member
-access (`services.McpRemoteService`). Core never references plugin services — they are negotiated at
-runtime between plugins.
+**Key is the interface name — no translation.** The registry holds interfaces; the string is the erasure-time stand-in for type identity. Name the key exactly after the interface it carries.
 
-**The key is the interface name — no translation.** The registry is a registry of *interfaces*;
-the string is only the erasure-time stand-in for type identity (with runtime reflection the name
-would not exist at all). So name the key exactly after the interface it carries — `McpRemoteService`
-holds a `McpRemoteService`, not a role-noun like `mcpRemote` that has to be kept in sync with its
-type. One token: grep finds the augmentation, the `register`, and every read in a single pass.
-
-**Two implementations of one interface** is the one case that needs a distinct handle. Mint a
-second type token rather than inventing a role name — an alias preserves structural typing today
-and lets the two diverge later:
+**Two implementations of one interface?** Alias, don't invent role names:
 ```ts
-type SessionStore = Store<Session>;   // distinct key, same shape now, free to diverge
+type SessionStore = Store<Session>;
 type ScratchStore = Store<Session>;
 ```
-This is also the tool for when the bare interface name is too *generic* to be a safe global key
-(never register bare `Store`; alias it to a domain-specific handle first).
 
-A few keys are interface-named like the rest but additionally carry **dedicated `register`
-behaviour** and are always-present core members (read as `services.StorageBackend` /
-`services.KnowledgeIndex` / `services.vault`). `register` doesn't merely store these — it swaps the
-live impl and fixes up everything pointing at the old one. Each is also handed out as a **capture-safe
-forwarding proxy**, so a reference captured before a swap (`const { KnowledgeIndex } = services`) keeps
-resolving to the current impl rather than pinning the old one:
-- `'StorageBackend'` (a `StorageBackend`) — replaces the active storage backend and re-wires all Store proxies
-- `'KnowledgeIndex'` (a `KnowledgeIndex`) — replaces the active KnowledgeIndex, draining entries from the old one
-- `'Vault'` (a `Vault`) — replaces the active vault backend behind the proxy; nothing is drained (unlike
-  `KnowledgeIndex`, secrets are not migrated from the old vault). Read path asymmetry: the live vault is
-  read as the lowercase `services.vault` (the pre-existing accessor); the capitalised `'Vault'` is the
-  swap *handle* used only with `register` — it has no separate getter. Because credential/endpoint
-  resolution is lazy (per-turn, through the proxy) and nothing captures the concrete impl, a plugin's
-  `register('Vault', impl)` is picked up by all subsequent resolution — including providers declared in
-  `matbot.yaml` — provided the vault plugin loads before any plugin that resolves secrets through the
-  vault during its own `setup()`. (A vault plugin's own bootstrap secret still comes from the default
-  `.env` vault, since it loads before registering itself.)
+**Swappable core members** (`StorageBackend`, `KnowledgeIndex`, `Vault`) use `register` to swap live impls behind capture-safe forwarding proxies. A captured reference keeps resolving to the current impl.
 
-To introduce a new cognitive subsystem (e.g. an `Imagination` interface):
-1. Declare `Imagination?: Imagination` on `MatbotServices` (augment in your package)
-2. Call `await services.register('Imagination', new ImaginationImpl(...))` in `setup()`
-3. Core is unchanged; other plugins access the service via `services.Imagination`
+### Discovery vs. direct dependency
 
-**Name collision**: the property name becomes the contract identifier. Naming it after the
-interface inherits the interface's own specificity discipline — short but domain-specific beats
-globally unique (which is why a bare `Store` would be a terrible key).
+Registry is for **negotiation between independent parties** — consumer neither knows nor cares who provides a capability. Use `services.x` (with `?:` optional) only when absence is genuinely acceptable; degrade gracefully (`if (!services.x) return;`), no fallback.
 
-### Registry discovery vs. direct dependency
-
-The registry is for **negotiation between independent parties**: the consumer neither knows nor
-cares who provides a capability, whether anyone does, or which implementation answers. That
-looseness is the whole point — it buys runtime swappability and graceful absence. Reach for
-`services.x` (and the `x?:` optional on `MatbotServices`) only when that's genuinely true.
-Genuine optional discovery has **no fallback**; it degrades (`if (!services.x) return;`).
-
-When one plugin is a **specialization** of another — "B *is* A, but broader" — that is an `extends`
-relationship, not an unknown-collaborator one. The dependency is named, owned, present by
-construction, and singular, so express it as a plain `import` + construct and a hard `package.json`
-dependency. Routing it through the registry there is ceremony around a fact known at author time,
-and it has real costs: a second resident plugin, lifecycle split across two `teardown`s (cleanup
-becomes load-order dependent), and capabilities registered only to be immediately overridden.
-
-The tell is the fallback. The moment you write `services.x ?? loadPlugin(x)`, you've admitted the
-dependency isn't optional — you're willing to *force* it into existence. That `??` is the seam
-between the two models; reaching for it means you've picked the loose tool for a hard relationship.
-
-The two halves compose and aren't in tension: a specialization may still **advertise** its own
-capability on the registry (offering loosely to whoever's out there) while **depending** on its
-base directly. Offer loosely; depend tightly. *(See `packages/plugins/mcp` embedding
-`packages/plugins/mcp-http`'s `RemoteMcpManager` directly, while mcp-http still registers
-`McpRemoteService` for standalone use.)*
+When one plugin **specializes** another ("B *is* A, but broader"), that's an `extends` relationship — express it with a plain `import` + construct and hard `package.json` dependency. The moment you write `services.x ?? loadPlugin(x)`, the dependency isn't optional. **Offer loosely; depend tightly.**
 
 ---
 
 ## Knowledge subsystem
 
-`KnowledgeIndex` is a **core** service (always present on `MatbotServices`). It stores named knowledge entries and supports term-based and semantic search.
-
-The default implementation (`LookupKnowledgeIndex` in `packages/core/knowledge/`) is
-in-memory and scores by term frequency. `packages/plugins/persist-ki-bge/` replaces it with
-a `Store<KnowledgeEntry>`-backed index that survives restarts and optionally calls a
-Cloudflare BGE reranker for semantic scoring.
-
-`packages/plugins/rumsfeld/` registers a `contextual_search` tool that queries the active
-`KnowledgeIndex` when the model encounters an unknown term. This is the primary consumption
-path: the model calls `contextual_search`, gets back the best-matching entry, and continues.
-
-`services.register('KnowledgeIndex', impl)` swaps the active index at runtime — all subsequent
-`contextual_search` calls use the new backend immediately.
+`KnowledgeIndex` is a **core** service. Default: `LookupKnowledgeIndex` (in-memory, term frequency). `persist-ki-bge` replaces it with `Store<KnowledgeEntry>`-backed persistence + optional BGE reranker. `rumsfeld` registers `contextual_search` tool — the primary consumption path. `register('KnowledgeIndex', impl)` swaps at runtime.
 
 ---
 
 ## Storage
 
-`Store<T extends { id: string; version: string }>` is the universal interface.
-All writes use compare-and-swap (`store.cas(id, expectedVersion, next)`) for thread safety.
-Never write to a store without a version check when concurrent updates are possible.
+`Store<T extends { id: string; version: string }>` — universal interface. All writes use compare-and-swap (`store.cas(id, expectedVersion, next)`). Never write without version check when concurrent updates are possible.
 
 ---
 
 ## Security principal
 
-A `Principal` (`{ id, type }`) is the identity that originated the current operation. It is carried
-**ambiently**, not threaded through signatures: there is one mechanism, the `PrincipalCarrier`,
-installed once at boot and read anywhere via free functions exported from `@matatbread/matbot-core`:
+A `Principal` (`{ id, type }`) is the operation origin, carried **ambiently** (not threaded through signatures):
 
-- `currentPrincipal()` — the identity in force; throws if read outside any established scope.
-- `tryCurrentPrincipal()` — same, but `undefined` instead of throwing (fail-open backends).
-- `runAs(principal, fn)` — establish `principal` for the async extent of `fn` (nests cleanly).
-- `enterPrincipal(principal)` — imperative establishment at a process/request *entry* (throws on re-entry).
+- `currentPrincipal()` — identity in force; throws outside any scope
+- `tryCurrentPrincipal()` — `undefined` instead of throwing
+- `runAs(principal, fn)` — establish for async extent
+- `enterPrincipal(principal)` — imperative entry (throws on re-entry)
 
-**Why ambient, not a parameter.** The requirement is that the principal survive top-to-bottom,
-*including across tool-use boundaries*, into `Store`/`FileStore`/`Vault`/`KnowledgeIndex` and
-`complete()`. Threading it would make the security model opt-in at every call site (a tool that
-forgets to pass it is indistinguishable from a system call). Ambient propagation is un-forgettable:
-established once at the entry, every downstream call sees it with zero plumbing and **no interface
-churn** — backends gain only the *ability* to call `currentPrincipal()`; the stock impls ignore it.
-Passing is the mechanism's job; reject/ignore/branch is the service's.
+**Why ambient.** The principal must survive tool-use boundaries into `Store`/`FileStore`/`Vault`/`KnowledgeIndex`/`complete()`. Threading makes security opt-in; ambient propagation is un-forgettable.
 
-**Platform split** (mirrors `Vault`):
-- node — `createAlsPrincipalCarrier()` (`apps/cli`, `AsyncLocalStorage`-backed). The many concurrent
-  per-session `pump` loops and per-request frontend handlers each get an isolated scope — the
-  multi-user case. Lives in the node app so `packages/core` stays node-free.
-- browser / single-principal realms / tests — `createConstantPrincipalCarrier(principal)` (neutral,
-  in plugin-api). There is only ever one identity, so `run` is a passthrough and no isolation is needed.
+**Platform split:** node uses `AsyncLocalStorage`-backed carrier (in `apps/cli`); browser/single-principal uses constant carrier (in plugin-api).
 
-**Establishment points (entry-only).** Frontends establish at their entry — the CLI `enterPrincipal`s
-its resolved **boot principal** at boot (see below); the web server `runAs` per HTTP request; telegram
-`runAs` per message. The `SessionRunner`'s `pump` separately wraps each turn in `runAs(submitter)`
-because it runs detached (`void pump`) from the request that enqueued it. In-process delegation is a
-nested `runAs`; cross-process delegation (a spawned worker) re-establishes at its own entry via
-`enterPrincipal`.
+**Establishment points:** entry-only — CLI `enterPrincipal`s boot principal; web server `runAs` per request; telegram `runAs` per message; `SessionRunner.pump` wraps each turn in `runAs(submitter)`.
 
-**Specifying the default principal.** Core has no opinion on *who* the boot identity is — it only
-receives whatever `Principal` the entry hands `enterPrincipal`. Sourcing that value is a
-platform-specific entry concern (the only layer allowed to read env / argv / yaml), so `packages/`
-stays neutral:
-- **node boot** — `apps/cli`'s `resolveBootPrincipal`, precedence most-specific first:
-  `--principal <id|json>` flag → `MATBOT_PRINCIPAL` env → `matbot.yaml` `principal:` (a string id, or
-  `{ id, type }`) → `systemPrincipal()`. The flag/env value is a bare id (type `user`) or the JSON
-  `{"id","type"}`.
-- **browser realm** — `BrowserConfig.principal` seeds the constant carrier; absent ⇒ an anonymous
-  `web-user`. A per-tenant bundle bakes the tenant identity here.
-- **web per-request identity** — the web frontend derives a principal per HTTP request from a
-  `WebPrincipalResolver` read off the registry (`services.WebPrincipalResolver`); the default defers to
-  the boot principal, and a plugin can register an override (e.g. header-derived). It is resolved at
-  *request receipt* and frozen into the queued submission, so it must be registered **before** the
-  submit it should affect (a resolver hot-loaded mid-turn won't retro-stamp that turn).
-- **cross-process delegation** — `env` is the identity transport: a spawner serialises `{ id, type }`
-  across the boundary (the `background` plugin writes the creator to the child's `MATBOT_PRINCIPAL`,
-  overriding any inherited deployment value) and the child re-establishes it through the same node-boot
-  resolution. `env` reads stay in `apps/`/`*-node`; the neutral core only ever sees the re-established
-  `Principal`.
-
-`Session` persists `ownerPrincipalId`/`actorPrincipalId` as ownership *data* (set explicitly via
-`createSession`) — that is record-keeping, not the ambient mechanism.
+**Boot principal resolution** (platform-specific entry concern):
+- Node: `--principal` flag → `MATBOT_PRINCIPAL` env → `matbot.yaml` `principal:` → `systemPrincipal()`
+- Browser: `BrowserConfig.principal` or anonymous `web-user`
+- Web: `WebPrincipalResolver` from registry, resolved at request receipt
+- Cross-process: serialized via env, re-established at child entry
 
 ---
 
 ## Hooks
 
-Hooks are sorted by the **job** they do, not by lifecycle position — the channel name *is* the
-contract. `Hook` is a discriminated union keyed by `on`, so each channel's context and return type
-carry only the effects it honours; a write that goes nowhere won't type-check — there is no shared
-per-call context type and no index-signature escape hatch. Register with `services.hooks.register({ on, handler })`;
-a handler that returns nothing is a pure observer. Every channel's `ctx` carries `removeHook()`, which
-unregisters the hook *currently running* — the clean primitive for a one-shot hook (it fires, does its
-job, and removes itself), with no need to know the plugin name or to use the coarser `removeByPlugin`.
+Sorted by **job**, not lifecycle position. `Hook` is a discriminated union keyed by `on`. Register: `services.hooks.register({ on, handler })`. Each channel's `ctx` carries `removeHook()` for one-shot hooks.
 
-A handler that **throws** is isolated by the dispatcher, never propagated: the throw is caught, logged,
-and treated as "the hook returned nothing" (skipped), so one misbehaving hook can't brick the turn —
-this matters because a `screen` hook runs before the model does, so a throw there (e.g. a hook calling a
-provider whose secret is unresolved) would otherwise kill every turn with no way to recover from inside
-the chat. An intentional stop is a *return value* (`abort` / `rejectTool`), not a throw. Each throwing
-hook is recorded once and surfaced as a `matbot-hooks` marker (drained into the session by the next
-`runScreen`), so the failure degrades *visibly* rather than silently.
+A throwing handler is isolated (caught, logged, skipped) — never propagated. An intentional stop is a *return value* (`abort`/`rejectTool`), not a throw. Throwing hooks surface as `matbot-hooks` markers.
 
-Five channels:
+| `on` | Cadence | Session | Effects |
+|---|---|---|---|
+| `screen`     | once per turn, before 1st provider call | read-write | replace `session`, add `ephemeral` context (tail of outgoing messages, never persisted), append durable `markers`, and/or `abort` |
+| `contribute` | before *every* provider call | read-only | return transformed `outgoing` copy (ephemeral) |
+| `toolcall`   | before each tool exec | read-only | `rejectTool` and/or `abort` |
+| `toolresult` | after each tool exec | read-only | replace `result` (redaction) or observe |
+| `followup`   | once, post-commit | read + durable-marker | `resubmit` robo turn, `retractAndRerun` (pop committed turn, re-run with context), append durable `markers` |
 
-| `on` | Home | Cadence | Session | Effects (the ceiling) |
-|---|---|---|---|---|
-| `screen`     | runner, top of turn | once, before the 1st provider call | read-write | the primary durable-mutate point: replace `session` (persisted), add turn-scoped `ephemeral` context (appended to the tail of this turn's outgoing messages — freshest, most salient, cache-prefix-stable — never persisted), append durable `markers` (persisted + emitted live), and/or `abort` |
-| `contribute` | runner, in the loop | before *every* provider call | read-only | return a transformed copy of `outgoing` (the message array about to be sent) — ephemeral, never persisted |
-| `toolcall`   | runner | before each tool exec | read-only | `rejectTool` (skip; an error result is fed back so the model self-corrects, pairing intact) and/or `abort` |
-| `toolresult` | runner | after each tool exec, pre-record | read-only | return `{ result }` to replace it (hard redaction, truncation) or nothing to observe (audit — ctx carries `toolCall`, `result`, `isError`, `durationMs`) |
-| `followup`   | pump, post-commit | once, after the turn commits | read + durable-marker | `resubmit` a robo turn (head-enqueued, runs next as its own real turn; `resubmitDepth` budgets the chain, the runner hard-caps it), `retractAndRerun` (pop the committed turn back to the last user message into a retraction marker, then re-run that user turn with ephemeral `context` injected — supersede the response rather than follow it), and/or append durable `markers` to the committed session (LLM-invisible; the pump persists them and emits them live) |
+`screen` and `followup` are the durable-mutate points (once per turn). `contribute` is the in-harness cousin of a wrapping provider — mind prompt caching: inject at the tail or as stable prefix.
 
-`toolcall` guards the call *in*, `toolresult` the result *out*. `followup` is matbot deciding to
-continue a turn — the inverse of `ask_user`, where it pauses to wait on a human. Cadence dictates
-durability: a once-per-turn point may persist; a per-call/per-tool point must not (it re-fires, so a
-durable write would accumulate) — hence the per-call channels are read-only or ephemeral. **Both**
-once-per-turn points may write durably: `screen` replaces the whole `session` (it runs before the
-turn), while `followup` *appends* `markers` to the committed session (it runs after) — annotating, not
-rewriting. The one exception is `retractAndRerun`, a controlled rewrite: it pops the committed turn
-back to the last user message and re-runs, but loses nothing — the popped content is relocated verbatim
-into a retraction marker (LLM-invisible, audit-preserved) and the re-run is `resubmitDepth`-capped, so
-it supersedes rather than erases. Per-channel
-dispatch lives on `HookRegistry` (`runScreen` / `runContribute` / `runToolCall` / `runToolResult` /
-`runFollowup`); the runner drives the first four, the `SessionRunner` pump the last.
+### Authorship vs. role
 
-`contribute` is the in-harness cousin of a wrapping ("indirect") provider — both transform the wire
-messages, but `contribute` stacks and doesn't own the HTTP call. Mind **prompt caching** (prefix-
-sensitive): content placed at the *tail* (newest turn) is free, but a transform that varies the cached
-prefix (system / early history) per call busts it. Inject at the tail, or as a stable prefix.
-
-### Authorship (`origin`) vs role
-
-`role` is the LLM-protocol identity (how the model treats a message); **authorship** is who produced
-it, for human presentation — orthogonal, and conflating them is a trap. A `followup` resubmission and
-a `screen`-injected fragment are machine-authored but carried as `role: 'user'` (the model must
-respond to them as input). The per-block `origin?: 'robo'` on `MessageContent` records this: optional,
-and OOB — never sent to the model. **Frontends present by author; the LLM operates by role.** So robo
-content lives in a user-role turn for the model but renders agent-side (a 🤖 indicator) for humans;
-the web splits one stored user message into per-`origin` bubbles, telegram surfaces robo blocks as bot
-messages (adopting its turn's followups via the `queued` event's `rootTraceId` lineage), and a
-text-only frontend that ignores `origin` still renders coherently. A "robo message" is just one whose
-blocks are all `origin: 'robo'`.
+`role` is LLM-protocol identity; **authorship** (`origin?: 'robo'` on `MessageContent`) records who produced it for presentation — orthogonal. Frontends present by author; the LLM operates by role. A "robo message" has all blocks `origin: 'robo'`.
 
 ---
 
 ## Triggers (data-driven hooks)
 
-*(For the **why** — the discretion-reduction gradient, JIT delivery, skills-as-tools, and the skills
-compiler endgame — see `docs/TRIGGERS-RATIONALE.md`. This section is the mechanics.)*
-
-`@matatbread/matbot-triggers` turns the hard-coded "fire a skill on a condition" wiring into
-**data**. A `Trigger` is a stored document:
+Stored documents turning condition-based wiring into **data**:
 
 ```ts
 interface Trigger {
   id; version;
-  conditions: { kind: 'augment' | 'retract' | 'followup'; rule: string }[];  // the OR — many ways to recognise
-  invoke:     { tool: string; params?: unknown };            // the one consequence
+  conditions: { kind: 'augment' | 'retract' | 'followup'; rule: string }[];
+  invoke: { tool: string; params?: unknown };
   enabled?: boolean; createdAt; updatedAt;
 }
 ```
 
-**The load-bearing idea: a trigger names a *tool*, not a skill.** Firing a skill is just
-`invoke: skill_action({ action: 'use', … })` — one tool call among many, not a special case. This
-collapses the old `tool → skill → tool` indirection (where a robo message asked the model to *load*
-a skill that then told it to *call* a tool) into `condition → tool`. "Apply a skill" is the
-specialization; "call a tool" is the general case. (`skill_action` has both `load` — raw content,
-for reading/editing — and `use` — the content wrapped as a directive to apply now; a trigger uses
-`use`, which is where the old "Use the skill X" imperative lives, content inlined so no round-trip.)
+**Triggers name a *tool*, not a skill.** "Apply a skill" is `invoke: skill_action({ action: 'use', … })` — a specialization, not a special case.
 
-**Conditions are the OR, `invoke` is the consequence.** Any matching condition fires the trigger
-once. Each condition is an LLM-judged rubric ("MATCH if …; DO NOT MATCH if …") on the *form/sentiment*
-of a message (not its topic — topical relevance is search's job). A condition's **`kind`** is a single
-discriminator — it fixes the surface judged, the hook, *and* how the consequence lands, because those
-aren't independent (delivery determines surface):
-- **`augment`** — judge the user message in a `screen` hook (pre-response); inject the output
-  **ephemerally** into the turn about to run.
-- **`retract`** — judge the assistant response in a `followup` hook (post-commit); the response was
-  *wrong*, so pop it into a retraction marker and re-run the user turn with the output injected.
-- **`followup`** — judge the assistant response in a `followup` hook; the response *stands* but needs a
-  steer, so keep it and resubmit the output as a robo turn (it stays in context for the steer to land).
+**Conditions are OR; `invoke` is the consequence.** Each condition is an LLM-judged rubric. `kind` determines surface judged, hook used, and delivery:
+- **`augment`** — judge user message in `screen` hook; inject ephemerally
+- **`retract`** — judge assistant response in `followup` hook; pop and re-run
+- **`followup`** — judge assistant response in `followup` hook; resubmit as robo turn
 
-The author picks the kind because only they know whether a match means "read this first" / "this is
-wrong" (`pgdwell` not `dwell` — every downstream conclusion void) / "look again" (Inner Voice / Verify
-Assumptions / Bicameral — critiques *of* the standing answer). The three are disjoint and exhaustive,
-which is why `kind` is one field, not a `(phase × delivery)` matrix with dead cells — the surface a
-condition is judged on (user message vs assistant response) is *derived* from `kind`
-(`surfaceOfKind`), not stored. Injected payloads are **fenced** as system-supplied context, not a user
-utterance (the dispatcher stays a dumb transport; the fence is the plugin's own framing). So triggers
-are exactly *data-driven hooks* — they ride the existing `screen`/`followup` channels, carrying config
-where there used to be plugin code.
+**Observational dispatch:** tool's output is the signal. A `result` → inject; no result → silent side-effect. The dispatcher is a dumb transport — tools frame themselves.
 
-**Observational dispatch decides whether the model wakes — the tool's *output* is the signal.** The
-dispatcher invokes the tool and looks at what it yields: a `result` is model-facing → inject it
-(ephemeral for `augment`, retract-and-rerun for `retract`, robo resubmit for `followup`); **no** result
-→ a silent side-effect, the model never wakes (`direct`). Nothing declares "direct vs inject" — `skill_action(use)` yields content so
-it injects; `remember_fact` yields no result (only a `marker`) so it runs silent. The dispatcher is a
-dumb transport: it injects whatever result a tool yields, with no framing of its own — a tool that
-wants its result *acted on* frames it itself (`use` returns content already wrapped as "follow these
-instructions"). A `marker` a tool yields is collected and persisted regardless (the silent-side-effect
-trace; see Markers).
+**Fails soft.** Absent tool → nothing happens. Conditions evaluated by a classifier provider (Settings-resolved, falls back to turn's provider). Zero config required.
 
-**Fails soft, everywhere.** An `invoke` naming an absent tool does nothing until the tool is present
-(no referential integrity, no cascade — the same graceful-degradation rule as a stale `skill_action`
-load id). Conditions are evaluated by a classifier provider, resolved live per turn: the
-`classifierProvider` setting (set via the `triggers_config` tool) if present, else a legacy provider
-named `skills-classifier` if one is configured (back-compat), else the current turn's own provider —
-so triggers work with zero config. The provider name is an *alias* for one of the already-configured
-providers, chosen via Settings, not a separate profile to stand up. (Each consuming plugin follows the
-same pattern: skills' analysis provider via `skills_config`, the inner-voice provider via
-`cognition_config`; all fall back to the turn provider / first provider when unset.)
-
-**Surfaces.** A `Triggers` service (CRUD + `importIfAbsent`, which dedupes by invocation since
-triggers carry no name — the key for idempotent seeding) and a `trigger_action` tool
-(`list`/`query`/`get`/`add`/`update`/`remove`; `query` filters by invoke target, e.g. "the trigger
-that uses skill X"). cognition seeds its built-in skills' triggers through the service; the web skill
-editor edits a skill's use-trigger conditions through `trigger_action query`.
-
-**Orthogonal to skills.** Triggers and skills don't import each other. Skills own content and the
-system-prompt catalogue (`SkillDoc.catalogSummary`, the former `system`-phase — advertisement, not a
-condition); triggers own conditions and firing. A skill is fired only by a trigger whose `invoke`
-uses it.
+**Orthogonal to skills.** Skills own content; triggers own conditions and firing. A skill is fired only by a trigger naming it.
 
 ---
 
-## Tool design — multi-action tools (preferred, not enforced)
+## Tool design — multi-action tools
 
-When a plugin exposes several closely-related operations (a noun with a handful of verbs —
-`mcp` add/list/remove, sessions list/get/rename, schedule list/suspend/resume/cancel), the
-**preferred** style is to collapse them into a single tool that takes an `action` discriminator
-rather than shipping one `noun_verb` tool per verb. This is a convention, **not** a rule the
-runtime enforces — nothing breaks if you ship separate tools, and some tools should stay
-separate (see below).
+**Preferred:** collapse related operations into one tool with an `action` discriminator. One description teaches the domain once; per-action contract as a TypeScript discriminated union in the description; `inputSchema` loose (`required: ['action']`), executor enforces. Use when operations share a domain or parameter shape.
 
-The shape that has worked well:
+**Keep separate:** genuinely standalone tools (`http`, `bash`, `ask_user`) or qualitatively different concerns (telegram's `send`/`provider`/`open_door`).
 
-- **One description that teaches the domain once.** The wordy shared context (what the thing is,
-  the gotchas) lives in a single place; the verbs are usually self-evident given that context.
-- **Per-action contract as a TypeScript discriminated union in the description.** LLMs read a TS
-  union (`{ action: 'add'; name: string; … } | { action: 'list' } | …`) far more reliably than a
-  verbose JSON-Schema `oneOf`, which providers honour inconsistently.
-- **Keep `inputSchema` loose** — `required: ['action']` plus the union of every action's optional
-  fields. **The executor enforces** per-action requirements and emits a loud `error` event on a
-  missing field or unknown action. (`switch (action)` with a `default` that errors.)
-
-**When to collapse:** the operations share a parameter shape, *or* they share a domain worth
-teaching once. Parameter divergence between actions is fine — that is exactly what the
-discriminated union absorbs.
-
-**When to keep separate (the other valid style):** genuinely standalone, single-purpose tools
-with nothing to share (`http`, `bash`, `ask_user`), or operations that belong to qualitatively
-different concerns even within one plugin — e.g. the telegram frontend keeps `telegram_send`
-(messaging), `telegram_provider` (config), and `telegram_open_door` (admission/permissions)
-separate rather than forcing a hollow `telegram_action` over three unrelated jobs.
-
-**Cross-references between tools may only point *down* the dependency graph** — a tool may name
-another tool that is guaranteed present (same plugin, or a hard dependency), never an optional
-dependent that dangles when its plugin is absent.
+**Cross-references** may only point down the dependency graph — never to optional dependents.
 
 ---
 
-## Thinking blocks (Anthropic extended thinking)
+## Thinking blocks (Anthropic)
 
-When `parameters.thinking` is set, the Anthropic adapter captures both the thinking text and
-its cryptographic `signature`. Complete thinking blocks are stored in session messages as
-`{ type: 'thinking', thinking: string, signature: string }` and round-tripped back to the API
-verbatim. Never strip thinking blocks from message history.
+When `parameters.thinking` is set, complete `{ type: 'thinking', thinking, signature }` blocks are stored and round-tripped verbatim. Never strip them.
 
 ---
 
 ## Markers
 
-Markers are opaque, durable annotations carried in the message stream — links, status, and
-cross-references that mean something to a frontend or another plugin but are transparent to the
-LLM. A marker is stored as a `MessageContent` block,
-`{ type: 'marker', creator: string, data: unknown }` — `creator` is the emitting plugin's
-reference, `data` anything serialisable. A standalone marker is its own message with the dedicated
-`marker` role (`MessageRole`), so every provider adapter skips it rather than letting it
-masquerade as tool-protocol I/O.
-
-Invariants: markers are **elided from LLM submission**, **persisted unchanged**, and **preserved
-by session compaction** — removing one can break things (e.g. a pointer back to an ancestor
-session). For per-creator type safety, augment the `MarkerData` registry and read/write through
-`Marker<'your-creator'>` (the same augmentation pattern as `MatbotServices`); the base
-`MessageContent` member stays loose so exhaustive switches are unaffected. Any code with session
-access may emit a marker — interpreting and rendering it is the creator's and the frontend's
-concern, never the core's.
-
-A **tool** emits one by yielding a `marker` `ToolEvent` (`{ type: 'marker', creator, data }`),
-independent of its `result`. In the normal loop the runner appends it as a marker-role message and
-carries it live; when a tool is invoked by a trigger (outside the loop), the triggers dispatcher
-collects it and persists it via the `screen` session or the `followup` `markers` path. This is the
-trace mechanism for silent side-effects: a trigger-fired tool that yields no result (so the model
-never wakes) can still leave a durable, LLM-invisible record of what it did — and the dispatcher
-adds an error marker of its own if the tool errors or throws, so a swallowed failure is auditable
-post-mortem rather than lost to a log line.
+Opaque, durable annotations in the message stream — `{ type: 'marker', creator: string, data: unknown }`. Stored as marker-role messages, **elided from LLM submission**, **persisted unchanged**, **preserved by compaction**. A tool emits one via `marker` `ToolEvent`; the triggers dispatcher collects and persists them for silent-side-effect trace. For type safety, augment `MarkerData` registry (same pattern as `MatbotServices`).
 
 ---
 
 ## Plugin hot-reload
 
-A plugin can be reloaded from disk without restarting the process (the `plugin reload` tool;
-`loadPlugins(..., bustCache = true)`). The requirement is **freshness all the way down**: if a
-plugin's code — or the code of any module it imports — changed since startup, the reload must
-re-evaluate it. The mechanism is split so the platform-neutral core stays node-free:
+Reload from disk without restart (`plugin reload`; `loadPlugins(..., bustCache = true)`). Freshness all the way down:
 
-- **Core marks intent.** `toFreshUrl` in `packages/core/runner/src/loader.ts` stamps the plugin
-  *entry* URL with a namespaced query param (`?mbfresh=<gen>`, `FRESH_PARAM`). On its own this
-  re-evaluates only the entry — a barrel re-export would leave all the real code behind it cached.
-- **A node-only resolve hook propagates it.** `apps/cli/ts-hooks.js` (registered via
-  `--import ./register.js`) reads the stamp off `context.parentURL` and re-stamps the entry's
-  first-party imports, cascading the generation through the whole subtree. The marker is just an
-  inert query string anywhere no such hook is installed — browser builds reload the whole realm
-  (`location.reload()`) instead, and node without the hook degrades to entry-only busting.
-- **The boundary is "only what the plugin API loaded".** The stamp originates solely at the plugin
-  entry and flows through *its* graph; it stops at host-shared singletons. `register.js` resolves
-  the host-shared package roots (`@matatbread/matbot-core`, `@matatbread/matbot-plugin-api`) and
-  passes them to the hook as an exclusion set. This is mandatory, not cosmetic: those packages
-  export runtime values used with identity semantics (e.g. `MissingSecretError`, matched with
-  `instanceof`). Re-stamp one and the reloaded plugin gets a *second copy* of the module, and
-  cross-boundary `instanceof` / shared-state checks silently break.
+- **Core stamps intent:** `toFreshUrl` adds `?mbfresh=<gen>` to plugin entry URL
+- **Node resolve hook propagates:** `apps/cli/ts-hooks.js` cascades stamp through first-party imports
+- **Boundary stops at host-shared singletons** (`@matatbread/matbot-core`, `@matatbread/matbot-plugin-api`) — re-stamping these breaks `instanceof` and shared state
 
-### Caveats
-
-- **Memory: every reload leaks its subtree.** Node's ESM module registry never evicts, and each
-  distinct `?mbfresh=<gen>` URL is a permanent new entry. A reloaded plugin's entire re-stamped
-  subtree stays resident for the life of the process. This is acceptable *because reloads are
-  rare* (startup-and-done for ~99% of runs); it is **not** a mechanism to call on a timer, per
-  request, or per turn. There is no `require.cache`-style eviction for ESM — true reclamation
-  needs a dropped realm (worker/child process or `vm` modules), which we deliberately did not build.
-- **First-party only by default.** The exclusion protects `core` + `plugin-api`; everything else
-  the plugin reaches, *including its private `node_modules` deps*, is re-evaluated on reload. That
-  is correct for "code changed all the way down", but a third-party lib holding a module-level
-  singleton not routed through `services` would be duplicated. matbot's "all shared state goes
-  through `services`, not shared module imports" rule is what keeps this safe; if you ever hit a
-  lib that breaks it, add its package root to `hostSharedDirs()` in `register.js`.
-- **The stamp must reach children as static imports.** Propagation is via `context.parentURL`, so
-  it follows the static import graph. A module pulled in by a bare dynamic `import(userString)`
-  with no stamped parent context is busted only if it resolves through a stamped ancestor.
-- **Keep `FRESH_PARAM` and the hook's marker name in sync.** Core writes it; the node hook reads
-  it. They are intentionally decoupled (core must not import node code), so the contract is the
-  literal param name — documented at both ends.
-- **Diagnostics.** `toFreshUrl` warns when `import.meta.resolve` throws and it falls back to the
-  cached module (no busting at all), and `loadPlugins` notes when busting runs without the hook
-  (entry-only). A reload that "doesn't pick up changes" should first be checked against these logs.
+**Caveats:** every reload leaks its subtree (ESM module registry never evicts); acceptable because reloads are rare. Not for per-request/timer use. All shared state must go through `services`, not shared module imports.
 
 ---
 
 ## Code style
 
-- No provider SDKs (already said — worth repeating)
-- No comments explaining *what* code does; only comments for non-obvious *why*
+- No provider SDKs
+- No comments explaining *what*; only non-obvious *why*
 - No trailing summaries, no docblocks
 - No premature abstractions — three similar functions beat one leaky abstraction
-- No error handling for impossible cases; trust TypeScript's discriminated unions
-- Validate only at system boundaries (user input, HTTP responses, file reads)
-- `types: ["node"]` must be explicit in any `tsconfig.json` that uses Node APIs — the base config
-  does not include it because shared packages must be platform-neutral
+- No error handling for impossible cases; trust discriminated unions
+- Validate only at system boundaries
+- `types: ["node"]` explicit in any tsconfig using Node APIs
 
 ---
 
-## Changelog maintenance
+## Changelog
 
-`CHANGELOG.md` (project root) records **functional** changes only. Omit purely stylistic or
-non-functional work: CSS, refactoring, code tidying, and docs-only merges.
+`CHANGELOG.md` records **functional** changes only. Omit stylistic, refactoring, docs-only merges.
 
-**Sections (in this order):**
-- `## Unreleased` — changes since the last update. Within it, four categories *in this order*:
-  1. **Breaking changes** — `core` contract changes that can upset consumers
-  2. **API gaps filled** — new `core` API surface (with a short note on *how* it was filled)
-  3. **Bug fixes** — `core` fixes
-  4. **Optional** — new or updated plugins/frontends/apps (feature *or* fix), grouped by plugin.
-     These churn more and don't affect consumers who don't use them, so they sit below the `core`
-     categories. The first three categories are reserved for `packages/core` + `plugin-api`.
-- `## Previously` — everything from prior updates, same category structure. Omit empty categories.
-
-**When the user says "Update the changelog":**
-1. Find merges to `main` since the last documented batch (`git log main --merges --oneline`; the
-   already-documented merges are recoverable from the existing entries). Inspect each merge's branch
-   commits (`git log <merge>^1..<merge>^2`) and their bodies to classify the changes.
-2. Move the current `## Unreleased` content down into `## Previously` (merging by category), then
-   write the new merges into a fresh `## Unreleased`.
-3. Classify each change into the four categories above; skip non-functional/docs-only changes.
-
-This will eventually be synchronised with releases (versioned headings replacing `Unreleased`).
+**Sections:** `## Unreleased` → `## Previously`. Within each, four categories in order:
+1. **Breaking changes** — core contract changes
+2. **API gaps filled** — new core API surface
+3. **Bug fixes** — core fixes
+4. **Optional** — new/updated plugins/frontends/apps, grouped by plugin

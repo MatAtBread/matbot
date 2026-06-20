@@ -20,7 +20,7 @@
  * `./service.ts` when added, or the tool executor when added — not here.
  */
 
-import type { MatbotServices, Store } from '@matatbread/matbot-plugin-api';
+import type { MatbotServices, Message, MessageContent, Store } from '@matatbread/matbot-plugin-api';
 import type { Ranker, Merger } from './ranker.js';
 import {
   type DreamRun,
@@ -33,30 +33,31 @@ import {
   type Score,
   type SkillCandidate,
   DEFAULT_DREAM_SETTINGS,
+  DREAM_SETTINGS_KEY,
+  DREAM_SKILL_ERROR,
   DREAM_SKILL_NONE,
+  validateDreamSettings,
 } from './types.js';
 
 // ── Settings I/O ──────────────────────────────────────────────────────────────
 
-const SETTINGS_KEY = 'dream-time';
-
 /**
  * Load and validate the tunables. Missing values fall back to {@link DEFAULT_DREAM_SETTINGS}, so a
- * fresh install with no stored settings runs with reasonable defaults. The threshold ordering
- * (weak <= strong) is enforced here, not in the store: a malformed setting is a setup bug we want
- * to surface loudly at the start of a run, not silently paper over.
+ * fresh install with no stored settings runs with reasonable defaults. Validation is shared with
+ * `cognition_config`'s `set` (see {@link validateDreamSettings}) so the two can never disagree on
+ * what counts as valid — this call is the last-resort safety net for settings written outside that
+ * tool (or before it existed), surfaced loudly at the start of a run rather than papered over.
  */
 async function loadSettings(services: MatbotServices): Promise<DreamSettings> {
-  const stored = await services.settings().get<Partial<DreamSettings>>(SETTINGS_KEY);
+  const stored = await services.settings().get<Partial<DreamSettings>>(DREAM_SETTINGS_KEY);
   const s: DreamSettings = { ...DEFAULT_DREAM_SETTINGS, ...(stored ?? {}) };
-  if (s.weakThreshold > s.strongThreshold) {
+  try {
+    validateDreamSettings(s);
+  } catch (e) {
     throw new Error(
-      `dream-time settings invalid: weakThreshold (${s.weakThreshold}) > strongThreshold ` +
-      `(${s.strongThreshold}). Repair via services.settings().set('${SETTINGS_KEY}', …).`,
+      `dream-time settings invalid: ${(e as Error).message} Repair via the cognition_config tool ` +
+      `(action "set"), or directly: services.settings().set('${DREAM_SETTINGS_KEY}', …).`,
     );
-  }
-  if (s.maxClusterSize < 1) {
-    throw new Error(`dream-time settings invalid: maxClusterSize (${s.maxClusterSize}) must be >= 1.`);
   }
   return s;
 }
@@ -64,16 +65,21 @@ async function loadSettings(services: MatbotServices): Promise<DreamSettings> {
 // ── Fact selection ────────────────────────────────────────────────────────────
 
 /**
- * Fetch every still-unassigned fact (no `dreamSkill` field) and sort oldest-first. Ties on
- * `createdAt` are broken by `id` (lexicographic) for stable ordering across runs.
+ * Fetch every still-eligible fact (no `dreamSkill` field, and not currently deferred past
+ * `ignoreUntil`) and sort oldest-first. Ties on `createdAt` are broken by `id` (lexicographic)
+ * for stable ordering across runs.
  *
  * We page through the store fully rather than relying on a single query: the store API does not
  * promise unbounded result sets in one call, and dream-time is a background pass — paging is fine.
  *
- * The `exists: false` filter on `dreamSkill` means facts with a sentinel ({@link DREAM_SKILL_NONE})
- * are NOT returned: the pipeline has already triaged them and a future pass won't reconsider.
+ * The `exists: false` filter on `dreamSkill` means facts with a terminal sentinel
+ * ({@link DREAM_SKILL_NONE} or {@link DREAM_SKILL_ERROR}) are NOT returned: the pipeline has
+ * already triaged them and no future pass will reconsider them. The `ignoreUntil` clause excludes
+ * facts the pipeline routed `weak` and deferred — they are NOT terminal (no `dreamSkill` is set),
+ * but are skipped until their deferral lapses, so a `weak` fact does not get re-ranked (and
+ * re-block the queue) on every single pass.
  */
-async function fetchUnassignedFacts(store: Store<RememberedFact>): Promise<RememberedFact[]> {
+async function fetchUnassignedFacts(store: Store<RememberedFact>, nowIso: string): Promise<RememberedFact[]> {
   const out: RememberedFact[] = [];
   let cursor: string | undefined;
   do {
@@ -81,8 +87,20 @@ async function fetchUnassignedFacts(store: Store<RememberedFact>): Promise<Remem
       cursor !== undefined
         ? { cursor }
         : {
-            where: { op: 'exists', field: 'dreamSkill', value: false },
-            sort:  [{ field: 'createdAt', dir: 'asc' }, { field: 'id', dir: 'asc' }],
+            where: {
+              op: 'and',
+              clauses: [
+                { op: 'exists', field: 'dreamSkill', value: false },
+                {
+                  op: 'or',
+                  clauses: [
+                    { op: 'exists', field: 'ignoreUntil', value: false },
+                    { op: 'lte',    field: 'ignoreUntil', value: nowIso },
+                  ],
+                },
+              ],
+            },
+            sort: [{ field: 'createdAt', dir: 'asc' }, { field: 'id', dir: 'asc' }],
           },
     );
     out.push(...page.items);
@@ -186,24 +204,71 @@ function indexScoresByFact(scores: readonly Score[]): Map<string, Score[]> {
 // ── Persistence helpers ───────────────────────────────────────────────────────
 
 /**
- * Mark a fact as processed by setting its `dreamSkill` field. Uses CAS to avoid clobbering a
+ * Patch a fact's `dreamSkill` and/or `ignoreUntil` fields. Uses CAS to avoid clobbering a
  * concurrent edit (a user-visible `remembered_facts_action({action:'set'})` mid-run, say). On a
  * CAS miss we re-read and retry once; if that also fails we give up and let the caller record a
  * partial outcome — better than spinning.
+ *
+ * One shared helper for every routing disposition: `{ dreamSkill: <skill> }` (merged),
+ * `{ dreamSkill: DREAM_SKILL_NONE }` / `{ dreamSkill: DREAM_SKILL_ERROR }` (terminal retirement),
+ * or `{ ignoreUntil }` (a `weak` deferral, leaving `dreamSkill` untouched — not terminal).
  */
-async function markProcessed(
-  store:     Store<RememberedFact>,
-  factId:    string,
-  dreamSkill: string,
+async function patchFact(
+  store:  Store<RememberedFact>,
+  factId: string,
+  patch:  Partial<Pick<RememberedFact, 'dreamSkill' | 'ignoreUntil'>>,
 ): Promise<void> {
   for (let attempt = 0; attempt < 2; attempt++) {
     const fresh = await store.get(factId);
-    if (fresh === null) return;   // deleted underneath us — nothing to mark
-    const next: RememberedFact = { ...fresh, dreamSkill };
+    if (fresh === null) return;   // deleted underneath us — nothing to patch
+    const next: RememberedFact = { ...fresh, ...patch };
     const res = await store.cas(fresh.id, fresh.version, next);
     if (res.ok) return;
   }
   throw new Error(`dream-time could not CAS-update fact ${factId} after retry`);
+}
+
+// ── Provenance enrichment (the 'none' rescue path) ────────────────────────────
+
+/** How many messages of leading context to pull when a fact's first-pass score is 'none'. A bare
+ *  atomic fact (e.g. "the user has a history of fainting") can under-score in isolation but route
+ *  cleanly once the conversation that produced it disambiguates who or what it refers to. */
+const ENRICHMENT_CONTEXT_MESSAGES = 3;
+
+function isTextBlock(c: MessageContent): c is MessageContent & { type: 'text'; text: string } {
+  return c.type === 'text';
+}
+
+/** Flatten a message's text blocks into one string; non-text content (tool calls, markers,
+ *  images, …) is skipped — it is noise for the purpose of disambiguating a fact. */
+function textOf(m: Message): string {
+  return m.content.filter(isTextBlock).map(c => c.text).join(' ');
+}
+
+/**
+ * Build an enriched fact string by prepending up to {@link ENRICHMENT_CONTEXT_MESSAGES} messages
+ * of conversation immediately preceding the fact's origin message. Returns `undefined` when no
+ * enrichment is possible — no sessions service, the session or message no longer exists (e.g. the
+ * session was since compacted), or there is no text content to add — so the caller falls back to
+ * the plain, un-enriched verdict. Read-only: never touches the session.
+ */
+async function buildEnrichedFact(
+  services: MatbotServices,
+  fact:     RememberedFact,
+): Promise<string | undefined> {
+  const session = await services.sessions?.get(fact.sessionId);
+  if (!session) return undefined;
+  const idx = session.messages.findIndex(m => m.id === fact.messageId);
+  if (idx <= 0) return undefined;   // not found, or it's the first message (nothing precedes it)
+
+  const context = session.messages
+    .slice(Math.max(0, idx - ENRICHMENT_CONTEXT_MESSAGES), idx)
+    .map(textOf)
+    .filter(t => t.length > 0)
+    .join('\n');
+  if (context.length === 0) return undefined;
+
+  return `${fact.fact}\n\n[Context from the surrounding conversation, for disambiguation only:]\n${context}`;
 }
 
 // ── The pipeline ──────────────────────────────────────────────────────────────
@@ -257,15 +322,18 @@ export async function runOnce(
   });
 
   try {
-    const unassigned = await fetchUnassignedFacts(facts);
+    const unassigned = await fetchUnassignedFacts(facts, startedAt);
     if (unassigned.length === 0) return finish('no-facts', 0);
     if (candidates.length === 0) {
-      // No skills to route into — every fact will route 'none'. Don't burn a rank call.
+      // No skills to route into at all — the purest case of "the skill landscape isn't ready",
+      // not a verdict on the fact. Don't burn a rank call; don't mark anything either — this
+      // branch costs one cheap query per pass and no LLM call, so the fact naturally stays
+      // eligible for whenever a skill appears, with no deferral bookkeeping needed.
       const primary = unassigned[0];
       if (primary === undefined) return finish('no-facts', 0);   // unreachable: length>0 above
       return finish('no-match', unassigned.length, {
         primaryFact: { id: primary.id, preview: preview(primary.fact) },
-        routedTo:    { skill: '', decision: 'none', score: 0, reasoning: 'no candidate skills available' },
+        routedTo:    { skill: '', decision: 'weak', score: 0, reasoning: 'no candidate skills are configured at all' },
       });
     }
 
@@ -277,23 +345,50 @@ export async function runOnce(
 
     const primary = unassigned[0];
     if (primary === undefined) return finish('no-facts', 0);   // unreachable: length>0 above
-    const primaryDecision = decide(primary.id, byFact, settings);
+    let primaryDecision = decide(primary.id, byFact, settings);
+    let enriched = false;
 
-    // Weak / none: record and exit. No merge, no fact-marking for weak (the prose spec leaves
-    // weak facts in the store for a future pass); for 'none' we set the sentinel so we don't
-    // reconsider the same fact every run.
-    if (primaryDecision.decision !== 'strong') {
-      if (primaryDecision.decision === 'none') {
-        await markProcessed(facts, primary.id, DREAM_SKILL_NONE);
+    // 'none': before retiring permanently, give the fact ONE extra look with provenance context.
+    // A bare atomic fact can under-score in isolation but route cleanly once the conversation
+    // that produced it disambiguates it — e.g. "the user has a history of fainting" scores low
+    // alone, but obviously belongs in a user-profile skill once the preceding messages show it
+    // was said in the context of dentist-visit anxiety. Exactly one re-rank, never a loop:
+    // whatever this second verdict is, it stands.
+    if (primaryDecision.decision === 'none') {
+      const enrichedText = await buildEnrichedFact(services, primary);
+      if (enrichedText !== undefined) {
+        const rerankStart    = Date.now();
+        const enrichedScores = await ranker.rank([{ ...primary, fact: enrichedText }], candidates, signal);
+        calls.push({ role: 'rank', inputSize: candidates.length, ms: Date.now() - rerankStart });
+        primaryDecision = decide(primary.id, indexScoresByFact(enrichedScores), settings);
+        enriched = true;
       }
-      return finish('no-match', unassigned.length - (primaryDecision.decision === 'none' ? 1 : 0), {
+    }
+
+    // Weak: the fact is fine, but no existing skill is a confident home for it RIGHT NOW. Defer
+    // via `ignoreUntil` rather than retire — the skill landscape can still change (a skill grows
+    // into a fit, or a new one is minted from a cluster of similarly-homeless facts), so
+    // re-asking later may get a different answer. `dreamSkill` is deliberately left unset:
+    // deferral is not a terminal routing decision.
+    if (primaryDecision.decision === 'weak') {
+      const ignoreUntil = new Date(Date.parse(startedAt) + settings.weakDeferralMs).toISOString();
+      await patchFact(facts, primary.id, { ignoreUntil });
+      return finish('no-match', unassigned.length, {
         primaryFact: { id: primary.id, preview: preview(primary.fact) },
-        routedTo:    {
-          skill:     primaryDecision.skill ?? '',
-          decision:  primaryDecision.decision,
-          score:     primaryDecision.score ?? 0,
-          reasoning: primaryDecision.reasoning,
-        },
+        routedTo:    { skill: primaryDecision.skill ?? '', decision: 'weak', score: primaryDecision.score ?? 0, reasoning: primaryDecision.reasoning },
+        ...(enriched ? { enriched: true } : {}),
+      });
+    }
+
+    // None: durable — re-asking the same ranker the same question won't change it (we just tried
+    // exactly that, above, if enrichment was possible). Retire so a future pass doesn't waste a
+    // judgement call reconsidering it.
+    if (primaryDecision.decision === 'none') {
+      await patchFact(facts, primary.id, { dreamSkill: DREAM_SKILL_NONE });
+      return finish('no-match', unassigned.length - 1, {
+        primaryFact: { id: primary.id, preview: preview(primary.fact) },
+        routedTo:    { skill: '', decision: 'none', score: primaryDecision.score ?? 0, reasoning: primaryDecision.reasoning },
+        ...(enriched ? { enriched: true } : {}),
       });
     }
 
@@ -312,11 +407,14 @@ export async function runOnce(
     // the prior merges' output, so contradiction detection has the full evolving picture.
     const doc = manager.get(chosenSkill);
     if (doc === undefined) {
-      // Raced with a delete between buildCandidates() and now. Report and exit cleanly.
+      // Raced with a delete between buildCandidates() and now — transient, not a durable failure
+      // of any fact. Report and exit cleanly; leave the fact unmarked so a future pass (against
+      // whatever skills still exist) reconsiders it fresh rather than quarantining it.
       return finish('error', unassigned.length, {
         primaryFact: { id: primary.id, preview: preview(primary.fact) },
         routedTo:    { skill: chosenSkill, decision: 'strong', score: primaryDecision.score ?? 0, reasoning: primaryDecision.reasoning },
         error:       `skill "${chosenSkill}" disappeared mid-run`,
+        ...(enriched ? { enriched: true } : {}),
       });
     }
 
@@ -330,12 +428,22 @@ export async function runOnce(
         result = await merger.merge(chosenSkill, content, f, signal);
       } catch (e) {
         calls.push({ role: 'merge', inputSize: 1, ms: Date.now() - mergeStart });
-        return finish('error', unassigned.length - mergedFactIds.length, {
+        // Durable: an unparseable response, truncation, or the merger's own length-guard
+        // tripping is a property of this (fact, skill, provider) combination, not a transient
+        // blip — retrying on the next 1-minute tick would just fail identically and burn tokens.
+        // Quarantine the CULPRIT fact so it stops blocking the queue; it needs human
+        // intervention (e.g. a provider swap via cognition_config) to be reconsidered, not an
+        // automatic retry. Cluster-mates merged earlier in this loop are not persisted (the skill
+        // save happens only after the whole cluster succeeds) and so remain naturally eligible
+        // for a future pass — only `f` itself is blamed.
+        await patchFact(facts, f.id, { dreamSkill: DREAM_SKILL_ERROR });
+        return finish('error', unassigned.length - 1, {
           primaryFact: { id: primary.id, preview: preview(primary.fact) },
           routedTo:    { skill: chosenSkill, decision: 'strong', score: primaryDecision.score ?? 0, reasoning: primaryDecision.reasoning },
           mergedFactIds,
           contradictions: allContradictions,
           error: `merge failed on fact ${f.id}: ${(e as Error).message ?? String(e)}`,
+          ...(enriched ? { enriched: true } : {}),
         });
       }
       calls.push({ role: 'merge', inputSize: 1, ms: Date.now() - mergeStart });
@@ -349,13 +457,14 @@ export async function runOnce(
     // All merges succeeded — persist the new skill content, then mark each fact processed.
     // Skill save first so a CAS failure on a fact doesn't strand an un-saved merge.
     await manager.save(chosenSkill, content);
-    for (const id of mergedFactIds) await markProcessed(facts, id, chosenSkill);
+    for (const id of mergedFactIds) await patchFact(facts, id, { dreamSkill: chosenSkill });
 
     return finish('merged', unassigned.length - mergedFactIds.length, {
       primaryFact: { id: primary.id, preview: preview(primary.fact) },
       routedTo:    { skill: chosenSkill, decision: 'strong', score: primaryDecision.score ?? 0, reasoning: primaryDecision.reasoning },
       mergedFactIds,
       contradictions: allContradictions,
+      ...(enriched ? { enriched: true } : {}),
     });
   } catch (e) {
     // Catch-all for anything we didn't anticipate. The run is recorded; the tool surfaces it.

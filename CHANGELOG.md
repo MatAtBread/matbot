@@ -137,6 +137,35 @@ churn and less likely to affect a consumer who doesn't use them.
   prior bug where an agent-phase fire read the user message instead. De-duplication is deliberately
   not done (a repeated fact is an importance signal; consolidation is dream-time's concern).
 
+- **cognition** — `dream_time`'s ranker and merger now resolve their OWN provider pins
+  independently (`dreamRankerProvider` / `dreamMergerProvider`, `cognition_config`) rather than
+  inheriting the calling turn's provider; unpinned, each still falls back to the turn's own model,
+  so nothing needs configuring to get started. Matters most for the merger, which sees a whole
+  skill's prose plus the fact and so can truncate/fail on a small-context provider that ranks fine
+  (ranking only ever sees short summaries). A durable merge failure (unparseable response,
+  truncation, the merger's own length-guard) now quarantines the culprit fact via a new
+  `DREAM_SKILL_ERROR` sentinel rather than leaving it stuck for an automatic retry that would just
+  fail identically. A fact that scores `none` gets one extra provenance-enriched re-rank — up to 3
+  preceding session messages prepended for disambiguation — before being retired permanently (a
+  bare atomic fact can under-score in isolation but route cleanly once the conversation that
+  produced it is visible); `DreamRun.enriched` records when this happened. A fact that scores only
+  `weak` is now **deferred** rather than retired: a new `RememberedFact.ignoreUntil` timestamp
+  (governed by `DreamSettings.weakDeferralMs`, default 36 hours) excludes it from selection without
+  marking it terminal, since the skill landscape can still change (a skill grows into a fit, or a
+  new one is minted from a cluster of similarly-homeless facts).
+
+- **cognition** — `cognition_config` now also exposes dream-time's tunable thresholds
+  (`strongThreshold`, `weakThreshold`, `maxClusterSize`, `blocklist`, `weakDeferralMs` — previously
+  only reachable via a direct, non-tool `services.settings().set('dream-time', …)` call) alongside
+  the three existing provider pins, as one consolidated `CognitionConfig` type. `get` returns the
+  effective settings — defaults already merged in for every key — so a single call teaches the
+  object's shape as well as its current values. `set` takes a flat partial patch instead of one
+  setting per call: an omitted key is left unchanged, a key given as `null` resets it to default
+  (or unpins a provider); validation runs over the whole patch before anything is written, so an
+  invalid combination (e.g. `weakThreshold` > `strongThreshold`, an unconfigured provider name)
+  rejects the call without persisting a partial change. `clear` now takes no parameters and resets
+  every setting to its default in one call.
+
 - **frontend/web** — skill editor's Triggers tab rewired to the triggers store: it finds
   the skill's use-trigger via `trigger_action query` and edits that trigger's conditions
   (a wholesale replace on save). Each condition is a `kind` (`augment`/`retract`/`followup`)

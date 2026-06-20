@@ -68,13 +68,14 @@ async function seedDreamRunsStore(services: MatbotServices): Promise<void> {
         contradictions:      { skill: string; location: string; note: string }[];
         unassignedRemaining: number;
         judgementCalls:      { role: 'rank'|'merge'; inputSize: number; ms: number }[];
+        enriched?:           boolean;
         error?:              string;
       }`,
   });
 }
 
 /**
- * Cognitive services. It seeds the Inner voice and Dream time skills into the active skills service,
+ * Cognitive services. It seeds the Inner voice skill and dream_time tool into the active skills service,
  * registers the remember_fact and dream_time tools, and wires remember_fact's trigger; it is the
  * intended home for further cognitive skills and tools.
  *
@@ -122,11 +123,11 @@ export function createCognitionPlugin(): MatbotPluginSpec {
   return {
     apiVersion: PLUGIN_API_VERSION,
     manifest: {
-      description: 'Cognitive services: seeds the Inner voice and Dream time skills, the remember_fact tool (with its trigger), and the dream_time tool. Home for further cognitive skills and tools.',
+      description: 'Cognitive services: seeds the Inner voice skill and dream_time tool, the remember_fact tool (with its trigger), and the dream_time tool. Home for further cognitive skills and tools.',
     },
 
     async installationMessage() {
-      return `Cognition is active. It seeds the Inner voice and Dream time skills into the skills
+      return `Cognition is active. It seeds the Inner voice skill and dream_time tool into the skills
 service — if no skills service is configured yet, they are seeded automatically once one is — and
 registers the remember_fact and dream_time tools.
 
@@ -142,11 +143,14 @@ provider via the triggers_config tool, else it uses the turn's own provider.)
 
 The **\`dream_time\` tool** runs one pass of background memory consolidation. It is a deterministic
 TypeScript pipeline: it picks the oldest unassigned fact from the remembered_facts store, scores it against
-every existing skill via two narrow LLM judgement calls (rank and merge) using the active provider, and —
-if a skill clears the configured threshold — splices the fact in and marks it processed (a \`dreamSkill\`
-field). Each pass writes a structured \`DreamRun\` record to the \`dream_runs\` store. Intended to be
-invoked via the \`background\` tool on a schedule, never inline. One pass at a time is enforced by a
-process-local mutex.
+every existing skill via two narrow LLM judgement calls (rank and merge — each pinned independently via
+cognition_config, else falling back to the active turn's provider), and — if a skill clears the configured
+threshold — splices the fact in and marks it processed (a \`dreamSkill\` field). A fact that scores too low
+("none") gets one extra look enriched with conversation context before being retired; a fact that scores
+only weakly is deferred rather than retired, since a future pass against a changed skill set may answer
+differently; a merge that fails outright quarantines the fact rather than retrying indefinitely. Each pass
+writes a structured \`DreamRun\` record to the \`dream_runs\` store. Intended to be invoked via the
+\`background\` tool on a schedule, never inline. One pass at a time is enforced by a process-local mutex.
 
 It also seeds a remembered_facts store and its \`remembered_facts_action\` tool, written to by remember_fact.
 The store is idempotent: a re-seed on restart keeps the existing data.
@@ -170,6 +174,7 @@ The store is idempotent: a re-seed on restart keeps the existing data.
             messageId: string;
             createdAt: string;
             dreamSkill?: string;
+            ignoreUntil?: string;
           }`,
       });
 

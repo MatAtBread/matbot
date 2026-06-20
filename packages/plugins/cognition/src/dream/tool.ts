@@ -13,10 +13,13 @@
  *     hazard (they would race on `SkillManager.save` and on per-fact CAS writes), and there is no
  *     legitimate reason to run them in parallel — one consolidation pass at a time is the design.
  *
- *   • The active provider (`ctx.provider`) is the model used for both the ranker and the merger.
- *     Inheriting the caller's choice means a user running on a cheap model gets cheap dream-time
- *     and a user running on a thinky model gets thinky dream-time — no separate provider config to
- *     reason about. If we later want to specialise, the wiring is here in one place.
+ *   • The ranker and merger each resolve their own provider independently — `dreamRankerProvider`
+ *     / `dreamMergerProvider` (cognition_config) if pinned, else `ctx.provider` (the model driving
+ *     the calling turn). Unpinned, a user on a cheap model gets cheap dream-time and a user on a
+ *     thinky model gets thinky dream-time — no config needed to get started. Pinning matters most
+ *     for the merger: it sees a whole skill's prose plus the fact, so a small-context provider can
+ *     truncate and fail on a large skill even when the same provider ranks fine (ranking only ever
+ *     sees short summaries, never full skill prose).
  *
  *   • The DreamRun is persisted BEFORE being returned. If the persist fails, the caller still
  *     sees the result; if the caller is aborted before reading the result, the run is still
@@ -29,6 +32,7 @@ import { runOnce } from './runOnce.js';
 import { createLlmRanker } from './llmRanker.js';
 import { createLlmMerger } from './llmMerger.js';
 import type { DreamRun } from './types.js';
+import { DREAM_RANKER_PROVIDER_KEY, DREAM_MERGER_PROVIDER_KEY } from '../inner-voice/tool.js';
 
 // Process-local mutex. A Promise the next caller awaits; the chain extends with every call and
 // settles in order. Simple, correct, no third-party dependency.
@@ -60,8 +64,20 @@ export function createDreamTimeTool(services: MatbotServices): Tool {
         return;
       }
 
-      const ranker = createLlmRanker(services, ctx.provider);
-      const merger = createLlmMerger(services, ctx.provider);
+      // Ranker and merger each resolve their own provider pin independently, falling back to the
+      // calling turn's provider when unset or stale (the pinned name no longer exists). This
+      // matters most for the merger, which sees a whole skill's prose plus the fact — a
+      // small-context provider can truncate and fail there even though the same provider ranks
+      // fine (ranking only ever sees short summaries).
+      const [rankerPinned, mergerPinned] = await Promise.all([
+        services.settings().get<string>(DREAM_RANKER_PROVIDER_KEY),
+        services.settings().get<string>(DREAM_MERGER_PROVIDER_KEY),
+      ]);
+      const rankerProvider = (rankerPinned !== undefined && services.providers.has(rankerPinned)) ? rankerPinned : ctx.provider;
+      const mergerProvider = (mergerPinned !== undefined && services.providers.has(mergerPinned)) ? mergerPinned : ctx.provider;
+
+      const ranker = createLlmRanker(services, rankerProvider);
+      const merger = createLlmMerger(services, mergerProvider);
 
       let run: DreamRun;
       try {
@@ -96,12 +112,19 @@ export function createDreamTimeTool(services: MatbotServices): Tool {
       'the remembered_facts store, scores it against every existing skill (minus a small ' +
       'blocklist), and — if the top skill clears the configured "strong" threshold — splices the ' +
       'fact in, flagging any contradictions inline. Will also batch-merge other unassigned facts ' +
-      'whose top skill is the same one, up to a configured cluster cap. Facts that fail to route ' +
-      'anywhere are marked considered (so the next pass does not reconsider them); facts that ' +
-      'route only weakly are left for a future pass.\n\n' +
+      'whose top skill is the same one, up to a configured cluster cap.\n\n' +
+      'Facts that score too low to route anywhere ("none") get one extra look enriched with the ' +
+      'surrounding conversation before being retired permanently — a bare fact can under-score in ' +
+      'isolation but route cleanly once disambiguated. Facts that route only weakly (a sound fact, ' +
+      'just no confident skill home yet) are deferred rather than retired — they become eligible ' +
+      'again after a cooldown, since the skill landscape may change later. A merge that fails ' +
+      'outright (unparseable response, truncation) quarantines the culprit fact so it stops ' +
+      'blocking the queue; that needs a config fix (e.g. a provider swap, see below), not an ' +
+      'automatic retry.\n\n' +
       'Takes no parameters. Intended to be invoked via the `background` tool on a schedule, not ' +
-      'inline during a conversation. Uses the active provider (the model driving the calling ' +
-      'turn) for the ranking and merging judgement calls.\n\n' +
+      'inline during a conversation. The ranker and merger each resolve their own provider — ' +
+      '`dreamRankerProvider` / `dreamMergerProvider` via the cognition_config tool if pinned, else ' +
+      "the active provider (the model driving the calling turn).\n\n" +
       'Returns a structured DreamRun record describing what the pass did (the same record is ' +
       'also persisted to the `dream_runs` store, queryable via `dream_runs_action` if exposed).',
     inputSchema: {
