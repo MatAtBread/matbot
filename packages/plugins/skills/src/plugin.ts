@@ -54,7 +54,9 @@ async function matchedSkills(
   );
   if (candidates.length === 0 || subject.text === '') return [];
 
-  const res = await services.singleTurn({
+  let verdicts: Record<string, unknown> = {};
+  try {
+    const res = await services.singleTurn({
     provider: CLASSIFIER_PROVIDER,
     signal,
     system:
@@ -69,14 +71,13 @@ async function matchedSkills(
       `${context.label} (earlier):\n${context.text === '' ? '(none)' : clip(context.text)}\n\n` +
       `${subject.label} (later — evaluate the triggers against THIS):\n${clip(subject.text)}\n\n` +
       `Triggers:\n${candidates.map(c => `[${c.id}] ${c.trigger}`).join('\n')}`,
-  });
-
-  let verdicts: Record<string, unknown> = {};
-  try {
+    });
     const m = res.text.match(/\{[\s\S]*\}/);
     verdicts = m ? JSON.parse(m[0]) : {};
-  } catch {
-    console.warn(`[skills] ${phase} classifier returned non-JSON:`, res.text.slice(0, 200));
+  } catch (e) {
+    // Fail-soft: a classifier-provider error (an EOL/unavailable model, a network blip) or a
+    // non-JSON reply must NEVER abort the user's turn — skip skill matching for this turn.
+    console.warn(`[skills] ${phase} classifier unavailable or non-JSON (skipping):`, e instanceof Error ? e.message : e);
     return [];
   }
 
