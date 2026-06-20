@@ -109,9 +109,6 @@ export function createRememberFactTool(services: MatbotServices): Tool {
         await store.set(doc.id, doc);
       }
 
-      console.warn(`[remember_fact] stored ${facts.length} fact(s) from message ${msg.id} (session ${ctx.session.id}):`);
-      for (const f of facts) console.warn(`  • ${f}`);
-
       // A durable, LLM-invisible trace of what was captured — so a silent firing is auditable
       // post-mortem (which message, which facts). No `result` event: the model is not woken.
       yield { type: 'marker', creator: 'remember_fact', data: { messageId: msg.id, sessionId: ctx.session.id, facts } };

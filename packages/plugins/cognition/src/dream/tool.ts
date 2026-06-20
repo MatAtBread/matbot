@@ -30,8 +30,6 @@ import { createLlmRanker } from './llmRanker.js';
 import { createLlmMerger } from './llmMerger.js';
 import type { DreamRun } from './types.js';
 
-console.warn('[cognition] MARKER-G: dream/tool.ts module imported');
-
 // Process-local mutex. A Promise the next caller awaits; the chain extends with every call and
 // settles in order. Simple, correct, no third-party dependency.
 let runChain: Promise<unknown> = Promise.resolve();
