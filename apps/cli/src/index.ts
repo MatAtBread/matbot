@@ -18,6 +18,7 @@ import { appendMessage, createMessage,
          getPluginNameForSpecifier, getRegisteredPlugins,
          installPrincipalCarrier, enterPrincipal, currentPrincipal,
          unifyServices, forwardingProxy, makeSwappable, singleTurnRequest,
+         createSingleTurnTool,
          MissingSecretError }              from '@matatbread/matbot-core';
 import type { MatbotServices, PluginSettings, Vault, SessionRunner,
               MatbotPlugin, StorageBackend, KnowledgeIndex, PromptFn, FormField, SwapFn } from '@matatbread/matbot-core';
@@ -960,6 +961,10 @@ async function main(): Promise<void> {
   // their YAML specifiers are recorded — createProviderTool reads getRegisteredPlugins()
   // and pluginNameToOrigPath to build its description.
   toolReg.register(createProviderTool(matbotConfig.providers, pluginNameToOrigPath));
+
+  // single_turn: the model-facing surface of the core singleTurn service. Registered here beside the
+  // other core service-management tools (it needs the live `services` for `singleTurn`/`providers`).
+  toolReg.register(createSingleTurnTool(services));
 
   // ── Server mode ───────────────────────────────────────────────────────────────
 

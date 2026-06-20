@@ -2,7 +2,7 @@ import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import type { MatbotPluginSpec, MatbotServices, Store, Message, MessageContent } from '@matatbread/matbot-plugin-api';
 import { TriggerManager } from './manager.js';
 import { dispatchTrigger, renderResult } from './dispatch.js';
-import { createTriggerActionTool } from './tools.js';
+import { createTriggerActionTool, createTriggersConfigTool } from './tools.js';
 import type { Trigger, Triggers } from './types.js';
 
 declare module '@matatbread/matbot-plugin-api' {
@@ -13,9 +13,16 @@ declare module '@matatbread/matbot-plugin-api' {
   }
 }
 
-// The provider name is retained from the skills implementation this was extracted from, so existing
-// `matbot.yaml` configs keep working without a rename. It points at a small, fast model.
-const CLASSIFIER_PROVIDER = 'skills-classifier';
+/** One-shot reachability probe for a pinned provider, used only when forming installationMessage
+ *  (install/reload) — never on the hot path. Fails soft: a thrown error becomes `{ ok: false }`. */
+async function testProvider(services: MatbotServices, provider: string): Promise<{ ok: boolean; error?: string }> {
+  try {
+    await services.singleTurn({ provider, prompt: 'Reply with "ok".', signal: AbortSignal.timeout(15000) });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
 
 // Multiple fired triggers' results are joined with a separator.
 const JOIN = '\n\n---\n\n';
@@ -126,18 +133,18 @@ export async function setupTriggers(services: MatbotServices): Promise<TriggerMa
   if (services.Triggers) return services.Triggers as TriggerManager;
 
   const store   = services.createStore<Trigger>('triggers') as Store<Trigger>;
-  const manager = new TriggerManager(store, services, CLASSIFIER_PROVIDER);
+  const manager = new TriggerManager(store, services);
   await manager.init();
   await services.register('Triggers', manager);
 
   services.tools.register(createTriggerActionTool(manager));
+  services.tools.register(createTriggersConfigTool(services));
 
   // user phase — pre-response. Judges the incoming user message; injects fired triggers' tool
   // results ephemerally so they inform this response without persisting.
   services.hooks.register({
     on: 'screen',
     async handler(ctx) {
-      if (!services.providers.has(CLASSIFIER_PROVIDER)) return;
       const lastUser = ctx.session.messages.findLast(l => l.role === 'user');
       // Skip our own agent-phase robo resubmissions — they are not real user turns.
       if (!lastUser || lastUser.content.every(c => c.origin === 'robo')) return;
@@ -157,6 +164,7 @@ export async function setupTriggers(services: MatbotServices): Promise<TriggerMa
           l => l.role === 'assistant' && l.content.some(c => c.type === 'text'),
         )) },
         ctx.signal,
+        ctx.config.provider,
       );
       if (fired.length === 0) return;
 
@@ -190,7 +198,6 @@ export async function setupTriggers(services: MatbotServices): Promise<TriggerMa
     on: 'followup',
     async handler(ctx) {
       if (ctx.resubmitDepth > 0) return;
-      if (!services.providers.has(CLASSIFIER_PROVIDER)) return;
 
       const fired = await manager.evaluate(
         'agent',
@@ -199,6 +206,7 @@ export async function setupTriggers(services: MatbotServices): Promise<TriggerMa
         )) },
         { label: 'preceding user message', text: textOf(ctx.session.messages.findLast(l => l.role === 'user')) },
         ctx.signal,
+        ctx.config.provider,
       );
       if (fired.length === 0) return;
 
@@ -263,11 +271,17 @@ export async function setupTriggers(services: MatbotServices): Promise<TriggerMa
 
 /**
  * The cross-runtime triggers plugin: stored conditions that, when an LLM classifier judges them
- * matched, invoke a tool. CRUD via `trigger_action`; the `agent`/`user` conditions are evaluated by
- * a classifier provider named "skills-classifier". Runs in both Node and the browser.
+ * matched, invoke a tool. CRUD via `trigger_action`; the `agent`/`user` conditions are evaluated by a
+ * classifier provider (pinned via `triggers_config`, else the turn's own provider). Runs in both Node
+ * and the browser.
  */
 export function createTriggersPlugin(): MatbotPluginSpec {
-  let manager: TriggerManager | undefined;
+  let manager:  TriggerManager  | undefined;
+  let captured: MatbotServices  | undefined;   // captured in setup() so installationMessage() can probe
+
+  const base =
+    'Triggers are active (trigger_action). A trigger fires a tool when an LLM classifier judges one of ' +
+    'its conditions matched against the current turn.';
 
   return {
     apiVersion: PLUGIN_API_VERSION,
@@ -276,14 +290,30 @@ export function createTriggersPlugin(): MatbotPluginSpec {
     },
 
     async installationMessage() {
-      return 'Triggers are active (trigger_action). A trigger fires a tool when an LLM classifier ' +
-        'judges one of its conditions matched against the current turn; the classifier needs a ' +
-        'provider named "skills-classifier" — until one is configured, triggers simply never fire. ' +
-        'Add it with the `provider` tool, pointing it at a small, fast model. Offer to do this now.';
+      if (!captured) return base;
+      const pinned    = await captured.settings().get<string>('classifierProvider');
+      const available = [...captured.providers.keys()];
+      const legacy    = captured.providers.has('skills-classifier');
+      if (pinned === undefined) {
+        return base +
+          (legacy
+            ? '\n\nThe classifier uses the provider "skills-classifier" (the legacy default present in this install).'
+            : '\n\nNo classifier provider is pinned, so the classifier uses whatever provider the current turn ' +
+              'runs on — triggers work out of the box.') +
+          ' To pin a small/fast model instead, use the triggers_config tool (action "set"). ' +
+          `Available providers: ${available.join(', ') || '(none)'}.`;
+      }
+      const probe = await testProvider(captured, pinned);
+      return base +
+        `\n\nThe classifier is pinned to "${pinned}" (triggers_config), which ` +
+        (probe.ok
+          ? 'responded to a test prompt.'
+          : `did NOT respond: ${probe.error}. It falls back to the turn's own provider until fixed.`);
     },
 
     async setup(services) {
-      manager = await setupTriggers(services);
+      captured = services;
+      manager  = await setupTriggers(services);
     },
 
     async teardown() {
