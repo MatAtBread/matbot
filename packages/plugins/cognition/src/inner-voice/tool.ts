@@ -12,8 +12,27 @@
  * cognition_config to get the genuine second opinion.
  */
 import type { Tool, ToolExecutor, ToolContext, ToolEvent, MatbotServices } from '@matatbread/matbot-plugin-api';
+import {
+  type DreamSettings,
+  DEFAULT_DREAM_SETTINGS,
+  DREAM_SETTINGS_KEY,
+  validateDreamSettings,
+} from '../dream/types.js';
 
 export const INNER_VOICE_PROVIDER_KEY = 'innerVoiceProvider';
+export const DREAM_RANKER_PROVIDER_KEY = 'dreamRankerProvider';
+export const DREAM_MERGER_PROVIDER_KEY = 'dreamMergerProvider';
+
+/** Every provider pin `cognition_config` understands. One flat list so the get/set/clear logic and
+ *  the input schema's enum can't drift apart. */
+const PROVIDER_SETTING_KEYS = [
+  INNER_VOICE_PROVIDER_KEY,
+  DREAM_RANKER_PROVIDER_KEY,
+  DREAM_MERGER_PROVIDER_KEY,
+] as const;
+
+/** Every DreamSettings field `cognition_config` understands, alongside the provider pins above. */
+const DREAM_SETTING_KEYS = ['strongThreshold', 'weakThreshold', 'maxClusterSize', 'blocklist', 'weakDeferralMs'] as const;
 
 export function createAskInnerVoiceTool(services: MatbotServices): Tool {
   const executor: ToolExecutor = {
@@ -62,33 +81,146 @@ export function createAskInnerVoiceTool(services: MatbotServices): Tool {
   };
 }
 
+/** Provider pins `cognition_config` exposes, beyond dream-time's own {@link DreamSettings}. Each is
+ *  an alias for an already-configured provider (see the provider tool), never a new profile to
+ *  stand up. `null` means unpinned. Unlike the DreamSettings fields below, "unpinned" has no fixed
+ *  effective value to report — the relevant call falls back to ITS OWN calling turn's provider —
+ *  so `get` reports the raw pin (or `null`), not a resolved value. */
+export interface CognitionProviderConfig {
+  innerVoiceProvider:  string | null;
+  dreamRankerProvider: string | null;
+  dreamMergerProvider: string | null;
+}
+
+/** The full shape `cognition_config` reads and writes: the three provider pins above plus
+ *  dream-time's tunables, flattened into one object so several settings can change in one `set`
+ *  call. This is also exactly what `get` returns, DreamSettings fields defaults-merged — one call
+ *  teaches the model both the current values and the object's shape. */
+export type CognitionConfig = CognitionProviderConfig & DreamSettings;
+
+async function readEffectiveConfig(services: MatbotServices): Promise<CognitionConfig & { available: string[] }> {
+  const settings = services.settings();
+  const [innerVoiceProvider, dreamRankerProvider, dreamMergerProvider, storedDream] = await Promise.all([
+    settings.get<string>(INNER_VOICE_PROVIDER_KEY),
+    settings.get<string>(DREAM_RANKER_PROVIDER_KEY),
+    settings.get<string>(DREAM_MERGER_PROVIDER_KEY),
+    settings.get<Partial<DreamSettings>>(DREAM_SETTINGS_KEY),
+  ]);
+  return {
+    innerVoiceProvider:  innerVoiceProvider ?? null,
+    dreamRankerProvider: dreamRankerProvider ?? null,
+    dreamMergerProvider: dreamMergerProvider ?? null,
+    ...DEFAULT_DREAM_SETTINGS,
+    ...(storedDream ?? {}),
+    available: [...services.providers.keys()],
+  };
+}
+
 export function createCognitionConfigTool(services: MatbotServices): Tool {
   const executor: ToolExecutor = {
     async *execute(input: unknown, _ctx: ToolContext): AsyncIterable<ToolEvent> {
-      const args      = input as { action?: string; provider?: string };
-      const settings  = services.settings();
-      const available = [...services.providers.keys()];
+      const args     = input as Record<string, unknown> & { action?: string };
+      const settings = services.settings();
+
       switch (args.action) {
         case 'get': {
-          const pinned = await settings.get<string>(INNER_VOICE_PROVIDER_KEY);
-          yield { type: 'result', value: { innerVoiceProvider: pinned ?? null, available } };
+          yield { type: 'result', value: await readEffectiveConfig(services) };
           return;
         }
+
         case 'set': {
-          if (!args.provider) { yield { type: 'error', message: 'action "set" requires "provider".' }; return; }
-          if (!services.providers.has(args.provider)) {
-            yield { type: 'error', message: `Unknown provider "${args.provider}". Configured providers: ${available.join(', ') || '(none)'}.` };
+          // Validate everything first; commit nothing until every check has passed, so a bad
+          // field never leaves an earlier field in the same call persisted (true all-or-nothing).
+          const providerWrites: { key: typeof PROVIDER_SETTING_KEYS[number]; value: string | null }[] = [];
+
+          for (const key of PROVIDER_SETTING_KEYS) {
+            if (!(key in args)) continue;
+            const v = args[key];
+            if (v === null) {
+              providerWrites.push({ key, value: null });
+            } else if (typeof v === 'string' && services.providers.has(v)) {
+              providerWrites.push({ key, value: v });
+            } else if (typeof v === 'string') {
+              const available = [...services.providers.keys()];
+              yield { type: 'error', message: `Unknown provider "${v}" for "${key}". Configured providers: ${available.join(', ') || '(none)'}.` };
+              return;
+            } else {
+              yield { type: 'error', message: `"${key}" must be a configured provider name, or null to unpin.` };
+              return;
+            }
+          }
+
+          let nextDream: Partial<DreamSettings> | undefined;
+          if (DREAM_SETTING_KEYS.some(k => k in args)) {
+            const stored = (await settings.get<Partial<DreamSettings>>(DREAM_SETTINGS_KEY)) ?? {};
+            const next: Partial<DreamSettings> = { ...stored };
+
+            if ('strongThreshold' in args) {
+              const v = args.strongThreshold;
+              if (v === null) delete next.strongThreshold;
+              else if (typeof v === 'number') next.strongThreshold = v;
+              else { yield { type: 'error', message: '"strongThreshold" must be a number, or null to reset to default.' }; return; }
+            }
+            if ('weakThreshold' in args) {
+              const v = args.weakThreshold;
+              if (v === null) delete next.weakThreshold;
+              else if (typeof v === 'number') next.weakThreshold = v;
+              else { yield { type: 'error', message: '"weakThreshold" must be a number, or null to reset to default.' }; return; }
+            }
+            if ('maxClusterSize' in args) {
+              const v = args.maxClusterSize;
+              if (v === null) delete next.maxClusterSize;
+              else if (typeof v === 'number' && Number.isInteger(v)) next.maxClusterSize = v;
+              else { yield { type: 'error', message: '"maxClusterSize" must be an integer, or null to reset to default.' }; return; }
+            }
+            if ('blocklist' in args) {
+              const v = args.blocklist;
+              if (v === null) delete next.blocklist;
+              else if (Array.isArray(v) && v.every(x => typeof x === 'string')) next.blocklist = v;
+              else { yield { type: 'error', message: '"blocklist" must be an array of strings, or null to reset to default.' }; return; }
+            }
+            if ('weakDeferralMs' in args) {
+              const v = args.weakDeferralMs;
+              if (v === null) delete next.weakDeferralMs;
+              else if (typeof v === 'number') next.weakDeferralMs = v;
+              else { yield { type: 'error', message: '"weakDeferralMs" must be a number, or null to reset to default.' }; return; }
+            }
+
+            try {
+              validateDreamSettings({ ...DEFAULT_DREAM_SETTINGS, ...next });
+            } catch (e) {
+              yield { type: 'error', message: (e as Error).message };
+              return;
+            }
+            nextDream = next;
+          }
+
+          if (providerWrites.length === 0 && nextDream === undefined) {
+            yield { type: 'error', message: 'action "set" requires at least one setting to update.' };
             return;
           }
-          await settings.set(INNER_VOICE_PROVIDER_KEY, args.provider);
-          yield { type: 'result', value: { innerVoiceProvider: args.provider } };
+
+          // Every check passed — commit.
+          await Promise.all([
+            ...providerWrites.map(({ key, value }) => value === null ? settings.delete(key) : settings.set(key, value)),
+            ...(nextDream !== undefined ? [settings.set(DREAM_SETTINGS_KEY, nextDream)] : []),
+          ]);
+
+          yield { type: 'result', value: await readEffectiveConfig(services) };
           return;
         }
+
         case 'clear': {
-          await settings.delete(INNER_VOICE_PROVIDER_KEY);
-          yield { type: 'result', value: { innerVoiceProvider: null } };
+          await Promise.all([
+            settings.delete(INNER_VOICE_PROVIDER_KEY),
+            settings.delete(DREAM_RANKER_PROVIDER_KEY),
+            settings.delete(DREAM_MERGER_PROVIDER_KEY),
+            settings.delete(DREAM_SETTINGS_KEY),
+          ]);
+          yield { type: 'result', value: await readEffectiveConfig(services) };
           return;
         }
+
         default:
           yield { type: 'error', message: `Unknown action "${String(args.action)}". Expected one of: get, set, clear.` };
       }
@@ -98,25 +230,68 @@ export function createCognitionConfigTool(services: MatbotServices): Tool {
   return {
     name: 'cognition_config',
     description:
-      'Configure the cognition subsystem. Currently one setting: `innerVoiceProvider` — which configured ' +
-      'provider answers ask_inner_voice (the Inner voice critic). It is an alias for an existing provider, ' +
-      "not a new one; ideally a DIFFERENT training lineage than your main model. Unset, the inner voice " +
-      "uses the current turn's own model (same-lineage, so degraded). `get` reports the current pin and " +
-      'the available provider names; `set` pins one (it must already be configured — see the provider ' +
-      'tool); `clear` reverts to the turn provider.\n\n' +
+      'Configure the cognition subsystem: three provider pins plus dream-time\'s tunable thresholds, ' +
+      'in one consolidated settings object so several can change in a single call.\n\n' +
+      'Provider pins — each an alias for an already-configured provider (see the provider tool), never ' +
+      'a new profile to stand up:\n' +
+      '  - `innerVoiceProvider` — answers ask_inner_voice (the Inner voice critic). Ideally a DIFFERENT ' +
+      "training lineage than your main model; unpinned, it uses the current turn's own model " +
+      '(same-lineage, so degraded).\n' +
+      '  - `dreamRankerProvider` — scores (fact, skill) pairs inside dream_time. Unpinned, it uses the ' +
+      "calling turn's own provider.\n" +
+      '  - `dreamMergerProvider` — splices facts into skill prose inside dream_time. Unpinned, it uses ' +
+      "the calling turn's own provider. Pin this (and/or the ranker) to a provider with a larger " +
+      'context window if dream_time is erroring out on large skills.\n\n' +
+      "Dream-time tunables, consumed at the start of every dream_time run:\n" +
+      '  - `strongThreshold` — minimum score [0,1] to trigger a merge (default 0.75).\n' +
+      '  - `weakThreshold` — minimum score [0,1] to record as a weak match and defer rather than ' +
+      'retire (default 0.5); below this the fact retires as unroutable. Must stay <= strongThreshold.\n' +
+      '  - `maxClusterSize` — cap on facts merged in one dream_time pass, including the primary ' +
+      '(default 5).\n' +
+      '  - `blocklist` — skill names never offered to the ranker (default ["Inner voice"]); ' +
+      'case-sensitive exact match.\n' +
+      '  - `weakDeferralMs` — milliseconds a weakly-routed fact is excluded from selection before ' +
+      'reconsideration (default 36 hours).\n\n' +
+      '`get` returns the EFFECTIVE settings — every key above, defaults already applied where unset — ' +
+      'plus `available` (configured provider names). Call it first to learn current values and the ' +
+      "object's shape before calling `set`.\n\n" +
+      '`set` accepts a partial patch with any subset of the keys above. A key that is OMITTED is left ' +
+      'unchanged; a key given as `null` resets it to its default (or, for a provider pin, unpins it). ' +
+      'An invalid patch (e.g. weakThreshold > strongThreshold, an unconfigured provider name, ' +
+      'maxClusterSize < 1) is rejected with an error and nothing from that call is persisted — `set` ' +
+      'is all-or-nothing, never partially applied.\n\n' +
+      '`clear` takes no parameters and resets every setting above to its default in one call.\n\n' +
       'Parameters (TypeScript):\n' +
       '```ts\n' +
-      "type CognitionConfig =\n" +
-      "  | { action: 'get' }                       // -> { innerVoiceProvider: string | null, available }\n" +
-      "  | { action: 'set'; provider: string }     // pin a provider -> { innerVoiceProvider }\n" +
-      "  | { action: 'clear' };                     // revert to the turn provider -> { innerVoiceProvider: null }\n" +
+      'interface CognitionConfig {\n' +
+      '  innerVoiceProvider:  string | null;\n' +
+      '  dreamRankerProvider: string | null;\n' +
+      '  dreamMergerProvider: string | null;\n' +
+      '  strongThreshold:     number;   // [0, 1]\n' +
+      '  weakThreshold:       number;   // [0, 1], <= strongThreshold\n' +
+      '  maxClusterSize:      number;   // integer >= 1\n' +
+      '  blocklist:           string[];\n' +
+      '  weakDeferralMs:      number;   // milliseconds, >= 0\n' +
+      '}\n\n' +
+      'type CognitionConfigAction =\n' +
+      "  | { action: 'get' }    // -> CognitionConfig & { available: string[] }\n" +
+      "  | ({ action: 'set' } & Partial<{ [K in keyof CognitionConfig]: CognitionConfig[K] | null }>)\n" +
+      '                         // -> CognitionConfig & { available: string[] }; throws on an invalid combination\n' +
+      "  | { action: 'clear' }; // -> CognitionConfig & { available: string[] }\n" +
       '```',
     inputSchema: {
       type:       'object',
       required:   ['action'],
       properties: {
-        action:   { type: 'string', enum: ['get', 'set', 'clear'], description: 'The operation to perform.' },
-        provider: { type: 'string', description: 'Name of an already-configured provider — required for "set".' },
+        action:              { type: 'string', enum: ['get', 'set', 'clear'], description: 'The operation to perform.' },
+        innerVoiceProvider:  { type: ['string', 'null'], description: '"set": a configured provider name, or null to unpin. Omit to leave unchanged.' },
+        dreamRankerProvider: { type: ['string', 'null'], description: '"set": a configured provider name, or null to unpin. Omit to leave unchanged.' },
+        dreamMergerProvider: { type: ['string', 'null'], description: '"set": a configured provider name, or null to unpin. Omit to leave unchanged.' },
+        strongThreshold:     { type: ['number', 'null'], description: '"set": minimum score [0,1] to trigger a merge, or null to reset to default. Omit to leave unchanged.' },
+        weakThreshold:       { type: ['number', 'null'], description: '"set": minimum score [0,1] for a weak match, or null to reset to default. Omit to leave unchanged.' },
+        maxClusterSize:      { type: ['number', 'null'], description: '"set": cap on facts merged per pass, or null to reset to default. Omit to leave unchanged.' },
+        blocklist:           { type: ['array', 'null'], items: { type: 'string' }, description: '"set": skill names never offered to the ranker, or null to reset to default. Omit to leave unchanged.' },
+        weakDeferralMs:      { type: ['number', 'null'], description: '"set": deferral window in milliseconds, or null to reset to default. Omit to leave unchanged.' },
       },
     },
     executor,
