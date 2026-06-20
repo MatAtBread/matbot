@@ -29,7 +29,47 @@ churn and less likely to affect a consumer who doesn't use them.
   *non-marker* message, so a trailing marker (e.g. the retraction marker) doesn't
   swallow the injected context.
 
+- **Registry observation: `ToolRegistry.watch()` and `watchPlugins()`.** Two read-only
+  `AsyncIterable` streams over registry CRUD — `ToolRegistry.watch(signal?)` yielding
+  `ToolRegistryEvent` (`registered`/`removed`, one per tool — `removeByPlugin` emits per match)
+  and the module-level `watchPlugins(signal?)` yielding `PluginRegistryEvent`
+  (`loaded`/`unloaded`) — both fed by one shared multi-subscriber broadcaster. Read-only:
+  observers can't veto a registration (interception is a separate, deliberately unbuilt concern).
+  Lets consumers react to a registry changing *out of band* — e.g. a storage backend restoring a
+  plugin set during its own `setup()`, after a frontend's one-shot load. `watch()` is a **required**
+  `ToolRegistry` method (breaking for any external implementer): the two host bootstraps that
+  hand-rolled their own registry literal were consolidated onto the exported `ToolRegistryImpl`,
+  which now emits on register/remove/removeByPlugin and takes an optional seed-tools constructor.
+
 ### Optional
+
+- **storage-google-drive** (`@matatbread/matbot-storage-google-drive`, browser) — a
+  `StorageBackend` that persists all documents and file blobs to a folder in the user's
+  Google Drive, so chats, settings, skills, files and secrets follow them between browsers and
+  machines. Layout mirrors the filesystem backend: `<root>/<namespace>/<id>.json` documents
+  (read into memory once, write-through, per-store mutex) and `<root>/__files/` blob+meta pairs.
+  In-browser auth via Google Identity Services — the non-sensitive `drive.file` scope (only files
+  matbot creates), a public client ID, no server or secret. Sign-in is driven from the setup
+  overlay's **Connect** button (the user gesture Chrome requires to open the consent popup — a
+  boot-time popup is blocked), and the overlay walks through the one-time Google console setup
+  (create OAuth client, enable the Drive API, add a test user). Connectivity is probed before the
+  backend is swapped in, so a misconfigured project (e.g. Drive API not enabled) leaves the
+  session on local storage with a clear message instead of erroring on every operation. It also
+  **re-points the vault at Drive** (secrets sync, migrating any held in localStorage) and
+  **shadows the built-in `plugin` tool** with a Drive-backed one — same name, so there's no
+  ambiguous second tool — so installs sync across machines: `add` → Drive; `remove`/`reload` →
+  Drive if synced, else delegated to the local tool; `list` marks each plugin Drive-synced or
+  local-only. Opt-in: baked into the web bundle, activated with `plugin add`. Web-bundle only
+  (the node-served runtime keeps its filesystem/SQLite backend).
+
+- **web-bundle / browser** — supporting changes for the above: the browser realm now honours
+  `register('Vault', impl)` (a capture-safe `forwardingProxy` over the active vault, mirroring the
+  CLI's swap), so a plugin can replace the secret store at runtime; and the browser defaults plugin
+  now persists its auto-load list to the *concrete* boot backend (captured at setup) rather than
+  through the swappable store proxy, so a plugin that swaps the `StorageBackend` during its own load
+  (e.g. storage-google-drive) reliably records itself in the list instead of writing into the
+  just-swapped-in backend (which boot would never read) — this also repairs the mirror bug on
+  `remove`.
 
 - **triggers** (`@matatbread/matbot-triggers`, cross-runtime) — a data-driven
   hooks subsystem. A `Trigger` is a stored
@@ -107,6 +147,18 @@ churn and less likely to affect a consumer who doesn't use them.
   the session) and renders as a collapsed, thinking-styled "Retraction" block holding
   only the final text of the retracted turn (no thinking/tool blocks). Assistant response
   wraps are tagged with their `traceId` so the live removal can target the right one.
+
+- **frontend/web** — the **skills and plugins panels now update live**. Two new SSE streams —
+  `GET /events/tools` (tool-registry CRUD) and `GET /events/plugins` (plugin load/unload),
+  surfaced on both transports as `toolEvents()`/`pluginEvents()` — drive the client to refresh
+  skills on `tool-changed` and plugins on `plugin-changed`. Fixes panels going stale when a plugin
+  loads out of band (e.g. the Google Drive backend restoring its synced plugin set at boot, after
+  the UI's one-shot loads). The plugin stream also catches tool-less plugins (pure
+  provider/hook/storage) the tool stream can't see, **retiring the old poll-on-`plugin`-tool-success
+  refresh** (which also fired on no-op `list`/`discover_local` calls). **All SSE endpoints moved
+  under a `/events/` prefix** (`/events/sessions`, `/events/sessions/:id`, `/events/files`,
+  `/events/files/:ns/:name`, `/events/tools`, `/events/plugins`) so no author-controlled path
+  segment can shadow a route — a tool named `events` no longer collides with `POST /tools/:name`.
 
 - **providers/openai-compat** — assistant messages with tool calls but no text are now sent
   with `content` **omitted** rather than `content: null` (the spec makes `content` optional
