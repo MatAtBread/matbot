@@ -41,6 +41,16 @@ churn and less likely to affect a consumer who doesn't use them.
   hand-rolled their own registry literal were consolidated onto the exported `ToolRegistryImpl`,
   which now emits on register/remove/removeByPlugin and takes an optional seed-tools constructor.
 
+### Bug fixes
+
+- **`plugin remove` no longer offers to `pnpm remove` a plugin that was never installed by the
+  package manager.** The "Also uninstall the npm package?" prompt fired unconditionally, even for
+  local-path plugins (referenced in place) and cached remote http/github plugins (materialized into
+  `.plugins/`) — for which the package-manager command was, at best, a no-op run against a path or
+  URL. It is now gated on the plugin's canonical name being a recorded dependency (mirroring the
+  `add` path, which only shells out for npm / tarball-or-git specifiers), and the uninstall addresses
+  the package by name rather than by the matbot.yaml entry.
+
 ### Optional
 
 - **storage-google-drive** (`@matatbread/matbot-storage-google-drive`, browser) — a

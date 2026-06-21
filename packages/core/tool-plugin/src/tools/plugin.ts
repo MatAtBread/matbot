@@ -2,7 +2,7 @@ import type { Tool, ToolEvent, ToolContext, MatbotPlugin, FormField, Runtime, Pl
 import { CONFIRM_YES, CONFIRM_NO, IncompatibleRuntimeError } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins, getRegisteredTools, getRegisteredFrontendPlugins,
          getRegisteredServiceKeys, getHookPlugins, getSystemContextPlugins,
-         getSpecifierForPlugin } from '@matatbread/matbot-core';
+         getSpecifierForPlugin, getPluginNameForSpecifier } from '@matatbread/matbot-core';
 import { readFile, writeFile, access, readdir } from 'node:fs/promises';
 import { spawn }                             from 'node:child_process';
 import { pathToFileURL, fileURLToPath }       from 'node:url';
@@ -586,6 +586,11 @@ const executor = {
         return;
       }
 
+      // Capture the canonical package name before deactivation drops it from the registry: it gates
+      // the uninstall offer below and is the correct handle for `pnpm remove` (the config entry may
+      // be a path or URL). Falls back to a disk walk for a configured-but-unloaded plugin.
+      const pkgName = getPluginNameForSpecifier(entry) ?? await nameFromSpecifier(entry, projectDir);
+
       yield { type: 'stdout', chunk: `Deactivating "${entry}"...\n` };
       try {
         await ctx.unloadPlugin(entry);
@@ -593,10 +598,15 @@ const executor = {
         yield { type: 'stderr', chunk: `Deactivation failed: ${String(e)}\n` };
       }
 
-      if (await confirmAction(ctx, 'Also uninstall the npm package?')) {
+      // Only offer to uninstall when the package manager actually installed it — i.e. its name is a
+      // recorded dependency. Local plugins are referenced in place and cached remote (http/github)
+      // plugins live under .plugins/; neither was `pnpm add`-ed, so `pnpm remove` is a no-op at best.
+      // Mirrors the add path, which only shells out for npm / tarball-or-git specifiers.
+      if (pkgName !== undefined && (await readDependencyNames(projectDir)).has(pkgName)
+          && await confirmAction(ctx, `Also uninstall the npm package **"${pkgName}"**?`)) {
         const pm = await detectPackageManager(projectDir);
         try {
-          const out = await runCommand(pm, ['remove', entry], projectDir);
+          const out = await runCommand(pm, ['remove', pkgName], projectDir);
           if (out) yield { type: 'stdout', chunk: out };
         } catch (e) {
           yield { type: 'stderr', chunk: `Uninstall failed: ${String(e)}\n` };
