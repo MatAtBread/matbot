@@ -68,7 +68,9 @@ export const plugin: MatbotPluginSpec = {
       unloadPlugin:  services.unloadPlugin.bind(services),
       watchPlugins,
       tools:         services.tools,
-      ...(services.SkillManager !== undefined ? { skills: services.SkillManager } : {}),
+      // Resolve the SkillManager per call, not once here: frontend-web loads before the skills plugin,
+      // so a snapshot would capture undefined forever (services.SkillManager is a live registry getter).
+      skills:        () => services.SkillManager,
       // Look up the resolver per request so an override registered in any load order takes effect.
       resolvePrincipal: (req) => (services.WebPrincipalResolver ?? defaultWebPrincipal)(req),
       ...(services.workdir    !== undefined ? { workdir:    services.workdir    } : {}),
