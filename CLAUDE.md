@@ -195,7 +195,7 @@ A throwing handler is isolated (caught, logged, skipped) — never propagated. A
 
 | `on` | Cadence | Session | Effects |
 |---|---|---|---|
-| `screen`     | once per turn, before 1st provider call | read-write | replace `session`, add `ephemeral` context (tail of outgoing messages, never persisted), append durable `markers`, and/or `abort` |
+| `screen`     | once per turn, before 1st provider call | read-write | replace `session`, add `ephemeral` context (tail of outgoing messages, never persisted), add `durable` context (folded onto the user turn — persisted + visible — and carried live as `robo-user`), append durable `markers`, and/or `abort` |
 | `contribute` | before *every* provider call | read-only | return transformed `outgoing` copy (ephemeral) |
 | `toolcall`   | before each tool exec | read-only | `rejectTool` and/or `abort` |
 | `toolresult` | after each tool exec | read-only | replace `result` (redaction) or observe |
@@ -216,7 +216,7 @@ Stored documents turning condition-based wiring into **data**:
 ```ts
 interface Trigger {
   id; version;
-  conditions: { kind: 'augment' | 'retract' | 'followup'; rule: string }[];
+  conditions: { kind: 'ephemeral' | 'contextual' | 'retract' | 'followup'; rule: string }[];
   invoke: { tool: string; params?: unknown };
   enabled?: boolean; createdAt; updatedAt;
 }
@@ -224,10 +224,13 @@ interface Trigger {
 
 **Triggers name a *tool*, not a skill.** "Apply a skill" is `invoke: skill_action({ action: 'use', … })` — a specialization, not a special case.
 
-**Conditions are OR; `invoke` is the consequence.** Each condition is an LLM-judged rubric. `kind` determines surface judged, hook used, and delivery:
-- **`augment`** — judge user message in `screen` hook; inject ephemerally
+**Conditions are OR; `invoke` is the consequence.** Each condition is an LLM-judged rubric. `kind` determines surface judged, hook used, and delivery — two user-surface kinds (an ephemeral/durable pair) and two agent-surface:
+- **`ephemeral`** — judge user message in `screen` hook; inject for this turn only (never persisted)
+- **`contextual`** — judge user message in `screen` hook; fold durably onto the user turn (`origin: 'robo'`, persisted + visible via the `screen` result's `durable`, carried live as `robo-user`)
 - **`retract`** — judge assistant response in `followup` hook; pop and re-run
 - **`followup`** — judge assistant response in `followup` hook; resubmit as robo turn
+
+The user-surface kinds were one kind named `augment` (= today's `ephemeral`); stored triggers migrate `augment`→`ephemeral` on plugin load.
 
 **Observational dispatch:** tool's output is the signal. A `result` → inject; no result → silent side-effect. The dispatcher is a dumb transport — tools frame themselves.
 

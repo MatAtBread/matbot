@@ -631,7 +631,7 @@ const skillEditorError   = document.getElementById('skill-editor-error');
 const skillEditorSave    = document.getElementById('skill-editor-save');
 const skillEditorRoot    = document.getElementById('skill-editor');
 const skillTriggerList   = document.getElementById('skill-trigger-list');
-const TRIGGER_KINDS = ['augment', 'retract', 'followup'];
+const TRIGGER_KINDS = ['ephemeral', 'contextual', 'retract', 'followup'];
 let editingSkillName = null;
 let skillEditor = null;   // TinyMDE.Editor, created lazily on first open
 // A skill is fired by (at most) one Trigger whose invoke is skill_action(use, {name}); its
@@ -736,12 +736,14 @@ function makeTriggerRow(c) {
   sel.className = 'trigger-kind';
   for (const k of TRIGGER_KINDS) {
     const o = document.createElement('option');
-    o.value = k; o.textContent = k;
+    o.value = k; 
+    o.textContent = { 'ephemeral': 'User Ephemeral', 'contextual': 'User Contextual', 'retract': 'Agent Retract', 'followup': 'Agent Follow-up' }[k];
     sel.appendChild(o);
   }
-  // augment = fire on the user message (route the skill in); retract/followup = fire on the
-  // assistant response (discard+redo / keep+steer). Most skill triggers route on user input.
-  sel.value = c?.kind ?? 'augment';
+  // ephemeral/contextual = fire on the user message (route knowledge in for this turn / fold it in
+  // durably); retract/followup = fire on the assistant response (discard+redo / keep+steer). Most
+  // skill triggers route on user input.
+  sel.value = c?.kind ?? 'ephemeral';
   sel.disabled = !editable;
 
   const txt = document.createElement('textarea');
@@ -2087,11 +2089,15 @@ async function renderTurn(sid, traceId) {
         }
 
         case 'robo-user': {
+          // Machine-authored content folded onto the running turn's user message (a screen hook's
+          // `durable` result — e.g. a fired `contextual` trigger). Draw it as an agent-side robo
+          // bubble so the live view matches the reload, where appendUserTurn splits the user turn's
+          // robo blocks into exactly such a bubble.
           const text = (ev.content ?? [])
             .filter(c => c.type === 'text')
             .map(c => c.text)
             .join('\n');
-          if (text) appendUserBubble(text); // index filled in by 'done' handler below
+          if (text) appendRoboBubble(text, undefined, ev.traceId);
           break;
         }
 

@@ -214,8 +214,11 @@ export interface RunConfig {
  *               turn-scoped `ephemeral` context (appended onto the tail of this turn's outgoing
  *               messages — the freshest input the model reads — never persisted, and placed at the
  *               tail rather than a system prefix so a "do X now" directive keeps its salience and
- *               doesn't bust the cached prefix), or `abort`. Mix freely. This is where the
- *               durable-vs-ephemeral choice for incoming user input lives.
+ *               doesn't bust the cached prefix), `durable` context (the persisted, visible twin of
+ *               `ephemeral`: folded onto this turn's user message as `origin: 'robo'` blocks and
+ *               carried live as a `robo-user` event, so it survives into the next turn's history),
+ *               or `abort`. Mix freely. This is where the durable-vs-ephemeral choice for incoming
+ *               user input lives.
  *   contribute  runner, before *every* provider call. Ephemeral by construction (it re-fires, so a
  *               durable mutation would accumulate). Returns a transformed copy of `outgoing` — the
  *               message array about to be sent — and never touches the stored session. Mind prompt
@@ -257,6 +260,16 @@ export interface ScreenResult {
    *  input the model reads), never persisted. At the tail, not a system prefix, so a directive
    *  keeps its salience and the cached system/history prefix stays stable across turns. */
   ephemeral?: MessageContent[];
+  /**
+   * The persisted, visible twin of `ephemeral`: context that should outlive this turn rather than
+   * inform it once. The runner folds these blocks onto this turn's user message (so they ride into
+   * the stored history and every subsequent provider call) AND carries them live as a `robo-user`
+   * event, so a live draw and a reload render the same thing. They are LLM-visible (unlike
+   * `markers`) and machine-authored, so a caller marks them `origin: 'robo'` for presentation.
+   * Use when a fired hook produces context that genuinely updates the conversation, not a one-shot
+   * corrective for the turn about to run.
+   */
+  durable?:   MessageContent[];
   /**
    * Durable `marker` blocks to append to this turn's session (LLM-invisible). The dispatcher both
    * appends them to the persisted session AND carries them live on the turn's event stream, so a
@@ -618,6 +631,11 @@ export type PipelineEvent =
   // `queued` is the number of submissions ahead of it (0 ⇒ about to run). Emitted live on enqueue
   // and replayed (in queue order) to anyone subscribing mid-flight.
   | { type: 'queued';         content: MessageContent[]; queued: number; concatQueue: boolean; traceId: string; rootTraceId: string }
+  // Machine-authored content folded onto the running turn's user message (a `screen` hook's
+  // `durable` result — e.g. a fired `contextual` trigger), carried live so a frontend draws it
+  // immediately. The blocks are already persisted in that user message (origin: 'robo'); this is
+  // purely the live-delivery channel, so a live draw matches the reload (which splits the user
+  // turn's robo blocks into their own agent-side bubble).
   | { type: 'robo-user';      content: MessageContent[]; traceId: string }
   // Marker blocks appended to the session this turn (e.g. the dispatcher's record of a hook that
   // threw), carried live so a frontend renders them without waiting for a session reload. The blocks

@@ -68,9 +68,12 @@ determinism/cost/auditability (permanent).
 
 ## How the mechanism serves this
 
-- **The `kind` model (augment / retract / followup)** = the three honest ways a system-executed
-  consequence lands, replacing the v1 "robo message" hack (text-into-transcript). matbot has a neutral
-  session format, so the native primitive is *structured*, not injected prose.
+- **The `kind` model (ephemeral / contextual / retract / followup)** = the honest ways a
+  system-executed consequence lands, replacing the v1 "robo message" hack (text-into-transcript).
+  matbot has a neutral session format, so the native primitive is *structured*, not injected prose.
+  The two user-surface kinds are an ephemeral/durable pair — inform just this turn (`ephemeral`, the
+  former `augment`) vs. fold into the session for good (`contextual`) — and the two agent-surface kinds
+  remove agent discretion to differing degrees (`retract` / `followup`).
 - **Retraction-as-marker + redo** = the strongest agent-side discretion removal: a wrong answer is
   *superseded*, not politely re-asked.
 - **Fences, the re-fire guards, suppression markers, the retraction UI** = keeping the mechanism

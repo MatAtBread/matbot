@@ -48,15 +48,15 @@ function fence(body: string): string {
     `Take it into account when responding.]\n\n${body}\n\n[End of additional context.]`;
 }
 
-// A durable trace of an augment-phase ephemeral injection (screen-ephemeral) — never otherwise
-// persisted, so without this a post-mortem can't see what the system fed the model before it answered,
-// OR which specific condition the classifier judged true and why. LLM-invisible like any marker; a
-// frontend may ignore it (diagnostic, not user-facing). `text` is the raw joined body (pre-fence);
-// `triggers` are the firing sources (id + matched conditions). (The other ephemeral injection — a
-// retract redo's context — is traced by the core retraction marker, not here; a `followup` resubmit is
-// a persisted robo turn and needs no trace.)
-function injectionMarker(triggers: FiredSource[], text: string): MessageContent {
-  return { type: 'marker', creator: 'triggers', data: { event: 'ephemeral-inject', surface: 'user', triggers, text } };
+// A durable trace of a user-phase injection. For `ephemeral-inject` the injected `text` is never
+// otherwise persisted, so without this a post-mortem can't see what the system fed the model before it
+// answered; for `durable-inject` the text IS persisted (folded onto the user turn), so `text` is
+// omitted and the marker records only WHICH condition fired and why. LLM-invisible like any marker; a
+// frontend may ignore it (diagnostic, not user-facing). `triggers` are the firing sources (id +
+// matched conditions). (The agent-phase injections are traced elsewhere: a retract redo's context by
+// the core retraction marker, and a `followup` resubmit by its persisted robo turn.)
+function injectionMarker(event: 'ephemeral-inject' | 'durable-inject', triggers: FiredSource[], text?: string): MessageContent {
+  return { type: 'marker', creator: 'triggers', data: { event, surface: 'user', triggers, ...(text !== undefined ? { text } : {}) } };
 }
 
 // The core retraction marker's creator (packages/core/runner/src/session-runner.ts). Hardcoded as a
@@ -70,7 +70,7 @@ const RETRACTION_CREATOR = 'matbot-retraction';
 // `retractFiredMarker` records which triggers/conditions caused a retract. Both are LLM-invisible
 // diagnostics. The convergence guard reads back BOTH retract-fired AND its own `retract-convergence`
 // suppressions (see retractActiveLastTurn).
-type SuppressCause = 'augment-redo' | 'retract-convergence' | 'followup-shadowed';
+type SuppressCause = 'user-redo' | 'retract-convergence' | 'followup-shadowed';
 function suppressedMarker(cause: SuppressCause, reason: string, triggers: FiredSource[]): MessageContent {
   return { type: 'marker', creator: 'triggers', data: { event: 'suppressed', cause, reason, triggers } };
 }
@@ -80,8 +80,8 @@ function retractFiredMarker(triggers: FiredSource[]): MessageContent {
 
 // True when the latest turn is a retract-redo: a `matbot-retraction` marker sits after the last genuine
 // (non-robo) user message — i.e. this user message was already processed on the original attempt, so
-// user-phase (augment) triggers and their side effects already fired. Re-firing them on the redo is the
-// duplicate-side-effect bug; skip them.
+// user-phase (ephemeral/contextual) triggers and their side effects already fired. Re-firing them on the
+// redo is the duplicate-side-effect bug; skip them.
 function isRetractRedo(messages: Message[]): boolean {
   const lastUser = messages.findLastIndex(m => m.role === 'user' && !m.content.every(c => c.origin === 'robo'));
   if (lastUser < 0) return false;
@@ -126,8 +126,10 @@ function textOf(msg: Message | undefined): string {
  * the `Triggers` service and the `trigger_action` tool, then install the two evaluation hooks:
  *
  *   user  — a `screen` hook (pre-response) that judges `user`-phase conditions against the incoming
- *           message, invokes each fired trigger's tool, and injects the results EPHEMERALLY (this
- *           turn only, never persisted).
+ *           message, invokes each fired trigger's tool, and delivers the result per the fired
+ *           condition's `kind`: `ephemeral` (inject for this turn only, never persisted) or
+ *           `contextual` (fold DURABLY onto the user message — persisted + visible — so it updates
+ *           the conversation rather than informing one answer).
  *   agent — a `followup` hook (post-commit) that judges agent-surface conditions against the
  *           assistant's response, invokes each fired trigger's tool, and delivers the result per the
  *           fired condition's `kind`: `retract` (discard the response and re-run with the result
@@ -152,8 +154,9 @@ export async function setupTriggers(services: MatbotServices): Promise<TriggerMa
   services.tools.register(createTriggerActionTool(manager));
   services.tools.register(createTriggersConfigTool(services));
 
-  // user phase — pre-response. Judges the incoming user message; injects fired triggers' tool
-  // results ephemerally so they inform this response without persisting.
+  // user phase — pre-response. Judges the incoming user message and delivers each fired trigger's tool
+  // result by its kind: `ephemeral` informs this response only; `contextual` folds durably onto the
+  // user turn so it persists into the conversation.
   services.hooks.register({
     on: 'screen',
     async handler(ctx) {
@@ -161,12 +164,13 @@ export async function setupTriggers(services: MatbotServices): Promise<TriggerMa
       // Skip our own agent-phase robo resubmissions — they are not real user turns.
       if (!lastUser || lastUser.content.every(c => c.origin === 'robo')) return;
 
-      // Guard: a retract-redo re-runs this same user turn. The user-phase (augment) triggers already
-      // fired — and their side effects (e.g. remember_fact's store write) already happened — on the
-      // original attempt, so re-firing here double-applies them. Hold off, and record why (suppression
-      // is never silent). The redo still gets the retract correction via the injected context.
+      // Guard: a retract-redo re-runs this same user turn. The user-phase (ephemeral/contextual)
+      // triggers already fired — and their side effects (e.g. remember_fact's store write, or a
+      // contextual fold persisted onto the user message) already happened — on the original attempt,
+      // so re-firing here double-applies them. Hold off, and record why (suppression is never silent).
+      // The redo still gets the retract correction via the injected context.
       if (isRetractRedo(ctx.session.messages)) {
-        return { markers: [suppressedMarker('augment-redo', 'augment held off: retract-redo (user message already processed on the original attempt)', [])] };
+        return { markers: [suppressedMarker('user-redo', 'user-phase triggers held off: retract-redo (user message already processed on the original attempt)', [])] };
       }
 
       const fired = await manager.evaluate(
@@ -180,22 +184,42 @@ export async function setupTriggers(services: MatbotServices): Promise<TriggerMa
       );
       if (fired.length === 0) return;
 
-      const bodies:  string[]         = [];
-      const sources: FiredSource[]    = [];
-      const markers: MessageContent[] = [];
-      for (const { trigger, matched } of fired) {
+      // Partition fired triggers' output by delivery. A trigger can carry both kinds on this surface;
+      // if any `contextual` condition fired the output goes durable, since a durable fold is also sent
+      // on this very turn (it lands in the user message before the provider call) — it is a superset of
+      // ephemeral, so "contextual dominates" loses nothing, mirroring retract-over-followup on the
+      // agent surface. Markers are collected regardless — they persist whichever path runs.
+      const ephemeralBodies:  string[]         = [];
+      const ephemeralSources: FiredSource[]    = [];
+      const durableBodies:    string[]         = [];
+      const durableSources:   FiredSource[]    = [];
+      const markers:          MessageContent[] = [];
+      for (const { trigger, kinds, matched } of fired) {
         const out = await dispatchTrigger(services, trigger, { session: ctx.session, signal: ctx.signal, provider: ctx.config.provider, ...(ctx.prompt !== undefined ? { prompt: ctx.prompt } : {}) });
-        if (out.hadResult) { bodies.push(renderResult(out.result)); sources.push({ id: trigger.id, matched }); }
+        if (out.hadResult) {
+          if (kinds.includes('contextual')) {
+            durableBodies.push(renderResult(out.result));
+            durableSources.push({ id: trigger.id, matched: matched.filter(m => m.kind === 'contextual') });
+          } else {
+            ephemeralBodies.push(renderResult(out.result));
+            ephemeralSources.push({ id: trigger.id, matched: matched.filter(m => m.kind === 'ephemeral') });
+          }
+        }
         markers.push(...out.markers);
       }
-      // Trace the ephemeral injection durably (the injected text itself is never persisted).
-      if (bodies.length > 0) markers.push(injectionMarker(sources, bodies.join(JOIN)));
-      if (bodies.length === 0 && markers.length === 0) return;
+      // Trace each injection. The ephemeral text is never otherwise persisted, so the marker carries it;
+      // the durable text rides the user message itself, so its marker records only the firing sources.
+      if (ephemeralBodies.length > 0) markers.push(injectionMarker('ephemeral-inject', ephemeralSources, ephemeralBodies.join(JOIN)));
+      if (durableBodies.length   > 0) markers.push(injectionMarker('durable-inject',   durableSources));
+      if (ephemeralBodies.length === 0 && durableBodies.length === 0 && markers.length === 0) return;
 
       return {
-        // The dispatcher appends these to the session AND emits them live (consistent draw/reload).
-        ...(markers.length > 0 ? { markers } : {}),
-        ...(bodies.length  > 0 ? { ephemeral: [{ type: 'text', text: fence(bodies.join(JOIN)) }] } : {}),
+        // The dispatcher appends markers to the session AND emits them live (consistent draw/reload).
+        // `ephemeral` informs only this turn; `durable` folds onto the user turn (origin: 'robo'),
+        // persists, and is carried live as a robo-user event.
+        ...(markers.length         > 0 ? { markers } : {}),
+        ...(ephemeralBodies.length > 0 ? { ephemeral: [{ type: 'text', text: fence(ephemeralBodies.join(JOIN)) }] } : {}),
+        ...(durableBodies.length   > 0 ? { durable:   [{ type: 'text', text: fence(durableBodies.join(JOIN)), origin: 'robo' as const }] } : {}),
       };
     },
   });

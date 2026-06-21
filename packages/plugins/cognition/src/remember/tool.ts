@@ -15,7 +15,7 @@
  *
  * **Which message it reads.** It captures from the latest genuine (non-robo) user *or assistant*
  * message — i.e. whichever fired it, because the trigger surface dictates the tail of the session at
- * firing time: an `augment` condition fires in the pre-response `screen` hook, so the tail is the
+ * firing time: an `ephemeral` condition fires in the pre-response `screen` hook, so the tail is the
  * incoming USER message; a `followup` condition fires post-commit, so the tail is the ASSISTANT
  * response (e.g. "I'll remember that X is Y" / owning a mistake). A direct mid-turn model call sees
  * the user message as the tail. Reading the tail therefore always lands on the message the condition
@@ -67,7 +67,7 @@ export function createRememberFactTool(services: MatbotServices): Tool {
   const executor: ToolExecutor = {
     async *execute(_input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
       // The fact lives in the message that fired this — the latest genuine (non-robo) user OR
-      // assistant message (see the header: augment→user tail, followup→assistant tail, direct→user
+      // assistant message (see the header: ephemeral→user tail, followup→assistant tail, direct→user
       // tail). Its id/createdAt are the provenance, ctx.session.id the session. All ambient — nothing
       // to fetch.
       const msg  = ctx.session.messages.findLast(m =>

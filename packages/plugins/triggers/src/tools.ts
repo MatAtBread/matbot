@@ -2,7 +2,7 @@ import type { Tool, ToolExecutor, ToolContext, ToolEvent, MatbotServices } from 
 import type { TriggerManager } from './manager.js';
 import type { TriggerCondition, TriggerKind } from './types.js';
 
-const KINDS: readonly TriggerKind[] = ['augment', 'retract', 'followup'];
+const KINDS: readonly TriggerKind[] = ['ephemeral', 'contextual', 'retract', 'followup'];
 const isKind = (x: unknown): x is TriggerKind => typeof x === 'string' && (KINDS as readonly string[]).includes(x);
 
 const GUIDANCE =
@@ -14,8 +14,12 @@ const GUIDANCE =
   'relevance is found by search, so keyword/entity rules are redundant noise — do not write them). ' +
   'Phrase it as a single LLM-judged rubric "MATCH if the message is …; DO NOT MATCH if …".\n' +
   '• `kind` fixes WHAT is judged and WHAT happens when it matches:\n' +
-  '   - "augment": judge the USER MESSAGE (e.g. frustration, a fact worth remembering); run the tool ' +
-  'and inject its output into the response about to be written.\n' +
+  '   - "ephemeral": judge the USER MESSAGE (e.g. frustration, a fact worth surfacing now); run the ' +
+  'tool and inject its output into the response about to be written — for THIS turn only, not kept.\n' +
+  '   - "contextual": judge the USER MESSAGE; run the tool and fold its output DURABLY onto the user ' +
+  "turn, so it persists into the conversation and every later turn sees it. Choose ephemeral vs " +
+  'contextual by whether a match means "use this for this answer" vs "this should become part of the ' +
+  'session".\n' +
   '   - "retract": judge the ASSISTANT RESPONSE; the response is WRONG, so discard it and regenerate ' +
   'the turn with the output as context (e.g. a corrected field name invalidates everything downstream).\n' +
   '   - "followup": judge the ASSISTANT RESPONSE; the response STANDS but needs a steer or ' +
@@ -131,7 +135,7 @@ export function createTriggerActionTool(manager: TriggerManager): Tool {
       '"get" or "list" first to read the id, then "update" by id.\n\n' +
       'Parameters depend on `action` (TypeScript):\n' +
       '```ts\n' +
-      "type TriggerKind = 'augment' | 'retract' | 'followup';  // augment=judge user msg+inject; retract=wrong, redo; followup=stands, add steer turn\n" +
+      "type TriggerKind = 'ephemeral' | 'contextual' | 'retract' | 'followup';  // ephemeral=judge user msg+inject for this turn; contextual=judge user msg+fold durably onto it; retract=wrong, redo; followup=stands, add steer turn\n" +
       'type TriggerCondition = { kind: TriggerKind; rule: string };\n' +
       'type TriggerAction =\n' +
       "  | { action: 'list' }                                                              // -> { triggers: [...] }\n" +
@@ -147,8 +151,8 @@ export function createTriggerActionTool(manager: TriggerManager): Tool {
       properties: {
         action:     { type: 'string', enum: ['list', 'query', 'get', 'add', 'update', 'remove'], description: 'The operation to perform.' },
         id:         { type: 'string', description: 'Trigger id. Required for get/update/remove.' },
-        conditions: { type: 'array', description: 'Conditions [{ kind: "augment"|"retract"|"followup", rule: string }]. Required for add.',
-          items: { type: 'object', properties: { kind: { type: 'string', enum: ['augment', 'retract', 'followup'] }, rule: { type: 'string' } } } },
+        conditions: { type: 'array', description: 'Conditions [{ kind: "ephemeral"|"contextual"|"retract"|"followup", rule: string }]. Required for add.',
+          items: { type: 'object', properties: { kind: { type: 'string', enum: ['ephemeral', 'contextual', 'retract', 'followup'] }, rule: { type: 'string' } } } },
         tool:       { type: 'string', description: 'Name of the tool to invoke when a condition matches. Required for add.' },
         params:     { type: 'object', description: 'Params passed verbatim as the invoked tool\'s input.' },
         enabled:    { type: 'boolean', description: 'Set false to keep but disable the trigger.' },
