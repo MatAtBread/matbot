@@ -66,15 +66,26 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
   // ── 1. screen — once per turn: shape/abort the incoming submission ──────────
 
   const screen = await hookReg.runScreen({ session: opts.session, config, signal, prompt: promptFn });
+  if (screen.abort) {
+    // Hook-failure (and any other screen-injected) markers carried live, even on abort, so a
+    // misconfigured hook surfaces this turn rather than only on a later reload.
+    if (screen.markers.length > 0) yield { type: 'marker', content: screen.markers, traceId };
+    await store.set(screen.session.id, screen.session);
+    yield { type: 'aborted', reason: screen.abort, session: screen.session, traceId };
+    return;
+  }
+  // Durable context a screen hook folded onto the user message (e.g. a fired `contextual` trigger),
+  // carried live so a frontend draws it now rather than only on a later reload. It is already part of
+  // screen.session (origin: 'robo' blocks on the user turn) — this event is purely live delivery.
+  // Emitted BEFORE the markers so the live order matches a reload: the durable blocks belong to the
+  // user message (rendered with the turn), while screen markers were appended to the session AFTER it.
+  if (screen.durable.length > 0) {
+    yield { type: 'robo-user', content: screen.durable, traceId };
+  }
   // Hook-failure (and any other screen-injected) markers, carried live so the UI shows them this turn
   // rather than only on a later session reload. They are already persisted in screen.session.
   if (screen.markers.length > 0) {
     yield { type: 'marker', content: screen.markers, traceId };
-  }
-  if (screen.abort) {
-    await store.set(screen.session.id, screen.session);
-    yield { type: 'aborted', reason: screen.abort, session: screen.session, traceId };
-    return;
   }
   let session = screen.session;
 

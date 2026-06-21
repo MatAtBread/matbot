@@ -6,6 +6,9 @@ type SkillAnalysis  = { entities: string[]; tags: string[]; summary: string };
 type SkillKnowledge = NonNullable<SkillDoc['knowledge']>;
 
 async function sha256Hex(text: string): Promise<string> {
+  // SubtleCrypto is a web-platform primitive (allowed in shared packages). In a non-secure browser
+  // context (plain-HTTP local hosting) `crypto.subtle` is withheld; the web-bundle loader installs a
+  // SHA-256 `digest` shim before any module runs, so this stays clean and works in both runtimes.
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
   return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('');
 }

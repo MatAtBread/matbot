@@ -10,31 +10,38 @@
 /**
  * What a trigger does when one of its conditions matches. A single discriminator: it fixes the
  * surface judged, the hook, AND how the fired tool's output reaches the model — because those are
- * not independent (delivery determines surface). The three are disjoint and exhaustive:
+ * not independent (delivery determines surface). The four are disjoint and exhaustive, two per
+ * surface:
  *
- *  `augment`  — judge the USER message (pre-response `screen` hook); run the tool and inject its
- *    output ephemerally into the turn about to run. The classic "route knowledge in" case.
- *  `retract`  — judge the ASSISTANT response (post-commit `followup` hook); the response is treated
+ *  `ephemeral`  — judge the USER message (pre-response `screen` hook); run the tool and inject its
+ *    output for THIS turn only — never persisted, byte-stable prefix preserved. The one-shot "route
+ *    knowledge in for this answer" case (was named `augment`).
+ *  `contextual` — judge the USER message (pre-response `screen` hook); run the tool and fold its
+ *    output DURABLY onto the user turn (an `origin: 'robo'` block, persisted + visible), so it
+ *    updates the conversation rather than informing one answer. Use when a match means "this should
+ *    become part of the session", not "correct just this turn". The durable twin of `ephemeral`.
+ *  `retract`    — judge the ASSISTANT response (post-commit `followup` hook); the response is treated
  *    as WRONG — pop it into a retraction marker and re-run the user turn with the output injected, so
  *    the bad answer does NOT remain (e.g. "the field is `pgdwell`, not `dwell`": everything built on
  *    the wrong field is void, so regenerate from scratch with the correction).
- *  `followup` — judge the ASSISTANT response (post-commit `followup` hook); the response STANDS but
+ *  `followup`   — judge the ASSISTANT response (post-commit `followup` hook); the response STANDS but
  *    warrants a steer or verification — keep it and resubmit the output as a robo turn, so the
  *    response stays in context for the steer to make sense (Inner Voice / Verify Assumptions /
  *    Bicameral — critiques *of* the standing answer, meaningless without it).
  *
- * The author picks the kind because only they know whether a match means "read this first" /
- * "this is wrong" / "look again".
+ * The author picks the kind because only they know whether a match means "read this for now" /
+ * "remember this from now on" / "this is wrong" / "look again".
  */
-export type TriggerKind = 'augment' | 'retract' | 'followup';
+export type TriggerKind = 'ephemeral' | 'contextual' | 'retract' | 'followup';
 
-/** The conversational surface a `kind` is judged against, and which hook does the judging: `augment`
- *  reads the user message (pre-response `screen` hook); `retract`/`followup` read the assistant
- *  response (post-commit `followup` hook). Derived from `kind` — see {@link surfaceOfKind}. */
+/** The conversational surface a `kind` is judged against, and which hook does the judging:
+ *  `ephemeral`/`contextual` read the user message (pre-response `screen` hook); `retract`/`followup`
+ *  read the assistant response (post-commit `followup` hook). Derived from `kind` — see
+ *  {@link surfaceOfKind}. */
 export type TriggerSurface = 'user' | 'agent';
 
 export function surfaceOfKind(kind: TriggerKind): TriggerSurface {
-  return kind === 'augment' ? 'user' : 'agent';
+  return kind === 'ephemeral' || kind === 'contextual' ? 'user' : 'agent';
 }
 
 /** A trigger condition: a `kind` (what a match does, and the surface it's judged on) plus a `rule`. */

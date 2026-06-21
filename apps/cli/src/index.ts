@@ -394,10 +394,12 @@ async function runTurn(
           break;
         case 'done':        clearThinking(); updated = ev.session; break;
         case 'robo-user': {
+          // Machine-authored context folded onto the user turn by a screen hook (e.g. a fired
+          // `contextual` trigger) — system-supplied, not the user's words, so label it as such.
           const text = ev.content
             .filter((c): c is Extract<MessageContent, { type: 'text' }> => c.type === 'text')
             .map(c => c.text).join('');
-          if (text) write(`you: ${text}\nassistant: `);
+          if (text) write(`[context] ${text}\nassistant: `);
           break;
         }
         case 'aborted': {

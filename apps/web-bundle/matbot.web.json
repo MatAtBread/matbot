@@ -4,8 +4,8 @@
   "output": "matbot.html",
 
   "assets": {
-    "scaffold": "packages/plugins/frontend/web/src/index.html",
-    "appJs": "packages/plugins/frontend/web/src/app.js"
+    "scaffold": "packages/plugins/frontend/web/static/index.html",
+    "appJs": "packages/plugins/frontend/web/static/app.js"
   },
 
   "plugins": [

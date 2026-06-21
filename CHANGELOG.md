@@ -13,6 +13,17 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### API gaps filled
 
+- **`screen` hooks can now inject *durable* context, the persisted twin of `ephemeral`.** A new
+  `ScreenResult.durable?: MessageContent[]`: where `ephemeral` informs only the turn about to run,
+  `durable` is folded onto that turn's user message (the runner appends the blocks to the last
+  `role: 'user'` message, so they persist into history and ride every subsequent provider call) AND
+  carried live on the turn's event stream as the previously-unused `robo-user` event — so a live draw
+  and a reload render the same thing. Callers mark the blocks `origin: 'robo'` so frontends present
+  them agent-side (the web `appendUserTurn` already splits a user turn's robo blocks into their own
+  bubble; the live `robo-user` handler now draws that same bubble, and the CLI labels the content
+  `[context]` rather than `you:`). Lets a `screen` hook produce context that genuinely updates the
+  conversation, not just a one-shot corrective.
+
 - **`followup` hooks can now `retractAndRerun` a committed turn.** A new
   `FollowupResult.retractAndRerun?: { context }` capability alongside the existing
   `resubmit`: instead of appending a robo turn *after* the response, the pump pops the
@@ -52,6 +63,31 @@ churn and less likely to affect a consumer who doesn't use them.
   the package by name rather than by the matbot.yaml entry.
 
 ### Optional
+
+- **web-bundle** — insecure-context Web Crypto shims, consolidated in the bundle loader
+  (`apps/web-bundle/src/loader.js`), so the single-file bundle works over plain HTTP on a non-localhost
+  origin. A non-secure browsing context withholds `crypto.randomUUID` and `crypto.subtle` (only
+  `crypto.getRandomValues` survives); since the bundle runs the whole runtime — core, every plugin,
+  the bootstrap — in one page, that previously crashed plugin load (`crypto.randomUUID is not a
+  function`, called in 20+ packages) and skill reindexing (`crypto.subtle.digest` of undefined). The
+  loader now installs a `getRandomValues`-based `randomUUID` and a SHA-256-only `crypto.subtle.digest`
+  (verified byte-for-byte against SubtleCrypto; the bundle's default vault is plaintext, so no AES-GCM
+  shim is needed) before importing any module. Each installs only when missing, so secure contexts are
+  untouched. The previous partial polyfill in the web frontend's `app.js` (which ran too late to help
+  the bundle) is removed.
+
+- **triggers** — a fourth trigger `kind`, **`contextual`**, and a rename of the user-surface kind
+  `augment` → **`ephemeral`** (forming an ephemeral/durable pair on the user surface). `contextual`
+  judges the user message in the `screen` hook like `ephemeral`, but folds the fired tool's output
+  *durably* onto the user turn (via the new `ScreenResult.durable`) instead of injecting it for one
+  turn — for when a match means "this should become part of the session", not "use this for this
+  answer". Within a single trigger `contextual` dominates `ephemeral` (a durable fold is also sent on
+  the firing turn, so it loses nothing — mirroring retract-over-followup on the agent surface). The
+  ephemeral injection is traced by a `durable-inject` marker recording only the firing sources (the
+  text itself now persists in the user message). Stored triggers and built-in cognition seeds are
+  migrated `augment` → `ephemeral` idempotently on plugin load (trigger docs live in `.data/`, outside
+  source), and the retract-redo suppression cause is renamed `augment-redo` → `user-redo`. The
+  `trigger_action` tool guidance/schema and the web skill-editor kind picker list all four kinds.
 
 - **storage-google-drive** (`@matatbread/matbot-storage-google-drive`, browser) — a
   `StorageBackend` that persists all documents and file blobs to a folder in the user's
