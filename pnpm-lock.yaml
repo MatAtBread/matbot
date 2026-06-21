@@ -318,6 +318,9 @@ importers:
       '@matatbread/matbot-plugin-api':
         specifier: workspace:*
         version: link:../../../core/plugin-api
+      '@matatbread/matbot-skills':
+        specifier: workspace:*
+        version: link:../../skills
     devDependencies:
       '@types/node':
         specifier: 'catalog:'

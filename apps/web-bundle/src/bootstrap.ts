@@ -130,8 +130,11 @@ export async function boot(env: BootEnv): Promise<void> {
       name:   draft.name,
       module: draft.module,
       model:  draft.model,
-      ...(draft.endpoint ? { endpoint: draft.endpoint } : {}),
-      ...(credentials    ? { credentials }              : {}),
+      ...(draft.endpoint   ? { endpoint: draft.endpoint } : {}),
+      ...(credentials      ? { credentials }              : {}),
+      ...(draft.parameters && Object.keys(draft.parameters).length > 0
+        ? { parameters: draft.parameters as NonNullable<ProviderConfig['parameters']> }
+        : {}),
     };
     savePersistedProvider(cfg);
     return cfg;
@@ -357,7 +360,8 @@ export async function boot(env: BootEnv): Promise<void> {
     available: config.availableProviders,
     list: () => [...providers.values()].map(p => ({
       name: p.name, module: p.module, model: p.model,
-      ...(p.endpoint !== undefined ? { endpoint: p.endpoint } : {}),
+      ...(p.endpoint   !== undefined ? { endpoint:   p.endpoint   } : {}),
+      ...(p.parameters !== undefined ? { parameters: p.parameters } : {}),
       hasKey: p.credentials?.['apiKey'] !== undefined,
     })),
     add:    applyDraft,

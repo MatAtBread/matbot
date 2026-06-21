@@ -1,7 +1,7 @@
-// A minimal multi-subscriber fan-out for AsyncIterable observation streams (registry watch,
-// plugin watch). Each subscriber gets its own unbounded queue, so a slow consumer never blocks
-// emit() or its peers. Acceptable because the events are rare and small (tool/plugin CRUD);
-// this is not a high-throughput data path. emit() is synchronous and never throws.
+// A minimal multi-subscriber fan-out for AsyncIterable observation streams (tool/plugin/skill watch,
+// and any future plugin-owned CRUD stream). Each subscriber gets its own unbounded queue, so a slow
+// consumer never blocks emit() or its peers. Acceptable because these events are rare and small
+// (registry/document CRUD); this is not a high-throughput data path. emit() is synchronous and never throws.
 
 interface Subscriber<T> {
   queue: T[];

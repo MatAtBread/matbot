@@ -2353,6 +2353,17 @@ async function init() {
     }
   })();
 
+  // Skill content saved/deleted — incl. by the LLM mid-turn via skill_action, which this UI's own
+  // save/delete buttons already refresh after locally but has no other way to learn about.
+  (async function connectSkillWatchStream() {
+    if (!T.skillEvents) return;
+    let timer = null;
+    for await (const _event of T.skillEvents(new AbortController().signal)) {
+      if (timer) continue;
+      timer = setTimeout(() => { timer = null; loadSkills(); }, 150);
+    }
+  })();
+
   // Plugin load/unload → refresh the plugins panel. Catches tool-less plugins the tool stream can't
   // see (pure provider/hook/storage), and supersedes the old poll-on-`plugin`-tool-success refresh.
   (async function connectPluginWatchStream() {

@@ -259,6 +259,11 @@ function makeInProcessTransport(services) {
     for await (const event of services.tools.watch(signal)) yield event;
   }
 
+  async function* skillEvents(signal) {
+    if (!services.SkillManager) return;
+    for await (const event of services.SkillManager.watch(signal)) yield event;
+  }
+
   async function* pluginEvents(signal) {
     for await (const event of watchPlugins(signal)) yield event;
   }
@@ -280,7 +285,7 @@ function makeInProcessTransport(services) {
   return {
     hostRuntime: 'browser',
     callTool, createSession: createSessionFn, sessionBusy, submit,
-    sessionEvents, answerPrompt, abort, statusEvents, fileEvents, toolEvents, pluginEvents, openFile,
+    sessionEvents, answerPrompt, abort, statusEvents, fileEvents, toolEvents, pluginEvents, skillEvents, openFile,
   };
 }
 

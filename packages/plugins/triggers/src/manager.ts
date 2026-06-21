@@ -1,5 +1,5 @@
 import type { Store, MatbotServices } from '@matatbread/matbot-plugin-api';
-import type { Trigger, TriggerSpec, TriggerSurface, TriggerKind, Triggers } from './types.js';
+import type { Trigger, TriggerSpec, TriggerSurface, TriggerKind, Triggers, FiredCondition } from './types.js';
 import { surfaceOfKind } from './types.js';
 
 const MAX_MSG_CHARS = 1500;
@@ -117,10 +117,13 @@ export class TriggerManager implements Triggers {
    * LLM-judge every enabled condition on `surface` against the current turn and return the distinct
    * triggers that fired, each with the set of `kinds` whose conditions matched (a trigger can carry
    * more than one kind on the same surface — `retract` and `followup` both read the agent response —
-   * so the caller resolves the delivery). Both sides of the exchange are passed: `subject` is judged,
-   * `context` is what it is paired with — many conditions are relational ("disputes the previous
-   * answer") and can only be judged from the pair. No LLM call when there are no candidate conditions
-   * or the subject is empty.
+   * so the caller resolves the delivery) AND `matched` — the specific condition(s) that fired, with
+   * the classifier's one-line reason for each. Without `matched`, a trigger with several conditions on
+   * the same kind is indistinguishable in the trace from one with a single condition — "it fired" tells
+   * you nothing about *why*, which is the question a false-positive post-mortem actually asks. Both
+   * sides of the exchange are passed: `subject` is judged, `context` is what it is paired with — many
+   * conditions are relational ("disputes the previous answer") and can only be judged from the pair. No
+   * LLM call when there are no candidate conditions or the subject is empty.
    */
   async evaluate(
     surface:      TriggerSurface,
@@ -128,14 +131,14 @@ export class TriggerManager implements Triggers {
     context:      { label: string; text: string },
     signal:       AbortSignal,
     turnProvider: string,
-  ): Promise<{ trigger: Trigger; kinds: TriggerKind[] }[]> {
+  ): Promise<{ trigger: Trigger; kinds: TriggerKind[]; matched: FiredCondition[] }[]> {
     // Candidate key is `${triggerId}#${conditionIndex}` — addressing conditions by index is fine
     // because evaluation is per-turn and the trigger set is stable for its duration. The surface a
     // condition belongs to is derived from its `kind` (augment→user, retract/followup→agent).
     const candidates = this.all()
       .filter(t => t.enabled !== false)
       .flatMap(t => t.conditions
-        .map((c, i) => ({ triggerId: t.id, key: `${t.id}#${i}`, kind: c.kind, rule: c.rule }))
+        .map((c, i) => ({ triggerId: t.id, key: `${t.id}#${i}`, index: i, kind: c.kind, rule: c.rule }))
         .filter(c => surfaceOfKind(c.kind) === surface));
     if (candidates.length === 0 || subject.text === '') return [];
 
@@ -148,8 +151,9 @@ export class TriggerManager implements Triggers {
         `followed by a list of conditions. Evaluate each condition against the "${subject.label}". The ` +
         `"${context.label}" is the message it is paired with; use it fully whenever a condition is ` +
         'relational (refers to what was asked, answered, disputed, or repeated). Fire a condition when, ' +
-        `reading the "${subject.label}" in light of the "${context.label}", it holds. Return ONLY a ` +
-        'JSON object mapping each condition id (the bracketed value) to true or false. No other text.',
+        `reading the "${subject.label}" in light of the "${context.label}", it holds. Return ONLY a JSON ` +
+        'object mapping each condition id (the bracketed value) to an object {"match": true|false, ' +
+        '"why": "<one short sentence citing the specific evidence>"}. No other text.',
       prompt:
         `${context.label} (earlier):\n${context.text === '' ? '(none)' : clip(context.text)}\n\n` +
         `${subject.label} (later — evaluate the conditions against THIS):\n${clip(subject.text)}\n\n` +
@@ -165,15 +169,22 @@ export class TriggerManager implements Triggers {
       return [];
     }
 
-    // Group fired conditions back to their triggers, accumulating the distinct kinds that matched.
-    const firedKinds = new Map<string, Set<TriggerKind>>();
+    // Group fired conditions back to their triggers, keeping each matched condition's index/rule/why
+    // alongside the distinct kinds that matched (kinds is a projection of matched, kept for callers
+    // that only need delivery routing).
+    const firedByTrigger = new Map<string, FiredCondition[]>();
     for (const c of candidates) {
-      if (verdicts[c.key] !== true) continue;
-      (firedKinds.get(c.triggerId) ?? firedKinds.set(c.triggerId, new Set()).get(c.triggerId)!).add(c.kind);
+      const v = verdicts[c.key] as { match?: unknown; why?: unknown } | boolean | undefined;
+      const isMatch = typeof v === 'object' && v !== null ? v.match === true : v === true;
+      if (!isMatch) continue;
+      const why = typeof v === 'object' && v !== null && typeof v.why === 'string' ? v.why : undefined;
+      const list = firedByTrigger.get(c.triggerId) ?? [];
+      list.push({ index: c.index, kind: c.kind, rule: c.rule, ...(why !== undefined ? { why } : {}) });
+      firedByTrigger.set(c.triggerId, list);
     }
-    return [...firedKinds].flatMap(([id, kinds]) => {
+    return [...firedByTrigger].flatMap(([id, matched]) => {
       const trigger = this.triggers.get(id);
-      return trigger ? [{ trigger, kinds: [...kinds] }] : [];
+      return trigger ? [{ trigger, kinds: [...new Set(matched.map(m => m.kind))], matched }] : [];
     });
   }
 

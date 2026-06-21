@@ -3,7 +3,15 @@ import type { MatbotPluginSpec, MatbotServices, Store, Message, MessageContent }
 import { TriggerManager } from './manager.js';
 import { dispatchTrigger, renderResult } from './dispatch.js';
 import { createTriggerActionTool, createTriggersConfigTool } from './tools.js';
-import type { Trigger, Triggers } from './types.js';
+import type { Trigger, Triggers, FiredCondition } from './types.js';
+
+/** A firing trigger's id plus the specific condition(s) that matched — the unit markers trace, so a
+ *  post-mortem can see not just that a trigger fired but which rubric the classifier judged true and
+ *  (if it said) why. */
+interface FiredSource {
+  id:      string;
+  matched: FiredCondition[];
+}
 
 declare module '@matatbread/matbot-plugin-api' {
   interface MatbotServices {
@@ -41,12 +49,13 @@ function fence(body: string): string {
 }
 
 // A durable trace of an augment-phase ephemeral injection (screen-ephemeral) — never otherwise
-// persisted, so without this a post-mortem can't see what the system fed the model before it answered.
-// LLM-invisible like any marker; a frontend may ignore it (diagnostic, not user-facing). `text` is the
-// raw joined body (pre-fence); `triggers` are the firing trigger ids. (The other ephemeral injection —
-// a retract redo's context — is traced by the core retraction marker, not here; a `followup` resubmit
-// is a persisted robo turn and needs no trace.)
-function injectionMarker(triggers: string[], text: string): MessageContent {
+// persisted, so without this a post-mortem can't see what the system fed the model before it answered,
+// OR which specific condition the classifier judged true and why. LLM-invisible like any marker; a
+// frontend may ignore it (diagnostic, not user-facing). `text` is the raw joined body (pre-fence);
+// `triggers` are the firing sources (id + matched conditions). (The other ephemeral injection — a
+// retract redo's context — is traced by the core retraction marker, not here; a `followup` resubmit is
+// a persisted robo turn and needs no trace.)
+function injectionMarker(triggers: FiredSource[], text: string): MessageContent {
   return { type: 'marker', creator: 'triggers', data: { event: 'ephemeral-inject', surface: 'user', triggers, text } };
 }
 
@@ -56,15 +65,16 @@ function injectionMarker(triggers: string[], text: string): MessageContent {
 const RETRACTION_CREATOR = 'matbot-retraction';
 
 // Suppression is NEVER silent: when a guard holds a trigger back, it leaves this marker naming the
-// `cause` (a machine tag), a human `reason`, and the triggers — so "why didn't it fire?" is answerable
-// from the session months later rather than from a remembered heuristic. `retractFiredMarker` records
-// which triggers caused a retract. Both are LLM-invisible diagnostics. The convergence guard reads back
-// BOTH retract-fired AND its own `retract-convergence` suppressions (see retractActiveLastTurn).
+// `cause` (a machine tag), a human `reason`, and the triggers (id + matched conditions) — so "why
+// didn't it fire?" is answerable from the session months later rather than from a remembered heuristic.
+// `retractFiredMarker` records which triggers/conditions caused a retract. Both are LLM-invisible
+// diagnostics. The convergence guard reads back BOTH retract-fired AND its own `retract-convergence`
+// suppressions (see retractActiveLastTurn).
 type SuppressCause = 'augment-redo' | 'retract-convergence' | 'followup-shadowed';
-function suppressedMarker(cause: SuppressCause, reason: string, triggers: string[]): MessageContent {
+function suppressedMarker(cause: SuppressCause, reason: string, triggers: FiredSource[]): MessageContent {
   return { type: 'marker', creator: 'triggers', data: { event: 'suppressed', cause, reason, triggers } };
 }
-function retractFiredMarker(triggers: string[]): MessageContent {
+function retractFiredMarker(triggers: FiredSource[]): MessageContent {
   return { type: 'marker', creator: 'triggers', data: { event: 'retract-fired', triggers } };
 }
 
@@ -98,7 +108,9 @@ function retractActiveLastTurn(messages: Message[]): Set<string> {
       const d = c.data as { event?: unknown; cause?: unknown; triggers?: unknown };
       const active = d?.event === 'retract-fired' || (d?.event === 'suppressed' && d?.cause === 'retract-convergence');
       if (active && Array.isArray(d.triggers)) {
-        for (const id of d.triggers) if (typeof id === 'string') ids.add(id);
+        for (const t of d.triggers) {
+          if (typeof t === 'object' && t !== null && typeof (t as { id?: unknown }).id === 'string') ids.add((t as { id: string }).id);
+        }
       }
     }
   }
@@ -169,11 +181,11 @@ export async function setupTriggers(services: MatbotServices): Promise<TriggerMa
       if (fired.length === 0) return;
 
       const bodies:  string[]         = [];
-      const sources: string[]         = [];
+      const sources: FiredSource[]    = [];
       const markers: MessageContent[] = [];
-      for (const { trigger } of fired) {
+      for (const { trigger, matched } of fired) {
         const out = await dispatchTrigger(services, trigger, { session: ctx.session, signal: ctx.signal, provider: ctx.config.provider, ...(ctx.prompt !== undefined ? { prompt: ctx.prompt } : {}) });
-        if (out.hadResult) { bodies.push(renderResult(out.result)); sources.push(trigger.id); }
+        if (out.hadResult) { bodies.push(renderResult(out.result)); sources.push({ id: trigger.id, matched }); }
         markers.push(...out.markers);
       }
       // Trace the ephemeral injection durably (the injected text itself is never persisted).
@@ -220,17 +232,25 @@ export async function setupTriggers(services: MatbotServices): Promise<TriggerMa
       // conditions; if any retract condition fired, the trigger is treated as retract (a wrong answer
       // can't be merely steered). Markers are collected regardless — they persist whichever path runs.
       const retractBodies:   string[]         = [];
-      const retractSources:  string[]         = [];
+      const retractSources:  FiredSource[]    = [];
       const followupBodies:  string[]         = [];
-      const followupSources: string[]         = [];
-      const suppressed:      string[]         = [];
+      const followupSources: FiredSource[]    = [];
+      const suppressed:      FiredSource[]    = [];
       const markers:         MessageContent[] = [];
-      for (const { trigger, kinds } of fired) {
-        if (kinds.includes('retract') && heldOff.has(trigger.id)) { suppressed.push(trigger.id); continue; }
+      for (const { trigger, kinds, matched } of fired) {
+        if (kinds.includes('retract') && heldOff.has(trigger.id)) {
+          suppressed.push({ id: trigger.id, matched: matched.filter(m => m.kind === 'retract') });
+          continue;
+        }
         const out = await dispatchTrigger(services, trigger, { session: ctx.session, signal: ctx.signal, provider: ctx.config.provider, ...(ctx.prompt !== undefined ? { prompt: ctx.prompt } : {}) });
         if (out.hadResult) {
-          if (kinds.includes('retract')) { retractBodies.push(renderResult(out.result));  retractSources.push(trigger.id); }
-          else                           { followupBodies.push(renderResult(out.result)); followupSources.push(trigger.id); }
+          if (kinds.includes('retract')) {
+            retractBodies.push(renderResult(out.result));
+            retractSources.push({ id: trigger.id, matched: matched.filter(m => m.kind === 'retract') });
+          } else {
+            followupBodies.push(renderResult(out.result));
+            followupSources.push({ id: trigger.id, matched: matched.filter(m => m.kind === 'followup') });
+          }
         }
         markers.push(...out.markers);
       }

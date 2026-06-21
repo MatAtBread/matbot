@@ -22,41 +22,43 @@ import type { MatbotServices } from '@matatbread/matbot-plugin-api';
 import type { Merger } from './ranker.js';
 import type { MergeResult, RememberedFact } from './types.js';
 
-const MERGER_SYSTEM =
-  'You are the merge stage of a memory-consolidation pass. You are given the FULL markdown of an ' +
-  'existing skill and ONE remembered fact. Splice the fact into the skill while preserving ' +
-  'everything else.\n' +
-  '\n' +
-  'Return ONLY a JSON object on the last line of your reply, in this shape:\n' +
-  '  {\n' +
-  '    "content": "<the COMPLETE updated skill markdown>",\n' +
-  '    "contradictions": [\n' +
-  '      { "location": "<short heading or section hint>", "note": "<one-line description>" }\n' +
-  '    ]\n' +
-  '  }\n' +
-  '\n' +
-  'Rules:\n' +
-  '  • PRESERVE all existing content. Never delete or overwrite material. The output\'s length ' +
-  'must be >= the input\'s.\n' +
-  '  • Add the fact as a new subsection under the MOST RELEVANT existing heading. If no heading ' +
-  'fits, add one in a natural place — do not just append to the bottom unless that genuinely ' +
-  'fits the skill\'s structure.\n' +
-  '  • Keep the existing heading style, prose voice, and formatting conventions.\n' +
-  '  • If the new fact CONTRADICTS existing content, insert an inline marker at the contradiction ' +
-  'site using this EXACT format (the literal `(!) Note:` prefix matters; a later tool scans for ' +
-  'it):\n' +
-  '\n' +
-  '      (!) Note: The new fact says "<short summary of new>", but existing content says\n' +
-  '      "<short summary of existing>". May need human review to reconcile.\n' +
-  '\n' +
-  '    AND list the contradiction in the JSON `contradictions` array. Do not block the merge on ' +
-  'a contradiction — record it inline and continue. If there are no contradictions, return an ' +
-  'empty array.\n' +
-  '  • "location" in the JSON is a short hint (e.g. the heading you placed the marker under). ' +
-  'Precision is not required; it is for a human reading a run report.\n' +
-  '\n' +
-  'Do not include any prose outside the JSON object. Do not wrap it in code fences. The ' +
-  '"content" string must be the entire skill markdown, not a diff or a fragment.';
+const MERGER_SYSTEM = `
+You are the merge stage of a memory-consolidation pass. You are given the FULL markdown of an existing skill and ONE remembered fact. Splice the fact into the skill while preserving everything else.
+
+Return ONLY a JSON object on the last line of your reply, in this shape: 
+{ 
+  "content": "", 
+  "contradictions": [ { "location": "", "note": "" } ], 
+  "anomalies": [ { "fact": "", "reasoning": "<why it doesn't fit the skill's structure>" } ] 
+}
+
+Rules:
+
+* PRESERVE all existing content. Never delete or overwrite material. The output's length must be >= the input's.
+
+* FIRST, decide where the fact belongs: 
+  1. GOOD FIT — the fact is about the skill's domain and fits under an existing heading. Add it as a new subsection under that heading. Add a new heading if needed, in a natural place — do not just append to the bottom unless that genuinely fits the skill's structure. 
+  2. POOR FIT — the fact could relate broadly to the skill's topic area but it's focus is on a different aspect, or its subject matter is a different kind of information than the surrounding content (e.g. a transient observation mixed with durable procedures, or an operational note in an artchiectural discussion, or a general fact in a personal profile, or the reverse of either). Place it in an "## Anomalies" section at the very end of the skill. If "## Anomalies" doesn't exist yet, create it. Add the fact as a bullet point under it. Insert an inline marker in this EXACT format immediately before the fact: (?) Tangential: "" AND list the anomaly in the JSON "anomalies" array with the fact summary and reasoning. 
+
+* Keep the existing heading style, prose voice, and formatting conventions.
+
+* If the new fact is a duplicate or near-duplicate of an existing fact, do not add it again. Instead, update the existing content to reflect the new fact's information.
+
+* If the new fact CONTRADICTS existing content, insert an inline marker at the contradiction site using this EXACT format (the literal "(!) Note:" prefix matters; a later tool scans for it):
+
+  (!) Note: The new fact says "<short summary of new>", but existing content says
+  "<short summary of existing>". May need human review to reconcile.
+
+AND list the contradiction in the JSON "contradictions" array. Do not block the merge on a contradiction — record it inline and continue. If there are no contradictions, return an empty array.
+* A fact can be BOTH tangential AND contradictory. In that case, use the "(!) Note:" marker for the contradiction and "## Anomalies" for the placement. List entries in both arrays.
+
+* "location" in the JSON contradictions is a short hint (e.g. the heading you placed the marker under). Precision is not required; it is for a human reading a run report.
+
+* If there are no anomalies, return an empty "anomalies" array.
+
+COHERENCE if resulting skill content has made pre-existing facts anomalous, you may move them to the "## Anomalies" section, but do not delete them. If you do this, add a note in the JSON "anomalies" array with the fact summary and reasoning.
+
+Do not include any prose outside the JSON object. Do not wrap it in code fences. The "content" string must be the entire skill markdown, not a diff or a fragment.`;
 
 function extractJsonObject(text: string): string | undefined {
   const m = text.match(/\{[\s\S]*\}/);

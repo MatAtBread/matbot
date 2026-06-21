@@ -4,8 +4,10 @@ import type {
   FormField, PromptFn, SessionRunner, PluginRegistryEvent,
 } from '@matatbread/matbot-core';
 import { createSession, PromptCancelledError, runAs, tryCurrentPrincipal } from '@matatbread/matbot-core';
+import type { SkillManager } from '@matatbread/matbot-skills';
 import { sseComment, sseEvent } from './sse-writer.js';
-import { favicon, html, httpTransport, js  } from './ui.js';
+import { promises } from "node:fs";
+const { readFile } = promises;
 
 export interface WebServerDeps {
   store:          Store<Session>;
@@ -16,6 +18,10 @@ export interface WebServerDeps {
   unloadPlugin:   (specifier: string) => Promise<boolean>;
   watchPlugins?:  (signal?: AbortSignal) => AsyncIterable<PluginRegistryEvent>;
   tools?:         ToolRegistry;
+  // Resolved lazily (a thunk, not a captured value) because the skills plugin may register its
+  // SkillManager *after* frontend-web sets up — load order isn't guaranteed. Returns undefined until
+  // then; the watch loop is started on first /events connect, by which point boot is complete.
+  skills?:        () => SkillManager | undefined;
   cors?:          string;  // Access-Control-Allow-Origin value, default '*'
   workdir?:       string;
   files?:         FileStore;
@@ -94,11 +100,6 @@ function corsHeaders(origin: string): Record<string, string> {
   };
 }
 
-function static200(res: ServerResponse, contentType: string, body: string): void {
-  res.writeHead(200, { 'content-type': contentType, 'content-length': Buffer.byteLength(body) });
-  res.end(body);
-}
-
 // The single interactive prompt implementation is the SSE round-trip built per-submit (see the
 // `/sessions/:id/submit` handler): it parks on `pendingPrompts` and is answered via
 // `POST /sessions/:id/prompt`. The direct tool-invocation endpoints (`/tools/:name`,
@@ -130,13 +131,18 @@ export function createWebServer(deps: WebServerDeps) {
   // fallback); `cancel` rejects it with PromptCancelledError — the "give up" path.
   const pendingPrompts = new Map<string, { resolve: (answer: string) => void; cancel: () => void }>();
 
-  // Clients subscribed to server-sent session status events (busy/idle).
-  const statusListeners = new Set<ServerResponse>();
+  // One multiplexed event stream (GET /events) carries every global, non-session event — session
+  // busy/idle, file changes, and tool/skill/plugin CRUD — each tagged by name and demuxed client-side.
+  // Browsers cap HTTP/1.1 at ~6 sockets per host; a separate SSE connection per panel would exhaust
+  // that and starve ordinary fetches (the sidebar load, tool calls), so the whole UI shares one socket.
+  const globalListeners = new Set<ServerResponse>();
 
-  // Clients subscribed to file-change events. The global set gets every namespace's events (each
-  // carries its `namespace`, so the client routes each to the right panel); the per-file map is
-  // keyed by `<namespace>/<name>` so single-file watchers don't collide across namespaces.
-  const allFileListeners   = new Set<ServerResponse>();
+  const broadcast = (msg: string): void => {
+    for (const res of globalListeners) { if (res.writable) res.write(msg); else globalListeners.delete(res); }
+  };
+
+  // Per-file watchers (GET /events/files/:ns/:name), keyed `<namespace>/<name>` so single-file streams
+  // don't collide across namespaces. Separate from the global stream: a targeted watch, not the firehose.
   const fileEventListeners = new Map<string, Set<ServerResponse>>();
   const watchAc            = new AbortController();
 
@@ -144,47 +150,37 @@ export function createWebServer(deps: WebServerDeps) {
     void (async () => {
       for await (const event of deps.files!.watch!(watchAc.signal)) {
         const msg = sseEvent('file-changed', event);
-        for (const res of allFileListeners) {
-          if (res.writable) res.write(msg); else allFileListeners.delete(res);
-        }
+        broadcast(msg);
         const subs = fileEventListeners.get(`${event.namespace ?? ''}/${event.name}`);
-        if (subs) {
-          for (const res of subs) {
-            if (res.writable) res.write(msg); else subs.delete(res);
-          }
-        }
+        if (subs) for (const res of subs) { if (res.writable) res.write(msg); else subs.delete(res); }
       }
     })();
   }
-
-  // Clients subscribed to tool-registry CRUD (a tool registered/removed — e.g. a plugin loaded at
-  // runtime adds its tools). Lets panels keyed off tool presence (skills, plugins) refresh live
-  // rather than only on a local action.
-  const toolListeners = new Set<ServerResponse>();
 
   if (deps.tools) {
     void (async () => {
-      for await (const event of deps.tools!.watch(watchAc.signal)) {
-        const msg = sseEvent('tool-changed', event);
-        for (const res of toolListeners) {
-          if (res.writable) res.write(msg); else toolListeners.delete(res);
-        }
-      }
+      for await (const event of deps.tools!.watch(watchAc.signal)) broadcast(sseEvent('tool-changed', event));
     })();
   }
 
-  // Clients subscribed to plugin load/unload. Covers tool-less plugins (pure provider/hook/storage —
-  // e.g. the storage backend itself) that the tool-changed stream can't see.
-  const pluginListeners = new Set<ServerResponse>();
+  // Skill content CRUD (save/delete), including saves the LLM makes mid-turn via skill_action. The
+  // SkillManager is resolved lazily on first /events connect (see deps.skills) because the skills plugin
+  // may load after frontend-web; the watch loop starts at most once, the first time a client subscribes.
+  let skillWatchStarted = false;
 
+  function startSkillWatch(skills: SkillManager): void {
+    if (skillWatchStarted) return;
+    skillWatchStarted = true;
+    void (async () => {
+      for await (const event of skills.watch(watchAc.signal)) broadcast(sseEvent('skill-changed', event));
+    })();
+  }
+
+  // Plugin load/unload. Covers tool-less plugins (pure provider/hook/storage — e.g. the storage backend
+  // itself) that the tool-changed stream can't see.
   if (deps.watchPlugins) {
     void (async () => {
-      for await (const event of deps.watchPlugins!(watchAc.signal)) {
-        const msg = sseEvent('plugin-changed', event);
-        for (const res of pluginListeners) {
-          if (res.writable) res.write(msg); else pluginListeners.delete(res);
-        }
-      }
+      for await (const event of deps.watchPlugins!(watchAc.signal)) broadcast(sseEvent('plugin-changed', event));
     })();
   }
 
@@ -200,8 +196,7 @@ export function createWebServer(deps: WebServerDeps) {
     const busy = deps.run.status(sessionId).busy;
     if ((busyState.get(sessionId) ?? false) === busy) return;
     if (busy) busyState.set(sessionId, true); else busyState.delete(sessionId);
-    const msg = sseEvent('session-busy', { sessionId, busy });
-    for (const res of statusListeners) { if (res.writable) res.write(msg); else statusListeners.delete(res); }
+    broadcast(sseEvent('session-busy', { sessionId, busy }));
   }
 
   const server = createServer(async (req, res) => {
@@ -250,29 +245,50 @@ export function createWebServer(deps: WebServerDeps) {
     };
   }
 
+  function static200(res: ServerResponse, contentType: string, path: string) {
+    return async () => {
+      const body = await readFile(new URL(path, import.meta.url), "utf-8");
+      res.writeHead(200, { 'content-type': contentType, 'content-length': Buffer.byteLength(body) });
+      res.end(body);
+    };
+  }
   async function handleRequest(
     req: IncomingMessage, res: ServerResponse, method: string, url: string, principal: Principal,
   ): Promise<void> {
 
     // --- Static UI ---
-    if (method === 'GET' && url === '/')       { static200(res, 'text/html; charset=utf-8',              await html()); return; }
-    if (method === 'GET' && url === '/app.js') { static200(res, 'application/javascript; charset=utf-8', await js());   return; }
-    if (method === 'GET' && url === '/http-transport.js') { static200(res, 'application/javascript; charset=utf-8', await httpTransport()); return; }
-    if (method === 'GET' && url === '/favicon.ico') { static200(res, 'image/svg+xml', await favicon()); return; }
+    const staticRoutes: Record<string, () => Promise<void>> = {
+      '/': static200(res, 'text/html; charset=utf-8', "../static/index.html"),
+      '/indx.html': static200(res, 'text/html; charset=utf-8', "../static/index.html"),
+      '/app.js': static200(res, 'application/javascript; charset=utf-8', "../static/app.js"),
+      '/http-transport.js': static200(res, 'application/javascript; charset=utf-8', "../static/http-transport.js"),
+      '/favicon.ico': static200(res, 'image/svg+xml', "../static/favicon.svg"),
+      // Hack - this exposes the web-bundle for testing purposes. In production, the web-bundle is served from the CDN.
+      '/matbot.html': static200(res, 'text/html; charset=utf-8', "../../../../../apps/web-bundle/dist/matbot.html"),
+    };
+    if (method === 'GET' && url in staticRoutes) {
+      staticRoutes[url]?.();
+      return;
+    }
+    // if (method === 'GET' && url === '/')       { static200(res, 'text/html; charset=utf-8',              await html()); return; }
+    // if (method === 'GET' && url === '/app.js') { static200(res, 'application/javascript; charset=utf-8', await js());   return; }
+    // if (method === 'GET' && url === '/http-transport.js') { static200(res, 'application/javascript; charset=utf-8', await httpTransport()); return; }
+    // if (method === 'GET' && url === '/favicon.ico') { static200(res, 'image/svg+xml', await favicon()); return; }
 
     // --- GET /health ---
     if (method === 'GET' && url === '/health') {
       json(res, 200, { status: 'ok' }); return;
     }
 
-    // --- GET /events/sessions --- (SSE stream for session busy/idle status changes)
-    if (method === 'GET' && url === '/events/sessions') {
+    // --- GET /events --- (one multiplexed SSE stream: session busy/idle, file changes, and tool/skill/
+    // plugin CRUD, demuxed client-side by event name. One socket for the whole UI — see globalListeners.)
+    if (method === 'GET' && url === '/events') {
       res.writeHead(200, {
         'content-type':  'text/event-stream',
         'cache-control': 'no-cache',
         'connection':    'keep-alive',
       });
-      res.write(sseComment('status stream open'));
+      res.write(sseComment('event stream open'));
       // Send current busy state so the client is up-to-date immediately. Reconcile against the
       // authoritative runner status first: a stale true (busyState that never got its idle
       // transition — e.g. a turn that ended with no events consumer attached) self-heals here,
@@ -281,8 +297,12 @@ export function createWebServer(deps: WebServerDeps) {
         if (!deps.run.status(sessionId).busy) { updateBusy(sessionId); continue; }
         res.write(sseEvent('session-busy', { sessionId, busy: true }));
       }
-      statusListeners.add(res);
-      req.on('close', () => { statusListeners.delete(res); });
+      // Wire skill CRUD lazily: by first connect the skills plugin has finished setup (load order may
+      // place it after frontend-web), so deps.skills() now resolves.
+      const skills = deps.skills?.();
+      if (skills) startSkillWatch(skills);
+      globalListeners.add(res);
+      req.on('close', () => { globalListeners.delete(res); });
       return; // keep connection open
     }
 
@@ -562,36 +582,6 @@ export function createWebServer(deps: WebServerDeps) {
       return;
     }
 
-    // --- GET /events/tools --- (SSE: tool-registry CRUD; panels keyed off tool presence refresh live)
-    if (method === 'GET' && url === '/events/tools') {
-      if (!deps.tools) { json(res, 404, { error: 'Tool registry not available' }); return; }
-      res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', 'connection': 'keep-alive' });
-      res.write(sseComment('tool watch stream open'));
-      toolListeners.add(res);
-      req.on('close', () => toolListeners.delete(res));
-      return;
-    }
-
-    // --- GET /events/plugins --- (SSE: plugin load/unload; catches tool-less plugins)
-    if (method === 'GET' && url === '/events/plugins') {
-      if (!deps.watchPlugins) { json(res, 404, { error: 'Plugin watch not available' }); return; }
-      res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', 'connection': 'keep-alive' });
-      res.write(sseComment('plugin watch stream open'));
-      pluginListeners.add(res);
-      req.on('close', () => pluginListeners.delete(res));
-      return;
-    }
-
-    // --- GET /events/files --- (SSE: file-change events across all namespaces; client filters by namespace)
-    if (method === 'GET' && url === '/events/files') {
-      if (!deps.files?.watch) { json(res, 404, { error: 'File watch not available' }); return; }
-      res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', 'connection': 'keep-alive' });
-      res.write(sseComment('file watch stream open'));
-      allFileListeners.add(res);
-      req.on('close', () => allFileListeners.delete(res));
-      return;
-    }
-
     // --- GET /events/files/<namespace>/<name> --- (SSE: single-file watch)
     const fileEventMatch = /^\/events\/files\/([^/]+)\/(.+)$/.exec(url);
     if (method === 'GET' && fileEventMatch) {
@@ -647,14 +637,12 @@ export function createWebServer(deps: WebServerDeps) {
     sessionConns.clear();
     busyState.clear();
 
-    // Close all status stream connections.
-    for (const res of statusListeners) res.end();
-    statusListeners.clear();
+    // Close the multiplexed global event stream(s).
+    for (const res of globalListeners) res.end();
+    globalListeners.clear();
 
-    // Stop file watcher and close all watch SSE connections.
+    // Stop the watch loops and close the per-file watch SSE connections.
     watchAc.abort();
-    for (const res of allFileListeners) res.end();
-    allFileListeners.clear();
     for (const subs of fileEventListeners.values()) for (const res of subs) res.end();
     fileEventListeners.clear();
 
@@ -674,3 +662,4 @@ export function createWebServer(deps: WebServerDeps) {
 
   return { server, close };
 }
+

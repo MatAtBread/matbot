@@ -44,6 +44,17 @@ export interface TriggerCondition {
   rule: string;
 }
 
+/** One condition the classifier judged matched, for tracing *why* a trigger fired (not just that it
+ *  did): `index` addresses it within the owning trigger's `conditions` array, `rule` is the rubric
+ *  text at the time of evaluation, and `why` is the classifier's one-line justification (absent if it
+ *  didn't supply one). */
+export interface FiredCondition {
+  index: number;
+  kind:  TriggerKind;
+  rule:  string;
+  why?:  string;
+}
+
 /** The tool call a matched trigger makes. `params` is passed verbatim as the tool's input. */
 export interface TriggerInvoke {
   tool:    string;
