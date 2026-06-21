@@ -50,7 +50,6 @@ export class TriggerManager implements Triggers {
   async init(): Promise<void> {
     const { items } = await this.store.query({});
     for (const t of items) {
-      await this.store.set(t.id, t);
       this.triggers.set(t.id, t);
     }
   }
