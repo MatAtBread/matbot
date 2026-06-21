@@ -6,7 +6,8 @@ import type {
 import { createSession, PromptCancelledError, runAs, tryCurrentPrincipal } from '@matatbread/matbot-core';
 import type { SkillManager } from '@matatbread/matbot-skills';
 import { sseComment, sseEvent } from './sse-writer.js';
-import { favicon, html, httpTransport, js  } from './ui.js';
+import { promises } from "node:fs";
+const { readFile } = promises;
 
 export interface WebServerDeps {
   store:          Store<Session>;
@@ -94,11 +95,6 @@ function corsHeaders(origin: string): Record<string, string> {
     'access-control-allow-headers': 'content-type, authorization',
     'access-control-allow-methods': 'GET, POST, OPTIONS',
   };
-}
-
-function static200(res: ServerResponse, contentType: string, body: string): void {
-  res.writeHead(200, { 'content-type': contentType, 'content-length': Buffer.byteLength(body) });
-  res.end(body);
 }
 
 // The single interactive prompt implementation is the SSE round-trip built per-submit (see the
@@ -267,15 +263,35 @@ export function createWebServer(deps: WebServerDeps) {
     };
   }
 
+  function static200(res: ServerResponse, contentType: string, path: string) {
+    return async () => {
+      const body = await readFile(new URL(path, import.meta.url), "utf-8");
+      res.writeHead(200, { 'content-type': contentType, 'content-length': Buffer.byteLength(body) });
+      res.end(body);
+    };
+  }
   async function handleRequest(
     req: IncomingMessage, res: ServerResponse, method: string, url: string, principal: Principal,
   ): Promise<void> {
 
     // --- Static UI ---
-    if (method === 'GET' && url === '/')       { static200(res, 'text/html; charset=utf-8',              await html()); return; }
-    if (method === 'GET' && url === '/app.js') { static200(res, 'application/javascript; charset=utf-8', await js());   return; }
-    if (method === 'GET' && url === '/http-transport.js') { static200(res, 'application/javascript; charset=utf-8', await httpTransport()); return; }
-    if (method === 'GET' && url === '/favicon.ico') { static200(res, 'image/svg+xml', await favicon()); return; }
+    const staticRoutes: Record<string, () => Promise<void>> = {
+      '/': static200(res, 'text/html; charset=utf-8', "../static/index.html"),
+      '/indx.html': static200(res, 'text/html; charset=utf-8', "../static/index.html"),
+      '/app.js': static200(res, 'application/javascript; charset=utf-8', "../static/app.js"),
+      '/http-transport.js': static200(res, 'application/javascript; charset=utf-8', "../static/http-transport.js"),
+      '/favicon.ico': static200(res, 'image/svg+xml', "../static/favicon.svg"),
+      // Hack - this exposes the web-bundle for testing purposes. In production, the web-bundle is served from the CDN.
+      '/matbot.html': static200(res, 'text/html; charset=utf-8', "../../../../../apps/web-bundle/dist/matbot.html"),
+    };
+    if (method === 'GET' && url in staticRoutes) {
+      staticRoutes[url]?.();
+      return;
+    }
+    // if (method === 'GET' && url === '/')       { static200(res, 'text/html; charset=utf-8',              await html()); return; }
+    // if (method === 'GET' && url === '/app.js') { static200(res, 'application/javascript; charset=utf-8', await js());   return; }
+    // if (method === 'GET' && url === '/http-transport.js') { static200(res, 'application/javascript; charset=utf-8', await httpTransport()); return; }
+    // if (method === 'GET' && url === '/favicon.ico') { static200(res, 'image/svg+xml', await favicon()); return; }
 
     // --- GET /health ---
     if (method === 'GET' && url === '/health') {
@@ -701,3 +717,4 @@ export function createWebServer(deps: WebServerDeps) {
 
   return { server, close };
 }
+
