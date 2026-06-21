@@ -32,7 +32,7 @@ satisfy one contract:
 | **`http-transport.js`** | Node-served (`frontend/web` server entry) | `fetch` + SSE to `server.ts` |
 | **`browser.js`** | baked into the bundle (`frontend/web` browser entry) | drives `services.run` / `services.tools` **in-process**, no wire |
 
-The contract (read it in [http-transport.js](../packages/plugins/frontend/web/src/http-transport.js)):
+The contract (read it in [http-transport.js](../packages/plugins/frontend/web/static/http-transport.js)):
 `hostRuntime`, `callTool`, `createSession`, `sessionBusy`, `submit`, `sessionEvents`,
 `answerPrompt`, `abort`, `statusEvents`, `fileEvents`, `toolEvents`, `pluginEvents`, `openFile`.
 `statusEvents`/`fileEvents`/`toolEvents`/`pluginEvents` are read-only `AsyncIterable` observation
@@ -41,7 +41,7 @@ one SSE endpoint under the `/events/…` prefix, in-process each is the matching
 (e.g. `services.tools.watch()` / `watchPlugins()`) yielded directly. They let panels keyed off
 tool/plugin presence (skills, plugins) refresh live when something loads out of band. (`sessionEvents`
 is the per-session turn demux — one persistent stream per session, not a global observer.) The in-process side
-([browser.js](../packages/plugins/frontend/web/src/browser.js)) is essentially `server.ts`'s
+([browser.js](../packages/plugins/frontend/web/static/browser.js)) is essentially `server.ts`'s
 coordination — the busy tracker, prompt parking, per-session subscribe, the buffered tool-call
 context — re-expressed without HTTP. Streaming is the same `AsyncIterable<PipelineEvent>` the runner
 emits natively; in-process is simply that iterable, HTTP demuxes it back out of one SSE stream.
