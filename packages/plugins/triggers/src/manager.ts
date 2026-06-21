@@ -21,23 +21,6 @@ function invokeKey(t: { invoke: Trigger['invoke'] }): string {
   return t.invoke.tool + '\u0000' + JSON.stringify(t.invoke.params ?? null);
 }
 
-// One-off, idempotent rename: the user-surface ephemeral kind was `augment` before the durable
-// `contextual` kind was added; it is now `ephemeral`. Stored trigger docs live in `.data/` (and other
-// installs' data dirs), outside source, so they still carry the old name — rewrite it on load so they
-// keep evaluating with no manual step. Returns a fresh doc (version bumped, so a reload re-reads it)
-// when anything changed, else null. The legacy literal is matched via a cast since it is no longer a
-// `TriggerKind`.
-function migrateLegacyKinds(t: Trigger): Trigger | null {
-  if (!t.conditions.some(c => (c.kind as string) === 'augment')) return null;
-  return {
-    ...t,
-    conditions: t.conditions.map(c =>
-      (c.kind as string) === 'augment' ? { ...c, kind: 'ephemeral' as const } : c),
-    version:   Date.now().toString(),
-    updatedAt: new Date().toISOString(),
-  };
-}
-
 /**
  * Owns the live trigger set: an in-memory list backed by a {@link Store} for persistence. All CRUD
  * goes through here so the plugin's hooks and the `trigger_action` tool share one source of truth.
@@ -67,13 +50,8 @@ export class TriggerManager implements Triggers {
   async init(): Promise<void> {
     const { items } = await this.store.query({});
     for (const t of items) {
-      const migrated = migrateLegacyKinds(t);
-      if (migrated !== null) {
-        await this.store.set(migrated.id, migrated);
-        this.triggers.set(migrated.id, migrated);
-      } else {
-        this.triggers.set(t.id, t);
-      }
+      await this.store.set(t.id, t);
+      this.triggers.set(t.id, t);
     }
   }
 
