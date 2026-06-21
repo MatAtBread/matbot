@@ -1,4 +1,4 @@
-import type { Store, KnowledgeIndex, KnowledgeEntry, MatbotServices } from '@matatbread/matbot-plugin-api';
+import type { Store, KnowledgeIndex, KnowledgeEntry, MatbotMachine } from '@matatbread/matbot-plugin-api';
 import { createBroadcaster } from '@matatbread/matbot-plugin-api';
 import type { SkillDoc, SkillEvent } from './types.js';
 
@@ -40,7 +40,7 @@ const ANALYSIS_TIMEOUT_MS = 6000_000;
 
 async function analyseSkill(
   doc:      SkillDoc,
-  services: MatbotServices,
+  services: MatbotMachine,
   provider: string,
   signal?:  AbortSignal,
 ): Promise<SkillAnalysis | undefined> {
@@ -96,7 +96,7 @@ function buildEntry(doc: SkillDoc, a: SkillAnalysis, contentHash: string): Knowl
  */
 export async function skillToKnowledgeEntry(
   doc:      SkillDoc,
-  services: MatbotServices,
+  services: MatbotMachine,
   provider: string,
   signal?:  AbortSignal,
 ): Promise<{ entry: KnowledgeEntry; cache?: SkillKnowledge }> {
@@ -137,14 +137,14 @@ export class SkillManager {
   // write, the skill being deleted, or teardown. Keeps it from outliving the skill or the process.
   private readonly inflight = new Map<string, AbortController>();
   private readonly store:    Store<SkillDoc>;
-  private readonly services: MatbotServices;
+  private readonly services: MatbotMachine;
   private readonly events    = createBroadcaster<SkillEvent>();
 
   // Read live so a runtime register('KnowledgeIndex', …) swap is honoured (the member is a
   // capture-safe forwarding proxy, but resolving it per call keeps that guarantee explicit).
   private get knowledge(): KnowledgeIndex { return this.services.KnowledgeIndex; }
 
-  constructor(store: Store<SkillDoc>, services: MatbotServices) {
+  constructor(store: Store<SkillDoc>, services: MatbotMachine) {
     this.store    = store;
     this.services = services;
   }

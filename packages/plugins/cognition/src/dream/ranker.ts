@@ -16,7 +16,7 @@
  *
  * Both interfaces are deliberately small: one method each, pure inputs in / structured output
  * out, no hidden dependencies on the platform's services object. The implementations are free
- * to capture whatever they need (a `MatbotServices`, a provider name, a model handle) in their
+ * to capture whatever they need (a `MatbotMachine`, a provider name, a model handle) in their
  * constructors. The pipeline only sees the interface.
  */
 

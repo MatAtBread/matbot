@@ -10,7 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@matatbread/matbot-core": "workspace:*",
+    "@matatbread/matbot-plugin-api": "workspace:*",
     "@matatbread/matbot-storage-base": "workspace:*"
   },
   "devDependencies": {

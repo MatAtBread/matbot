@@ -6,7 +6,7 @@ import { pathToFileURL }    from 'node:url';
 import { randomUUID }       from 'node:crypto';
 import type { Readable }    from 'node:stream';
 import type {
-  MatbotPluginSpec, MatbotServices, Tool, ToolEvent, ToolContext, FileStore, Store, Principal,
+  MatbotPluginSpec, MatbotMachine, Tool, ToolEvent, ToolContext, FileStore, Store, Principal,
 } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION, currentPrincipal } from '@matatbread/matbot-plugin-api';
 
@@ -473,7 +473,7 @@ export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,
   tools: [backgroundTool, everyActionTool],
 
-  async setup(services: MatbotServices) {
+  async setup(services: MatbotMachine) {
     if (!services.configPath) return;
     // A spawned background job must not arm its own scheduler — that would cascade.
     if (services.isSubAgent()) return;

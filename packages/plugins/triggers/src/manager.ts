@@ -1,4 +1,4 @@
-import type { Store, MatbotServices } from '@matatbread/matbot-plugin-api';
+import type { Store, MatbotMachine } from '@matatbread/matbot-plugin-api';
 import type { Trigger, TriggerSpec, TriggerSurface, TriggerKind, Triggers, FiredCondition } from './types.js';
 import { surfaceOfKind } from './types.js';
 
@@ -46,9 +46,9 @@ function migrateLegacyKinds(t: Trigger): Trigger | null {
 export class TriggerManager implements Triggers {
   private readonly triggers = new Map<string, Trigger>();
   private readonly store:    Store<Trigger>;
-  private readonly services: MatbotServices;
+  private readonly services: MatbotMachine;
 
-  constructor(store: Store<Trigger>, services: MatbotServices) {
+  constructor(store: Store<Trigger>, services: MatbotMachine) {
     this.store    = store;
     this.services = services;
   }

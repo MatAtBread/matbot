@@ -11,6 +11,26 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ## Unreleased
 
+### Breaking changes
+
+- **`MatbotServices` split into a registry bucket + `MatbotRuntime`, joined as `MatbotMachine`.** What a
+  plugin's `setup(services)` receives is now `MatbotMachine` (the full object). `MatbotServices` itself
+  shrank to only the *registerable* services — `StorageBackend?`, `Vault`, `KnowledgeIndex`, plus
+  whatever plugins augment in — making it the precise `keyof` domain of `register`/`get`, so
+  `register('hooks', …)` (registering a runtime handle that was never swappable) is now a compile error.
+  The fixed plumbing (hooks, tools, complete, settings, sessions, createStore, and the registry API
+  itself) moved to the new `MatbotRuntime`. Migration is mechanical and the *public* surface is
+  unchanged: the `register`/`get` signatures still read `keyof MatbotServices` (now correctly scoped),
+  and the `declare module '@matatbread/matbot-plugin-api' { interface MatbotServices { … } }`
+  augmentation idiom is untouched — only annotations of the *full* services object move `MatbotServices`
+  → `MatbotMachine`. A plugin that relies on `setup`'s inferred parameter type needs no change.
+
+- **`vault`/`Vault` collapsed to a single member.** The lowercase `services.vault` read accessor is
+  removed; the vault is now both read and registered through one `services.Vault` member (non-optional,
+  capture-safe proxy), consistent with `KnowledgeIndex`/`StorageBackend` — the previously write-only
+  `Vault` register key is now also the read surface. Migration: `services.vault` → `services.Vault`. The
+  tool-context field `ctx.vault` is a separate surface and is unchanged.
+
 ### API gaps filled
 
 - **`screen` hooks can now inject *durable* context, the persisted twin of `ephemeral`.** A new
@@ -53,6 +73,30 @@ churn and less likely to affect a consumer who doesn't use them.
   which now emits on register/remove/removeByPlugin and takes an optional seed-tools constructor.
 
 ### Bug fixes
+
+- **A bad `matbot.yaml` plugin entry no longer aborts startup.** `loadPlugins` only honoured its
+  `skip`/`throw` mode (renamed `onIncompatibleRuntime` → `onLoadError`) for the runtime-compat gate;
+  an import that rejected or a module that was not plugin-shaped (no `plugin` export, no `apiVersion`,
+  a non-function lifecycle member) threw unconditionally — out of the startup batch, exiting the
+  process. Under a supervisor that restarts on exit (e.g. systemd `Restart=always`), a single
+  mistaken entry — such as adding the bare `@matatbread/matbot-storage-filesystem` store library as
+  if it were a plugin — became an unbreakable crash loop fixable only by hand-editing the config. The
+  startup batch now logs and skips every such failure; only an explicit, user-initiated load (the
+  `plugin`/`provider` tools, which pass `throw`) still surfaces the error. Regression-tested in
+  `apps/cli` (`pnpm test`).
+
+- **Unloading a plugin that provided a swap-key core service no longer leaves a dangling reference.**
+  `services.unregister` is now symmetric with `register` for the three swap-members (`StorageBackend`,
+  `Vault`, `KnowledgeIndex`): when the providing plugin is unloaded, the member **reverts to the host's
+  captured boot default** (and the displaced backend is `close()`d) instead of leaving `services.X`
+  pointing at the now-unloaded plugin's impl. Previously `unregister` only deleted from the plain
+  service map — which the three swap-keys bypass on `register` — so the call was a no-op for them, and
+  e.g. removing the SQLite backend left every store silently bound to the orphaned (and, had teardown
+  closed it, dead) database. The boot default is whatever the app constructed at startup (the CLI:
+  filesystem or in-memory per `--session`; the browser: OPFS), so the registry remembers and restores
+  the app's base services rather than hardcoding a fallback. Fixed in both hosts (`apps/cli`,
+  `apps/web-bundle`) via a shared `swapStorage`/`swapKnowledge` helper driving both register and the
+  unregister revert.
 
 - **`plugin remove` no longer offers to `pnpm remove` a plugin that was never installed by the
   package manager.** The "Also uninstall the npm package?" prompt fired unconditionally, even for

@@ -7,6 +7,7 @@
   },
   "scripts": {
     "typecheck":  "pnpm -r run typecheck",
+    "test":       "pnpm --filter @matatbread/matbot-cli test",
     "check:docs": "node scripts/check-docs.mjs",
     "repl":       "pnpm --filter @matatbread/matbot-cli repl",
     "start":      "pnpm --filter @matatbread/matbot-cli start",

@@ -1,4 +1,4 @@
-import type { MatbotPluginSpec, MatbotServices, PluginSettings } from '@matatbread/matbot-plugin-api';
+import type { MatbotPluginSpec, MatbotMachine, PluginSettings } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import { makePluginSettings, type SettingsDoc } from '@matatbread/matbot-core';
 import { BrowserStorageBackend, assertBrowserRealm } from './storage-backend.js';
@@ -24,7 +24,7 @@ export const plugin: MatbotPluginSpec = {
     open: (dotData: string) => BrowserStorageBackend.open(dotData),
   },
 
-  async setup(services: MatbotServices): Promise<void> {
+  async setup(services: MatbotMachine): Promise<void> {
     // Browser-only: on node this throws, the loader logs and skips the plugin, and the host keeps its
     // real (filesystem) backend — no dead config.
     assertBrowserRealm();

@@ -7,7 +7,7 @@ import {
   forwardingProxy, makeSwappable, singleTurnRequest, createSingleTurnTool,
 } from '@matatbread/matbot-core';
 import type {
-  MatbotServices, Store, Session, ProviderConfig, ProviderAdapter,
+  MatbotMachine, Store, Session, ProviderConfig, ProviderAdapter,
   PluginSettings, Vault, SessionRunner, KnowledgeIndex,
   PluginResolver, StorageBackend, FileStore, PromptFn, MatbotPlugin, Principal, Runtime, SwapFn,
 } from '@matatbread/matbot-plugin-api';
@@ -192,6 +192,27 @@ export async function boot(env: BootEnv): Promise<void> {
   const knowledgeProxy      = forwardingProxy<KnowledgeIndex>(() => knowledgeImpl);
   const storageBackendProxy = forwardingProxy<StorageBackend>(() => activeStorageBackend);
 
+  // Boot defaults captured for revert-on-unregister (mirrors the CLI host): a swap-key reverts here
+  // when its plugin is unloaded, instead of dangling on the now-gone impl. Boot backend is OPFS/IDB.
+  const bootBackend: StorageBackend = activeStorageBackend!;
+  const bootVault                   = activeVault;
+  const bootKnowledge               = knowledgeImpl;
+
+  const swapStorage = async (next: StorageBackend): Promise<void> => {
+    const removed = activeStorageBackend;
+    if (removed === next) return;
+    activeStorageBackend = next;
+    for (const [ns, [, swap]] of storeProxies) swap(next.createStore(ns));
+    swapFiles(next.fileStore);
+    await removed?.close?.();
+  };
+  const swapKnowledge = (next: KnowledgeIndex): void => {
+    const prev = knowledgeImpl;
+    if (prev === next) return;
+    knowledgeImpl = next;
+    if (prev.entries !== undefined) for (const e of prev.entries()) void next.index(e);
+  };
+
   const resolver: PluginResolver = {
     async identify(specifier: string): Promise<string> {
       if (specNames[specifier] !== undefined) return specNames[specifier]!;
@@ -207,33 +228,26 @@ export async function boot(env: BootEnv): Promise<void> {
 
   let sessionRunner: SessionRunner | undefined;
 
-  const baseServices: MatbotServices = {
+  const baseServices: MatbotMachine = {
     settings(): PluginSettings {
       throw new Error('settings() is only available within a plugin scope (use the services passed to setup()).');
     },
     createStore,
     get(key) { return serviceRegistry.get(key as string) as never; },
     async register(key, value) {
-      if (key === 'StorageBackend') {
-        const next = value as StorageBackend;
-        for (const [ns, [, swap]] of storeProxies) swap(next.createStore(ns));
-        swapFiles(next.fileStore);
-        const old = activeStorageBackend;
-        activeStorageBackend = next;
-        await old?.close?.();
-      } else if (key === 'KnowledgeIndex') {
-        const prev = knowledgeImpl;
-        knowledgeImpl = value as KnowledgeIndex;
-        if (prev.entries !== undefined) for (const e of prev.entries()) void (value as KnowledgeIndex).index(e);
-      } else if (key === 'Vault') {
-        // Swap the live vault behind the proxy. Nothing is migrated (secrets aren't drained from the
-        // old vault) — mirrors the CLI's Vault swap; a new backend seeds itself as it sees fit.
-        activeVault = value as Vault;
-      } else {
-        serviceRegistry.set(key as string, value);
-      }
+      if (key === 'StorageBackend')      await swapStorage(value as StorageBackend);
+      else if (key === 'KnowledgeIndex') swapKnowledge(value as KnowledgeIndex);
+      else if (key === 'Vault')          activeVault = value as Vault;
+      else serviceRegistry.set(key as string, value);
     },
-    unregister(key: string) { serviceRegistry.delete(key); },
+    // Symmetric with register: a swap-key reverts to the app's captured boot default instead of
+    // dangling on the unloaded plugin's impl; everything else is a plain registry delete.
+    unregister(key: string) {
+      if (key === 'StorageBackend')      void swapStorage(bootBackend);
+      else if (key === 'KnowledgeIndex') knowledgeImpl = bootKnowledge;
+      else if (key === 'Vault')          activeVault = bootVault;
+      else serviceRegistry.delete(key);
+    },
     registerFrontend() { /* bound per-plugin in setupPlugin's scope; base is a no-op */ },
 
     async complete(req) {
@@ -278,7 +292,7 @@ export async function boot(env: BootEnv): Promise<void> {
       // appends would corrupt a blob:/mbmod: specifier (those don't take query strings) — making the
       // import reject. A remote spec is a freshly fetched blob, so it's already fresh; baked specs
       // re-import their existing blob. (True reload in the browser is a realm reload, by design.)
-      const loaded = await loadPlugins([req], services, /* bustCache */ false, prompt, /* onIncompatibleRuntime */ 'throw');
+      const loaded = await loadPlugins([req], services, /* bustCache */ false, prompt, /* onLoadError */ 'throw');
       const plugin = loaded[0];
       if (plugin === undefined) throw new Error(`No plugin loaded for specifier "${specifier}"`);
       return plugin;
@@ -295,14 +309,14 @@ export async function boot(env: BootEnv): Promise<void> {
     sessions: store,
     get run() { return sessionRunner; },
     files: fileStore,
-    vault,
+    Vault: vault,
     hooks:         hookReg,
     tools:         toolReg,
     systemContext: systemContextReg,
     isSubAgent: () => false,
     get KnowledgeIndex() { return knowledgeProxy; },
   };
-  const services: MatbotServices = unifyServices(baseServices);
+  const services: MatbotMachine = unifyServices(baseServices);
 
   const resolveProvider = async (name: string): Promise<{ adapter: ProviderAdapter; config: ProviderConfig } | null> => {
     const cfg = providers.get(name);

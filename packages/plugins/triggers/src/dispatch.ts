@@ -1,4 +1,4 @@
-import type { MatbotServices, Session, ToolContext, PromptFn, FormField, MessageContent } from '@matatbread/matbot-plugin-api';
+import type { MatbotMachine, Session, ToolContext, PromptFn, FormField, MessageContent } from '@matatbread/matbot-plugin-api';
 import type { Trigger } from './types.js';
 
 // Fallback when the firing hook carries no interactive prompt (cron/background run, or a frontend
@@ -28,7 +28,7 @@ export interface DispatchOutcome {
  * throws — or names an absent tool — is recorded as an error marker rather than vanishing into a log.
  */
 export async function dispatchTrigger(
-  services: MatbotServices,
+  services: MatbotMachine,
   trigger:  Trigger,
   ctx:      { session: Session; signal: AbortSignal; provider: string; prompt?: PromptFn },
 ): Promise<DispatchOutcome> {
@@ -55,7 +55,7 @@ export async function dispatchTrigger(
       callId:       crypto.randomUUID(),
       session:      ctx.session,
       signal:       ctx.signal,
-      vault:        services.vault,
+      vault:        services.Vault,
       provider:     ctx.provider,
       prompt:       ctx.prompt ?? rejectingPrompt,
       // Forward the prompt into plugin loading too (mirrors the normal loop): collision resolution

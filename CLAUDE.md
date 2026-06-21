@@ -31,13 +31,12 @@ Secrets and configuration go through the `Vault` (`${NAME}` placeholders) or plu
 packages/
   core/
     runner/        — agentic loop, hook dispatch, plugin loader
-    plugin-api/    — MatbotPlugin, MatbotServices, shared types
+    plugin-api/    — MatbotPlugin, MatbotServices/MatbotRuntime/MatbotMachine, shared types
     config/        — YAML + .env loading
     security/      — VaultImpl, Principal origin
     knowledge/     — LookupKnowledgeIndex (default in-memory)
     storage/
-      _base/       — filter/sort engine
-      filesystem/  — FilesystemStore<T> (Node, CAS-safe)
+      _base/       — filter/sort engine (translatable StoreQuery)
     providers/
       _base/       — SSE parser, HTTP helpers
     tool-plugin/   — built-in provider management tools
@@ -60,6 +59,10 @@ packages/
       openai-compat/— OpenAI-compatible adapter
     tools/
       bash/, docker-bash/, http/, schedule/, workspace/
+    storage/
+      filesystem/    — FilesystemStore (Node, CAS-safe); CLI boot default
+      sqlite/        — SQLite StorageBackend (WAL)
+      google-drive/  — Drive-backed StorageBackend (browser)
 apps/
   cli/             — interactive REPL + single-turn
   web-bundle/      — browser-only matbot.html
@@ -115,7 +118,7 @@ All runtime state under `.data/` **next to `matbot.yaml`**, never in source:
 
 ## Service registry
 
-`MatbotServices` is the runtime environment passed to every plugin's `setup()`. Core members (hooks, tools, complete, settings, vault, sessions) are always present. Optional services advertised with `register` and consumed as **members** — one access surface:
+`MatbotMachine` is the runtime environment passed to every plugin's `setup()` — the intersection `MatbotServices & MatbotRuntime`. **`MatbotRuntime`** is the fixed plumbing (hooks, tools, complete, settings, sessions, createStore, and the registry API itself): always present, never registerable. **`MatbotServices`** is the registry bucket — the swappable, registerable services keyed by interface name (`StorageBackend?`, `Vault`, `KnowledgeIndex`, plus whatever plugins augment in). It alone is the `keyof` domain of `register`/`get` and the surface third-party plugins augment, so `register('hooks', …)` is a *type error*. Optional services are advertised with `register` and consumed as **members** — one access surface:
 
 ```ts
 // Providing:
@@ -142,7 +145,7 @@ type SessionStore = Store<Session>;
 type ScratchStore = Store<Session>;
 ```
 
-**Swappable core members** (`StorageBackend`, `KnowledgeIndex`, `Vault`) use `register` to swap live impls behind capture-safe forwarding proxies. A captured reference keeps resolving to the current impl.
+**Swappable core members** (`StorageBackend`, `KnowledgeIndex`, `Vault`) use `register` to swap live impls behind capture-safe forwarding proxies. A captured reference keeps resolving to the current impl. On `unregister` (i.e. when the providing plugin is unloaded) a swap-member **reverts to the host's captured boot default** rather than dangling on the gone impl — the app decides its own base services (the CLI: filesystem or in-memory; the browser: OPFS), and the registry only remembers and restores them.
 
 ### Discovery vs. direct dependency
 

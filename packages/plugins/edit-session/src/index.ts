@@ -1,5 +1,5 @@
 import type {
-  MatbotPluginSpec, MatbotServices, Tool, ToolEvent, Session, Store, Message, Marker,
+  MatbotPluginSpec, MatbotMachine, Tool, ToolEvent, Session, Store, Message, Marker,
 } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 
@@ -222,7 +222,7 @@ function makeSessionEditTool(store: Store<Session>): Tool {
 export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,
 
-  async setup(services: MatbotServices) {
+  async setup(services: MatbotMachine) {
     const store = services.sessions;
     if (!store) return;
     services.tools.register(makeSessionEditTool(store));

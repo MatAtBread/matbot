@@ -1,7 +1,7 @@
 import type { Tool, ToolRegistry, Hook, PromptFn, FormField, FrontendInfo, PluginRegistryEvent } from './types.js';
 import { createBroadcaster } from '@matatbread/matbot-plugin-api';
 import type {
-  MatbotPlugin, MatbotServices,
+  MatbotPlugin, MatbotMachine,
   ProviderAdapterFactory, StoreFactory,
 } from './plugin.js';
 import { PLUGIN_API_VERSION, unifyServices } from './plugin.js';
@@ -18,7 +18,7 @@ const state = {
   storage:         new Map<string, StoreFactory>(),
   toolRegistry:    undefined as ToolRegistry | undefined,
   frontendPlugins:  new Map<string, FrontendInfo>(),  // pluginName → info, written by services.registerFrontend()
-  serviceKeys:     new Map<string, string[]>(),  // pluginName → MatbotServices keys it registered
+  serviceKeys:     new Map<string, string[]>(),  // pluginName → MatbotMachine keys it registered
   hookPlugins:        new Set<string>(),         // plugins that registered at least one hook
   systemContextPlugins: new Set<string>(),       // plugins that registered a system-context contributor
   overwriteAllTools: undefined as boolean | undefined,  // persisted "overwrite on collision, this install" choice, loaded lazily
@@ -51,7 +51,7 @@ const OVERWRITE_TOOLS_KEY = 'overwriteToolsOnCollision';
  * the default — preserving matbot's historical last-registration-wins behaviour.
  */
 async function resolveToolCollision(
-  services:      MatbotServices,
+  services:      MatbotMachine,
   toolName:      string,
   existingOwner: string | undefined,
   incomingOwner: string,
@@ -170,7 +170,7 @@ export function getRegisteredFrontendPlugins(): ReadonlyMap<string, FrontendInfo
   return state.frontendPlugins;
 }
 
-/** MatbotServices keys a plugin registered at runtime via services.register() (e.g. 'KnowledgeIndex'). */
+/** MatbotMachine keys a plugin registered at runtime via services.register() (e.g. 'KnowledgeIndex'). */
 export function getRegisteredServiceKeys(pluginName: string): readonly string[] {
   return state.serviceKeys.get(pluginName) ?? [];
 }
@@ -205,7 +205,7 @@ export function getSpecifierForPlugin(pluginName: string): string | undefined {
  * tool whose name a *different* plugin already owns asks the user whether to overwrite. Absent
  * (non-interactive host), collisions overwrite silently — the historical default.
  */
-export async function setupPlugin(plugin: MatbotPlugin, services: MatbotServices, prompt?: PromptFn): Promise<void> {
+export async function setupPlugin(plugin: MatbotPlugin, services: MatbotMachine, prompt?: PromptFn): Promise<void> {
   state.toolRegistry ??= services.tools;
 
   // Single choke point for every plugin tool registration (static `plugin.tools` and in-setup
@@ -226,7 +226,7 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotServices
   // own settings — there is no way to name another's.
   const ownSettings = makePluginSettings(services.createStore<SettingsDoc>('settings'), plugin.name);
 
-  const scopedServices: MatbotServices = unifyServices({
+  const scopedServices: MatbotMachine = unifyServices({
     ...services,
     settings: () => ownSettings,
     self: {
@@ -274,7 +274,7 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotServices
 }
 
 /** Tear down and fully unload a single plugin, removing all its registered contributions. */
-export async function unloadPlugin(pluginName: string, services: MatbotServices): Promise<boolean> {
+export async function unloadPlugin(pluginName: string, services: MatbotMachine): Promise<boolean> {
   console.warn(`[matbot] Unloading plugin "${pluginName}"`);
   const idx = state.plugins.findIndex(p => p.name === pluginName);
   if (idx === -1) return false;

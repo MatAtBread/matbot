@@ -1,6 +1,6 @@
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
-import type { Store, StoreQuery, QueryResult, CASResult } from '@matatbread/matbot-core';
+import type { Store, StoreQuery, QueryResult, CASResult } from '@matatbread/matbot-plugin-api';
 import { executeQuery } from '@matatbread/matbot-storage-base';
 
 export class FilesystemStore<T extends { id: string; version: string }> implements Store<T> {

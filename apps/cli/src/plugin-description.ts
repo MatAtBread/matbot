@@ -3,7 +3,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { loadPlugins } from '@matatbread/matbot-core';
-import type { MatbotPlugin, PluginManifest, MatbotServices, PromptFn, Runtime } from '@matatbread/matbot-core';
+import type { MatbotPlugin, PluginManifest, MatbotMachine, PromptFn, Runtime } from '@matatbread/matbot-core';
 
 /**
  * A fully host-resolved plugin load request. The CLI resolves a config/human specifier (`spec`) to
@@ -99,13 +99,13 @@ export async function backfillPluginDescription(
 // the project directory (where package.json paths and node_modules resolve from).
 export async function loadPluginsWithDescriptions(
   requests:   readonly PluginLoadRequest[],
-  services:   MatbotServices,
+  services:   MatbotMachine,
   baseDir:    string,
   bustCache = false,
   prompt?:    PromptFn,
-  onIncompatibleRuntime: 'skip' | 'throw' = 'skip',
+  onLoadError: 'skip' | 'throw' = 'skip',
 ): Promise<MatbotPlugin[]> {
-  const plugins = await loadPlugins(requests, services, bustCache, prompt, onIncompatibleRuntime);
+  const plugins = await loadPlugins(requests, services, bustCache, prompt, onLoadError);
   // plugin.specifier is the config-level `spec`; the package.json lives at the resolved importSpec.
   const importByCfg = new Map(requests.map(r => [r.spec, r.importSpec]));
   for (const plugin of plugins) {

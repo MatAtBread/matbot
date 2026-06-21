@@ -43,7 +43,7 @@ importers:
         version: link:../../packages/core/storage/_base
       '@matatbread/matbot-storage-filesystem':
         specifier: workspace:*
-        version: link:../../packages/core/storage/filesystem
+        version: link:../../packages/plugins/storage/filesystem
       '@matatbread/matbot-tool-plugin':
         specifier: workspace:*
         version: link:../../packages/core/tool-plugin
@@ -138,22 +138,6 @@ importers:
         specifier: workspace:*
         version: link:../../runner
     devDependencies:
-      typescript:
-        specifier: 'catalog:'
-        version: 5.9.3
-
-  packages/core/storage/filesystem:
-    dependencies:
-      '@matatbread/matbot-core':
-        specifier: workspace:*
-        version: link:../../runner
-      '@matatbread/matbot-storage-base':
-        specifier: workspace:*
-        version: link:../_base
-    devDependencies:
-      '@types/node':
-        specifier: 'catalog:'
-        version: 22.19.19
       typescript:
         specifier: 'catalog:'
         version: 5.9.3
@@ -472,6 +456,22 @@ importers:
       '@matatbread/matbot-skills':
         specifier: workspace:*
         version: link:../skills
+    devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 22.19.19
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
+
+  packages/plugins/storage/filesystem:
+    dependencies:
+      '@matatbread/matbot-plugin-api':
+        specifier: workspace:*
+        version: link:../../../core/plugin-api
+      '@matatbread/matbot-storage-base':
+        specifier: workspace:*
+        version: link:../../../core/storage/_base
     devDependencies:
       '@types/node':
         specifier: 'catalog:'

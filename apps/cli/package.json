@@ -6,6 +6,7 @@
   "scripts": {
     "repl":     "node --import ./register.js src/index.ts",
     "start":     "node --import ./register.js src/index.ts start",
+    "test":      "node --import ./register.js --test test/loader.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

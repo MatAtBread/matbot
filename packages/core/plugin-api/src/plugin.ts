@@ -76,7 +76,30 @@ export interface PluginSelf {
 
 // ── Services container ────────────────────────────────────────────────────────
 
+/**
+ * The registry bucket: the swappable, registerable services, keyed by interface name. This is the
+ * `keyof` domain of {@link MatbotRuntime.register}/`get`, and the surface third-party plugins augment
+ * (`declare module '@matatbread/matbot-plugin-api' { interface MatbotServices { Foo?: Foo } }`). The
+ * core three carry a host boot default and revert to it when unregistered; an augmented service is
+ * optional and simply drops. Read each as a member (`services.KnowledgeIndex`); swap with register().
+ */
 export interface MatbotServices {
+  readonly StorageBackend?: StorageBackend | undefined;
+  /** The live vault — also the `register('Vault', impl)` swap key. Capture-safe behind a proxy, so a
+   *  reference held across a swap keeps resolving to the live backend. Always present (boot default). */
+  readonly Vault: Vault;
+  readonly KnowledgeIndex: KnowledgeIndex;
+}
+
+/** The assembled machine: registry services wired to the fixed runtime — what `setup()` receives. */
+export type MatbotMachine = MatbotServices & MatbotRuntime;
+
+/**
+ * The fixed runtime — microcode, not a service: the agentic loop's primitives (`complete`,
+ * `createStore`), the registries you mutate but never swap wholesale (`hooks`, `tools`,
+ * `systemContext`), plugin lifecycle, and the registry API itself. Not augmentable, not registerable.
+ */
+export interface MatbotRuntime {
   complete(req: CompletionRequest): Promise<CompletionResponse>;
 
   /**
@@ -116,7 +139,7 @@ export interface MatbotServices {
    *   'StorageBackend' — replaces the active storage backend and re-wires all Store proxies.
    *   'KnowledgeIndex' — replaces the active KnowledgeIndex, draining entries from the old one.
    *   'Vault' — replaces the active vault backend and re-points the capture-safe vault proxy, so
-   *             references to `services.vault` / `ctx.vault` keep resolving to the live impl.
+   *             references to `services.Vault` / `ctx.vault` keep resolving to the live impl.
    * All other keys store the value in a per-plugin service registry accessible via get().
    *
    * Third-party plugins advertise novel services by augmenting MatbotServices:
@@ -155,13 +178,7 @@ export interface MatbotServices {
   /** Per-session turn serialiser. Frontends submit and observe through this rather than calling
    *  runSession directly, so concurrent submits queue instead of clobbering the session. */
   readonly run?:            SessionRunner | undefined;
-  readonly StorageBackend?: StorageBackend | undefined;
   readonly files?:          FileStore;
-  /** The live vault (a capture-safe proxy). Read as `services.vault`. The capitalised `Vault`
-   *  key below is the dedicated `register('Vault', impl)` swap handle (no separate accessor). */
-  readonly vault:           Vault;
-  /** @see register — registering under 'Vault' swaps the active vault backend behind `vault`. */
-  readonly Vault?:          Vault | undefined;
   readonly hooks:           HookRegistry;
   readonly tools:           ToolRegistry;
   readonly systemContext:   SystemContextRegistry;
@@ -169,8 +186,6 @@ export interface MatbotServices {
   readonly workdir?:        string;
   /** Absolute path to the loaded config file. Plugins that create servers should forward this to tool contexts. */
   readonly configPath?:     string;
-
-  readonly KnowledgeIndex: KnowledgeIndex;
 
   /**
    * Whether this process is a background sub-agent (spawned by another matbot, not a top-level
@@ -192,7 +207,7 @@ export interface MatbotServices {
  * directing callers to `register()` (the swap-aware write path). Applied to both the host services object
  * and the per-plugin scoped object, so plugins see the same surface the host does.
  */
-export function unifyServices(services: MatbotServices): MatbotServices {
+export function unifyServices(services: MatbotMachine): MatbotMachine {
   return new Proxy(services, {
     get(target, key, receiver) {
       if (Reflect.has(target, key)) return Reflect.get(target, key, receiver);
@@ -252,7 +267,7 @@ export function makeSwappable<T extends object>(initial: T): [T, SwapFn<T>] {
 }
 
 /**
- * Build the one-message CompletionRequest for a {@link MatbotServices.singleTurn} call, hiding the
+ * Build the one-message CompletionRequest for a {@link MatbotRuntime.singleTurn} call, hiding the
  * otherwise-mandatory and meaningless Message fields (id/traceId/createdAt) an out-of-band one-shot
  * has no use for. Pure; the host invokes its own complete() with the result.
  */
@@ -318,7 +333,7 @@ export interface MatbotPluginSpec {
   readonly storageBackend?: {
     open(dotData: string): Promise<StorageBackend>;
   };
-  setup?(services: MatbotServices): Promise<void>;
+  setup?(services: MatbotMachine): Promise<void>;
   teardown?(): Promise<void>;
   installationMessage?(): Promise<string>;
 }

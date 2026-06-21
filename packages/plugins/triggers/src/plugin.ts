@@ -1,5 +1,5 @@
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
-import type { MatbotPluginSpec, MatbotServices, Store, Message, MessageContent } from '@matatbread/matbot-plugin-api';
+import type { MatbotPluginSpec, MatbotMachine, Store, Message, MessageContent } from '@matatbread/matbot-plugin-api';
 import { TriggerManager } from './manager.js';
 import { dispatchTrigger, renderResult } from './dispatch.js';
 import { createTriggerActionTool, createTriggersConfigTool } from './tools.js';
@@ -23,7 +23,7 @@ declare module '@matatbread/matbot-plugin-api' {
 
 /** One-shot reachability probe for a pinned provider, used only when forming installationMessage
  *  (install/reload) — never on the hot path. Fails soft: a thrown error becomes `{ ok: false }`. */
-async function testProvider(services: MatbotServices, provider: string): Promise<{ ok: boolean; error?: string }> {
+async function testProvider(services: MatbotMachine, provider: string): Promise<{ ok: boolean; error?: string }> {
   try {
     await services.singleTurn({ provider, prompt: 'Reply with "ok".', signal: AbortSignal.timeout(15000) });
     return { ok: true };
@@ -141,7 +141,7 @@ function textOf(msg: Message | undefined): string {
  * Returns the manager so a specialization (a node watcher, say) could attach to the same instance.
  * Uses only web-platform APIs.
  */
-export async function setupTriggers(services: MatbotServices): Promise<TriggerManager> {
+export async function setupTriggers(services: MatbotMachine): Promise<TriggerManager> {
   // Idempotent on the registered service, not a module flag (a re-import would reset a flag; the
   // registry persists for the process) — a second setupTriggers hands back the live manager.
   if (services.Triggers) return services.Triggers as TriggerManager;
@@ -321,7 +321,7 @@ export async function setupTriggers(services: MatbotServices): Promise<TriggerMa
  */
 export function createTriggersPlugin(): MatbotPluginSpec {
   let manager:  TriggerManager  | undefined;
-  let captured: MatbotServices  | undefined;   // captured in setup() so installationMessage() can probe
+  let captured: MatbotMachine  | undefined;   // captured in setup() so installationMessage() can probe
 
   const base =
     'Triggers are active (trigger_action). A trigger fires a tool when an LLM classifier judges one of ' +

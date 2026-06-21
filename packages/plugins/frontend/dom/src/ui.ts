@@ -1,5 +1,5 @@
 import type {
-  MatbotServices, Session, PipelineEvent, MessageContent, FormField, PromptFn, Principal,
+  MatbotMachine, Session, PipelineEvent, MessageContent, FormField, PromptFn, Principal,
 } from '@matatbread/matbot-plugin-api';
 import { createSession, currentPrincipal, PromptCancelledError } from '@matatbread/matbot-core';
 
@@ -59,7 +59,7 @@ function textOf(content: MessageContent[]): string {
  * over SSE — only here the runner is in the same realm, so there is no wire.
  */
 export class ChatUI {
-  private readonly services: MatbotServices;
+  private readonly services: MatbotMachine;
   private readonly root: HTMLElement;
   private msgs!:     HTMLElement;
   private input!:    HTMLTextAreaElement;
@@ -79,7 +79,7 @@ export class ChatUI {
   // undefined and messages render as plain text — keeping the bundle self-contained and offline.
   private renderMd: ((src: string) => string) | undefined;
 
-  constructor(services: MatbotServices, root: HTMLElement) {
+  constructor(services: MatbotMachine, root: HTMLElement) {
     this.services = services;
     this.root = root;
   }

@@ -1,11 +1,11 @@
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
-import type { MatbotPluginSpec, MatbotServices, ToolExecutor, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
+import type { MatbotPluginSpec, MatbotMachine, ToolExecutor, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
 
 export function createRumsfeldPlugin(): MatbotPluginSpec {
   return {
     apiVersion: PLUGIN_API_VERSION,
 
-    async setup(services: MatbotServices) {
+    async setup(services: MatbotMachine) {
       const executor: ToolExecutor = {
         async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
           const { terms } = input as { terms: Array<{ term: string; context?: string }> };

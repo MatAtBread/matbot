@@ -1,4 +1,4 @@
-import type { MatbotPluginSpec, MatbotServices, Tool, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
+import type { MatbotPluginSpec, MatbotMachine, Tool, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import { ChatUI } from './ui.js';
 
@@ -51,7 +51,7 @@ export const plugin: MatbotPluginSpec = {
   manifest:   { description: 'Browser chat frontend rendering to the DOM (in-process, no server).' },
   tools:      [urlForResourceTool],
 
-  async setup(services: MatbotServices): Promise<void> {
+  async setup(services: MatbotMachine): Promise<void> {
     services.registerFrontend({ name: 'frontend-dom' });
     const root = document.getElementById('matbot-root') ?? document.body;
     await new ChatUI(services, root).mount();

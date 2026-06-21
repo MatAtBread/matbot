@@ -20,7 +20,7 @@
  * `./service.ts` when added, or the tool executor when added — not here.
  */
 
-import type { MatbotServices, Message, MessageContent, Store } from '@matatbread/matbot-plugin-api';
+import type { MatbotMachine, Message, MessageContent, Store } from '@matatbread/matbot-plugin-api';
 import type { Ranker, Merger } from './ranker.js';
 import {
   type DreamRun,
@@ -48,7 +48,7 @@ import {
  * what counts as valid — this call is the last-resort safety net for settings written outside that
  * tool (or before it existed), surfaced loudly at the start of a run rather than papered over.
  */
-async function loadSettings(services: MatbotServices): Promise<DreamSettings> {
+async function loadSettings(services: MatbotMachine): Promise<DreamSettings> {
   const stored = await services.settings().get<Partial<DreamSettings>>(DREAM_SETTINGS_KEY);
   const s: DreamSettings = { ...DEFAULT_DREAM_SETTINGS, ...(stored ?? {}) };
   try {
@@ -121,7 +121,7 @@ async function fetchUnassignedFacts(store: Store<RememberedFact>, nowIso: string
  * routing decisions inscrutable).
  */
 function buildCandidates(
-  services: MatbotServices,
+  services: MatbotMachine,
   blocklist: readonly string[],
 ): SkillCandidate[] {
   const manager = services.SkillManager;
@@ -253,7 +253,7 @@ function textOf(m: Message): string {
  * the plain, un-enriched verdict. Read-only: never touches the session.
  */
 async function buildEnrichedFact(
-  services: MatbotServices,
+  services: MatbotMachine,
   fact:     RememberedFact,
 ): Promise<string | undefined> {
   const session = await services.sessions?.get(fact.sessionId);
@@ -285,7 +285,7 @@ async function buildEnrichedFact(
  * those are bugs the caller should surface, not data points to record.
  */
 export async function runOnce(
-  services: MatbotServices,
+  services: MatbotMachine,
   ranker:   Ranker,
   merger:   Merger,
   signal:   AbortSignal,

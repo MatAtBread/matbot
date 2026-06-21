@@ -1,4 +1,4 @@
-import type { Tool, ToolEvent, ToolContext, MatbotPluginSpec, MatbotServices, PluginSettings } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolEvent, ToolContext, MatbotPluginSpec, MatbotMachine, PluginSettings } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import type { MCPClient, MCPToolDef, MCPRemoteConfig } from '@matatbread/matbot-mcp-http';
 import { makeProxyTool, proxyToolName, RemoteMcpManager } from '@matatbread/matbot-mcp-http';
@@ -30,7 +30,7 @@ export function createMCPPlugin(): MatbotPluginSpec {
   const localActive = new Map<string, ActiveLocal>();
   let settings: PluginSettings | undefined;
   let remote:   RemoteMcpManager | undefined;
-  let registry: MatbotServices['tools'] | undefined;
+  let registry: MatbotMachine['tools'] | undefined;
 
   const resolveLocalClient = (name: string): MCPClient | undefined => localActive.get(name)?.client;
 
