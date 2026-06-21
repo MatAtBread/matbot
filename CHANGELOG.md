@@ -64,6 +64,18 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Optional
 
+- **web-bundle** — insecure-context Web Crypto shims, consolidated in the bundle loader
+  (`apps/web-bundle/src/loader.js`), so the single-file bundle works over plain HTTP on a non-localhost
+  origin. A non-secure browsing context withholds `crypto.randomUUID` and `crypto.subtle` (only
+  `crypto.getRandomValues` survives); since the bundle runs the whole runtime — core, every plugin,
+  the bootstrap — in one page, that previously crashed plugin load (`crypto.randomUUID is not a
+  function`, called in 20+ packages) and skill reindexing (`crypto.subtle.digest` of undefined). The
+  loader now installs a `getRandomValues`-based `randomUUID` and a SHA-256-only `crypto.subtle.digest`
+  (verified byte-for-byte against SubtleCrypto; the bundle's default vault is plaintext, so no AES-GCM
+  shim is needed) before importing any module. Each installs only when missing, so secure contexts are
+  untouched. The previous partial polyfill in the web frontend's `app.js` (which ran too late to help
+  the bundle) is removed.
+
 - **triggers** — a fourth trigger `kind`, **`contextual`**, and a rename of the user-surface kind
   `augment` → **`ephemeral`** (forming an ephemeral/durable pair on the user surface). `contextual`
   judges the user message in the `screen` hook like `ephemeral`, but folds the fired tool's output

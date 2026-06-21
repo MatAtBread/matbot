@@ -1,13 +1,7 @@
-// crypto.randomUUID requires HTTPS; patch it for plain-HTTP local access
-if (crypto && typeof crypto.randomUUID !== 'function') {
-  crypto.randomUUID = function() {
-    const b = crypto.getRandomValues(new Uint8Array(16));
-    b[6] = (b[6] & 0x0f) | 0x40;
-    b[8] = (b[8] & 0x3f) | 0x80;
-    const h = Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
-    return h.slice(0,8)+'-'+h.slice(8,12)+'-'+h.slice(12,16)+'-'+h.slice(16,20)+'-'+h.slice(20);
-  };
-}
+// Insecure-context Web Crypto shims (crypto.randomUUID / crypto.subtle.digest, for plain-HTTP local
+// hosting) live in the web-bundle loader (apps/web-bundle/src/loader.js), which runs before any module
+// — including this frontend — so they're already in place by the time anything here runs. In
+// server-backed mode the runtime executes in Node, where Web Crypto is always available.
 
 // ── State ─────────────────────────────────────────────────────────────────────
 

@@ -13,6 +13,79 @@
 // inlined sucrase stripper is used only for *runtime* remote-plugin loading (loadRemote), the one
 // path that fetches raw .ts in the browser.
 
+// ── Insecure-context Web Crypto shims ─────────────────────────────────────────
+// A non-secure browsing context (plain HTTP on a non-localhost origin) withholds part of Web Crypto:
+// `crypto.randomUUID` and `crypto.subtle` are absent — only `crypto.getRandomValues` survives. matbot
+// supports plain-HTTP local hosting, and in this single-file bundle the WHOLE runtime (core, every
+// plugin, the bootstrap) executes in this one page, so the gap would otherwise crash plugin load
+// (`crypto.randomUUID is not a function`, called in 20+ packages) and skill reindexing
+// (`crypto.subtle.digest` of undefined). This is the consolidation point for those shims — it runs
+// before the loader imports any module below, so every consumer sees a working API. Secure contexts
+// (HTTPS / localhost) already provide both natively, so each shim installs only when its target is
+// missing. The bundle's default vault is plaintext (LocalStorageVault), so nothing here needs the
+// AES-GCM side of `crypto.subtle`; only SHA-256 `digest` (skills content hashing) is provided.
+(() => {
+  const c = globalThis.crypto;
+  if (!c) return;  // no Crypto object at all is beyond a polyfill's reach
+
+  if (typeof c.randomUUID !== 'function') {
+    c.randomUUID = () => {
+      const b = c.getRandomValues(new Uint8Array(16));
+      b[6] = (b[6] & 0x0f) | 0x40;
+      b[8] = (b[8] & 0x3f) | 0x80;
+      const h = Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
+      return h.slice(0, 8) + '-' + h.slice(8, 12) + '-' + h.slice(12, 16) + '-' + h.slice(16, 20) + '-' + h.slice(20);
+    };
+  }
+
+  if (!c.subtle || typeof c.subtle.digest !== 'function') {
+    // Standard SHA-256, 32-bit arithmetic; verified byte-for-byte against SubtleCrypto. Returns an
+    // ArrayBuffer like the real `digest`. Only SHA-256 is implemented (the one digest the runtime
+    // uses); any other algorithm throws rather than return a wrong hash.
+    const sha256 = (bytes) => {
+      const rotr = (n, x) => (x >>> n) | (x << (32 - n));
+      const K = [0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2];
+      const H = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
+      const bitLen = bytes.length * 8;
+      const totalLen = ((bytes.length + 1 + 8 + 63) >> 6) << 6;
+      const padded = new Uint8Array(totalLen);
+      padded.set(bytes); padded[bytes.length] = 0x80;
+      const dv = new DataView(padded.buffer);
+      dv.setUint32(totalLen - 4, bitLen >>> 0, false);
+      dv.setUint32(totalLen - 8, Math.floor(bitLen / 0x100000000), false);
+      const w = new Uint32Array(64);
+      for (let off = 0; off < totalLen; off += 64) {
+        for (let i = 0; i < 16; i++) w[i] = dv.getUint32(off + i * 4, false);
+        for (let i = 16; i < 64; i++) {
+          const s0 = rotr(7, w[i-15]) ^ rotr(18, w[i-15]) ^ (w[i-15] >>> 3);
+          const s1 = rotr(17, w[i-2]) ^ rotr(19, w[i-2]) ^ (w[i-2] >>> 10);
+          w[i] = (w[i-16] + s0 + w[i-7] + s1) >>> 0;
+        }
+        let a=H[0],b=H[1],cc=H[2],d=H[3],e=H[4],f=H[5],g=H[6],hh=H[7];
+        for (let i = 0; i < 64; i++) {
+          const S1 = rotr(6,e) ^ rotr(11,e) ^ rotr(25,e), ch = (e & f) ^ (~e & g), t1 = (hh + S1 + ch + K[i] + w[i]) >>> 0;
+          const S0 = rotr(2,a) ^ rotr(13,a) ^ rotr(22,a), maj = (a & b) ^ (a & cc) ^ (b & cc), t2 = (S0 + maj) >>> 0;
+          hh=g; g=f; f=e; e=(d+t1)>>>0; d=cc; cc=b; b=a; a=(t1+t2)>>>0;
+        }
+        H[0]=(H[0]+a)>>>0;H[1]=(H[1]+b)>>>0;H[2]=(H[2]+cc)>>>0;H[3]=(H[3]+d)>>>0;H[4]=(H[4]+e)>>>0;H[5]=(H[5]+f)>>>0;H[6]=(H[6]+g)>>>0;H[7]=(H[7]+hh)>>>0;
+      }
+      const out = new Uint8Array(32), odv = new DataView(out.buffer);
+      for (let i = 0; i < 8; i++) odv.setUint32(i * 4, H[i] >>> 0, false);
+      return out;
+    };
+    const digest = async (algorithm, data) => {
+      const name = (typeof algorithm === 'string' ? algorithm : algorithm && algorithm.name) || '';
+      if (String(name).toUpperCase() !== 'SHA-256') throw new Error('insecure-context crypto shim: only SHA-256 digest is supported, got ' + name);
+      const bytes = data instanceof Uint8Array ? data : new Uint8Array(data.buffer || data);
+      return sha256(bytes).buffer;
+    };
+    // `subtle` is a getter-only accessor on Crypto.prototype here, so define an own data property to
+    // shadow it rather than assigning (which would silently fail / throw).
+    try { Object.defineProperty(c, 'subtle', { value: { digest }, configurable: true, writable: true }); }
+    catch { /* engine forbids shadowing — nothing more we can do */ }
+  }
+})();
+
 (async () => {
   const MB = globalThis.__MB__;
   if (!MB) throw new Error('matbot: missing inlined payload (__MB__).');
