@@ -90,7 +90,7 @@ providers:
       maxTokens: 4096
 ```
 
-- Prefer duplication over references — five similar blocks is fine
+- Prefer duplication over references **for provider config blocks specifically** — five similar `matbot.yaml` blocks is fine. This is a config-authoring exception, not a general code-style rule — see Code style for shared *code*.
 - `${NAME}` resolved by `Vault` at runtime (flat namespace; `.env` is default node backend)
 - Credentials never in source code
 - Built-in `provider` tool adds/removes profiles live
@@ -276,7 +276,7 @@ Reload from disk without restart (`plugin reload`; `loadPlugins(..., bustCache =
 - No provider SDKs
 - No comments explaining *what*; only non-obvious *why*
 - No trailing summaries, no docblocks
-- No premature abstractions — three similar functions beat one leaky abstraction
+- No premature abstractions — three similar functions beat one leaky abstraction. This is about avoiding speculative/leaky interfaces, not a license to duplicate: a small, stable, already-shared utility (e.g. an `AsyncIterable` broadcaster) belongs in `plugin-api` once a second package needs it, not copy-pasted
 - No error handling for impossible cases; trust discriminated unions
 - Validate only at system boundaries
 - `types: ["node"]` explicit in any tsconfig using Node APIs

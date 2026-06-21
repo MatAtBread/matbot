@@ -1,5 +1,5 @@
 import type { Tool, ToolRegistry, ToolRegistryEvent } from './types.js';
-import { createBroadcaster } from './broadcast.js';
+import { createBroadcaster } from '@matatbread/matbot-plugin-api';
 
 export class ToolRegistryImpl implements ToolRegistry {
   private readonly tools = new Map<string, Tool>();

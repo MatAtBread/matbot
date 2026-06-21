@@ -1,5 +1,5 @@
 import type { Tool, ToolRegistry, Hook, PromptFn, FormField, FrontendInfo, PluginRegistryEvent } from './types.js';
-import { createBroadcaster } from './broadcast.js';
+import { createBroadcaster } from '@matatbread/matbot-plugin-api';
 import type {
   MatbotPlugin, MatbotServices,
   ProviderAdapterFactory, StoreFactory,

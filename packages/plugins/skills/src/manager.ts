@@ -1,5 +1,6 @@
 import type { Store, KnowledgeIndex, KnowledgeEntry, MatbotServices } from '@matatbread/matbot-plugin-api';
-import type { SkillDoc } from './types.js';
+import { createBroadcaster } from '@matatbread/matbot-plugin-api';
+import type { SkillDoc, SkillEvent } from './types.js';
 
 type SkillAnalysis  = { entities: string[]; tags: string[]; summary: string };
 type SkillKnowledge = NonNullable<SkillDoc['knowledge']>;
@@ -134,6 +135,7 @@ export class SkillManager {
   private readonly inflight = new Map<string, AbortController>();
   private readonly store:    Store<SkillDoc>;
   private readonly services: MatbotServices;
+  private readonly events    = createBroadcaster<SkillEvent>();
 
   // Read live so a runtime register('KnowledgeIndex', …) swap is honoured (the member is a
   // capture-safe forwarding proxy, but resolving it per call keeps that guarantee explicit).
@@ -177,6 +179,12 @@ export class SkillManager {
     return this.skills.get(name.toLowerCase());
   }
 
+  /** Observe skill content CRUD (save/delete), including saves made by the LLM mid-turn via
+   *  `skill_action` — the source a UI needs to refresh a skills list live. */
+  watch(signal?: AbortSignal): AsyncIterable<SkillEvent> {
+    return this.events.subscribe(signal);
+  }
+
   /** Create a new skill or update an existing one's content by name. */
   // `catalogue` (the system-prompt advertisement flag) is optional: omitted ⇒ left unchanged (the
   // common content-only save), present ⇒ set. It rides on `save` so the editor persists content,
@@ -198,10 +206,13 @@ export class SkillManager {
       };
       await this.store.set(newDoc.id, newDoc);
       this.commit(newDoc, true);
+      this.events.emit({ type: 'saved', name: newDoc.name });
       return newDoc;
     }
 
-    return this.casMutate(doc, cur => this.bump({ ...cur, content, ...(catalogue !== undefined ? { catalogue } : {}) }), true);
+    const saved = await this.casMutate(doc, cur => this.bump({ ...cur, content, ...(catalogue !== undefined ? { catalogue } : {}) }), true);
+    this.events.emit({ type: 'saved', name: saved.name });
+    return saved;
   }
 
   /** Delete a skill by name. Returns the removed doc, or `undefined`. */
@@ -213,6 +224,7 @@ export class SkillManager {
     this.inflight.delete(doc.id);
     await this.store.delete(doc.id, doc.version);
     this.skills.delete(key);
+    this.events.emit({ type: 'deleted', name: doc.name });
     return doc;
   }
 
@@ -241,6 +253,7 @@ export class SkillManager {
     };
     await this.store.set(doc.id, doc);
     this.commit(doc, true);
+    this.events.emit({ type: 'saved', name: doc.name });
     return true;
   }
 

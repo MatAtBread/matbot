@@ -1,6 +1,8 @@
 import type { MatbotPluginSpec, MatbotServices, Tool, ToolContext, ToolEvent, ToolRegistry } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION }                from '@matatbread/matbot-plugin-api';
 import { watchPlugins }                      from '@matatbread/matbot-core';
+// Type import also brings the `SkillManager` augmentation of MatbotServices into scope.
+import type { SkillManager }                 from '@matatbread/matbot-skills';
 import { createWebServer, defaultWebPrincipal } from './server.js';
 import process                               from 'node:process';
 
@@ -66,6 +68,7 @@ export const plugin: MatbotPluginSpec = {
       unloadPlugin:  services.unloadPlugin.bind(services),
       watchPlugins,
       tools:         services.tools,
+      ...(services.SkillManager !== undefined ? { skills: services.SkillManager } : {}),
       // Look up the resolver per request so an override registered in any load order takes effect.
       resolvePrincipal: (req) => (services.WebPrincipalResolver ?? defaultWebPrincipal)(req),
       ...(services.workdir    !== undefined ? { workdir:    services.workdir    } : {}),

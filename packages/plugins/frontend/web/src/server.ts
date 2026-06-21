@@ -4,6 +4,7 @@ import type {
   FormField, PromptFn, SessionRunner, PluginRegistryEvent,
 } from '@matatbread/matbot-core';
 import { createSession, PromptCancelledError, runAs, tryCurrentPrincipal } from '@matatbread/matbot-core';
+import type { SkillManager } from '@matatbread/matbot-skills';
 import { sseComment, sseEvent } from './sse-writer.js';
 import { favicon, html, httpTransport, js  } from './ui.js';
 
@@ -16,6 +17,7 @@ export interface WebServerDeps {
   unloadPlugin:   (specifier: string) => Promise<boolean>;
   watchPlugins?:  (signal?: AbortSignal) => AsyncIterable<PluginRegistryEvent>;
   tools?:         ToolRegistry;
+  skills?:        SkillManager;
   cors?:          string;  // Access-Control-Allow-Origin value, default '*'
   workdir?:       string;
   files?:         FileStore;
@@ -168,6 +170,21 @@ export function createWebServer(deps: WebServerDeps) {
         const msg = sseEvent('tool-changed', event);
         for (const res of toolListeners) {
           if (res.writable) res.write(msg); else toolListeners.delete(res);
+        }
+      }
+    })();
+  }
+
+  // Clients subscribed to skill content CRUD (save/delete) — including saves the LLM makes mid-turn
+  // via skill_action, which the skills sidebar otherwise has no way to learn about.
+  const skillListeners = new Set<ServerResponse>();
+
+  if (deps.skills) {
+    void (async () => {
+      for await (const event of deps.skills!.watch(watchAc.signal)) {
+        const msg = sseEvent('skill-changed', event);
+        for (const res of skillListeners) {
+          if (res.writable) res.write(msg); else skillListeners.delete(res);
         }
       }
     })();
@@ -569,6 +586,16 @@ export function createWebServer(deps: WebServerDeps) {
       res.write(sseComment('tool watch stream open'));
       toolListeners.add(res);
       req.on('close', () => toolListeners.delete(res));
+      return;
+    }
+
+    // --- GET /events/skills --- (SSE: skill content saved/deleted, incl. by the LLM mid-turn)
+    if (method === 'GET' && url === '/events/skills') {
+      if (!deps.skills) { json(res, 404, { error: 'Skill watch not available' }); return; }
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', 'connection': 'keep-alive' });
+      res.write(sseComment('skill watch stream open'));
+      skillListeners.add(res);
+      req.on('close', () => skillListeners.delete(res));
       return;
     }
 

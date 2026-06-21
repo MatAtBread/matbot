@@ -33,3 +33,10 @@ export interface SkillDoc {
     summary:     string;
   };
 }
+
+/** Emitted by {@link SkillManager.watch} on content CRUD — drives live UI refresh (e.g. the web
+ *  frontend's skills sidebar) when a skill is saved or deleted, including by the LLM mid-turn. */
+export interface SkillEvent {
+  type: 'saved' | 'deleted';
+  name: string;
+}

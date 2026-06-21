@@ -15,6 +15,7 @@
 //   abort(sid)                                     -> Promise<void>
 //   statusEvents(signal)                           -> AsyncIterable<{ sessionId, busy }>
 //   fileEvents(signal)                             -> AsyncIterable<{ namespace, name, size }>
+//   skillEvents(signal)                            -> AsyncIterable<{ type: 'saved'|'deleted', name }>
 //   openFile(namespace, path)                      -> void
 
 (function () {
@@ -145,6 +146,7 @@
   function fileEvents(signal)   { return eventStream('/events/files',    'file-changed',   signal); }
   function toolEvents(signal)   { return eventStream('/events/tools',    'tool-changed',   signal); }
   function pluginEvents(signal) { return eventStream('/events/plugins',  'plugin-changed', signal); }
+  function skillEvents(signal)  { return eventStream('/events/skills',   'skill-changed',  signal); }
 
   function openFile(namespace, path) {
     window.open('/files/' + namespace + '/' + path, '_blank');
@@ -153,6 +155,6 @@
   window.matbotTransport = {
     hostRuntime: 'node',
     callTool, createSession, sessionBusy, submit,
-    sessionEvents, answerPrompt, abort, statusEvents, fileEvents, toolEvents, pluginEvents, openFile,
+    sessionEvents, answerPrompt, abort, statusEvents, fileEvents, toolEvents, pluginEvents, skillEvents, openFile,
   };
 })();
