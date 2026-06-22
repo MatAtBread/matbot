@@ -86,12 +86,11 @@ async function seedDreamRunsStore(services: MatbotMachine): Promise<void> {
  *
  * Absence of a skills service is handled gracefully rather than fatally: seeding needs the live
  * manager, which a registry consumer can't guarantee is present at its own setup (config/load order
- * is not ours to dictate). So when it is already present we seed immediately; when it is not, we
- * install a one-shot `screen` hook that seeds on the first turn where it appears, then removes
- * itself. This makes seeding order-independent and self-healing (a skills provider loaded *after*
- * cognition still gets seeded, with no reload), without leaving a per-turn hook resident once the
- * one-time job is done. Throwing in setup() was the alternative, but it rolls the plugin back — a
- * later skills load would then require re-adding and reloading cognition.
+ * is not ours to dictate). So it subscribes to the SkillManager mount via `services.mounted` with
+ * `replay: true` — `seedCognition` runs once now if a manager is already present, and again on each
+ * (re)mount if a skills provider is loaded later. Seeding is idempotent (`importIfAbsent`), so a
+ * remount re-seed is a no-op. This makes seeding order-independent and self-healing with no resident
+ * per-turn hook and no reload.
  *
  * The inner-voice provider is likewise not required: the Inner voice skill calls cognition's own
  * `ask_inner_voice` tool, which falls back to the current turn's model when none is pinned via
@@ -119,6 +118,7 @@ async function innerVoiceStatus(services: MatbotMachine | undefined): Promise<st
 
 export function createCognitionPlugin(): MatbotPluginSpec {
   let captured: MatbotMachine | undefined;   // captured in setup() so installationMessage() can probe
+  const lifecycle = new AbortController();    // ends the SkillManager mount subscription on teardown
 
   return {
     apiVersion: PLUGIN_API_VERSION,
@@ -197,28 +197,18 @@ The store is idempotent: a re-seed on restart keeps the existing data.
       services.tools.register(createAskInnerVoiceTool(services));
       services.tools.register(createCognitionConfigTool(services));
 
-      if (services.SkillManager) {
-        await seedCognition(services);
-        return;
-      }
-
-      // No skills service yet — defer. Seed on the first turn it appears, then unregister this hook.
-      // (Triggers are seeded opportunistically in the same pass: if the Triggers service is present
-      // by then it gets the load-triggers too, otherwise the skills still seed without them.)
-      console.warn(
-        '[cognition] No skills service present at setup; built-in skills will be seeded on the first ' +
-        'turn after a skills service (e.g. @matatbread/matbot-skills) is loaded.',
+      // Seed once the SkillManager is present — now if a skills provider is already loaded (replay),
+      // else on the first mount when one is. Re-seed on each remount is a no-op (importIfAbsent). The
+      // Triggers service is seeded opportunistically in the same pass when present. Order-independent
+      // and self-healing, with no resident hook.
+      services.mounted.consume(
+        { key: 'SkillManager', replay: true, signal: lifecycle.signal },
+        m => seedCognition(m),
       );
-      let seeded = false;
-      services.hooks.register({
-        on: 'screen',
-        async handler(ctx) {
-          if (seeded || !services.SkillManager) return;
-          seeded = true;
-          await seedCognition(services);
-          ctx.removeHook();
-        },
-      });
+    },
+
+    async teardown() {
+      lifecycle.abort();
     },
   };
 }

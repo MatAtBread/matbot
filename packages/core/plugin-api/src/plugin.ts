@@ -4,7 +4,6 @@ import type {
   Store, Session, SystemContextRegistry, KnowledgeIndex, PromptFn, SessionRunner,
 } from './types.js';
 import type { HookRegistry } from './hooks.js';
-import type { Subscribable } from './broadcast.js';
 
 export const PLUGIN_API_VERSION = '0.1';
 
@@ -135,18 +134,26 @@ export interface MatbotRuntime {
   createStore<T extends { id: string; version: string }>(namespace: string): Store<T>;
 
   /**
-   * Context-switch notifications: re-emits the (per-plugin scoped) machine after every deferred
-   * StorageBackend swap lands at a quiescent edge. Not on subscribe — the *initial* machine is the
-   * setup() call itself; `mounted` is its deferred encore, the "the backend changed, rebuild" signal.
-   * (So a plugin keeps its normal one-shot setup load and adds this for swaps — no double load.) The
-   * swap is already live when the event fires, so the emitted `services` reads the new backend:
+   * Mount-table notifications: react to a registry service (re)mounting or being unloaded. A plugin
+   * needs this iff its setup() reads another service's *current state* to build cached/derived state —
+   * skills/triggers cache the StorageBackend's documents; cognition seeds from the SkillManager. A pure
+   * map (no setup data; data arrives later as a tool call or hook) needs nothing — resolve the service
+   * per-invocation through its proxy/member instead.
    *
-   *   services.mounted.consume(s => this.load(s), signal);   // signal ends the loop on teardown
+   *   // cache the backend's documents; rebuild on every swap (own initial load was in setup())
+   *   services.mounted.consume({ key: 'StorageBackend', signal }, () => this.load());
    *
-   * The element is the machine, not the raw backend: `services` is all a rebuilder needs (it reads
-   * through proxies). A backend that wants to know it became live drives that off its own register().
+   *   // depend on a peer service that may not be present yet; seed now if it is, and on each (re)mount
+   *   services.mounted.consume({ key: 'SkillManager', replay: true, signal }, m => seed(m));
+   *
+   * Contract guarantees only *eventual, ordered* delivery of each key's net presence transition — it
+   * says nothing about timing: a mount may fire synchronously-ish or batch to a later quiescent edge, so
+   * never assume a register() is observed inline or at a turn boundary. A reload (unregister+register
+   * before the edge) collapses to a single remount; an unregister not replaced by the edge is a
+   * committed unload, delivered to `onUnmount` (drop your captured ref there to let the gone plugin's
+   * working set be collected). Handlers may re-fire on later remounts, so they must be idempotent.
    */
-  readonly mounted: Subscribable<MatbotMachine>;
+  readonly mounted: Mounted;
 
   /**
    * Register a service under a MatbotServices key (the key is the interface name it carries).
@@ -279,6 +286,124 @@ export function forwardingProxy<T extends object>(getCurrent: () => T | undefine
 export function makeSwappable<T extends object>(initial: T): [T, SwapFn<T>] {
   let current = initial;
   return [forwardingProxy<T>(() => current), (next: T) => { current = next; }];
+}
+
+// ── Mount table ─────────────────────────────────────────────────────────────────
+
+/** The machine with one registry key narrowed to present — what a keyed mount handler receives. */
+export type MountedMachine<K extends keyof MatbotServices> =
+  MatbotMachine & { readonly [P in K]-?: NonNullable<MatbotServices[P]> };
+
+export interface MountConsumeOptions<K extends keyof MatbotServices> {
+  /** The registry service whose mount transitions this subscription tracks. */
+  readonly key:        K;
+  /** Fire `handler` once on the next microtask against the *current* machine if `key` is present now
+   *  (then on each later remount). Off by default — a cacher that did its initial load in setup() wants
+   *  only future transitions; a deferred dependency wants the latch. */
+  readonly replay?:    boolean;
+  /** Ends the subscription (the consumer's own teardown). */
+  readonly signal?:    AbortSignal;
+  /** The *dependency's* teardown: fired when `key` is committed-unloaded (removed and not replaced by
+   *  the quiescent edge) while this consumer lives on. The stream continues — a later remount re-fires
+   *  `handler`. Drop any captured ref to the gone service here. */
+  readonly onUnmount?: (machine: MatbotMachine) => void | Promise<void>;
+}
+
+/** The mount-table consumer facet exposed on {@link MatbotRuntime.mounted}. */
+export interface Mounted {
+  consume<K extends keyof MatbotServices>(
+    options: MountConsumeOptions<K>,
+    handler: (machine: MountedMachine<K>) => void | Promise<void>,
+  ): void;
+}
+
+/** The host-side mount table: {@link Mounted} for plugins, plus the producer half the host drives from
+ *  its register/unregister and quiescent-edge flush. */
+export interface MountTable {
+  readonly mounted: Mounted;
+  /** Record that a key's presence may have changed since the last edge (called by register/unregister). */
+  markDirty(key: keyof MatbotServices): void;
+  /** At a quiescent edge, compute each dirty key's net presence transition and multicast it. */
+  flush(): void;
+}
+
+interface MountInterest {
+  readonly handler:   (machine: MatbotMachine) => void | Promise<void>;
+  readonly onUnmount: ((machine: MatbotMachine) => void | Promise<void>) | undefined;
+  readonly signal:    AbortSignal | undefined;
+}
+
+function reportMountHandlerError(e: unknown): void {
+  console.error('[matbot] mounted handler threw:', e instanceof Error ? e.message : e);
+}
+
+/**
+ * Build a {@link MountTable} over a lazily-read machine. Notifications batch to the quiescent edge
+ * ({@link flush}), where each dirty key's net presence (absent→present = mount, present→present =
+ * remount, present→absent = committed unload) is multicast to that key's subscribers. The clock holds
+ * the last-committed presence per key, so a reload collapses to one remount and a committed unload is
+ * well-defined. Presence is read by member access on the unified machine, which resolves both the core
+ * getters (StorageBackend/Vault/KnowledgeIndex) and the registry-backed augmented keys.
+ */
+export function createMountTable(getMachine: () => MatbotMachine): MountTable {
+  const interests = new Map<string, Set<MountInterest>>();
+  const committed = new Map<string, boolean>();   // last-committed presence per key (the clock)
+  const dirty     = new Set<string>();
+
+  const present = (key: string): boolean => (getMachine() as unknown as Record<string, unknown>)[key] !== undefined;
+
+  const run = (fn: (machine: MatbotMachine) => void | Promise<void>, machine: MatbotMachine): void => {
+    try {
+      const r = fn(machine);
+      if (r instanceof Promise) r.catch(reportMountHandlerError);
+    } catch (e) { reportMountHandlerError(e); }
+  };
+
+  const mounted: Mounted = {
+    consume(options, handler) {
+      const { key, replay, signal, onUnmount } = options;
+      if (signal?.aborted === true) return;
+      const interest: MountInterest = {
+        handler:   handler as MountInterest['handler'],
+        onUnmount: onUnmount as MountInterest['onUnmount'],
+        signal,
+      };
+      let set = interests.get(key);
+      if (set === undefined) { set = new Set(); interests.set(key, set); }
+      const subs = set;
+      subs.add(interest);
+      signal?.addEventListener('abort', () => { subs.delete(interest); }, { once: true });
+      // Replay on the next microtask (async-iterator parity — never inline in the consume() frame).
+      // Reads the live machine, not `committed`: replay is "current state", separate from the clock.
+      if (replay === true) queueMicrotask(() => {
+        if (signal?.aborted === true) return;
+        if (present(key as string)) run(interest.handler, getMachine());
+      });
+    },
+  };
+
+  return {
+    mounted,
+    markDirty(key) { dirty.add(key as string); },
+    flush() {
+      if (dirty.size === 0) return;
+      const keys = [...dirty];
+      dirty.clear();
+      const machine = getMachine();
+      for (const key of keys) {
+        const before = committed.get(key) ?? false;
+        const after  = present(key);
+        committed.set(key, after);
+        const subs = interests.get(key);
+        if (subs === undefined) continue;
+        if (after) {
+          for (const i of subs) run(i.handler, machine);                                  // mount / remount
+        } else if (before) {
+          for (const i of subs) if (i.onUnmount !== undefined) run(i.onUnmount, machine);  // committed unload
+        }
+      }
+    },
+  };
 }
 
 /**

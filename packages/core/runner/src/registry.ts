@@ -1,7 +1,7 @@
 import type { Tool, ToolRegistry, Hook, PromptFn, FormField, FrontendInfo, PluginRegistryEvent } from './types.js';
-import { createBroadcaster, subscribable } from '@matatbread/matbot-plugin-api';
+import { createBroadcaster } from '@matatbread/matbot-plugin-api';
 import type {
-  MatbotPlugin, MatbotMachine,
+  MatbotPlugin, MatbotMachine, Mounted,
   ProviderAdapterFactory, StoreFactory,
 } from './plugin.js';
 import { PLUGIN_API_VERSION, unifyServices } from './plugin.js';
@@ -238,16 +238,21 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotMachine,
   // own settings — there is no way to name another's.
   const ownSettings = makePluginSettings(services.createStore<SettingsDoc>('settings'), plugin.name);
 
-  // Per-plugin `mounted`: re-emits *this plugin's* scoped machine on every host StorageBackend swap (not
-  // on subscribe — the initial machine is the setup() call itself; `mounted` is its deferred encore). The
-  // element is the stable `scoped` object: it reads through the host's re-pointing proxies, so the
-  // same reference already sees the new backend by the time the host announces the swap. Forward-referenced
-  // via `scoped`, assigned below; the generator body only runs on subscribe (after setup), by which point
-  // it is defined.
+  // Per-plugin `mounted`: a thin adapter over the host mount table that delivers *this plugin's* scoped
+  // machine (and scoped onUnmount) to handlers. The stable `scoped` object reads through the host's
+  // re-pointing proxies/registry, so `scoped[key]` is the host's live service by the time a transition
+  // fires. Forward-referenced via `scoped`, assigned below; consume() only runs after setup.
   let scoped: MatbotMachine;
-  const scopedMounted = subscribable<MatbotMachine>(async function* (signal) {
-    for await (const _ of services.mounted.subscribe(signal)) yield scoped;
-  });
+  const scopedMounted: Mounted = {
+    consume(options, handler) {
+      // Forward to the host mount table but deliver *this plugin's* scoped machine — it reads through
+      // the same proxies/registry, so scoped[key] is the host's live service. onUnmount is scoped too.
+      const forwarded = options.onUnmount !== undefined
+        ? { ...options, onUnmount: () => options.onUnmount!(scoped) }
+        : options;
+      services.mounted.consume(forwarded, () => handler(scoped as never));
+    },
+  };
 
   scoped = unifyServices({
     ...services,

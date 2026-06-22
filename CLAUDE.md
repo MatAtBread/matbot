@@ -153,14 +153,22 @@ type ScratchStore = Store<Session>;
 
 A **context switch** is the machine analogue of an OS one — "page in pending machine state, then set the owner." `runAs(principal, fn)` is the bare *set-the-owner* primitive (the principal carrier stays a pure identity primitive); `contextSwitch(principal, fn)` layers the machine half on top, running host-registered flushers (`onContextQuiesce`) at depth-0 edges. The principal scope counter *is* the quiescence signal — the two concerns share call sites, not code. **The pump turn** (the CAS transactional unit) switches context; web/telegram entry points stay `runAs` (their request/message scope spans a long-lived SSE stream, so they must not count as a busy edge).
 
-A plugin that caches storage-derived state (skills, triggers) subscribes to **`services.mounted`** — a `Subscribable<MatbotMachine>` that re-emits the (per-plugin scoped) machine **after every landed swap** (not on subscribe; the initial load is the plugin's own `setup()`). It rebuilds by re-reading through the now-repointed proxies:
+### The mount table (`services.mounted`)
+
+A plugin reacts to a registry service (re)mounting or being unloaded through **`services.mounted`** — a `Mounted` whose one method, `consume({ key, replay?, signal?, onUnmount? }, handler)`, is keyed on the service it cares about. The host batches mount notifications to the **quiescent edge**: `register`/`unregister` mark a key dirty; the edge computes each key's net presence transition and **multicasts** to that key's subscribers. A reload (unregister+register before the edge) collapses to a single **remount**; an unregister not replaced by the edge is a **committed unload**, delivered to `onUnmount`. The contract guarantees only *eventual, ordered* delivery per key — **it says nothing about timing** (a register is not observably inline, nor pinned to a turn boundary). `StorageBackend`'s swap also lands at the edge (CAS coherence); other keys repoint immediately but still notify at the edge.
+
+**Litmus — does a plugin need it?** Only if its `setup()` reads another service's *current state* to build cached/derived state. A pure map (no setup data; data arrives later as a tool call or hook) resolves its dependency per-invocation through the proxy/member and subscribes to nothing.
 
 ```ts
-await manager.load();                                          // initial, in setup()
-services.mounted.consume(() => void manager.load(), signal);   // re-load on every swap
+// cache the backend's documents; rebuild on every swap (initial load was in setup(), so no replay)
+await manager.load();
+services.mounted.consume({ key: 'StorageBackend', signal: manager.signal }, () => void manager.load());
+
+// depend on a peer service that may arrive later; seed now if present (replay) and on each remount
+services.mounted.consume({ key: 'SkillManager', replay: true, signal }, m => seed(m));   // m.SkillManager narrowed present
 ```
 
-A cacher that reads straight through a store proxy on each call (e.g. `persist-ki-bge`) needs no subscription — the proxy already follows the swap.
+`replay` fires the handler on the next microtask against the current machine if the key is present (the deferred-dependency latch); handlers must be idempotent (a remount re-fires). A cacher that reads straight through a store proxy on each call (e.g. `persist-ki-bge`) needs no subscription — the proxy already follows the swap.
 
 ### Discovery vs. direct dependency
 

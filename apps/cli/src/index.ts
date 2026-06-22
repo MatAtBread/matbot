@@ -18,10 +18,10 @@ import { appendMessage, createMessage,
          getPluginNameForSpecifier, getRegisteredPlugins, recordServiceKey,
          installPrincipalCarrier, enterPrincipal, currentPrincipal,
          unifyServices, forwardingProxy, makeSwappable, singleTurnRequest,
-         createBroadcaster, onContextQuiesce, flushIfQuiescent,
+         createMountTable, onContextQuiesce, flushIfQuiescent,
          createSingleTurnTool,
          MissingSecretError }              from '@matatbread/matbot-core';
-import type { MatbotMachine, PluginSettings, Vault, SessionRunner, Subscribable,
+import type { MatbotMachine, MatbotServices, PluginSettings, Vault, SessionRunner,
               MatbotPlugin, StorageBackend, KnowledgeIndex, PromptFn, FormField, SwapFn } from '@matatbread/matbot-core';
 import { systemPrincipal }                 from '@matatbread/matbot-security';
 import { createAlsPrincipalCarrier }       from './principal-als.js';
@@ -812,17 +812,23 @@ async function main(): Promise<void> {
   // (last write wins — only the final intended backend matters, so a slot, not a queue) and ask the
   // context-switch machinery to land it at the next quiescent edge. Swapping the system of record under
   // a running turn would split a compare-and-swap across two backends, so the apply waits for depth 0.
-  const mountedBroadcaster = createBroadcaster<MatbotMachine>();
+  // The mount table batches mount notifications to the quiescent edge: register/unregister mark a key
+  // dirty; the edge computes each key's net presence transition (mount / remount / committed unload) and
+  // multicasts to that key's subscribers. A reload (unregister+register within one turn) collapses to a
+  // single remount. Notification timing is deliberately unspecified — see the `Mounted` contract.
+  const mountTable = createMountTable(() => services);
   let pendingSwap: { next: StorageBackend | undefined } | undefined;
   const stageSwap = (next: StorageBackend | undefined): void => {
     pendingSwap = { next };
     flushIfQuiescent();
   };
   onContextQuiesce(() => {
-    if (pendingSwap === undefined) return;
-    const { next } = pendingSwap;
-    pendingSwap = undefined;
-    if (swapStorage(next)) mountedBroadcaster.emit(services);
+    if (pendingSwap !== undefined) {
+      const { next } = pendingSwap;
+      pendingSwap = undefined;
+      if (swapStorage(next)) mountTable.markDirty('StorageBackend');
+    }
+    mountTable.flush();
   });
 
   // Swap the KnowledgeIndex, draining the displaced impl's entries into the incoming one.
@@ -859,19 +865,23 @@ async function main(): Promise<void> {
     get(key) { return serviceRegistry.get(key as string) as never; },
     async register(key, value) {
       // StorageBackend is the system of record: stage it and let the quiescent edge apply it (idle →
-      // now; mid-turn → at turn end). The other swap-keys are safe to repoint immediately.
+      // now; mid-turn → at turn end) — its mount notification is marked dirty there, after the swap
+      // lands. The other swap-keys repoint immediately, then mark dirty so the edge multicasts the mount.
       if (key === 'StorageBackend')      stageSwap(value as StorageBackend);
       else if (key === 'KnowledgeIndex') swapKnowledge(value as KnowledgeIndex);
       else if (key === 'Vault')          activeVault = value as Vault;
       else serviceRegistry.set(key as string, value);
+      if (key !== 'StorageBackend') { mountTable.markDirty(key); flushIfQuiescent(); }
     },
     // Symmetric with register: a swap-key reverts to the app's captured boot default instead of
-    // dangling on the unloaded plugin's impl; everything else is a plain registry delete.
+    // dangling on the unloaded plugin's impl; everything else is a plain registry delete. Marking dirty
+    // lets the edge deliver a committed unload (or, if re-registered before the edge, a single remount).
     unregister(key: string) {
       if (key === 'StorageBackend')      stageSwap(bootBackend);
       else if (key === 'KnowledgeIndex') knowledgeImpl = bootKnowledge;
       else if (key === 'Vault')          activeVault = bootVault;
       else serviceRegistry.delete(key);
+      if (key !== 'StorageBackend') { mountTable.markDirty(key as keyof MatbotServices); flushIfQuiescent(); }
     },
     registerFrontend() { /* bound per-plugin in setupPlugin's scopedServices; base is a no-op */ },
 
@@ -932,7 +942,7 @@ async function main(): Promise<void> {
     },
     resolver:  nodePluginResolver(path.dirname(configPath)),
     providers: matbotConfig.providers,
-    mounted:   mountedBroadcaster as Subscribable<MatbotMachine>,
+    mounted:   mountTable.mounted,
     get StorageBackend() { return activeStorageBackend === undefined ? undefined : storageBackendProxy; },
     sessions:  store,
     get run() { return sessionRunner; },

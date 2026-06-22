@@ -72,15 +72,22 @@ churn and less likely to affect a consumer who doesn't use them.
   hand-rolled their own registry literal were consolidated onto the exported `ToolRegistryImpl`,
   which now emits on register/remove/removeByPlugin and takes an optional seed-tools constructor.
 
-- **`services.mounted` — a stream that re-emits the machine after a `StorageBackend` swap.** A new
-  `MatbotRuntime.mounted: Subscribable<MatbotMachine>` lets a plugin that caches storage-derived state
-  rebuild when the live backend changes, without a restart: `services.mounted.consume(s => this.load(s),
-  signal)`. It fires only on a *landed* swap — not on subscribe, since the initial load is the plugin's
-  own `setup()` — so a cacher keeps its one-shot boot load and adds `mounted` for swaps, with no double
-  load. Per-plugin scoped: the emitted machine is the subscriber's own scoped services. Built on a
-  small `Subscribable<T>`/`Broadcaster<T>` split of the broadcaster (the consumer facet now also carries
-  `consume(handler, signal)` — the detached, handler-isolating `for await` loop every `watch` call site
-  hand-wrote), plus a `subscribable(subscribe)` wrapper for derived streams.
+- **`services.mounted` — a keyed mount table for reacting to a registry service (re)mounting or
+  unloading.** `MatbotRuntime.mounted: Mounted` exposes one method,
+  `consume({ key, replay?, signal?, onUnmount? }, handler)`, keyed on the `MatbotServices` interface a
+  plugin depends on. The host batches notifications to the quiescent edge and **multicasts** each key's
+  net presence transition to that key's subscribers: a reload (unregister+register before the edge)
+  collapses to a single **remount**; an unregister not replaced by the edge is a **committed unload**,
+  delivered to `onUnmount`. The handler receives the (per-plugin scoped) machine with `key` narrowed
+  present (`MountedMachine<K>`). `replay: true` is the deferred-dependency latch — fire on the next
+  microtask against the current machine if the key is present now, then on each remount (so a consumer
+  whose dependency may load *after* it is seeded with no resident poll-hook). The contract guarantees
+  only eventual, ordered delivery per key — **timing is unspecified** (a register is not observably
+  inline nor pinned to a turn boundary). `StorageBackend`'s deferred swap still lands at the edge; other
+  keys repoint immediately but notify at the edge. Use it only when `setup()` reads another service's
+  current state to build cached/derived state; a pure map resolves its dependency per-invocation and
+  subscribes to nothing. (`createMountTable` is the shared host helper; the `Subscribable`/`Broadcaster`
+  broadcaster split it was prototyped on stays for the `watch` streams.)
 
 - **`contextSwitch` / `onContextQuiesce` — quiescent-edge machine flush, layered over the principal
   carrier.** `contextSwitch(principal, fn)` runs `fn` under `principal` (like `runAs`) and additionally
