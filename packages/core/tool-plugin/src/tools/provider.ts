@@ -452,6 +452,8 @@ PARAMETERS  (pass as the parameters object)
   topP        — float, nucleus sampling probability
   thinking    — { type: "enabled", budgetTokens: <int> }  (Anthropic extended thinking;
                 claude-3-7-sonnet and newer; set maxTokens > budgetTokens)
+  promptCache — boolean, opt-in Anthropic-style cache_control breakpoints (openai-compat
+                adapter only; OpenRouter Anthropic/Gemini/Qwen); default off
 
 GUIDANCE
 When a user asks to add a new LLM or provider, ask for:
