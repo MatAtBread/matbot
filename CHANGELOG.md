@@ -68,6 +68,14 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Optional
 
+- **providers/openai-compat** — opt-in prompt caching. With `parameters.promptCache: true`,
+  the adapter sends Anthropic-style `cache_control: {type:'ephemeral'}` breakpoints on the system
+  prefix, the tool defs, and the second-to-last user turn (mirroring the native anthropic adapter),
+  and reads `usage.prompt_tokens_details.cached_tokens` back as `cacheReadTokens`. Unlocks prompt
+  caching for Anthropic/Gemini/Qwen routed via OpenRouter (and surfaces OpenAI/DeepSeek automatic
+  caching). Default off — a plain OpenAI or local (ollama/vLLM) endpoint never receives
+  `cache_control`, so the flat OpenAI wire shape is unchanged.
+
 - **frontend/web** — queued-message UI no longer folds a quickly-queued message into
   the wrong bubble: only a head still waiting behind a running turn (`queued > 0`)
   opens a foldable batch; a head that runs immediately (`queued === 0`) is sealed

@@ -33,7 +33,7 @@ interface OAIDelta {
 
 interface OAIChunk {
   choices?: Array<{ delta?: OAIDelta; finish_reason?: string | null }>;
-  usage?:   { prompt_tokens?: number; completion_tokens?: number };
+  usage?:   { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } };
 }
 
 export class OpenAICompatAdapter implements ProviderAdapter {
@@ -60,16 +60,19 @@ export class OpenAICompatAdapter implements ProviderAdapter {
   ): AsyncIterable<CompletionEvent> {
     const endpoint = config.endpoint ?? DEFAULT_ENDPOINT;
     const apiKey   = config.credentials?.['apiKey'] ?? '';
+    // Opt-in prompt caching (Anthropic-style breakpoints, e.g. via OpenRouter). Off by default so a
+    // plain OpenAI / ollama endpoint never receives `cache_control` it can't parse.
+    const cache    = config.parameters?.['promptCache'] === true;
 
     const body: Record<string, unknown> = {
       model:    config.model,
       [tokenLimitParam(config)]: config.parameters?.maxTokens ?? DEFAULT_MAX_TOKENS,
-      messages:       toOAIMessages(messages),
+      messages:       toOAIMessages(messages, cache),
       stream:         true,
       stream_options: { include_usage: true },
     };
 
-    const toolDefs = toOAITools(tools);
+    const toolDefs = toOAITools(tools, cache);
     if (toolDefs.length > 0) body['tools'] = toolDefs;
 
     if (config.parameters?.temperature !== undefined) {
@@ -102,12 +105,18 @@ export class OpenAICompatAdapter implements ProviderAdapter {
       let chunk: OAIChunk;
       try { chunk = JSON.parse(line) as OAIChunk; } catch { continue; }
 
-      // Usage (some providers send at end of stream)
+      // Usage (some providers send at end of stream). `prompt_tokens` is the full input including any
+      // cache hit; `prompt_tokens_details.cached_tokens` is the cached portion (OpenAI auto-cache,
+      // DeepSeek, and Anthropic-via-OpenRouter all report it). Split them so inputTokens is the fresh
+      // (full-price) part and cacheReadTokens the discounted part — matching the anthropic adapter.
       if (chunk.usage) {
+        const cached = chunk.usage.prompt_tokens_details?.cached_tokens ?? 0;
+        const prompt = chunk.usage.prompt_tokens ?? 0;
         yield {
           type:         'usage',
-          inputTokens:  chunk.usage.prompt_tokens     ?? 0,
+          inputTokens:  Math.max(0, prompt - cached),
           outputTokens: chunk.usage.completion_tokens ?? 0,
+          ...(cached > 0 ? { cacheReadTokens: cached } : {}),
         };
       }
 
