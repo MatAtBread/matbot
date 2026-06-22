@@ -305,7 +305,7 @@ function describeInstallFailure(specifier: string, pm: string, e: unknown): stri
 
 // A plugin contributes through several channels: static fields on the plugin object
 // (provider, tools, storage, storageBackend, frontend) and runtime registrations made
-// during setup() (tools, hooks, system-context contributors, and MatbotServices keys such
+// during setup() (tools, hooks, system-context contributors, and MatbotMachine keys such
 // as 'KnowledgeIndex'). Reflect every channel so the reported type list is complete, not just
 // the static ones.
 function pluginTypes(p: MatbotPlugin, registeredToolPlugins: Set<string>): string[] {

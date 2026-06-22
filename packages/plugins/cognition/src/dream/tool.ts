@@ -1,7 +1,7 @@
 /**
  * The `dream_time` tool: one pass of background memory consolidation, exposed to the model.
  *
- * Zero-input tool. Everything it needs is already in `MatbotServices` (the skill manager, the
+ * Zero-input tool. Everything it needs is already in `MatbotMachine` (the skill manager, the
  * stores, the provider list) and `ToolContext` (the active provider, the abort signal). Returns a
  * single result event carrying the fully-assembled {@link DreamRun} record; the same record is
  * also persisted to the `dream_runs` store, so observability survives the conversation that
@@ -27,7 +27,7 @@
  *     about why dream-time did what it did", which is exactly what this whole exercise was for.
  */
 
-import type { MatbotServices, Tool, ToolExecutor, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
+import type { MatbotMachine, Tool, ToolExecutor, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
 import { runOnce } from './runOnce.js';
 import { createLlmRanker } from './llmRanker.js';
 import { createLlmMerger } from './llmMerger.js';
@@ -44,7 +44,7 @@ function serialise<T>(fn: () => Promise<T>): Promise<T> {
   return next;
 }
 
-export function createDreamTimeTool(services: MatbotServices): Tool {
+export function createDreamTimeTool(services: MatbotMachine): Tool {
   const executor: ToolExecutor = {
     async *execute(_input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
       if (ctx.provider === undefined) {

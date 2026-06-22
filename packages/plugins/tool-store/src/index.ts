@@ -1,6 +1,6 @@
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import type {
-  MatbotPluginSpec, MatbotServices, Tool, ToolEvent, Store, StoreQuery,
+  MatbotPluginSpec, MatbotMachine, Tool, ToolEvent, Store, StoreQuery,
 } from '@matatbread/matbot-plugin-api';
 import type { StoreDef, StoreRecord } from './types.js';
 
@@ -16,7 +16,7 @@ async function listDefs(meta: Store<StoreDef>): Promise<StoreDef[]> {
   return res.items;
 }
 
-function registerStoreTool(services: MatbotServices, def: StoreDef): void {
+function registerStoreTool(services: MatbotMachine, def: StoreDef): void {
   services.tools.remove(actionToolName(def.namespace));
   services.tools.register(makeStoreTool(services.self?.name, def, services.createStore<StoreRecord>(def.namespace)));
 }
@@ -29,7 +29,7 @@ function registerStoreTool(services: MatbotServices, def: StoreDef): void {
  * simply re-registers the tool, matching the restart behaviour. Returns the persisted def.
  */
 export async function defineStore(
-  services: MatbotServices,
+  services: MatbotMachine,
   spec: { namespace: string; description: string; shape: string },
 ): Promise<StoreDef> {
   const meta = services.createStore<StoreDef>(META_NAMESPACE);
@@ -50,7 +50,7 @@ export async function defineStore(
 
 // A namespace "exists" if we already govern it, or it already holds documents (a store created by
 // other means). createStore is lazy, so an untouched namespace queries empty.
-async function storeHasData(services: MatbotServices, namespace: string): Promise<boolean> {
+async function storeHasData(services: MatbotMachine, namespace: string): Promise<boolean> {
   const store = services.createStore<StoreRecord>(namespace);
   const res = await store.query({ limit: 1 });
   return res.items.length > 0;
@@ -175,7 +175,7 @@ interface StoreActionInput {
   shape?:       string;
 }
 
-function makeStoreActionTool(services: MatbotServices, meta: Store<StoreDef>): Tool {
+function makeStoreActionTool(services: MatbotMachine, meta: Store<StoreDef>): Tool {
   const pluginName = services.self?.name;
 
   // Shared by create and expose: persist the def and (re)register its tool. Caller has already
@@ -281,7 +281,7 @@ export const plugin: MatbotPluginSpec = {
     description: 'Define persistent stores and generated CRUD tools over them via store_action.',
   },
 
-  async setup(services: MatbotServices) {
+  async setup(services: MatbotMachine) {
     const meta = services.createStore<StoreDef>(META_NAMESPACE);
 
     services.tools.register(makeStoreActionTool(services, meta));

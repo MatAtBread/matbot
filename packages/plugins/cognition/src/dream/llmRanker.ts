@@ -18,7 +18,7 @@
  * pipeline-side scoring adjustments, not in this prompt.
  */
 
-import type { MatbotServices } from '@matatbread/matbot-plugin-api';
+import type { MatbotMachine } from '@matatbread/matbot-plugin-api';
 import type { Ranker } from './ranker.js';
 import type { RememberedFact, Score, SkillCandidate } from './types.js';
 
@@ -97,7 +97,7 @@ function parseRankerResponse(raw: string): RankerCallResponse | undefined {
 
 /** Construct an LLM-backed ranker bound to a configured provider name. The provider must already
  *  exist in matbot.yaml; if it does not, calls error out at use time (the standard pattern). */
-export function createLlmRanker(services: MatbotServices, provider: string): Ranker {
+export function createLlmRanker(services: MatbotMachine, provider: string): Ranker {
   return {
     async rank(
       facts:      readonly RememberedFact[],

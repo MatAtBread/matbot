@@ -27,7 +27,7 @@
  * Silent for now — the durable trace is a `marker` (yielded below); a frontend may surface it.
  */
 
-import type { MatbotServices, Tool, ToolExecutor, ToolContext, ToolEvent, Message } from '@matatbread/matbot-plugin-api';
+import type { MatbotMachine, Tool, ToolExecutor, ToolContext, ToolEvent, Message } from '@matatbread/matbot-plugin-api';
 import type { RememberedFact } from '../dream/types.js';
 
 const EXTRACT_SYSTEM =
@@ -63,7 +63,7 @@ function textOf(msg: Message | undefined): string {
   return msg?.content.filter(c => c.type === 'text').map(c => c.text).join('\n') ?? '';
 }
 
-export function createRememberFactTool(services: MatbotServices): Tool {
+export function createRememberFactTool(services: MatbotMachine): Tool {
   const executor: ToolExecutor = {
     async *execute(_input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
       // The fact lives in the message that fired this — the latest genuine (non-robo) user OR

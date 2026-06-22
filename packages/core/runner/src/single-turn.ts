@@ -1,7 +1,7 @@
-import type { Tool, ToolExecutor, ToolContext, ToolEvent, MatbotServices } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolContext, ToolEvent, MatbotMachine } from '@matatbread/matbot-plugin-api';
 
 /**
- * Exposes {@link MatbotServices.singleTurn} to the model: a one-shot completion against a configured
+ * Exposes {@link MatbotMachine.singleTurn} to the model: a one-shot completion against a configured
  * provider, returning its reply. The intended use is consulting another model (e.g. a different-lineage
  * critic of the current draft, or any generation that should run on a specific provider) with a
  * well-defined interface, rather than the model improvising a bash/curl call.
@@ -12,7 +12,7 @@ import type { Tool, ToolExecutor, ToolContext, ToolEvent, MatbotServices } from 
  * a core service (`singleTurn`); core is also the one cross-runtime home both the node app and the
  * browser bundle register it from — the tool-plugin barrel (where `plugin`/`provider` live) is node-only.
  */
-export function createSingleTurnTool(services: MatbotServices): Tool {
+export function createSingleTurnTool(services: MatbotMachine): Tool {
   const executor: ToolExecutor = {
     async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
       const args = input as { provider?: string; prompt?: string; system?: string };

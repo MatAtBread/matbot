@@ -1,4 +1,4 @@
-import type { Tool, ToolExecutor, ToolContext, ToolEvent, MatbotServices } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolContext, ToolEvent, MatbotMachine } from '@matatbread/matbot-plugin-api';
 import type { SkillManager } from './manager.js';
 
 // The precise per-action contract. JSON Schema can't express "content required only for save"
@@ -131,7 +131,7 @@ export function createSkillTool(manager: SkillManager): Tool {
  * with zero config); set it to pin a specific — e.g. cheap, fast — model. Resolved per analysis, so a
  * change takes effect on the next reindex without a restart.
  */
-export function createSkillsConfigTool(services: MatbotServices): Tool {
+export function createSkillsConfigTool(services: MatbotMachine): Tool {
   const KEY = 'analysisProvider';
   const executor: ToolExecutor = {
     async *execute(input: unknown, _ctx: ToolContext): AsyncIterable<ToolEvent> {

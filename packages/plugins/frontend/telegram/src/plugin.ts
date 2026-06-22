@@ -1,5 +1,5 @@
 import type {
-  MatbotPluginSpec, MatbotServices, Principal, ProviderAdapter, ProviderConfig, Session, PromptFn, FormField,
+  MatbotPluginSpec, MatbotMachine, Principal, ProviderAdapter, ProviderConfig, Session, PromptFn, FormField,
 } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import {
@@ -20,18 +20,18 @@ interface ActiveProvider {
 // Module-level state: readable/writable by the tools regardless of where setup() is in scope.
 let teardownAc:    AbortController | undefined;
 let activeProvider: ActiveProvider;
-let servicesRef:   MatbotServices | undefined;
+let servicesRef:   MatbotMachine | undefined;
 let botTokenRef:   string | undefined;
 const knownChats = new Set<number>(); // populated as chats interact with the bot
 let openDoor = 0;
 
-async function buildProvider(name: string, services: MatbotServices): Promise<ActiveProvider> {
+async function buildProvider(name: string, services: MatbotMachine): Promise<ActiveProvider> {
   const rawConfig = services.providers.get(name);
   if (!rawConfig) throw new Error(`Provider "${name}" not found`);
 
   const resolvedCreds: Record<string, string> = {};
   for (const [k, v] of Object.entries(rawConfig.credentials ?? {})) {
-    resolvedCreds[k] = await services.vault.resolve(v);
+    resolvedCreds[k] = await services.Vault.resolve(v);
   }
   const config: ProviderConfig = { ...rawConfig, credentials: resolvedCreds };
   const adapter = resolveProviderFactory(config.module)(config);
@@ -143,10 +143,10 @@ export const plugin: MatbotPluginSpec = {
     },
   ],
 
-  async setup(services: MatbotServices) {
+  async setup(services: MatbotMachine) {
     let botToken: string;
     try {
-      botToken = await services.vault.resolve('${TELEGRAM_API_KEY}');
+      botToken = await services.Vault.resolve('${TELEGRAM_API_KEY}');
     } catch {
       console.warn('[frontend-telegram] TELEGRAM_API_KEY not set; skipping');
       return;

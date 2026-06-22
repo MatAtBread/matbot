@@ -11,7 +11,7 @@
  * (the value is a *different-lineage* perspective) but functional. Pin a different-lineage model via
  * cognition_config to get the genuine second opinion.
  */
-import type { Tool, ToolExecutor, ToolContext, ToolEvent, MatbotServices } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolContext, ToolEvent, MatbotMachine } from '@matatbread/matbot-plugin-api';
 import {
   type DreamSettings,
   DEFAULT_DREAM_SETTINGS,
@@ -34,7 +34,7 @@ const PROVIDER_SETTING_KEYS = [
 /** Every DreamSettings field `cognition_config` understands, alongside the provider pins above. */
 const DREAM_SETTING_KEYS = ['strongThreshold', 'weakThreshold', 'maxClusterSize', 'blocklist', 'weakDeferralMs'] as const;
 
-export function createAskInnerVoiceTool(services: MatbotServices): Tool {
+export function createAskInnerVoiceTool(services: MatbotMachine): Tool {
   const executor: ToolExecutor = {
     async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
       const args = input as { prompt?: string; system?: string };
@@ -98,7 +98,7 @@ export interface CognitionProviderConfig {
  *  teaches the model both the current values and the object's shape. */
 export type CognitionConfig = CognitionProviderConfig & DreamSettings;
 
-async function readEffectiveConfig(services: MatbotServices): Promise<CognitionConfig & { available: string[] }> {
+async function readEffectiveConfig(services: MatbotMachine): Promise<CognitionConfig & { available: string[] }> {
   const settings = services.settings();
   const [innerVoiceProvider, dreamRankerProvider, dreamMergerProvider, storedDream] = await Promise.all([
     settings.get<string>(INNER_VOICE_PROVIDER_KEY),
@@ -116,7 +116,7 @@ async function readEffectiveConfig(services: MatbotServices): Promise<CognitionC
   };
 }
 
-export function createCognitionConfigTool(services: MatbotServices): Tool {
+export function createCognitionConfigTool(services: MatbotMachine): Tool {
   const executor: ToolExecutor = {
     async *execute(input: unknown, _ctx: ToolContext): AsyncIterable<ToolEvent> {
       const args     = input as Record<string, unknown> & { action?: string };

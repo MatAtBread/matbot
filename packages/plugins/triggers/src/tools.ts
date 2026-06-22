@@ -1,4 +1,4 @@
-import type { Tool, ToolExecutor, ToolContext, ToolEvent, MatbotServices } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolContext, ToolEvent, MatbotMachine } from '@matatbread/matbot-plugin-api';
 import type { TriggerManager } from './manager.js';
 import type { TriggerCondition, TriggerKind } from './types.js';
 
@@ -168,7 +168,7 @@ export function createTriggerActionTool(manager: TriggerManager): Tool {
  * own provider (so triggers work with zero config); set it to pin a small/fast model. Resolved per
  * evaluation, so a change takes effect on the next turn without a restart.
  */
-export function createTriggersConfigTool(services: MatbotServices): Tool {
+export function createTriggersConfigTool(services: MatbotMachine): Tool {
   const KEY = 'classifierProvider';
   const executor: ToolExecutor = {
     async *execute(input: unknown, _ctx: ToolContext): AsyncIterable<ToolEvent> {

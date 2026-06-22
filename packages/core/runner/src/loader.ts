@@ -1,4 +1,4 @@
-import type { MatbotPlugin, MatbotPluginSpec, MatbotServices, PluginSource, Runtime } from './plugin.js';
+import type { MatbotPlugin, MatbotPluginSpec, MatbotMachine, PluginSource, Runtime } from './plugin.js';
 import type { PromptFn } from './types.js';
 import { IncompatibleRuntimeError } from '@matatbread/matbot-plugin-api';
 import { registerPlugin, setupPlugin, unloadPlugin } from './registry.js';
@@ -80,19 +80,22 @@ let freshSeq = 0;
  * @param prompt Optional host prompt used by setup() to resolve tool-name collisions
  *   interactively. Omitted by non-interactive hosts, in which case collisions overwrite
  *   silently (the historical default).
- * @param onIncompatibleRuntime What to do when a plugin's `matbotRuntime` excludes this host.
- *   `'skip'` (default, the startup batch) warns and moves on — one mis-targeted plugin in the
- *   config must not abort the process. `'throw'` is for an explicit, single, user-initiated load
- *   (the `plugin`/`provider` tools via `services.loadPlugin`): the user named *this* plugin, so a
- *   silent skip would surface only as a confusing empty-result error downstream — fail loudly with
- *   the reason instead. Both modes share the one gate below; only the mismatch reaction differs.
+ * @param onLoadError What to do when an entry cannot become a plugin — an incompatible
+ *   `matbotRuntime`, an import that rejects, or a module that is not plugin-shaped (no `plugin`
+ *   export, no `apiVersion`, a non-function lifecycle member). `'skip'` (default, the startup
+ *   batch) warns and moves on — one mis-targeted or non-plugin entry in the config must not abort
+ *   the process, or, under a supervisor that restarts on exit (systemd `Restart=always`), a single
+ *   bad `matbot.yaml` line becomes an unbreakable crash loop fixable only by hand-editing the
+ *   config. `'throw'` is for an explicit, single, user-initiated load (the `plugin`/`provider`
+ *   tools via `services.loadPlugin`): the user named *this* plugin, so a silent skip would surface
+ *   only as a confusing empty-result error downstream — fail loudly with the reason instead.
  */
 export async function loadPlugins(
   specifiers: readonly (string | { spec: string; importSpec?: string; name?: string; runtimes?: readonly Runtime[] })[],
-  services:   MatbotServices,
+  services:   MatbotMachine,
   bustCache = false,
   prompt?:    PromptFn,
-  onIncompatibleRuntime: 'skip' | 'throw' = 'skip',
+  onLoadError: 'skip' | 'throw' = 'skip',
 ): Promise<MatbotPlugin[]> {
   const reqs = specifiers.map(s => (typeof s === 'string' ? { spec: s } : s) as { spec: string; importSpec?: string; name?: string; runtimes?: readonly Runtime[] });
   if (bustCache) {
@@ -120,7 +123,7 @@ export async function loadPlugins(
     const { spec, importSpec, name } = reqs[i]!;
     const runtimes = declared[i];
     if (runtimes !== undefined && runtimes.length > 0 && !runtimes.includes(CURRENT_RUNTIME)) {
-      if (onIncompatibleRuntime === 'throw') {
+      if (onLoadError === 'throw') {
         throw new IncompatibleRuntimeError(spec, runtimes, CURRENT_RUNTIME);
       }
       console.warn(`[matbot] Skipping plugin "${spec}": declares matbotRuntime [${runtimes.join(', ')}], host runtime is "${CURRENT_RUNTIME}".`);
@@ -141,6 +144,14 @@ export async function loadPlugins(
 
   const loaded: MatbotPlugin[] = [];
 
+  // A load failure is either skipped (the startup batch — a bad entry must not abort the whole
+  // boot) or rethrown (an explicit single load — the user named this plugin). One funnel so every
+  // failure below — import rejection and each shape check — obeys the same mode. See @param onLoadError.
+  const failLoad = (spec: string, reason: string): void => {
+    if (onLoadError === 'throw') throw new Error(reason);
+    console.warn(`[matbot] Skipping plugin "${spec}": ${reason}`);
+  };
+
   for (let i = 0; i < toLoad.length; i++) {
     const spec   = toLoad[i]!.spec;
     const result = results[i]!;
@@ -152,9 +163,9 @@ export async function loadPlugins(
         console.warn(`[matbot] Could not load plugin "${spec}" (browser: use a URL path or configure an import map): ${reason}`);
         continue;
       }
-      // Node.js: throw so callers (including the plugin tool) see the actual error.
       console.error(`[matbot] Failed to load plugin "${spec}":`, result.reason);
-      throw new Error(`Could not load plugin "${spec}": ${reason}`);
+      failLoad(spec, `Could not load plugin "${spec}": ${reason}`);
+      continue;
     }
 
     const mod  = result.value;
@@ -165,23 +176,26 @@ export async function loadPlugins(
     // post-import half of the install guard (the pre-import half is the package.json matbotRuntime
     // check) — it is what stops an arbitrary fetched/installed module from being treated as a plugin.
     if (spec_obj === undefined || typeof spec_obj !== 'object') {
-      throw new Error(
+      failLoad(spec,
         `Plugin module "${spec}" does not export a \`plugin\` object — it is not a matbot plugin. ` +
         `Expected: export const plugin: MatbotPluginSpec`,
       );
+      continue;
     }
     if (!('apiVersion' in spec_obj)) {
-      throw new Error(
-        `Plugin module "${spec}" exports a \`plugin\` object with no \`apiVersion\` — it is not a valid matbot plugin.`,
-      );
+      failLoad(spec, `Plugin module "${spec}" exports a \`plugin\` object with no \`apiVersion\` — it is not a valid matbot plugin.`);
+      continue;
     }
     const lifecycle = spec_obj as { setup?: unknown; teardown?: unknown; installationMessage?: unknown };
+    let lifecycleError: string | undefined;
     for (const fn of ['setup', 'teardown', 'installationMessage'] as const) {
       const v = lifecycle[fn];
       if (v !== undefined && typeof v !== 'function') {
-        throw new Error(`Plugin module "${spec}" exports \`plugin.${fn}\` that is not a function (got ${typeof v}).`);
+        lifecycleError = `Plugin module "${spec}" exports \`plugin.${fn}\` that is not a function (got ${typeof v}).`;
+        break;
       }
     }
+    if (lifecycleError !== undefined) { failLoad(spec, lifecycleError); continue; }
 
     // The single boundary where an author's spec becomes a loaded plugin: identity is stamped here,
     // never declared by the author. The host-injected resolver derives the canonical name; absent a

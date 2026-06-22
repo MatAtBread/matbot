@@ -1,4 +1,4 @@
-import type { MatbotPluginSpec, MatbotServices } from '@matatbread/matbot-plugin-api';
+import type { MatbotPluginSpec, MatbotMachine } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import { GoogleDriveStorageBackend, DRIVE_SCOPE } from './drive-backend.js';
 import { DriveAuth } from './drive-auth.js';
@@ -68,7 +68,7 @@ export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,
   manifest:   { description: 'Persist matbot sessions, settings, files and secrets to a folder in your Google Drive (browser).' },
 
-  async setup(services: MatbotServices): Promise<void> {
+  async setup(services: MatbotMachine): Promise<void> {
     if (services.StorageBackend instanceof GoogleDriveStorageBackend) return;
     const backend = await authoriseAndBuild();
 

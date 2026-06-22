@@ -1,4 +1,4 @@
-import type { Store, MatbotServices } from '@matatbread/matbot-plugin-api';
+import type { Store, MatbotMachine } from '@matatbread/matbot-plugin-api';
 import type { Trigger, TriggerSpec, TriggerSurface, TriggerKind, Triggers, FiredCondition } from './types.js';
 import { surfaceOfKind } from './types.js';
 
@@ -21,23 +21,6 @@ function invokeKey(t: { invoke: Trigger['invoke'] }): string {
   return t.invoke.tool + '\u0000' + JSON.stringify(t.invoke.params ?? null);
 }
 
-// One-off, idempotent rename: the user-surface ephemeral kind was `augment` before the durable
-// `contextual` kind was added; it is now `ephemeral`. Stored trigger docs live in `.data/` (and other
-// installs' data dirs), outside source, so they still carry the old name — rewrite it on load so they
-// keep evaluating with no manual step. Returns a fresh doc (version bumped, so a reload re-reads it)
-// when anything changed, else null. The legacy literal is matched via a cast since it is no longer a
-// `TriggerKind`.
-function migrateLegacyKinds(t: Trigger): Trigger | null {
-  if (!t.conditions.some(c => (c.kind as string) === 'augment')) return null;
-  return {
-    ...t,
-    conditions: t.conditions.map(c =>
-      (c.kind as string) === 'augment' ? { ...c, kind: 'ephemeral' as const } : c),
-    version:   Date.now().toString(),
-    updatedAt: new Date().toISOString(),
-  };
-}
-
 /**
  * Owns the live trigger set: an in-memory list backed by a {@link Store} for persistence. All CRUD
  * goes through here so the plugin's hooks and the `trigger_action` tool share one source of truth.
@@ -46,12 +29,18 @@ function migrateLegacyKinds(t: Trigger): Trigger | null {
 export class TriggerManager implements Triggers {
   private readonly triggers = new Map<string, Trigger>();
   private readonly store:    Store<Trigger>;
-  private readonly services: MatbotServices;
+  private readonly services: MatbotMachine;
+  // Aborts on teardown (clear()), ending the mounted-swap subscription set up in setupTriggers.
+  private readonly lifecycle = new AbortController();
 
-  constructor(store: Store<Trigger>, services: MatbotServices) {
+  constructor(store: Store<Trigger>, services: MatbotMachine) {
     this.store    = store;
     this.services = services;
   }
+
+  /** Ends with the manager (teardown). Hand to `services.mounted.consume` so a StorageBackend swap
+   *  re-reads the new backend's triggers, and the loop stops when the plugin unloads. */
+  get signal(): AbortSignal { return this.lifecycle.signal; }
 
   // The classifier provider, resolved live per evaluation (so a triggers_config change takes effect on
   // the next turn): the `classifierProvider` setting if set and valid, else the legacy "skills-classifier"
@@ -64,16 +53,15 @@ export class TriggerManager implements Triggers {
     return turnProvider;
   }
 
-  async init(): Promise<void> {
+  /** (Re)load persisted triggers into memory. Re-runnable: the initial boot load and every later
+   *  StorageBackend swap funnel through here. Reading `this.store` (a swap-following proxy) always hits
+   *  the live backend, so a swap re-reads the new backend's triggers. Clears first — the old in-memory
+   *  set belongs to the displaced backend. */
+  async load(): Promise<void> {
+    this.triggers.clear();
     const { items } = await this.store.query({});
     for (const t of items) {
-      const migrated = migrateLegacyKinds(t);
-      if (migrated !== null) {
-        await this.store.set(migrated.id, migrated);
-        this.triggers.set(migrated.id, migrated);
-      } else {
-        this.triggers.set(t.id, t);
-      }
+      this.triggers.set(t.id, t);
     }
   }
 
@@ -136,7 +124,7 @@ export class TriggerManager implements Triggers {
     return this.add(spec);
   }
 
-  clear(): void { this.triggers.clear(); }
+  clear(): void { this.lifecycle.abort(); this.triggers.clear(); }
 
   /**
    * LLM-judge every enabled condition on `surface` against the current turn and return the distinct

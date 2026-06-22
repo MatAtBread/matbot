@@ -1,7 +1,7 @@
-import type { MatbotPluginSpec, MatbotServices, Tool, ToolContext, ToolEvent, ToolRegistry } from '@matatbread/matbot-plugin-api';
+import type { MatbotPluginSpec, MatbotMachine, Tool, ToolContext, ToolEvent, ToolRegistry } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION }                from '@matatbread/matbot-plugin-api';
 import { watchPlugins }                      from '@matatbread/matbot-core';
-// Type import also brings the `SkillManager` augmentation of MatbotServices into scope.
+// Type import also brings the `SkillManager` augmentation of MatbotMachine into scope.
 import type { SkillManager }                 from '@matatbread/matbot-skills';
 import { createWebServer, defaultWebPrincipal } from './server.js';
 import process                               from 'node:process';
@@ -50,7 +50,7 @@ export const plugin: MatbotPluginSpec = {
     return `Go to http://localhost:${port}/ to access the web interface.`;
   },
 
-  async setup(services: MatbotServices) {
+  async setup(services: MatbotMachine) {
     if (services.isSubAgent()) return;
 
     services.registerFrontend({ name: 'frontend-web' });
@@ -63,7 +63,7 @@ export const plugin: MatbotPluginSpec = {
     webServer = createWebServer({
       store: sessions,
       run,
-      vault: services.vault,
+      vault: services.Vault,
       loadPlugin:    services.loadPlugin.bind(services),
       unloadPlugin:  services.unloadPlugin.bind(services),
       watchPlugins,

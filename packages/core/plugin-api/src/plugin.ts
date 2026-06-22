@@ -76,7 +76,30 @@ export interface PluginSelf {
 
 // ── Services container ────────────────────────────────────────────────────────
 
+/**
+ * The registry bucket: the swappable, registerable services, keyed by interface name. This is the
+ * `keyof` domain of {@link MatbotRuntime.register}/`get`, and the surface third-party plugins augment
+ * (`declare module '@matatbread/matbot-plugin-api' { interface MatbotServices { Foo?: Foo } }`). The
+ * core three carry a host boot default and revert to it when unregistered; an augmented service is
+ * optional and simply drops. Read each as a member (`services.KnowledgeIndex`); swap with register().
+ */
 export interface MatbotServices {
+  readonly StorageBackend?: StorageBackend | undefined;
+  /** The live vault — also the `register('Vault', impl)` swap key. Capture-safe behind a proxy, so a
+   *  reference held across a swap keeps resolving to the live backend. Always present (boot default). */
+  readonly Vault: Vault;
+  readonly KnowledgeIndex: KnowledgeIndex;
+}
+
+/** The assembled machine: registry services wired to the fixed runtime — what `setup()` receives. */
+export type MatbotMachine = MatbotServices & MatbotRuntime;
+
+/**
+ * The fixed runtime — microcode, not a service: the agentic loop's primitives (`complete`,
+ * `createStore`), the registries you mutate but never swap wholesale (`hooks`, `tools`,
+ * `systemContext`), plugin lifecycle, and the registry API itself. Not augmentable, not registerable.
+ */
+export interface MatbotRuntime {
   complete(req: CompletionRequest): Promise<CompletionResponse>;
 
   /**
@@ -111,12 +134,34 @@ export interface MatbotServices {
   createStore<T extends { id: string; version: string }>(namespace: string): Store<T>;
 
   /**
+   * Mount-table notifications: react to a registry service (re)mounting or being unloaded. A plugin
+   * needs this iff its setup() reads another service's *current state* to build cached/derived state —
+   * skills/triggers cache the StorageBackend's documents; cognition seeds from the SkillManager. A pure
+   * map (no setup data; data arrives later as a tool call or hook) needs nothing — resolve the service
+   * per-invocation through its proxy/member instead.
+   *
+   *   // cache the backend's documents; rebuild on every swap (own initial load was in setup())
+   *   services.mounted.consume({ key: 'StorageBackend', signal }, () => this.load());
+   *
+   *   // depend on a peer service that may not be present yet; seed now if it is, and on each (re)mount
+   *   services.mounted.consume({ key: 'SkillManager', replay: true, signal }, m => seed(m));
+   *
+   * Contract guarantees only *eventual, ordered* delivery of each key's net presence transition — it
+   * says nothing about timing: a mount may fire synchronously-ish or batch to a later quiescent edge, so
+   * never assume a register() is observed inline or at a turn boundary. A reload (unregister+register
+   * before the edge) collapses to a single remount; an unregister not replaced by the edge is a
+   * committed unload, delivered to `onUnmount` (drop your captured ref there to let the gone plugin's
+   * working set be collected). Handlers may re-fire on later remounts, so they must be idempotent.
+   */
+  readonly mounted: Mounted;
+
+  /**
    * Register a service under a MatbotServices key (the key is the interface name it carries).
    * Well-known keys have dedicated behaviour:
    *   'StorageBackend' — replaces the active storage backend and re-wires all Store proxies.
    *   'KnowledgeIndex' — replaces the active KnowledgeIndex, draining entries from the old one.
    *   'Vault' — replaces the active vault backend and re-points the capture-safe vault proxy, so
-   *             references to `services.vault` / `ctx.vault` keep resolving to the live impl.
+   *             references to `services.Vault` / `ctx.vault` keep resolving to the live impl.
    * All other keys store the value in a per-plugin service registry accessible via get().
    *
    * Third-party plugins advertise novel services by augmenting MatbotServices:
@@ -155,13 +200,7 @@ export interface MatbotServices {
   /** Per-session turn serialiser. Frontends submit and observe through this rather than calling
    *  runSession directly, so concurrent submits queue instead of clobbering the session. */
   readonly run?:            SessionRunner | undefined;
-  readonly StorageBackend?: StorageBackend | undefined;
   readonly files?:          FileStore;
-  /** The live vault (a capture-safe proxy). Read as `services.vault`. The capitalised `Vault`
-   *  key below is the dedicated `register('Vault', impl)` swap handle (no separate accessor). */
-  readonly vault:           Vault;
-  /** @see register — registering under 'Vault' swaps the active vault backend behind `vault`. */
-  readonly Vault?:          Vault | undefined;
   readonly hooks:           HookRegistry;
   readonly tools:           ToolRegistry;
   readonly systemContext:   SystemContextRegistry;
@@ -169,8 +208,6 @@ export interface MatbotServices {
   readonly workdir?:        string;
   /** Absolute path to the loaded config file. Plugins that create servers should forward this to tool contexts. */
   readonly configPath?:     string;
-
-  readonly KnowledgeIndex: KnowledgeIndex;
 
   /**
    * Whether this process is a background sub-agent (spawned by another matbot, not a top-level
@@ -192,7 +229,7 @@ export interface MatbotServices {
  * directing callers to `register()` (the swap-aware write path). Applied to both the host services object
  * and the per-plugin scoped object, so plugins see the same surface the host does.
  */
-export function unifyServices(services: MatbotServices): MatbotServices {
+export function unifyServices(services: MatbotMachine): MatbotMachine {
   return new Proxy(services, {
     get(target, key, receiver) {
       if (Reflect.has(target, key)) return Reflect.get(target, key, receiver);
@@ -251,8 +288,126 @@ export function makeSwappable<T extends object>(initial: T): [T, SwapFn<T>] {
   return [forwardingProxy<T>(() => current), (next: T) => { current = next; }];
 }
 
+// ── Mount table ─────────────────────────────────────────────────────────────────
+
+/** The machine with one registry key narrowed to present — what a keyed mount handler receives. */
+export type MountedMachine<K extends keyof MatbotServices> =
+  MatbotMachine & { readonly [P in K]-?: NonNullable<MatbotServices[P]> };
+
+export interface MountConsumeOptions<K extends keyof MatbotServices> {
+  /** The registry service whose mount transitions this subscription tracks. */
+  readonly key:        K;
+  /** Fire `handler` once on the next microtask against the *current* machine if `key` is present now
+   *  (then on each later remount). Off by default — a cacher that did its initial load in setup() wants
+   *  only future transitions; a deferred dependency wants the latch. */
+  readonly replay?:    boolean;
+  /** Ends the subscription (the consumer's own teardown). */
+  readonly signal?:    AbortSignal;
+  /** The *dependency's* teardown: fired when `key` is committed-unloaded (removed and not replaced by
+   *  the quiescent edge) while this consumer lives on. The stream continues — a later remount re-fires
+   *  `handler`. Drop any captured ref to the gone service here. */
+  readonly onUnmount?: (machine: MatbotMachine) => void | Promise<void>;
+}
+
+/** The mount-table consumer facet exposed on {@link MatbotRuntime.mounted}. */
+export interface Mounted {
+  consume<K extends keyof MatbotServices>(
+    options: MountConsumeOptions<K>,
+    handler: (machine: MountedMachine<K>) => void | Promise<void>,
+  ): void;
+}
+
+/** The host-side mount table: {@link Mounted} for plugins, plus the producer half the host drives from
+ *  its register/unregister and quiescent-edge flush. */
+export interface MountTable {
+  readonly mounted: Mounted;
+  /** Record that a key's presence may have changed since the last edge (called by register/unregister). */
+  markDirty(key: keyof MatbotServices): void;
+  /** At a quiescent edge, compute each dirty key's net presence transition and multicast it. */
+  flush(): void;
+}
+
+interface MountInterest {
+  readonly handler:   (machine: MatbotMachine) => void | Promise<void>;
+  readonly onUnmount: ((machine: MatbotMachine) => void | Promise<void>) | undefined;
+  readonly signal:    AbortSignal | undefined;
+}
+
+function reportMountHandlerError(e: unknown): void {
+  console.error('[matbot] mounted handler threw:', e instanceof Error ? e.message : e);
+}
+
 /**
- * Build the one-message CompletionRequest for a {@link MatbotServices.singleTurn} call, hiding the
+ * Build a {@link MountTable} over a lazily-read machine. Notifications batch to the quiescent edge
+ * ({@link flush}), where each dirty key's net presence (absent→present = mount, present→present =
+ * remount, present→absent = committed unload) is multicast to that key's subscribers. The clock holds
+ * the last-committed presence per key, so a reload collapses to one remount and a committed unload is
+ * well-defined. Presence is read by member access on the unified machine, which resolves both the core
+ * getters (StorageBackend/Vault/KnowledgeIndex) and the registry-backed augmented keys.
+ */
+export function createMountTable(getMachine: () => MatbotMachine): MountTable {
+  const interests = new Map<string, Set<MountInterest>>();
+  const committed = new Map<string, boolean>();   // last-committed presence per key (the clock)
+  const dirty     = new Set<string>();
+
+  const present = (key: string): boolean => (getMachine() as unknown as Record<string, unknown>)[key] !== undefined;
+
+  const run = (fn: (machine: MatbotMachine) => void | Promise<void>, machine: MatbotMachine): void => {
+    try {
+      const r = fn(machine);
+      if (r instanceof Promise) r.catch(reportMountHandlerError);
+    } catch (e) { reportMountHandlerError(e); }
+  };
+
+  const mounted: Mounted = {
+    consume(options, handler) {
+      const { key, replay, signal, onUnmount } = options;
+      if (signal?.aborted === true) return;
+      const interest: MountInterest = {
+        handler:   handler as MountInterest['handler'],
+        onUnmount: onUnmount as MountInterest['onUnmount'],
+        signal,
+      };
+      let set = interests.get(key);
+      if (set === undefined) { set = new Set(); interests.set(key, set); }
+      const subs = set;
+      subs.add(interest);
+      signal?.addEventListener('abort', () => { subs.delete(interest); }, { once: true });
+      // Replay on the next microtask (async-iterator parity — never inline in the consume() frame).
+      // Reads the live machine, not `committed`: replay is "current state", separate from the clock.
+      if (replay === true) queueMicrotask(() => {
+        if (signal?.aborted === true) return;
+        if (present(key as string)) run(interest.handler, getMachine());
+      });
+    },
+  };
+
+  return {
+    mounted,
+    markDirty(key) { dirty.add(key as string); },
+    flush() {
+      if (dirty.size === 0) return;
+      const keys = [...dirty];
+      dirty.clear();
+      const machine = getMachine();
+      for (const key of keys) {
+        const before = committed.get(key) ?? false;
+        const after  = present(key);
+        committed.set(key, after);
+        const subs = interests.get(key);
+        if (subs === undefined) continue;
+        if (after) {
+          for (const i of subs) run(i.handler, machine);                                  // mount / remount
+        } else if (before) {
+          for (const i of subs) if (i.onUnmount !== undefined) run(i.onUnmount, machine);  // committed unload
+        }
+      }
+    },
+  };
+}
+
+/**
+ * Build the one-message CompletionRequest for a {@link MatbotRuntime.singleTurn} call, hiding the
  * otherwise-mandatory and meaningless Message fields (id/traceId/createdAt) an out-of-band one-shot
  * has no use for. Pure; the host invokes its own complete() with the result.
  */
@@ -311,14 +466,18 @@ export interface MatbotPluginSpec {
   readonly storage?:    Record<string, StoreFactory>;
   readonly tools?:      readonly Tool[];
   /**
-   * When present, the runtime calls open(dotData) before creating the services
-   * object and uses the returned backend for all Store and FileStore creation.
-   * The plugin must be listed before any plugin whose setup() calls createStore.
+   * When present, the runtime calls open(dotData) before creating the services object and uses the
+   * returned backend for all Store and FileStore creation. The plugin must be listed before any plugin
+   * whose setup() calls createStore. The host treats a boot-opened backend as owned by this plugin (as
+   * if it had `register('StorageBackend', …)` in setup), so unloading the plugin reverts storage to the
+   * host's own base and closes the backend. A backend swapped in *later* via register() does not take
+   * effect immediately — see {@link MatbotRuntime.mounted}: it lands at the next quiescent edge so it
+   * never splits a turn's compare-and-swap across two backends.
    */
   readonly storageBackend?: {
     open(dotData: string): Promise<StorageBackend>;
   };
-  setup?(services: MatbotServices): Promise<void>;
+  setup?(services: MatbotMachine): Promise<void>;
   teardown?(): Promise<void>;
   installationMessage?(): Promise<string>;
 }

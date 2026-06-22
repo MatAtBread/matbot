@@ -1,4 +1,4 @@
-import type { MatbotServices, PluginSettings } from '@matatbread/matbot-plugin-api';
+import type { MatbotMachine, PluginSettings } from '@matatbread/matbot-plugin-api';
 import type {
   MCPClient, MCPRemoteConfig, MCPToolDef, MCPPersistedRemote, MCPRemoteServerInfo, McpRemoteService,
 } from './types.js';
@@ -16,10 +16,10 @@ const PERSIST_KEY = 'servers';
  */
 export class RemoteMcpManager implements McpRemoteService {
   private readonly active = new Map<string, ActiveRemote>();
-  private readonly services: MatbotServices;
+  private readonly services: MatbotMachine;
   private readonly settings: PluginSettings;
 
-  constructor(services: MatbotServices, settings: PluginSettings) {
+  constructor(services: MatbotMachine, settings: PluginSettings) {
     this.services = services;
     this.settings = settings;
   }

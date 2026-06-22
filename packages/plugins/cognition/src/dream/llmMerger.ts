@@ -18,7 +18,7 @@
  * inconsistency the deterministic spine is meant to prevent.
  */
 
-import type { MatbotServices } from '@matatbread/matbot-plugin-api';
+import type { MatbotMachine } from '@matatbread/matbot-plugin-api';
 import type { Merger } from './ranker.js';
 import type { MergeResult, RememberedFact } from './types.js';
 
@@ -86,7 +86,7 @@ function parseMergeResult(raw: string): MergeResult | undefined {
 }
 
 /** Construct an LLM-backed merger bound to a configured provider name. */
-export function createLlmMerger(services: MatbotServices, provider: string): Merger {
+export function createLlmMerger(services: MatbotMachine, provider: string): Merger {
   return {
     async merge(
       skillName:    string,

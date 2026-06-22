@@ -1,7 +1,7 @@
 import type { Tool, ToolRegistry, Hook, PromptFn, FormField, FrontendInfo, PluginRegistryEvent } from './types.js';
 import { createBroadcaster } from '@matatbread/matbot-plugin-api';
 import type {
-  MatbotPlugin, MatbotServices,
+  MatbotPlugin, MatbotMachine, Mounted,
   ProviderAdapterFactory, StoreFactory,
 } from './plugin.js';
 import { PLUGIN_API_VERSION, unifyServices } from './plugin.js';
@@ -18,7 +18,7 @@ const state = {
   storage:         new Map<string, StoreFactory>(),
   toolRegistry:    undefined as ToolRegistry | undefined,
   frontendPlugins:  new Map<string, FrontendInfo>(),  // pluginName → info, written by services.registerFrontend()
-  serviceKeys:     new Map<string, string[]>(),  // pluginName → MatbotServices keys it registered
+  serviceKeys:     new Map<string, string[]>(),  // pluginName → MatbotMachine keys it registered
   hookPlugins:        new Set<string>(),         // plugins that registered at least one hook
   systemContextPlugins: new Set<string>(),       // plugins that registered a system-context contributor
   overwriteAllTools: undefined as boolean | undefined,  // persisted "overwrite on collision, this install" choice, loaded lazily
@@ -51,7 +51,7 @@ const OVERWRITE_TOOLS_KEY = 'overwriteToolsOnCollision';
  * the default — preserving matbot's historical last-registration-wins behaviour.
  */
 async function resolveToolCollision(
-  services:      MatbotServices,
+  services:      MatbotMachine,
   toolName:      string,
   existingOwner: string | undefined,
   incomingOwner: string,
@@ -170,9 +170,21 @@ export function getRegisteredFrontendPlugins(): ReadonlyMap<string, FrontendInfo
   return state.frontendPlugins;
 }
 
-/** MatbotServices keys a plugin registered at runtime via services.register() (e.g. 'KnowledgeIndex'). */
+/** MatbotMachine keys a plugin registered at runtime via services.register() (e.g. 'KnowledgeIndex'). */
 export function getRegisteredServiceKeys(pluginName: string): readonly string[] {
   return state.serviceKeys.get(pluginName) ?? [];
+}
+
+/**
+ * Attribute a service key to a plugin out of band. The host uses this for a backend it opened at boot
+ * *before* the registry knew the plugin's name — a storageBackend manifest pre-scan bypasses the scoped
+ * register() that would normally record the key. Recording it makes the boot-opened backend unload-equal
+ * to a runtime register(): unloadPlugin() then calls unregister() for it, reverting to the host base.
+ */
+export function recordServiceKey(pluginName: string, key: string): void {
+  const keys = state.serviceKeys.get(pluginName) ?? [];
+  if (!keys.includes(key)) keys.push(key);
+  state.serviceKeys.set(pluginName, keys);
 }
 
 /** Plugins that registered at least one hook in setup(). */
@@ -205,7 +217,7 @@ export function getSpecifierForPlugin(pluginName: string): string | undefined {
  * tool whose name a *different* plugin already owns asks the user whether to overwrite. Absent
  * (non-interactive host), collisions overwrite silently — the historical default.
  */
-export async function setupPlugin(plugin: MatbotPlugin, services: MatbotServices, prompt?: PromptFn): Promise<void> {
+export async function setupPlugin(plugin: MatbotPlugin, services: MatbotMachine, prompt?: PromptFn): Promise<void> {
   state.toolRegistry ??= services.tools;
 
   // Single choke point for every plugin tool registration (static `plugin.tools` and in-setup
@@ -226,8 +238,25 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotServices
   // own settings — there is no way to name another's.
   const ownSettings = makePluginSettings(services.createStore<SettingsDoc>('settings'), plugin.name);
 
-  const scopedServices: MatbotServices = unifyServices({
+  // Per-plugin `mounted`: a thin adapter over the host mount table that delivers *this plugin's* scoped
+  // machine (and scoped onUnmount) to handlers. The stable `scoped` object reads through the host's
+  // re-pointing proxies/registry, so `scoped[key]` is the host's live service by the time a transition
+  // fires. Forward-referenced via `scoped`, assigned below; consume() only runs after setup.
+  let scoped: MatbotMachine;
+  const scopedMounted: Mounted = {
+    consume(options, handler) {
+      // Forward to the host mount table but deliver *this plugin's* scoped machine — it reads through
+      // the same proxies/registry, so scoped[key] is the host's live service. onUnmount is scoped too.
+      const forwarded = options.onUnmount !== undefined
+        ? { ...options, onUnmount: () => options.onUnmount!(scoped) }
+        : options;
+      services.mounted.consume(forwarded, () => handler(scoped as never));
+    },
+  };
+
+  scoped = unifyServices({
     ...services,
+    mounted: scopedMounted,
     settings: () => ownSettings,
     self: {
       name:      plugin.name,
@@ -270,11 +299,11 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotServices
   for (const tool of plugin.tools ?? []) {
     await registerTool(tool);
   }
-  await plugin.setup?.(scopedServices);
+  await plugin.setup?.(scoped);
 }
 
 /** Tear down and fully unload a single plugin, removing all its registered contributions. */
-export async function unloadPlugin(pluginName: string, services: MatbotServices): Promise<boolean> {
+export async function unloadPlugin(pluginName: string, services: MatbotMachine): Promise<boolean> {
   console.warn(`[matbot] Unloading plugin "${pluginName}"`);
   const idx = state.plugins.findIndex(p => p.name === pluginName);
   if (idx === -1) return false;

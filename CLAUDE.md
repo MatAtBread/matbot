@@ -31,13 +31,12 @@ Secrets and configuration go through the `Vault` (`${NAME}` placeholders) or plu
 packages/
   core/
     runner/        — agentic loop, hook dispatch, plugin loader
-    plugin-api/    — MatbotPlugin, MatbotServices, shared types
+    plugin-api/    — MatbotPlugin, MatbotServices/MatbotRuntime/MatbotMachine, shared types
     config/        — YAML + .env loading
     security/      — VaultImpl, Principal origin
     knowledge/     — LookupKnowledgeIndex (default in-memory)
     storage/
-      _base/       — filter/sort engine
-      filesystem/  — FilesystemStore<T> (Node, CAS-safe)
+      _base/       — filter/sort engine (translatable StoreQuery)
     providers/
       _base/       — SSE parser, HTTP helpers
     tool-plugin/   — built-in provider management tools
@@ -60,6 +59,10 @@ packages/
       openai-compat/— OpenAI-compatible adapter
     tools/
       bash/, docker-bash/, http/, schedule/, workspace/
+    storage/
+      filesystem/    — FilesystemStore (Node, CAS-safe); CLI boot default
+      sqlite/        — SQLite StorageBackend (WAL)
+      google-drive/  — Drive-backed StorageBackend (browser)
 apps/
   cli/             — interactive REPL + single-turn
   web-bundle/      — browser-only matbot.html
@@ -115,7 +118,7 @@ All runtime state under `.data/` **next to `matbot.yaml`**, never in source:
 
 ## Service registry
 
-`MatbotServices` is the runtime environment passed to every plugin's `setup()`. Core members (hooks, tools, complete, settings, vault, sessions) are always present. Optional services advertised with `register` and consumed as **members** — one access surface:
+`MatbotMachine` is the runtime environment passed to every plugin's `setup()` — the intersection `MatbotServices & MatbotRuntime`. **`MatbotRuntime`** is the fixed plumbing (hooks, tools, complete, settings, sessions, createStore, and the registry API itself): always present, never registerable. **`MatbotServices`** is the registry bucket — the swappable, registerable services keyed by interface name (`StorageBackend?`, `Vault`, `KnowledgeIndex`, plus whatever plugins augment in). It alone is the `keyof` domain of `register`/`get` and the surface third-party plugins augment, so `register('hooks', …)` is a *type error*. Optional services are advertised with `register` and consumed as **members** — one access surface:
 
 ```ts
 // Providing:
@@ -142,7 +145,30 @@ type SessionStore = Store<Session>;
 type ScratchStore = Store<Session>;
 ```
 
-**Swappable core members** (`StorageBackend`, `KnowledgeIndex`, `Vault`) use `register` to swap live impls behind capture-safe forwarding proxies. A captured reference keeps resolving to the current impl.
+**Swappable core members** (`StorageBackend`, `KnowledgeIndex`, `Vault`) use `register` to swap live impls behind capture-safe forwarding proxies. A captured reference keeps resolving to the current impl. On `unregister` (i.e. when the providing plugin is unloaded) a swap-member **reverts to the host's captured boot default** rather than dangling on the gone impl — the app decides its own base services (the CLI: filesystem or in-memory; the browser: OPFS), and the registry only remembers and restores them. The host's boot default is captured **before** any storage-plugin pre-scan, so a config-supplied backend never poses as the base; a pre-scanned backend is recorded as plugin-owned, so unloading its plugin reverts to that base.
+
+### Context switch & the deferred StorageBackend swap
+
+`StorageBackend` is the system of record: swapping it under a running turn would split a compare-and-swap across two backends. So `register('StorageBackend', …)` (and its `unregister` revert) is **deferred**, not immediate — it stages a last-write-wins pending slot and applies it at the next **quiescent edge** (no turn/request/message in flight). The other swap-members (`KnowledgeIndex`, `Vault`) repoint immediately.
+
+A **context switch** is the machine analogue of an OS one — "page in pending machine state, then set the owner." `runAs(principal, fn)` is the bare *set-the-owner* primitive (the principal carrier stays a pure identity primitive); `contextSwitch(principal, fn)` layers the machine half on top, running host-registered flushers (`onContextQuiesce`) at depth-0 edges. The principal scope counter *is* the quiescence signal — the two concerns share call sites, not code. **The pump turn** (the CAS transactional unit) switches context; web/telegram entry points stay `runAs` (their request/message scope spans a long-lived SSE stream, so they must not count as a busy edge).
+
+### The mount table (`services.mounted`)
+
+A plugin reacts to a registry service (re)mounting or being unloaded through **`services.mounted`** — a `Mounted` whose one method, `consume({ key, replay?, signal?, onUnmount? }, handler)`, is keyed on the service it cares about. The host batches mount notifications to the **quiescent edge**: `register`/`unregister` mark a key dirty; the edge computes each key's net presence transition and **multicasts** to that key's subscribers. A reload (unregister+register before the edge) collapses to a single **remount**; an unregister not replaced by the edge is a **committed unload**, delivered to `onUnmount`. The contract guarantees only *eventual, ordered* delivery per key — **it says nothing about timing** (a register is not observably inline, nor pinned to a turn boundary). `StorageBackend`'s swap also lands at the edge (CAS coherence); other keys repoint immediately but still notify at the edge.
+
+**Litmus — does a plugin need it?** Only if its `setup()` reads another service's *current state* to build cached/derived state. A pure map (no setup data; data arrives later as a tool call or hook) resolves its dependency per-invocation through the proxy/member and subscribes to nothing.
+
+```ts
+// cache the backend's documents; rebuild on every swap (initial load was in setup(), so no replay)
+await manager.load();
+services.mounted.consume({ key: 'StorageBackend', signal: manager.signal }, () => void manager.load());
+
+// depend on a peer service that may arrive later; seed now if present (replay) and on each remount
+services.mounted.consume({ key: 'SkillManager', replay: true, signal }, m => seed(m));   // m.SkillManager narrowed present
+```
+
+`replay` fires the handler on the next microtask against the current machine if the key is present (the deferred-dependency latch); handlers must be idempotent (a remount re-fires). A cacher that reads straight through a store proxy on each call (e.g. `persist-ki-bge`) needs no subscription — the proxy already follows the swap.
 
 ### Discovery vs. direct dependency
 

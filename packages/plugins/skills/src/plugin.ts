@@ -1,12 +1,12 @@
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
-import type { MatbotPluginSpec, MatbotServices, Store } from '@matatbread/matbot-plugin-api';
+import type { MatbotPluginSpec, MatbotMachine, Store } from '@matatbread/matbot-plugin-api';
 import { SkillManager } from './manager.js';
 import { createSkillTool, createSkillsConfigTool } from './tools.js';
 import type { SkillDoc } from './types.js';
 
 /** One-shot reachability probe for a pinned provider, used only when forming installationMessage
  *  (install/reload) — never on the hot path. Fails soft: a thrown error becomes `{ ok: false }`. */
-async function testProvider(services: MatbotServices, provider: string): Promise<{ ok: boolean; error?: string }> {
+async function testProvider(services: MatbotMachine, provider: string): Promise<{ ok: boolean; error?: string }> {
   try {
     await services.singleTurn({ provider, prompt: 'Reply with "ok".', signal: AbortSignal.timeout(15000) });
     return { ok: true };
@@ -35,7 +35,7 @@ declare module '@matatbread/matbot-plugin-api' {
  * Returns the manager so a specialization (e.g. the node plugin) can attach a filesystem watch.
  * Uses only web-platform APIs.
  */
-export async function setupSkills(services: MatbotServices): Promise<SkillManager> {
+export async function setupSkills(services: MatbotMachine): Promise<SkillManager> {
   // Idempotency keyed on the registered service entry, not a module-scoped flag: a re-import would
   // reset such a flag, but the registry persists across this process. So a second setupSkills (base
   // + node both configured, or any re-entry) is a benign no-op that hands back the live manager.
@@ -43,7 +43,11 @@ export async function setupSkills(services: MatbotServices): Promise<SkillManage
 
   const store = services.createStore<SkillDoc>('skills') as Store<SkillDoc>;
   const manager = new SkillManager(store, services);
-  await manager.init();
+  await manager.load();
+  // Re-read after a deferred StorageBackend swap lands: the new backend's `skills` namespace replaces
+  // the old in-memory set (and re-indexes). No `replay` — the initial load is the boot load above; this
+  // reacts only to future swaps. Ends with the manager (teardown aborts manager.signal).
+  services.mounted.consume({ key: 'StorageBackend', signal: manager.signal }, () => void manager.load());
   await services.register('SkillManager', manager);
 
   services.tools.register(createSkillTool(manager));
@@ -76,7 +80,7 @@ export async function setupSkills(services: MatbotServices): Promise<SkillManage
  */
 export function createSkillsPlugin(): MatbotPluginSpec {
   let manager:  SkillManager   | undefined;
-  let captured: MatbotServices | undefined;   // captured in setup() so installationMessage() can probe
+  let captured: MatbotMachine | undefined;   // captured in setup() so installationMessage() can probe
 
   const base =
     'Skills are active (skill_action). A skill is loaded on demand by name; to make one apply ' +

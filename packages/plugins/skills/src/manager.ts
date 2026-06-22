@@ -1,4 +1,4 @@
-import type { Store, KnowledgeIndex, KnowledgeEntry, MatbotServices } from '@matatbread/matbot-plugin-api';
+import type { Store, KnowledgeIndex, KnowledgeEntry, MatbotMachine } from '@matatbread/matbot-plugin-api';
 import { createBroadcaster } from '@matatbread/matbot-plugin-api';
 import type { SkillDoc, SkillEvent } from './types.js';
 
@@ -40,7 +40,7 @@ const ANALYSIS_TIMEOUT_MS = 6000_000;
 
 async function analyseSkill(
   doc:      SkillDoc,
-  services: MatbotServices,
+  services: MatbotMachine,
   provider: string,
   signal?:  AbortSignal,
 ): Promise<SkillAnalysis | undefined> {
@@ -96,7 +96,7 @@ function buildEntry(doc: SkillDoc, a: SkillAnalysis, contentHash: string): Knowl
  */
 export async function skillToKnowledgeEntry(
   doc:      SkillDoc,
-  services: MatbotServices,
+  services: MatbotMachine,
   provider: string,
   signal?:  AbortSignal,
 ): Promise<{ entry: KnowledgeEntry; cache?: SkillKnowledge }> {
@@ -137,17 +137,23 @@ export class SkillManager {
   // write, the skill being deleted, or teardown. Keeps it from outliving the skill or the process.
   private readonly inflight = new Map<string, AbortController>();
   private readonly store:    Store<SkillDoc>;
-  private readonly services: MatbotServices;
+  private readonly services: MatbotMachine;
   private readonly events    = createBroadcaster<SkillEvent>();
+  // Aborts on teardown (clear()), ending the mounted-swap subscription set up in setupSkills.
+  private readonly lifecycle = new AbortController();
 
   // Read live so a runtime register('KnowledgeIndex', …) swap is honoured (the member is a
   // capture-safe forwarding proxy, but resolving it per call keeps that guarantee explicit).
   private get knowledge(): KnowledgeIndex { return this.services.KnowledgeIndex; }
 
-  constructor(store: Store<SkillDoc>, services: MatbotServices) {
+  constructor(store: Store<SkillDoc>, services: MatbotMachine) {
     this.store    = store;
     this.services = services;
   }
+
+  /** Ends with the manager (teardown). Hand to `services.mounted.consume` so a StorageBackend swap
+   *  re-reads the new backend's skills, and the loop stops when the plugin unloads. */
+  get signal(): AbortSignal { return this.lifecycle.signal; }
 
   // The provider used to derive a skill's catalogue summary / knowledge analysis. The user pins one
   // via the `analysisProvider` setting (skills_config); absent (or stale), it falls back to the first
@@ -160,8 +166,14 @@ export class SkillManager {
     return [...this.services.providers.keys()][0] ?? '';
   }
 
-  /** Load persisted skills into memory and index each one. */
-  async init(): Promise<void> {
+  /** (Re)load persisted skills into memory and index each one. Re-runnable: the initial boot load and
+   *  every later StorageBackend swap funnel through here. Reading `this.store` (a swap-following proxy)
+   *  always hits the live backend, so a swap re-reads the new backend's skills. Clears first — old
+   *  in-memory skills and their in-flight analyses belong to the displaced backend. */
+  async load(): Promise<void> {
+    for (const ac of this.inflight.values()) ac.abort();
+    this.inflight.clear();
+    this.skills.clear();
     const { items } = await this.store.query({});
     for (const doc of items) this.commit(doc, true);
   }
@@ -261,6 +273,7 @@ export class SkillManager {
   }
 
   clear(): void {
+    this.lifecycle.abort();                                // end the mounted-swap subscription
     for (const ac of this.inflight.values()) ac.abort();   // cancel detached analyses on teardown
     this.inflight.clear();
     this.skills.clear();
