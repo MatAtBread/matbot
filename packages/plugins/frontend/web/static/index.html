@@ -446,7 +446,7 @@
     #skill-trigger-list { flex: 1; min-height: 0; overflow-y: auto; }
     #skill-trigger-add { align-self: flex-start; margin-top: 10px; }
     #skill-trigger-list:empty::after {
-      content: 'No triggers. Most skills need none — search surfaces them by content.';
+      content: 'No trigger conditions. Most skills need none — search surfaces them by content. Add one to load this skill when it matches.';
       color: #9ca3af;
       font-size: 0.82em;
     }
@@ -456,7 +456,7 @@
       align-items: flex-start;
       margin-bottom: 10px;
     }
-    .trigger-row .trigger-phase {
+    .trigger-row .trigger-kind {
       flex: 0 0 84px;
       font-family: inherit;
       font-size: 0.82em;
@@ -477,7 +477,7 @@
       border-radius: 6px;
       color: #1f2937;
     }
-    .trigger-row .trigger-phase:disabled,
+    .trigger-row .trigger-kind:disabled,
     .trigger-row .trigger-text:disabled {
       background: #f9fafb;
       color: #4b5563;
@@ -537,6 +537,17 @@
       line-height: 1.5;
       padding: 4px 0;
     }
+    .meta-system {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+      font-size: 0.9em;
+      font-weight: 500;
+      color: #374151;
+      user-select: none;
+    }
+    .meta-system input { cursor: pointer; }
     #skill-editor-text {
       flex: 1;
       min-height: 0;
@@ -663,7 +674,7 @@
 
     /* ── Message types ─────────────────────────────────────────── */
 
-    .message { max-width: min(700px, 95%); }
+    .message { max-width: min(1000px, 90%); }
 
     /* User: right-aligned dark bubble */
     .message.user {
@@ -733,8 +744,14 @@
       font-style: normal;
     }
 
-    /* Assistant: left-aligned, no background */
-    .message.assistant { align-self: flex-start; }
+    /* Assistant: left-aligned */
+    .message.assistant {
+      align-self: flex-start;
+      background: #0044ff08;
+      border-radius: 8px 8px 8px 0px;
+      padding: 04px;
+      border: 1px solid #ebf0ff;
+    }
 
     /* Marker: centered cross-thread link notice */
     .marker-note {
@@ -871,6 +888,17 @@
       color: #9ca3af;
       font-style: italic;
       margin-bottom: 6px;
+    }
+
+    /* Retraction marker (renderMarker): reuses the thinking-block look. These hooks are intentionally
+       near-empty — a place to style the retracted-response block distinctly from thinking when wanted.
+       `.retraction` is the assistant-aligned wrapper; `.retraction-block` is the <details>. The inert
+       custom property is just a placeholder so the ruleset isn't empty (no rendering effect). */
+    .retraction       { --retraction-tweak: 0; }
+    .retraction-block { --retraction-tweak: 0; }
+    .retraction-block > div {
+      text-decoration: line-through;
+      opacity: 0.6;
     }
 
     /* ── Tool blocks ───────────────────────────────────────────── */
@@ -1623,7 +1651,7 @@
         </div>
         <div id="skill-editor-pane-triggers" class="skill-pane">
           <div id="skill-trigger-list"></div>
-          <button id="skill-trigger-add" class="skill-editor-btn">+ Add trigger</button>
+          <button id="skill-trigger-add" class="skill-editor-btn">+ Add condition</button>
         </div>
         <div id="skill-editor-pane-metadata" class="skill-pane">
           <div id="skill-metadata"></div>

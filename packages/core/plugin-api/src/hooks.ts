@@ -88,22 +88,47 @@ export class HookRegistry {
 
   // screen folds across hooks: each sees the session as shaped so far, accumulates ephemeral, and
   // the first `abort` short-circuits (the partial session is returned so the caller can persist it).
-  async runScreen(ctx: Omit<ScreenContext, 'removeHook'>): Promise<{ session: Session; ephemeral: MessageContent[]; markers: MessageContent[]; abort?: string }> {
+  async runScreen(ctx: Omit<ScreenContext, 'removeHook'>): Promise<{ session: Session; ephemeral: MessageContent[]; durable: MessageContent[]; markers: MessageContent[]; abort?: string }> {
     let session = ctx.session;
     const ephemeral: MessageContent[] = [];
+    // Handler-returned markers: appended to the session here (so they persist) and accumulated so the
+    // runner can also emit them live — keeping a live draw and a reload identical.
+    const handlerMarkers: MessageContent[] = [];
+    const appendMarkers = (blocks: MessageContent[]): void => {
+      handlerMarkers.push(...blocks);
+      session = { ...session, messages: [...session.messages, {
+        id: crypto.randomUUID(), role: 'marker', createdAt: new Date().toISOString(), traceId: '', content: blocks,
+      }] };
+    };
+    // Handler-returned durable context: folded onto the running turn's user message (the last one
+    // with role 'user'), so it persists into history AND rides every subsequent provider call — the
+    // persisted twin of `ephemeral`. Accumulated too, so the runner emits it live as a `robo-user`
+    // event (keeping live draw and reload identical). No user message ⇒ nothing to fold onto, so the
+    // blocks are dropped rather than orphaned (a screen hook only runs when a turn is being submitted,
+    // so a user message is present in practice; this is defensive).
+    const durable: MessageContent[] = [];
+    const foldDurable = (blocks: MessageContent[]): void => {
+      const idx = session.messages.findLastIndex(m => m.role === 'user');
+      if (idx < 0) return;
+      durable.push(...blocks);
+      session = { ...session, messages: session.messages.map((m, i) =>
+        i === idx ? { ...m, content: [...m.content, ...blocks] } : m) };
+    };
     for (const hook of this.hooks.get('screen') ?? []) {
       if (hook.on !== 'screen') continue;
       const r = await this.invoke(hook, () => hook.handler({ ...ctx, session, removeHook: () => this.removeOne('screen', hook) }));
       if (!r) continue;
-      if (r.session)   session = r.session;
-      if (r.ephemeral) ephemeral.push(...r.ephemeral);
+      if (r.session)                     session = r.session;
+      if (r.ephemeral)                   ephemeral.push(...r.ephemeral);
+      if (r.durable && r.durable.length) foldDurable(r.durable);
+      if (r.markers && r.markers.length) appendMarkers(r.markers);
       if (r.abort) {
         const drained = this.drainFailureMarkers(session);
-        return { session: drained.session, ephemeral, markers: drained.markers, abort: r.abort };
+        return { session: drained.session, ephemeral, durable, markers: [...handlerMarkers, ...drained.markers], abort: r.abort };
       }
     }
     const drained = this.drainFailureMarkers(session);
-    return { session: drained.session, ephemeral, markers: drained.markers };
+    return { session: drained.session, ephemeral, durable, markers: [...handlerMarkers, ...drained.markers] };
   }
 
   // contribute folds the outgoing array through each hook — a pure transform pipeline; the stored
@@ -140,14 +165,21 @@ export class HookRegistry {
     return result;
   }
 
-  // followup runs every hook and collects their resubmissions (each becomes its own head-enqueued turn).
-  async runFollowup(ctx: Omit<FollowupContext, 'removeHook'>): Promise<MessageContent[][]> {
+  // followup runs every hook and collects their resubmissions (each becomes its own head-enqueued
+  // turn), any durable markers (appended to the committed session by the pump), and any
+  // retract-and-rerun requests. A turn can be popped only once, so multiple hooks' retraction
+  // contexts merge into a single redo (in practice only one fires); `retract` is omitted when none did.
+  async runFollowup(ctx: Omit<FollowupContext, 'removeHook'>): Promise<{ resubmits: MessageContent[][]; markers: MessageContent[]; retract?: { context: MessageContent[] } }> {
     const resubmits: MessageContent[][] = [];
+    const markers:   MessageContent[]   = [];
+    const retract:   MessageContent[]   = [];
     for (const hook of this.hooks.get('followup') ?? []) {
       if (hook.on !== 'followup') continue;
       const r = await this.invoke(hook, () => hook.handler({ ...ctx, removeHook: () => this.removeOne('followup', hook) }));
-      if (r?.resubmit) resubmits.push(r.resubmit.content);
+      if (r?.resubmit)        resubmits.push(r.resubmit.content);
+      if (r?.retractAndRerun) retract.push(...r.retractAndRerun.context);
+      if (r?.markers)         markers.push(...r.markers);
     }
-    return resubmits;
+    return { resubmits, markers, ...(retract.length > 0 ? { retract: { context: retract } } : {}) };
   }
 }

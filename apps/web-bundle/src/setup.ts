@@ -16,6 +16,9 @@ export interface ProviderDraft {
   endpoint: string;
   model:    string;
   apiKey:   string;
+  /** Generation parameters (maxTokens, temperature, thinking, …) — wizard never sets this; the
+   *  `provider` tool's `add` action does, mirroring the node tool's `parameters` input. */
+  parameters?: Record<string, unknown>;
 }
 
 const CSS = `

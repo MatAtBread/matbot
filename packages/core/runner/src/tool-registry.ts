@@ -1,19 +1,26 @@
-import type { Tool, ToolRegistry } from './types.js';
+import type { Tool, ToolRegistry, ToolRegistryEvent } from './types.js';
+import { createBroadcaster } from '@matatbread/matbot-plugin-api';
 
 export class ToolRegistryImpl implements ToolRegistry {
   private readonly tools = new Map<string, Tool>();
+  private readonly events = createBroadcaster<ToolRegistryEvent>();
+
+  constructor(initial?: Iterable<Tool>) {
+    if (initial !== undefined) for (const tool of initial) this.tools.set(tool.name, tool);
+  }
 
   register(tool: Tool): void {
     this.tools.set(tool.name, tool);
+    this.events.emit({ type: 'registered', name: tool.name, ...(tool.pluginName !== undefined ? { pluginName: tool.pluginName } : {}) });
   }
 
   remove(name: string): void {
-    this.tools.delete(name);
+    if (this.tools.delete(name)) this.events.emit({ type: 'removed', name });
   }
 
   removeByPlugin(pluginName: string): void {
     for (const [name, tool] of this.tools) {
-      if (tool.pluginName === pluginName) this.tools.delete(name);
+      if (tool.pluginName === pluginName && this.tools.delete(name)) this.events.emit({ type: 'removed', name });
     }
   }
 
@@ -23,5 +30,9 @@ export class ToolRegistryImpl implements ToolRegistry {
 
   list(): Tool[] {
     return [...this.tools.values()];
+  }
+
+  watch(signal?: AbortSignal): AsyncIterable<ToolRegistryEvent> {
+    return this.events.subscribe(signal);
   }
 }

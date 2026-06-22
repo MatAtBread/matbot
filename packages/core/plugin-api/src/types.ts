@@ -211,9 +211,14 @@ export interface RunConfig {
  *
  *   screen      runner, once per turn before the first provider call. The only channel that may
  *               durably mutate history. Returns any of: a replacement `session` (persisted),
- *               turn-scoped `ephemeral` context (prepended to this turn's provider calls, never
- *               persisted), or `abort`. Mix freely. This is where the durable-vs-ephemeral choice
- *               for incoming user input lives.
+ *               turn-scoped `ephemeral` context (appended onto the tail of this turn's outgoing
+ *               messages — the freshest input the model reads — never persisted, and placed at the
+ *               tail rather than a system prefix so a "do X now" directive keeps its salience and
+ *               doesn't bust the cached prefix), `durable` context (the persisted, visible twin of
+ *               `ephemeral`: folded onto this turn's user message as `origin: 'robo'` blocks and
+ *               carried live as a `robo-user` event, so it survives into the next turn's history),
+ *               or `abort`. Mix freely. This is where the durable-vs-ephemeral choice for incoming
+ *               user input lives.
  *   contribute  runner, before *every* provider call. Ephemeral by construction (it re-fires, so a
  *               durable mutation would accumulate). Returns a transformed copy of `outgoing` — the
  *               message array about to be sent — and never touches the stored session. Mind prompt
@@ -228,9 +233,13 @@ export interface RunConfig {
  *               `durationMs`). It owns the LLM-facing + persisted result and the `tool:end` event;
  *               note it does NOT see the live `tool:stdout/stderr` chunks, which stream before the
  *               result exists.
- *   followup    pump, once after a turn commits (post-persist). Read-only. May `resubmit` a robo
- *               follow-up turn (head-enqueued, so it runs next as its own real turn); `resubmitDepth`
- *               is the chain length for the hook's own budget — the runner also hard-caps it.
+ *   followup    pump, once after a turn commits (post-persist). May `resubmit` a robo follow-up turn
+ *               (head-enqueued, so it runs next as its own real turn; `resubmitDepth` is the chain
+ *               length for the hook's own budget — the runner also hard-caps it), `retractAndRerun`
+ *               (pop the committed turn into a marker and re-run the originating user turn with
+ *               ephemeral context — supersede rather than follow), and/or append durable `markers`
+ *               to the committed session (LLM-invisible annotations — the second durable-write point
+ *               after `screen`, safe because it too fires once per turn).
  */
 export type HookPoint = 'screen' | 'contribute' | 'toolcall' | 'toolresult' | 'followup';
 
@@ -238,12 +247,36 @@ export interface ScreenContext {
   session: Session;
   config:  RunConfig;
   signal:  AbortSignal;
+  /** The turn's interactive prompt, when a frontend supplied one (a live user behind this turn).
+   *  A hook that drives an interactive tool (e.g. a trigger invoking `ask_user`) forwards this into
+   *  the tool's context; absent (cron/background/no frontend) the tool gets a rejecting prompt. */
+  prompt?: PromptFn;
   /** Unregister the hook currently running. For one-shot hooks that should fire at most once. */
   removeHook(): void;
 }
 export interface ScreenResult {
   session?:   Session;
+  /** Turn-scoped context appended onto the tail of this turn's outgoing messages (the freshest
+   *  input the model reads), never persisted. At the tail, not a system prefix, so a directive
+   *  keeps its salience and the cached system/history prefix stays stable across turns. */
   ephemeral?: MessageContent[];
+  /**
+   * The persisted, visible twin of `ephemeral`: context that should outlive this turn rather than
+   * inform it once. The runner folds these blocks onto this turn's user message (so they ride into
+   * the stored history and every subsequent provider call) AND carries them live as a `robo-user`
+   * event, so a live draw and a reload render the same thing. They are LLM-visible (unlike
+   * `markers`) and machine-authored, so a caller marks them `origin: 'robo'` for presentation.
+   * Use when a fired hook produces context that genuinely updates the conversation, not a one-shot
+   * corrective for the turn about to run.
+   */
+  durable?:   MessageContent[];
+  /**
+   * Durable `marker` blocks to append to this turn's session (LLM-invisible). The dispatcher both
+   * appends them to the persisted session AND carries them live on the turn's event stream, so a
+   * live draw and a reload render the same thing. Use instead of hand-appending to `session` when
+   * you just want to annotate (e.g. a fired trigger's silent tool recording what it did).
+   */
+  markers?:   MessageContent[];
   abort?:     string;
 }
 
@@ -290,11 +323,39 @@ export interface FollowupContext {
   readonly resubmitDepth: number;
   config:  RunConfig;
   signal:  AbortSignal;
+  /** The turn's interactive prompt, when a frontend supplied one (a live user behind this turn).
+   *  A hook that drives an interactive tool (e.g. a trigger invoking `ask_user` as a proactive
+   *  follow-up question) forwards this into the tool's context; absent (cron/background/no frontend)
+   *  the tool gets a rejecting prompt. Note this prompt fires *post-commit*, out of band from the
+   *  turn's `done`, and blocks the pump until the human answers. */
+  prompt?: PromptFn;
   /** Unregister the hook currently running. For one-shot hooks that should fire at most once. */
   removeHook(): void;
 }
 export interface FollowupResult {
   resubmit?: { content: MessageContent[] };
+  /**
+   * Retract-and-rerun: supersede the just-committed turn instead of following it. The pump pops the
+   * committed turn back to (and excluding) the last user message, stashes the popped content in a
+   * durable retraction marker (LLM-elided like every marker, so a frontend can render it
+   * struck-through and a post-mortem can audit it), then re-runs that same user turn with `context`
+   * injected EPHEMERALLY (tail-folded, never persisted) — agent-phase injection time-shifted onto a
+   * committed turn. This is the inverse of `resubmit`, which leaves the response in place and appends
+   * a new robo turn after it. Self-terminating by design: a well-formed trigger fires on a *curable*
+   * defect that the injected context dissolves on the redo, so it won't re-fire; `resubmitDepth` (a
+   * redo carries parent+1) caps an ill-formed one. `resubmit` and `retractAndRerun` are independent
+   * capabilities — a single turn returning both is not expected, but both head-enqueue if it does.
+   */
+  retractAndRerun?: { context: MessageContent[] };
+  /**
+   * Durable `marker` blocks to append to the just-committed session (LLM-invisible; for tracing /
+   * cross-references). The second durable-write capability after `screen` — safe here for the same
+   * reason: `followup` fires once per turn, so an append can't accumulate the way a per-call channel
+   * would. The pump persists them AND emits them live (post-commit, like a `queued` event) so a live
+   * draw matches a reload. Use for recording what a post-commit reaction (e.g. a fired trigger's
+   * silent tool) actually did.
+   */
+  markers?: MessageContent[];
 }
 
 export type Hook =
@@ -350,6 +411,11 @@ export type ToolEvent =
   | { type: 'progress'; pct: number; message?: string }
   | { type: 'result';   value: unknown }
   | { type: 'file';     handle: FileHandle }
+  // A durable, LLM-invisible annotation the tool emits as it runs (a link, a status, a trace of a
+  // side-effect). Persisted as a `marker`-role message; elided from provider submission like any
+  // marker. Independent of `result` — a tool may emit markers and no result (a silent side-effect,
+  // e.g. a trigger-fired tool), a result and no markers, or both.
+  | { type: 'marker';   creator: string; data: unknown }
   | { type: 'error';    message: string; code?: number; stdout?: string; stderr?: string };
 
 /**
@@ -515,13 +581,24 @@ export type HealthStatus =
 
 // ── Registries ────────────────────────────────────────────────────────────────
 
+export type ToolRegistryEvent =
+  | { type: 'registered'; name: string; pluginName?: string }
+  | { type: 'removed';    name: string };
+
 export interface ToolRegistry {
   register(tool: Tool): void;
   remove(name: string): void;
   resolve(name: string): Tool | null;
   list(): readonly Tool[];
   removeByPlugin(pluginName: string): void;
+  /** Observe tool CRUD as it happens. Read-only — observers cannot veto a registration. One event
+   *  per tool (removeByPlugin emits a `removed` per matched tool). The stream ends when `signal` aborts. */
+  watch(signal?: AbortSignal): AsyncIterable<ToolRegistryEvent>;
 }
+
+export type PluginRegistryEvent =
+  | { type: 'loaded';   name: string }
+  | { type: 'unloaded'; name: string };
 
 // ── Pipeline events ─────────────────────────────────────────────────────────────
 
@@ -554,6 +631,11 @@ export type PipelineEvent =
   // `queued` is the number of submissions ahead of it (0 ⇒ about to run). Emitted live on enqueue
   // and replayed (in queue order) to anyone subscribing mid-flight.
   | { type: 'queued';         content: MessageContent[]; queued: number; concatQueue: boolean; traceId: string; rootTraceId: string }
+  // Machine-authored content folded onto the running turn's user message (a `screen` hook's
+  // `durable` result — e.g. a fired `contextual` trigger), carried live so a frontend draws it
+  // immediately. The blocks are already persisted in that user message (origin: 'robo'); this is
+  // purely the live-delivery channel, so a live draw matches the reload (which splits the user
+  // turn's robo blocks into their own agent-side bubble).
   | { type: 'robo-user';      content: MessageContent[]; traceId: string }
   // Marker blocks appended to the session this turn (e.g. the dispatcher's record of a hook that
   // threw), carried live so a frontend renders them without waiting for a session reload. The blocks

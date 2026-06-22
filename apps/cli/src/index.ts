@@ -7,19 +7,20 @@ import { nodePluginResolver }               from './plugin-resolver.js';
 import type { Principal, ProviderAdapter,
               ProviderConfig, Session,
               Store, StoreQuery, QueryResult, CASResult,
-              Tool, MessageContent, FileStore } from '@matatbread/matbot-core';
+              MessageContent, FileStore } from '@matatbread/matbot-core';
 import { appendMessage, createMessage,
          createSession,
          createSessionRunner,
-         HookRegistry, SystemContextRegistryImpl,
+         HookRegistry, SystemContextRegistryImpl, ToolRegistryImpl,
          resolveProviderFactory,
          teardownPlugins,
          unloadPlugin as unloadPluginFn,
          getPluginNameForSpecifier, getRegisteredPlugins,
          installPrincipalCarrier, enterPrincipal, currentPrincipal,
          unifyServices, forwardingProxy, makeSwappable, singleTurnRequest,
+         createSingleTurnTool,
          MissingSecretError }              from '@matatbread/matbot-core';
-import type { MatbotServices, PluginSettings, ToolRegistry, Vault, SessionRunner,
+import type { MatbotServices, PluginSettings, Vault, SessionRunner,
               MatbotPlugin, StorageBackend, KnowledgeIndex, PromptFn, FormField, SwapFn } from '@matatbread/matbot-core';
 import { systemPrincipal }                 from '@matatbread/matbot-security';
 import { createAlsPrincipalCarrier }       from './principal-als.js';
@@ -393,10 +394,12 @@ async function runTurn(
           break;
         case 'done':        clearThinking(); updated = ev.session; break;
         case 'robo-user': {
+          // Machine-authored context folded onto the user turn by a screen hook (e.g. a fired
+          // `contextual` trigger) — system-supplied, not the user's words, so label it as such.
           const text = ev.content
             .filter((c): c is Extract<MessageContent, { type: 'text' }> => c.type === 'text')
             .map(c => c.text).join('');
-          if (text) write(`you: ${text}\nassistant: `);
+          if (text) write(`[context] ${text}\nassistant: `);
           break;
         }
         case 'aborted': {
@@ -768,19 +771,8 @@ async function main(): Promise<void> {
     activeStorageBackend?.fileStore ?? new FilesystemFileStore(filesDir),
   );
 
-  // toolMap is shared: plugins register into it via services, runSession reads it
-  const toolMap = new Map<string, Tool>(createBuiltinTools().map(t => [t.name, t]));
-  const toolReg: ToolRegistry = {
-    register: (t: Tool) => { toolMap.set(t.name, t); },
-    remove:   (n: string) => { toolMap.delete(n); },
-    resolve:  (n) => toolMap.get(n) ?? null,
-    list:     () => [...toolMap.values()],
-    removeByPlugin: (pluginName: string) => {
-      for (const [name, tool] of toolMap) {
-        if (tool.pluginName === pluginName) toolMap.delete(name);
-      }
-    },
-  };
+  // toolReg is shared: plugins register into it via services, runSession reads it
+  const toolReg = new ToolRegistryImpl(createBuiltinTools());
 
   // hookReg is shared: plugins register hooks via services, runSession fires them
   const hookReg = new HookRegistry();
@@ -971,6 +963,10 @@ async function main(): Promise<void> {
   // their YAML specifiers are recorded — createProviderTool reads getRegisteredPlugins()
   // and pluginNameToOrigPath to build its description.
   toolReg.register(createProviderTool(matbotConfig.providers, pluginNameToOrigPath));
+
+  // single_turn: the model-facing surface of the core singleTurn service. Registered here beside the
+  // other core service-management tools (it needs the live `services` for `singleTurn`/`providers`).
+  toolReg.register(createSingleTurnTool(services));
 
   // ── Server mode ───────────────────────────────────────────────────────────────
 

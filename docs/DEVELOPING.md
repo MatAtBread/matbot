@@ -498,7 +498,7 @@ type Hook =
 
 | Hook | When it fires | What it can do |
 |---|---|---|
-| `screen` | Once per turn, before the first provider call | Mutate the session durably, inject ephemeral context, abort the turn |
+| `screen` | Once per turn, before the first provider call | Mutate the session durably, inject ephemeral context (this turn only) or durable context (folded onto the user turn, persisted + visible, carried live as `robo-user`), abort the turn |
 | `contribute` | Before every provider call | Transform the outgoing messages (ephemeral, never persisted) |
 | `toolcall` | Before each tool runs | Reject or abort the tool call |
 | `toolresult` | After each tool runs | Redact or transform the result; observe for audit |

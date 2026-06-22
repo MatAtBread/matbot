@@ -4,8 +4,8 @@
   "output": "matbot.html",
 
   "assets": {
-    "scaffold": "packages/plugins/frontend/web/src/index.html",
-    "appJs": "packages/plugins/frontend/web/src/app.js"
+    "scaffold": "packages/plugins/frontend/web/static/index.html",
+    "appJs": "packages/plugins/frontend/web/static/app.js"
   },
 
   "plugins": [
@@ -20,6 +20,7 @@
     "packages/plugins/edit-session",
     "packages/plugins/workspace",
     "packages/plugins/rumsfeld",
+    "packages/plugins/triggers",
     "packages/plugins/skills",
     "packages/plugins/mcp-http",
     "packages/plugins/whoami",
@@ -27,7 +28,8 @@
     "packages/plugins/persist-ki-bge",
     "packages/plugins/json-validation",
     "packages/plugins/tool-store",
-    "packages/plugins/cognition"
+    "packages/plugins/cognition",
+    "packages/plugins/storage/google-drive"
   ],
 
   "providers": {},

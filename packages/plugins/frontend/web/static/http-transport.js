@@ -15,6 +15,7 @@
 //   abort(sid)                                     -> Promise<void>
 //   statusEvents(signal)                           -> AsyncIterable<{ sessionId, busy }>
 //   fileEvents(signal)                             -> AsyncIterable<{ namespace, name, size }>
+//   skillEvents(signal)                            -> AsyncIterable<{ type: 'saved'|'deleted', name }>
 //   openFile(namespace, path)                      -> void
 
 (function () {
@@ -74,12 +75,12 @@
     return res.json().catch(() => ({}));
   }
 
-  // One persistent GET /sessions/:id/events carrying ALL turns for the session, demuxed by the
+  // One persistent GET /events/sessions/:id carrying ALL turns for the session, demuxed by the
   // caller. Reconnects with a 1s backoff until `signal` aborts.
   async function* sessionEvents(sid, signal) {
     while (!signal.aborted) {
       try {
-        const res = await fetch('/sessions/' + sid + '/events', { signal });
+        const res = await fetch('/events/sessions/' + sid, { signal });
         if (!res.ok || !res.body) break;
         const reader = res.body.getReader();
         const dec = new TextDecoder();
@@ -113,36 +114,62 @@
     await fetch('/sessions/' + sid + '/abort', { method: 'POST' });
   }
 
-  // EventSource wrapped as an async iterable, with the same 3s reconnect-on-error the UI used inline.
-  // Runs for the page lifetime (the UI never aborts these); `signal` is honoured if provided.
-  function eventStream(url, eventName, signal) {
+  // All global (non-session) event types share ONE EventSource to /events, demuxed by event name and
+  // fanned out to per-event-name subscriber sets. Browsers cap HTTP/1.1 at ~6 sockets per host; a
+  // stream per panel (status/files/tools/plugins/skills) would exhaust that and starve ordinary fetches
+  // (the sidebar load, tool calls). The connection opens on first subscribe and reconnects on error with
+  // a 3s backoff; subscriber sets persist across reconnects, and every name is re-bound onto the new
+  // EventSource, so no listener is dropped.
+  const globalSubs = new Map(); // eventName -> Set<(data) => void>
+  let globalES = null;
+
+  function bindGlobalEvent(es, name) {
+    es.addEventListener(name, e => {
+      const subs = globalSubs.get(name);
+      if (!subs) return;
+      let data; try { data = JSON.parse(e.data); } catch { return; }
+      for (const fn of subs) fn(data);
+    });
+  }
+
+  function ensureGlobalStream() {
+    if (globalES) return;
+    const es = new EventSource('/events');
+    globalES = es;
+    for (const name of globalSubs.keys()) bindGlobalEvent(es, name);
+    es.onerror = () => { es.close(); if (globalES === es) globalES = null; setTimeout(ensureGlobalStream, 3000); };
+  }
+
+  // One typed view onto the shared stream: yields only `eventName` payloads. Same async-iterable shape
+  // and 3s-reconnect resilience the UI had with a stream per type, now over a single socket. Runs for
+  // the page lifetime (the UI never aborts these); `signal` is honoured if provided.
+  function globalEventStream(eventName, signal) {
     return (async function* () {
       const queue = [];
       let wake = null;
       let closed = false;
-      let es = null;
       const pump = () => { if (wake) { const w = wake; wake = null; w(); } };
-      const connect = () => {
-        es = new EventSource(url);
-        es.addEventListener(eventName, e => {
-          try { queue.push(JSON.parse(e.data)); pump(); } catch { /* skip malformed */ }
-        });
-        es.onerror = () => { es.close(); if (!closed) setTimeout(() => { if (!closed) connect(); }, 3000); };
-      };
-      if (signal) signal.addEventListener('abort', () => { closed = true; es?.close(); pump(); });
-      connect();
+      let subs = globalSubs.get(eventName);
+      if (!subs) { subs = new Set(); globalSubs.set(eventName, subs); if (globalES) bindGlobalEvent(globalES, eventName); }
+      const push = (data) => { queue.push(data); pump(); };
+      subs.add(push);
+      if (signal) signal.addEventListener('abort', () => { closed = true; pump(); });
+      ensureGlobalStream();
       try {
         while (!closed) {
           while (queue.length) yield queue.shift();
           if (closed) break;
           await new Promise(r => { wake = r; });
         }
-      } finally { closed = true; es?.close(); }
+      } finally { subs.delete(push); }
     })();
   }
 
-  function statusEvents(signal) { return eventStream('/sessions/events', 'session-busy', signal); }
-  function fileEvents(signal)   { return eventStream('/files/events',    'file-changed', signal); }
+  function statusEvents(signal) { return globalEventStream('session-busy',   signal); }
+  function fileEvents(signal)   { return globalEventStream('file-changed',   signal); }
+  function toolEvents(signal)   { return globalEventStream('tool-changed',   signal); }
+  function pluginEvents(signal) { return globalEventStream('plugin-changed', signal); }
+  function skillEvents(signal)  { return globalEventStream('skill-changed',  signal); }
 
   function openFile(namespace, path) {
     window.open('/files/' + namespace + '/' + path, '_blank');
@@ -151,6 +178,6 @@
   window.matbotTransport = {
     hostRuntime: 'node',
     callTool, createSession, sessionBusy, submit,
-    sessionEvents, answerPrompt, abort, statusEvents, fileEvents, openFile,
+    sessionEvents, answerPrompt, abort, statusEvents, fileEvents, toolEvents, pluginEvents, skillEvents, openFile,
   };
 })();

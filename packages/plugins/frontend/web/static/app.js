@@ -1,13 +1,7 @@
-// crypto.randomUUID requires HTTPS; patch it for plain-HTTP local access
-if (crypto && typeof crypto.randomUUID !== 'function') {
-  crypto.randomUUID = function() {
-    const b = crypto.getRandomValues(new Uint8Array(16));
-    b[6] = (b[6] & 0x0f) | 0x40;
-    b[8] = (b[8] & 0x3f) | 0x80;
-    const h = Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
-    return h.slice(0,8)+'-'+h.slice(8,12)+'-'+h.slice(12,16)+'-'+h.slice(16,20)+'-'+h.slice(20);
-  };
-}
+// Insecure-context Web Crypto shims (crypto.randomUUID / crypto.subtle.digest, for plain-HTTP local
+// hosting) live in the web-bundle loader (apps/web-bundle/src/loader.js), which runs before any module
+// — including this frontend — so they're already in place by the time anything here runs. In
+// server-backed mode the runtime executes in Node, where Web Crypto is always available.
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
@@ -631,10 +625,13 @@ const skillEditorError   = document.getElementById('skill-editor-error');
 const skillEditorSave    = document.getElementById('skill-editor-save');
 const skillEditorRoot    = document.getElementById('skill-editor');
 const skillTriggerList   = document.getElementById('skill-trigger-list');
-const TRIGGER_PHASES = ['agent', 'user', 'system'];
+const TRIGGER_KINDS = ['ephemeral', 'contextual', 'retract', 'followup'];
 let editingSkillName = null;
 let skillEditor = null;   // TinyMDE.Editor, created lazily on first open
-let loadedTriggers = [];  // originals from skill_triggers `get`, for save-time reconciliation
+// A skill is fired by (at most) one Trigger whose invoke is skill_action(use, {name}); its
+// `conditions` are what the Triggers tab edits. `editingTriggerId` is that trigger's id (null when
+// the skill has no trigger yet — we create one on save if conditions are added).
+let editingTriggerId = null;
 
 function setSkillTab(tab) {
   for (const btn of document.querySelectorAll('.skill-tab')) btn.classList.toggle('active', btn.dataset.tab === tab);
@@ -645,11 +642,30 @@ function setSkillTab(tab) {
   skillEditorRoot.classList.toggle('tab-metadata', tab === 'metadata');
 }
 
-// Read-only render of a skill's derived LLM analysis. `knowledge` is null until the background
-// analysis has run and cached it (see SkillManager) — show a note rather than empty sections.
-function renderSkillMetadata(knowledge) {
+// Render the skill's metadata pane: the "system skill" toggle (always), then the read-only derived
+// LLM analysis. `knowledge` is null until the background analysis has run and cached it (see
+// SkillManager) — show a note rather than empty sections. `catalogue` is the current advertise flag.
+function renderSkillMetadata(catalogue, knowledge) {
   const el = document.getElementById('skill-metadata');
   el.innerHTML = '';
+
+  // System-skill toggle — advertise this skill in the system prompt (using its summary). Independent
+  // of whether analysis has run; the editor persists it (with content + triggers) on Save.
+  const sysRow = document.createElement('label');
+  sysRow.className = 'meta-system';
+  const cb = document.createElement('input');
+  cb.type = 'checkbox';
+  cb.id = 'skill-system-checkbox';
+  cb.checked = catalogue === true;
+  const sysLbl = document.createElement('span');
+  sysLbl.textContent = 'This is a system skill';
+  sysRow.append(cb, sysLbl);
+  el.appendChild(sysRow);
+  const sysHint = document.createElement('div');
+  sysHint.className = 'meta-note';
+  sysHint.textContent = 'When set, the skill is advertised in the system prompt using the generated summary below.';
+  el.appendChild(sysHint);
+
   if (!knowledge) {
     const note = document.createElement('div');
     note.className = 'meta-note';
@@ -702,31 +718,34 @@ function renderSkillMetadata(knowledge) {
   section('Tags', () => chips(knowledge.tags, 'tag'));
 }
 
-// One trigger row: a phase <select> + the rubric <textarea>, both disabled (read-only) until ✎ is
-// clicked; × removes the row. New rows (no `t`) start editable. Nothing is persisted until Save,
-// which diffs the live rows against `loadedTriggers`.
-function makeTriggerRow(t) {
-  const editable = !t || !t.id;
+// One condition row: a phase <select> + the rubric <textarea>, both disabled (read-only) until ✎ is
+// clicked; × removes the row. New rows (no `c`) start editable. Nothing is persisted until Save,
+// which replaces the skill's trigger conditions wholesale (conditions have no stable id).
+function makeTriggerRow(c) {
+  const editable = !c;
   const row = document.createElement('div');
   row.className = 'trigger-row';
-  if (t && t.id) row.dataset.id = t.id;
 
   const sel = document.createElement('select');
-  sel.className = 'trigger-phase';
-  for (const p of TRIGGER_PHASES) {
+  sel.className = 'trigger-kind';
+  for (const k of TRIGGER_KINDS) {
     const o = document.createElement('option');
-    o.value = p; o.textContent = p;
+    o.value = k; 
+    o.textContent = { 'ephemeral': 'User Ephemeral', 'contextual': 'User Contextual', 'retract': 'Agent Retract', 'followup': 'Agent Follow-up' }[k];
     sel.appendChild(o);
   }
-  sel.value = t?.phase ?? 'agent';
+  // ephemeral/contextual = fire on the user message (route knowledge in for this turn / fold it in
+  // durably); retract/followup = fire on the assistant response (discard+redo / keep+steer). Most
+  // skill triggers route on user input.
+  sel.value = c?.kind ?? 'ephemeral';
   sel.disabled = !editable;
 
   const txt = document.createElement('textarea');
   txt.className = 'trigger-text';
   txt.rows = 2;
-  txt.value = t?.trigger ?? '';
+  txt.value = c?.rule ?? '';
   txt.disabled = !editable;
-  txt.placeholder = 'agent/user: "MATCH if …; DO NOT MATCH if …"   ·   system: a one-line catalogue summary';
+  txt.placeholder = '"MATCH if the message is …; DO NOT MATCH if …" — judged against the latest turn';
 
   const editBtn = document.createElement('button');
   editBtn.className = 'trigger-edit';
@@ -750,33 +769,35 @@ function makeTriggerRow(t) {
   return row;
 }
 
-function renderTriggers(triggers) {
+function renderTriggers(conditions) {
   skillTriggerList.innerHTML = '';
-  for (const t of triggers) skillTriggerList.appendChild(makeTriggerRow(t));
+  for (const c of conditions) skillTriggerList.appendChild(makeTriggerRow(c));
 }
 
-// Diff the live rows against the loaded originals and emit the minimal add/update/remove calls.
+// Collect the live rows into a `conditions` array and reconcile the skill's single load-trigger:
+// update it (or create it if absent) when there are conditions, remove it when the last one is
+// cleared. Conditions have no stable id, so this is a wholesale replace, not a per-row diff.
 async function saveTriggers(name) {
-  const present = new Set();
+  const conditions = [];
   for (const row of skillTriggerList.querySelectorAll('.trigger-row')) {
-    const id = row.dataset.id || '';
-    const phase = row.querySelector('.trigger-phase').value;
-    const trigger = row.querySelector('.trigger-text').value.trim();
-    if (!trigger) continue; // an empty row is a no-op, not a delete
-    if (!id) {
-      await callTool('skill_triggers', { action: 'add', name, phase, trigger });
-    } else {
-      present.add(id);
-      const orig = loadedTriggers.find(o => o.id === id);
-      if (orig && (orig.phase !== phase || orig.trigger !== trigger)) {
-        await callTool('skill_triggers', { action: 'update', name, id, phase, trigger });
-      }
-    }
+    const kind = row.querySelector('.trigger-kind').value;
+    const rule = row.querySelector('.trigger-text').value.trim();
+    if (!rule) continue; // an empty row is a no-op, not a delete
+    conditions.push({ kind, rule });
   }
-  for (const orig of loadedTriggers) {
-    if (orig.id && !present.has(orig.id)) {
-      await callTool('skill_triggers', { action: 'remove', name, id: orig.id });
+
+  if (editingTriggerId) {
+    if (conditions.length) {
+      await callTool('trigger_action', { action: 'update', id: editingTriggerId, conditions });
+    } else {
+      await callTool('trigger_action', { action: 'remove', id: editingTriggerId });
+      editingTriggerId = null;
     }
+  } else if (conditions.length) {
+    const res = await callTool('trigger_action', {
+      action: 'add', conditions, tool: 'skill_action', params: { action: 'use', name },
+    });
+    editingTriggerId = res?.id ?? null;
   }
 }
 
@@ -801,18 +822,23 @@ async function openSkillEditor(name) {
   editingSkillName = name;
   skillEditorError.textContent = '';
   skillEditorTitle.textContent = name;
-  loadedTriggers = [];
+  editingTriggerId = null;
   renderTriggers([]);
-  renderSkillMetadata(null);
+  renderSkillMetadata(false, null);
   setSkillTab('content');
   skillEditorOverlay.classList.add('open');
-  // Triggers are independent of the markdown editor, so load them even if TinyMDE is absent.
-  callTool('skill_triggers', { action: 'get', name })
-    .then((tr) => { loadedTriggers = Array.isArray(tr?.triggers) ? tr.triggers : []; renderTriggers(loadedTriggers); })
-    .catch(() => { /* skill_triggers tool not loaded — leave the triggers tab empty. */ });
+  // Triggers live in their own store now, keyed by the tool they invoke — find the one that loads
+  // this skill. Independent of the markdown editor, so load it even if TinyMDE is absent.
+  callTool('trigger_action', { action: 'query', tool: 'skill_action', params: { action: 'use', name } })
+    .then((res) => {
+      const trig = Array.isArray(res?.triggers) ? res.triggers[0] : undefined;
+      editingTriggerId = trig?.id ?? null;
+      renderTriggers(Array.isArray(trig?.conditions) ? trig.conditions : []);
+    })
+    .catch(() => { /* triggers plugin not loaded — leave the triggers tab empty. */ });
   // Derived analysis, likewise independent of TinyMDE; absent until the background pass has cached it.
   callTool('skill_action', { action: 'metadata', name })
-    .then((meta) => renderSkillMetadata(meta?.knowledge ?? null))
+    .then((meta) => renderSkillMetadata(meta?.catalogue ?? false, meta?.knowledge ?? null))
     .catch(() => { /* old skills plugin without the metadata action — leave the note. */ });
   // The editor needs TinyMDE (CDN, http(s) only). On an offline file:// bundle it never loaded —
   // degrade with a message rather than throwing on `new TinyMDE.Editor`.
@@ -857,7 +883,13 @@ if (skillEditorOverlay) {
     skillEditorSave.disabled = true;
     skillEditorError.textContent = '';
     try {
-      if (skillEditor) await callTool('skill_action', { action: 'save', name: editingSkillName, content: skillEditor.getContent() });
+      if (skillEditor) {
+        const sysCb = document.getElementById('skill-system-checkbox');
+        await callTool('skill_action', {
+          action: 'save', name: editingSkillName, content: skillEditor.getContent(),
+          ...(sysCb ? { catalogue: sysCb.checked } : {}),
+        });
+      }
       await saveTriggers(editingSkillName);
     } catch (err) {
       skillEditorError.textContent = 'Failed to save: ' + (err?.message ?? err);
@@ -1261,10 +1293,17 @@ function createAssistantWrap(labelText, anchorAfter) {
 
 // Render marker blocks as centered cross-thread notices. Markers are opaque to the LLM; the UI
 // is free to interpret known creators. Unknown creators get a generic, non-navigating chip.
-function appendMarker(content) {
+function appendMarker(content, traceId) {
   messagesEl.querySelector('.empty-state')?.remove();
   for (const part of content) {
     if (part.type !== 'marker') continue;
+    // A retraction supersedes the turn's original response: drop that response from the live view so
+    // the thread matches what a refresh shows (the original is popped from the session and survives
+    // only inside this marker). Idempotent — a no-op on reload, where the original was never rendered
+    // (renderSession doesn't tag assistant wraps with a traceId).
+    if (part.creator === 'matbot-retraction' && traceId) {
+      messagesEl.querySelectorAll(`.message.assistant[data-trace="${traceId}"]`).forEach(el => el.remove());
+    }
     messagesEl.appendChild(renderMarker(part));
   }
 }
@@ -1297,6 +1336,25 @@ function renderMarker(part) {
     return note;
   }
 
+  // A retract-and-rerun: show a collapsed, thinking-styled block titled "Retraction" holding ONLY the
+  // final text of the superseded response (no thinking/tool blocks). The response itself was removed
+  // from the thread (see appendMarker), so this is the sole, de-emphasised trace of what was said.
+  if (part.creator === 'matbot-retraction') {
+    const retracted = Array.isArray(data.retracted) ? data.retracted : [];
+    const text = retracted
+      .flatMap(m => (m.content || []).filter(c => c.type === 'text').map(c => c.text))
+      .join('\n\n').trim();
+    const wrap = document.createElement('div');
+    wrap.className = 'message assistant marker-block retraction';
+    const { details, content: body } = makeThinkingBlock('↩️ Retraction', false);
+    details.classList.add('retraction-block');
+    body.classList.add('md-body');
+    body.style.whiteSpace = 'normal';   // thinking-content defaults to pre-wrap; rendered markdown needs normal flow
+    body.innerHTML = md(text || '_(no text content)_');
+    wrap.appendChild(details);
+    return wrap;
+  }
+
   // A hook threw and was skipped — surface it as a warning so a misconfigured hook (e.g. a provider
   // with an unresolved secret) is visible rather than silently degrading.
   if (part.creator === 'matbot-hooks') {
@@ -1312,14 +1370,26 @@ function renderMarker(part) {
     return note;
   }
 
-  const icon = document.createElement('span');
-  icon.className = 'marker-icon';
-  icon.textContent = '🔖';
-  note.appendChild(icon);
-  const text = document.createElement('span');
-  text.textContent = part.creator + ': ' + JSON.stringify(data);
-  note.appendChild(text);
-  return note;
+  // Everything else: render like a tool block — a collapsible whose title is the creator and whose
+  // body is the marker's JSON data. Generic, so any creator (remember_fact, triggers, future ones)
+  // gets a useful surface with no per-creator UI. Wrapped in an assistant-style container so it
+  // inherits the same width/alignment a tool block has *inside a turn* — a bare .tool-block dropped
+  // at the message-list top level full-bleeds and its overflow:hidden clips the content. The
+  // `marker-block` class on the wrapper makes it easy to restyle or suppress later.
+  const wrap = document.createElement('div');
+  wrap.className = 'message assistant marker-block';
+  const det = document.createElement('details');
+  det.className = 'tool-block';
+  const sum = document.createElement('summary');
+  sum.className = 'tool-header';
+  sum.textContent = '🔖 ' + part.creator;
+  det.appendChild(sum);
+  const pre = document.createElement('pre');
+  pre.className = 'tool-args';
+  pre.textContent = JSON.stringify(data, null, 2);
+  det.appendChild(pre);
+  wrap.appendChild(det);
+  return wrap;
 }
 
 // Populate a wrapper from historical message content parts
@@ -1462,7 +1532,7 @@ function renderSession(session, startIdx, scrollTarget) {
       const dummy = document.createDocumentFragment();
       renderContentParts(dummy, msg.content);
     } else if (msg.role === 'marker') {
-      appendMarker(msg.content);
+      appendMarker(msg.content, msg.traceId);
     }
   }
   if (scrollTarget !== undefined) {
@@ -1533,7 +1603,7 @@ async function submitFormResponse(sessionId, values) {
 
 // ── Per-session event stream (one persistent connection; submits are fire-and-forget) ──────────
 //
-// A single GET /sessions/:id/events SSE carries ALL turns for the session. Events are demuxed by
+// A single GET /events/sessions/:id SSE carries ALL turns for the session. Events are demuxed by
 // traceId into per-turn queues, each drained by renderTurn(). One connection per session (not per
 // submission) is what keeps queued submits off the browser's ~6-socket-per-host limit — the cause
 // of both the missing-queued-badge and the prompt-stall bugs.
@@ -1563,6 +1633,14 @@ function wake(q) { if (q.wake) { const w = q.wake; q.wake = null; w(); } }
 
 function pushTurnEvent(ev) {
   if (foldedTraces.has(ev.traceId)) return;   // a folded submission's later events (incl. cancelled) are noise
+
+  // Markers can arrive after a turn's terminal event (e.g. a followup hook's, emitted post-commit).
+  // If the turn's queue is gone/finished, render directly rather than re-spawning a renderTurn for a
+  // done traceId; otherwise let it flow through the queue so it renders inline at the right spot.
+  if (ev.type === 'marker') {
+    const q = turnQueues.get(ev.traceId);
+    if (!q || q.done) { appendMarker(ev.content ?? [], ev.traceId); return; }
+  }
 
   if (ev.type === 'queued') {
     // Fold a follower into the head only when BOTH the head and this submission are concat — mirroring
@@ -1700,6 +1778,7 @@ async function renderTurn(sid, traceId) {
     started = true;
     if (userBubble) userBubble.classList.remove('pending');
     turnWrap = createAssistantWrap('assistant', userBubble);
+    turnWrap.dataset.trace = traceId;   // so a retraction marker for this turn can drop this wrap live
     loadingEl = document.createElement('div');
     loadingEl.className = 'msg-loading';
     turnWrap.appendChild(loadingEl);
@@ -1717,7 +1796,6 @@ async function renderTurn(sid, traceId) {
   let thinkingAccum   = '';
   let currentTool     = null;
   let providerToolPending = false;
-  let pluginToolPending   = false;
   let turnIn          = 0;
   let turnOut         = 0;
   let turnCost        = 0;
@@ -1829,7 +1907,6 @@ async function renderTurn(sid, traceId) {
         case 'tool:start': {
           removeLoading();
           if (ev.name === 'provider') providerToolPending = true;
-          if (ev.name === 'plugin')   pluginToolPending   = true;
           currentTool = makeToolBlock(ev.name, ev.input, ev.callId);
           currentTool.open = true;
           turnWrap.appendChild(currentTool);
@@ -1866,7 +1943,6 @@ async function renderTurn(sid, traceId) {
           textElFinalised = true;
           textAccum = '';
           if (providerToolPending && !ev.isError) { providerToolPending = false; refreshProviderSelect(); }
-          if (pluginToolPending   && !ev.isError) { pluginToolPending   = false; loadPlugins(); }
           break;
         }
 
@@ -2007,11 +2083,15 @@ async function renderTurn(sid, traceId) {
         }
 
         case 'robo-user': {
+          // Machine-authored content folded onto the running turn's user message (a screen hook's
+          // `durable` result — e.g. a fired `contextual` trigger). Draw it as an agent-side robo
+          // bubble so the live view matches the reload, where appendUserTurn splits the user turn's
+          // robo blocks into exactly such a bubble.
           const text = (ev.content ?? [])
             .filter(c => c.type === 'text')
             .map(c => c.text)
             .join('\n');
-          if (text) appendUserBubble(text); // index filled in by 'done' handler below
+          if (text) appendRoboBubble(text, undefined, ev.traceId);
           break;
         }
 
@@ -2019,7 +2099,7 @@ async function renderTurn(sid, traceId) {
           // A marker appended to the session this turn (e.g. a hook that threw). Render it inline now;
           // on a later reload it comes back through renderSession's role==='marker' path identically.
           removeLoading();
-          appendMarker(ev.content ?? []);
+          appendMarker(ev.content ?? [], ev.traceId);
           break;
         }
 
@@ -2258,6 +2338,40 @@ async function init() {
         updatedFiles.add(name);
         loadFiles();
       }
+    }
+  })();
+
+  // Tool-registry CRUD → refresh the skills panel (skills are tools; a skill_action registered out
+  // of band — e.g. the Drive backend restoring matbot-skills at boot, after this UI's one-shot loads
+  // — surfaces here). Debounced: one plugin load fires many tool-changed events, want one re-query.
+  (async function connectToolWatchStream() {
+    if (!T.toolEvents) return;
+    let timer = null;
+    for await (const _event of T.toolEvents(new AbortController().signal)) {
+      if (timer) continue;
+      timer = setTimeout(() => { timer = null; loadSkills(); }, 150);
+    }
+  })();
+
+  // Skill content saved/deleted — incl. by the LLM mid-turn via skill_action, which this UI's own
+  // save/delete buttons already refresh after locally but has no other way to learn about.
+  (async function connectSkillWatchStream() {
+    if (!T.skillEvents) return;
+    let timer = null;
+    for await (const _event of T.skillEvents(new AbortController().signal)) {
+      if (timer) continue;
+      timer = setTimeout(() => { timer = null; loadSkills(); }, 150);
+    }
+  })();
+
+  // Plugin load/unload → refresh the plugins panel. Catches tool-less plugins the tool stream can't
+  // see (pure provider/hook/storage), and supersedes the old poll-on-`plugin`-tool-success refresh.
+  (async function connectPluginWatchStream() {
+    if (!T.pluginEvents) return;
+    let timer = null;
+    for await (const _event of T.pluginEvents(new AbortController().signal)) {
+      if (timer) continue;
+      timer = setTimeout(() => { timer = null; loadPlugins(); }, 150);
     }
   })();
 

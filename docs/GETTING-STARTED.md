@@ -300,17 +300,9 @@ providers:
     parameters:
       maxTokens: 16384
 
-  skills-classifier:
-    module: ./packages/plugins/providers/anthropic
-    endpoint: https://api.deepseek.com/anthropic
-    model: deepseek-v4-flash
-    credentials:
-      apiKey: ${DEEPSEEK_API_KEY}
-    parameters:
-      maxTokens: 4096
-
 plugins:
   - ./packages/plugins/skills
+  - ./packages/plugins/triggers
   - ./packages/plugins/rumsfeld
   - ./packages/plugins/cognition
   - ./packages/plugins/sessions
@@ -321,6 +313,14 @@ plugins:
 pnpm repl --session create
 ```
 
-Skills are classified and injected automatically each turn. The `cognition` plugin adds
-inner-voice critique (`inner-voice` provider), persistent fact memory (`Remember this`
-skill), and background consolidation (`Dream time` skill).
+The `triggers` plugin fires skills/tools on behavioural conditions (judged by an LLM classifier);
+the `cognition` plugin adds inner-voice critique (the `ask_inner_voice` tool), persistent fact memory
+(`remember_fact`), and background consolidation (`Dream time` skill).
+
+**No dedicated provider profiles are needed for these.** Each subsystem that consults a model for an
+internal job — the triggers classifier, skills' content analysis, cognition's inner voice — uses the
+**current turn's provider** by default. Those roles are *aliases* for an already-configured provider,
+not new profiles to stand up: to point one at a cheaper/faster (or, for the inner voice, a
+different-lineage) model, pin it to an existing provider with the relevant config tool —
+`triggers_config`, `skills_config`, or `cognition_config` (action `set`). Installs that historically
+defined a provider literally named `skills-classifier` keep working — it stays the classifier default.
