@@ -148,6 +148,14 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Optional
 
+- **providers/openai-compat** — opt-in prompt caching. With `parameters.promptCache: true`,
+  the adapter sends Anthropic-style `cache_control: {type:'ephemeral'}` breakpoints on the system
+  prefix, the tool defs, and the second-to-last user turn (mirroring the native anthropic adapter),
+  and reads `usage.prompt_tokens_details.cached_tokens` back as `cacheReadTokens`. Unlocks prompt
+  caching for Anthropic/Gemini/Qwen routed via OpenRouter (and surfaces OpenAI/DeepSeek automatic
+  caching). Default off — a plain OpenAI or local (ollama/vLLM) endpoint never receives
+  `cache_control`, so the flat OpenAI wire shape is unchanged.
+
 - **web-bundle** — insecure-context Web Crypto shims, consolidated in the bundle loader
   (`apps/web-bundle/src/loader.js`), so the single-file bundle works over plain HTTP on a non-localhost
   origin. A non-secure browsing context withholds `crypto.randomUUID` and `crypto.subtle` (only
