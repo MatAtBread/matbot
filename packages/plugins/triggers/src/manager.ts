@@ -30,11 +30,17 @@ export class TriggerManager implements Triggers {
   private readonly triggers = new Map<string, Trigger>();
   private readonly store:    Store<Trigger>;
   private readonly services: MatbotMachine;
+  // Aborts on teardown (clear()), ending the mounted-swap subscription set up in setupTriggers.
+  private readonly lifecycle = new AbortController();
 
   constructor(store: Store<Trigger>, services: MatbotMachine) {
     this.store    = store;
     this.services = services;
   }
+
+  /** Ends with the manager (teardown). Hand to `services.mounted.consume` so a StorageBackend swap
+   *  re-reads the new backend's triggers, and the loop stops when the plugin unloads. */
+  get signal(): AbortSignal { return this.lifecycle.signal; }
 
   // The classifier provider, resolved live per evaluation (so a triggers_config change takes effect on
   // the next turn): the `classifierProvider` setting if set and valid, else the legacy "skills-classifier"
@@ -47,7 +53,12 @@ export class TriggerManager implements Triggers {
     return turnProvider;
   }
 
-  async init(): Promise<void> {
+  /** (Re)load persisted triggers into memory. Re-runnable: the initial boot load and every later
+   *  StorageBackend swap funnel through here. Reading `this.store` (a swap-following proxy) always hits
+   *  the live backend, so a swap re-reads the new backend's triggers. Clears first — the old in-memory
+   *  set belongs to the displaced backend. */
+  async load(): Promise<void> {
+    this.triggers.clear();
     const { items } = await this.store.query({});
     for (const t of items) {
       this.triggers.set(t.id, t);
@@ -113,7 +124,7 @@ export class TriggerManager implements Triggers {
     return this.add(spec);
   }
 
-  clear(): void { this.triggers.clear(); }
+  clear(): void { this.lifecycle.abort(); this.triggers.clear(); }
 
   /**
    * LLM-judge every enabled condition on `surface` against the current turn and return the distinct

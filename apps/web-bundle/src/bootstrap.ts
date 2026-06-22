@@ -1,14 +1,15 @@
 import {
   createSessionRunner, HookRegistry, SystemContextRegistryImpl, ToolRegistryImpl,
-  resolveProviderFactory, getPluginNameForSpecifier,
+  resolveProviderFactory, getPluginNameForSpecifier, recordServiceKey,
   installPrincipalCarrier, createConstantPrincipalCarrier,
   createMessage, MissingSecretError, loadPlugins,
   unloadPlugin as unloadPluginFn, unifyServices,
   forwardingProxy, makeSwappable, singleTurnRequest, createSingleTurnTool,
+  createBroadcaster, onContextQuiesce, flushIfQuiescent,
 } from '@matatbread/matbot-core';
 import type {
   MatbotMachine, Store, Session, ProviderConfig, ProviderAdapter,
-  PluginSettings, Vault, SessionRunner, KnowledgeIndex,
+  PluginSettings, Vault, SessionRunner, KnowledgeIndex, Subscribable,
   PluginResolver, StorageBackend, FileStore, PromptFn, MatbotPlugin, Principal, Runtime, SwapFn,
 } from '@matatbread/matbot-plugin-api';
 import { LookupKnowledgeIndex } from '@matatbread/matbot-knowledge';
@@ -154,15 +155,23 @@ export async function boot(env: BootEnv): Promise<void> {
 
   // ── Storage backend: IndexedDB + OPFS, discovered from a plugin or defaulted ──────────────
   let activeStorageBackend: StorageBackend | undefined;
+  // The config entry of the plugin whose storageBackend the pre-scan opened, if any. Recorded against
+  // its plugin name once the loader has resolved names, so its unload reverts storage like a register().
+  let storageBootSpec: string | undefined;
   const providerSpecs = [...new Set([...providers.values()].map(p => p.module))];
   for (const spec of [...providerSpecs, ...config.plugins]) {
     try {
       const mod  = await import(/* @vite-ignore */ spec) as Record<string, unknown>;
       const plug = (mod['plugin'] ?? (mod['default'] as Record<string, unknown> | undefined)?.['plugin']) as MatbotPlugin | undefined;
-      if (plug?.storageBackend !== undefined) { activeStorageBackend = await plug.storageBackend.open(''); break; }
+      if (plug?.storageBackend !== undefined) { activeStorageBackend = await plug.storageBackend.open(''); storageBootSpec = spec; break; }
     } catch { /* loadPlugins will surface load errors */ }
   }
-  activeStorageBackend ??= new BrowserStorageBackend();
+
+  // The host's own boot base (OPFS/IDB) — the revert target when a swapped-in StorageBackend's plugin
+  // unloads. With no pre-scan backend it *is* the active backend; a pre-scanned one is plugin-owned
+  // (see storageBootSpec), so unloading it lands back here.
+  const bootBackend: StorageBackend = new BrowserStorageBackend();
+  activeStorageBackend ??= bootBackend;
 
   // ── Swappable store/file proxies (verbatim from the node bootstrap: register('StorageBackend')
   //    re-targets every captured reference) ───────────────────────────────────────────────────
@@ -193,19 +202,41 @@ export async function boot(env: BootEnv): Promise<void> {
   const storageBackendProxy = forwardingProxy<StorageBackend>(() => activeStorageBackend);
 
   // Boot defaults captured for revert-on-unregister (mirrors the CLI host): a swap-key reverts here
-  // when its plugin is unloaded, instead of dangling on the now-gone impl. Boot backend is OPFS/IDB.
-  const bootBackend: StorageBackend = activeStorageBackend!;
+  // when its plugin is unloaded, instead of dangling on the now-gone impl. (bootBackend is captured
+  // above, before the pre-scan defaulting, so a config backend never poses as the host base.)
   const bootVault                   = activeVault;
   const bootKnowledge               = knowledgeImpl;
 
-  const swapStorage = async (next: StorageBackend): Promise<void> => {
+  // Re-point every store proxy + the file proxy at `next`. Returns whether anything actually changed,
+  // so the caller can skip a redundant `mounted` emit. Synchronous: the repoint completes before this
+  // returns, so readers see `next` at once and the `mounted` emit can fire immediately. The displaced
+  // impl is closed in the *background* — a slow or throwing close() must never gate the swap or suppress
+  // the mounted notification. Driven only from the quiescent-edge flush below — never mid-turn.
+  const swapStorage = (next: StorageBackend): boolean => {
     const removed = activeStorageBackend;
-    if (removed === next) return;
+    if (removed === next) return false;
     activeStorageBackend = next;
     for (const [ns, [, swap]] of storeProxies) swap(next.createStore(ns));
     swapFiles(next.fileStore);
-    await removed?.close?.();
+    void Promise.resolve(removed?.close?.()).catch(e => console.error('[matbot] closing displaced StorageBackend:', e));
+    return true;
   };
+
+  // Deferred StorageBackend swap (mirrors the CLI host): register/unregister('StorageBackend') stage the
+  // desired backend (last write wins — a slot, not a queue) and ask the context-switch machinery to land
+  // it at the next quiescent edge, so a swap never splits a compare-and-swap across two backends.
+  const mountedBroadcaster = createBroadcaster<MatbotMachine>();
+  let pendingSwap: { next: StorageBackend } | undefined;
+  const stageSwap = (next: StorageBackend): void => {
+    pendingSwap = { next };
+    flushIfQuiescent();
+  };
+  onContextQuiesce(() => {
+    if (pendingSwap === undefined) return;
+    const { next } = pendingSwap;
+    pendingSwap = undefined;
+    if (swapStorage(next)) mountedBroadcaster.emit(services);
+  });
   const swapKnowledge = (next: KnowledgeIndex): void => {
     const prev = knowledgeImpl;
     if (prev === next) return;
@@ -235,7 +266,9 @@ export async function boot(env: BootEnv): Promise<void> {
     createStore,
     get(key) { return serviceRegistry.get(key as string) as never; },
     async register(key, value) {
-      if (key === 'StorageBackend')      await swapStorage(value as StorageBackend);
+      // StorageBackend is the system of record: stage it and let the quiescent edge apply it (idle →
+      // now; mid-turn → at turn end). The other swap-keys are safe to repoint immediately.
+      if (key === 'StorageBackend')      stageSwap(value as StorageBackend);
       else if (key === 'KnowledgeIndex') swapKnowledge(value as KnowledgeIndex);
       else if (key === 'Vault')          activeVault = value as Vault;
       else serviceRegistry.set(key as string, value);
@@ -243,7 +276,7 @@ export async function boot(env: BootEnv): Promise<void> {
     // Symmetric with register: a swap-key reverts to the app's captured boot default instead of
     // dangling on the unloaded plugin's impl; everything else is a plain registry delete.
     unregister(key: string) {
-      if (key === 'StorageBackend')      void swapStorage(bootBackend);
+      if (key === 'StorageBackend')      stageSwap(bootBackend);
       else if (key === 'KnowledgeIndex') knowledgeImpl = bootKnowledge;
       else if (key === 'Vault')          activeVault = bootVault;
       else serviceRegistry.delete(key);
@@ -305,6 +338,7 @@ export async function boot(env: BootEnv): Promise<void> {
 
     resolver,
     providers,
+    mounted: mountedBroadcaster as Subscribable<MatbotMachine>,
     get StorageBackend() { return activeStorageBackend === undefined ? undefined : storageBackendProxy; },
     sessions: store,
     get run() { return sessionRunner; },
@@ -395,6 +429,14 @@ export async function boot(env: BootEnv): Promise<void> {
 
   // Then the rest — frontends, tools, storage, knowledge, hooks. The frontend plugin mounts the UI.
   await loadPlugins(config.plugins, services);
+
+  // The pre-scan opened a manifest storageBackend before the loader knew the plugin's name, bypassing
+  // the scoped register() that records a service key. Attribute it now, so unloading that plugin reverts
+  // storage to the host base and closes the backend — unload-equal to a runtime register().
+  if (storageBootSpec !== undefined) {
+    const name = getPluginNameForSpecifier(storageBootSpec);
+    if (name !== undefined) recordServiceKey(name, 'StorageBackend');
+  }
 
   console.warn('[matbot] web runtime ready —', toolReg.list().length, 'tools,', providers.size, 'providers.');
 }

@@ -6,7 +6,7 @@ import type {
 import type { MatbotPlugin } from './plugin.js';
 import type { HookRegistry } from './hooks.js';
 import { appendMessage, createMessage } from './session.js';
-import { runAs } from '@matatbread/matbot-plugin-api';
+import { contextSwitch } from '@matatbread/matbot-plugin-api';
 import { runSession } from './runner.js';
 
 export interface SessionRunnerDeps {
@@ -216,8 +216,10 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
           // pump runs detached (`void pump`), so this scope — not the request that enqueued — is the
           // turn's async root. Everything downstream (hooks, tools, and any Store/FileStore/Vault
           // access they trigger) reads it via currentPrincipal(). The consumption MUST happen inside
-          // the callback: an async iterator returned out of runAs would lose the scope before it pulls.
-          await runAs(head.principal, async () => {
+          // the callback: an async iterator returned out of the scope would lose it before it pulls.
+          // contextSwitch (not bare runAs): a turn is the transactional unit, so a StorageBackend swap
+          // deferred during it lands at this scope's quiescent edge — never mid-CAS.
+          await contextSwitch(head.principal, async () => {
             for await (const ev of runSession({
               session,
               config:         { provider: head.provider, traceId: head.traceId },
@@ -250,7 +252,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
             const committed = await deps.store.get(id);
             if (committed && head.resubmitDepth < MAX_RESUBMIT_DEPTH) {
               let followup: { resubmits: MessageContent[][]; markers: MessageContent[]; retract?: { context: MessageContent[] } } = { resubmits: [], markers: [] };
-              await runAs(head.principal, async () => {
+              await contextSwitch(head.principal, async () => {
                 followup = await hooks.runFollowup({
                   session:       committed,
                   resubmitDepth: head.resubmitDepth,

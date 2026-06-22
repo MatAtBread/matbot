@@ -148,7 +148,11 @@ export async function setupTriggers(services: MatbotMachine): Promise<TriggerMan
 
   const store   = services.createStore<Trigger>('triggers') as Store<Trigger>;
   const manager = new TriggerManager(store, services);
-  await manager.init();
+  await manager.load();
+  // Re-read after a deferred StorageBackend swap lands: the new backend's `triggers` namespace replaces
+  // the old in-memory set. `mounted` fires only on a real swap, so this never doubles the boot load
+  // above. Ends with the manager (teardown aborts manager.signal).
+  services.mounted.consume(() => void manager.load(), manager.signal);
   await services.register('Triggers', manager);
 
   services.tools.register(createTriggerActionTool(manager));

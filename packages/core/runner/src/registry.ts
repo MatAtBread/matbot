@@ -1,5 +1,5 @@
 import type { Tool, ToolRegistry, Hook, PromptFn, FormField, FrontendInfo, PluginRegistryEvent } from './types.js';
-import { createBroadcaster } from '@matatbread/matbot-plugin-api';
+import { createBroadcaster, subscribable } from '@matatbread/matbot-plugin-api';
 import type {
   MatbotPlugin, MatbotMachine,
   ProviderAdapterFactory, StoreFactory,
@@ -175,6 +175,18 @@ export function getRegisteredServiceKeys(pluginName: string): readonly string[] 
   return state.serviceKeys.get(pluginName) ?? [];
 }
 
+/**
+ * Attribute a service key to a plugin out of band. The host uses this for a backend it opened at boot
+ * *before* the registry knew the plugin's name — a storageBackend manifest pre-scan bypasses the scoped
+ * register() that would normally record the key. Recording it makes the boot-opened backend unload-equal
+ * to a runtime register(): unloadPlugin() then calls unregister() for it, reverting to the host base.
+ */
+export function recordServiceKey(pluginName: string, key: string): void {
+  const keys = state.serviceKeys.get(pluginName) ?? [];
+  if (!keys.includes(key)) keys.push(key);
+  state.serviceKeys.set(pluginName, keys);
+}
+
 /** Plugins that registered at least one hook in setup(). */
 export function getHookPlugins(): ReadonlySet<string> {
   return state.hookPlugins;
@@ -226,8 +238,20 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotMachine,
   // own settings — there is no way to name another's.
   const ownSettings = makePluginSettings(services.createStore<SettingsDoc>('settings'), plugin.name);
 
-  const scopedServices: MatbotMachine = unifyServices({
+  // Per-plugin `mounted`: re-emits *this plugin's* scoped machine on every host StorageBackend swap (not
+  // on subscribe — the initial machine is the setup() call itself; `mounted` is its deferred encore). The
+  // element is the stable `scoped` object: it reads through the host's re-pointing proxies, so the
+  // same reference already sees the new backend by the time the host announces the swap. Forward-referenced
+  // via `scoped`, assigned below; the generator body only runs on subscribe (after setup), by which point
+  // it is defined.
+  let scoped: MatbotMachine;
+  const scopedMounted = subscribable<MatbotMachine>(async function* (signal) {
+    for await (const _ of services.mounted.subscribe(signal)) yield scoped;
+  });
+
+  scoped = unifyServices({
     ...services,
+    mounted: scopedMounted,
     settings: () => ownSettings,
     self: {
       name:      plugin.name,
@@ -270,7 +294,7 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotMachine,
   for (const tool of plugin.tools ?? []) {
     await registerTool(tool);
   }
-  await plugin.setup?.(scopedServices);
+  await plugin.setup?.(scoped);
 }
 
 /** Tear down and fully unload a single plugin, removing all its registered contributions. */

@@ -72,6 +72,24 @@ churn and less likely to affect a consumer who doesn't use them.
   hand-rolled their own registry literal were consolidated onto the exported `ToolRegistryImpl`,
   which now emits on register/remove/removeByPlugin and takes an optional seed-tools constructor.
 
+- **`services.mounted` — a stream that re-emits the machine after a `StorageBackend` swap.** A new
+  `MatbotRuntime.mounted: Subscribable<MatbotMachine>` lets a plugin that caches storage-derived state
+  rebuild when the live backend changes, without a restart: `services.mounted.consume(s => this.load(s),
+  signal)`. It fires only on a *landed* swap — not on subscribe, since the initial load is the plugin's
+  own `setup()` — so a cacher keeps its one-shot boot load and adds `mounted` for swaps, with no double
+  load. Per-plugin scoped: the emitted machine is the subscriber's own scoped services. Built on a
+  small `Subscribable<T>`/`Broadcaster<T>` split of the broadcaster (the consumer facet now also carries
+  `consume(handler, signal)` — the detached, handler-isolating `for await` loop every `watch` call site
+  hand-wrote), plus a `subscribable(subscribe)` wrapper for derived streams.
+
+- **`contextSwitch` / `onContextQuiesce` — quiescent-edge machine flush, layered over the principal
+  carrier.** `contextSwitch(principal, fn)` runs `fn` under `principal` (like `runAs`) and additionally
+  runs host-registered flushers (`onContextQuiesce(flush)`) whenever no scope is active (depth 0). The
+  principal carrier stays a pure identity primitive; this is the host's hook to *land deferred machine
+  mutations* — currently the `StorageBackend` swap — at a boundary where no turn is mid-flight. The pump
+  turn now switches context; web/telegram entry points stay `runAs` (their scope spans a long-lived SSE
+  stream, so they must not register as a busy edge). Re-exported from `@matatbread/matbot-core`.
+
 ### Bug fixes
 
 - **A bad `matbot.yaml` plugin entry no longer aborts startup.** `loadPlugins` only honoured its
@@ -97,6 +115,21 @@ churn and less likely to affect a consumer who doesn't use them.
   the app's base services rather than hardcoding a fallback. Fixed in both hosts (`apps/cli`,
   `apps/web-bundle`) via a shared `swapStorage`/`swapKnowledge` helper driving both register and the
   unregister revert.
+
+- **Hot-swapping the `StorageBackend` at runtime is now coherent — stale caches and split
+  compare-and-swaps are gone.** Three defects compounded when a backend was registered/unregistered
+  while the system was live (e.g. switching the default filesystem store for SQLite without a restart):
+  the swap fired *mid-turn*, so a single turn's compare-and-swap could straddle two backends; in-memory
+  caches (skills, triggers) kept serving the *old* backend's documents, so the frontend "claimed
+  filesystem but showed SQL"; and a backend opened by the boot pre-scan was captured *as* the host base
+  and recorded no owning plugin, so unloading it neither reverted nor closed it. Now: `register/
+  unregister('StorageBackend')` stage a last-write-wins pending swap that lands at the next **quiescent
+  edge** (`onContextQuiesce`, reached when no turn/request/message is in flight — the pump turn switches
+  context to mark that edge); the host then emits `services.mounted`, on which the cachers re-read the
+  new backend (`SkillManager`/`TriggerManager` gained a re-runnable `load()` that clears and reloads,
+  subscribed for the life of the plugin); and the boot base is captured *before* the pre-scan, with the
+  pre-scanned backend recorded as plugin-owned so its unload reverts to that base and closes it. Fixed
+  in both hosts (`apps/cli`, `apps/web-bundle`).
 
 - **`plugin remove` no longer offers to `pnpm remove` a plugin that was never installed by the
   package manager.** The "Also uninstall the npm package?" prompt fired unconditionally, even for

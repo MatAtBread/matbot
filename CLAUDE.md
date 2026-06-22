@@ -145,7 +145,22 @@ type SessionStore = Store<Session>;
 type ScratchStore = Store<Session>;
 ```
 
-**Swappable core members** (`StorageBackend`, `KnowledgeIndex`, `Vault`) use `register` to swap live impls behind capture-safe forwarding proxies. A captured reference keeps resolving to the current impl. On `unregister` (i.e. when the providing plugin is unloaded) a swap-member **reverts to the host's captured boot default** rather than dangling on the gone impl — the app decides its own base services (the CLI: filesystem or in-memory; the browser: OPFS), and the registry only remembers and restores them.
+**Swappable core members** (`StorageBackend`, `KnowledgeIndex`, `Vault`) use `register` to swap live impls behind capture-safe forwarding proxies. A captured reference keeps resolving to the current impl. On `unregister` (i.e. when the providing plugin is unloaded) a swap-member **reverts to the host's captured boot default** rather than dangling on the gone impl — the app decides its own base services (the CLI: filesystem or in-memory; the browser: OPFS), and the registry only remembers and restores them. The host's boot default is captured **before** any storage-plugin pre-scan, so a config-supplied backend never poses as the base; a pre-scanned backend is recorded as plugin-owned, so unloading its plugin reverts to that base.
+
+### Context switch & the deferred StorageBackend swap
+
+`StorageBackend` is the system of record: swapping it under a running turn would split a compare-and-swap across two backends. So `register('StorageBackend', …)` (and its `unregister` revert) is **deferred**, not immediate — it stages a last-write-wins pending slot and applies it at the next **quiescent edge** (no turn/request/message in flight). The other swap-members (`KnowledgeIndex`, `Vault`) repoint immediately.
+
+A **context switch** is the machine analogue of an OS one — "page in pending machine state, then set the owner." `runAs(principal, fn)` is the bare *set-the-owner* primitive (the principal carrier stays a pure identity primitive); `contextSwitch(principal, fn)` layers the machine half on top, running host-registered flushers (`onContextQuiesce`) at depth-0 edges. The principal scope counter *is* the quiescence signal — the two concerns share call sites, not code. **The pump turn** (the CAS transactional unit) switches context; web/telegram entry points stay `runAs` (their request/message scope spans a long-lived SSE stream, so they must not count as a busy edge).
+
+A plugin that caches storage-derived state (skills, triggers) subscribes to **`services.mounted`** — a `Subscribable<MatbotMachine>` that re-emits the (per-plugin scoped) machine **after every landed swap** (not on subscribe; the initial load is the plugin's own `setup()`). It rebuilds by re-reading through the now-repointed proxies:
+
+```ts
+await manager.load();                                          // initial, in setup()
+services.mounted.consume(() => void manager.load(), signal);   // re-load on every swap
+```
+
+A cacher that reads straight through a store proxy on each call (e.g. `persist-ki-bge`) needs no subscription — the proxy already follows the swap.
 
 ### Discovery vs. direct dependency
 

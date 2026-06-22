@@ -4,6 +4,7 @@ import type {
   Store, Session, SystemContextRegistry, KnowledgeIndex, PromptFn, SessionRunner,
 } from './types.js';
 import type { HookRegistry } from './hooks.js';
+import type { Subscribable } from './broadcast.js';
 
 export const PLUGIN_API_VERSION = '0.1';
 
@@ -132,6 +133,20 @@ export interface MatbotRuntime {
    * Namespaces are isolated: 'schedules' and 'settings' never share documents.
    */
   createStore<T extends { id: string; version: string }>(namespace: string): Store<T>;
+
+  /**
+   * Context-switch notifications: re-emits the (per-plugin scoped) machine after every deferred
+   * StorageBackend swap lands at a quiescent edge. Not on subscribe — the *initial* machine is the
+   * setup() call itself; `mounted` is its deferred encore, the "the backend changed, rebuild" signal.
+   * (So a plugin keeps its normal one-shot setup load and adds this for swaps — no double load.) The
+   * swap is already live when the event fires, so the emitted `services` reads the new backend:
+   *
+   *   services.mounted.consume(s => this.load(s), signal);   // signal ends the loop on teardown
+   *
+   * The element is the machine, not the raw backend: `services` is all a rebuilder needs (it reads
+   * through proxies). A backend that wants to know it became live drives that off its own register().
+   */
+  readonly mounted: Subscribable<MatbotMachine>;
 
   /**
    * Register a service under a MatbotServices key (the key is the interface name it carries).
@@ -326,9 +341,13 @@ export interface MatbotPluginSpec {
   readonly storage?:    Record<string, StoreFactory>;
   readonly tools?:      readonly Tool[];
   /**
-   * When present, the runtime calls open(dotData) before creating the services
-   * object and uses the returned backend for all Store and FileStore creation.
-   * The plugin must be listed before any plugin whose setup() calls createStore.
+   * When present, the runtime calls open(dotData) before creating the services object and uses the
+   * returned backend for all Store and FileStore creation. The plugin must be listed before any plugin
+   * whose setup() calls createStore. The host treats a boot-opened backend as owned by this plugin (as
+   * if it had `register('StorageBackend', …)` in setup), so unloading the plugin reverts storage to the
+   * host's own base and closes the backend. A backend swapped in *later* via register() does not take
+   * effect immediately — see {@link MatbotRuntime.mounted}: it lands at the next quiescent edge so it
+   * never splits a turn's compare-and-swap across two backends.
    */
   readonly storageBackend?: {
     open(dotData: string): Promise<StorageBackend>;

@@ -4,6 +4,7 @@ export * from './store-query.js';
 export * from './vault.js';
 export * from './errors.js';
 export * from './principal-context.js';
+export * from './context-switch.js';
 export * from './hooks.js';
 export * from './plugin.js';
 export * from './broadcast.js';

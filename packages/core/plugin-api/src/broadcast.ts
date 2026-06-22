@@ -9,9 +9,36 @@ interface Subscriber<T> {
   done:  boolean;
 }
 
-export interface Broadcaster<T> {
-  emit(value: T): void;
+// The consumer facet — what a stream hands out. `emit` is the producer's, kept off this so a
+// surface that only exposes observation (e.g. services.mounted) cannot forge events.
+export interface Subscribable<T> {
   subscribe(signal?: AbortSignal): AsyncIterable<T>;
+  // Detached observation loop: awaits each handler before pulling the next (no overlapping runs),
+  // isolates a throwing handler (logged, never propagated — a bad observer must not kill the stream),
+  // and ends when the source ends or `signal` aborts. The fire-and-forget form of the for-await loop
+  // every watch call site otherwise hand-writes.
+  consume(handler: (value: T) => void | Promise<void>, signal?: AbortSignal): void;
+}
+
+export interface Broadcaster<T> extends Subscribable<T> {
+  emit(value: T): void;
+}
+
+/**
+ * Wrap a bare subscribe generator into a full {@link Subscribable}, supplying the standard detached
+ * `consume` loop. Use for a *derived* stream — e.g. a per-plugin scoped view of a shared broadcaster —
+ * that owns its own subscribe generator but wants the same consume ergonomics as a real broadcaster.
+ */
+export function subscribable<T>(subscribe: (signal?: AbortSignal) => AsyncIterable<T>): Subscribable<T> {
+  const consume = (handler: (value: T) => void | Promise<void>, signal?: AbortSignal): void => {
+    void (async () => {
+      for await (const v of subscribe(signal)) {
+        try { await handler(v); }
+        catch (e) { console.error('[matbot] consume handler threw:', e instanceof Error ? e.message : e); }
+      }
+    })();
+  };
+  return { subscribe, consume };
 }
 
 export function createBroadcaster<T>(): Broadcaster<T> {
@@ -42,5 +69,5 @@ export function createBroadcaster<T>(): Broadcaster<T> {
     }
   }
 
-  return { emit, subscribe };
+  return { emit, ...subscribable(subscribe) };
 }
