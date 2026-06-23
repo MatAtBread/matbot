@@ -223,6 +223,17 @@ churn and less likely to affect a consumer who doesn't use them.
   local-only. Opt-in: baked into the web bundle, activated with `plugin add`. Web-bundle only
   (the node-served runtime keeps its filesystem/SQLite backend).
 
+- **storage-filesystem** (`@matatbread/matbot-storage-filesystem`, node) — now also an installable
+  `StorageBackend` plugin, not only a bare `FilesystemStore` library. The package keeps exporting
+  `FilesystemStore` for the host to wire as its zero-plugin boot base (apps/cli is unchanged), and adds
+  a `plugin` export (`FilesystemStorageBackend`: `<dotData>/<namespace>/<id>.json` documents +
+  `<dotData>/files` blobs, the exact layout the node host already falls back to) with a `storageBackend.
+  open` boot hook and a `setup()` that registers it — mirroring the SQLite/Drive backends. The point is
+  to make the node default *nameable*: `plugin add @matatbread/matbot-storage-filesystem` asserts it to
+  override another backend, instead of only reaching it implicitly by unregistering whatever is in
+  force. (Pairs with the discovery/`add` fix above: it now appears in `discover_local` because it is a
+  real plugin, rather than a library that fails on install.)
+
 - **web-bundle / browser** — supporting changes for the above: the browser realm now honours
   `register('Vault', impl)` (a capture-safe `forwardingProxy` over the active vault, mirroring the
   CLI's swap), so a plugin can replace the secret store at runtime; and the browser defaults plugin
