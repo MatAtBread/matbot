@@ -87,13 +87,16 @@ interface DiscoveredPlugin {
 // then failing at install. Returns the discovery entry (with the caller-supplied specifier + source),
 // or null.
 async function inspectPluginDir(sub: string, specifier: string, source: { type: PluginSource; uri: string }): Promise<DiscoveredPlugin | null> {
-  let pkg: { name?: string; description?: string; dependencies?: Record<string, string>; exports?: unknown; matbotRuntime?: unknown };
+  let pkg: { name?: string; description?: string; dependencies?: Record<string, string>; peerDependencies?: Record<string, string>; exports?: unknown; matbotRuntime?: unknown };
   try {
     pkg = JSON.parse(await readFile(path.join(sub, 'package.json'), 'utf8')) as typeof pkg;
   } catch {
     return null;
   }
-  if (pkg.dependencies?.['@matatbread/matbot-plugin-api'] === undefined) return null;
+  // plugin-api is a peerDependency on a published plugin (the host provides the singleton); a
+  // monorepo/source plugin may list it under dependencies. Either declaration passes the pre-filter.
+  if (pkg.dependencies?.['@matatbread/matbot-plugin-api'] === undefined
+      && pkg.peerDependencies?.['@matatbread/matbot-plugin-api'] === undefined) return null;
 
   // The entry is resolved from exports["."] (so we import the .ts file directly, not the directory).
   // No resolvable entry, an import that rejects, or a module with no `plugin` export → not a plugin.
