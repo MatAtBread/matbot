@@ -16,6 +16,14 @@
     "assemble:demo": "node assemble.mjs matbot.web-demo.json",
     "serve": "node serve.mjs"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MatAtBread/matbot.git",
+    "directory": "apps/web-bundle"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "@matatbread/matbot-core": "workspace:*",
     "@matatbread/matbot-plugin-api": "workspace:*",

@@ -23,6 +23,14 @@
   "scripts": {
     "typecheck": "tsc --noEmit"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MatAtBread/matbot.git",
+    "directory": "plugins/frontend/web"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "@matatbread/matbot-skills": "workspace:*"
   },

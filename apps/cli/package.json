@@ -23,6 +23,14 @@
     "test": "node --import ./register.js --test test/loader.test.ts",
     "typecheck": "tsc --noEmit"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MatAtBread/matbot.git",
+    "directory": "apps/cli"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "@matatbread/matbot-core": "workspace:*",
     "@matatbread/matbot-files-node": "workspace:*",

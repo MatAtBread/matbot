@@ -56,8 +56,14 @@ npx matbot                 # runs the locally-installed `matbot` bin
 ```
 
 > Just kicking the tyres, no plugins? `npx @matatbread/matbot-cli` runs it standalone.
-> From source (development): `git clone … && pnpm install && pnpm repl` — `pnpm repl` is the
-> from-source alias for `matbot`.
+>
+> From source, which includes **all** the optional plugins and the web-bundler, or for development: 
+> ```
+> git clone https://github.com/MatAtBread/matbot.git  # ...or fork your own
+> pnpm install 
+> pnpm repl
+> ```
+> `pnpm repl` is the from-source alias for `matbot`.
 
 No config file needed — on first run matbot walks you through setting up a provider. After
 that, capabilities are added with the built-in `plugin` tool; each is its own npm package

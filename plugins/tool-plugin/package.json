@@ -17,6 +17,14 @@
   "scripts": {
     "typecheck": "tsc --noEmit"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MatAtBread/matbot.git",
+    "directory": "plugins/tool-plugin"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "peerDependencies": {
     "@matatbread/matbot-plugin-api": "workspace:*",
     "@matatbread/matbot-core": "workspace:*"

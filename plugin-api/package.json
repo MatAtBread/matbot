@@ -1,15 +1,30 @@
 {
   "name": "@matatbread/matbot-plugin-api",
-  "matbotRuntime": ["node", "browser"],
+  "matbotRuntime": [
+    "node",
+    "browser"
+  ],
   "version": "0.1.0",
-  "engines": { "node": ">=24.0.0" },
-  "files": ["src"],
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "files": [
+    "src"
+  ],
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MatAtBread/matbot.git",
+    "directory": "plugin-api"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "devDependencies": {
     "typescript": "catalog:"
