@@ -466,6 +466,9 @@ importers:
 
   packages/plugins/storage/filesystem:
     dependencies:
+      '@matatbread/matbot-files-node':
+        specifier: workspace:*
+        version: link:../../files
       '@matatbread/matbot-plugin-api':
         specifier: workspace:*
         version: link:../../../core/plugin-api

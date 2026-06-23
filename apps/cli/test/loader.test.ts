@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { loadPlugins } from '@matatbread/matbot-core';
+import { loadPlugins, NotAPluginError } from '@matatbread/matbot-core';
 import type { MatbotMachine } from '@matatbread/matbot-core';
 
 // Regression guard for the boot crash-loop: a non-plugin entry in matbot.yaml (a bare library
@@ -24,7 +24,10 @@ test('startup mode (skip) logs and skips a non-plugin module rather than abortin
   assert.deepEqual(loaded, []);
 });
 
-test('interactive mode (throw) surfaces the not-a-plugin error', async () => {
+// The throw is a *typed* NotAPluginError, not a bare Error — that is the signal the `plugin add` flow
+// keys on to roll the specifier back out of matbot.yaml (a permanent "this is a library" fault),
+// distinct from a transient setup() failure left in config to retry.
+test('interactive mode (throw) surfaces a typed NotAPluginError', async () => {
   await assert.rejects(
     loadPlugins(
       [{ spec: notAPlugin, importSpec: notAPlugin }],
@@ -33,6 +36,6 @@ test('interactive mode (throw) surfaces the not-a-plugin error', async () => {
       /* prompt */ undefined,
       'throw',
     ),
-    /not a matbot plugin/,
+    (e: unknown) => e instanceof NotAPluginError && e.specifier === notAPlugin && /not a matbot plugin/.test(e.message),
   );
 });

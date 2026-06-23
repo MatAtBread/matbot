@@ -1,6 +1,6 @@
 import type { MatbotPlugin, MatbotPluginSpec, MatbotMachine, PluginSource, Runtime } from './plugin.js';
 import type { PromptFn } from './types.js';
-import { IncompatibleRuntimeError } from '@matatbread/matbot-plugin-api';
+import { IncompatibleRuntimeError, NotAPluginError } from '@matatbread/matbot-plugin-api';
 import { registerPlugin, setupPlugin, unloadPlugin } from './registry.js';
 
 /**
@@ -147,8 +147,12 @@ export async function loadPlugins(
   // A load failure is either skipped (the startup batch — a bad entry must not abort the whole
   // boot) or rethrown (an explicit single load — the user named this plugin). One funnel so every
   // failure below — import rejection and each shape check — obeys the same mode. See @param onLoadError.
-  const failLoad = (spec: string, reason: string): void => {
-    if (onLoadError === 'throw') throw new Error(reason);
+  // `kind: 'shape'` distinguishes a module that imported cleanly but is not plugin-shaped (a library)
+  // from a `'load'` failure (import rejection — a bad path, a syntax error). Only the former is
+  // permanently-not-a-plugin: it throws NotAPluginError so the `add` flow can roll back the config
+  // write, where an import failure may be a fixable typo and is left in config.
+  const failLoad = (spec: string, reason: string, kind: 'load' | 'shape' = 'load'): void => {
+    if (onLoadError === 'throw') throw kind === 'shape' ? new NotAPluginError(spec, reason) : new Error(reason);
     console.warn(`[matbot] Skipping plugin "${spec}": ${reason}`);
   };
 
@@ -179,11 +183,12 @@ export async function loadPlugins(
       failLoad(spec,
         `Plugin module "${spec}" does not export a \`plugin\` object — it is not a matbot plugin. ` +
         `Expected: export const plugin: MatbotPluginSpec`,
+        'shape',
       );
       continue;
     }
     if (!('apiVersion' in spec_obj)) {
-      failLoad(spec, `Plugin module "${spec}" exports a \`plugin\` object with no \`apiVersion\` — it is not a valid matbot plugin.`);
+      failLoad(spec, `Plugin module "${spec}" exports a \`plugin\` object with no \`apiVersion\` — it is not a valid matbot plugin.`, 'shape');
       continue;
     }
     const lifecycle = spec_obj as { setup?: unknown; teardown?: unknown; installationMessage?: unknown };
@@ -195,7 +200,7 @@ export async function loadPlugins(
         break;
       }
     }
-    if (lifecycleError !== undefined) { failLoad(spec, lifecycleError); continue; }
+    if (lifecycleError !== undefined) { failLoad(spec, lifecycleError, 'shape'); continue; }
 
     // The single boundary where an author's spec becomes a loaded plugin: identity is stamped here,
     // never declared by the author. The host-injected resolver derives the canonical name; absent a
