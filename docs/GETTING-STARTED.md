@@ -16,14 +16,19 @@ big-picture overview see [README.md](../README.md); for writing plugins see
 
 ## Installation
 
-From npm (recommended):
+matbot loads plugins from the project it runs in, so install it **into a project**, not
+globally. A `-g` or bare `npx` install runs, but the CLI then lives in a different
+`node_modules` than any plugin you `plugin add` — two copies of the core, which breaks the
+singleton contract. A local install keeps the CLI and its plugins in one tree:
 
 ```sh
-npm i -g @matatbread/matbot-cli    # provides the `matbot` command
-# or, no install:  npx @matatbread/matbot-cli
+mkdir my-matbot && cd my-matbot
+npm init -y
+npm i @matatbread/matbot-cli
 ```
 
-From source (for development):
+Run it with `npx matbot` (the locally-installed bin) or via an npm script. From source, for
+development:
 
 ```sh
 git clone https://github.com/MatAtBread/matbot
@@ -43,8 +48,9 @@ matbot --session <id>              # resume an existing session
 matbot start                       # headless server mode (waits for a frontend plugin)
 ```
 
-> From source, substitute `pnpm repl` for `matbot` (and `pnpm start` for `matbot start`) —
-> they run the same entrypoint. The examples below use `matbot`.
+> The examples write `matbot` for brevity. With a project install, invoke it as
+> `npx matbot …` (or via an npm script); from source, substitute `pnpm repl` / `pnpm start`.
+> All three run the same entrypoint.
 
 Sessions are **ephemeral by default** — nothing is written to disk unless you pass
 `--session create`. On exit, a persistent session prints a `--session <id>` resume

@@ -43,58 +43,32 @@ the browser, the sandbox means even an overenthusiastic LLM can't touch your fil
 
 ## Quick start (Node)
 
-Install the CLI from npm (Node 24+):
+matbot is a small CLI plus a set of **optional plugins you install alongside it** — so install
+it **into a project**, not globally. That way the CLI and its plugins share one `node_modules`
+and resolve to a single core (a `-g` or bare `npx` install runs fine but can't load
+project-local plugins, which are the whole point):
 
 ```sh
-npm i -g @matatbread/matbot-cli
-matbot
+mkdir my-matbot && cd my-matbot
+npm init -y
+npm i @matatbread/matbot-cli
+npx matbot                 # runs the locally-installed `matbot` bin
 ```
 
-Or run it without installing:
+> Just kicking the tyres, no plugins? `npx @matatbread/matbot-cli` runs it standalone.
+> From source (development): `git clone … && pnpm install && pnpm repl` — `pnpm repl` is the
+> from-source alias for `matbot`.
 
-```sh
-npx @matatbread/matbot-cli
-```
-
-Or from source, for development:
-
-```sh
-git clone https://github.com/MatAtBread/matbot
-cd matbot
-pnpm install
-pnpm repl            # `pnpm repl` is the from-source alias for `matbot`
-```
-
-No config file needed. On first run matbot will walk you through setting up a provider.
-Once that's done, use the built-in `plugin` tool to add capabilities as you go:
+No config file needed — on first run matbot walks you through setting up a provider. After
+that, capabilities are added with the built-in `plugin` tool; each is its own npm package
+(see [What's in the box](#whats-in-the-box) for the catalogue):
 
 ```
-you: got any cool plugins?
-```
-
-```
-[thinking…]
-Sure! Here's what's available locally:
-
-| Plugin           | What it does                                      |
-|------------------|---------------------------------------------------|
-| bash             | Run shell commands; stream stdout/stderr          |
-| docker-bash      | Same, but sandboxed inside Docker                 |
-| http             | Make HTTP requests to any web API                 |
-| workspace        | Read/write files; served as downloads in the UI   |
-| mcp              | Connect Model Context Protocol servers            |
-| frontend/web     | Browser-accessible chat UI with session sidebar   |
-| frontend/telegram| Run matbot as a Telegram bot                      |
-| skills           | Named markdown playbooks, injected automatically  |
-| cognition        | Memory, inner-voice critique, dream consolidation |
-| …and more        |                                                   |
-
-Want me to add any of these?
-
-you: install the web frontend
+you: I'd like a browser UI — add the web frontend
 
 ⚙  plugin { "action": "add", "specifier": "@matatbread/matbot-frontend-web" }
 Install plugin "@matatbread/matbot-frontend-web"? [y/N] y
+Installing with npm…
 
 [frontend-web] http://localhost:19778
 
@@ -103,7 +77,8 @@ Your current session continues there; no restart needed.
 ```
 
 That last bit is the point: the plugin hot-loads, prints a URL, and you move seamlessly
-from the terminal into the web UI — same session, no interruption.
+from the terminal into the web UI — same session, no interruption. (`plugin add` installs the
+package into your project alongside the CLI, so it resolves to the same core.)
 
 > **No API key?** The `customer-services` provider is free, needs no key, and runs
 > without GPU support. It's not a real LLM, but it's useful for testing your setup
