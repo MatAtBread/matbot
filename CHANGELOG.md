@@ -97,6 +97,15 @@ churn and less likely to affect a consumer who doesn't use them.
   turn now switches context; web/telegram entry points stay `runAs` (their scope spans a long-lived SSE
   stream, so they must not register as a busy edge). Re-exported from `@matatbread/matbot-core`.
 
+- **`NotAPluginError` — a typed "this module is a library, not a plugin" load failure.** The loader's
+  three shape checks (no `plugin` export, a `plugin` without `apiVersion`, a non-function lifecycle
+  member) now throw this instead of a bare `Error`, carrying the `specifier` and the precise `reason`.
+  It is the post-import sibling of `IncompatibleRuntimeError`: both mean *permanent for this specifier*,
+  letting the `plugin add` flow roll the entry back out of config rather than persisting something that
+  can never activate. Import-rejection failures (a bad path, a syntax error) stay a plain `Error` — they
+  may be a fixable typo. Exported from `@matatbread/matbot-plugin-api` and re-exported from
+  `@matatbread/matbot-core`.
+
 ### Bug fixes
 
 - **A bad `matbot.yaml` plugin entry no longer aborts startup.** `loadPlugins` only honoured its
@@ -104,9 +113,9 @@ churn and less likely to affect a consumer who doesn't use them.
   an import that rejected or a module that was not plugin-shaped (no `plugin` export, no `apiVersion`,
   a non-function lifecycle member) threw unconditionally — out of the startup batch, exiting the
   process. Under a supervisor that restarts on exit (e.g. systemd `Restart=always`), a single
-  mistaken entry — such as adding the bare `@matatbread/matbot-storage-filesystem` store library as
-  if it were a plugin — became an unbreakable crash loop fixable only by hand-editing the config. The
-  startup batch now logs and skips every such failure; only an explicit, user-initiated load (the
+  mistaken entry — a bare library mistaken for a plugin (a module that imports cleanly but exports no
+  `plugin`) — became an unbreakable crash loop fixable only by hand-editing the config. The startup
+  batch now logs and skips every such failure; only an explicit, user-initiated load (the
   `plugin`/`provider` tools, which pass `throw`) still surfaces the error. Regression-tested in
   `apps/cli` (`pnpm test`).
 
@@ -145,6 +154,20 @@ churn and less likely to affect a consumer who doesn't use them.
   URL. It is now gated on the plugin's canonical name being a recorded dependency (mirroring the
   `add` path, which only shells out for npm / tarball-or-git specifiers), and the uninstall addresses
   the package by name rather than by the matbot.yaml entry.
+
+- **`plugin discover_local` no longer offers a non-plugin library, and `plugin add` no longer strands
+  a dead config entry when one is forced.** Discovery qualified a directory as installable purely from
+  its `package.json` depending on `@matatbread/matbot-plugin-api` — but a *library* may import the API
+  for its types alone (e.g. `Store<T>`) while exporting no `plugin`, so the bare
+  `@matatbread/matbot-storage-filesystem` store showed up as installable and then failed at load. The
+  scan now matches the loader's actual contract: a candidate qualifies only if its entry module truly
+  exports a `plugin` (the dependency is just a cheap pre-filter). And if a non-plugin is added anyway
+  (e.g. by hand), the loader's shape failures now throw the typed `NotAPluginError`, which the `add`
+  flow treats like `IncompatibleRuntimeError` — permanent, so it **rolls the specifier back out of
+  matbot.yaml** and reports a terminal "not a matbot plugin" message instead of the previous "added to
+  config but activation failed" (which left a dead entry and echoed the loader's `Expected: export
+  const plugin` text — a code-fix instruction an LLM would try to act on). Transient setup() failures
+  (a missing secret) are still left in config to retry.
 
 ### Optional
 

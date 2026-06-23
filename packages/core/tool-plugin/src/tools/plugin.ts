@@ -1,5 +1,5 @@
 import type { Tool, ToolEvent, ToolContext, MatbotPlugin, FormField, Runtime, PluginSource } from '@matatbread/matbot-plugin-api';
-import { CONFIRM_YES, CONFIRM_NO, IncompatibleRuntimeError } from '@matatbread/matbot-plugin-api';
+import { CONFIRM_YES, CONFIRM_NO, IncompatibleRuntimeError, NotAPluginError } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins, getRegisteredTools, getRegisteredFrontendPlugins,
          getRegisteredServiceKeys, getHookPlugins, getSystemContextPlugins,
          getSpecifierForPlugin, getPluginNameForSpecifier } from '@matatbread/matbot-core';
@@ -80,8 +80,12 @@ interface DiscoveredPlugin {
   matbotRuntime?: Runtime[];
 }
 
-// Inspect one candidate directory: it is a plugin only if its package.json depends on the plugin
-// API. Returns the discovery entry (with the caller-supplied specifier + source), or null.
+// Inspect one candidate directory: it is a plugin only if its entry module actually exports a
+// `plugin` object — the same contract the loader enforces. The package.json plugin-api dependency is
+// only a cheap pre-filter (a library may import the API for its *types*, e.g. `Store<T>`, yet export
+// no plugin); making the import load-bearing is what stops such a library from being offered here and
+// then failing at install. Returns the discovery entry (with the caller-supplied specifier + source),
+// or null.
 async function inspectPluginDir(sub: string, specifier: string, source: { type: PluginSource; uri: string }): Promise<DiscoveredPlugin | null> {
   let pkg: { name?: string; description?: string; dependencies?: Record<string, string>; exports?: unknown; matbotRuntime?: unknown };
   try {
@@ -91,19 +95,22 @@ async function inspectPluginDir(sub: string, specifier: string, source: { type: 
   }
   if (pkg.dependencies?.['@matatbread/matbot-plugin-api'] === undefined) return null;
 
-  // Prefer manifest.description (runtime source of truth) over package.json description. Resolve the
-  // explicit entry from exports["."] so we import the .ts file directly rather than the directory.
-  let description = pkg.description ?? '';
+  // The entry is resolved from exports["."] (so we import the .ts file directly, not the directory).
+  // No resolvable entry, an import that rejects, or a module with no `plugin` export → not a plugin.
   const exportsMain = resolveExportsMain(pkg.exports);
-  if (exportsMain) {
-    try {
-      const mod = await import(pathToFileURL(path.join(sub, exportsMain)).href) as Record<string, unknown>;
-      const p = (mod['plugin'] ?? (mod['default'] as Record<string, unknown> | undefined)?.['plugin']) as MatbotPlugin | undefined;
-      if (p?.manifest?.description) description = p.manifest.description;
-    } catch { /* leave description as-is */ }
+  if (!exportsMain) return null;
+  let p: MatbotPlugin | undefined;
+  try {
+    const mod = await import(pathToFileURL(path.join(sub, exportsMain)).href) as Record<string, unknown>;
+    p = (mod['plugin'] ?? (mod['default'] as Record<string, unknown> | undefined)?.['plugin']) as MatbotPlugin | undefined;
+  } catch {
+    return null;
   }
+  if (p === undefined) return null;
 
-  const runtimes = normalizeRuntimes(pkg.matbotRuntime);
+  // Prefer manifest.description (runtime source of truth) over package.json description.
+  const description = p.manifest?.description ?? pkg.description ?? '';
+  const runtimes    = normalizeRuntimes(pkg.matbotRuntime);
   return {
     specifier,
     name:        pkg.name ?? path.basename(sub),
@@ -551,12 +558,23 @@ const executor = {
           },
         };
       } catch (e) {
-        // A runtime mismatch is permanent for this host, not a fixable hiccup: roll the specifier
-        // back out of matbot.yaml so the config never carries a plugin that can never activate here.
-        // Other activation failures (e.g. a missing secret) are left in config to fix and retry.
+        // A runtime mismatch (wrong host) or a not-plugin-shaped module (a library) is permanent for
+        // this specifier, not a fixable hiccup: roll it back out of matbot.yaml so the config never
+        // carries an entry that can never activate. Other activation failures (e.g. a missing secret)
+        // are left in config to fix and retry.
         if (e instanceof IncompatibleRuntimeError) {
           await removePlugin(configPath, configSpecifier);
           yield { type: 'error', message: e.message };
+          return;
+        }
+        // Definitive, not retryable: state the conclusion ("not a matbot plugin") rather than echoing
+        // the loader's `reason`, which reads as a code-fix instruction ("Expected: export const plugin")
+        // an LLM may try to act on by editing the library's source.
+        if (e instanceof NotAPluginError) {
+          await removePlugin(configPath, configSpecifier);
+          yield { type: 'error', message:
+            `"${configSpecifier}" is not a matbot plugin — it exports no \`plugin\`, so it cannot be installed ` +
+            `(it is most likely a library). Nothing was changed in ${path.basename(configPath)}.` };
           return;
         }
         yield { type: 'result', value: { message: `"${configSpecifier}" added to config but activation failed: ${String(e)}.` } };
