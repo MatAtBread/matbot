@@ -1,0 +1,29 @@
+{
+  "name": "@matatbread/matbot-tool-json-validation",
+  "matbotRuntime": [
+    "node",
+    "browser"
+  ],
+  "version": "0.1.0",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "files": [
+    "src"
+  ],
+  "description": "Validates tool-call inputs against each tool's JSON Schema, returning an error result on mismatch so the model can self-correct.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@matatbread/matbot-plugin-api": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "catalog:",
+    "@matatbread/matbot-plugin-api": "workspace:*"
+  }
+}

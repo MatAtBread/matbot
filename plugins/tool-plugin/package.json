@@ -1,0 +1,30 @@
+{
+  "name": "@matatbread/matbot-tool-plugin",
+  "matbotRuntime": [
+    "node"
+  ],
+  "version": "0.1.0",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "files": [
+    "src"
+  ],
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@matatbread/matbot-plugin-api": "workspace:*",
+    "@matatbread/matbot-core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "@matatbread/matbot-plugin-api": "workspace:*",
+    "@matatbread/matbot-core": "workspace:*"
+  }
+}

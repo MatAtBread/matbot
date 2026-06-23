@@ -1,4 +1,4 @@
-import { VaultImpl } from '@matatbread/matbot-security';
+import { VaultImpl } from '@matatbread/matbot-core';
 import { readFile, writeFile } from 'node:fs/promises';
 
 /**

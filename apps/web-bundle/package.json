@@ -1,8 +1,13 @@
 {
   "name": "@matatbread/matbot-web-bundle",
-  "matbotRuntime": ["node", "browser"],
+  "matbotRuntime": [
+    "node",
+    "browser"
+  ],
   "version": "0.1.0",
-  "engines": { "node": ">=24.0.0" },
+  "engines": {
+    "node": ">=24.0.0"
+  },
   "description": "Self-contained, browser-only matbot: assembles the platform-neutral core and browser plugins into a single matbot.html that runs entirely client-side (file:// or any static host).",
   "type": "module",
   "scripts": {
@@ -14,8 +19,8 @@
   "dependencies": {
     "@matatbread/matbot-core": "workspace:*",
     "@matatbread/matbot-plugin-api": "workspace:*",
-    "@matatbread/matbot-knowledge": "workspace:*",
-    "@matatbread/matbot-browser": "workspace:*"
+    "@matatbread/matbot-browser": "workspace:*",
+    "@matatbread/matbot-frontend-web": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "catalog:",

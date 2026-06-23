@@ -12,7 +12,7 @@ import type {
   PluginSettings, Vault, SessionRunner, KnowledgeIndex,
   PluginResolver, StorageBackend, FileStore, PromptFn, MatbotPlugin, Principal, Runtime, SwapFn,
 } from '@matatbread/matbot-plugin-api';
-import { LookupKnowledgeIndex } from '@matatbread/matbot-knowledge';
+import { LookupKnowledgeIndex } from '@matatbread/matbot-core';
 import { BrowserStorageBackend, LocalStorageVault } from '@matatbread/matbot-browser';
 import { runProviderSetup, type AvailableProvider, type ProviderDraft } from './setup.js';
 import { createBrowserProviderTool } from './provider-tool.js';

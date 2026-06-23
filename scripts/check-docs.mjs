@@ -127,7 +127,7 @@ function newPackagesSince(baseline) {
 }
 
 const tierOf = (file) =>
-  file.startsWith('packages/core/plugin-api/') ? 0 : file.startsWith('packages/core/') ? 1 : 2;
+  file.startsWith('plugin-api/') ? 0 : file.startsWith('core/') ? 1 : 2;
 const TIER_LABEL = ['public API (plugin-api)', 'core', 'plugins / apps'];
 
 let findings = 0;

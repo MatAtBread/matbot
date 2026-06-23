@@ -1,0 +1,29 @@
+{
+  "name": "@matatbread/matbot-tool-ask-user",
+  "matbotRuntime": [
+    "node",
+    "browser"
+  ],
+  "version": "0.1.0",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "files": [
+    "src"
+  ],
+  "description": "Ask the user a question with interactive form controls — text, password, select, and confirm.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@matatbread/matbot-plugin-api": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "catalog:",
+    "@matatbread/matbot-plugin-api": "workspace:*"
+  }
+}

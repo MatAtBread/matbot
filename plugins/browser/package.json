@@ -1,0 +1,30 @@
+{
+  "name": "@matatbread/matbot-browser",
+  "matbotRuntime": [
+    "browser"
+  ],
+  "version": "0.1.0",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "files": [
+    "src"
+  ],
+  "description": "Browser-native backends for the web frontend: an IndexedDB Store, an OPFS file store, and a WebCrypto-backed vault.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@matatbread/matbot-plugin-api": "workspace:*",
+    "@matatbread/matbot-core": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "catalog:",
+    "@matatbread/matbot-plugin-api": "workspace:*",
+    "@matatbread/matbot-core": "workspace:*"
+  }
+}

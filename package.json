@@ -9,6 +9,7 @@
     "typecheck":  "pnpm -r run typecheck",
     "test":       "pnpm --filter @matatbread/matbot-cli test",
     "check:docs": "node scripts/check-docs.mjs",
+    "check:isolation": "node scripts/check-base-isolation.mjs",
     "repl":       "pnpm --filter @matatbread/matbot-cli repl",
     "start":      "pnpm --filter @matatbread/matbot-cli start",
     "web-build":  "pnpm --filter @matatbread/matbot-web-bundle assemble && pnpm --filter @matatbread/matbot-web-bundle assemble:demo",

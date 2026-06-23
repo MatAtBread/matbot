@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { loadConfig, loadConfigFromText, loadDotEnv } from './config.js';
 import { installPlugin }                    from './install.js';
-import { executeQuery }                     from '@matatbread/matbot-storage-base';
+import { executeQuery }                     from '@matatbread/matbot-core/storage-base';
 import { loadPluginsWithDescriptions, readPluginMeta, type PluginLoadRequest } from './plugin-description.js';
 import { nodePluginResolver }               from './plugin-resolver.js';
 import type { Principal, ProviderAdapter,
@@ -23,13 +23,13 @@ import { appendMessage, createMessage,
          MissingSecretError }              from '@matatbread/matbot-core';
 import type { MatbotMachine, MatbotServices, PluginSettings, Vault, SessionRunner,
               MatbotPlugin, StorageBackend, KnowledgeIndex, PromptFn, FormField, SwapFn } from '@matatbread/matbot-core';
-import { systemPrincipal }                 from '@matatbread/matbot-security';
+import { systemPrincipal }                 from '@matatbread/matbot-core';
 import { createAlsPrincipalCarrier }       from './principal-als.js';
 import { EnvFileVault }                     from './env-vault.js';
 import { FilesystemStore }                 from '@matatbread/matbot-storage-filesystem';
 import { FilesystemFileStore }             from '@matatbread/matbot-files-node';
 import { createBuiltinTools, createProviderTool, classifySpecifier, materializeRemote } from '@matatbread/matbot-tool-plugin';
-import { LookupKnowledgeIndex }               from '@matatbread/matbot-knowledge';
+import { LookupKnowledgeIndex }               from '@matatbread/matbot-core';
 import { access, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { createInterface }                 from 'node:readline/promises';
 import { createRequire }                   from 'node:module';
@@ -464,7 +464,7 @@ interface ProviderPackage { type: string; name: string; dir: string; }
 
 async function discoverProviders(): Promise<ProviderPackage[]> {
   const thisDir      = path.dirname(fileURLToPath(import.meta.url));
-  const providersDir = path.resolve(thisDir, '../../../packages/plugins/providers');
+  const providersDir = path.resolve(thisDir, '../../../plugins/providers');
   let entries: string[];
   try { entries = await readdir(providersDir); } catch { return []; }
   const results: ProviderPackage[] = [];

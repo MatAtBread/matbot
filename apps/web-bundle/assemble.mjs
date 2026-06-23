@@ -38,34 +38,44 @@ function resolveExportsEntry(value) {
   return undefined;
 }
 
-// Scan workspace package roots (mirrors pnpm-workspace.yaml globs) → { name: entryModuleId }.
+// Scan workspace package roots (mirrors pnpm-workspace.yaml globs) → { specifier: entryModuleId }.
+// Only `plugins` is discovered dynamically; `core` and `plugin-api` are built-in singletons added
+// directly, and `apps` is the bundle itself (the root is passed in as an explicit id, not by name).
+// Each package contributes its bare name (exports ".") AND every subpath export (e.g. core's
+// "./storage-base" → "@matatbread/matbot-core/storage-base"), so the resolver follows a subpath
+// import the same way it follows a top-level one.
 async function buildNameMap() {
-  const roots = [];
   const dirsAt = async (rel) => {
     try { return (await readdir(path.join(repoRoot, rel), { withFileTypes: true }))
       .filter(d => d.isDirectory()).map(d => path.join(rel, d.name)); }
     catch { return []; }
   };
-  const lvl1 = await dirsAt('packages');
-  const lvl2 = (await Promise.all(lvl1.map(d => dirsAt(d)))).flat();
-  const lvl3 = (await Promise.all(lvl2.map(d => dirsAt(d)))).flat();
-  const apps = await dirsAt('apps');
-  roots.push(...lvl1, ...lvl2, ...lvl3, ...apps);
+  const plugins1 = await dirsAt('plugins');
+  const plugins2 = (await Promise.all(plugins1.map(d => dirsAt(d)))).flat();
+  const roots = ['core', 'plugin-api', ...plugins1, ...plugins2];
 
   const map = {};
   for (const rel of roots) {
     try {
       const pkg = JSON.parse(await readFile(path.join(repoRoot, rel, 'package.json'), 'utf8'));
-      const entry = resolveExportsEntry(pkg.exports);
-      if (pkg.name && typeof entry === 'string') {
-        map[pkg.name] = idOf(path.join(repoRoot, rel, entry));
+      if (!pkg.name) continue;
+      const exp = pkg.exports;
+      const entries = (typeof exp === 'object' && exp !== null && !Array.isArray(exp)
+                       && Object.keys(exp).some(k => k.startsWith('.')))
+        ? Object.entries(exp)
+        : [['.', exp]];
+      for (const [sub, val] of entries) {
+        const entry = resolveExportsEntry(val);
+        if (typeof entry !== 'string') continue;
+        const spec = sub === '.' ? pkg.name : pkg.name + sub.slice(1);
+        map[spec] = idOf(path.join(repoRoot, rel, entry));
       }
     } catch { /* no/invalid package.json */ }
   }
   return map;
 }
 
-// A config plugin/provider path ("packages/plugins/http") → its entry module id.
+// A config plugin/provider path ("plugins/http") → its entry module id.
 async function entryForPath(rel) {
   const dir = path.join(repoRoot, rel);
   const pkg = JSON.parse(await readFile(path.join(dir, 'package.json'), 'utf8'));

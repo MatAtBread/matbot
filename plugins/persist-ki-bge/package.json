@@ -1,0 +1,30 @@
+{
+  "name": "@matatbread/matbot-persist-ki-bge",
+  "matbotRuntime": [
+    "node",
+    "browser"
+  ],
+  "version": "0.1.0",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "files": [
+    "src"
+  ],
+  "description": "Persistent KnowledgeIndex backed by a Store, with entity/heading search and optional BGE reranker.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@matatbread/matbot-plugin-api": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "@matatbread/matbot-plugin-api": "workspace:*"
+  }
+}

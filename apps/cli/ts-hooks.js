@@ -7,7 +7,7 @@
 //
 //   2. Plugin hot-reload freshness. When a plugin is reloaded, the core loader
 //      stamps the plugin entry URL with `?mbfresh=<gen>` (see FRESH_PARAM in
-//      packages/core/runner/src/loader.ts). On its own that re-evaluates only the
+//      core/src/loader.ts). On its own that re-evaluates only the
 //      entry; its static imports stay cached. Here we propagate that stamp from a
 //      stamped parent onto its first-party children, so the whole plugin subtree
 //      re-evaluates — "fresh all the way down".
