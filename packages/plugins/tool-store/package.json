@@ -2,6 +2,8 @@
   "name": "@matatbread/matbot-tool-store",
   "matbotRuntime": ["node", "browser"],
   "version": "0.1.0",
+  "engines": { "node": ">=24.0.0" },
+  "files": ["src"],
   "description": "Define named stores and expose generated CRUD tools over them via store_action. Cross-runtime (node + browser).",
   "type": "module",
   "exports": {

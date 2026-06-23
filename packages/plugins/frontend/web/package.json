@@ -2,6 +2,8 @@
   "name": "@matatbread/matbot-frontend-web",
   "matbotRuntime": ["node", "browser"],
   "version": "0.1.0",
+  "engines": { "node": ">=24.0.0" },
+  "files": ["src"],
   "description": "Web UI with session management. Node entry serves it over HTTP+SSE; browser entry mounts the same UI in-process. Both share index.html + app.js.",
   "type": "module",
   "exports": {

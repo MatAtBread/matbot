@@ -2,6 +2,8 @@
   "name": "@matatbread/matbot-web-principal-user",
   "matbotRuntime": ["node"],
   "version": "0.1.0",
+  "engines": { "node": ">=24.0.0" },
+  "files": ["src"],
   "description": "Override the web frontend's request principal with the host OS user ($USER).",
   "type": "module",
   "exports": {

@@ -2,6 +2,8 @@
   "name": "@matatbread/matbot-triggers",
   "matbotRuntime": ["node", "browser"],
   "version": "0.1.0",
+  "engines": { "node": ">=24.0.0" },
+  "files": ["src"],
   "description": "Data-driven hooks: stored conditions that, when an LLM classifier judges them matched, invoke a tool. Cross-runtime (node + browser).",
   "type": "module",
   "exports": {

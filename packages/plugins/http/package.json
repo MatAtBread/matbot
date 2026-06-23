@@ -2,6 +2,8 @@
   "name": "@matatbread/matbot-tool-http",
   "matbotRuntime": ["node", "browser"],
   "version": "0.1.0",
+  "engines": { "node": ">=24.0.0" },
+  "files": ["src"],
   "description": "Make HTTP requests (method, headers, body) to web APIs and remote resources; requires the network capability.",
   "type": "module",
   "exports": {

@@ -2,6 +2,8 @@
   "name": "@matatbread/matbot-tool-docker-bash",
   "matbotRuntime": ["node"],
   "version": "0.1.0",
+  "engines": { "node": ">=24.0.0" },
+  "files": ["src"],
   "description": "Replaces the bash tool with a persistent Docker container (exec-based). Project root is read-only at /app; .data is read-write.",
   "type": "module",
   "exports": {

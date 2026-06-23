@@ -2,6 +2,8 @@
   "name": "@matatbread/matbot-plugin-api",
   "matbotRuntime": ["node", "browser"],
   "version": "0.1.0",
+  "engines": { "node": ">=24.0.0" },
+  "files": ["src"],
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
