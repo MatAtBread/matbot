@@ -25,7 +25,7 @@
 
   <rect x="150" y="105" width="900" height="445" rx="24" fill="url(#core)" filter="url(#shadow)"/>
   <text x="600" y="140" text-anchor="middle" class="coreTitle">Core packages</text>
-  <text x="600" y="162" text-anchor="middle" class="pkg">packages/core/* and apps/* bootstrap wiring</text>
+  <text x="600" y="162" text-anchor="middle" class="pkg">core, plugin-api and apps/* bootstrap wiring</text>
 
   <!-- core package cards -->
   <g transform="translate(185,190)">

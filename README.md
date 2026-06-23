@@ -43,11 +43,26 @@ the browser, the sandbox means even an overenthusiastic LLM can't touch your fil
 
 ## Quick start (Node)
 
+Install the CLI from npm (Node 24+):
+
+```sh
+npm i -g @matatbread/matbot-cli
+matbot
+```
+
+Or run it without installing:
+
+```sh
+npx @matatbread/matbot-cli
+```
+
+Or from source, for development:
+
 ```sh
 git clone https://github.com/MatAtBread/matbot
 cd matbot
 pnpm install
-pnpm repl
+pnpm repl            # `pnpm repl` is the from-source alias for `matbot`
 ```
 
 No config file needed. On first run matbot will walk you through setting up a provider.
@@ -78,8 +93,8 @@ Want me to add any of these?
 
 you: install the web frontend
 
-⚙  plugin { "action": "add", "specifier": "./packages/plugins/frontend/web" }
-Install plugin "./packages/plugins/frontend/web"? [y/N] y
+⚙  plugin { "action": "add", "specifier": "@matatbread/matbot-frontend-web" }
+Install plugin "@matatbread/matbot-frontend-web"? [y/N] y
 
 [frontend-web] http://localhost:19778
 

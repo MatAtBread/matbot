@@ -12,9 +12,9 @@ A TypeScript AI harness — a thin, composable runtime connecting language model
 
 ## Hard constraints
 
-**No provider SDKs.** All LLM communication uses `fetch` with SSE parsed via `parseSSE` from `@matatbread/matbot-providers-base`. Never import `@anthropic-ai/sdk`, `openai`, or equivalents.
+**No provider SDKs.** All LLM communication uses `fetch` with SSE parsed via `parseSSE` from `@matatbread/matbot-core/providers-base`. Never import `@anthropic-ai/sdk`, `openai`, or equivalents.
 
-**No Node primitives in shared packages.** Packages under `packages/` (except those suffixed `-node`) must run in Node and browser. Use `fetch`, `crypto.randomUUID()`, `AbortController`, `ReadableStream`, `TextDecoder`, `SubtleCrypto`. Never use `require`, `Buffer`, `EventEmitter`, `fs`, `path`, `child_process`, `os`, or `process.env`.
+**No Node primitives in shared packages.** Shared packages — `plugin-api/`, `core/`, and `plugins/*` (except those suffixed `-node`) — must run in Node and browser. Use `fetch`, `crypto.randomUUID()`, `AbortController`, `ReadableStream`, `TextDecoder`, `SubtleCrypto`. Never use `require`, `Buffer`, `EventEmitter`, `fs`, `path`, `child_process`, `os`, or `process.env`.
 
 Secrets and configuration go through the `Vault` (`${NAME}` placeholders) or plugin `Settings` — both have swappable backends. Reaching for `process.env` directly is non-portable.
 
@@ -28,19 +28,17 @@ Secrets and configuration go through the `Vault` (`${NAME}` placeholders) or plu
 
 ### Monorepo layout
 ```
-packages/
-  core/
-    runner/        — agentic loop, hook dispatch, plugin loader
-    plugin-api/    — MatbotPlugin, MatbotServices/MatbotRuntime/MatbotMachine, shared types
-    config/        — YAML + .env loading
-    security/      — VaultImpl, Principal origin
-    knowledge/     — LookupKnowledgeIndex (default in-memory)
-    storage/
-      _base/       — filter/sort engine (translatable StoreQuery)
-    providers/
-      _base/       — SSE parser, HTTP helpers
-    tool-plugin/   — built-in provider management tools
-  plugins/
+plugin-api/        — @matatbread/matbot-plugin-api: MatbotPlugin, MatbotServices/MatbotRuntime/
+                     MatbotMachine, shared types, principal carrier, errors. The singleton contract;
+                     every plugin peer-depends on it. Its own package (never folded into core).
+core/              — @matatbread/matbot-core: agentic loop, hook dispatch, plugin loader, config
+                     (YAML + .env), security (VaultImpl, Principal origin), knowledge
+                     (LookupKnowledgeIndex). Author-facing subpath exports — link against without
+                     pulling the runtime:
+                       ./providers-base — SSE parser, HTTP helpers (write a provider)
+                       ./storage-base   — filter/sort engine, StoreQuery (write a storage backend)
+plugins/
+    tool-plugin/   — built-in provider/plugin management tools (node)
     rumsfeld/      — contextual_search tool; knowledge fault handler
     persist-ki-bge/— persistent KnowledgeIndex + BGE reranker
     triggers/      — data-driven hooks (condition → tool invocation)
@@ -68,7 +66,7 @@ apps/
   web-bundle/      — browser-only matbot.html
 ```
 
-**Dependency direction:** `apps` → `packages/plugins/*-node` → `packages/plugins/*` → `packages/core/plugin-api`. `packages/core/runner` → `packages/core/plugin-api`. Nothing in `packages/` may depend on `apps/`.
+**Dependency direction:** `apps` → `plugins/*-node` → `plugins/*` → `core` → `plugin-api`. Nothing in `plugin-api/`, `core/`, or `plugins/` may depend on `apps/`.
 
 ### Package naming
 - `@matatbread/matbot-foo` — single implementation
@@ -84,7 +82,7 @@ Named LLM configurations in `matbot.yaml`, fully self-contained:
 ```yaml
 providers:
   claude-sonnet-4-6:
-    module: ./packages/plugins/providers/anthropic
+    module: ./plugins/providers/anthropic
     endpoint: https://api.anthropic.com
     model: claude-sonnet-4-6
     credentials:

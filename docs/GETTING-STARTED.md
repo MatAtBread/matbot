@@ -8,13 +8,22 @@ big-picture overview see [README.md](../README.md); for writing plugins see
 
 ## Requirements
 
-- Node 24+
-- pnpm 9+
+- Node 24+ (matbot ships raw TypeScript and relies on Node's native type stripping)
 - An LLM API key (Anthropic, OpenAI-compatible, DeepSeek, Ollama, …)
+- pnpm 9+ — only needed to run from source
 
 ---
 
 ## Installation
+
+From npm (recommended):
+
+```sh
+npm i -g @matatbread/matbot-cli    # provides the `matbot` command
+# or, no install:  npx @matatbread/matbot-cli
+```
+
+From source (for development):
 
 ```sh
 git clone https://github.com/MatAtBread/matbot
@@ -27,12 +36,15 @@ pnpm install
 ## Running matbot
 
 ```sh
-pnpm repl                          # interactive REPL (ephemeral session)
-pnpm repl "What is 2 + 2?"         # single turn, then exit
-pnpm repl --session create         # new persistent session
-pnpm repl --session <id>           # resume an existing session
-pnpm start                         # headless server mode (waits for a frontend plugin)
+matbot                             # interactive REPL (ephemeral session)
+matbot "What is 2 + 2?"            # single turn, then exit
+matbot --session create            # new persistent session
+matbot --session <id>              # resume an existing session
+matbot start                       # headless server mode (waits for a frontend plugin)
 ```
+
+> From source, substitute `pnpm repl` for `matbot` (and `pnpm start` for `matbot start`) —
+> they run the same entrypoint. The examples below use `matbot`.
 
 Sessions are **ephemeral by default** — nothing is written to disk unless you pass
 `--session create`. On exit, a persistent session prints a `--session <id>` resume
@@ -48,7 +60,7 @@ You don't need a config file to start. On first run with no providers configured
 matbot walks you through setting one up interactively:
 
 ```
-$ pnpm repl
+$ matbot
 
 No providers configured. Let's set one up.
 
@@ -89,7 +101,7 @@ with `--config`). Everything in it is optional — matbot will prompt for what i
 ```yaml
 providers:
   claude:
-    module: ./packages/plugins/providers/anthropic
+    module: ./plugins/providers/anthropic
     endpoint: https://api.anthropic.com
     model: claude-sonnet-4-6
     credentials:
@@ -99,7 +111,7 @@ providers:
       temperature: 0.7
 
   deepseek:
-    module: ./packages/plugins/providers/anthropic
+    module: ./plugins/providers/anthropic
     endpoint: https://api.deepseek.com/anthropic
     model: deepseek-v4-flash
     credentials:
@@ -119,10 +131,10 @@ When working in the monorepo, reference packages by relative path (no install st
 
 ```yaml
 plugins:
-  - ./packages/plugins/bash
-  - ./packages/plugins/http
-  - ./packages/plugins/workspace
-  - ./packages/plugins/frontend/web
+  - ./plugins/bash
+  - ./plugins/http
+  - ./plugins/workspace
+  - ./plugins/frontend/web
 ```
 
 ---
@@ -234,7 +246,7 @@ Purely conversational — one provider, no plugins.
 # matbot.yaml
 providers:
   deepseek:
-    module: ./packages/plugins/providers/anthropic
+    module: ./plugins/providers/anthropic
     endpoint: https://api.deepseek.com/anthropic
     model: deepseek-v4-flash
     credentials:
@@ -249,7 +261,7 @@ DEEPSEEK_API_KEY=sk-...
 ```
 
 ```sh
-pnpm repl
+matbot
 ```
 
 ---
@@ -262,7 +274,7 @@ Adds bash execution, HTTP requests, workspace files, and a browser-accessible ch
 # matbot.yaml
 providers:
   claude:
-    module: ./packages/plugins/providers/anthropic
+    module: ./plugins/providers/anthropic
     endpoint: https://api.anthropic.com
     model: claude-sonnet-4-6
     credentials:
@@ -271,14 +283,14 @@ providers:
       maxTokens: 8192
 
 plugins:
-  - ./packages/plugins/bash
-  - ./packages/plugins/http
-  - ./packages/plugins/workspace
-  - ./packages/plugins/frontend/web
+  - ./plugins/bash
+  - ./plugins/http
+  - ./plugins/workspace
+  - ./plugins/frontend/web
 ```
 
 ```sh
-pnpm repl
+matbot
 # The web frontend prints its URL on startup:
 # [frontend-web] http://localhost:19778
 ```
@@ -292,7 +304,7 @@ Open the URL in your browser — the same session continues in the web UI.
 ```yaml
 providers:
   deepseek:
-    module: ./packages/plugins/providers/anthropic
+    module: ./plugins/providers/anthropic
     endpoint: https://api.deepseek.com/anthropic
     model: deepseek-v4-flash
     credentials:
@@ -301,16 +313,16 @@ providers:
       maxTokens: 16384
 
 plugins:
-  - ./packages/plugins/skills
-  - ./packages/plugins/triggers
-  - ./packages/plugins/rumsfeld
-  - ./packages/plugins/cognition
-  - ./packages/plugins/sessions
-  - ./packages/plugins/frontend/web
+  - ./plugins/skills
+  - ./plugins/triggers
+  - ./plugins/rumsfeld
+  - ./plugins/cognition
+  - ./plugins/sessions
+  - ./plugins/frontend/web
 ```
 
 ```sh
-pnpm repl --session create
+matbot --session create
 ```
 
 The `triggers` plugin fires skills/tools on behavioural conditions (judged by an LLM classifier);

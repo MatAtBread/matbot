@@ -115,7 +115,7 @@ plugin({ action: 'add',            specifier: '@matatbread/matbot-tool-bash' })
 plugin({ action: 'remove',         specifier: '@matatbread/matbot-tool-bash' })  // address by package name
 plugin({ action: 'reload',         specifier: '@matatbread/matbot-tool-bash' })  // re-import from disk
 plugin({ action: 'list' })                                                       // configured + loaded, with matbotRuntime
-plugin({ action: 'discover_local' })                                             // scan packages/plugins + the .plugins cache
+plugin({ action: 'discover_local' })                                             // scan plugins + the .plugins cache
 plugin({ action: 'store-key',      name: 'SOME_API_KEY' })                       // supply a missing secret (value entered out-of-band)
 ```
 
@@ -448,10 +448,10 @@ is what makes consecutive pages a disjoint cover (each page re-applies the same 
 order never shifts under you). A present `cursor` means more pages follow; an absent one means done.
 Comparisons are type-strict; null and absent are a single
 "missing" state queried only via `exists`. The in-memory reference evaluator (`executeQuery` in
-`@matatbread/matbot-storage-base`) compiles the AST to a composed-closure predicate; a backend may
+`@matatbread/matbot-core/storage-base`) compiles the AST to a composed-closure predicate; a backend may
 instead compile the same AST to its native query. Full-text and vector search are **not** part of
 `Store` — they live on `KnowledgeIndex`. See `Filter`, `StoreQuery`, and `StoreQueryError` in the
-API types (`packages/core/plugin-api/src/store-query.ts`).
+API types (`plugin-api/src/store-query.ts`).
 
 ---
 
@@ -653,7 +653,7 @@ into three layers:
    storage + the `plugin` tool) and `frontend/web` (the UI).
 
 2. **Baked-but-idle (`bundledPlugins[]`)** — bundled into the artifact but not auto-loaded.
-   These are the browser analogue of Node's on-disk `packages/plugins`. `discover_local`
+   These are the browser analogue of Node's on-disk `plugins`. `discover_local`
    lists them; enabling one is a single `plugin add`. Persisted by package name — resolves
    through the import map on every reload without network access.
 
