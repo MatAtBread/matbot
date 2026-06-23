@@ -10,6 +10,7 @@
   "files": [
     "src"
   ],
+  "description": "Filesystem-backed StorageBackend for Node — content-addressed and CAS-safe; the CLI's default store.",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
