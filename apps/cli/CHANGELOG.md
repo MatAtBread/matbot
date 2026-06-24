@@ -1,5 +1,24 @@
 # @matatbread/matbot-cli
 
+## 0.1.2
+
+### Patch Changes
+
+- f9f193c: Fix first-run setup on an npm install. The CLI now bundles the provider adapters
+  (anthropic, openai-compat, customer-services) as dependencies, discovers them via
+  module resolution instead of a monorepo-only directory scan, and writes the
+  provider's package name as `module:` in matbot.yaml (resolves in both an install
+  and the workspace). Previously `matbot` aborted with "No provider packages found".
+- 55ab48d: Suppress the experimental `stripTypeScriptTypes` warning that the loader otherwise
+  prints on every plugin load. Only that one warning is filtered; all others pass through.
+  - @matatbread/matbot-core@0.1.2
+  - @matatbread/matbot-files-node@0.1.2
+  - @matatbread/matbot-provider-anthropic@0.1.2
+  - @matatbread/matbot-provider-customer-services@0.1.2
+  - @matatbread/matbot-provider-openai-compat@0.1.2
+  - @matatbread/matbot-storage-filesystem@0.1.2
+  - @matatbread/matbot-tool-plugin@0.1.2
+
 ## 0.1.1
 
 ### Patch Changes

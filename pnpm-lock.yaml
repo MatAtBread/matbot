@@ -32,6 +32,15 @@ importers:
       '@matatbread/matbot-files-node':
         specifier: workspace:*
         version: link:../../plugins/files
+      '@matatbread/matbot-provider-anthropic':
+        specifier: workspace:*
+        version: link:../../plugins/providers/anthropic
+      '@matatbread/matbot-provider-customer-services':
+        specifier: workspace:*
+        version: link:../../plugins/providers/customer-services
+      '@matatbread/matbot-provider-openai-compat':
+        specifier: workspace:*
+        version: link:../../plugins/providers/openai-compat
       '@matatbread/matbot-storage-filesystem':
         specifier: workspace:*
         version: link:../../plugins/storage/filesystem
