@@ -692,7 +692,8 @@ export const pluginTool: Tool = {
     "  | { action: 'store-key';  key: string };        // store a secret a plugin/provider needs; value entered out-of-band\n" +
     '```\n\n' +
     'A `specifier` (for add/remove/reload) is EXACTLY ONE of these forms — pass a concrete string, ' +
-    'not a fuzzy name (run `discover_local` first to find the exact specifier):\n' +
+    'not a fuzzy name (run `discover_local` first to find the exact specifier). If the user gives you a ' +
+    'specifier, pass it through VERBATIM — never reformat it (especially a github: one):\n' +
     '```ts\n' +
     'type Specifier =\n' +
     '  // npm registry — published packages; resolves via your .npmrc (npmjs, verdaccio, or private)\n' +
@@ -706,8 +707,12 @@ export const pluginTool: Tool = {
     '  //   directory containing one, OR is a code entry with a package.json as its DIRECT SIBLING.\n' +
     '  | "https://<host>/<path>/" | "https://<host>/<path>/package.json"\n' +
     '  | "https://<host>/<path>/<entry>.ts" | "https://<host>/<path>/<pkg>.tgz"\n' +
-    '  // GitHub — raw source is fetched & cached; "#path:" / git URLs install via the package manager\n' +
-    '  | "github:<owner>/<repo>" | "github:<owner>/<repo>#<ref>" | "github:<owner>/<repo>/<subdir>"\n' +
+    '  // GitHub — RAW source fetched & cached. Use this for matbot source plugins (incl. a repo subdir).\n' +
+    '  //   The "#<ref>" (branch/tag/commit) comes LAST, after any "/<subdir>". The "#path:" and git+ forms\n' +
+    '  //   install via the package manager instead and work ONLY for fully-packaged (published) packages,\n' +
+    '  //   NOT raw workspace source — do not use them for a repo subdir.\n' +
+    '  | "github:<owner>/<repo>" | "github:<owner>/<repo>#<ref>"\n' +
+    '  | "github:<owner>/<repo>/<subdir>" | "github:<owner>/<repo>/<subdir>#<ref>"\n' +
     '  | "github:<owner>/<repo>#path:/<subdir>" | "git+https://<host>/<owner>/<repo>.git";\n' +
     '```\n' +
     'Raw-source (HTTP/github) installs are packages: a package.json must resolve (the URL itself, a ' +
