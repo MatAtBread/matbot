@@ -50,9 +50,8 @@ project-local plugins, which are the whole point):
 
 ```sh
 mkdir my-matbot && cd my-matbot
-npm init -y
-npm i @matatbread/matbot-cli
-npx matbot                 # runs the locally-installed `matbot` bin
+npm i @matatbread/matbot-cli   # creates a minimal package.json + node_modules
+npx matbot                     # runs the locally-installed `matbot` bin
 ```
 
 > Just kicking the tyres, no plugins? `npx @matatbread/matbot-cli` runs it standalone.

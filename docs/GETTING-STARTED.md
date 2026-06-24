@@ -23,8 +23,7 @@ singleton contract. A local install keeps the CLI and its plugins in one tree:
 
 ```sh
 mkdir my-matbot && cd my-matbot
-npm init -y
-npm i @matatbread/matbot-cli
+npm i @matatbread/matbot-cli   # creates a minimal package.json + node_modules
 ```
 
 Run it with `npx matbot` (the locally-installed bin) or via an npm script. From source, for
