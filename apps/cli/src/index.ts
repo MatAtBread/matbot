@@ -462,18 +462,29 @@ async function runTurn(
 
 interface ProviderPackage { type: string; name: string; dir: string; }
 
+// The provider adapters the CLI ships with (its dependencies). Resolved through the module graph
+// rather than a directory scan, so discovery works identically when installed (node_modules) and in
+// the monorepo (workspace symlinks). A user can `plugin add` other providers after setup.
+const BUNDLED_PROVIDERS = [
+  '@matatbread/matbot-provider-anthropic',
+  '@matatbread/matbot-provider-openai-compat',
+  '@matatbread/matbot-provider-customer-services',
+];
+
 async function discoverProviders(): Promise<ProviderPackage[]> {
-  const thisDir      = path.dirname(fileURLToPath(import.meta.url));
-  const providersDir = path.resolve(thisDir, '../../../plugins/providers');
-  let entries: string[];
-  try { entries = await readdir(providersDir); } catch { return []; }
+  const require = createRequire(import.meta.url);
   const results: ProviderPackage[] = [];
-  for (const entry of entries) {
-    const dir = path.join(providersDir, entry);
+  for (const name of BUNDLED_PROVIDERS) {
+    let dir: string;
+    try {
+      // package root is two levels up from the entry (…/<pkg>/src/index.ts)
+      dir = path.dirname(path.dirname(require.resolve(name)));
+    } catch { continue; }  // not installed
     try {
       const pkg = JSON.parse(await readFile(path.join(dir, 'package.json'), 'utf8')) as Record<string, unknown>;
-      if (typeof pkg['name'] === 'string') results.push({ type: entry, name: pkg['name'] as string, dir });
-    } catch { /* skip entries without a readable package.json */ }
+      const type = name.slice('@matatbread/matbot-provider-'.length);
+      results.push({ type, name: (pkg['name'] as string) ?? name, dir });
+    } catch { /* unreadable package.json */ }
   }
   return results;
 }
@@ -560,9 +571,9 @@ async function runSetupWizard(configPath: string): Promise<import('./config.js')
     await writeFile(envPath, envLines.join('\n') + '\n', 'utf8');
     process.env[envVarName] = apiKey;
 
-    // Write a relative path so the config is self-contained regardless of where matbot is installed.
-    const relDir = path.relative(configDir, chosen.dir).replace(/\\/g, '/');
-    const moduleSpec = relDir.startsWith('.') ? relDir : `./${relDir}`;
+    // Reference the provider by package name: resolves via node_modules when installed and via the
+    // workspace symlink in the monorepo, so the config is portable either way.
+    const moduleSpec = chosen.name;
 
     const yaml = [
       'providers:',
