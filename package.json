@@ -15,7 +15,9 @@
     "repl": "pnpm --filter @matatbread/matbot-cli repl",
     "start": "pnpm --filter @matatbread/matbot-cli start",
     "web-build": "pnpm --filter @matatbread/matbot-web-bundle assemble && pnpm --filter @matatbread/matbot-web-bundle assemble:demo",
-    "web-server": "pnpm --filter @matatbread/matbot-web-bundle serve"
+    "web-server": "pnpm --filter @matatbread/matbot-web-bundle serve",
+    "publish-app": "pnpm --filter '@matatbread/matbot-cli...' publish",
+    "publish-all": "pnpm -r publish"
   },
   "devDependencies": {
     "@changesets/cli": "^2.31.0",

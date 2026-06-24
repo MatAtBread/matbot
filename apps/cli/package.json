@@ -13,6 +13,7 @@
     "register.js",
     "ts-hooks.js"
   ],
+  "description": "matbot CLI: interactive REPL and single-turn runner for the matbot AI harness, with hot-loadable plugins.",
   "license": "Apache-2.0",
   "type": "module",
   "bin": {
