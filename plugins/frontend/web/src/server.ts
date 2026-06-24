@@ -247,9 +247,13 @@ export function createWebServer(deps: WebServerDeps) {
 
   function static200(res: ServerResponse, contentType: string, path: string) {
     return async () => {
-      const body = await readFile(new URL(path, import.meta.url), "utf-8");
-      res.writeHead(200, { 'content-type': contentType, 'content-length': Buffer.byteLength(body) });
-      res.end(body);
+      try { 
+        const body = await readFile(new URL(path, import.meta.url), "utf-8");
+        res.writeHead(200, { 'content-type': contentType, 'content-length': Buffer.byteLength(body) });
+        res.end(body);
+      } catch (e: any) {
+        json(res, e.code === 'ENOENT' ? 404 : 500, { error: String(e) });
+      }
     };
   }
   async function handleRequest(
@@ -264,16 +268,12 @@ export function createWebServer(deps: WebServerDeps) {
       '/http-transport.js': static200(res, 'application/javascript; charset=utf-8', "../static/http-transport.js"),
       '/favicon.ico': static200(res, 'image/svg+xml', "../static/favicon.svg"),
       // Hack - this exposes the web-bundle for testing purposes. In production, the web-bundle is served from the CDN.
-      '/matbot.html': static200(res, 'text/html; charset=utf-8', "../../../../../apps/web-bundle/dist/matbot.html"),
+      '/matbot.html': static200(res, 'text/html; charset=utf-8', "../../../../apps/web-bundle/dist/matbot.html"),
     };
     if (method === 'GET' && url in staticRoutes) {
       staticRoutes[url]?.();
       return;
     }
-    // if (method === 'GET' && url === '/')       { static200(res, 'text/html; charset=utf-8',              await html()); return; }
-    // if (method === 'GET' && url === '/app.js') { static200(res, 'application/javascript; charset=utf-8', await js());   return; }
-    // if (method === 'GET' && url === '/http-transport.js') { static200(res, 'application/javascript; charset=utf-8', await httpTransport()); return; }
-    // if (method === 'GET' && url === '/favicon.ico') { static200(res, 'image/svg+xml', await favicon()); return; }
 
     // --- GET /health ---
     if (method === 'GET' && url === '/health') {
