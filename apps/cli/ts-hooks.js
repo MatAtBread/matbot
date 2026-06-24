@@ -31,6 +31,17 @@ import { stripTypeScriptTypes } from 'node:module';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
+// stripTypeScriptTypes is still flagged experimental, so it emits an ExperimentalWarning the
+// first time it runs. This hook runs on the module-customization thread (where the strip in
+// `load` happens), so we silence *only* that one warning here — on every launch it would
+// otherwise print scary, irrelevant noise. All other warnings pass through untouched.
+const _emitWarning = process.emitWarning.bind(process);
+process.emitWarning = (warning, ...args) => {
+  const message = typeof warning === 'string' ? warning : (warning && warning.message) || '';
+  if (/stripTypeScriptTypes/.test(message)) return;
+  return _emitWarning(warning, ...args);
+};
+
 const FRESH = 'mbfresh';
 
 let excludePrefixes = [];
