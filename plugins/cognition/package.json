@@ -12,6 +12,7 @@
     "src"
   ],
   "description": "Cognitive services: seeds built-in cognition skills (Inner voice, Remember this, Dream time) into the active skills service. A home for further cognitive skills and tools.",
+  "license": "Apache-2.0",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

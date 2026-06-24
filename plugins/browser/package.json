@@ -11,6 +11,7 @@
     "src"
   ],
   "description": "Browser-native backends for the web frontend: an IndexedDB Store, an OPFS file store, and a WebCrypto-backed vault.",
+  "license": "Apache-2.0",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

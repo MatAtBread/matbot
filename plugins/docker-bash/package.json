@@ -11,6 +11,7 @@
     "src"
   ],
   "description": "Replaces the bash tool with a persistent Docker container (exec-based). Project root is read-only at /app; .data is read-write.",
+  "license": "Apache-2.0",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

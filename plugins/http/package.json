@@ -12,6 +12,7 @@
     "src"
   ],
   "description": "Make HTTP requests (method, headers, body) to web APIs and remote resources; requires the network capability.",
+  "license": "Apache-2.0",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

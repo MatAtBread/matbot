@@ -12,6 +12,7 @@
     "src"
   ],
   "description": "Anthropic Messages API provider adapter with streaming, tool use, and extended thinking; also handles DeepSeek's Anthropic-compatible API.",
+  "license": "Apache-2.0",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

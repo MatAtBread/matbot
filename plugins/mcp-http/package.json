@@ -12,6 +12,7 @@
     "src"
   ],
   "description": "Cross-platform MCP client: connect to remote MCP servers over HTTP/SSE and register their tools. Runs in the browser and Node (fetch only, no child processes).",
+  "license": "Apache-2.0",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

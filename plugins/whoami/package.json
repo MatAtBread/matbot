@@ -12,6 +12,7 @@
     "src"
   ],
   "description": "Report the security principal (identity) that originated the current operation.",
+  "license": "Apache-2.0",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

@@ -12,6 +12,7 @@
     "src"
   ],
   "description": "Persistent KnowledgeIndex backed by a Store, with entity/heading search and optional BGE reranker.",
+  "license": "Apache-2.0",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

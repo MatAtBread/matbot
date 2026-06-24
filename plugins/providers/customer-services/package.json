@@ -12,6 +12,7 @@
     "src"
   ],
   "description": "Mock LLM provider for customer services scenarios. Always helpful, never useful.",
+  "license": "Apache-2.0",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

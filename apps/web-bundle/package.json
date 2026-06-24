@@ -9,6 +9,7 @@
     "node": ">=24.0.0"
   },
   "description": "Self-contained, browser-only matbot: assembles the platform-neutral core and browser plugins into a single matbot.html that runs entirely client-side (file:// or any static host).",
+  "license": "Apache-2.0",
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",

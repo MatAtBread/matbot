@@ -12,6 +12,7 @@
     "src"
   ],
   "description": "Web UI with session management. Node entry serves it over HTTP+SSE; browser entry mounts the same UI in-process. Both share index.html + app.js.",
+  "license": "Apache-2.0",
   "type": "module",
   "exports": {
     ".": {

@@ -12,6 +12,7 @@
     "src"
   ],
   "description": "OpenAI-compatible chat completions provider adapter (OpenAI and any compatible endpoint) with streaming and tool calls.",
+  "license": "Apache-2.0",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

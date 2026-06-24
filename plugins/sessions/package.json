@@ -12,6 +12,7 @@
     "src"
   ],
   "description": "Session-management tools: list, get, rename, and hide conversation sessions.",
+  "license": "Apache-2.0",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

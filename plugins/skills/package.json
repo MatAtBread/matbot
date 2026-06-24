@@ -12,6 +12,7 @@
     "src"
   ],
   "description": "Cross-runtime skill documents: CRUD over named markdown playbooks via skill_action, persisted and knowledge-indexed. Runs in Node and the browser.",
+  "license": "Apache-2.0",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
