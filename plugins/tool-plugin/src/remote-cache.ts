@@ -270,7 +270,30 @@ export async function materializeRemote(spec: string, dotPlugins: string, resolv
 
   const { entryLocal, bare } = await crawl(manifest.entryUrl, dotPlugins);
   await linkHostPackages(bare, dotPlugins, resolveBase);
+  await fetchDeclaredFiles(manifest.pkg, manifest.pkgUrl, dotPlugins);
   return entryLocal;
+}
+
+// The import crawl only fetches code reachable by `import`. A plugin may also read non-imported
+// runtime assets (e.g. frontend/web serves static/index.html, app.js via `new URL(..., import.meta.url)`).
+// A raw host can't be directory-listed, so we mirror the *concrete* files the package declares in
+// `files` (skipping directory entries like "src" — those are code, covered by the crawl — and globs).
+// Best-effort: a missing asset warns and is skipped rather than aborting the install.
+async function fetchDeclaredFiles(pkg: Record<string, unknown>, pkgUrl: string, dotPlugins: string): Promise<void> {
+  const files = Array.isArray(pkg['files']) ? pkg['files'] : [];
+  for (const raw of files) {
+    if (typeof raw !== 'string') continue;
+    const rel = raw.replace(/^\.?\//, '');
+    const last = rel.split('/').pop() ?? '';
+    if (rel.includes('*') || !last.includes('.')) continue; // glob or directory entry — not fetchable here
+    const url = new URL(rel, pkgUrl).href;
+    const cachePath = urlToCachePath(url, dotPlugins);
+    try { await access(cachePath); continue; } catch { /* not cached yet */ }
+    const res = await fetch(url);
+    if (!res.ok) { console.warn(`[matbot] declared file "${rel}" not fetched (HTTP ${res.status})`); continue; }
+    await mkdir(path.dirname(cachePath), { recursive: true });
+    await writeFile(cachePath, Buffer.from(await res.arrayBuffer()));
+  }
 }
 
 async function crawl(entryUrl: string, dotPlugins: string): Promise<{ entryLocal: string; bare: Set<string> }> {

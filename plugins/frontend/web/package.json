@@ -10,7 +10,11 @@
   },
   "files": [
     "src",
-    "static"
+    "static/app.js",
+    "static/browser.js",
+    "static/favicon.svg",
+    "static/http-transport.js",
+    "static/index.html"
   ],
   "description": "Web UI with session management. Node entry serves it over HTTP+SSE; browser entry mounts the same UI in-process. Both share index.html + app.js.",
   "license": "Apache-2.0",
