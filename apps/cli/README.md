@@ -29,13 +29,18 @@ you: add a tool for running shell commands
 
 ## Usage
 
+With a local install, invoke the bin via `npx`:
+
 ```sh
-matbot                      # interactive REPL (ephemeral session)
-matbot "What is 2 + 2?"     # single turn, then exit
-matbot --session create     # new persistent session
-matbot start                # headless server mode (waits for a frontend plugin)
-matbot --help               # full option list
+npx matbot                   # interactive REPL (ephemeral session)
+npx matbot "What is 2 + 2?"  # single turn, then exit
+npx matbot --session create  # new persistent session
+npx matbot start             # headless server mode (waits for a frontend plugin)
+npx matbot --help            # full option list
 ```
+
+(A global install puts `matbot` on your `PATH` directly, but installing locally is
+recommended so the CLI and its plugins share one `node_modules`.)
 
 See the [main repository](https://github.com/MatAtBread/matbot) and
 [Getting Started](https://github.com/MatAtBread/matbot/blob/main/docs/GETTING-STARTED.md) for
