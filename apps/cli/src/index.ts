@@ -31,6 +31,7 @@ import { FilesystemFileStore }             from '@matatbread/matbot-files-node';
 import { createBuiltinTools, createProviderTool, classifySpecifier, materializeRemote } from '@matatbread/matbot-tool-plugin';
 import { LookupKnowledgeIndex }               from '@matatbread/matbot-core';
 import { access, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { readFileSync }                     from 'node:fs';
 import { createInterface }                 from 'node:readline/promises';
 import { createRequire }                   from 'node:module';
 import { fileURLToPath, pathToFileURL }     from 'node:url';
@@ -259,6 +260,7 @@ function parseArgs(argv: string[]): { opts: CliOpts; prompt: string | undefined 
       case '--principal':   { const v = args[++i]; if (v !== undefined) opts.principal  = v; } break;
       case '--ephemeral':   opts.ephemeral = true; break;
       case '--help': printHelp(); process.exit(0);
+      case '--version': case '-v': process.stdout.write(versionBanner() + '\n'); process.exit(0);
       default:
         if (!arg.startsWith('-')) positional.push(arg);
     }
@@ -305,6 +307,52 @@ function resolveBootPrincipal(opts: CliOpts, config: import('./config.js').Matbo
   return systemPrincipal();
 }
 
+// Walk up from a resolved module entry to the owning package.json (a package's `exports` may not
+// expose package.json), returning the `name`d package's version.
+function pkgVersionAt(entryPath: string, name: string): string {
+  let dir = path.dirname(entryPath);
+  for (;;) {
+    try {
+      const pkg = JSON.parse(readFileSync(path.join(dir, 'package.json'), 'utf8')) as { name?: string; version?: string };
+      if (pkg.name === name) return pkg.version ?? '?';
+    } catch { /* no package.json here — keep walking up */ }
+    const parent = path.dirname(dir);
+    if (parent === dir) return '?';
+    dir = parent;
+  }
+}
+
+function selfVersion(): string {
+  try {
+    const pkg = JSON.parse(readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8')) as { version?: string };
+    return pkg.version ?? '?';
+  } catch { return '?'; }
+}
+
+// One line naming the CLI version and the *resolved* singleton versions. plugin-api is resolved
+// *through* core (cli → core → plugin-api), which is both how the import graph actually reaches it and
+// the exact instance the principal carrier lives in. A mismatch means two physical copies of a host
+// singleton are loaded (a skewed / in-place-upgraded install) — the condition that splits shared
+// module state — so we surface it loudly here rather than let it fail obscurely at the first read.
+function versionBanner(): string {
+  const cli = selfVersion();
+  let core = '?', api = '?';
+  try {
+    const coreEntry = createRequire(import.meta.url).resolve('@matatbread/matbot-core');
+    core = pkgVersionAt(coreEntry, '@matatbread/matbot-core');
+    try {
+      const apiEntry = createRequire(coreEntry).resolve('@matatbread/matbot-plugin-api');
+      api = pkgVersionAt(apiEntry, '@matatbread/matbot-plugin-api');
+    } catch { /* plugin-api unresolved from core — leave '?' */ }
+  } catch { /* core unresolved — leave '?' */ }
+  let line = `matbot v${cli} (core ${core}, plugin-api ${api})`;
+  if ((core !== cli && core !== '?') || (api !== cli && api !== '?')) {
+    line += '\n⚠ version skew: the CLI and a shared singleton resolve to different copies. Run a clean '
+          + 'reinstall (rm -rf node_modules package-lock.json && npm i) — duplicate copies can split shared state.';
+  }
+  return line;
+}
+
 function printHelp(): void {
   process.stderr.write(`
 matbot — AI CLI
@@ -322,6 +370,7 @@ Options:
   --principal   <id|json>   Boot identity: an id (type "user") or JSON {"id","type"}.
                             Overrides MATBOT_PRINCIPAL and config principal:.
   --help                    Show this help
+  --version, -v             Print the CLI + resolved core/plugin-api versions and exit
 
 Sessions are ephemeral by default (discarded on exit). Use --session create to persist,
 or --session <id> to resume a previously persisted session.
@@ -696,6 +745,8 @@ async function main(): Promise<void> {
   // delegating parent (the background plugin) can supply it without any shared-package env reads.
   installPrincipalCarrier(createAlsPrincipalCarrier());
   enterPrincipal(resolveBootPrincipal(opts, matbotConfig));
+
+  process.stderr.write(`[${new Date().toISOString()} ${_pid}] [matbot] ${versionBanner()}\n`);
 
   // The vault is a capture-safe forwarding proxy over a swappable backend (mirrors StorageBackend):
   // EnvFileVault by default, replaced when a plugin calls register('Vault', impl). References to
