@@ -1,5 +1,19 @@
 # @matatbread/matbot-core
 
+## 0.1.6
+
+### Patch Changes
+
+- b40c2ec: fix(core/config): tolerate empty `plugins:` / `providers:` sections
+
+  A bare `plugins:` (or `providers:`) key with no entries parses to YAML `null`,
+  which the loader rejected with `"plugins" must be a sequence (list)`. This is the
+  state `plugin remove` leaves behind when it deletes the last list item, so a config
+  that had every plugin removed failed to boot. An empty/null section now reads as
+  empty.
+
+  - @matatbread/matbot-plugin-api@0.1.6
+
 ## 0.1.5
 
 ### Patch Changes

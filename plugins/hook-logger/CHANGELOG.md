@@ -1,5 +1,11 @@
 # @matatbread/matbot-hook-logger
 
+## 0.1.6
+
+### Patch Changes
+
+- @matatbread/matbot-plugin-api@0.1.6
+
 ## 0.1.5
 
 ### Patch Changes

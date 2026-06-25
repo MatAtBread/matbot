@@ -1,5 +1,12 @@
 # @matatbread/matbot-tool-mcp
 
+## 0.1.6
+
+### Patch Changes
+
+- @matatbread/matbot-plugin-api@0.1.6
+- @matatbread/matbot-mcp-http@0.1.6
+
 ## 0.1.5
 
 ### Patch Changes
