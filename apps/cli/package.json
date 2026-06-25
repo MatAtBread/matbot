@@ -34,13 +34,13 @@
     "access": "public"
   },
   "dependencies": {
-    "@matatbread/matbot-core": "workspace:*",
-    "@matatbread/matbot-files-node": "workspace:*",
-    "@matatbread/matbot-storage-filesystem": "workspace:*",
-    "@matatbread/matbot-tool-plugin": "workspace:*",
-    "@matatbread/matbot-provider-anthropic": "workspace:*",
-    "@matatbread/matbot-provider-openai-compat": "workspace:*",
-    "@matatbread/matbot-provider-customer-services": "workspace:*"
+    "@matatbread/matbot-core": "workspace:^",
+    "@matatbread/matbot-files-node": "workspace:^",
+    "@matatbread/matbot-storage-filesystem": "workspace:^",
+    "@matatbread/matbot-tool-plugin": "workspace:^",
+    "@matatbread/matbot-provider-anthropic": "workspace:^",
+    "@matatbread/matbot-provider-openai-compat": "workspace:^",
+    "@matatbread/matbot-provider-customer-services": "workspace:^"
   },
   "devDependencies": {
     "@types/node": "catalog:",

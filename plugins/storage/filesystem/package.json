@@ -28,16 +28,16 @@
     "access": "public"
   },
   "dependencies": {
-    "@matatbread/matbot-files-node": "workspace:*"
+    "@matatbread/matbot-files-node": "workspace:^"
   },
   "peerDependencies": {
-    "@matatbread/matbot-plugin-api": "workspace:*",
-    "@matatbread/matbot-core": "workspace:*"
+    "@matatbread/matbot-plugin-api": "workspace:^",
+    "@matatbread/matbot-core": "workspace:^"
   },
   "devDependencies": {
     "typescript": "catalog:",
     "@types/node": "catalog:",
-    "@matatbread/matbot-plugin-api": "workspace:*",
-    "@matatbread/matbot-core": "workspace:*"
+    "@matatbread/matbot-plugin-api": "workspace:^",
+    "@matatbread/matbot-core": "workspace:^"
   }
 }

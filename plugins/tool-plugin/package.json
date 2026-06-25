@@ -28,13 +28,13 @@
     "access": "public"
   },
   "peerDependencies": {
-    "@matatbread/matbot-plugin-api": "workspace:*",
-    "@matatbread/matbot-core": "workspace:*"
+    "@matatbread/matbot-plugin-api": "workspace:^",
+    "@matatbread/matbot-core": "workspace:^"
   },
   "devDependencies": {
     "@types/node": "catalog:",
     "typescript": "catalog:",
-    "@matatbread/matbot-plugin-api": "workspace:*",
-    "@matatbread/matbot-core": "workspace:*"
+    "@matatbread/matbot-plugin-api": "workspace:^",
+    "@matatbread/matbot-core": "workspace:^"
   }
 }

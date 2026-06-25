@@ -27,25 +27,25 @@ importers:
   apps/cli:
     dependencies:
       '@matatbread/matbot-core':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../core
       '@matatbread/matbot-files-node':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../plugins/files
       '@matatbread/matbot-provider-anthropic':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../plugins/providers/anthropic
       '@matatbread/matbot-provider-customer-services':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../plugins/providers/customer-services
       '@matatbread/matbot-provider-openai-compat':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../plugins/providers/openai-compat
       '@matatbread/matbot-storage-filesystem':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../plugins/storage/filesystem
       '@matatbread/matbot-tool-plugin':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../plugins/tool-plugin
     devDependencies:
       '@types/node':
@@ -58,16 +58,16 @@ importers:
   apps/web-bundle:
     dependencies:
       '@matatbread/matbot-browser':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../plugins/browser
       '@matatbread/matbot-core':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../core
       '@matatbread/matbot-frontend-web':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../plugins/frontend/web
       '@matatbread/matbot-plugin-api':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../plugin-api
     devDependencies:
       '@types/node':
@@ -83,7 +83,7 @@ importers:
   core:
     dependencies:
       '@matatbread/matbot-plugin-api':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../plugin-api
     devDependencies:
       typescript:
@@ -99,7 +99,7 @@ importers:
   plugins/ask-user:
     devDependencies:
       '@matatbread/matbot-plugin-api':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../plugin-api
       typescript:
         specifier: 'catalog:'
@@ -108,7 +108,7 @@ importers:
   plugins/background:
     devDependencies:
       '@matatbread/matbot-plugin-api':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../plugin-api
       '@types/node':
         specifier: 'catalog:'
@@ -120,7 +120,7 @@ importers:
   plugins/bash:
     devDependencies:
       '@matatbread/matbot-plugin-api':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../plugin-api
       '@types/node':
         specifier: 'catalog:'
@@ -132,10 +132,10 @@ importers:
   plugins/browser:
     devDependencies:
       '@matatbread/matbot-core':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../core
       '@matatbread/matbot-plugin-api':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../plugin-api
       typescript:
         specifier: 'catalog:'
@@ -144,17 +144,17 @@ importers:
   plugins/cognition:
     dependencies:
       '@matatbread/matbot-tool-store':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../tool-store
     devDependencies:
       '@matatbread/matbot-plugin-api':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../plugin-api
       '@matatbread/matbot-skills':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../skills
       '@matatbread/matbot-triggers':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../triggers
       typescript:
         specifier: 'catalog:'
@@ -163,7 +163,7 @@ importers:
   plugins/docker-bash:
     devDependencies:
       '@matatbread/matbot-plugin-api':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../plugin-api
       '@types/node':
         specifier: 'catalog:'
@@ -175,7 +175,7 @@ importers:
   plugins/edit-session:
     devDependencies:
       '@matatbread/matbot-plugin-api':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../plugin-api
       typescript:
         specifier: 'catalog:'
@@ -184,7 +184,7 @@ importers:
   plugins/files:
     devDependencies:
       '@matatbread/matbot-core':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../core
       '@types/node':
         specifier: 'catalog:'
@@ -196,10 +196,10 @@ importers:
   plugins/frontend/dom:
     devDependencies:
       '@matatbread/matbot-core':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../../core
       '@matatbread/matbot-plugin-api':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../../plugin-api
       typescript:
         specifier: 'catalog:'
@@ -208,10 +208,10 @@ importers:
   plugins/frontend/telegram:
     devDependencies:
       '@matatbread/matbot-core':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../../core
       '@matatbread/matbot-plugin-api':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../../plugin-api
       typescript:
         specifier: 'catalog:'
@@ -220,13 +220,13 @@ importers:
   plugins/frontend/web:
     devDependencies:
       '@matatbread/matbot-core':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../../core
       '@matatbread/matbot-plugin-api':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../../plugin-api
       '@matatbread/matbot-skills':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../skills
       '@types/node':
         specifier: 'catalog:'
@@ -238,7 +238,7 @@ importers:
   plugins/hook-logger:
     devDependencies:
       '@matatbread/matbot-plugin-api':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../plugin-api
       typescript:
         specifier: 'catalog:'
@@ -247,7 +247,7 @@ importers:
   plugins/http:
     devDependencies:
       '@matatbread/matbot-plugin-api':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../plugin-api
       typescript:
         specifier: 'catalog:'
@@ -256,7 +256,7 @@ importers:
   plugins/json-validation:
     devDependencies:
       '@matatbread/matbot-plugin-api':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../plugin-api
       typescript:
         specifier: 'catalog:'
@@ -265,11 +265,11 @@ importers:
   plugins/mcp:
     dependencies:
       '@matatbread/matbot-mcp-http':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../mcp-http
     devDependencies:
       '@matatbread/matbot-plugin-api':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../plugin-api
       '@types/node':
         specifier: 'catalog:'
@@ -281,7 +281,7 @@ importers:
   plugins/mcp-http:
     devDependencies:
       '@matatbread/matbot-plugin-api':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../plugin-api
       typescript:
         specifier: 'catalog:'
@@ -290,7 +290,7 @@ importers:
   plugins/persist-ki-bge:
     devDependencies:
       '@matatbread/matbot-plugin-api':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../plugin-api
       '@types/node':
         specifier: 'catalog:'
@@ -302,10 +302,10 @@ importers:
   plugins/providers/anthropic:
     devDependencies:
       '@matatbread/matbot-core':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../../core
       '@matatbread/matbot-plugin-api':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../../plugin-api
       typescript:
         specifier: 'catalog:'
@@ -314,7 +314,7 @@ importers:
   plugins/providers/customer-services:
     devDependencies:
       '@matatbread/matbot-plugin-api':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../../plugin-api
       typescript:
         specifier: 'catalog:'
@@ -323,10 +323,10 @@ importers:
   plugins/providers/openai-compat:
     devDependencies:
       '@matatbread/matbot-core':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../../core
       '@matatbread/matbot-plugin-api':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../../plugin-api
       typescript:
         specifier: 'catalog:'
@@ -335,7 +335,7 @@ importers:
   plugins/rumsfeld:
     devDependencies:
       '@matatbread/matbot-plugin-api':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../plugin-api
       typescript:
         specifier: 'catalog:'
@@ -344,7 +344,7 @@ importers:
   plugins/sessions:
     devDependencies:
       '@matatbread/matbot-plugin-api':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../plugin-api
       typescript:
         specifier: 'catalog:'
@@ -353,7 +353,7 @@ importers:
   plugins/skills:
     devDependencies:
       '@matatbread/matbot-plugin-api':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../plugin-api
       typescript:
         specifier: 'catalog:'
@@ -362,11 +362,11 @@ importers:
   plugins/skills-node:
     dependencies:
       '@matatbread/matbot-skills':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../skills
     devDependencies:
       '@matatbread/matbot-plugin-api':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../plugin-api
       '@types/node':
         specifier: 'catalog:'
@@ -378,14 +378,14 @@ importers:
   plugins/storage/filesystem:
     dependencies:
       '@matatbread/matbot-files-node':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../files
     devDependencies:
       '@matatbread/matbot-core':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../../core
       '@matatbread/matbot-plugin-api':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../../plugin-api
       '@types/node':
         specifier: 'catalog:'
@@ -397,14 +397,14 @@ importers:
   plugins/storage/google-drive:
     dependencies:
       '@matatbread/matbot-browser':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../browser
     devDependencies:
       '@matatbread/matbot-core':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../../core
       '@matatbread/matbot-plugin-api':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../../plugin-api
       typescript:
         specifier: 'catalog:'
@@ -413,10 +413,10 @@ importers:
   plugins/storage/sqlite:
     devDependencies:
       '@matatbread/matbot-core':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../../core
       '@matatbread/matbot-plugin-api':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../../plugin-api
       '@types/node':
         specifier: 'catalog:'
@@ -428,10 +428,10 @@ importers:
   plugins/tool-plugin:
     devDependencies:
       '@matatbread/matbot-core':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../core
       '@matatbread/matbot-plugin-api':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../plugin-api
       '@types/node':
         specifier: 'catalog:'
@@ -443,7 +443,7 @@ importers:
   plugins/tool-store:
     devDependencies:
       '@matatbread/matbot-plugin-api':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../plugin-api
       typescript:
         specifier: 'catalog:'
@@ -452,7 +452,7 @@ importers:
   plugins/triggers:
     devDependencies:
       '@matatbread/matbot-plugin-api':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../plugin-api
       typescript:
         specifier: 'catalog:'
@@ -461,10 +461,10 @@ importers:
   plugins/web-principal-user:
     devDependencies:
       '@matatbread/matbot-frontend-web':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../frontend/web
       '@matatbread/matbot-plugin-api':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../plugin-api
       '@types/node':
         specifier: 'catalog:'
@@ -476,7 +476,7 @@ importers:
   plugins/whoami:
     devDependencies:
       '@matatbread/matbot-plugin-api':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../plugin-api
       typescript:
         specifier: 'catalog:'
@@ -485,7 +485,7 @@ importers:
   plugins/workspace:
     devDependencies:
       '@matatbread/matbot-plugin-api':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../plugin-api
       '@types/node':
         specifier: 'catalog:'

@@ -36,14 +36,22 @@ export interface PrincipalCarrier {
   enter(principal: Principal): void;
 }
 
-let carrier: PrincipalCarrier | undefined;
+// The carrier is process-global, not module-local: a published install can end up with two physical
+// copies of this package (npm nesting under a version skew, a mixed .plugins/npm tree, pnpm peer
+// suffixes). A plain module `let` would then give each copy its own carrier — the host installs into
+// one, a plugin reads the other, and every principal read throws. Anchoring it on `globalThis` under a
+// well-known symbol lets all copies share the single carrier the host installs at boot. Deduping the
+// package (caret ranges) is still preferred; this just makes duplication harmless rather than fatal.
+const CARRIER_KEY = Symbol.for('@matatbread/matbot-plugin-api#principalCarrier');
+type CarrierGlobal = { [CARRIER_KEY]?: PrincipalCarrier };
 
 /** Install the host's platform carrier. Called once at boot, before any turn or request runs. */
 export function installPrincipalCarrier(impl: PrincipalCarrier): void {
-  carrier = impl;
+  (globalThis as CarrierGlobal)[CARRIER_KEY] = impl;
 }
 
 function need(): PrincipalCarrier {
+  const carrier = (globalThis as CarrierGlobal)[CARRIER_KEY];
   if (carrier === undefined) {
     throw new Error('No PrincipalCarrier installed — the host must call installPrincipalCarrier() at boot.');
   }
@@ -58,7 +66,7 @@ export function currentPrincipal(): Principal {
 /** The principal in force, or `undefined` when no carrier is installed or no scope is established.
  *  Backends that want to fail-open on out-of-scope access read this instead of {@link currentPrincipal}. */
 export function tryCurrentPrincipal(): Principal | undefined {
-  return carrier?.tryCurrent();
+  return (globalThis as CarrierGlobal)[CARRIER_KEY]?.tryCurrent();
 }
 
 /** Run `fn` with `principal` established as the ambient identity for its async extent. */

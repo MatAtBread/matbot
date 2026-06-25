@@ -28,11 +28,11 @@
     "access": "public"
   },
   "peerDependencies": {
-    "@matatbread/matbot-core": "workspace:*"
+    "@matatbread/matbot-core": "workspace:^"
   },
   "devDependencies": {
     "@types/node": "catalog:",
     "typescript": "catalog:",
-    "@matatbread/matbot-core": "workspace:*"
+    "@matatbread/matbot-core": "workspace:^"
   }
 }

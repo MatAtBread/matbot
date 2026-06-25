@@ -28,15 +28,15 @@
     "access": "public"
   },
   "dependencies": {
-    "@matatbread/matbot-browser": "workspace:*"
+    "@matatbread/matbot-browser": "workspace:^"
   },
   "peerDependencies": {
-    "@matatbread/matbot-plugin-api": "workspace:*",
-    "@matatbread/matbot-core": "workspace:*"
+    "@matatbread/matbot-plugin-api": "workspace:^",
+    "@matatbread/matbot-core": "workspace:^"
   },
   "devDependencies": {
     "typescript": "catalog:",
-    "@matatbread/matbot-plugin-api": "workspace:*",
-    "@matatbread/matbot-core": "workspace:*"
+    "@matatbread/matbot-plugin-api": "workspace:^",
+    "@matatbread/matbot-core": "workspace:^"
   }
 }

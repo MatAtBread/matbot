@@ -26,10 +26,10 @@
     "access": "public"
   },
   "dependencies": {
-    "@matatbread/matbot-core": "workspace:*",
-    "@matatbread/matbot-plugin-api": "workspace:*",
-    "@matatbread/matbot-browser": "workspace:*",
-    "@matatbread/matbot-frontend-web": "workspace:*"
+    "@matatbread/matbot-core": "workspace:^",
+    "@matatbread/matbot-plugin-api": "workspace:^",
+    "@matatbread/matbot-browser": "workspace:^",
+    "@matatbread/matbot-frontend-web": "workspace:^"
   },
   "devDependencies": {
     "@types/node": "catalog:",
