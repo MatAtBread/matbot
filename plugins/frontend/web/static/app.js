@@ -385,7 +385,7 @@ async function loadFiles() {
         btn.onmouseover = () => { btn.style.background = '#b45309'; };
         btn.onmouseout  = () => { btn.style.background = '#d97706'; };
         btn.onclick = () => {
-          submit('Please discover local plugins and add the workspace plugin to enable file management.');
+          submit('Add the plugin named exactly @matatbread/matbot-tool-workspace to enable file management. First run the plugin discover_local action to check whether it is already available locally and add it from there; only if it is not found locally, install it from npm or github by that exact package name. Do not guess or try other name variations.');
         };
         el.appendChild(prompt);
       }
@@ -1242,7 +1242,7 @@ function showEditSessionBanner() {
   btn.textContent = 'Install edit-session';
   btn.onclick = () => {
     banner.remove();
-    submit('Please discover and install the edit-session plugin');
+    submit('Add the plugin named exactly @matatbread/matbot-edit-session, which enables Cut, Fork, Split, and Compact. First run the plugin discover_local action to check whether it is already available locally and add it from there; only if it is not found locally, install it from npm or github by that exact package name. Do not guess or try other name variations.');
   };
   banner.appendChild(btn);
   const inputArea = document.getElementById('input-area');
@@ -2192,7 +2192,7 @@ sendBtn.onclick = () => {
 stopBtn.onclick = () => requestStop();
 
 document.getElementById('sessions-enable-btn').onclick = () => {
-  submit('Discover the local plugins and add the sessions plugin to enable persistent conversations.');
+  submit('Add the plugin named exactly @matatbread/matbot-sessions to enable persistent conversations. First run the plugin discover_local action to check whether it is already available locally and add it from there; only if it is not found locally, install it from npm or github by that exact package name. Do not guess or try other name variations.');
 };
 
 inputEl.addEventListener('keydown', e => {
