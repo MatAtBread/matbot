@@ -1,5 +1,12 @@
 # @matatbread/matbot-cognition
 
+## 0.1.7
+
+### Patch Changes
+
+- @matatbread/matbot-plugin-api@0.1.7
+- @matatbread/matbot-tool-store@0.1.7
+
 ## 0.1.6
 
 ### Patch Changes
