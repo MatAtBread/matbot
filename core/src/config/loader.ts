@@ -74,7 +74,7 @@ export function parseConfig(
   // plugins: optional ordered list of specifiers
   const pluginsRaw = doc['plugins'];
   const plugins: string[] = [];
-  if (pluginsRaw !== undefined) {
+  if (pluginsRaw !== undefined && pluginsRaw !== null) {
     if (!Array.isArray(pluginsRaw)) {
       throw new Error('Config: "plugins" must be a sequence (list)');
     }
@@ -86,7 +86,7 @@ export function parseConfig(
   const providersRaw = doc['providers'];
   const providers    = new Map<string, ProviderConfig>();
 
-  if (providersRaw !== undefined) {
+  if (providersRaw !== undefined && providersRaw !== null) {
     const providersMap = asRecord(providersRaw, 'providers');
     for (const [name, raw] of Object.entries(providersMap)) {
       providers.set(name, toProviderConfig(name, asRecord(raw, `providers.${name}`)));

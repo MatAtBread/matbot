@@ -27,15 +27,13 @@
   "publishConfig": {
     "access": "public"
   },
-  "dependencies": {
-    "@matatbread/matbot-frontend-web": "workspace:*"
-  },
   "peerDependencies": {
     "@matatbread/matbot-plugin-api": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "catalog:",
     "typescript": "catalog:",
-    "@matatbread/matbot-plugin-api": "workspace:*"
+    "@matatbread/matbot-plugin-api": "workspace:*",
+    "@matatbread/matbot-frontend-web": "workspace:*"
   }
 }

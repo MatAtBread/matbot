@@ -37,9 +37,6 @@
   "publishConfig": {
     "access": "public"
   },
-  "dependencies": {
-    "@matatbread/matbot-skills": "workspace:*"
-  },
   "peerDependencies": {
     "@matatbread/matbot-plugin-api": "workspace:*",
     "@matatbread/matbot-core": "workspace:*"
@@ -48,6 +45,7 @@
     "@types/node": "catalog:",
     "typescript": "catalog:",
     "@matatbread/matbot-plugin-api": "workspace:*",
-    "@matatbread/matbot-core": "workspace:*"
+    "@matatbread/matbot-core": "workspace:*",
+    "@matatbread/matbot-skills": "workspace:*"
   }
 }

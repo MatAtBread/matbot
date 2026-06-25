@@ -143,28 +143,24 @@ importers:
 
   plugins/cognition:
     dependencies:
-      '@matatbread/matbot-skills':
-        specifier: workspace:*
-        version: link:../skills
       '@matatbread/matbot-tool-store':
         specifier: workspace:*
         version: link:../tool-store
-      '@matatbread/matbot-triggers':
-        specifier: workspace:*
-        version: link:../triggers
     devDependencies:
       '@matatbread/matbot-plugin-api':
         specifier: workspace:*
         version: link:../../plugin-api
+      '@matatbread/matbot-skills':
+        specifier: workspace:*
+        version: link:../skills
+      '@matatbread/matbot-triggers':
+        specifier: workspace:*
+        version: link:../triggers
       typescript:
         specifier: 'catalog:'
         version: 5.9.3
 
   plugins/docker-bash:
-    dependencies:
-      '@matatbread/matbot-tool-bash':
-        specifier: workspace:*
-        version: link:../bash
     devDependencies:
       '@matatbread/matbot-plugin-api':
         specifier: workspace:*
@@ -222,10 +218,6 @@ importers:
         version: 5.9.3
 
   plugins/frontend/web:
-    dependencies:
-      '@matatbread/matbot-skills':
-        specifier: workspace:*
-        version: link:../../skills
     devDependencies:
       '@matatbread/matbot-core':
         specifier: workspace:*
@@ -233,6 +225,9 @@ importers:
       '@matatbread/matbot-plugin-api':
         specifier: workspace:*
         version: link:../../../plugin-api
+      '@matatbread/matbot-skills':
+        specifier: workspace:*
+        version: link:../../skills
       '@types/node':
         specifier: 'catalog:'
         version: 22.19.19
@@ -464,11 +459,10 @@ importers:
         version: 5.9.3
 
   plugins/web-principal-user:
-    dependencies:
+    devDependencies:
       '@matatbread/matbot-frontend-web':
         specifier: workspace:*
         version: link:../frontend/web
-    devDependencies:
       '@matatbread/matbot-plugin-api':
         specifier: workspace:*
         version: link:../../plugin-api
