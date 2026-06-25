@@ -61,11 +61,25 @@ async function confirmAction(ctx: ToolContext, label: string): Promise<boolean> 
   return answer.trim().toLowerCase() === CONFIRM_YES;
 }
 
+// Resolve package.json `exports["."]` to a node-importable entry. Discovery imports under node, so we
+// honour the node ESM conditions ({node, import, default}) and skip browser/require — frontend-web's
+// `{ browser, import, default }` form would otherwise resolve to `undefined` and be silently dropped.
+function resolveCondition(target: unknown): string | undefined {
+  if (typeof target === 'string') return target;
+  if (target === null || typeof target !== 'object') return undefined;
+  for (const [key, value] of Object.entries(target as Record<string, unknown>)) {
+    if (key === 'node' || key === 'import' || key === 'default') {
+      const resolved = resolveCondition(value);
+      if (resolved !== undefined) return resolved;
+    }
+  }
+  return undefined;
+}
+
 function resolveExportsMain(exports: unknown): string | undefined {
   if (typeof exports === 'string') return exports;
   if (exports !== null && typeof exports === 'object') {
-    const dot = (exports as Record<string, unknown>)['.'];
-    if (typeof dot === 'string') return dot;
+    return resolveCondition((exports as Record<string, unknown>)['.']);
   }
   return undefined;
 }
