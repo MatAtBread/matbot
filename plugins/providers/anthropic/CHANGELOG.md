@@ -1,5 +1,12 @@
 # @matatbread/matbot-provider-anthropic
 
+## 0.1.5
+
+### Patch Changes
+
+- @matatbread/matbot-core@0.1.5
+- @matatbread/matbot-plugin-api@0.1.5
+
 ## 0.1.4
 
 ### Patch Changes
