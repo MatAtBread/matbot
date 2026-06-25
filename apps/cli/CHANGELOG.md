@@ -1,5 +1,17 @@
 # @matatbread/matbot-cli
 
+## 0.1.8
+
+### Patch Changes
+
+- @matatbread/matbot-core@0.1.8
+- @matatbread/matbot-files-node@0.1.8
+- @matatbread/matbot-provider-anthropic@0.1.8
+- @matatbread/matbot-provider-customer-services@0.1.8
+- @matatbread/matbot-provider-openai-compat@0.1.8
+- @matatbread/matbot-storage-filesystem@0.1.8
+- @matatbread/matbot-tool-plugin@0.1.8
+
 ## 0.1.7
 
 ### Patch Changes
