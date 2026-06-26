@@ -22,6 +22,16 @@ import path from 'node:path';
 
 // ── Specifier classification ────────────────────────────────────────────────────
 
+// DEPENDENCY RESOLUTION differs by source — the deciding factor when a plugin imports OTHER packages:
+//   local     — bare imports resolve against the SURROUNDING node_modules; works iff those deps are
+//               installed there (always true in a workspace checkout, where everything is symlinked).
+//               The source doesn't "resolve deps" itself — it inherits whatever is installed around it.
+//   npm       — `pnpm/npm add` installs the FULL dependency tree from the registry. Always resolves.
+//   pnpm-url  — .tgz tarball / git repo via the package manager: same full-tree resolution as npm.
+//   remote    — raw github/http: fetches ONLY this plugin's own files (its relative imports) and bridges
+//               bare imports to already-present packages (host copies + previously-fetched plugins by
+//               canonical name). It does NOT install a dependency graph — a runtime dep that isn't
+//               already present cannot be resolved, so provide it separately or install from npm.
 export type Classified =
   | { kind: 'local';        dir: string }   // a package.json was confirmed at/above the resolved dir
   | { kind: 'npm';          spec: string }  // bare registry name → pnpm add / node_modules resolution

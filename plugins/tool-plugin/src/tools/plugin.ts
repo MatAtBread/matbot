@@ -325,6 +325,20 @@ function describeInstallFailure(specifier: string, pm: string, e: unknown): stri
   return `Could not install "${specifier}" with ${pm}:${hint}\n${raw}`;
 }
 
+/** If `e` is a module-resolution failure, the bare package specifier it couldn't find — else undefined.
+ *  A raw github/URL fetch copies one plugin's own files, not its dependency graph, so a plugin with a
+ *  runtime dependency on another package fails here with the package unresolved. We surface the package
+ *  name so the caller can give one readable instruction instead of an opaque ERR_MODULE_NOT_FOUND that
+ *  sends the model hunting for name variations. */
+function missingPackageOf(e: unknown): string | undefined {
+  if (!(e instanceof Error) || (e as NodeJS.ErrnoException).code !== 'ERR_MODULE_NOT_FOUND') return undefined;
+  const m = /Cannot find (?:package|module) '([^']+)'/.exec(e.message);
+  const pkg = m?.[1];
+  // A bare package specifier (not a relative/absolute path): that's a missing dependency, not a
+  // broken internal import.
+  return pkg !== undefined && !pkg.startsWith('.') && !pkg.startsWith('/') ? pkg : undefined;
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 // A plugin contributes through several channels: static fields on the plugin object
@@ -605,6 +619,23 @@ const executor = {
             `(it is most likely a library). Nothing was changed in ${path.basename(configPath)}.` };
           return;
         }
+        // A raw github/URL fetch installs ONE plugin's files, not its dependency graph. A plugin with a
+        // runtime dependency on another package therefore fails with that package unresolved. State the
+        // remedy plainly — install the dependency too — instead of surfacing the raw module-not-found,
+        // which makes the model hunt for npm name variations. The entry is LEFT in config (it activates
+        // once the dependency is present), like any other fixable activation failure.
+        const missing = classified.kind === 'remote' ? missingPackageOf(e) : undefined;
+        if (missing !== undefined) {
+          const fromNpm = missing.startsWith('@matatbread/')
+            ? `Installing it from npm is simplest — \`${missing}\` — because npm resolves ITS dependencies too.`
+            : `Install \`${missing}\` (e.g. from npm) so it is present.`;
+          yield { type: 'result', value: { message:
+            `"${configSpecifier}" was fetched, but it depends on "${missing}", which a raw github/URL fetch does ` +
+            `not bring in — source-fetch copies a plugin's own files, not its dependency graph. ${fromNpm} ` +
+            `Then "${configSpecifier}" activates (it has been left in ${path.basename(configPath)}). Do not retry ` +
+            `name variations — the dependency is genuinely missing, not misnamed.` } };
+          return;
+        }
         yield { type: 'result', value: { message: `"${configSpecifier}" added to config but activation failed: ${String(e)}.` } };
       }
       return;
@@ -744,6 +775,17 @@ export const pluginTool: Tool = {
     'directory containing one, or — for a code-entry URL — its direct sibling), it must declare a "name", ' +
     'and its `matbotRuntime` must include "node"; the install is refused otherwise. ' +
     'Cached code lives read-only under `.plugins/`.\n\n' +
+    'DEPENDENCY RESOLUTION BY SOURCE — decisive when a plugin depends on OTHER packages:\n' +
+    '  • npm names and .tgz/git URLs install through the package manager, which resolves the FULL ' +
+    'dependency tree. Use these for a plugin that depends on other packages.\n' +
+    '  • A local path resolves dependencies only if they already exist in the surrounding node_modules ' +
+    '(true in a workspace checkout, where everything is installed).\n' +
+    '  • RAW source (HTTP/github) fetches ONLY that one plugin\'s own files — it does NOT install a ' +
+    'dependency graph. A raw-source plugin that imports another package needs that package provided ' +
+    'separately (install it too, or just install the plugin from npm). So PREFER npm for any plugin ' +
+    'with dependencies; reserve raw github/HTTP for self-contained plugins or testing a single ' +
+    'plugin\'s source. If a raw-source install fails with a missing package, that package is a genuine ' +
+    'unmet dependency — install it (from npm), do not retry name variations.\n\n' +
     'For remove/reload, prefer the plugin\'s canonical package.json **name** (the stable identity shown ' +
     'as `name` by `list`) — the exact matbot.yaml entry also works, but the resolved `specifier` shown ' +
     'under `loaded` may be a file: URL and is NOT the handle. A plugin name is unique, so addressing by ' +
