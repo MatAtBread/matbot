@@ -1,5 +1,40 @@
 # @matatbread/matbot-cli
 
+## 0.2.1
+
+### Patch Changes
+
+- 2578f79: Harden the host-shared singletons (plugin-api/core) against duplication in skewed installs, so a
+  second physical copy is benign instead of corrupting. Two changes, per an audit of all module-level
+  state (see new `docs/duplicate-singletons.md`):
+
+  - **State-shaped singletons now live on `globalThis`.** New `globalSlot()` helper anchors shared
+    state under one `Symbol.for` key; the context-switch quiescers/depth/flushing state (reachable by a
+    storage plugin) moves there, joining the principal carrier. Duplicate copies share one object
+    rather than splitting.
+
+  - **Typed errors are now duck-typed, not classes** (BREAKING for code using them). `MissingSecretError`,
+    `IncompatibleRuntimeError`, `NotAPluginError`, `PromptCancelledError` are now plain `Error`s carrying
+    a `matbot` brand string. Construct with the `xError()` factory and detect with the `isXError()` guard
+    instead of `new XError()` / `instanceof XError` — the brand is identity-independent, so a guard works
+    across module copies (where `instanceof` silently returned `false`). The `XError` names remain as
+    **types** for annotations and field access. `StoreQueryError` is unchanged (not reached by
+    `instanceof` across the boundary).
+
+- 8139163: frontend-web: don't crash the process when an SSE write hits a dead socket. Tearing the server down
+  mid-stream (e.g. unloading the frontend-web plugin while a session's `/events` stream is open) makes
+  a pending `res.write` emit an asynchronous `'error'` on a later tick — which escapes the request
+  handler's try/catch and, with no listener, becomes an unhandled `'error'` event that exits the
+  process. The handler now attaches a no-op `'error'` listener to every request/response, so a
+  dead-socket write is absorbed (the SSE loop already breaks on `!res.writable`).
+  - @matatbread/matbot-core@0.2.1
+  - @matatbread/matbot-files-node@0.2.1
+  - @matatbread/matbot-provider-anthropic@0.2.1
+  - @matatbread/matbot-provider-customer-services@0.2.1
+  - @matatbread/matbot-provider-openai-compat@0.2.1
+  - @matatbread/matbot-storage-filesystem@0.2.1
+  - @matatbread/matbot-tool-plugin@0.2.1
+
 ## 0.2.0
 
 ### Minor Changes
