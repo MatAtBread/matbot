@@ -1,5 +1,11 @@
 # @matatbread/matbot-files-node
 
+## 0.2.3
+
+### Patch Changes
+
+- @matatbread/matbot-core@0.2.3
+
 ## 0.2.2
 
 ### Patch Changes
