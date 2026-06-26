@@ -1,16 +1,43 @@
 /**
+ * matbot's typed errors are **duck-typed, not class-based**: each is a plain `Error` carrying a
+ * `matbot` brand string (the discriminant) plus its data fields. Callers test the brand through the
+ * exported `isX` guards — never `instanceof`.
+ *
+ * Why not classes: plugin-api can be physically duplicated in a skewed install (two copies at
+ * different versions). A class is a per-copy object, so `instanceof MissingSecretError` returns
+ * `false` when the host throws from one copy and a plugin tests with another — silently breaking
+ * error handling across the boundary. A brand string is identity-independent, so the guard holds no
+ * matter how many copies are loaded. See docs/duplicate-singletons.md.
+ *
+ * The interfaces are kept named `XError` so existing `import type { XError }` annotations and field
+ * access (`e.missingKeys`) survive; only construction (`new XError()` → `xError()`) and detection
+ * (`instanceof XError` → `isXError()`) change.
+ */
+
+const BRAND = 'matbot';
+
+export type MatbotErrorKind = 'MissingSecret' | 'IncompatibleRuntime' | 'NotAPlugin' | 'PromptCancelled';
+
+function isKind(e: unknown, kind: MatbotErrorKind): boolean {
+  return typeof e === 'object' && e !== null && (e as Record<string, unknown>)[BRAND] === kind;
+}
+
+/**
  * Thrown by Vault.resolve() when one or more ${NAME} placeholders cannot be resolved.
  * `missingKeys` carries the unresolved key names (e.g. `ANTHROPIC_API_KEY`) so callers
  * can prompt for and store them.
  */
-export class MissingSecretError extends Error {
+export interface MissingSecretError extends Error {
+  matbot: 'MissingSecret';
   readonly missingKeys: readonly string[];
-
-  constructor(missingKeys: readonly string[]) {
-    super(`Vault: secret(s) not found: ${missingKeys.join(', ')}`);
-    this.name        = 'MissingSecretError';
-    this.missingKeys = missingKeys;
-  }
+}
+export function missingSecretError(missingKeys: readonly string[]): MissingSecretError {
+  const e = new Error(`Vault: secret(s) not found: ${missingKeys.join(', ')}`);
+  e.name = 'MissingSecretError';
+  return Object.assign(e, { matbot: 'MissingSecret' as const, missingKeys });
+}
+export function isMissingSecretError(e: unknown): e is MissingSecretError {
+  return isKind(e, 'MissingSecret');
 }
 
 /**
@@ -20,18 +47,19 @@ export class MissingSecretError extends Error {
  * fix — this is permanent for the host, so the `add` flow catches it specifically and rolls the
  * specifier back out of matbot.yaml rather than persisting a plugin that can never activate here.
  */
-export class IncompatibleRuntimeError extends Error {
-  readonly specifier:    string;
-  readonly declared:     readonly string[];
-  readonly hostRuntime:  string;
-
-  constructor(specifier: string, declared: readonly string[], hostRuntime: string) {
-    super(`Cannot load plugin "${specifier}": declares matbotRuntime [${declared.join(', ')}], host runtime is "${hostRuntime}".`);
-    this.name        = 'IncompatibleRuntimeError';
-    this.specifier   = specifier;
-    this.declared    = declared;
-    this.hostRuntime = hostRuntime;
-  }
+export interface IncompatibleRuntimeError extends Error {
+  matbot: 'IncompatibleRuntime';
+  readonly specifier:   string;
+  readonly declared:    readonly string[];
+  readonly hostRuntime: string;
+}
+export function incompatibleRuntimeError(specifier: string, declared: readonly string[], hostRuntime: string): IncompatibleRuntimeError {
+  const e = new Error(`Cannot load plugin "${specifier}": declares matbotRuntime [${declared.join(', ')}], host runtime is "${hostRuntime}".`);
+  e.name = 'IncompatibleRuntimeError';
+  return Object.assign(e, { matbot: 'IncompatibleRuntime' as const, specifier, declared, hostRuntime });
+}
+export function isIncompatibleRuntimeError(e: unknown): e is IncompatibleRuntimeError {
+  return isKind(e, 'IncompatibleRuntime');
 }
 
 /**
@@ -44,16 +72,18 @@ export class IncompatibleRuntimeError extends Error {
  * surfacing this to an LLM should prefer a terminal "not a plugin" message over echoing `reason`,
  * which is phrased as a code-fix instruction the model may try to act on.
  */
-export class NotAPluginError extends Error {
+export interface NotAPluginError extends Error {
+  matbot: 'NotAPlugin';
   readonly specifier: string;
   readonly reason:    string;
-
-  constructor(specifier: string, reason: string) {
-    super(reason);
-    this.name      = 'NotAPluginError';
-    this.specifier = specifier;
-    this.reason    = reason;
-  }
+}
+export function notAPluginError(specifier: string, reason: string): NotAPluginError {
+  const e = new Error(reason);
+  e.name = 'NotAPluginError';
+  return Object.assign(e, { matbot: 'NotAPlugin' as const, specifier, reason });
+}
+export function isNotAPluginError(e: unknown): e is NotAPluginError {
+  return isKind(e, 'NotAPlugin');
 }
 
 /**
@@ -61,9 +91,14 @@ export class NotAPluginError extends Error {
  * decline. Callers awaiting `ctx.prompt()` need not branch on it: the surrounding try/catch turns
  * it into a tool error that closes the tool call, while the host separately abandons the turn.
  */
-export class PromptCancelledError extends Error {
-  constructor(message = 'User cancelled — cannot proceed.') {
-    super(message);
-    this.name = 'PromptCancelledError';
-  }
+export interface PromptCancelledError extends Error {
+  matbot: 'PromptCancelled';
+}
+export function promptCancelledError(message = 'User cancelled — cannot proceed.'): PromptCancelledError {
+  const e = new Error(message);
+  e.name = 'PromptCancelledError';
+  return Object.assign(e, { matbot: 'PromptCancelled' as const });
+}
+export function isPromptCancelledError(e: unknown): e is PromptCancelledError {
+  return isKind(e, 'PromptCancelled');
 }

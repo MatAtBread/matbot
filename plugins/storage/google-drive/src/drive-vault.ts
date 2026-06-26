@@ -1,5 +1,5 @@
 import type { Store, Vault } from '@matatbread/matbot-core';
-import { MissingSecretError, applyCreateSecret } from '@matatbread/matbot-core';
+import { missingSecretError, applyCreateSecret } from '@matatbread/matbot-core';
 
 const REF_RE  = /\$\{([^}]+)\}/g;
 const DOC_ID  = 'secrets';
@@ -66,7 +66,7 @@ export class DriveVault implements Vault {
       if (value === undefined) { errors.push(name); return ''; }
       return value;
     });
-    if (errors.length > 0) throw new MissingSecretError(errors);
+    if (errors.length > 0) throw missingSecretError(errors);
     return result;
   }
 

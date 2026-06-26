@@ -1,6 +1,6 @@
 import type { MatbotPlugin, MatbotPluginSpec, MatbotMachine, PluginSource, Runtime } from './plugin.js';
 import type { PromptFn } from './types.js';
-import { IncompatibleRuntimeError, NotAPluginError } from '@matatbread/matbot-plugin-api';
+import { incompatibleRuntimeError, notAPluginError } from '@matatbread/matbot-plugin-api';
 import { registerPlugin, setupPlugin, unloadPlugin } from './registry.js';
 
 /**
@@ -124,7 +124,7 @@ export async function loadPlugins(
     const runtimes = declared[i];
     if (runtimes !== undefined && runtimes.length > 0 && !runtimes.includes(CURRENT_RUNTIME)) {
       if (onLoadError === 'throw') {
-        throw new IncompatibleRuntimeError(spec, runtimes, CURRENT_RUNTIME);
+        throw incompatibleRuntimeError(spec, runtimes, CURRENT_RUNTIME);
       }
       console.warn(`[matbot] Skipping plugin "${spec}": declares matbotRuntime [${runtimes.join(', ')}], host runtime is "${CURRENT_RUNTIME}".`);
       continue;
@@ -152,7 +152,7 @@ export async function loadPlugins(
   // permanently-not-a-plugin: it throws NotAPluginError so the `add` flow can roll back the config
   // write, where an import failure may be a fixable typo and is left in config.
   const failLoad = (spec: string, reason: string, kind: 'load' | 'shape' = 'load'): void => {
-    if (onLoadError === 'throw') throw kind === 'shape' ? new NotAPluginError(spec, reason) : new Error(reason);
+    if (onLoadError === 'throw') throw kind === 'shape' ? notAPluginError(spec, reason) : new Error(reason);
     console.warn(`[matbot] Skipping plugin "${spec}": ${reason}`);
   };
 

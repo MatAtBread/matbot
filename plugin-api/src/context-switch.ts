@@ -1,5 +1,6 @@
 import type { Principal } from './types.js';
 import { runAs } from './principal-context.js';
+import { globalSlot } from './global-state.js';
 
 /**
  * A context switch is the machine analogue of an OS one: it pages in any pending machine state and
@@ -19,9 +20,19 @@ import { runAs } from './principal-context.js';
  * baseline and is never counted.
  */
 
-const quiescers = new Set<() => void>();
-let depth = 0;
-let flushing = false;
+// State-shaped and reachable from a plugin (a storage plugin registering a deferred-swap flusher, or
+// switching context), so it lives in the global slot: a duplicated plugin-api copy shares one set of
+// quiescers and one depth count rather than splitting them. See ./global-state.ts.
+interface ContextSwitchState {
+  quiescers: Set<() => void>;
+  depth:     number;
+  flushing:  boolean;
+}
+const cs = globalSlot<ContextSwitchState>('context-switch', () => ({
+  quiescers: new Set<() => void>(),
+  depth:     0,
+  flushing:  false,
+}));
 
 /**
  * Register a machine-update flush, run at every quiescent edge (no context active). Flushers MUST be
@@ -30,8 +41,8 @@ let flushing = false;
  * into the operation that triggered the edge.
  */
 export function onContextQuiesce(flush: () => void): () => void {
-  quiescers.add(flush);
-  return () => { quiescers.delete(flush); };
+  cs.quiescers.add(flush);
+  return () => { cs.quiescers.delete(flush); };
 }
 
 /**
@@ -41,15 +52,15 @@ export function onContextQuiesce(flush: () => void): () => void {
  * it applies immediately, so an idle-time swap doesn't wait for the next request to take effect.
  */
 export function flushIfQuiescent(): void {
-  if (depth !== 0 || flushing) return;
-  flushing = true;
+  if (cs.depth !== 0 || cs.flushing) return;
+  cs.flushing = true;
   try {
-    for (const q of quiescers) {
+    for (const q of cs.quiescers) {
       try { q(); }
       catch (e) { console.error('[matbot] context-quiesce flush threw:', e instanceof Error ? e.message : e); }
     }
   } finally {
-    flushing = false;
+    cs.flushing = false;
   }
 }
 
@@ -60,8 +71,8 @@ export function flushIfQuiescent(): void {
  */
 export function contextSwitch<T>(principal: Principal, fn: () => T): T {
   flushIfQuiescent();
-  depth++;
-  const settle = (): void => { depth--; flushIfQuiescent(); };
+  cs.depth++;
+  const settle = (): void => { cs.depth--; flushIfQuiescent(); };
   let result: T;
   try {
     result = runAs(principal, fn);

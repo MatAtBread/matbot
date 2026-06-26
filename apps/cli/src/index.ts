@@ -20,7 +20,7 @@ import { appendMessage, createMessage,
          unifyServices, forwardingProxy, makeSwappable, singleTurnRequest,
          createMountTable, onContextQuiesce, flushIfQuiescent,
          createSingleTurnTool,
-         MissingSecretError }              from '@matatbread/matbot-core';
+         isMissingSecretError }            from '@matatbread/matbot-core';
 import type { MatbotMachine, MatbotServices, PluginSettings, Vault, SessionRunner,
               MatbotPlugin, StorageBackend, KnowledgeIndex, PromptFn, FormField, SwapFn } from '@matatbread/matbot-core';
 import { systemPrincipal }                 from '@matatbread/matbot-core';
@@ -180,7 +180,7 @@ async function resolveCredentialsInteractive(
     try {
       return await resolveCredentials(credentials, vault);
     } catch (e) {
-      if (!(e instanceof MissingSecretError)) throw e;
+      if (!isMissingSecretError(e)) throw e;
       const rl = createInterface({ input: process.stdin, output: process.stderr });
       try {
         for (const name of e.missingKeys) {

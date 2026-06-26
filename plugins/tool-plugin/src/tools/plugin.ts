@@ -1,5 +1,5 @@
 import type { Tool, ToolEvent, ToolContext, MatbotPlugin, FormField, Runtime, PluginSource } from '@matatbread/matbot-plugin-api';
-import { CONFIRM_YES, CONFIRM_NO, IncompatibleRuntimeError, NotAPluginError } from '@matatbread/matbot-plugin-api';
+import { CONFIRM_YES, CONFIRM_NO, isIncompatibleRuntimeError, isNotAPluginError } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins, getRegisteredTools, getRegisteredFrontendPlugins,
          getRegisteredServiceKeys, getHookPlugins, getSystemContextPlugins,
          getSpecifierForPlugin, getPluginNameForSpecifier } from '@matatbread/matbot-core';
@@ -579,7 +579,7 @@ const executor = {
         // this specifier, not a fixable hiccup: roll it back out of matbot.yaml so the config never
         // carries an entry that can never activate. Other activation failures (e.g. a missing secret)
         // are left in config to fix and retry.
-        if (e instanceof IncompatibleRuntimeError) {
+        if (isIncompatibleRuntimeError(e)) {
           await removePlugin(configPath, configSpecifier);
           yield { type: 'error', message: e.message };
           return;
@@ -587,7 +587,7 @@ const executor = {
         // Definitive, not retryable: state the conclusion ("not a matbot plugin") rather than echoing
         // the loader's `reason`, which reads as a code-fix instruction ("Expected: export const plugin")
         // an LLM may try to act on by editing the library's source.
-        if (e instanceof NotAPluginError) {
+        if (isNotAPluginError(e)) {
           await removePlugin(configPath, configSpecifier);
           yield { type: 'error', message:
             `"${configSpecifier}" is not a matbot plugin — it exports no \`plugin\`, so it cannot be installed ` +

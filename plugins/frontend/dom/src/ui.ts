@@ -1,7 +1,7 @@
 import type {
   MatbotMachine, Session, PipelineEvent, MessageContent, FormField, PromptFn, Principal,
 } from '@matatbread/matbot-plugin-api';
-import { createSession, currentPrincipal, PromptCancelledError } from '@matatbread/matbot-core';
+import { createSession, currentPrincipal, promptCancelledError } from '@matatbread/matbot-core';
 
 const CSS = `
 .mb-app { display:flex; flex-direction:column; height:100vh; font:14px/1.5 system-ui,sans-serif; color:#1a1a1a; background:#fafafa; }
@@ -401,7 +401,7 @@ export class ChatUI {
       const cancelable = field.cancelable !== false;
 
       const done = (value: string): void => { box.remove(); resolve(value); };
-      const cancel = (): void => { box.remove(); reject(new PromptCancelledError()); };
+      const cancel = (): void => { box.remove(); reject(promptCancelledError()); };
 
       if (field.type === 'confirm') {
         const opts = el('div', 'mb-opts');

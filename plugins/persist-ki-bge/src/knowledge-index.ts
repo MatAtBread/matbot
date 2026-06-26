@@ -1,8 +1,8 @@
 import type { KnowledgeIndex, KnowledgeEntry, Store, Vault } from '@matatbread/matbot-plugin-api';
-import { MissingSecretError } from '@matatbread/matbot-plugin-api';
+import { isMissingSecretError } from '@matatbread/matbot-plugin-api';
 
 const ifMissing = (e: unknown): undefined => {
-  if (e instanceof MissingSecretError) return undefined;
+  if (isMissingSecretError(e)) return undefined;
   throw e;
 };
 

@@ -1,7 +1,17 @@
 export type * from './types.js';
-// Explicit value re-export: MissingSecretError is a class, so the `export type *`
-// above would otherwise win and strip its value meaning under verbatimModuleSyntax.
-export { MissingSecretError, PromptCancelledError, IncompatibleRuntimeError, NotAPluginError, StoreQueryError } from '@matatbread/matbot-plugin-api';
+// matbot's typed errors are duck-typed: factory `xError()` builders + `isXError()` brand guards are
+// runtime values (re-exported here, since the `export type *` above would strip their value meaning),
+// while the `XError` shapes are types (re-exported below). StoreQueryError is still a class value.
+export {
+  missingSecretError, isMissingSecretError,
+  incompatibleRuntimeError, isIncompatibleRuntimeError,
+  notAPluginError, isNotAPluginError,
+  promptCancelledError, isPromptCancelledError,
+  StoreQueryError,
+} from '@matatbread/matbot-plugin-api';
+export type {
+  MissingSecretError, IncompatibleRuntimeError, NotAPluginError, PromptCancelledError, MatbotErrorKind,
+} from '@matatbread/matbot-plugin-api';
 export { applyCreateSecret }  from '@matatbread/matbot-plugin-api';
 // unifyServices is a runtime fn; the `export type *` above would otherwise strip its value meaning.
 export { unifyServices }      from '@matatbread/matbot-plugin-api';

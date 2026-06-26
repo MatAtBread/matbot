@@ -261,7 +261,10 @@ function scanImports(code: string): { relative: string[]; bare: string[] } {
  * `resolveBase` is the directory whose module graph defines the host singletons — every bare import
  * the plugin makes (`@matatbread/matbot-plugin-api`, …) is resolved from here and symlinked into
  * `.plugins/node_modules/`, so the cached files resolve those packages to the SAME physical module
- * the host loaded (identity-sensitive checks like `instanceof MissingSecretError` depend on this).
+ * the host loaded. plugin-api is now hardened against duplication (state lives on `globalThis`,
+ * errors are brand-checked not `instanceof`'d — see docs/duplicate-singletons.md), so a second copy
+ * is benign rather than corrupting; sharing the host's copy is still preferred to avoid the bloat
+ * and confusion of duplicates.
  */
 export async function materializeRemote(spec: string, dotPlugins: string, resolveBase: string): Promise<string> {
   const manifest = await fetchRemoteManifest(spec);

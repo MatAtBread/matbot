@@ -2,7 +2,7 @@ import {
   createSessionRunner, HookRegistry, SystemContextRegistryImpl, ToolRegistryImpl,
   resolveProviderFactory, getPluginNameForSpecifier, recordServiceKey,
   installPrincipalCarrier, createConstantPrincipalCarrier,
-  createMessage, MissingSecretError, loadPlugins,
+  createMessage, isMissingSecretError, loadPlugins,
   unloadPlugin as unloadPluginFn, unifyServices,
   forwardingProxy, makeSwappable, singleTurnRequest, createSingleTurnTool,
   createMountTable, onContextQuiesce, flushIfQuiescent,
@@ -80,7 +80,7 @@ async function resolveInteractive(ref: string, vault: Vault): Promise<string> {
     try {
       return await vault.resolve(ref);
     } catch (e) {
-      if (!(e instanceof MissingSecretError)) throw e;
+      if (!isMissingSecretError(e)) throw e;
       for (const name of e.missingKeys) {
         const val = globalThis.prompt?.(`matbot needs the secret "${name}" (e.g. an API key):`) ?? '';
         if (!val.trim()) throw new Error(`No value provided for required secret "${name}".`);

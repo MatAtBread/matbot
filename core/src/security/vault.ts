@@ -1,5 +1,5 @@
 import type { Vault } from '@matatbread/matbot-plugin-api';
-import { MissingSecretError, applyCreateSecret } from '@matatbread/matbot-plugin-api';
+import { missingSecretError, applyCreateSecret } from '@matatbread/matbot-plugin-api';
 
 const REF_RE = /\$\{([^}]+)\}/g;
 
@@ -59,7 +59,7 @@ export class VaultImpl implements Vault {
     });
 
     if (errors.length > 0) {
-      throw new MissingSecretError(errors);
+      throw missingSecretError(errors);
     }
     return result;
   }
