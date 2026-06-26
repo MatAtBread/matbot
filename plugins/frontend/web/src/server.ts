@@ -3,7 +3,7 @@ import type {
   MatbotPlugin, Principal, Session, Store, ToolRegistry, FileStore, Vault,
   FormField, PromptFn, SessionRunner, PluginRegistryEvent,
 } from '@matatbread/matbot-core';
-import { createSession, PromptCancelledError, runAs, tryCurrentPrincipal } from '@matatbread/matbot-core';
+import { createSession, promptCancelledError, runAs, tryCurrentPrincipal } from '@matatbread/matbot-core';
 import type { SkillManager } from '@matatbread/matbot-skills';
 import { sseComment, sseEvent } from './sse-writer.js';
 import { promises } from "node:fs";
@@ -203,6 +203,13 @@ export function createWebServer(deps: WebServerDeps) {
     const method = req.method ?? 'GET';
     const url    = req.url ?? '/';
 
+    // A dead socket — client gone, or the server torn down mid-stream while this plugin unloads —
+    // makes a pending `res.write` (e.g. the SSE loop below) emit an async 'error' on a later tick.
+    // That escapes the handler's try/catch and, with no listener, is an unhandled 'error' event that
+    // exits the process. Writing to a dead socket is never fatal, so absorb it on both streams.
+    req.on('error', () => {});
+    res.on('error', () => {});
+
     // Set CORS headers on every response
     for (const [k, v] of Object.entries(corsHeaders(origin))) {
       res.setHeader(k, v);
@@ -355,7 +362,7 @@ export function createWebServer(deps: WebServerDeps) {
           const def = typeof p === 'string' ? defaultValue : p.default;
           pendingPrompts.set(targetId, {
             resolve: answer => { pendingPrompts.delete(targetId); resolve(answer || def || ''); },
-            cancel:  ()     => { pendingPrompts.delete(targetId); reject(new PromptCancelledError()); },
+            cancel:  ()     => { pendingPrompts.delete(targetId); reject(promptCancelledError()); },
           });
           sendToSession(targetId, sseEvent('prompt', {
             type: 'prompt',
