@@ -3,7 +3,7 @@
   "matbotRuntime": [
     "browser"
   ],
-  "version": "0.1.8",
+  "version": "0.2.0",
   "engines": {
     "node": ">=24.0.0"
   },
@@ -11,7 +11,14 @@
     "src"
   ],
   "description": "Google Drive storage backend: document stores and file blobs persisted to a folder in the user's Google Drive, authenticated in-browser via Google Identity Services.",
-  "keywords": ["matbot","matbot-plugin","matbot-storage","llm","ai","agent"],
+  "keywords": [
+    "matbot",
+    "matbot-plugin",
+    "matbot-storage",
+    "llm",
+    "ai",
+    "agent"
+  ],
   "license": "Apache-2.0",
   "type": "module",
   "exports": {

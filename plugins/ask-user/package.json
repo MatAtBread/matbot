@@ -4,7 +4,7 @@
     "node",
     "browser"
   ],
-  "version": "0.1.8",
+  "version": "0.2.0",
   "engines": {
     "node": ">=24.0.0"
   },
@@ -12,7 +12,13 @@
     "src"
   ],
   "description": "Ask the user a question with interactive form controls — text, password, select, and confirm.",
-  "keywords": ["matbot","matbot-plugin","llm","ai","agent"],
+  "keywords": [
+    "matbot",
+    "matbot-plugin",
+    "llm",
+    "ai",
+    "agent"
+  ],
   "license": "Apache-2.0",
   "type": "module",
   "exports": {

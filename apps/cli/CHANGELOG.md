@@ -1,5 +1,52 @@
 # @matatbread/matbot-cli
 
+## 0.2.0
+
+### Minor Changes
+
+- ede1b7b: feat(cli): version banner + `--version` flag surfacing resolved singleton versions
+
+  The CLI now prints `matbot vX (core Y, plugin-api Z)` at boot and via `matbot --version`
+  (`-v`). The core/plugin-api versions are the ones actually _resolved_ at runtime
+  (plugin-api through core, the instance the principal carrier lives in), so a duplicated /
+  version-skewed install shows up directly — and prints an explicit "version skew" warning
+  with the reinstall remedy instead of failing obscurely later.
+
+- d550b6a: cognition/dream-time: drain the whole backlog per pass instead of one fact.
+
+  Each `dream_time` pass already ranks the entire `remembered_facts` backlog against every skill in a
+  single call, but the old pipeline acted only on the oldest fact (plus cluster-mates sharing its
+  skill) and threw the rest of the scores away — and only the oldest fact's `weak`/`none` disposition
+  was recorded, so every other fact was re-ranked from scratch on every pass. That made throughput one
+  fact per pass at `O(facts × skills)` cost each.
+
+  `runOnce` now spends the one ranking on all facts: strong facts are grouped by chosen skill and
+  merged up to a per-pass budget, weak facts are all deferred, and dead `none` facts are all retired —
+  in the same pass. A per-fact merge failure quarantines just the culprit and the pass carries on with
+  the other skills (previously it aborted the whole pass). Partial cluster progress is now committed
+  rather than discarded on failure.
+
+  New `cognition_config` tunables: `maxMergesPerPass` (default 20; cap on facts merged across all
+  skills per pass) and `maxEnrichmentsPerPass` (default 10; cap on `none` facts given an enriched
+  second look, the rest deferred not retired). `maxClusterSize` is now the per-skill cap. `DreamRun`
+  records gain `deferred`/`retired`/`quarantined` counts and an `errors` list; `unassignedRemaining`
+  now means immediately-actionable (over-budget strong) facts.
+
+### Patch Changes
+
+- d550b6a: Add npm `keywords` to every published package. A shared `matbot` anchor on all of
+  them plus a role tag by location (`matbot-plugin-api`, `matbot-core`, `matbot-app`,
+  `matbot-plugin`, and `matbot-provider`/`matbot-frontend`/`matbot-storage`). This makes
+  the family discoverable via npmjs keyword search (`keywords:matbot`,
+  `keywords:matbot,matbot-provider`) rather than relying on the lagging text/org index.
+  - @matatbread/matbot-core@0.2.0
+  - @matatbread/matbot-files-node@0.2.0
+  - @matatbread/matbot-provider-anthropic@0.2.0
+  - @matatbread/matbot-provider-customer-services@0.2.0
+  - @matatbread/matbot-provider-openai-compat@0.2.0
+  - @matatbread/matbot-storage-filesystem@0.2.0
+  - @matatbread/matbot-tool-plugin@0.2.0
+
 ## 0.1.8
 
 ### Patch Changes

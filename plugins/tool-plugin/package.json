@@ -3,7 +3,7 @@
   "matbotRuntime": [
     "node"
   ],
-  "version": "0.1.8",
+  "version": "0.2.0",
   "engines": {
     "node": ">=24.0.0"
   },
@@ -11,7 +11,13 @@
     "src"
   ],
   "description": "Built-in `plugin` and `provider` tools for managing plugins and LLM providers at runtime — install, remove, reload, and discover.",
-  "keywords": ["matbot","matbot-plugin","llm","ai","agent"],
+  "keywords": [
+    "matbot",
+    "matbot-plugin",
+    "llm",
+    "ai",
+    "agent"
+  ],
   "license": "Apache-2.0",
   "type": "module",
   "exports": {

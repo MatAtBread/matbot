@@ -4,12 +4,19 @@
     "node",
     "browser"
   ],
-  "version": "0.1.8",
+  "version": "0.2.0",
   "engines": {
     "node": ">=24.0.0"
   },
   "description": "Self-contained, browser-only matbot: assembles the platform-neutral core and browser plugins into a single matbot.html that runs entirely client-side (file:// or any static host).",
-  "keywords": ["matbot","matbot-app","browser","llm","ai","agent"],
+  "keywords": [
+    "matbot",
+    "matbot-app",
+    "browser",
+    "llm",
+    "ai",
+    "agent"
+  ],
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {

@@ -4,7 +4,7 @@
     "node",
     "browser"
   ],
-  "version": "0.1.8",
+  "version": "0.2.0",
   "engines": {
     "node": ">=24.0.0"
   },
@@ -12,7 +12,14 @@
     "src"
   ],
   "description": "Anthropic Messages API provider adapter with streaming, tool use, and extended thinking; also handles DeepSeek's Anthropic-compatible API.",
-  "keywords": ["matbot","matbot-plugin","matbot-provider","llm","ai","agent"],
+  "keywords": [
+    "matbot",
+    "matbot-plugin",
+    "matbot-provider",
+    "llm",
+    "ai",
+    "agent"
+  ],
   "license": "Apache-2.0",
   "type": "module",
   "exports": {

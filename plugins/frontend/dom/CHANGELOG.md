@@ -1,5 +1,12 @@
 # @matatbread/matbot-frontend-dom
 
+## 0.2.0
+
+### Patch Changes
+
+- @matatbread/matbot-core@0.2.0
+- @matatbread/matbot-plugin-api@0.2.0
+
 ## 0.1.8
 
 ### Patch Changes

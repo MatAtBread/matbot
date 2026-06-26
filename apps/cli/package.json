@@ -3,7 +3,7 @@
   "matbotRuntime": [
     "node"
   ],
-  "version": "0.1.8",
+  "version": "0.2.0",
   "engines": {
     "node": ">=24.0.0"
   },
@@ -14,7 +14,14 @@
     "ts-hooks.js"
   ],
   "description": "matbot CLI: interactive REPL and single-turn runner for the matbot AI harness, with hot-loadable plugins.",
-  "keywords": ["matbot","matbot-app","cli","llm","ai","agent"],
+  "keywords": [
+    "matbot",
+    "matbot-app",
+    "cli",
+    "llm",
+    "ai",
+    "agent"
+  ],
   "license": "Apache-2.0",
   "type": "module",
   "bin": {
