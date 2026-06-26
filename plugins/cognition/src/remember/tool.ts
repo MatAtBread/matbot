@@ -118,11 +118,10 @@ export function createRememberFactTool(services: MatbotMachine): Tool {
   return {
     name: 'remember_fact',
     description:
-      'Store durable fact(s) the user wants remembered across conversations. Extracts them from the ' +
-      'latest user message and reads provenance (session id, message id, timestamp) from context — ' +
-      'takes no parameters. Writes one document per fact to the remembered_facts store. Returns ' +
-      'nothing: fired by a trigger it runs as a silent side-effect (you are not involved); you may ' +
-      'also call it directly to capture the current message.',
+`Extracts facts from the latest user message and reads provenance (session id, message id, 
+timestamp) from context — takes no parameters. Writes one document per fact to the 
+remembered_facts store. Returns nothing: fired by a trigger it runs as a silent side-effect
+(you are not involved). You may also call it directly to capture the current message.`,
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     executor,
   };

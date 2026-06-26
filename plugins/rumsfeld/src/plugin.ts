@@ -49,6 +49,7 @@ export function createRumsfeldPlugin(): MatbotPluginSpec {
       - use of definite articles, demonstratives or possessives ("the", "my", "his", "that", "Fred's") even if the noun is common, for example "my Volvo" isn't a reference to Volvo's in general, it's about the user's specific car which they assume you have information about.
       - words that are clearly novel proper nouns or nouns used in a non-standard or domain-specific way, for example "the Xmit system" or "What does Xmit say?".
       - when the user directly uses the term 'skill' in their query, for example "Use your skill about <unknown> to do <unknown>".
+      - Deictic words such as "here", "there", "the other one", "home" which imply contextual knowledge, but none was present.
 
       List one or more unknown terms you need more information about (without any qualifiers, demonstratives or possessives), together with the contextual phrase or sentence they were mentioned in.
       If the qualifiers are specific, for example "Fred's car", include "Fred" and "car" as separate terms.`,

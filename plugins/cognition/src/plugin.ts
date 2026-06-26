@@ -163,10 +163,12 @@ The store is idempotent: a re-seed on restart keeps the existing data.
       // remember_fact tool). Idempotent — a re-seed on restart keeps the existing store's data.
       await defineStore(services, {
         namespace:   'remembered_facts',
-        description:
-          'Stores user-provided facts, personal details, preferences, and other information the ' +
-          'user wants remembered across conversations. Each fact is captured with provenance ' +
-          'showing which session and message it came from.',
+        description: 
+`Short-term memory for user-provided facts, personal details, preferences, and other information the 
+user wants remembered across conversations. Each fact is captured with provenance showing which session 
+and message it came from. The temporary nature means that this is the wrong choice to fill in contextual gaps - 
+it is purely a data maintenance function.
+`,
         shape:
           `interface RememberedFact {
             fact: string;
