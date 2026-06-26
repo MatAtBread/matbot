@@ -466,6 +466,17 @@ const executor = {
         return;
       }
 
+      // The host runtime packages are not plugins — they are the shared singletons every plugin
+      // peer-depends on, always already present. The model sometimes tries to "install" them (often
+      // with a version suffix, e.g. `@matatbread/matbot-plugin-api@latest`); refuse so they never
+      // land in the config as a bogus, unloadable entry.
+      if (/^@matatbread\/matbot-(plugin-api|core)(@|$)/.test(specifier)) {
+        yield { type: 'error', message:
+          `"${specifier}" is a host runtime package (a shared matbot singleton), not a plugin — it is ` +
+          `already present and cannot be installed. Nothing was changed.` };
+        return;
+      }
+
       // Classification is grounded in what is actually on disk (a stat), not just the string shape:
       // a bare `plugins/foo` is local iff it exists, and a `./`-/`/`-shaped path with no
       // package.json is reported rather than silently mis-installed.

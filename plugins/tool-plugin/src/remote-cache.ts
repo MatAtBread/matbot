@@ -269,12 +269,39 @@ function scanImports(code: string): { relative: string[]; bare: string[] } {
 export async function materializeRemote(spec: string, dotPlugins: string, resolveBase: string): Promise<string> {
   const manifest = await fetchRemoteManifest(spec);
 
-  await writeCached(urlToCachePath(manifest.pkgUrl, dotPlugins), JSON.stringify(manifest.pkg, null, 2));
+  const pkgPath = urlToCachePath(manifest.pkgUrl, dotPlugins);
+  await writeCached(pkgPath, JSON.stringify(manifest.pkg, null, 2));
+
+  // Register this plugin in the symlink farm under its OWN package name, so a sibling plugin that
+  // imports it by canonical name (`@matatbread/matbot-skills` from skills-node, `…-tool-store` from
+  // cognition) resolves to this fetched copy. The package name is the canonical identity — the source
+  // it was fetched from (github/http/npm) is not part of it. The host resolves all remote specifiers
+  // before importing any (resolvePluginSpecifiers), so by load time every fetched plugin's self-link
+  // is present and inter-plugin imports resolve regardless of the order they appear in the config.
+  await registerByName(manifest.pkg, path.dirname(pkgPath), dotPlugins);
 
   const { entryLocal, bare } = await crawl(manifest.entryUrl, dotPlugins);
   await linkHostPackages(bare, dotPlugins, resolveBase);
   await fetchDeclaredFiles(manifest.pkg, manifest.pkgUrl, dotPlugins);
   return entryLocal;
+}
+
+// The host singletons must ALWAYS resolve to the host's own copy (the singleton boundary); a fetched
+// plugin is never allowed to self-register under these names and shadow it. (A plugin is never named
+// these in practice — defensive.)
+const HOST_SINGLETONS = new Set(['@matatbread/matbot-plugin-api', '@matatbread/matbot-core']);
+
+/** Symlink `.plugins/node_modules/<pkg.name>` → the fetched plugin's cache dir. Idempotent; a name
+ *  already linked (by an earlier self-registration or a host bridge) is left as-is — first writer wins. */
+async function registerByName(pkg: Record<string, unknown>, pkgRoot: string, dotPlugins: string): Promise<void> {
+  const name = pkg['name'];
+  if (typeof name !== 'string' || HOST_SINGLETONS.has(name)) return;
+  const linkPath = path.join(dotPlugins, 'node_modules', name);
+  try { await access(linkPath); return; } catch { /* not linked yet */ }
+  await mkdir(path.dirname(linkPath), { recursive: true });
+  const linkType = process.platform === 'win32' ? 'junction' : 'dir';
+  try { await symlink(pkgRoot, linkPath, linkType); }
+  catch (e) { if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e; }
 }
 
 // The import crawl only fetches code reachable by `import`. A plugin may also read non-imported
