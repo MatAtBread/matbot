@@ -104,21 +104,21 @@ export interface MergeResult {
 // ── DreamRun record ───────────────────────────────────────────────────────────
 
 /**
- * The outcome bucket for a single `runOnce()` pass. Determines which other fields on a
- * {@link DreamRun} carry meaningful values:
+ * The summary bucket for a single `runOnce()` pass. A pass now drains the whole ranked backlog —
+ * it can merge into several skills, defer, retire and quarantine facts all in one go — so the
+ * outcome is a one-glance summary and the `deferred`/`retired`/`quarantined`/`mergedFactIds` counts
+ * carry the detail:
  *
- *   `no-facts`  — no unassigned facts to process; no other fields meaningful.
- *   `no-match`  — a fact was picked but routed `weak` or `none`; `primaryFact` and `routedTo`
- *                 are set, `mergedFactIds` is empty. `enriched` is true if a `none` verdict was
- *                 reached only after a provenance-enriched second look (see `enriched` below).
- *   `merged`    — the happy path: `primaryFact`, `routedTo` (with `decision: 'strong'`), and a
- *                 non-empty `mergedFactIds` are all set.
- *   `error`     — a pipeline step or a ranker/merger call threw; `error` carries the message.
- *                 No skill writes happen on this path, but earlier fields may be partially set
- *                 depending on how far the run got before failing. A *durable* merge failure (bad
- *                 JSON, truncation, length-guard) also quarantines the culprit fact via
- *                 {@link DREAM_SKILL_ERROR} so it does not block the queue; a *transient* failure
- *                 (the chosen skill was deleted mid-run) leaves the fact untouched to retry.
+ *   `no-facts`  — no eligible facts to process; count fields are all zero.
+ *   `no-match`  — facts were processed but none merged (all deferred/retired, or no candidate
+ *                 skills at all); `primaryFact`/`routedTo` describe the oldest fact's verdict.
+ *   `merged`    — at least one fact was spliced into a skill; `mergedFactIds` is non-empty and
+ *                 `primaryFact`/`routedTo` describe the oldest fact. Other facts may also have been
+ *                 deferred/retired/quarantined in the same pass — see the counts.
+ *   `error`     — a catastrophic, setup-shaped failure ended the pass (missing service, invalid
+ *                 settings); `error` carries the message. Per-fact merge failures do NOT produce
+ *                 this outcome — they quarantine the culprit via {@link DREAM_SKILL_ERROR}, are
+ *                 counted in `quarantined`, listed in `errors`, and the pass carries on.
  */
 export type DreamRunOutcome = 'no-facts' | 'no-match' | 'merged' | 'error';
 
@@ -146,12 +146,27 @@ export interface DreamRun {
   routedTo?:           { skill: string; decision: RouteDecision['decision']; score: number; reasoning: string };
   mergedFactIds:       string[];
   contradictions:      { skill: string; location: string; note: string }[];
+  /** How many facts were deferred this pass: `weak`-routed facts plus `none` facts left over the
+   *  enrichment budget (both via `ignoreUntil`, both reconsidered later). */
+  deferred:            number;
+  /** How many facts were retired terminally this pass (`none` after their enrichment look, via
+   *  {@link DREAM_SKILL_NONE}). */
+  retired:             number;
+  /** How many facts were quarantined this pass after a durable merge failure ({@link DREAM_SKILL_ERROR}). */
+  quarantined:         number;
+  /** Immediately-actionable facts left after this pass — `strong` facts that exceeded the merge
+   *  budget (or per-skill cluster cap). Deferred/retired/merged/quarantined facts are NOT counted:
+   *  this is the signal a scheduler can use to decide whether to re-fire straight away. */
   unassignedRemaining: number;
   judgementCalls:      JudgementCallStat[];
-  /** True if a `none` verdict was reached only after a provenance-enriched re-rank (see
-   *  `buildEnrichedFact` in runOnce.ts). Absent/false means the first-pass score already
-   *  cleared (or failed to clear) the weak threshold with no enrichment needed. */
+  /** True if the oldest (primary) fact's verdict was reached only after a provenance-enriched
+   *  re-rank (see `buildEnrichedFact` in runOnce.ts). Reflects the primary fact only — other facts
+   *  in the same pass may also have been enriched. */
   enriched?:           boolean;
+  /** Per-fact merge/save failures collected this pass (one pass can touch several skills, so this
+   *  is a list). A single skill's failure no longer aborts the whole pass. */
+  errors?:             string[];
+  /** Catastrophic, setup-shaped failure that ended the pass before normal completion. */
   error?:              string;
 }
 
@@ -218,19 +233,30 @@ export const DREAM_SKILL_ERROR = '__error__';
  *                      still giving the skill landscape time to change between looks.
  */
 export interface DreamSettings {
-  strongThreshold: number;
-  weakThreshold:   number;
-  maxClusterSize:  number;
-  blocklist:       string[];
-  weakDeferralMs:  number;
+  strongThreshold:       number;
+  weakThreshold:         number;
+  maxClusterSize:        number;
+  blocklist:             string[];
+  weakDeferralMs:        number;
+  /** Cap on the total number of facts merged across all skills in one pass (default 20). The single
+   *  whole-backlog rank call is already paid before this kicks in, so raising it costs only merge
+   *  calls, not re-ranking. Strong facts beyond the cap are left untouched and picked up next pass. */
+  maxMergesPerPass:      number;
+  /** Cap on how many `none`-scoring facts get a provenance-enriched second look (one rank call each)
+   *  per pass (default 10). `none` facts beyond the cap are deferred — not retired — so they are
+   *  reconsidered (and enriched) in a later pass rather than re-ranked every pass. 0 disables
+   *  enrichment entirely (every first-pass `none` retires immediately). */
+  maxEnrichmentsPerPass: number;
 }
 
 export const DEFAULT_DREAM_SETTINGS: DreamSettings = {
-  strongThreshold: 0.75,
-  weakThreshold:   0.5,
-  maxClusterSize:  5,
-  blocklist:       ['Inner voice'],
-  weakDeferralMs:  36 * 60 * 60 * 1000,
+  strongThreshold:       0.75,
+  weakThreshold:         0.5,
+  maxClusterSize:        5,
+  blocklist:             ['Inner voice'],
+  weakDeferralMs:        36 * 60 * 60 * 1000,
+  maxMergesPerPass:      20,
+  maxEnrichmentsPerPass: 10,
 };
 
 /** Storage key for the persisted (partial) {@link DreamSettings} override. Shared by `runOnce`'s
@@ -258,5 +284,11 @@ export function validateDreamSettings(s: DreamSettings): void {
   }
   if (s.weakDeferralMs < 0) {
     throw new Error(`weakDeferralMs (${s.weakDeferralMs}) must be >= 0.`);
+  }
+  if (!Number.isInteger(s.maxMergesPerPass) || s.maxMergesPerPass < 1) {
+    throw new Error(`maxMergesPerPass (${s.maxMergesPerPass}) must be an integer >= 1.`);
+  }
+  if (!Number.isInteger(s.maxEnrichmentsPerPass) || s.maxEnrichmentsPerPass < 0) {
+    throw new Error(`maxEnrichmentsPerPass (${s.maxEnrichmentsPerPass}) must be an integer >= 0.`);
   }
 }

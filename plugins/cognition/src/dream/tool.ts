@@ -108,19 +108,21 @@ export function createDreamTimeTool(services: MatbotMachine): Tool {
   return {
     name: 'dream_time',
     description:
-      'Run one pass of background memory consolidation. Picks the oldest unassigned fact from ' +
-      'the remembered_facts store, scores it against every existing skill (minus a small ' +
-      'blocklist), and — if the top skill clears the configured "strong" threshold — splices the ' +
-      'fact in, flagging any contradictions inline. Will also batch-merge other unassigned facts ' +
-      'whose top skill is the same one, up to a configured cluster cap.\n\n' +
+      'Run one pass of background memory consolidation. Scores every unassigned fact in the ' +
+      'remembered_facts store against every existing skill (minus a small blocklist) in a single ' +
+      'ranking, then acts on the whole backlog at once: facts whose top skill clears the "strong" ' +
+      'threshold are spliced into that skill (grouped by skill, contradictions flagged inline), up ' +
+      'to a configured per-pass merge budget and per-skill cluster cap. Anything above the budget ' +
+      'waits for the next pass.\n\n' +
       'Facts that score too low to route anywhere ("none") get one extra look enriched with the ' +
       'surrounding conversation before being retired permanently — a bare fact can under-score in ' +
-      'isolation but route cleanly once disambiguated. Facts that route only weakly (a sound fact, ' +
-      'just no confident skill home yet) are deferred rather than retired — they become eligible ' +
-      'again after a cooldown, since the skill landscape may change later. A merge that fails ' +
-      'outright (unparseable response, truncation) quarantines the culprit fact so it stops ' +
-      'blocking the queue; that needs a config fix (e.g. a provider swap, see below), not an ' +
-      'automatic retry.\n\n' +
+      'isolation but route cleanly once disambiguated (enrichment itself is budgeted per pass; ' +
+      'facts over that budget are deferred, not retired). Facts that route only weakly (a sound ' +
+      'fact, just no confident skill home yet) are deferred rather than retired — they become ' +
+      'eligible again after a cooldown, since the skill landscape may change later. A merge that ' +
+      'fails outright (unparseable response, truncation) quarantines the culprit fact so it stops ' +
+      'blocking the queue (needs a config fix, e.g. a provider swap, not an automatic retry) and ' +
+      'the pass carries on with the other skills.\n\n' +
       'Takes no parameters. Intended to be invoked via the `background` tool on a schedule, not ' +
       'inline during a conversation. The ranker and merger each resolve their own provider — ' +
       '`dreamRankerProvider` / `dreamMergerProvider` via the cognition_config tool if pinned, else ' +

@@ -12,6 +12,7 @@
     "src"
   ],
   "description": "matbot core runtime: agentic loop, hook dispatch, plugin loader, config, security, and knowledge. Exposes ./providers-base and ./storage-base for plugin authors.",
+  "keywords": ["matbot","matbot-core","llm","ai","agent"],
   "license": "Apache-2.0",
   "type": "module",
   "exports": {

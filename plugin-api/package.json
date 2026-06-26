@@ -12,6 +12,7 @@
     "src"
   ],
   "description": "matbot plugin API: the singleton contract every matbot plugin builds against — MatbotPlugin, the service registry, hooks, principal carrier, and shared types.",
+  "keywords": ["matbot","matbot-plugin-api","llm","ai","agent"],
   "license": "Apache-2.0",
   "type": "module",
   "exports": {

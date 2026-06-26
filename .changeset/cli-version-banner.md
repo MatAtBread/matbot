@@ -1,5 +1,5 @@
 ---
-"@matatbread/matbot-cli": patch
+"@matatbread/matbot-cli": minor
 ---
 
 feat(cli): version banner + `--version` flag surfacing resolved singleton versions

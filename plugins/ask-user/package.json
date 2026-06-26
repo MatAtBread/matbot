@@ -12,6 +12,7 @@
     "src"
   ],
   "description": "Ask the user a question with interactive form controls — text, password, select, and confirm.",
+  "keywords": ["matbot","matbot-plugin","llm","ai","agent"],
   "license": "Apache-2.0",
   "type": "module",
   "exports": {

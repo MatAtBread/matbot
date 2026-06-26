@@ -12,6 +12,7 @@
     "src"
   ],
   "description": "Contextual knowledge fault handler — looks up the knowledge index when the model encounters an unknown term.",
+  "keywords": ["matbot","matbot-plugin","llm","ai","agent"],
   "license": "Apache-2.0",
   "type": "module",
   "exports": {

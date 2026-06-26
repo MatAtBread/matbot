@@ -11,6 +11,7 @@
     "src"
   ],
   "description": "Run prompts in detached background processes. Schedule recurring prompts with every/every_list/every_cancel/every_suspend/every_resume/everything_suspend/everything_resume.",
+  "keywords": ["matbot","matbot-plugin","llm","ai","agent"],
   "license": "Apache-2.0",
   "type": "module",
   "exports": {

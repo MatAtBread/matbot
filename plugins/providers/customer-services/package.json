@@ -12,6 +12,7 @@
     "src"
   ],
   "description": "Mock LLM provider for customer services scenarios. Always helpful, never useful.",
+  "keywords": ["matbot","matbot-plugin","matbot-provider","llm","ai","agent"],
   "license": "Apache-2.0",
   "type": "module",
   "exports": {

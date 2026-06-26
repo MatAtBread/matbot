@@ -12,6 +12,7 @@
     "src"
   ],
   "description": "Define named stores and expose generated CRUD tools over them via store_action. Cross-runtime (node + browser).",
+  "keywords": ["matbot","matbot-plugin","llm","ai","agent"],
   "license": "Apache-2.0",
   "type": "module",
   "exports": {

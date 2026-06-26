@@ -12,6 +12,7 @@
     "src"
   ],
   "description": "Read, write, and list files in the session workspace. When the web frontend is running, all workspace files are also served as static read-only downloads at /workspace/<path> on the HTTP server, so you can give the user a direct link to any file you write there.",
+  "keywords": ["matbot","matbot-plugin","llm","ai","agent"],
   "license": "Apache-2.0",
   "type": "module",
   "exports": {

@@ -12,6 +12,7 @@
     "src"
   ],
   "description": "Data-driven hooks: stored conditions that, when an LLM classifier judges them matched, invoke a tool. Cross-runtime (node + browser).",
+  "keywords": ["matbot","matbot-plugin","llm","ai","agent"],
   "license": "Apache-2.0",
   "type": "module",
   "exports": {

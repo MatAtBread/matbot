@@ -66,9 +66,13 @@ async function seedDreamRunsStore(services: MatbotMachine): Promise<void> {
         routedTo?:           { skill: string; decision: 'strong'|'weak'|'none'; score: number; reasoning: string };
         mergedFactIds:       string[];
         contradictions:      { skill: string; location: string; note: string }[];
+        deferred:            number;
+        retired:             number;
+        quarantined:         number;
         unassignedRemaining: number;
         judgementCalls:      { role: 'rank'|'merge'; inputSize: number; ms: number }[];
         enriched?:           boolean;
+        errors?:             string[];
         error?:              string;
       }`,
   });

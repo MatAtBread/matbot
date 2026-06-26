@@ -32,7 +32,7 @@ const PROVIDER_SETTING_KEYS = [
 ] as const;
 
 /** Every DreamSettings field `cognition_config` understands, alongside the provider pins above. */
-const DREAM_SETTING_KEYS = ['strongThreshold', 'weakThreshold', 'maxClusterSize', 'blocklist', 'weakDeferralMs'] as const;
+const DREAM_SETTING_KEYS = ['strongThreshold', 'weakThreshold', 'maxClusterSize', 'blocklist', 'weakDeferralMs', 'maxMergesPerPass', 'maxEnrichmentsPerPass'] as const;
 
 export function createAskInnerVoiceTool(services: MatbotMachine): Tool {
   const executor: ToolExecutor = {
@@ -185,6 +185,18 @@ export function createCognitionConfigTool(services: MatbotMachine): Tool {
               else if (typeof v === 'number') next.weakDeferralMs = v;
               else { yield { type: 'error', message: '"weakDeferralMs" must be a number, or null to reset to default.' }; return; }
             }
+            if ('maxMergesPerPass' in args) {
+              const v = args.maxMergesPerPass;
+              if (v === null) delete next.maxMergesPerPass;
+              else if (typeof v === 'number' && Number.isInteger(v)) next.maxMergesPerPass = v;
+              else { yield { type: 'error', message: '"maxMergesPerPass" must be an integer, or null to reset to default.' }; return; }
+            }
+            if ('maxEnrichmentsPerPass' in args) {
+              const v = args.maxEnrichmentsPerPass;
+              if (v === null) delete next.maxEnrichmentsPerPass;
+              else if (typeof v === 'number' && Number.isInteger(v)) next.maxEnrichmentsPerPass = v;
+              else { yield { type: 'error', message: '"maxEnrichmentsPerPass" must be an integer, or null to reset to default.' }; return; }
+            }
 
             try {
               validateDreamSettings({ ...DEFAULT_DREAM_SETTINGS, ...next });
@@ -246,8 +258,14 @@ export function createCognitionConfigTool(services: MatbotMachine): Tool {
       '  - `strongThreshold` — minimum score [0,1] to trigger a merge (default 0.75).\n' +
       '  - `weakThreshold` — minimum score [0,1] to record as a weak match and defer rather than ' +
       'retire (default 0.5); below this the fact retires as unroutable. Must stay <= strongThreshold.\n' +
-      '  - `maxClusterSize` — cap on facts merged in one dream_time pass, including the primary ' +
+      '  - `maxClusterSize` — cap on facts merged into a SINGLE skill in one dream_time pass ' +
       '(default 5).\n' +
+      '  - `maxMergesPerPass` — cap on facts merged across ALL skills in one dream_time pass ' +
+      '(default 20). One pass ranks the whole backlog in a single call, so raising this drains the ' +
+      'backlog faster at the cost of more merge calls per pass, not more ranking.\n' +
+      '  - `maxEnrichmentsPerPass` — cap on how many unroutable ("none") facts get a provenance-' +
+      'enriched second look per pass (default 10); facts over the cap are deferred, not retired. ' +
+      '0 disables enrichment.\n' +
       '  - `blocklist` — skill names never offered to the ranker (default ["Inner voice"]); ' +
       'case-sensitive exact match.\n' +
       '  - `weakDeferralMs` — milliseconds a weakly-routed fact is excluded from selection before ' +
@@ -269,7 +287,9 @@ export function createCognitionConfigTool(services: MatbotMachine): Tool {
       '  dreamMergerProvider: string | null;\n' +
       '  strongThreshold:     number;   // [0, 1]\n' +
       '  weakThreshold:       number;   // [0, 1], <= strongThreshold\n' +
-      '  maxClusterSize:      number;   // integer >= 1\n' +
+      '  maxClusterSize:        number;   // integer >= 1, per-skill\n' +
+      '  maxMergesPerPass:      number;   // integer >= 1, across all skills\n' +
+      '  maxEnrichmentsPerPass: number;   // integer >= 0\n' +
       '  blocklist:           string[];\n' +
       '  weakDeferralMs:      number;   // milliseconds, >= 0\n' +
       '}\n\n' +
@@ -289,7 +309,9 @@ export function createCognitionConfigTool(services: MatbotMachine): Tool {
         dreamMergerProvider: { type: ['string', 'null'], description: '"set": a configured provider name, or null to unpin. Omit to leave unchanged.' },
         strongThreshold:     { type: ['number', 'null'], description: '"set": minimum score [0,1] to trigger a merge, or null to reset to default. Omit to leave unchanged.' },
         weakThreshold:       { type: ['number', 'null'], description: '"set": minimum score [0,1] for a weak match, or null to reset to default. Omit to leave unchanged.' },
-        maxClusterSize:      { type: ['number', 'null'], description: '"set": cap on facts merged per pass, or null to reset to default. Omit to leave unchanged.' },
+        maxClusterSize:        { type: ['number', 'null'], description: '"set": cap on facts merged into a single skill per pass, or null to reset to default. Omit to leave unchanged.' },
+        maxMergesPerPass:      { type: ['number', 'null'], description: '"set": cap on facts merged across all skills per pass, or null to reset to default. Omit to leave unchanged.' },
+        maxEnrichmentsPerPass: { type: ['number', 'null'], description: '"set": cap on "none" facts given an enriched second look per pass (0 disables), or null to reset to default. Omit to leave unchanged.' },
         blocklist:           { type: ['array', 'null'], items: { type: 'string' }, description: '"set": skill names never offered to the ranker, or null to reset to default. Omit to leave unchanged.' },
         weakDeferralMs:      { type: ['number', 'null'], description: '"set": deferral window in milliseconds, or null to reset to default. Omit to leave unchanged.' },
       },

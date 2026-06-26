@@ -11,6 +11,7 @@
     "src"
   ],
   "description": "Run bash scripts in the session workspace.",
+  "keywords": ["matbot","matbot-plugin","llm","ai","agent"],
   "license": "Apache-2.0",
   "type": "module",
   "exports": {

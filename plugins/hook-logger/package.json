@@ -12,6 +12,7 @@
     "src"
   ],
   "description": "Diagnostic plugin: registers a hook on every channel (screen/contribute/toolcall/toolresult/followup) and console.logs when each fires. For exercising and debugging the hook pipeline.",
+  "keywords": ["matbot","matbot-plugin","llm","ai","agent"],
   "license": "Apache-2.0",
   "type": "module",
   "exports": {

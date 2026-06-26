@@ -11,6 +11,7 @@
     "src"
   ],
   "description": "Node filesystem-backed FileStore for MIME-typed blobs, served by the frontend.",
+  "keywords": ["matbot","matbot-plugin","llm","ai","agent"],
   "license": "Apache-2.0",
   "type": "module",
   "exports": {

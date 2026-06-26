@@ -12,6 +12,7 @@
     "src"
   ],
   "description": "Anthropic Messages API provider adapter with streaming, tool use, and extended thinking; also handles DeepSeek's Anthropic-compatible API.",
+  "keywords": ["matbot","matbot-plugin","matbot-provider","llm","ai","agent"],
   "license": "Apache-2.0",
   "type": "module",
   "exports": {

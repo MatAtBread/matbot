@@ -3,11 +3,19 @@
  *
  * `runOnce` is pure procedure. Every irreducibly-judgemental step is delegated through one of two
  * narrow interfaces — {@link Ranker} for scoring (fact, skill) pairs, {@link Merger} for editing
- * prose. Everything else — fetching facts, filtering out already-processed ones, picking the
- * oldest, building the candidate set, applying the blocklist, thresholding scores into routing
- * decisions, identifying cluster-mates, looping the merger over the cluster, CAS-writing facts
+ * prose. Everything else — fetching facts, filtering out already-processed ones, building the
+ * candidate set, applying the blocklist, thresholding scores into routing decisions, grouping the
+ * strong facts by chosen skill, looping the merger over each skill's cluster, CAS-writing facts
  * back, assembling and persisting the {@link DreamRun} record — is here, in TypeScript, in one
  * readable function.
+ *
+ * One pass ranks the WHOLE backlog in a single call and then spends that one ranking on every fact:
+ * it drains the strong facts (grouped by skill, up to a per-pass merge budget), defers the weak
+ * ones, and retires the dead `none` ones — all in the same pass. The single most expensive thing —
+ * the rank call — is paid once whether one fact moves or fifty, so acting on only the oldest (the
+ * original design, born of an in-LLM implementation that blew context across passes) left almost
+ * all of that paid-for work on the floor. The merge budget bounds how much prose-editing one pass
+ * does; everything above it waits for the next pass.
  *
  * The point of this layout is observability and replaceability. The pipeline can be reasoned
  * about, traced, and tested without ever calling an LLM (pass in stub Ranker/Merger). The Ranker
@@ -316,6 +324,9 @@ export async function runOnce(
     outcome,
     mergedFactIds:  [],
     contradictions: [],
+    deferred:       0,
+    retired:        0,
+    quarantined:    0,
     unassignedRemaining,
     judgementCalls: calls,
     ...extras,
@@ -337,134 +348,154 @@ export async function runOnce(
       });
     }
 
-    // ONE rank call, over every (fact, skill) pair. The ranker is free to batch internally.
+    const oldest = unassigned[0];
+    if (oldest === undefined) return finish('no-facts', 0);   // unreachable: length>0 above
+
+    // ── ONE rank call over the WHOLE backlog (fact × skill). Its scores drive every fact's
+    //    disposition below — the expensive call is paid once and spent on all of them, not just the
+    //    oldest. The ranker is free to batch internally. ──
     const rankStart = Date.now();
     const scores    = await ranker.rank(unassigned, candidates, signal);
     calls.push({ role: 'rank', inputSize: unassigned.length * candidates.length, ms: Date.now() - rankStart });
     const byFact = indexScoresByFact(scores);
 
-    const primary = unassigned[0];
-    if (primary === undefined) return finish('no-facts', 0);   // unreachable: length>0 above
-    let primaryDecision = decide(primary.id, byFact, settings);
-    let enriched = false;
-
-    // 'none': before retiring permanently, give the fact ONE extra look with provenance context.
-    // A bare atomic fact can under-score in isolation but route cleanly once the conversation
-    // that produced it disambiguates it — e.g. "the user has a history of fainting" scores low
-    // alone, but obviously belongs in a user-profile skill once the preceding messages show it
-    // was said in the context of dentist-visit anxiety. Exactly one re-rank, never a loop:
-    // whatever this second verdict is, it stands.
-    if (primaryDecision.decision === 'none') {
-      const enrichedText = await buildEnrichedFact(services, primary);
-      if (enrichedText !== undefined) {
-        const rerankStart    = Date.now();
-        const enrichedScores = await ranker.rank([{ ...primary, fact: enrichedText }], candidates, signal);
-        calls.push({ role: 'rank', inputSize: candidates.length, ms: Date.now() - rerankStart });
-        primaryDecision = decide(primary.id, indexScoresByFact(enrichedScores), settings);
-        enriched = true;
-      }
-    }
-
-    // Weak: the fact is fine, but no existing skill is a confident home for it RIGHT NOW. Defer
-    // via `ignoreUntil` rather than retire — the skill landscape can still change (a skill grows
-    // into a fit, or a new one is minted from a cluster of similarly-homeless facts), so
-    // re-asking later may get a different answer. `dreamSkill` is deliberately left unset:
-    // deferral is not a terminal routing decision.
-    if (primaryDecision.decision === 'weak') {
-      const ignoreUntil = new Date(Date.parse(startedAt) + settings.weakDeferralMs).toISOString();
-      await patchFact(facts, primary.id, { ignoreUntil });
-      return finish('no-match', unassigned.length, {
-        primaryFact: { id: primary.id, preview: preview(primary.fact) },
-        routedTo:    { skill: primaryDecision.skill ?? '', decision: 'weak', score: primaryDecision.score ?? 0, reasoning: primaryDecision.reasoning },
-        ...(enriched ? { enriched: true } : {}),
-      });
-    }
-
-    // None: durable — re-asking the same ranker the same question won't change it (we just tried
-    // exactly that, above, if enrichment was possible). Retire so a future pass doesn't waste a
-    // judgement call reconsidering it.
-    if (primaryDecision.decision === 'none') {
-      await patchFact(facts, primary.id, { dreamSkill: DREAM_SKILL_NONE });
-      return finish('no-match', unassigned.length - 1, {
-        primaryFact: { id: primary.id, preview: preview(primary.fact) },
-        routedTo:    { skill: '', decision: 'none', score: primaryDecision.score ?? 0, reasoning: primaryDecision.reasoning },
-        ...(enriched ? { enriched: true } : {}),
-      });
-    }
-
-    // Strong: identify cluster-mates — other unassigned facts whose top-scoring skill is the
-    // SAME as the primary's chosen skill, also above strongThreshold. Cap at maxClusterSize total.
-    const chosenSkill = primaryDecision.skill as string;   // strong implies skill present
-    const clusterMates: RememberedFact[] = [];
-    for (const f of unassigned.slice(1)) {
-      if (clusterMates.length + 1 >= settings.maxClusterSize) break;   // +1 for the primary
+    // Classify every fact from that single rank. `unassigned` is oldest-first, so each bucket and
+    // the per-skill groups below inherit that order (oldest facts processed first under any cap).
+    const strong: { fact: RememberedFact; decision: RouteDecision }[] = [];
+    const weak:   RememberedFact[] = [];
+    const none:   RememberedFact[] = [];
+    let oldestDecision: RouteDecision = { decision: 'none', reasoning: '' };
+    for (const f of unassigned) {
       const d = decide(f.id, byFact, settings);
-      if (d.decision === 'strong' && d.skill === chosenSkill) clusterMates.push(f);
-    }
-    const cluster = [primary, ...clusterMates];
-
-    // Load the chosen skill's full prose and merge each cluster member in turn. Each merge sees
-    // the prior merges' output, so contradiction detection has the full evolving picture.
-    const doc = manager.get(chosenSkill);
-    if (doc === undefined) {
-      // Raced with a delete between buildCandidates() and now — transient, not a durable failure
-      // of any fact. Report and exit cleanly; leave the fact unmarked so a future pass (against
-      // whatever skills still exist) reconsiders it fresh rather than quarantining it.
-      return finish('error', unassigned.length, {
-        primaryFact: { id: primary.id, preview: preview(primary.fact) },
-        routedTo:    { skill: chosenSkill, decision: 'strong', score: primaryDecision.score ?? 0, reasoning: primaryDecision.reasoning },
-        error:       `skill "${chosenSkill}" disappeared mid-run`,
-        ...(enriched ? { enriched: true } : {}),
-      });
+      if (f.id === oldest.id) oldestDecision = d;
+      if      (d.decision === 'strong') strong.push({ fact: f, decision: d });
+      else if (d.decision === 'weak')   weak.push(f);
+      else                              none.push(f);
     }
 
-    let content = doc.content;
-    const allContradictions: DreamRun['contradictions'] = [];
+    // ── Enrichment phase: rescue `none` facts with provenance context, oldest-first, bounded by
+    //    maxEnrichmentsPerPass. A bare atomic fact can under-score in isolation but route cleanly
+    //    once the conversation that produced it disambiguates it (e.g. "the user has a history of
+    //    fainting" scores low alone, but belongs in a user-profile skill once the preceding messages
+    //    show it was said amid dentist-visit anxiety). Exactly one re-rank per fact, never a loop.
+    //    A `none` fact we can't enrich (no session/context) is terminal → retire. A `none` fact over
+    //    the enrichment budget is deferred (not retired) so a future pass enriches it rather than
+    //    re-ranking it every pass. ──
+    const enrichedIds   = new Set<string>();
+    const stillNone:    RememberedFact[] = [];
+    const deferredNone: RememberedFact[] = [];
+    let enrichBudget = settings.maxEnrichmentsPerPass;
+    for (const f of none) {
+      if (enrichBudget <= 0) { deferredNone.push(f); continue; }
+      const enrichedText = await buildEnrichedFact(services, f);
+      if (enrichedText === undefined) { stillNone.push(f); continue; }
+      enrichBudget--;
+      enrichedIds.add(f.id);
+      const rerankStart    = Date.now();
+      const enrichedScores = await ranker.rank([{ ...f, fact: enrichedText }], candidates, signal);
+      calls.push({ role: 'rank', inputSize: candidates.length, ms: Date.now() - rerankStart });
+      const d = decide(f.id, indexScoresByFact(enrichedScores), settings);
+      if (f.id === oldest.id) oldestDecision = d;
+      if      (d.decision === 'strong') strong.push({ fact: f, decision: d });
+      else if (d.decision === 'weak')   weak.push(f);
+      else                              stillNone.push(f);
+    }
+
+    // ── Cheap dispositions (no skill writes, no judgement calls): defer the weak + over-budget
+    //    `none` facts, retire the terminal `none` facts. A CAS miss here means the fact was edited
+    //    underneath us — harmless, the next pass reconsiders it — so we skip and carry on rather
+    //    than abort the whole pass. ──
+    const ignoreUntil = new Date(Date.parse(startedAt) + settings.weakDeferralMs).toISOString();
+    let deferred = 0, retired = 0;
+    for (const f of [...weak, ...deferredNone]) {
+      try { await patchFact(facts, f.id, { ignoreUntil }); deferred++; } catch { /* raced edit */ }
+    }
+    for (const f of stillNone) {
+      try { await patchFact(facts, f.id, { dreamSkill: DREAM_SKILL_NONE }); retired++; } catch { /* raced edit */ }
+    }
+
+    // ── Merge phase: group strong facts by their chosen skill and drain up to maxMergesPerPass
+    //    total (per-skill cluster still capped at maxClusterSize). Insertion order = oldest-first,
+    //    so under the budget the oldest skills/facts win. Each skill's merges run in sequence so
+    //    contradiction detection sees the full evolving prose; different skills are independent. ──
+    const bySkill = new Map<string, RememberedFact[]>();
+    for (const s of strong) {
+      const skill = s.decision.skill as string;   // strong implies skill present
+      const arr = bySkill.get(skill);
+      if (arr === undefined) bySkill.set(skill, [s.fact]);
+      else arr.push(s.fact);
+    }
+
     const mergedFactIds: string[] = [];
-    for (const f of cluster) {
-      const mergeStart = Date.now();
-      let result: MergeResult;
+    const allContradictions: DreamRun['contradictions'] = [];
+    const mergeErrors: string[] = [];
+    let quarantined = 0;
+    let mergeBudget = settings.maxMergesPerPass;
+
+    for (const [skill, members] of bySkill) {
+      if (mergeBudget <= 0) break;
+      const doc = manager.get(skill);
+      if (doc === undefined) continue;   // raced a delete between buildCandidates() and now — leave its facts for a future pass
+
+      const cluster = members.slice(0, Math.min(settings.maxClusterSize, mergeBudget));
+      let content = doc.content;
+      const skillMergedIds: string[] = [];
+      for (const f of cluster) {
+        const mergeStart = Date.now();
+        try {
+          const result: MergeResult = await merger.merge(skill, content, f, signal);
+          calls.push({ role: 'merge', inputSize: 1, ms: Date.now() - mergeStart });
+          content = result.content;
+          for (const c of result.contradictions) allContradictions.push({ skill, location: c.location, note: c.note });
+          skillMergedIds.push(f.id);
+        } catch (e) {
+          calls.push({ role: 'merge', inputSize: 1, ms: Date.now() - mergeStart });
+          // Durable failure on THIS fact (unparseable response, truncation, length-guard) — a
+          // property of this (fact, skill, provider) combination, not a transient blip. Quarantine
+          // the culprit so it stops blocking the queue (needs a config fix, not an auto-retry),
+          // stop this skill's cluster, but commit the merges that already succeeded (below) and
+          // move on to the next skill rather than aborting the whole pass.
+          try { await patchFact(facts, f.id, { dreamSkill: DREAM_SKILL_ERROR }); } catch { /* raced edit */ }
+          quarantined++;
+          mergeErrors.push(`merge failed on fact ${f.id} (skill "${skill}"): ${(e as Error).message ?? String(e)}`);
+          break;
+        }
+      }
+      if (skillMergedIds.length === 0) continue;
       try {
-        result = await merger.merge(chosenSkill, content, f, signal);
+        // Skill save first so a CAS failure on a fact doesn't strand an un-saved merge.
+        await manager.save(skill, content);
+        for (const id of skillMergedIds) {
+          try { await patchFact(facts, id, { dreamSkill: skill }); } catch { /* raced edit; fact stays eligible */ }
+          mergedFactIds.push(id);
+        }
+        mergeBudget -= skillMergedIds.length;
       } catch (e) {
-        calls.push({ role: 'merge', inputSize: 1, ms: Date.now() - mergeStart });
-        // Durable: an unparseable response, truncation, or the merger's own length-guard
-        // tripping is a property of this (fact, skill, provider) combination, not a transient
-        // blip — retrying on the next 1-minute tick would just fail identically and burn tokens.
-        // Quarantine the CULPRIT fact so it stops blocking the queue; it needs human
-        // intervention (e.g. a provider swap via cognition_config) to be reconsidered, not an
-        // automatic retry. Cluster-mates merged earlier in this loop are not persisted (the skill
-        // save happens only after the whole cluster succeeds) and so remain naturally eligible
-        // for a future pass — only `f` itself is blamed.
-        await patchFact(facts, f.id, { dreamSkill: DREAM_SKILL_ERROR });
-        return finish('error', unassigned.length - 1, {
-          primaryFact: { id: primary.id, preview: preview(primary.fact) },
-          routedTo:    { skill: chosenSkill, decision: 'strong', score: primaryDecision.score ?? 0, reasoning: primaryDecision.reasoning },
-          mergedFactIds,
-          contradictions: allContradictions,
-          error: `merge failed on fact ${f.id}: ${(e as Error).message ?? String(e)}`,
-          ...(enriched ? { enriched: true } : {}),
-        });
+        // The skill save itself failed — none of this cluster's facts are marked, so they stay
+        // eligible for a future pass. Record and continue with the remaining skills.
+        mergeErrors.push(`saving skill "${skill}" failed: ${(e as Error).message ?? String(e)}`);
       }
-      calls.push({ role: 'merge', inputSize: 1, ms: Date.now() - mergeStart });
-      content = result.content;
-      for (const c of result.contradictions) {
-        allContradictions.push({ skill: chosenSkill, location: c.location, note: c.note });
-      }
-      mergedFactIds.push(f.id);
     }
 
-    // All merges succeeded — persist the new skill content, then mark each fact processed.
-    // Skill save first so a CAS failure on a fact doesn't strand an un-saved merge.
-    await manager.save(chosenSkill, content);
-    for (const id of mergedFactIds) await patchFact(facts, id, { dreamSkill: chosenSkill });
+    const merged    = mergedFactIds.length;
+    const remaining = unassigned.length - merged - deferred - retired - quarantined;   // over-budget strong, eligible next pass
+    const outcome: DreamRunOutcome = merged > 0 ? 'merged' : 'no-match';
 
-    return finish('merged', unassigned.length - mergedFactIds.length, {
-      primaryFact: { id: primary.id, preview: preview(primary.fact) },
-      routedTo:    { skill: chosenSkill, decision: 'strong', score: primaryDecision.score ?? 0, reasoning: primaryDecision.reasoning },
+    return finish(outcome, remaining, {
+      primaryFact: { id: oldest.id, preview: preview(oldest.fact) },
+      routedTo: {
+        skill:     oldestDecision.skill ?? '',
+        decision:  oldestDecision.decision,
+        score:     oldestDecision.score ?? 0,
+        reasoning: oldestDecision.reasoning,
+      },
       mergedFactIds,
       contradictions: allContradictions,
-      ...(enriched ? { enriched: true } : {}),
+      deferred,
+      retired,
+      quarantined,
+      ...(enrichedIds.has(oldest.id) ? { enriched: true } : {}),
+      ...(mergeErrors.length > 0 ? { errors: mergeErrors } : {}),
     });
   } catch (e) {
     // Catch-all for anything we didn't anticipate. The run is recorded; the tool surfaces it.

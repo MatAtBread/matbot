@@ -11,6 +11,7 @@
     "src"
   ],
   "description": "SQLite storage backend (WAL mode) providing persistent Stores and file storage for all runtime state.",
+  "keywords": ["matbot","matbot-plugin","matbot-storage","llm","ai","agent"],
   "license": "Apache-2.0",
   "type": "module",
   "exports": {
