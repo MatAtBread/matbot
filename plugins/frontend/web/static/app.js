@@ -1382,7 +1382,7 @@ function renderMarker(part) {
   det.className = 'tool-block';
   const sum = document.createElement('summary');
   sum.className = 'tool-header';
-  sum.textContent = '🔖 ' + part.creator;
+  sum.textContent = String.fromCodePoint(0x1F4CC) + ' ' + part.creator;
   det.appendChild(sum);
   const pre = document.createElement('pre');
   pre.className = 'tool-args';

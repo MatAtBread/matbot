@@ -116,7 +116,8 @@ export function createLlmMerger(services: MatbotMachine, provider: string): Merg
       // Defensive structural check: the prompt told the model never to shrink the content. If it
       // did anyway, refuse the merge rather than silently overwriting good material with a
       // truncated version. The pipeline catches this and records the run as `error`.
-      if (parsed.content.length < skillContent.length) {
+      // The -20 buffer is because trailing line white space is often modifed by the LLM
+      if (parsed.content.length < (skillContent.length - 20)) {
         throw new Error(
           `dream-time merger returned shorter content (${parsed.content.length} chars) than the ` +
           `input (${skillContent.length} chars) for fact ${fact.id}; refusing to overwrite`,

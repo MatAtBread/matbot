@@ -64,7 +64,7 @@ function formatMarker(part: Extract<MessageContent, { type: 'marker' }>): string
     const who  = data.pluginName !== undefined ? ` (${data.pluginName})` : '';
     return yellow(`⚠  ${data.channel ?? 'hook'} hook${who} failed and was skipped: ${data.message ?? 'unknown error'}`);
   }
-  return dim(`🔖 ${part.creator}: ${JSON.stringify(part.data)}`);
+  return dim(`${String.fromCodePoint(0x1F4CC)} ${part.creator}: ${JSON.stringify(part.data)}`);
 }
 
 /**

@@ -52,6 +52,7 @@ export function createAskInnerVoiceTool(services: MatbotMachine): Tool {
         signal: ctx.signal,
         ...(typeof args.system === 'string' ? { system: args.system } : {}),
       });
+      yield { type: 'stdout', chunk: "" }; // No function, except to make the UI render the result
       yield { type: 'result', value: { text: res.text, usage: res.usage } };
     },
   };
