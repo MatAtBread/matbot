@@ -3,6 +3,8 @@ import type {
 } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION, lastActivityAt } from '@matatbread/matbot-plugin-api';
 
+import { makeCompactSessionsTool } from './compact-sessions.js'
+
 const MARKER_CREATOR = '@matatbread/matbot-edit-session';
 
 // This plugin's marker payload, made type-safe by augmenting the shared MarkerData registry.
@@ -230,5 +232,6 @@ export const plugin: MatbotPluginSpec = {
     const store = services.sessions;
     if (!store) return;
     services.tools.register(makeSessionEditTool(store));
+    services.tools.register(makeCompactSessionsTool(store));
   },
 };

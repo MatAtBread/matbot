@@ -38,7 +38,7 @@ export interface StoreQuery {
   where?:  Filter;
   sort?:   SortSpec[];
   limit?:  number;
-  cursor?: string;
+  cursor?: string | undefined;
 }
 
 export interface QueryResult<T> {
