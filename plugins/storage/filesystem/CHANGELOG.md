@@ -1,5 +1,14 @@
 # @matatbread/matbot-storage-filesystem
 
+## 0.2.4
+
+### Patch Changes
+
+- Updated dependencies
+  - @matatbread/matbot-core@0.2.4
+  - @matatbread/matbot-plugin-api@0.2.4
+  - @matatbread/matbot-files-node@0.2.4
+
 ## 0.2.3
 
 ### Patch Changes

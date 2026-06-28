@@ -1,5 +1,11 @@
 # @matatbread/matbot-tool-docker-bash
 
+## 0.2.4
+
+### Patch Changes
+
+- @matatbread/matbot-plugin-api@0.2.4
+
 ## 0.2.3
 
 ### Patch Changes

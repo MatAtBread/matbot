@@ -1,5 +1,12 @@
 # @matatbread/matbot-core
 
+## 0.2.4
+
+### Patch Changes
+
+- Release: web_user_environment + compact_sessions tools, triggers reworked to fire tools with the user/agent × ephemeral/durable orthogonality, quiescent-edge registry application, google-drive storage backend, durable screen context / retractAndRerun, persisted token usage, plus the npm-publishing restructure and assorted fixes. See CHANGELOG.md.
+  - @matatbread/matbot-plugin-api@0.2.4
+
 ## 0.2.3
 
 ### Patch Changes
