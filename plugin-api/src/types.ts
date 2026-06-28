@@ -488,8 +488,10 @@ export interface ToolContext {
   files?:      FileStore;
   /** Prompt the user for input. The host provides a readline or form implementation. */
   prompt:      PromptFn;
-  /** Hot-load a plugin by specifier without restarting the process. Returns the loaded plugin. */
-  loadPlugin(specifier: string): Promise<MatbotPlugin>;
+  /** Hot-load a plugin by specifier without restarting the process. Returns the loaded plugin.
+   *  `refresh` (default false) forces a remote (github/http) plugin to be re-downloaded rather than
+   *  re-loaded from its `.plugins/` cache — pass true to pick up changed upstream source. */
+  loadPlugin(specifier: string, refresh?: boolean): Promise<MatbotPlugin>;
   /**
    * Hot-unload a plugin by specifier, removing its tools, hooks, and system context contributions.
    * Resolves `true` if a plugin was actually resident and unloaded, `false` if there was nothing

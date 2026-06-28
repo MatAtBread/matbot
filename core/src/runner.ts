@@ -42,7 +42,7 @@ export interface RunSessionOpts {
    * re-run of the originating user turn. Empty/absent for an ordinary turn.
    */
   injectedEphemeral?: MessageContent[];
-  loadPlugin:     (specifier: string, prompt?: PromptFn) => Promise<MatbotPlugin>;
+  loadPlugin:     (specifier: string, prompt?: PromptFn, refresh?: boolean) => Promise<MatbotPlugin>;
   unloadPlugin:   (specifier: string) => Promise<boolean>;
 }
 
@@ -273,7 +273,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
         callId: tc.id, session, signal, vault,
         provider:     config.provider,
         prompt:       promptFn,
-        loadPlugin:   (specifier: string) => opts.loadPlugin(specifier, promptFn),
+        loadPlugin:   (specifier: string, refresh?: boolean) => opts.loadPlugin(specifier, promptFn, refresh),
         unloadPlugin: opts.unloadPlugin,
         ...(opts.workdir     !== undefined ? { workdir:     opts.workdir     } : {}),
         ...(opts.configPath  !== undefined ? { configPath:  opts.configPath  } : {}),

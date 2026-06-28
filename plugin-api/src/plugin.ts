@@ -116,8 +116,11 @@ export interface MatbotRuntime {
    * Hot-load a plugin by specifier into the running process. Returns the loaded plugin.
    * `prompt`, when supplied, resolves tool-name collisions interactively during the new
    * plugin's setup(); the runner injects the triggering session's prompt automatically.
+   * `refresh` (default false) forces a remote (github/http) plugin's `.plugins/` cache subtree
+   * to be evicted and re-downloaded — a reload of changed upstream source. Cache-first otherwise:
+   * a programmatic loader gets the cached copy and stays offline-tolerant.
    */
-  loadPlugin(specifier: string, prompt?: PromptFn): Promise<MatbotPlugin>;
+  loadPlugin(specifier: string, prompt?: PromptFn, refresh?: boolean): Promise<MatbotPlugin>;
 
   /**
    * Hot-unload a plugin by specifier, removing its tools, hooks, and system context contributions.

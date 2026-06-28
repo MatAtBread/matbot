@@ -103,14 +103,15 @@ function resolveExportsEntry(value: unknown): string | undefined {
  * imports) and the `name`/`runtimes` read from the resolved package.json. Per the classifier:
  *  - local  → resolve package.json exports["."] so matbot.yaml can reference the package folder
  *             rather than a deep src/ path;
- *  - remote → fetch the module graph into `.plugins/` (idempotent; a restart loads from cache) and
+ *  - remote → fetch the module graph into `.plugins/` (idempotent; a restart loads from cache, but
+ *             `forceRefresh` from a reload evicts the subtree first to re-download changed source) and
  *             point at the cached entry — bare imports then resolve up to the host's node_modules;
  *  - npm / tarball / git → resolved through the project's module graph (pnpm installs them); a bare
  *             name passes through if not yet on disk so loadPlugins can emit the warning.
  *
  * This is the single funnel for both startup and runtime (`plugin add` / hot-load) resolution.
  */
-async function resolvePluginSpecifiers(specifiers: readonly string[], configDir: string): Promise<PluginLoadRequest[]> {
+async function resolvePluginSpecifiers(specifiers: readonly string[], configDir: string, forceRefresh = false): Promise<PluginLoadRequest[]> {
   const req = createRequire(path.join(configDir, '_'));
   const dotPlugins = path.join(configDir, '.plugins');
   const results: PluginLoadRequest[] = [];
@@ -121,7 +122,7 @@ async function resolvePluginSpecifiers(specifiers: readonly string[], configDir:
 
     if (classified.kind === 'remote') {
       try {
-        importSpec = pathToFileURL(await materializeRemote(spec, dotPlugins, configDir)).href;
+        importSpec = pathToFileURL(await materializeRemote(spec, dotPlugins, configDir, forceRefresh)).href;
       } catch (e) {
         console.warn(`[matbot] Could not fetch remote plugin "${spec}": ${e instanceof Error ? e.message : String(e)}`);
         results.push({ spec, importSpec: spec });  // unresolved — let loadPlugins surface the failure
@@ -1009,8 +1010,11 @@ async function main(): Promise<void> {
     async singleTurn(req) {
       return this.complete(singleTurnRequest(req));
     },
-    async loadPlugin(specifier: string, prompt?: PromptFn) {
-      const resolved = await resolvePluginSpecifiers([specifier], path.dirname(configPath));
+    async loadPlugin(specifier: string, prompt?: PromptFn, refresh = false) {
+      // refresh re-downloads a changed remote source rather than re-importing the stale cached subtree
+      // (the file:// cache-bust only re-evaluates bytes, it can't refetch them). Default off: a
+      // programmatic load stays cache-first and offline-tolerant. `plugin reload` opts in.
+      const resolved = await resolvePluginSpecifiers([specifier], path.dirname(configPath), refresh);
       const plugins  = await loadPluginsWithDescriptions(resolved, services, path.dirname(configPath), /* bustCache */ true, prompt, /* onLoadError */ 'throw');
       const plugin   = plugins[0];
       if (plugin === undefined) throw new Error(`No plugin loaded for specifier "${specifier}"`);

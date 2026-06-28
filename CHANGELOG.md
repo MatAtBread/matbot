@@ -207,6 +207,19 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Optional
 
+- **tool-plugin** — `plugin reload` now re-downloads a changed remote (github/http) plugin instead of
+  silently re-importing stale code. The `.plugins/` cache is write-once (skip-if-present), and reload's
+  cache-bust only re-*evaluated* the already-cached bytes, so a changed remote source could never reach
+  a running matbot short of manually deleting its `.plugins/` subtree. Reload now evicts the plugin's
+  cached subtree (and its `node_modules/<name>` self-link) and clears the in-memory manifest memo before
+  re-materialising. It is governed by a new optional `refresh` parameter on the `reload` action
+  (default **true** — reloading a remote plugin means "pick up the latest upstream source", the
+  cross-source analog of how a local reload always reflects on-disk edits); pass `refresh: false` to
+  re-run `setup()` against the cached copy without a network round-trip (reset state, or work offline).
+  The capability is threaded through the runtime as a new optional `refresh` arg on
+  `MatbotRuntime.loadPlugin` / `ToolContext.loadPlugin` (default **false** — a programmatic load stays
+  cache-first). Boot and `plugin add` are unchanged.
+
 - **frontend/web** — new `web_user_environment` tool: the LLM evaluates a JavaScript expression in the
   user's attached browser and gets the JSON-serialisable result back. It runs in a sandboxed Web Worker
   (built from a blob URL, so it works from the `file://` bundle too) with no DOM, storage, cookies, or

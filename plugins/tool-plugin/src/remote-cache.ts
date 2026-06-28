@@ -14,7 +14,7 @@
 // (e.g. mounted read-only into docker-bash) so cached plugin code cannot be tampered with by the
 // model. Do not move this under `.data/`.
 
-import { writeFile, mkdir, access, stat, symlink } from 'node:fs/promises';
+import { writeFile, mkdir, access, stat, symlink, rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import process from 'node:process';
@@ -263,10 +263,34 @@ function scanImports(code: string): { relative: string[]; bare: string[] } {
 }
 
 /**
+ * Drop a remote plugin's cached state so the next materialize re-downloads it. Clears the in-memory
+ * manifest memo (so a moved entry / changed `files` / renamed package is re-read), then removes the
+ * cached package subtree under `.plugins/<host>/<path…>` and the plugin's `node_modules/<name>`
+ * self-link. The manifest is re-fetched here to learn the subtree root and name; that fetch repopulates
+ * the memo, so the subsequent `fetchRemoteManifest` in materialize hits it (one network round-trip).
+ * Best-effort removal — an absent subtree/link is not an error.
+ */
+async function evictRemote(spec: string, dotPlugins: string): Promise<void> {
+  manifestCache.delete(spec);
+  const manifest = await fetchRemoteManifest(spec);
+  const pkgRoot = path.dirname(urlToCachePath(manifest.pkgUrl, dotPlugins));
+  await rm(pkgRoot, { recursive: true, force: true });
+
+  const name = manifest.pkg['name'];
+  if (typeof name === 'string' && !HOST_SINGLETONS.has(name)) {
+    await rm(path.join(dotPlugins, 'node_modules', name), { force: true });
+  }
+}
+
+/**
  * Download a remote plugin's module graph into `.plugins/<host>/<path…>`, preserving structure, and
  * return the local file path of its entry. Idempotent and offline-friendly: a module already present
- * in the cache is not re-fetched, so a restart loads from disk. (To force a refresh, delete the
- * plugin's subtree under `.plugins/`.)
+ * in the cache is not re-fetched, so a restart loads from disk.
+ *
+ * `forceRefresh` (set by `plugin reload`) evicts the plugin's cached subtree first, so changed remote
+ * source is actually re-downloaded — without it, the skip-if-present writes (`writeCached`) would
+ * re-import stale bytes regardless of any URL cache-busting on the entry. Boot and `plugin add` leave
+ * it false: cache-first keeps startup fast and offline-tolerant.
  *
  * `resolveBase` is the directory whose module graph defines the host singletons — every bare import
  * the plugin makes (`@matatbread/matbot-plugin-api`, …) is resolved from here and symlinked into
@@ -276,7 +300,8 @@ function scanImports(code: string): { relative: string[]; bare: string[] } {
  * is benign rather than corrupting; sharing the host's copy is still preferred to avoid the bloat
  * and confusion of duplicates.
  */
-export async function materializeRemote(spec: string, dotPlugins: string, resolveBase: string): Promise<string> {
+export async function materializeRemote(spec: string, dotPlugins: string, resolveBase: string, forceRefresh = false): Promise<string> {
+  if (forceRefresh) await evictRemote(spec, dotPlugins);
   const manifest = await fetchRemoteManifest(spec);
 
   const pkgPath = urlToCachePath(manifest.pkgUrl, dotPlugins);

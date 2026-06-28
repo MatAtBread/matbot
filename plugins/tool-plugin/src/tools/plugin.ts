@@ -372,7 +372,7 @@ type PluginInput =
   | { action: 'list' }
   | { action: 'add';            specifier: string }
   | { action: 'remove';         specifier: string }
-  | { action: 'reload';         specifier: string }
+  | { action: 'reload';         specifier: string; refresh?: boolean }
   | { action: 'store-key';      key: string }
   | { action: 'discover_local' };
 
@@ -718,7 +718,11 @@ const executor = {
         return;
       }
 
-      const reloaded = await ctx.loadPlugin(entry);
+      // Default refresh=true: for a remote (github/http) plugin, reload means "pick up the latest
+      // upstream source" — the cross-source analog of how a local reload always reflects on-disk edits.
+      // Pass refresh:false to re-run setup() against the cached copy (e.g. to reset state, or offline).
+      const { refresh = true } = input as { refresh?: boolean };
+      const reloaded = await ctx.loadPlugin(entry, refresh);
       const result = await reloaded.installationMessage?.() || `"${entry}" reloaded successfully.`;
 
       if (result !== null) {
@@ -735,7 +739,7 @@ export const pluginTool: Tool = {
   description:
     'Manage matbot plugins — the units that contribute tools, providers, storage, hooks, and ' +
     'frontends to the running process. List or discover them, install or remove one, reload one ' +
-    'from disk to pick up code changes without restarting, or supply a secret a plugin or provider ' +
+    'to pick up code changes without restarting, or supply a secret a plugin or provider ' +
     'reported missing.\n\n' +
     'Parameters depend on `action` (TypeScript):\n' +
     '```ts\n' +
@@ -744,7 +748,8 @@ export const pluginTool: Tool = {
     "  | { action: 'discover_local' }                  // scan plugins + the .plugins cache; each result carries source {type: local|github|cdn, uri} + matbotRuntime\n" +
     "  | { action: 'add';        specifier: string }   // install & activate (specifier = a Specifier, below)\n" +
     "  | { action: 'remove';     specifier: string }   // deactivate & remove (specifier = package name, preferred — or its matbot.yaml entry)\n" +
-    "  | { action: 'reload';     specifier: string }   // re-import without restarting (specifier = package name, preferred — or its matbot.yaml entry)\n" +
+    "  | { action: 'reload';     specifier: string; refresh?: boolean }   // re-import without restarting (specifier = package name, preferred — or its matbot.yaml entry).\n" +
+    "      // refresh (default true) re-downloads a remote (github/http) plugin's latest upstream source; pass false to re-run against the cached copy (reset state / offline). No effect on local/npm plugins.\n" +
     "  | { action: 'store-key';  key: string };        // store a secret a plugin/provider needs; value entered out-of-band\n" +
     '```\n\n' +
     'A `specifier` (for add/remove/reload) is EXACTLY ONE of these forms — pass a concrete string, ' +
@@ -797,7 +802,11 @@ export const pluginTool: Tool = {
       action: {
         type:        'string',
         enum:        ['list', 'add', 'remove', 'reload', 'discover_local', 'store-key'],
-        description: 'list: show configured plugins. add: install and register a plugin. remove: deregister and optionally uninstall. reload: unload and re-import from disk (picks up code changes without restarting). discover_local: scan plugins and the .plugins cache for installable plugins (each result reports its source). store-key: supply a secret (e.g. an API key) that a plugin or provider reported missing — you provide only the key name; the value is entered out-of-band.',
+        description: 'list: show configured plugins. add: install and register a plugin. remove: deregister and optionally uninstall. reload: unload and re-import (picks up code changes without restarting; for a remote plugin re-downloads the latest upstream source by default — see refresh). discover_local: scan plugins and the .plugins cache for installable plugins (each result reports its source). store-key: supply a secret (e.g. an API key) that a plugin or provider reported missing — you provide only the key name; the value is entered out-of-band.',
+      },
+      refresh: {
+        type:        'boolean',
+        description: 'reload only. Default true: re-download a remote (github/http) plugin\'s latest upstream source, evicting its .plugins cache. Set false to re-run against the cached copy (reset state, or work offline). No effect on local/npm plugins.',
       },
       specifier: {
         type:        'string',
