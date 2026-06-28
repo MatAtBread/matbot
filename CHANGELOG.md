@@ -33,6 +33,17 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### API gaps filled
 
+- **`invokeTool`/`toolText` — call a tool by name programmatically.** Two helpers exported from
+  `@matatbread/matbot-plugin-api` formalise the resolve-then-drain pattern that callers (the triggers
+  dispatcher) were hand-rolling. `invokeTool(machine, name, params, opts)` resolves the tool off
+  `machine.tools` (throws if unregistered), builds a full `ToolContext` from the machine (vault, plugin
+  load/unload, workdir/configPath/files), and returns its `AsyncIterable<ToolEvent>`; the caller
+  supplies only the host-bound bits via `opts` (`session`, `signal`, optional `prompt`/`provider`/
+  `callId`) — no `prompt` runs non-interactively (a prompt attempt rejects as a normal tool error).
+  `toolText(events)` drains that stream to its result string (throws on the first `error` event or if
+  no `result` was yielded), rendering as the model would see it (string verbatim, `{ content: string }`
+  by `content`, else JSON).
+
 - **Token/cost usage is now persisted on the session.** Two new fields carry per-call accounting that
   was previously emitted live and dropped: `Message.usage?: Usage` records the provider call that
   produced an assistant turn (billed provider is the message's `providerName`), and a `tool-result`

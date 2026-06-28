@@ -1,14 +1,6 @@
-import type { MatbotMachine, Session, ToolContext, PromptFn, FormField, MessageContent } from '@matatbread/matbot-plugin-api';
+import type { MatbotMachine, Session, PromptFn, MessageContent } from '@matatbread/matbot-plugin-api';
+import { invokeTool } from '@matatbread/matbot-plugin-api';
 import type { Trigger } from './types.js';
-
-// Fallback when the firing hook carries no interactive prompt (cron/background run, or a frontend
-// that supplied none): a tool that tries to prompt resolves to a rejection it surfaces as a normal
-// tool error. When the hook DOES carry a prompt (a live interactive session behind this turn), it is
-// forwarded instead, so a trigger can invoke an interactive tool (e.g. `ask_user`) for real.
-const rejectingPrompt: PromptFn = (((p: string | FormField): Promise<string> => {
-  const label = typeof p === 'string' ? p : p.label;
-  return Promise.reject(new Error(`Non-interactive context: cannot prompt for "${label}"`));
-}) as PromptFn);
 
 export interface DispatchOutcome {
   /** Whether the tool yielded a result — i.e. whether the model should be woken with it (inject). */
@@ -44,32 +36,23 @@ export async function dispatchTrigger(
   // and the worst case is "this trigger did nothing and left a trace"; sibling triggers, the hook,
   // and the session are unaffected. (The hook dispatcher's own try/catch is a second layer behind this.)
   try {
-    const tool = services.tools.resolve(trigger.invoke.tool);
-    if (tool === null) {
+    if (services.tools.resolve(trigger.invoke.tool) === null) {
       console.warn(`[triggers] trigger ${trigger.id} invokes unknown tool "${trigger.invoke.tool}"; skipped.`);
       fail(`tool "${trigger.invoke.tool}" not registered`);
       return { hadResult: false, result: undefined, markers };
     }
 
-    const toolCtx: ToolContext = {
-      callId:       crypto.randomUUID(),
-      session:      ctx.session,
-      signal:       ctx.signal,
-      vault:        services.Vault,
-      provider:     ctx.provider,
-      prompt:       ctx.prompt ?? rejectingPrompt,
-      // Forward the prompt into plugin loading too (mirrors the normal loop): collision resolution
-      // during a loaded plugin's setup() prompts the user, so a trigger that loads a plugin (e.g. the
-      // DRTX case — an agent reply triggers `plugin(load …)`) is interactive end-to-end, not just at
-      // the tool's own ctx.prompt calls.
-      loadPlugin:   (specifier: string) => services.loadPlugin(specifier, ctx.prompt ?? rejectingPrompt),
-      unloadPlugin: (specifier: string) => services.unloadPlugin(specifier),
-      ...(services.workdir    !== undefined ? { workdir:    services.workdir    } : {}),
-      ...(services.configPath !== undefined ? { configPath: services.configPath } : {}),
-      ...(services.files      !== undefined ? { files:      services.files      } : {}),
-    };
+    // The prompt (when the firing hook carries one — a live interactive session behind this turn) is
+    // forwarded so a trigger can invoke an interactive tool (e.g. `ask_user`) for real; absent, the
+    // tool runs non-interactively and a prompt attempt surfaces as a normal tool error.
+    const events = invokeTool(services, trigger.invoke.tool, trigger.invoke.params, {
+      session:  ctx.session,
+      signal:   ctx.signal,
+      provider: ctx.provider,
+      ...(ctx.prompt !== undefined ? { prompt: ctx.prompt } : {}),
+    });
 
-    for await (const ev of tool.executor.execute(trigger.invoke.params, toolCtx)) {
+    for await (const ev of events) {
       if      (ev.type === 'result') { result = ev.value; hadResult = true; }
       else if (ev.type === 'marker') { markers.push({ type: 'marker', creator: ev.creator, data: ev.data }); }
       else if (ev.type === 'error')  {
