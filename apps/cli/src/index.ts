@@ -357,7 +357,7 @@ function versionBanner(): string {
       api = pkgVersionAt(apiEntry, '@matatbread/matbot-plugin-api');
     } catch { /* plugin-api unresolved from core — leave '?' */ }
   } catch { /* core unresolved — leave '?' */ }
-  let line = `matbot v${cli} (core ${core}, plugin-api ${api})`;
+  let line = `matbot v${cli} (core ${core}, plugin-api ${api}, isSubAgent ${isBackground})`;
   if ((core !== cli && core !== '?') || (api !== cli && api !== '?')) {
     line += '\n⚠ version skew: the CLI and a shared singleton resolve to different copies. Run a clean '
           + 'reinstall (rm -rf node_modules package-lock.json && npm i) — duplicate copies can split shared state.';
