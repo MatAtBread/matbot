@@ -529,7 +529,9 @@ churn and less likely to affect a consumer who doesn't use them.
   playbooks on every fire.
 - **frontend/web** & **CLI** — render the new `matbot-hooks` marker live and on
   reload (amber warning pill / amber ⚠ line).
-- **telegram** — no longer polls in the background.
+- **telegram** — a sub-agent now runs send-only (skips `getUpdates` polling, so its long-poll can't
+  409-conflict with the foreground owner's), while still having a live `setup()` so it can send. The
+  foreground bot polls as before.
 - Plugin bug fixes: **background** correctly sets `allowed` on writes with a clearer
   HTTP error on disallowed; **frontend/web** send/stop button state on session switch
   + initial-message echo; mangled robo message; tool-store type-extraction regex;
