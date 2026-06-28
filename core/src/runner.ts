@@ -1,11 +1,13 @@
 import type {
-  Session, MessageContent,
+  Session, MessageContent, Usage,
   PipelineEvent, RunConfig, ProviderAdapter, ProviderConfig,
   Tool, ToolRegistry, ToolContext, Store, FileStore, SystemContextRegistry, Vault, PromptFn, FormField,
 } from './types.js';
 import type { MatbotPlugin } from './plugin.js';
+import { currentUsageSink } from '@matatbread/matbot-plugin-api';
 import { HookRegistry } from './hooks.js';
 import { appendMessage, createMessage } from './session.js';
+import { addUsage } from './usage.js';
 
 export interface RunSessionOpts {
   session:        Session;
@@ -130,6 +132,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
     const pendingCalls: Array<{ id: string; name: string; input: unknown }> = [];
     const assistantParts: MessageContent[] = [];
     let textAcc = '';
+    let turnUsage: Usage | undefined;
 
     // One provider call. The outgoing array (system context + history, with screen's ephemeral
     // blocks appended onto the tail message) is assembled here and handed to `contribute` hooks for
@@ -172,6 +175,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
             pendingCalls.push({ id: ev.id, name: ev.name, input: ev.input });
             break;
           case 'usage':
+            turnUsage = addUsage(turnUsage, ev);
             yield { type: 'usage', inputTokens: ev.inputTokens, outputTokens: ev.outputTokens, traceId,
               ...(ev.costUsd              !== undefined ? { costUsd:              ev.costUsd              } : {}),
               ...(ev.cacheReadTokens     !== undefined ? { cacheReadTokens:     ev.cacheReadTokens     } : {}),
@@ -188,6 +192,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
         if (assistantParts.length > 0) {
           session = appendMessage(session, createMessage({
             role: 'assistant', content: assistantParts, traceId, providerName: config.provider,
+            ...(turnUsage !== undefined ? { usage: turnUsage } : {}),
           }));
         }
         await store.set(session.id, session);
@@ -210,6 +215,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
         content:      assistantParts,
         traceId,
         providerName: config.provider,
+        ...(turnUsage !== undefined ? { usage: turnUsage } : {}),
       });
       session = appendMessage(session, assistantMsg);
     } else {
@@ -257,6 +263,10 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
 
       let result: unknown;
       let isError = false;
+      // Token accounting for completions this tool runs (via singleTurn/complete) accrues into the
+      // ambient turn sink; slice off whatever it appends during *this* call to attribute it here.
+      const usageSink = currentUsageSink();
+      const usageMark = usageSink?.length ?? 0;
       const startedAt = Date.now();
 
       const toolCtx: ToolContext = {
@@ -299,7 +309,9 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
         tool, result, isError, durationMs: Date.now() - startedAt,
       });
 
-      toolResults.push({ type: 'tool-result', id: tc.id, result, isError });
+      const callUsage = usageSink ? usageSink.slice(usageMark) : [];
+      toolResults.push({ type: 'tool-result', id: tc.id, result, isError,
+        ...(callUsage.length > 0 ? { usage: callUsage } : {}) });
       yield { type: 'tool:end', callId: tc.id, result, isError, traceId };
     }
 

@@ -1,7 +1,7 @@
 import type {
   MatbotPluginSpec, MatbotMachine, Tool, ToolEvent, Session, Store, Message, Marker,
 } from '@matatbread/matbot-plugin-api';
-import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, lastActivityAt } from '@matatbread/matbot-plugin-api';
 
 const MARKER_CREATOR = '@matatbread/matbot-edit-session';
 
@@ -49,6 +49,7 @@ function bumpVersion<T extends { version: string }>(doc: T): T {
 // Resolve msgIndex (raw index into session.messages) to the actual index.
 // The frontend passes the original message index from the full messages array.
 function resolveIndex(session: Session, msgIndex: number): number | null {
+  if (msgIndex < 0) msgIndex = session.messages.length + msgIndex;
   if (msgIndex < 0 || msgIndex >= session.messages.length) return null;
   return msgIndex;
 }
@@ -70,7 +71,7 @@ const KEEP_TYPES = new Set(['text', 'refusal', 'marker']);
 // All four actions share the same parameter shape ({ sessionId, msgIndex }); only the behaviour
 // differs. The schema stays loose (action enum + the shared fields) and the description carries
 // this TypeScript signature, which the executor enforces.
-interface SessionEditInput { action: string; sessionId: string; msgIndex: number }
+interface SessionEditInput { action: 'cut' | 'fork' | 'split' | 'compact'; sessionId: string; msgIndex: number }
 
 function makeSessionEditTool(store: Store<Session>): Tool {
   return {
@@ -86,7 +87,7 @@ function makeSessionEditTool(store: Store<Session>): Tool {
       '  compact — Shrink: strip thinking blocks, tool calls, and tool results from messages before\n' +
       '            msgIndex, keeping user/assistant text — fewer tokens, same thread.\n\n' +
       '```ts\n' +
-      "type SessionEdit = { action: 'cut' | 'fork' | 'split' | 'compact'; sessionId: string; msgIndex: number };\n" +
+      "interface SessionEditInput { action: 'cut' | 'fork' | 'split' | 'compact'; sessionId: string; msgIndex: number /* like slice index, negative is an offset from the end of the session */ };\n" +
       '```',
     inputSchema: {
       type:       'object',
@@ -94,7 +95,7 @@ function makeSessionEditTool(store: Store<Session>): Tool {
       properties: {
         action:    { type: 'string', enum: ['cut', 'fork', 'split', 'compact'], description: 'The edit to perform.' },
         sessionId: { type: 'string', description: 'ID of the session to edit.' },
-        msgIndex:  { type: 'number', description: 'Index into session.messages the action pivots on (see per-action meaning in the description).' },
+        msgIndex:  { type: 'number', description: 'Index into session.messages the action pivots on (see per-action meaning in the description). Like slice index, negative is an offset from the end of the session.' },
       },
     },
     executor: {
@@ -110,11 +111,8 @@ function makeSessionEditTool(store: Store<Session>): Tool {
 
         switch (action) {
           case 'cut': {
-            const next: Session = bumpVersion({
-              ...session,
-              messages:  session.messages.slice(0, idx),
-              updatedAt: now(),
-            });
+            const trimmed: Session = { ...session, messages: session.messages.slice(0, idx) };
+            const next: Session = bumpVersion({ ...trimmed, updatedAt: lastActivityAt(trimmed) });
             const res = await store.cas(sessionId, session.version, next);
             if (!res.ok) { yield { type: 'error', message: 'Concurrent modification — please retry.' }; return; }
             yield { type: 'result', value: { sessionId, messagesRemaining: next.messages.length } };
@@ -124,15 +122,16 @@ function makeSessionEditTool(store: Store<Session>): Tool {
           case 'fork': {
             // One-way: only the fork is marked (pointing back to its origin). The original is left
             // unchanged, per this action's contract.
+            // targetMsg idx-1: the fork point in the (unchanged) parent — its last message shared with
+            // this fork. The marker is the fork's last message, so its timestamp is the fork's updatedAt.
+            const forkMarker = markerMessage({ relation: 'forked-from', peerSessionId: sessionId, targetMsg: Math.max(0, idx - 1) });
             const forked: Session = {
               ...bumpVersion(session),
               id:               crypto.randomUUID(),
               parentSessionId:  sessionId,
-              // targetMsg idx-1: the fork point in the (unchanged) parent — its last message shared
-              // with this fork.
-              messages:         [...session.messages.slice(0, idx), markerMessage({ relation: 'forked-from', peerSessionId: sessionId, targetMsg: Math.max(0, idx - 1) })],
+              messages:         [...session.messages.slice(0, idx), forkMarker],
               createdAt:        now(),
-              updatedAt:        now(),
+              updatedAt:        forkMarker.createdAt,
             };
             await store.set(forked.id, forked);
             yield { type: 'result', value: { newSessionId: forked.id, messagesCopied: idx } };
@@ -150,28 +149,30 @@ function makeSessionEditTool(store: Store<Session>): Tool {
             const newSessionId = crypto.randomUUID();
 
             // New session: prefix messages, tailed by a marker pointing forward to the continuing
-            // (current) session.
+            // (current) session. The marker is its last message, hence its updatedAt.
+            // targetMsg 1: in the current session the prepended split-from marker is index 0, so the
+            // continuation (first suffix message) lands at index 1.
+            const continuedMarker = markerMessage({ relation: 'continued-in', peerSessionId: sessionId, targetMsg: 1 });
             const newSession: Session = {
               ...bumpVersion(session),
               id:               newSessionId,
               parentSessionId:  sessionId,
-              // targetMsg 1: in the current session the prepended split-from marker is index 0, so the
-              // continuation (first suffix message) lands at index 1.
-              messages:         [...prefixMsgs, markerMessage({ relation: 'continued-in', peerSessionId: sessionId, targetMsg: 1 })],
+              messages:         [...prefixMsgs, continuedMarker],
               createdAt:        now(),
-              updatedAt:        now(),
+              updatedAt:        continuedMarker.createdAt,
             };
             await store.set(newSession.id, newSession);
 
             // Current session: keep only suffix messages, headed by a marker pointing back to where
-            // the earlier messages now live.
-            const updated: Session = bumpVersion({
+            // the earlier messages now live. Its tail (the last suffix message) is unchanged, so by the
+            // lastActivityAt invariant updatedAt is preserved — the split doesn't reorder this session.
+            // targetMsg idx-1: the last earlier message in the new session.
+            const continued: Session = {
               ...session,
-              title:     generateSplitTitle(session.title ?? ''),
-              // targetMsg idx-1: the last earlier message in the new session.
-              messages:  [markerMessage({ relation: 'split-from', peerSessionId: newSessionId, targetMsg: idx - 1 }), ...suffixMsgs],
-              updatedAt: now(),
-            });
+              title:    generateSplitTitle(session.title ?? ''),
+              messages: [markerMessage({ relation: 'split-from', peerSessionId: newSessionId, targetMsg: idx - 1 }), ...suffixMsgs],
+            };
+            const updated: Session = bumpVersion({ ...continued, updatedAt: lastActivityAt(continued) });
             const res = await store.cas(sessionId, session.version, updated);
             if (!res.ok) {
               // CAS failed — clean up the new session we just created
@@ -202,7 +203,10 @@ function makeSessionEditTool(store: Store<Session>): Tool {
               stripped++;
               return { ...m, content: compact };
             });
-            const next: Session = bumpVersion({ ...session, messages, updatedAt: now() });
+            // Compaction strips block content but preserves every message (and its timestamp), so the
+            // tail is unchanged and updatedAt holds — the session keeps its place in a recency-sorted list.
+            const compacted: Session = { ...session, messages };
+            const next: Session = bumpVersion({ ...compacted, updatedAt: lastActivityAt(compacted) });
             const res = await store.cas(sessionId, session.version, next);
             if (!res.ok) { yield { type: 'error', message: 'Concurrent modification — please retry.' }; return; }
             yield { type: 'result', value: { sessionId, messagesStripped: stripped } };

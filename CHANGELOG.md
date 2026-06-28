@@ -33,6 +33,21 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### API gaps filled
 
+- **Token/cost usage is now persisted on the session.** Two new fields carry per-call accounting that
+  was previously emitted live and dropped: `Message.usage?: Usage` records the provider call that
+  produced an assistant turn (billed provider is the message's `providerName`), and a `tool-result`
+  block gains `usage?: UsageRecord[]` for completions a tool runs itself (`single_turn`,
+  `ask_inner_voice`, each of `dream_time`'s ranker/merger calls), one provider-tagged entry per call.
+  Both are pure accounting — elided from provider submission (adapters serialise only
+  `id`/`result`/`isError`), so they never reach the model. Capture is automatic via a new ambient
+  **usage carrier** (`installUsageCarrier`/`recordUsage`/`currentUsageSink`/`withUsageScope`,
+  mirroring the principal carrier; node ALS-backed, browser serial): a tool reaches an LLM only
+  through `complete`/`singleTurn`, so reporting at that one choke point attributes every tool's spend
+  to its call with zero per-tool code. `single_turn`/`ask_inner_voice` no longer return usage in their
+  result (it was leaking accounting data to the model). `CompletionResponse.usage` widened from
+  `{ inputTokens, outputTokens }` to the full `Usage` (adds optional `costUsd`, cache token counts).
+  A session's total cost is now computable from its stored messages (an aggregation tool is a follow-up).
+
 - **`screen` hooks can now inject *durable* context, the persisted twin of `ephemeral`.** A new
   `ScreenResult.durable?: MessageContent[]`: where `ephemeral` informs only the turn about to run,
   `durable` is folded onto that turn's user message (the runner appends the blocks to the last
@@ -108,6 +123,16 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Bug fixes
 
+- **`session.updatedAt` now tracks conversational activity, not structural/metadata edits.** It is the
+  timestamp of the session's last message (its `createdAt`), or the session's own `createdAt` when empty —
+  a materialised field upholding a single invariant (new helper `lastActivityAt(session)`), not a fresh
+  `now()` stamped at each write. Previously `session_edit` (`compact`/`cut`/`split`), `fork`, and
+  `session` `rename`/`hide` each stamped `now()`, so compacting or renaming a session floated it to the
+  top of a recency-sorted list despite no new conversation. All session writers now derive `updatedAt`
+  from the final message via `lastActivityAt`; `appendMessage` uses the appended message's `createdAt`.
+  Kept as a stored field (not a getter): `Session` round-trips as plain JSON and is sorted on `updatedAt`
+  as a stored column.
+
 - **A bad `matbot.yaml` plugin entry no longer aborts startup.** `loadPlugins` only honoured its
   `skip`/`throw` mode (renamed `onIncompatibleRuntime` → `onLoadError`) for the runtime-compat gate;
   an import that rejected or a module that was not plugin-shaped (no `plugin` export, no `apiVersion`,
@@ -170,6 +195,12 @@ churn and less likely to affect a consumer who doesn't use them.
   (a missing secret) are still left in config to retry.
 
 ### Optional
+
+- **apps/cli & frontend/web** — per-turn token usage is now reported **broken down by provider**,
+  computed from the persisted session at turn end (so it includes spend by tools that ran their own
+  completions — `single_turn`, `ask_inner_voice`, `dream_time`) rather than from the live main-turn
+  `usage` stream (now legacy). Zero counts are elided. The CLI prints one line per provider; the web
+  client's `tokens` block lists a row per provider. Backed by the new core helper `usageByProvider`.
 
 - **providers/openai-compat** — opt-in prompt caching. With `parameters.promptCache: true`,
   the adapter sends Anthropic-style `cache_control: {type:'ephemeral'}` breakpoints on the system

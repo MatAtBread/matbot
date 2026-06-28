@@ -2,6 +2,7 @@ import {
   createSessionRunner, HookRegistry, SystemContextRegistryImpl, ToolRegistryImpl,
   resolveProviderFactory, getPluginNameForSpecifier, recordServiceKey,
   installPrincipalCarrier, createConstantPrincipalCarrier,
+  installUsageCarrier, createSerialUsageCarrier, recordUsage,
   createMessage, isMissingSecretError, loadPlugins,
   unloadPlugin as unloadPluginFn, unifyServices,
   forwardingProxy, makeSwappable, singleTurnRequest, createSingleTurnTool,
@@ -10,7 +11,7 @@ import {
 import type {
   MatbotMachine, MatbotServices, Store, Session, ProviderConfig, ProviderAdapter,
   PluginSettings, Vault, SessionRunner, KnowledgeIndex,
-  PluginResolver, StorageBackend, FileStore, PromptFn, MatbotPlugin, Principal, Runtime, SwapFn,
+  PluginResolver, StorageBackend, FileStore, PromptFn, MatbotPlugin, Principal, Runtime, SwapFn, Usage,
 } from '@matatbread/matbot-plugin-api';
 import { LookupKnowledgeIndex } from '@matatbread/matbot-core';
 import { BrowserStorageBackend, LocalStorageVault } from '@matatbread/matbot-browser';
@@ -105,6 +106,9 @@ export async function boot(env: BootEnv): Promise<void> {
   // The realm's identity comes from config (a per-tenant bundle bakes it); WEB_USER is the
   // anonymous default.
   installPrincipalCarrier(createConstantPrincipalCarrier(config.principal ?? WEB_USER));
+  // Token accounting needs a per-turn sink even though identity is constant; the serial carrier is
+  // correct here because the browser runs one turn at a time (no async-context isolation to do).
+  installUsageCarrier(createSerialUsageCarrier());
 
   // Vault behind a capture-safe proxy (like StorageBackend/KnowledgeIndex): a plugin may
   // `register('Vault', impl)` to swap in a different secret store (e.g. a Drive-backed one), and
@@ -305,12 +309,24 @@ export async function boot(env: BootEnv): Promise<void> {
       const msgs = req.system !== undefined
         ? [createMessage({ role: 'system', content: [{ type: 'text', text: req.system }], traceId: crypto.randomUUID() }), ...req.messages]
         : req.messages;
-      let text = '', inputTokens = 0, outputTokens = 0;
+      let text = '';
+      let usage: Usage = { inputTokens: 0, outputTokens: 0 };
       for await (const ev of adpt.complete(msgs, resolved, [], req.signal ?? NEVER_ABORT)) {
         if (ev.type === 'text-delta') text += ev.delta;
-        if (ev.type === 'usage') { inputTokens = ev.inputTokens; outputTokens = ev.outputTokens; }
+        if (ev.type === 'usage') {
+          usage = {
+            inputTokens:  ev.inputTokens,
+            outputTokens: ev.outputTokens,
+            ...(ev.costUsd              !== undefined ? { costUsd:             ev.costUsd              } : {}),
+            ...(ev.cacheReadTokens     !== undefined ? { cacheReadTokens:     ev.cacheReadTokens     } : {}),
+            ...(ev.cacheCreationTokens !== undefined ? { cacheCreationTokens: ev.cacheCreationTokens } : {}),
+          };
+        }
       }
-      return { text, usage: { inputTokens, outputTokens } };
+      // Report into the ambient usage sink: a tool running this completion has its spend attributed to
+      // the tool call by the runner. No-op outside any tool scope.
+      recordUsage(req.provider, usage);
+      return { text, usage };
     },
 
     async singleTurn(req) {

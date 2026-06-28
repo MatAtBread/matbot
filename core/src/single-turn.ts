@@ -33,7 +33,9 @@ export function createSingleTurnTool(services: MatbotMachine): Tool {
         signal: ctx.signal,
         ...(typeof args.system === 'string' ? { system: args.system } : {}),
       });
-      yield { type: 'result', value: { text: res.text, usage: res.usage } };
+      // Usage is accounting, not conversation: it is captured ambiently (the host's complete() reports
+      // it into the turn's usage sink, attributed to this tool call) — the model gets only the text.
+      yield { type: 'result', value: { text: res.text } };
     },
   };
 
@@ -42,13 +44,13 @@ export function createSingleTurnTool(services: MatbotMachine): Tool {
     description:
       'Run a single-turn completion against a configured provider and return its reply. This is a ' +
       'one-shot call — not your own response: you send one `prompt` (and optional `system`), and get ' +
-      'back its text and token usage. Use it to consult a different model — e.g. a second, ' +
+      'back its text. Use it to consult a different model — e.g. a second, ' +
       'different-lineage model critiquing your draft, or any generation that should run on a specific ' +
       'provider. `provider` is OPTIONAL: omit it to run on the current conversation\'s model, or name ' +
       'a configured provider to switch models (list or add providers with the provider tool).\n\n' +
       'Parameters (TypeScript):\n' +
       '```ts\n' +
-      '{ provider?: string; prompt: string; system?: string }  // -> { text, usage: { inputTokens, outputTokens } }\n' +
+      '{ provider?: string; prompt: string; system?: string }  // -> { text }\n' +
       '```',
     inputSchema: {
       type:       'object',

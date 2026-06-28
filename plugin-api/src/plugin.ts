@@ -1,7 +1,7 @@
 import type {
   FileStore, Vault, Message, ModelParameters,
   ProviderAdapter, ProviderConfig, Tool, ToolRegistry, FrontendInfo,
-  Store, Session, SystemContextRegistry, KnowledgeIndex, PromptFn, SessionRunner,
+  Store, Session, SystemContextRegistry, KnowledgeIndex, PromptFn, SessionRunner, Usage,
 } from './types.js';
 import type { HookRegistry } from './hooks.js';
 
@@ -19,7 +19,7 @@ export interface CompletionRequest {
 
 export interface CompletionResponse {
   text:  string;
-  usage: { inputTokens: number; outputTokens: number };
+  usage: Usage;
 }
 
 export interface SingleTurnRequest {

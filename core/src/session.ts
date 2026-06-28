@@ -1,4 +1,4 @@
-import type { Session, Message, MessageContent, MessageRole, Principal } from './types.js';
+import type { Session, Message, MessageContent, MessageRole, Principal, Usage } from './types.js';
 
 export interface CreateSessionOpts {
   ownerPrincipal:        Principal;
@@ -32,10 +32,12 @@ export function createSession(opts: CreateSessionOpts): Session {
 }
 
 export function appendMessage(session: Session, message: Message): Session {
+  // updatedAt tracks conversational activity: the new last message's timestamp (the lastActivityAt
+  // invariant), not a fresh `now()` — so it stays consistent with structural edits that preserve the tail.
   return {
     ...session,
     messages:  [...session.messages, message],
-    updatedAt: new Date().toISOString(),
+    updatedAt: message.createdAt,
     version:   crypto.randomUUID(),
   };
 }
@@ -45,6 +47,7 @@ export function createMessage(opts: {
   content:        MessageContent[];
   traceId:        string;
   providerName?:  string;
+  usage?:         Usage;
   metadata?:      Record<string, unknown>;
 }): Message {
   return {
@@ -54,6 +57,7 @@ export function createMessage(opts: {
     createdAt: new Date().toISOString(),
     traceId:   opts.traceId,
     ...(opts.providerName !== undefined ? { providerName: opts.providerName } : {}),
+    ...(opts.usage        !== undefined ? { usage:        opts.usage        } : {}),
     ...(opts.metadata     !== undefined ? { metadata:     opts.metadata     } : {}),
   };
 }

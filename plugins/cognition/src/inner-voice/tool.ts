@@ -53,7 +53,9 @@ export function createAskInnerVoiceTool(services: MatbotMachine): Tool {
         ...(typeof args.system === 'string' ? { system: args.system } : {}),
       });
       yield { type: 'stdout', chunk: "" }; // No function, except to make the UI render the result
-      yield { type: 'result', value: { text: res.text, usage: res.usage } };
+      // Usage is accounting, not conversation: it is captured ambiently (the host's complete() reports
+      // it into the turn's usage sink, attributed to this tool call) — the model gets only the text.
+      yield { type: 'result', value: { text: res.text } };
     },
   };
 
@@ -63,12 +65,12 @@ export function createAskInnerVoiceTool(services: MatbotMachine): Tool {
       'Consult the Inner voice — a second model that constructively critiques your draft response — and ' +
       'return its critique. This is a one-shot call to a SEPARATE model (not your own response): send a ' +
       '`prompt` summarising the problem and your draft, plus an optional `system` framing, and get back ' +
-      'its text and token usage. Which provider answers is configured (cognition_config `innerVoiceProvider`) ' +
+      'its text. Which provider answers is configured (cognition_config `innerVoiceProvider`) ' +
       "— ideally a different training lineage; absent, it uses the current turn's model. You do not name a " +
       'provider here.\n\n' +
       'Parameters (TypeScript):\n' +
       '```ts\n' +
-      '{ prompt: string; system?: string }  // -> { text, usage: { inputTokens, outputTokens } }\n' +
+      '{ prompt: string; system?: string }  // -> { text }\n' +
       '```',
     inputSchema: {
       type:       'object',

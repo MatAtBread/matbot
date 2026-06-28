@@ -1031,11 +1031,21 @@
     details.token-stats[open] > summary::before { content: '▼'; }
     .token-stats-body {
       display: flex;
-      gap: 12px;
+      flex-direction: column;
+      gap: 4px;
       font-size: 0.79em;
       color: #6b7280;
       padding: 3px 0 0;
       font-family: 'SF Mono', 'Cascadia Code', ui-monospace, monospace;
+    }
+    .token-stats-row {
+      display: flex;
+      gap: 12px;
+      align-items: baseline;
+    }
+    .token-stats-provider {
+      color: #9ca3af;
+      min-width: 8em;
     }
 
     /* ── Sessions banner ───────────────────────────────────────── */

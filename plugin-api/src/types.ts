@@ -39,6 +39,29 @@ export interface ProviderConfig {
   fallback?:    string;
 }
 
+/**
+ * Token (and optional cost) counters for one provider call — pure accounting data, never conversation
+ * content. Recorded onto the message stream for cost reckoning but elided from provider submission. The
+ * producing provider is recorded alongside at each storage site (an assistant turn carries it on the
+ * message's `providerName`; a tool-invoked completion pairs it explicitly — see `tool-result`), since a
+ * tool may run a completion against any configured provider, each with its own rates.
+ */
+export interface Usage {
+  inputTokens:          number;
+  outputTokens:         number;
+  costUsd?:             number;
+  cacheReadTokens?:     number;
+  cacheCreationTokens?: number;
+}
+
+/** One provider call's usage, tagged with the provider billed — the unit a tool accrues (a tool may
+ *  run completions against any provider, each with its own rates) and the element persisted on a
+ *  `tool-result`'s `usage` addendum. See the ambient usage carrier (`recordUsage`/`currentUsageSink`). */
+export interface UsageRecord {
+  provider: string;
+  usage:    Usage;
+}
+
 export type CompletionEvent =
   | { type: 'text-delta';          delta: string }
   | { type: 'tool-call';           id: string; name: string; input: unknown }
@@ -49,7 +72,7 @@ export type CompletionEvent =
   | { type: 'reasoning-block';     reasoning: string }
   | { type: 'refusal';             text: string }
   | { type: 'unknown-block';       blockType: string; raw: unknown }
-  | { type: 'usage';               inputTokens: number; outputTokens: number; costUsd?: number; cacheReadTokens?: number; cacheCreationTokens?: number }
+  | ({ type: 'usage' } & Usage)
   | { type: 'done' };
 
 export interface ProviderAdapter {
@@ -77,7 +100,14 @@ export type MessageContent = (
   | { type: 'document';          data: string; mimeType: MimeType; name?: string }
   | { type: 'audio';             data: string; mimeType: MimeType }
   | { type: 'tool-call';         id: string; name: string; input: unknown }
-  | { type: 'tool-result';       id: string; result: unknown; isError?: boolean }
+  | { type: 'tool-result';       id: string; result: unknown; isError?: boolean;
+      /**
+       * Accounting addendum: completions the tool itself ran (e.g. `single_turn`, `dream_time`'s ranker/
+       * merger), captured ambiently via the usage carrier and recorded for cost reckoning. Elided from
+       * provider submission — adapters serialise only `id`/`result`/`isError`. One entry per provider
+       * call, each tagged with the provider billed; never summed at write time, as rates differ.
+       */
+      usage?: UsageRecord[] }
   | { type: 'refusal';           text: string }
   | { type: 'file-ref';          fileId: string; name: string; mimeType: MimeType }
   | { type: 'form';              fields: FormField[]; submitLabel?: string }
@@ -158,6 +188,9 @@ export interface Message {
   createdAt:     ISODate;
   traceId:       string;
   providerName?: string;
+  /** Token/cost accounting for the provider call that produced this message (assistant turns). The
+   *  billed provider is this message's `providerName`. Accounting only — elided from provider submission. */
+  usage?:        Usage;
   metadata?:     Record<string, unknown>;
 }
 
@@ -618,7 +651,7 @@ export type PipelineEvent =
   | { type: 'tool:stderr';    callId: string; chunk: string;  traceId: string }
   | { type: 'tool:end';       callId: string; result: unknown; isError: boolean; traceId: string }
   | { type: 'file';           handle: FileHandle;     traceId: string }
-  | { type: 'usage';          inputTokens: number; outputTokens: number; costUsd?: number; cacheReadTokens?: number; cacheCreationTokens?: number; traceId: string }
+  | ({ type: 'usage';         traceId: string } & Usage)
   | { type: 'done';           session: Session;       traceId: string }
   | { type: 'aborted';        reason: string; session: Session; traceId: string }
   | { type: 'cancelled';      sessionId: string;      traceId: string }

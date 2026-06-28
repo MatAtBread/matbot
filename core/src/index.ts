@@ -25,8 +25,11 @@ export {
   installPrincipalCarrier, currentPrincipal, tryCurrentPrincipal,
   runAs, enterPrincipal, createConstantPrincipalCarrier,
   contextSwitch, onContextQuiesce, flushIfQuiescent,
+  installUsageCarrier, createSerialUsageCarrier, recordUsage, currentUsageSink, withUsageScope,
+  lastActivityAt,
 } from '@matatbread/matbot-plugin-api';
 export * from './session.js';
+export * from './usage.js';
 export * from './hooks.js';
 export * from './runner.js';
 export * from './session-runner.js';

@@ -6,7 +6,7 @@ import type {
 import type { MatbotPlugin } from './plugin.js';
 import type { HookRegistry } from './hooks.js';
 import { appendMessage, createMessage } from './session.js';
-import { contextSwitch } from '@matatbread/matbot-plugin-api';
+import { contextSwitch, withUsageScope } from '@matatbread/matbot-plugin-api';
 import { runSession } from './runner.js';
 
 export interface SessionRunnerDeps {
@@ -219,7 +219,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
           // the callback: an async iterator returned out of the scope would lose it before it pulls.
           // contextSwitch (not bare runAs): a turn is the transactional unit, so a StorageBackend swap
           // deferred during it lands at this scope's quiescent edge — never mid-CAS.
-          await contextSwitch(head.principal, async () => {
+          await contextSwitch(head.principal, () => withUsageScope(async () => {
             for await (const ev of runSession({
               session,
               config:         { provider: head.provider, traceId: head.traceId },
@@ -242,7 +242,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
             })) {
               emit(s, ev);
             }
-          });
+          }));
 
           // followup — post-commit, in the queue owner. A hook reads the just-committed turn and may
           // head-enqueue a robo follow-up (its own real turn, running next). Skipped on abort; runs

@@ -975,23 +975,79 @@ function makeToolResultBlock(result, isError) {
   return wrap;
 }
 
-function makeTokenStatsBlock(inputTokens, outputTokens, costUsd, cacheReadTokens, cacheCreationTokens) {
+// Aggregate the token accounting persisted on a turn's messages, keyed by the provider billed: an
+// assistant message's own `usage` (billed to its `providerName`) plus every tool-result block's `usage`
+// records (each provider-tagged \u2014 a tool may run completions against several). `traceId` scopes it to
+// one turn. Mirrors core's usageByProvider; the static client can't import core, so it reduces inline.
+function usageByProvider(messages, traceId) {
+  const map = new Map();
+  const add = (provider, u) => {
+    if (!provider || !u) return;
+    const cur = map.get(provider) || { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, costUsd: 0 };
+    cur.inputTokens         += u.inputTokens         || 0;
+    cur.outputTokens        += u.outputTokens        || 0;
+    cur.cacheReadTokens     += u.cacheReadTokens     || 0;
+    cur.cacheCreationTokens += u.cacheCreationTokens || 0;
+    cur.costUsd             += u.costUsd             || 0;
+    map.set(provider, cur);
+  };
+  for (const m of (messages || [])) {
+    if (traceId && m.traceId !== traceId) continue;
+    if (m.usage && m.providerName) add(m.providerName, m.usage);
+    for (const c of (m.content || [])) {
+      if (c && c.type === 'tool-result' && Array.isArray(c.usage)) {
+        for (const r of c.usage) add(r.provider, r.usage);
+      }
+    }
+  }
+  return [...map].map(([provider, usage]) => ({ provider, usage }));
+}
+
+// One details block listing per-provider usage for a turn, eliding any zero count. `perProvider` is the
+// output of usageByProvider; an empty array means nothing to render (caller should skip).
+function makeTokenStatsBlock(perProvider) {
   const det = document.createElement('details');
   det.className = 'token-stats';
   const sum = document.createElement('summary');
   sum.textContent = 'tokens';
+  det.appendChild(sum);
   const body = document.createElement('div');
   body.className = 'token-stats-body';
-  const s = (t) => { const el = document.createElement('span'); el.textContent = t; return el; };
-  let inLabel = '\u2191 ' + inputTokens.toLocaleString() + ' in';
-  if (cacheReadTokens > 0) inLabel += ' (' + cacheReadTokens.toLocaleString() + ' cached)';
-  body.appendChild(s(inLabel));
-  body.appendChild(s('\u2193 ' + outputTokens.toLocaleString() + ' out'));
-  if (cacheCreationTokens > 0) body.appendChild(s('\u2601 ' + cacheCreationTokens.toLocaleString() + ' written'));
-  if (costUsd > 0) body.appendChild(s('\u2248 $' + costUsd.toFixed(4)));
-  det.appendChild(sum);
+  const s = (t, cls) => { const el = document.createElement('span'); if (cls) el.className = cls; el.textContent = t; return el; };
+  for (const { provider, usage } of perProvider) {
+    const row = document.createElement('div');
+    row.className = 'token-stats-row';
+    if (perProvider.length > 1) row.appendChild(s(provider, 'token-stats-provider'));
+    if (usage.inputTokens > 0) {
+      let inLabel = '\u2191 ' + usage.inputTokens.toLocaleString() + ' in';
+      if (usage.cacheReadTokens > 0) inLabel += ' (' + usage.cacheReadTokens.toLocaleString() + ' cached)';
+      row.appendChild(s(inLabel));
+    }
+    if (usage.outputTokens > 0)        row.appendChild(s('\u2193 ' + usage.outputTokens.toLocaleString() + ' out'));
+    if (usage.cacheCreationTokens > 0) row.appendChild(s('\u2601 ' + usage.cacheCreationTokens.toLocaleString() + ' written'));
+    if (usage.costUsd > 0)             row.appendChild(s('\u2248 $' + usage.costUsd.toFixed(4)));
+    body.appendChild(row);
+  }
   det.appendChild(body);
   return det;
+}
+
+// Attach the per-provider token block to each turn already rendered into the DOM, exactly as the live
+// `done` path does — appended to the turn's last assistant wrap (the turn's bottom). Used on reload, so
+// historical turns show the same accounting as if they had just streamed. Idempotent: skips a turn whose
+// wrap already carries a block, and turns with no recorded usage.
+function applyTurnUsageBlocks(messages) {
+  const seen = new Set();
+  for (const m of (messages || [])) {
+    if (!m.traceId || seen.has(m.traceId)) continue;
+    seen.add(m.traceId);
+    const perProvider = usageByProvider(messages, m.traceId);
+    if (!perProvider.length) continue;
+    const wraps = messagesEl.querySelectorAll('.message.assistant[data-trace="' + m.traceId + '"]');
+    const lastWrap = wraps[wraps.length - 1];
+    if (!lastWrap || lastWrap.querySelector(':scope > .token-stats')) continue;
+    lastWrap.appendChild(makeTokenStatsBlock(perProvider));
+  }
 }
 
 // ── Rendering ─────────────────────────────────────────────────────────────────
@@ -1526,6 +1582,7 @@ function renderSession(session, startIdx, scrollTarget) {
       appendUserTurn(msg.content, origIdx, msg.traceId);
     } else if (msg.role === 'assistant') {
       const wrap = createAssistantWrap('assistant');
+      if (msg.traceId) wrap.dataset.trace = msg.traceId;
       renderContentParts(wrap, msg.content);
     } else if (msg.role === 'tool') {
       // Results are attached to their matching .tool-block via data-call-id; no wrapper needed.
@@ -1535,6 +1592,7 @@ function renderSession(session, startIdx, scrollTarget) {
       appendMarker(msg.content, msg.traceId);
     }
   }
+  applyTurnUsageBlocks(allMsgs);
   if (scrollTarget !== undefined) {
     const divider = messagesEl.querySelector(`.msg-divider[data-msg-idx="${scrollTarget}"]`);
     const target  = divider?.nextElementSibling;
@@ -1796,11 +1854,6 @@ async function renderTurn(sid, traceId) {
   let thinkingAccum   = '';
   let currentTool     = null;
   let providerToolPending = false;
-  let turnIn          = 0;
-  let turnOut         = 0;
-  let turnCost        = 0;
-  let turnCacheRead   = 0;
-  let turnCacheCreate = 0;
 
 
   function getOrMakeTextEl() {
@@ -1945,14 +1998,6 @@ async function renderTurn(sid, traceId) {
           if (providerToolPending && !ev.isError) { providerToolPending = false; refreshProviderSelect(); }
           break;
         }
-
-        case 'usage':
-          turnIn  += ev.inputTokens;
-          turnOut += ev.outputTokens;
-          if (ev.costUsd              !== undefined) turnCost        += ev.costUsd;
-          if (ev.cacheReadTokens     !== undefined) turnCacheRead   += ev.cacheReadTokens;
-          if (ev.cacheCreationTokens !== undefined) turnCacheCreate += ev.cacheCreationTokens;
-          break;
 
         case 'prompt': {
           removeLoading();
@@ -2129,7 +2174,10 @@ async function renderTurn(sid, traceId) {
             if (det) det.open = false;
           }
           if (ev.session?.title && chatHeaderEl) chatTitleEl.textContent = ev.session.title;
-          if (turnWrap && (turnIn > 0 || turnOut > 0)) turnWrap.appendChild(makeTokenStatsBlock(turnIn, turnOut, turnCost, turnCacheRead, turnCacheCreate));
+          // Per-provider token accounting for this turn, from the persisted session — so it includes
+          // spend by tools that ran their own completions (single_turn, ask_inner_voice, dream_time).
+          const perProvider = usageByProvider(ev.session?.messages, traceId);
+          if (turnWrap && perProvider.length > 0) turnWrap.appendChild(makeTokenStatsBlock(perProvider));
           loadFiles();
           // Back-fill origIdx on any dividers added without an index this turn.
           if (ev.session) {

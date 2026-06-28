@@ -1,4 +1,5 @@
 import type { Tool, ToolEvent, ToolContext, Session, Store } from '@matatbread/matbot-plugin-api';
+import { lastActivityAt } from '@matatbread/matbot-plugin-api';
 
 function sessionPreview(session: Session): string {
   const first = session.messages.find(m => m.role === 'user');
@@ -87,7 +88,9 @@ function makeSessionActionTool(store: Store<Session>): Tool {
             if (title === undefined) { yield { type: 'error', message: 'action "rename" requires "title".' }; return; }
             const session = await store.get(sessionId);
             if (!session) { yield { type: 'error', message: `Session "${sessionId}" not found.` }; return; }
-            const next = { ...session, title, version: crypto.randomUUID(), updatedAt: new Date().toISOString() };
+            // Rename is a metadata edit, not conversational activity: keep updatedAt on the last message
+            // (the lastActivityAt invariant) so renaming doesn't float the session up a recency-sorted list.
+            const next = { ...session, title, version: crypto.randomUUID(), updatedAt: lastActivityAt(session) };
             const res  = await store.cas(sessionId, session.version, next);
             if (!res.ok) { yield { type: 'error', message: 'Concurrent modification — please retry.' }; return; }
             yield { type: 'result', value: { id: sessionId, title } };
@@ -99,7 +102,8 @@ function makeSessionActionTool(store: Store<Session>): Tool {
             if (!sessionId) { yield { type: 'error', message: 'action "hide" requires "sessionId".' }; return; }
             const session = await store.get(sessionId);
             if (!session) { yield { type: 'error', message: `Session "${sessionId}" not found.` }; return; }
-            const next = { ...session, status: 'archived' as const, version: crypto.randomUUID(), updatedAt: new Date().toISOString() };
+            // Archiving is a status edit, not conversational activity — preserve updatedAt (lastActivityAt).
+            const next = { ...session, status: 'archived' as const, version: crypto.randomUUID(), updatedAt: lastActivityAt(session) };
             const res  = await store.cas(sessionId, session.version, next);
             if (!res.ok) { yield { type: 'error', message: 'Concurrent modification — please retry.' }; return; }
             yield { type: 'result', value: { id: sessionId, status: 'archived' } };

@@ -7,7 +7,7 @@ import { nodePluginResolver }               from './plugin-resolver.js';
 import type { Principal, ProviderAdapter,
               ProviderConfig, Session,
               Store, StoreQuery, QueryResult, CASResult,
-              MessageContent, FileStore } from '@matatbread/matbot-core';
+              MessageContent, FileStore, Usage } from '@matatbread/matbot-core';
 import { appendMessage, createMessage,
          createSession,
          createSessionRunner,
@@ -16,7 +16,7 @@ import { appendMessage, createMessage,
          teardownPlugins,
          unloadPlugin as unloadPluginFn,
          getPluginNameForSpecifier, getRegisteredPlugins, recordServiceKey,
-         installPrincipalCarrier, enterPrincipal, currentPrincipal,
+         installPrincipalCarrier, installUsageCarrier, recordUsage, usageByProvider, enterPrincipal, currentPrincipal,
          unifyServices, forwardingProxy, makeSwappable, singleTurnRequest,
          createMountTable, onContextQuiesce, flushIfQuiescent,
          createSingleTurnTool,
@@ -25,6 +25,7 @@ import type { MatbotMachine, MatbotServices, PluginSettings, Vault, SessionRunne
               MatbotPlugin, StorageBackend, KnowledgeIndex, PromptFn, FormField, SwapFn } from '@matatbread/matbot-core';
 import { systemPrincipal }                 from '@matatbread/matbot-core';
 import { createAlsPrincipalCarrier }       from './principal-als.js';
+import { createAlsUsageCarrier }           from './usage-als.js';
 import { EnvFileVault }                     from './env-vault.js';
 import { FilesystemStore }                 from '@matatbread/matbot-storage-filesystem';
 import { FilesystemFileStore }             from '@matatbread/matbot-files-node';
@@ -65,6 +66,17 @@ function formatMarker(part: Extract<MessageContent, { type: 'marker' }>): string
     return yellow(`⚠  ${data.channel ?? 'hook'} hook${who} failed and was skipped: ${data.message ?? 'unknown error'}`);
   }
   return dim(`${String.fromCodePoint(0x1F4CC)} ${part.creator}: ${JSON.stringify(part.data)}`);
+}
+
+/** Render one provider's usage as terse parts, omitting any zero count. Empty ⇒ nothing to show. */
+function formatUsageParts(u: Usage): string[] {
+  const parts: string[] = [];
+  if (u.inputTokens         > 0) parts.push(`↑${u.inputTokens}`);
+  if (u.outputTokens        > 0) parts.push(`↓${u.outputTokens}`);
+  if ((u.cacheReadTokens     ?? 0) > 0) parts.push(`${u.cacheReadTokens} cached`);
+  if ((u.cacheCreationTokens ?? 0) > 0) parts.push(`+${u.cacheCreationTokens} written`);
+  if ((u.costUsd             ?? 0) > 0) parts.push(`≈$${u.costUsd!.toFixed(4)}`);
+  return parts;
 }
 
 /**
@@ -399,10 +411,8 @@ async function runTurn(
     : content;
 
   let updated       = session;
-  let totalIn       = 0;
-  let totalOut      = 0;
-  let totalCostUsd  = 0;
   let thinkingTicks = 0;
+  let turnTraceId: string | undefined;
 
   const clearThinking = (): void => {
     if (thinkingTicks > 0) { process.stderr.write('\n'); thinkingTicks = 0; }
@@ -418,6 +428,7 @@ async function runTurn(
       principal,
       prompt:    promptFn,
     });
+    turnTraceId = view.traceId;
     for await (const ev of view.events) {
       if (ev.type === 'idle') continue; // session-level lifecycle signal, not this turn's
       if (ev.traceId !== view.traceId) continue;
@@ -437,11 +448,6 @@ async function runTurn(
         case 'tool:stdout': write(ev.chunk); break;
         case 'tool:stderr': write(ev.chunk); break;
         case 'tool:end':    write(`\n`); break;
-        case 'usage':
-          totalIn      += ev.inputTokens;
-          totalOut     += ev.outputTokens;
-          if (ev.costUsd !== undefined) totalCostUsd += ev.costUsd;
-          break;
         case 'done':        clearThinking(); updated = ev.session; break;
         case 'robo-user': {
           // Machine-authored context folded onto the user turn by a screen hook (e.g. a fired
@@ -497,9 +503,17 @@ async function runTurn(
   }
 
   write('\n');
-  if (totalIn > 0 || totalOut > 0) {
-    const cost = totalCostUsd > 0 ? ` ≈$${totalCostUsd.toFixed(4)}` : '';
-    write(`[↑${totalIn} ↓${totalOut} tokens${cost}]\n`);
+  // Per-provider token accounting for this turn, from the persisted session (so it includes spend by
+  // tools that ran their own completions — single_turn, ask_inner_voice, dream_time), eliding zero counts.
+  const turnUsage = usageByProvider(updated.messages.filter(m => m.traceId === turnTraceId));
+  const lines = [...turnUsage]
+    .map(([prov, u]) => ({ prov, parts: formatUsageParts(u) }))
+    .filter(e => e.parts.length > 0);
+  if (lines.length === 1 && lines[0] !== undefined) {
+    write(`[tokens · ${lines[0].prov}] ${lines[0].parts.join(' ')}\n`);
+  } else if (lines.length > 1) {
+    write('[tokens]\n');
+    for (const e of lines) write(`  ${e.prov}: ${e.parts.join(' ')}\n`);
   }
 
   return updated;
@@ -744,6 +758,7 @@ async function main(): Promise<void> {
   // identity is resolved at this entry — flag → MATBOT_PRINCIPAL → config → system — so a pod or a
   // delegating parent (the background plugin) can supply it without any shared-package env reads.
   installPrincipalCarrier(createAlsPrincipalCarrier());
+  installUsageCarrier(createAlsUsageCarrier());
   enterPrincipal(resolveBootPrincipal(opts, matbotConfig));
 
   process.stderr.write(`[${new Date().toISOString()} ${_pid}] [matbot] ${versionBanner()}\n`);
@@ -973,13 +988,23 @@ async function main(): Promise<void> {
         : req.messages;
       const signal = req.signal ?? NEVER_ABORT_SIGNAL;
       let text = '';
-      let inputTokens = 0;
-      let outputTokens = 0;
+      let usage: Usage = { inputTokens: 0, outputTokens: 0 };
       for await (const ev of adpt.complete(msgs, resolved, [], signal)) {
         if (ev.type === 'text-delta') text += ev.delta;
-        if (ev.type === 'usage') { inputTokens = ev.inputTokens; outputTokens = ev.outputTokens; }
+        if (ev.type === 'usage') {
+          usage = {
+            inputTokens:  ev.inputTokens,
+            outputTokens: ev.outputTokens,
+            ...(ev.costUsd              !== undefined ? { costUsd:             ev.costUsd              } : {}),
+            ...(ev.cacheReadTokens     !== undefined ? { cacheReadTokens:     ev.cacheReadTokens     } : {}),
+            ...(ev.cacheCreationTokens !== undefined ? { cacheCreationTokens: ev.cacheCreationTokens } : {}),
+          };
+        }
       }
-      return { text, usage: { inputTokens, outputTokens } };
+      // Report into the ambient usage sink: a tool running this completion (singleTurn/complete) has
+      // its spend attributed to the tool call by the runner. No-op outside any tool scope.
+      recordUsage(req.provider, usage);
+      return { text, usage };
     },
     async singleTurn(req) {
       return this.complete(singleTurnRequest(req));
