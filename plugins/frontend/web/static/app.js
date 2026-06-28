@@ -233,6 +233,43 @@ function md(text) {
 // This file is byte-identical in both modes; only the transport behind T differs.
 const T = window.matbotTransport;
 
+// ── web_user_environment: run an LLM-supplied expression in a sandboxed Worker ──
+// The tool (server.ts) pushes a `web-env-eval` event; we evaluate the expression in a throwaway Web
+// Worker built from a blob URL — the only Worker construction that also works from a file:// bundle —
+// and post the JSON-serialisable result back. The Worker has no DOM/storage/cookies/sensors, so this
+// is read-only introspection of the standard web platform (Date, Intl, navigator.*), nothing more.
+const WEB_ENV_WORKER_SRC = `self.onmessage = async (e) => {
+  let out;
+  try { out = { ok: true, value: await (0, eval)(e.data) }; }
+  catch (err) { out = { ok: false, error: (err && err.message) ? String(err.message) : String(err) }; }
+  try { self.postMessage(out); }
+  catch (_) { self.postMessage({ ok: false, error: 'Result is not serialisable.' }); }
+};`;
+
+function runWebEnv(expression) {
+  return new Promise((resolve) => {
+    let worker, url, done = false;
+    const finish = (out) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      if (worker) worker.terminate();
+      if (url) URL.revokeObjectURL(url);
+      resolve(out);
+    };
+    const timer = setTimeout(() => finish({ ok: false, error: 'Timed out after 5s.' }), 5000);
+    try {
+      url = URL.createObjectURL(new Blob([WEB_ENV_WORKER_SRC], { type: 'text/javascript' }));
+      worker = new Worker(url);
+      worker.onmessage = (e) => finish(e.data);
+      worker.onerror = (e) => finish({ ok: false, error: (e && e.message) ? e.message : 'Worker error.' });
+      worker.postMessage(expression);
+    } catch (err) {
+      finish({ ok: false, error: (err && err.message) ? String(err.message) : String(err) });
+    }
+  });
+}
+
 // ── API ───────────────────────────────────────────────────────────────────────
 
 async function apiListSessions() {
@@ -1755,6 +1792,15 @@ async function connectSessionStream(sid) {
   try {
     for await (const ev of T.sessionEvents(sid, ac.signal)) {
       if (ac.signal.aborted || sid !== currentSessionId) break;
+      // A session-scoped side-channel, not a turn-render event (it carries no traceId): a parked
+      // web_user_environment tool call asking us to evaluate an expression in the browser. Handle it
+      // here, before the per-trace demux, and answer out-of-band. Fire-and-forget so the Worker never
+      // stalls the stream; the tool call is parked server-side (with its own timeout) until answerEnv.
+      if (ev.type === 'web-env-eval') {
+        const callId = ev.callId;
+        void runWebEnv(ev.expression).then(out => T.answerEnv(sid, { callId, ...out }));
+        continue;
+      }
       pushTurnEvent(ev);
     }
   } catch {

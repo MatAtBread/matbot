@@ -12,6 +12,7 @@
 //   submit(sid, { content, provider, concatQueue }) -> Promise<{ queued, traceId }>  (throws on failure)
 //   sessionEvents(sid, signal)                     -> AsyncIterable<PipelineEvent>   all turn output for the session
 //   answerPrompt(sid, body)                        -> Promise<void>    body = { answer } | { cancel: true }
+//   answerEnv(sid, body)                           -> Promise<void>    body = { callId, ok, value } | { callId, ok:false, error }
 //   abort(sid)                                     -> Promise<void>
 //   statusEvents(signal)                           -> AsyncIterable<{ sessionId, busy }>
 //   fileEvents(signal)                             -> AsyncIterable<{ namespace, name, size }>
@@ -110,6 +111,14 @@
     });
   }
 
+  async function answerEnv(sid, body) {
+    await fetch('/sessions/' + sid + '/env-result', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+
   async function abort(sid) {
     await fetch('/sessions/' + sid + '/abort', { method: 'POST' });
   }
@@ -178,6 +187,6 @@
   window.matbotTransport = {
     hostRuntime: 'node',
     callTool, createSession, sessionBusy, submit,
-    sessionEvents, answerPrompt, abort, statusEvents, fileEvents, toolEvents, pluginEvents, skillEvents, openFile,
+    sessionEvents, answerPrompt, answerEnv, abort, statusEvents, fileEvents, toolEvents, pluginEvents, skillEvents, openFile,
   };
 })();

@@ -95,12 +95,19 @@ export const plugin: MatbotPluginSpec = {
       });
     });
 
-    // Only advertise URL minting when a server is actually serving (not on EADDRINUSE).
-    if (webServer) { services.tools.register(urlForResourceTool); toolRegistry = services.tools; }
+    // Only advertise these when a server is actually serving (not on EADDRINUSE): both need a live
+    // browser on the other end — url minting serves over the HTTP routes, web_user_environment
+    // round-trips an expression to the attached browser's sandboxed Worker.
+    if (webServer) {
+      services.tools.register(urlForResourceTool);
+      services.tools.register(webServer.webEnvTool);
+      toolRegistry = services.tools;
+    }
   },
 
   async teardown() {
     toolRegistry?.remove('url_for_resource');
+    toolRegistry?.remove('web_user_environment');
     toolRegistry = undefined;
     if (webServer) await webServer.close();
   },

@@ -196,6 +196,20 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Optional
 
+- **frontend/web** — new `web_user_environment` tool: the LLM evaluates a JavaScript expression in the
+  user's attached browser and gets the JSON-serialisable result back. It runs in a sandboxed Web Worker
+  (built from a blob URL, so it works from the `file://` bundle too) with no DOM, storage, cookies, or
+  permission-gated sensors — read-only introspection of the standard web platform for ambient facts like
+  timezone, locale, and user-agent, leaning on the model's own knowledge of browser APIs rather than a
+  per-capability tool. Round-trips over the session SSE stream (a new `web-env-eval` event answered via
+  `POST /sessions/:id/env-result`), registered identically in both UIs (the Node server and the
+  in-process browser bundle) from one shared tool definition — only the transport differs.
+
+- **frontend/web** — fixed a regression that broke the **browser bundle entirely**: `browser.js`
+  imported the removed `PromptCancelledError` class as a value (it is now a type-only export plus the
+  `promptCancelledError()` factory), so the in-process transport failed to link and the whole UI never
+  mounted. Now uses the factory, mirroring the Node server.
+
 - **apps/cli & frontend/web** — per-turn token usage is now reported **broken down by provider**,
   computed from the persisted session at turn end (so it includes spend by tools that ran their own
   completions — `single_turn`, `ask_inner_voice`, `dream_time`) rather than from the live main-turn

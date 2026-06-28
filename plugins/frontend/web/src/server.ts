@@ -6,6 +6,7 @@ import type {
 import { createSession, promptCancelledError, runAs, tryCurrentPrincipal } from '@matatbread/matbot-core';
 import type { SkillManager } from '@matatbread/matbot-skills';
 import { sseComment, sseEvent } from './sse-writer.js';
+import { makeWebEnvTool } from './web-env.js';
 import { promises } from "node:fs";
 const { readFile } = promises;
 
@@ -130,6 +131,10 @@ export function createWebServer(deps: WebServerDeps) {
   // session ID → the parked prompt's settlers. `resolve` delivers an answer (applying the default
   // fallback); `cancel` rejects it with PromptCancelledError — the "give up" path.
   const pendingPrompts = new Map<string, { resolve: (answer: string) => void; cancel: () => void }>();
+  // call ID → settlers for an in-flight web_user_environment round-trip. Keyed by the tool call's
+  // `callId` (not session id) because a turn can issue parallel tool calls; the answer arrives via
+  // POST /sessions/:id/env-result carrying that callId. See evalInBrowser below.
+  const pendingEvalCalls = new Map<string, { resolve: (value: unknown) => void; reject: (e: Error) => void }>();
 
   // One multiplexed event stream (GET /events) carries every global, non-session event — session
   // busy/idle, file changes, and tool/skill/plugin CRUD — each tagged by name and demuxed client-side.
@@ -189,6 +194,39 @@ export function createWebServer(deps: WebServerDeps) {
     if (conns === undefined) return;
     for (const res of conns) { if (res.writable) res.write(msg); else conns.delete(res); }
   }
+
+  // Round-trip the `web_user_environment` tool to the session's attached browser: push the expression
+  // down the session's SSE stream, park the settlers on pendingEvalCalls, and resolve when the client
+  // POSTs back to /sessions/:id/env-result. Fails fast with no browser attached, and backstops a hung
+  // or disconnected client with a timeout (the client runs its own, shorter, Worker timeout too).
+  const EVAL_TIMEOUT_MS = 10_000;
+  function evalInBrowser(sessionId: string, callId: string, expression: string, signal: AbortSignal): Promise<unknown> {
+    const conns = sessionConns.get(sessionId);
+    if (!conns || conns.size === 0) {
+      return Promise.reject(new Error('No browser is attached to this session, so the user environment cannot be read.'));
+    }
+    return new Promise<unknown>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pendingEvalCalls.delete(callId);
+        signal.removeEventListener('abort', onAbort);
+        reject(new Error('The browser did not return a result in time.'));
+      }, EVAL_TIMEOUT_MS);
+      const onAbort = () => {
+        pendingEvalCalls.delete(callId);
+        clearTimeout(timer);
+        reject(new Error('Aborted.'));
+      };
+      if (signal.aborted) { onAbort(); return; }
+      signal.addEventListener('abort', onAbort, { once: true });
+      pendingEvalCalls.set(callId, {
+        resolve: (value) => { clearTimeout(timer); signal.removeEventListener('abort', onAbort); resolve(value); },
+        reject:  (e)     => { clearTimeout(timer); signal.removeEventListener('abort', onAbort); reject(e); },
+      });
+      sendToSession(sessionId, sseEvent('web-env-eval', { type: 'web-env-eval', callId, expression }));
+    });
+  }
+
+  const webEnvTool = makeWebEnvTool(evalInBrowser);
 
   // Broadcast a session's busy/idle transition to the global status listeners (sidebar), deduped
   // against the last value. Authoritative busy comes from the runner (running || queued > 0).
@@ -589,6 +627,21 @@ export function createWebServer(deps: WebServerDeps) {
       return;
     }
 
+    // --- POST /sessions/:id/env-result --- (answer for a parked web_user_environment round-trip)
+    const envResultMatch = /^\/sessions\/([^/]+)\/env-result$/.exec(url);
+    if (method === 'POST' && envResultMatch) {
+      let body: { callId?: string; ok?: boolean; value?: unknown; error?: string };
+      try { body = JSON.parse(await readBody(req)) as typeof body; }
+      catch { json(res, 400, { error: 'Invalid JSON' }); return; }
+      const entry = body.callId ? pendingEvalCalls.get(body.callId) : undefined;
+      if (!entry) { json(res, 409, { error: 'No pending web_user_environment call' }); return; }
+      pendingEvalCalls.delete(body.callId!);
+      if (body.ok) entry.resolve(body.value);
+      else entry.reject(new Error(typeof body.error === 'string' && body.error ? body.error : 'Browser evaluation failed.'));
+      json(res, 200, { ok: true });
+      return;
+    }
+
     // --- GET /events/files/<namespace>/<name> --- (SSE: single-file watch)
     const fileEventMatch = /^\/events\/files\/([^/]+)\/(.+)$/.exec(url);
     if (method === 'GET' && fileEventMatch) {
@@ -657,6 +710,10 @@ export function createWebServer(deps: WebServerDeps) {
     for (const entry of pendingPrompts.values()) entry.resolve('');
     pendingPrompts.clear();
 
+    // Reject any in-flight environment round-trips so their tool calls close with an error.
+    for (const entry of pendingEvalCalls.values()) entry.reject(new Error('Server shutting down.'));
+    pendingEvalCalls.clear();
+
     await new Promise<void>((resolve) =>
       server.close(err => {
         if (err) {
@@ -667,6 +724,6 @@ export function createWebServer(deps: WebServerDeps) {
     );
   }
 
-  return { server, close };
+  return { server, close, webEnvTool };
 }
 

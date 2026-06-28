@@ -11,8 +11,11 @@
 // The in-process transport is server.ts re-expressed without HTTP: per-session subscribe, the busy
 // tracker, prompt parking, and the buffered tool-call ctx, all ported faithfully.
 
-import { createSession, currentPrincipal, PromptCancelledError, watchPlugins } from '@matatbread/matbot-core';
+import { createSession, currentPrincipal, promptCancelledError, watchPlugins } from '@matatbread/matbot-core';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
+// The SAME tool definition the Node frontend registers (server.ts/plugin.ts) — identical name,
+// description, and schema in both UIs; only the evalInBrowser transport differs (hub vs HTTP SSE).
+import { makeWebEnvTool } from '../src/web-env.js';
 
 // ── In-process transport ──────────────────────────────────────────────────────
 
@@ -22,6 +25,9 @@ function makeInProcessTransport(services) {
   // sid → the parked prompt's settlers (mirror server.ts pendingPrompts). resolve applies the
   // default fallback; cancel rejects with PromptCancelledError (the "give up" path).
   const pendingPrompts = new Map();
+  // callId → settlers for an in-flight web_user_environment round-trip (mirror server.ts
+  // pendingEvalCalls). Keyed by the tool call's callId, answered via answerEnv.
+  const pendingEvalCalls = new Map();
   // sid → set of live sessionEvents() injectors, so a turn's promptFn can push a synthetic `prompt`
   // event into whatever stream the UI is currently draining (mirror server.ts sendToSession).
   const hubs = new Map();
@@ -104,7 +110,7 @@ function makeInProcessTransport(services) {
       const def = typeof p === 'string' ? defaultValue : p.default;
       pendingPrompts.set(sid, {
         resolve: answer => { pendingPrompts.delete(sid); resolve(answer || def || ''); },
-        cancel:  ()     => { pendingPrompts.delete(sid); reject(new PromptCancelledError()); },
+        cancel:  ()     => { pendingPrompts.delete(sid); reject(promptCancelledError()); },
       });
       const ev = {
         type: 'prompt',
@@ -116,6 +122,40 @@ function makeInProcessTransport(services) {
       for (const inject of hub(sid)) inject(ev);
     });
   }
+
+  // In-process twin of server.ts evalInBrowser: push a `web-env-eval` event into the session's hub
+  // (app.js runs it in a Worker and answers via answerEnv), park the settlers on pendingEvalCalls, and
+  // backstop a missing/hung UI with a timeout. Same event + same app.js path as the HTTP transport.
+  const EVAL_TIMEOUT_MS = 10_000;
+  function evalInBrowser(sessionId, callId, expression, signal) {
+    if (hub(sessionId).size === 0) {
+      return Promise.reject(new Error('No browser is attached to this session, so the user environment cannot be read.'));
+    }
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pendingEvalCalls.delete(callId);
+        signal.removeEventListener('abort', onAbort);
+        reject(new Error('The browser did not return a result in time.'));
+      }, EVAL_TIMEOUT_MS);
+      const onAbort = () => {
+        pendingEvalCalls.delete(callId);
+        clearTimeout(timer);
+        reject(new Error('Aborted.'));
+      };
+      if (signal.aborted) { onAbort(); return; }
+      signal.addEventListener('abort', onAbort, { once: true });
+      pendingEvalCalls.set(callId, {
+        resolve: value => { clearTimeout(timer); signal.removeEventListener('abort', onAbort); resolve(value); },
+        reject:  e     => { clearTimeout(timer); signal.removeEventListener('abort', onAbort); reject(e); },
+      });
+      const ev = { type: 'web-env-eval', callId, expression };
+      for (const inject of hub(sessionId)) inject(ev);
+    });
+  }
+
+  // Register the identical tool here (the in-process analogue of plugin.ts): makeInProcessTransport
+  // holds the hub + pendingEvalCalls the round-trip needs, just as createWebServer does on Node.
+  services.tools.register(makeWebEnvTool(evalInBrowser));
 
   // Fire-and-forget enqueue: the turn's output reaches the UI over the separate sessionEvents()
   // subscription, not here (mirror the server's submit handler). The first submit of a busy period
@@ -219,6 +259,14 @@ function makeInProcessTransport(services) {
     }
   }
 
+  async function answerEnv(_sid, body) {
+    const entry = body.callId ? pendingEvalCalls.get(body.callId) : undefined;
+    if (!entry) return;
+    pendingEvalCalls.delete(body.callId);
+    if (body.ok) entry.resolve(body.value);
+    else entry.reject(new Error(typeof body.error === 'string' && body.error ? body.error : 'Browser evaluation failed.'));
+  }
+
   async function abort(sid) {
     // Release any pending prompt first so a turn parked on ctx.prompt() observes the abort rather
     // than hangs, then drop the queue + abort the running turn (mirror server.ts).
@@ -285,7 +333,7 @@ function makeInProcessTransport(services) {
   return {
     hostRuntime: 'browser',
     callTool, createSession: createSessionFn, sessionBusy, submit,
-    sessionEvents, answerPrompt, abort, statusEvents, fileEvents, toolEvents, pluginEvents, skillEvents, openFile,
+    sessionEvents, answerPrompt, answerEnv, abort, statusEvents, fileEvents, toolEvents, pluginEvents, skillEvents, openFile,
   };
 }
 
