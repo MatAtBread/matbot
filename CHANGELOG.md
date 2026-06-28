@@ -210,6 +210,19 @@ churn and less likely to affect a consumer who doesn't use them.
   `promptCancelledError()` factory), so the in-process transport failed to link and the whole UI never
   mounted. Now uses the factory, mirroring the Node server.
 
+- **edit-session** — new `compact_sessions` tool: applies the compaction policy across the *whole*
+  session store, in two tiers — **full compact** (archived or >28 days idle: strips all tool calls,
+  tool results, and thinking blocks) and **partial compact** (active sessions with >20 messages,
+  keeping the last 10 intact). Never touches the current session and is idempotent, so it is safe to
+  run on a schedule or as a background task; it should always be user-initiated, not model-invoked
+  mid-turn. Per-session compaction stays `session_edit({ action: 'compact' })`.
+
+- **apps/cli** — sub-agent status is now shown at startup.
+
+- **cognition** — the inner-voice (`ask_inner_voice`) tool now emits an empty output chunk so its
+  result reliably renders in the UI; and `dream_time`'s merge length-guard gains a 20-character buffer,
+  so trailing-whitespace edits the merger makes no longer trip a false truncation failure.
+
 - **apps/cli & frontend/web** — per-turn token usage is now reported **broken down by provider**,
   computed from the persisted session at turn end (so it includes spend by tools that ran their own
   completions — `single_turn`, `ask_inner_voice`, `dream_time`) rather than from the live main-turn
