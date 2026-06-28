@@ -16,7 +16,7 @@ mechanics (the assembler, the in-page loader, try-it-live link, CORS/storage cav
 
 The headline: **the same client UI runs unchanged whether it's served from Node over HTTP+SSE or
 hosted entirely in the browser in-process.** There is one `index.html` + one `app.js`
-([packages/plugins/frontend/web/src/](../packages/plugins/frontend/web/src/)) — byte-identical in both
+([plugins/frontend/web/src/](../plugins/frontend/web/src/)) — byte-identical in both
 modes — and every server touch-point is routed through a single runtime global:
 
 ```js
@@ -32,7 +32,7 @@ satisfy one contract:
 | **`http-transport.js`** | Node-served (`frontend/web` server entry) | `fetch` + SSE to `server.ts` |
 | **`browser.js`** | baked into the bundle (`frontend/web` browser entry) | drives `services.run` / `services.tools` **in-process**, no wire |
 
-The contract (read it in [http-transport.js](../packages/plugins/frontend/web/static/http-transport.js)):
+The contract (read it in [http-transport.js](../plugins/frontend/web/static/http-transport.js)):
 `hostRuntime`, `callTool`, `createSession`, `sessionBusy`, `submit`, `sessionEvents`,
 `answerPrompt`, `abort`, `statusEvents`, `fileEvents`, `toolEvents`, `pluginEvents`, `openFile`.
 `statusEvents`/`fileEvents`/`toolEvents`/`pluginEvents` are read-only `AsyncIterable` observation
@@ -41,7 +41,7 @@ one SSE endpoint under the `/events/…` prefix, in-process each is the matching
 (e.g. `services.tools.watch()` / `watchPlugins()`) yielded directly. They let panels keyed off
 tool/plugin presence (skills, plugins) refresh live when something loads out of band. (`sessionEvents`
 is the per-session turn demux — one persistent stream per session, not a global observer.) The in-process side
-([browser.js](../packages/plugins/frontend/web/static/browser.js)) is essentially `server.ts`'s
+([browser.js](../plugins/frontend/web/static/browser.js)) is essentially `server.ts`'s
 coordination — the busy tracker, prompt parking, per-session subscribe, the buffered tool-call
 context — re-expressed without HTTP. Streaming is the same `AsyncIterable<PipelineEvent>` the runner
 emits natively; in-process is simply that iterable, HTTP demuxes it back out of one SSE stream.
@@ -54,7 +54,7 @@ named `events` no longer collides with `POST /tools/:name`).
 ### The `browser` export condition
 
 `frontend/web` is one package that answers to both runtimes via a standard export condition
-([package.json](../packages/plugins/frontend/web/package.json)):
+([package.json](../plugins/frontend/web/package.json)):
 
 ```jsonc
 "exports": { ".": { "browser": "./src/browser.js", "import": "./src/index.ts", "default": "./src/index.ts" } }
@@ -101,7 +101,7 @@ The browser has no `matbot.yaml`. Its `matbot.web.json` is the analogue, and plu
    Nothing else auto-loads.
 
 2. **Baked-but-idle — `bundledPlugins[]`.** Baked into the artifact *and* the import map but **not**
-   auto-loaded. They're the browser analogue of Node's on-disk `packages/plugins` — present, ready,
+   auto-loaded. They're the browser analogue of Node's on-disk `plugins` — present, ready,
    and offered for on-demand activation. The `browser` plugin tool's **`discover_local`** action
    lists them (with `specifier` = their package name); the UI's plugin panel and "enable" banners
    surface them. Loading one is a single `plugin add`.
@@ -117,13 +117,13 @@ layers differ sharply:
 
 - A **baked** plugin loaded by its **package name** re-resolves every boot through the import map to
   a fresh blob — **no network, works on `file://`, survives refresh.** This is the good path.
-- A `mbmod:` synthetic id or a `/packages/…` HTTP path does *not* survive cleanly (ephemeral blob, or
+- A `mbmod:` synthetic id or a `/plugins/…` HTTP path does *not* survive cleanly (ephemeral blob, or
   http-only re-fetch).
 
 So the `browser` plugin tool **canonicalizes what it persists**: after a successful load, if the
 plugin is baked (its name is a key in the bundle's `packageEntries`), it persists the **package
 name**; only genuinely remote plugins keep their URL
-([plugin-tool.ts](../packages/plugins/browser/src/plugin-tool.ts)). The package name is also the one
+([plugin-tool.ts](../plugins/browser/src/plugin-tool.ts)). The package name is also the one
 specifier common to Node and the browser. Net effect: enable a bundled plugin once, and it sticks
 across reloads.
 

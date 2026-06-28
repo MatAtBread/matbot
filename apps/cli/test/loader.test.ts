@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { loadPlugins, NotAPluginError } from '@matatbread/matbot-core';
+import { loadPlugins, isNotAPluginError } from '@matatbread/matbot-core';
 import type { MatbotMachine } from '@matatbread/matbot-core';
 
 // Regression guard for the boot crash-loop: a non-plugin entry in matbot.yaml (a bare library
@@ -36,6 +36,6 @@ test('interactive mode (throw) surfaces a typed NotAPluginError', async () => {
       /* prompt */ undefined,
       'throw',
     ),
-    (e: unknown) => e instanceof NotAPluginError && e.specifier === notAPlugin && /not a matbot plugin/.test(e.message),
+    (e: unknown) => isNotAPluginError(e) && e.specifier === notAPlugin && /not a matbot plugin/.test(e.message),
   );
 });

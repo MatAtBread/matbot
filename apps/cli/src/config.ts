@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { parseConfig, parseYaml } from '@matatbread/matbot-config';
-import type { MatbotConfig } from '@matatbread/matbot-config';
+import { parseConfig, parseYaml } from '@matatbread/matbot-core';
+import type { MatbotConfig } from '@matatbread/matbot-core';
 
 export type { MatbotConfig };
 

@@ -36,13 +36,13 @@ which tools a user can *see* (see *the tool-visibility ceiling* below).
 > **Mental model:** you do not make plugins user-aware; you make their **surfaces** user-aware.
 > `setup()` is global and runs once at the boot principal, but tools, hooks, system-context
 > contributors and stores all run inside the per-turn `runAs(principal)` scope
-> ([session-runner.ts:204](../packages/core/runner/src/session-runner.ts#L204)), so each reads
+> ([session-runner.ts:204](../core/src/session-runner.ts#L204)), so each reads
 > `currentPrincipal()` and branches per user.
 
 ### Step 0 (foundational) — establish per-user identity
 
 Nothing else works without this. Register a `WebPrincipalResolver`
-([frontend/web/src/server.ts](../packages/plugins/frontend/web/src/server.ts)) that derives the user
+([frontend/web/src/server.ts](../plugins/frontend/web/src/server.ts)) that derives the user
 from each HTTP request (cookie, auth header, token, mTLS):
 
 ```ts
@@ -59,7 +59,7 @@ await services.register('WebPrincipalResolver', (req) => ({
 The web server reads this **per request** and wraps the request in `runAs(principal, …)`, freezing
 the identity into the queued submission. **The default resolver returns one constant identity for
 every request** — so skip this and `currentPrincipal()` is identical for all users, making every gate
-below a silent no-op. (`packages/plugins/web-principal-user` is a working template.) Register it
+below a silent no-op. (`plugins/web-principal-user` is a working template.) Register it
 **before** the submit it should affect — a resolver hot-loaded mid-turn won't retro-stamp that turn.
 
 ### Step 1 — close the install seam (bootstrap plugin)
@@ -84,8 +84,8 @@ single hook that covers them all — by design (see *Why gating is per-entry-poi
 
 **Runner path (model-driven turns) — a central `toolcall` hook.** It fires for *every* tool call
 regardless of which plugin owns the tool, including plugins an admin loads later
-([hooks.ts](../packages/core/plugin-api/src/hooks.ts) `runToolCall`;
-[runner.ts:201](../packages/core/runner/src/runner.ts#L201)), so one hook in the bootstrap plugin is
+([hooks.ts](../plugin-api/src/hooks.ts) `runToolCall`;
+[runner.ts:201](../core/src/runner.ts#L201)), so one hook in the bootstrap plugin is
 the whole-system chokepoint *for this path*:
 
 ```ts
@@ -105,7 +105,7 @@ the model *sees* and can *attempt* every tool, including admin-added ones.
 
 **Direct-call paths bypass the hook — the frontend must re-enforce.** The web server's
 `POST /tools/:name` and `POST /stream/tools/:name` call `tool.executor.execute(...)` **directly**
-([server.ts](../packages/plugins/frontend/web/src/server.ts)); the in-process `browser.js` `callTool`
+([server.ts](../plugins/frontend/web/src/server.ts)); the in-process `browser.js` `callTool`
 does the same. **Neither invokes `runToolCall`** — the `toolcall` hook fires *only* inside the runner
 loop. So **a plugin that exposes tool execution outside the runner (any frontend, web service, RPC
 surface) must re-implement the same gating in its own handler.** `currentPrincipal()` *is* available
@@ -119,7 +119,7 @@ function or a small registered authorization service — and *enforce* it at eac
 ### Step 3 — per-user data
 
 The default `Store`/`FileStore` do **not** partition by principal — sessions carry `ownerPrincipalId`
-but nothing enforces it ([storage/filesystem/src/store.ts](../packages/plugins/storage/filesystem/src/store.ts)).
+but nothing enforces it ([storage/filesystem/src/store.ts](../plugins/storage/filesystem/src/store.ts)).
 Two in-model options:
 
 - **Principal-aware `StorageBackend`** (`register()`-swappable core service): a backend whose
@@ -133,8 +133,8 @@ Either is correct because `currentPrincipal()` is live at every store call insid
 ### Step 4 (optional) — per-user system prompt
 
 System-context contributors are rebuilt **every turn** inside the principal scope
-([system-context.ts](../packages/core/runner/src/system-context.ts);
-[runner.ts:80-88](../packages/core/runner/src/runner.ts#L80-L88)), not captured at registration. A
+([system-context.ts](../core/src/system-context.ts);
+[runner.ts:80-88](../core/src/runner.ts#L80-L88)), not captured at registration. A
 contributor may call `currentPrincipal()` and emit per-user instructions (role, tenant rules,
 persona).
 
@@ -162,15 +162,15 @@ another tenant's tools exist), that is the line at which you move to **process-p
 
 `loadPlugin`/`unloadPlugin` are hardcoded **core members** of `MatbotServices`, not
 `register()`-swappable — `unifyServices` throws on `services.loadPlugin = …`, and `register` won't
-accept them ([plugin-api/src/plugin.ts](../packages/core/plugin-api/src/plugin.ts)). A plugin cannot
+accept them ([plugin-api/src/plugin.ts](../plugin-api/src/plugin.ts)). A plugin cannot
 override them. Their *implementation* lives in the app entry, not core
 ([apps/cli/src/index.ts](../apps/cli/src/index.ts);
 [apps/web-bundle/src/bootstrap.ts](../apps/web-bundle/src/bootstrap.ts)).
 
 But that openness is not a hole, because **`services.loadPlugin` is not reachable by the model** — it
 is plugin-code-facing. The model reaches it only *through a registered tool*
-([runner.ts](../packages/core/runner/src/runner.ts) wraps it onto `ToolContext`; the built-in `plugin`
-tool calls `ctx.loadPlugin` in [tool-plugin/src/tools/plugin.ts](../packages/core/tool-plugin/src/tools/plugin.ts)).
+([runner.ts](../core/src/runner.ts) wraps it onto `ToolContext`; the built-in `plugin`
+tool calls `ctx.loadPlugin` in [tool-plugin/src/tools/plugin.ts](../plugins/tool-plugin/src/tools/plugin.ts)).
 So the real question is not "is the seam open?" but **"which registered tools reach it?"** In a stock
 config that is the always-present built-in `plugin` tool — which is exactly why Step 1 shadows it. The
 closure rests on one auditable assumption you now control: no manifest-listed plugin re-exposes
@@ -179,18 +179,18 @@ closure rests on one auditable assumption you now control: no manifest-listed pl
 ### The global registry and the tool-visibility ceiling
 
 The registry — `state.plugins`, the tool map, providers, hooks
-([registry.ts](../packages/core/runner/src/registry.ts)) — is one module-scoped object shared by every
+([registry.ts](../core/src/registry.ts)) — is one module-scoped object shared by every
 concurrent session. `loadPlugin` mutates it globally; a bootstrap `setup()` runs once, at the boot
 principal.
 
 The toolset the model sees is built by `deps.tools.list()` at
-[session-runner.ts:194](../packages/core/runner/src/session-runner.ts#L194) — **one line before**
+[session-runner.ts:194](../core/src/session-runner.ts#L194) — **one line before**
 `runAs(head.principal, …)` opens the principal scope at line 204. So `currentPrincipal()` is **not even
 established** when the menu is assembled. This is why re-implementing `ToolRegistry` the way you'd
 re-implement `Store` cannot rescue per-user *visibility*: `list()` has no principal to branch on.
 
 *Invocation*, by contrast, runs inside the scope — `resolve()` at
-[runner.ts:193](../packages/core/runner/src/runner.ts#L193) and the `toolcall` hook both see the
+[runner.ts:193](../core/src/runner.ts#L193) and the `toolcall` hook both see the
 principal — which is why per-user *gating* works while per-user *visibility* does not.
 
 **Why `Store` escapes this and plugins don't.** `Store`/`FileStore`/`Vault`/`KnowledgeIndex` can be
@@ -207,9 +207,9 @@ plugin-visibility ceiling is structural.
   sequentially; `registerPlugin` throws on duplicate names and the global `state` mutations don't
   interleave.
 - **Shadow, not omit.** The built-in `plugin` tool is hardcoded into `createBuiltinTools()`
-  ([tool-plugin/src/index.ts](../packages/core/tool-plugin/src/index.ts)) and seeded before any config
+  ([tool-plugin/src/index.ts](../plugins/tool-plugin/src/index.ts)) and seeded before any config
   plugin loads — you cannot exclude it, only register a same-named tool over it. That triggers
-  `resolveToolCollision` ([registry.ts](../packages/core/runner/src/registry.ts)): **non-interactive**
+  `resolveToolCollision` ([registry.ts](../core/src/registry.ts)): **non-interactive**
   (boot / HTTP installs, no `prompt`) → overwrites by default, your tool wins; **interactive** →
   prompts Keep / Overwrite / Always. The registry `Map` is keyed by name, so the later `register()`
   replaces the earlier entry.

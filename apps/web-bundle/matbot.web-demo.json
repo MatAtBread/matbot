@@ -4,15 +4,15 @@
   "output": "matbot-demo.html",
 
   "plugins": [
-    "packages/plugins/browser",
-    "packages/plugins/frontend/dom",
-    "packages/plugins/http",
-    "packages/plugins/ask-user",
-    "packages/plugins/sessions",
-    "packages/plugins/edit-session",
-    "packages/plugins/workspace",
-    "packages/plugins/rumsfeld",
-    "packages/plugins/json-validation"
+    "plugins/browser",
+    "plugins/frontend/dom",
+    "plugins/http",
+    "plugins/ask-user",
+    "plugins/sessions",
+    "plugins/edit-session",
+    "plugins/workspace",
+    "plugins/rumsfeld",
+    "plugins/json-validation"
   ],
 
   "providers": {},
@@ -20,13 +20,13 @@
   "providerModules": [
     {
       "label": "Anthropic Messages API (Claude, DeepSeek /anthropic)",
-      "module": "packages/plugins/providers/anthropic",
+      "module": "plugins/providers/anthropic",
       "endpointHint": "https://api.deepseek.com/anthropic",
       "modelHint": "deepseek-chat"
     },
     {
       "label": "OpenAI-compatible chat completions (GPT, DeepSeek, Azure, local)",
-      "module": "packages/plugins/providers/openai-compat",
+      "module": "plugins/providers/openai-compat",
       "endpointHint": "https://api.deepseek.com/v1/chat/completions",
       "modelHint": "deepseek-chat"
     }

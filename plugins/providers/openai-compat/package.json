@@ -1,0 +1,48 @@
+{
+  "name": "@matatbread/matbot-provider-openai-compat",
+  "matbotRuntime": [
+    "node",
+    "browser"
+  ],
+  "version": "0.2.4",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "files": [
+    "src"
+  ],
+  "description": "OpenAI-compatible chat completions provider adapter (OpenAI and any compatible endpoint) with streaming and tool calls.",
+  "keywords": [
+    "matbot",
+    "matbot-plugin",
+    "matbot-provider",
+    "llm",
+    "ai",
+    "agent"
+  ],
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MatAtBread/matbot.git",
+    "directory": "plugins/providers/openai-compat"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "@matatbread/matbot-plugin-api": "workspace:^",
+    "@matatbread/matbot-core": "workspace:^"
+  },
+  "devDependencies": {
+    "typescript": "catalog:",
+    "@matatbread/matbot-plugin-api": "workspace:^",
+    "@matatbread/matbot-core": "workspace:^"
+  }
+}

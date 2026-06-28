@@ -1,0 +1,46 @@
+{
+  "name": "@matatbread/matbot-provider-customer-services",
+  "matbotRuntime": [
+    "node",
+    "browser"
+  ],
+  "version": "0.2.4",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "files": [
+    "src"
+  ],
+  "description": "Mock LLM provider for customer services scenarios. Always helpful, never useful.",
+  "keywords": [
+    "matbot",
+    "matbot-plugin",
+    "matbot-provider",
+    "llm",
+    "ai",
+    "agent"
+  ],
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MatAtBread/matbot.git",
+    "directory": "plugins/providers/customer-services"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "@matatbread/matbot-plugin-api": "workspace:^"
+  },
+  "devDependencies": {
+    "typescript": "catalog:",
+    "@matatbread/matbot-plugin-api": "workspace:^"
+  }
+}

@@ -1,13 +1,22 @@
 // Node-only module-customization hook (registered via register.js / --import).
-// Two concerns, both pure resolution-time URL rewriting:
+// Three concerns:
 //
 //   1. Remap *.js imports to *.ts for TypeScript source that ships no compiled
 //      output. Required because Node's native strip-types does not perform this
 //      remapping across pnpm workspace symlinks.
 //
-//   2. Plugin hot-reload freshness. When a plugin is reloaded, the core loader
+//   2. Strip TypeScript types ourselves in a `load` hook. matbot ships raw .ts and
+//      relies on type stripping — but Node's *native* stripper refuses files under
+//      node_modules (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING), which is exactly
+//      where every dependency lives once published. Returning already-stripped source
+//      from a load hook bypasses that path, so installed packages load the same as
+//      workspace ones. The code is erasable-only (enforced by tsconfig
+//      `erasableSyntaxOnly`), so `mode: 'strip'` suffices — no transform, columns
+//      preserved, no source map needed.
+//
+//   3. Plugin hot-reload freshness. When a plugin is reloaded, the core loader
 //      stamps the plugin entry URL with `?mbfresh=<gen>` (see FRESH_PARAM in
-//      packages/core/runner/src/loader.ts). On its own that re-evaluates only the
+//      core/src/loader.ts). On its own that re-evaluates only the
 //      entry; its static imports stay cached. Here we propagate that stamp from a
 //      stamped parent onto its first-party children, so the whole plugin subtree
 //      re-evaluates — "fresh all the way down".
@@ -17,6 +26,21 @@
 //      which exports `MissingSecretError` used with `instanceof`) must NOT be
 //      duplicated, or cross-boundary identity silently breaks. Those package
 //      directories arrive via `initialize(data.exclude)` from register.js.
+
+import { stripTypeScriptTypes } from 'node:module';
+import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+
+// stripTypeScriptTypes is still flagged experimental, so it emits an ExperimentalWarning the
+// first time it runs. This hook runs on the module-customization thread (where the strip in
+// `load` happens), so we silence *only* that one warning here — on every launch it would
+// otherwise print scary, irrelevant noise. All other warnings pass through untouched.
+const _emitWarning = process.emitWarning.bind(process);
+process.emitWarning = (warning, ...args) => {
+  const message = typeof warning === 'string' ? warning : (warning && warning.message) || '';
+  if (/stripTypeScriptTypes/.test(message)) return;
+  return _emitWarning(warning, ...args);
+};
 
 const FRESH = 'mbfresh';
 
@@ -71,4 +95,15 @@ export async function resolve(specifier, context, nextResolve) {
   const url = new URL(result.url);
   url.searchParams.set(FRESH, parentFresh);
   return { ...result, url: url.href };
+}
+
+export async function load(url, context, nextLoad) {
+  // Strip .ts ourselves (concern 2). Match a file: URL ending in .ts, allowing a
+  // trailing ?mbfresh query. Everything else (real .js, node:, data:) passes through.
+  if (url.startsWith('file:') && /\.ts(\?.*)?$/.test(url)) {
+    const source = await readFile(fileURLToPath(url.split('?')[0]), 'utf8');
+    const code = stripTypeScriptTypes(source, { mode: 'strip', sourceUrl: url });
+    return { format: 'module', source: code, shortCircuit: true };
+  }
+  return nextLoad(url, context);
 }

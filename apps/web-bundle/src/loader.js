@@ -90,8 +90,8 @@
   const MB = globalThis.__MB__;
   if (!MB) throw new Error('matbot: missing inlined payload (__MB__).');
 
-  const SOURCES = MB.sources;          // { "/packages/.../index.ts": "<pre-stripped JS>" }
-  const PKG     = MB.packageEntries;   // { "@matatbread/matbot-core": "/packages/.../index.ts" }
+  const SOURCES = MB.sources;          // { "/core/.../index.ts": "<pre-stripped JS>" }
+  const PKG     = MB.packageEntries;   // { "@matatbread/matbot-core": "/core/.../index.ts" }
   const ENTRY   = MB.entry;            // bootstrap module id
   const SYN = (id) => 'mbmod:' + id;
 

@@ -1,26 +1,57 @@
 {
   "name": "@matatbread/matbot-cli",
-  "matbotRuntime": ["node"],
-  "version": "0.1.0",
+  "matbotRuntime": [
+    "node"
+  ],
+  "version": "0.2.4",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "files": [
+    "src",
+    "bin.js",
+    "register.js",
+    "ts-hooks.js"
+  ],
+  "description": "matbot CLI: interactive REPL and single-turn runner for the matbot AI harness, with hot-loadable plugins.",
+  "keywords": [
+    "matbot",
+    "matbot-app",
+    "cli",
+    "llm",
+    "ai",
+    "agent"
+  ],
+  "license": "Apache-2.0",
   "type": "module",
+  "bin": {
+    "matbot": "bin.js"
+  },
   "scripts": {
-    "repl":     "node --import ./register.js src/index.ts",
-    "start":     "node --import ./register.js src/index.ts start",
-    "test":      "node --import ./register.js --test test/loader.test.ts",
+    "repl": "node bin.js",
+    "start": "node bin.js start",
+    "test": "node --import ./register.js --test test/loader.test.ts",
     "typecheck": "tsc --noEmit"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MatAtBread/matbot.git",
+    "directory": "apps/cli"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
-    "@matatbread/matbot-config":              "workspace:*",
-    "@matatbread/matbot-core":                "workspace:*",
-    "@matatbread/matbot-knowledge":           "workspace:*",
-    "@matatbread/matbot-files-node":          "workspace:*",
-    "@matatbread/matbot-security":            "workspace:*",
-    "@matatbread/matbot-storage-base":        "workspace:*",
-    "@matatbread/matbot-storage-filesystem":  "workspace:*",
-    "@matatbread/matbot-tool-plugin":          "workspace:*"
+    "@matatbread/matbot-core": "workspace:^",
+    "@matatbread/matbot-files-node": "workspace:^",
+    "@matatbread/matbot-storage-filesystem": "workspace:^",
+    "@matatbread/matbot-tool-plugin": "workspace:^",
+    "@matatbread/matbot-provider-anthropic": "workspace:^",
+    "@matatbread/matbot-provider-openai-compat": "workspace:^",
+    "@matatbread/matbot-provider-customer-services": "workspace:^"
   },
   "devDependencies": {
     "@types/node": "catalog:",
-    "typescript":  "catalog:"
+    "typescript": "catalog:"
   }
 }

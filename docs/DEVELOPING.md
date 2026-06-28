@@ -34,7 +34,9 @@ The loader stamps `name`/`specifier`/`source` onto the spec (deriving the name f
 every consumer sees. So write a `MatbotPluginSpec`; read a `MatbotPlugin`.
 
 The loader also accepts a default export with a `plugin` key, but the named export is
-preferred. Keep `@matatbread/matbot-plugin-api` in `dependencies` (not `devDependencies`).
+preferred. Declare `@matatbread/matbot-plugin-api` as a **`peerDependency`** (with a
+`devDependencies` mirror) — never bundle your own copy. See *Dependencies* below for the
+full rule.
 
 ### `MatbotPluginSpec` fields
 
@@ -59,7 +61,10 @@ preferred. Keep `@matatbread/matbot-plugin-api` in `dependencies` (not `devDepen
   "type": "module",
   "matbotRuntime": ["node", "browser"], // runtimes this plugin supports (see below)
   "exports": { ".": "./src/index.ts" },
-  "dependencies": { "@matatbread/matbot-plugin-api": "workspace:*" }
+  // host-provided singleton — a peer (never bundle your own copy), mirrored in devDependencies so it
+  // typechecks and runs standalone. See "Dependencies" below.
+  "peerDependencies": { "@matatbread/matbot-plugin-api": "^0.1.0" },
+  "devDependencies":  { "@matatbread/matbot-plugin-api": "^0.1.0" }
 }
 ```
 
@@ -73,6 +78,52 @@ my-plugin/
 
 The plugin's **identity is its `package.json` `name`** — the loader derives it and stamps it onto
 the spec (the author never sets `name`). That name is the canonical handle for `remove`/`reload`.
+
+### Dependencies: `peerDependencies` vs `dependencies` vs `devDependencies`
+
+In matbot, dependency placement is **load-bearing, not cosmetic**. Get it wrong and you either
+duplicate a host singleton (subtle, dangerous) or make a package manager try to install a package
+your code never imports (a hard install failure when that package isn't published). Place every
+dependency by this rule:
+
+**`peerDependencies` — the host-provided singletons.** `@matatbread/matbot-plugin-api` and
+`@matatbread/matbot-core` are supplied by the host (the CLI, the browser bundle) as **exactly one
+shared instance**. A plugin must bind to *that* instance — never bundle its own copy. A second copy
+breaks `instanceof`, the ambient principal carrier, shared registry state, and `declare module`
+augmentation — all of which depend on object/type identity being shared across the whole process.
+Declaring them as peers says "I need this; the host provides it," so the package manager won't
+install a duplicate into your plugin's tree. **Always mirror each peer in `devDependencies`** too —
+peers are not installed for you, so the mirror is what lets the plugin typecheck, test, and run
+standalone during development.
+
+**`dependencies` — real runtime libraries you import.** Third-party npm packages whose *values* you
+import and call at runtime (a parser, a client library), plus any first-party matbot package you
+depend on **by construction** — the *specialization* relationship from CLAUDE.md, where your plugin
+imports another plugin's runtime code and constructs it (e.g. `skills-node` → `skills`, `tool-mcp` →
+`mcp-http`). These are installed into your tree and shipped.
+
+**`devDependencies` — build/dev/type-only, erased at runtime.** `typescript` and `@types/node`; the
+peer mirrors above; and — the subtle one — **any matbot package you import only as a type.** Under
+`verbatimModuleSyntax` + Node type-stripping, an `import type { SkillManager } from
+'@matatbread/matbot-skills'` is *erased entirely* — the package is never loaded at runtime.
+Cross-plugin coupling in matbot is usually exactly this shape: you read a peer service through the
+registry (`services.SkillManager?.…`, see *Plugin-to-plugin services*) and import its *type* only for
+the annotation. So the provider package is a **devDependency, not a runtime dependency.** Listing it
+under `dependencies` makes a packed/published tarball try to install it from the registry — and 404
+if it isn't published — for a package your code never imports.
+
+**Litmus test for a first-party (`@matatbread/*`) dependency:**
+
+| Question | Bucket |
+|---|---|
+| Is it `plugin-api` or `core`? | `peerDependencies` **+** `devDependencies` mirror |
+| Do you `import` a **value** from it and use it at runtime (construct/call)? | `dependencies` |
+| Do you `import type` from it only (runtime coupling is via `services.X`)? | `devDependencies` |
+| You don't reference it at all? | remove it |
+
+The first-party packages in this repo follow exactly this: `plugin-api`/`core` are peers everywhere;
+`skills-node` keeps `skills` in `dependencies`; `frontend-web`, `cognition`, and `web-principal-user`
+keep their type-only `@matatbread/*` imports in `devDependencies`.
 
 ### Declaring supported runtimes (`matbotRuntime`)
 
@@ -115,7 +166,7 @@ plugin({ action: 'add',            specifier: '@matatbread/matbot-tool-bash' })
 plugin({ action: 'remove',         specifier: '@matatbread/matbot-tool-bash' })  // address by package name
 plugin({ action: 'reload',         specifier: '@matatbread/matbot-tool-bash' })  // re-import from disk
 plugin({ action: 'list' })                                                       // configured + loaded, with matbotRuntime
-plugin({ action: 'discover_local' })                                             // scan packages/plugins + the .plugins cache
+plugin({ action: 'discover_local' })                                             // scan plugins + the .plugins cache
 plugin({ action: 'store-key',      name: 'SOME_API_KEY' })                       // supply a missing secret (value entered out-of-band)
 ```
 
@@ -448,10 +499,10 @@ is what makes consecutive pages a disjoint cover (each page re-applies the same 
 order never shifts under you). A present `cursor` means more pages follow; an absent one means done.
 Comparisons are type-strict; null and absent are a single
 "missing" state queried only via `exists`. The in-memory reference evaluator (`executeQuery` in
-`@matatbread/matbot-storage-base`) compiles the AST to a composed-closure predicate; a backend may
+`@matatbread/matbot-core/storage-base`) compiles the AST to a composed-closure predicate; a backend may
 instead compile the same AST to its native query. Full-text and vector search are **not** part of
 `Store` — they live on `KnowledgeIndex`. See `Filter`, `StoreQuery`, and `StoreQueryError` in the
-API types (`packages/core/plugin-api/src/store-query.ts`).
+API types (`plugin-api/src/store-query.ts`).
 
 ---
 
@@ -653,7 +704,7 @@ into three layers:
    storage + the `plugin` tool) and `frontend/web` (the UI).
 
 2. **Baked-but-idle (`bundledPlugins[]`)** — bundled into the artifact but not auto-loaded.
-   These are the browser analogue of Node's on-disk `packages/plugins`. `discover_local`
+   These are the browser analogue of Node's on-disk `plugins`. `discover_local`
    lists them; enabling one is a single `plugin add`. Persisted by package name — resolves
    through the import map on every reload without network access.
 

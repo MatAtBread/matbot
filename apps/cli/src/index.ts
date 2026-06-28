@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 import { loadConfig, loadConfigFromText, loadDotEnv } from './config.js';
 import { installPlugin }                    from './install.js';
-import { executeQuery }                     from '@matatbread/matbot-storage-base';
+import { executeQuery }                     from '@matatbread/matbot-core/storage-base';
 import { loadPluginsWithDescriptions, readPluginMeta, type PluginLoadRequest } from './plugin-description.js';
 import { nodePluginResolver }               from './plugin-resolver.js';
 import type { Principal, ProviderAdapter,
               ProviderConfig, Session,
               Store, StoreQuery, QueryResult, CASResult,
-              MessageContent, FileStore } from '@matatbread/matbot-core';
+              MessageContent, FileStore, Usage } from '@matatbread/matbot-core';
 import { appendMessage, createMessage,
          createSession,
          createSessionRunner,
@@ -16,21 +16,23 @@ import { appendMessage, createMessage,
          teardownPlugins,
          unloadPlugin as unloadPluginFn,
          getPluginNameForSpecifier, getRegisteredPlugins, recordServiceKey,
-         installPrincipalCarrier, enterPrincipal, currentPrincipal,
+         installPrincipalCarrier, installUsageCarrier, recordUsage, usageByProvider, enterPrincipal, currentPrincipal,
          unifyServices, forwardingProxy, makeSwappable, singleTurnRequest,
          createMountTable, onContextQuiesce, flushIfQuiescent,
          createSingleTurnTool,
-         MissingSecretError }              from '@matatbread/matbot-core';
+         isMissingSecretError }            from '@matatbread/matbot-core';
 import type { MatbotMachine, MatbotServices, PluginSettings, Vault, SessionRunner,
               MatbotPlugin, StorageBackend, KnowledgeIndex, PromptFn, FormField, SwapFn } from '@matatbread/matbot-core';
-import { systemPrincipal }                 from '@matatbread/matbot-security';
+import { systemPrincipal }                 from '@matatbread/matbot-core';
 import { createAlsPrincipalCarrier }       from './principal-als.js';
+import { createAlsUsageCarrier }           from './usage-als.js';
 import { EnvFileVault }                     from './env-vault.js';
 import { FilesystemStore }                 from '@matatbread/matbot-storage-filesystem';
 import { FilesystemFileStore }             from '@matatbread/matbot-files-node';
 import { createBuiltinTools, createProviderTool, classifySpecifier, materializeRemote } from '@matatbread/matbot-tool-plugin';
-import { LookupKnowledgeIndex }               from '@matatbread/matbot-knowledge';
+import { LookupKnowledgeIndex }               from '@matatbread/matbot-core';
 import { access, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { readFileSync }                     from 'node:fs';
 import { createInterface }                 from 'node:readline/promises';
 import { createRequire }                   from 'node:module';
 import { fileURLToPath, pathToFileURL }     from 'node:url';
@@ -63,7 +65,18 @@ function formatMarker(part: Extract<MessageContent, { type: 'marker' }>): string
     const who  = data.pluginName !== undefined ? ` (${data.pluginName})` : '';
     return yellow(`⚠  ${data.channel ?? 'hook'} hook${who} failed and was skipped: ${data.message ?? 'unknown error'}`);
   }
-  return dim(`🔖 ${part.creator}: ${JSON.stringify(part.data)}`);
+  return dim(`${String.fromCodePoint(0x1F4CC)} ${part.creator}: ${JSON.stringify(part.data)}`);
+}
+
+/** Render one provider's usage as terse parts, omitting any zero count. Empty ⇒ nothing to show. */
+function formatUsageParts(u: Usage): string[] {
+  const parts: string[] = [];
+  if (u.inputTokens         > 0) parts.push(`↑${u.inputTokens}`);
+  if (u.outputTokens        > 0) parts.push(`↓${u.outputTokens}`);
+  if ((u.cacheReadTokens     ?? 0) > 0) parts.push(`${u.cacheReadTokens} cached`);
+  if ((u.cacheCreationTokens ?? 0) > 0) parts.push(`+${u.cacheCreationTokens} written`);
+  if ((u.costUsd             ?? 0) > 0) parts.push(`≈$${u.costUsd!.toFixed(4)}`);
+  return parts;
 }
 
 /**
@@ -179,7 +192,7 @@ async function resolveCredentialsInteractive(
     try {
       return await resolveCredentials(credentials, vault);
     } catch (e) {
-      if (!(e instanceof MissingSecretError)) throw e;
+      if (!isMissingSecretError(e)) throw e;
       const rl = createInterface({ input: process.stdin, output: process.stderr });
       try {
         for (const name of e.missingKeys) {
@@ -259,6 +272,7 @@ function parseArgs(argv: string[]): { opts: CliOpts; prompt: string | undefined 
       case '--principal':   { const v = args[++i]; if (v !== undefined) opts.principal  = v; } break;
       case '--ephemeral':   opts.ephemeral = true; break;
       case '--help': printHelp(); process.exit(0);
+      case '--version': case '-v': process.stdout.write(versionBanner() + '\n'); process.exit(0);
       default:
         if (!arg.startsWith('-')) positional.push(arg);
     }
@@ -305,6 +319,52 @@ function resolveBootPrincipal(opts: CliOpts, config: import('./config.js').Matbo
   return systemPrincipal();
 }
 
+// Walk up from a resolved module entry to the owning package.json (a package's `exports` may not
+// expose package.json), returning the `name`d package's version.
+function pkgVersionAt(entryPath: string, name: string): string {
+  let dir = path.dirname(entryPath);
+  for (;;) {
+    try {
+      const pkg = JSON.parse(readFileSync(path.join(dir, 'package.json'), 'utf8')) as { name?: string; version?: string };
+      if (pkg.name === name) return pkg.version ?? '?';
+    } catch { /* no package.json here — keep walking up */ }
+    const parent = path.dirname(dir);
+    if (parent === dir) return '?';
+    dir = parent;
+  }
+}
+
+function selfVersion(): string {
+  try {
+    const pkg = JSON.parse(readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8')) as { version?: string };
+    return pkg.version ?? '?';
+  } catch { return '?'; }
+}
+
+// One line naming the CLI version and the *resolved* singleton versions. plugin-api is resolved
+// *through* core (cli → core → plugin-api), which is both how the import graph actually reaches it and
+// the exact instance the principal carrier lives in. A mismatch means two physical copies of a host
+// singleton are loaded (a skewed / in-place-upgraded install) — the condition that splits shared
+// module state — so we surface it loudly here rather than let it fail obscurely at the first read.
+function versionBanner(): string {
+  const cli = selfVersion();
+  let core = '?', api = '?';
+  try {
+    const coreEntry = createRequire(import.meta.url).resolve('@matatbread/matbot-core');
+    core = pkgVersionAt(coreEntry, '@matatbread/matbot-core');
+    try {
+      const apiEntry = createRequire(coreEntry).resolve('@matatbread/matbot-plugin-api');
+      api = pkgVersionAt(apiEntry, '@matatbread/matbot-plugin-api');
+    } catch { /* plugin-api unresolved from core — leave '?' */ }
+  } catch { /* core unresolved — leave '?' */ }
+  let line = `matbot v${cli} (core ${core}, plugin-api ${api}, isSubAgent ${isBackground})`;
+  if ((core !== cli && core !== '?') || (api !== cli && api !== '?')) {
+    line += '\n⚠ version skew: the CLI and a shared singleton resolve to different copies. Run a clean '
+          + 'reinstall (rm -rf node_modules package-lock.json && npm i) — duplicate copies can split shared state.';
+  }
+  return line;
+}
+
 function printHelp(): void {
   process.stderr.write(`
 matbot — AI CLI
@@ -322,6 +382,7 @@ Options:
   --principal   <id|json>   Boot identity: an id (type "user") or JSON {"id","type"}.
                             Overrides MATBOT_PRINCIPAL and config principal:.
   --help                    Show this help
+  --version, -v             Print the CLI + resolved core/plugin-api versions and exit
 
 Sessions are ephemeral by default (discarded on exit). Use --session create to persist,
 or --session <id> to resume a previously persisted session.
@@ -350,10 +411,8 @@ async function runTurn(
     : content;
 
   let updated       = session;
-  let totalIn       = 0;
-  let totalOut      = 0;
-  let totalCostUsd  = 0;
   let thinkingTicks = 0;
+  let turnTraceId: string | undefined;
 
   const clearThinking = (): void => {
     if (thinkingTicks > 0) { process.stderr.write('\n'); thinkingTicks = 0; }
@@ -369,6 +428,7 @@ async function runTurn(
       principal,
       prompt:    promptFn,
     });
+    turnTraceId = view.traceId;
     for await (const ev of view.events) {
       if (ev.type === 'idle') continue; // session-level lifecycle signal, not this turn's
       if (ev.traceId !== view.traceId) continue;
@@ -388,11 +448,6 @@ async function runTurn(
         case 'tool:stdout': write(ev.chunk); break;
         case 'tool:stderr': write(ev.chunk); break;
         case 'tool:end':    write(`\n`); break;
-        case 'usage':
-          totalIn      += ev.inputTokens;
-          totalOut     += ev.outputTokens;
-          if (ev.costUsd !== undefined) totalCostUsd += ev.costUsd;
-          break;
         case 'done':        clearThinking(); updated = ev.session; break;
         case 'robo-user': {
           // Machine-authored context folded onto the user turn by a screen hook (e.g. a fired
@@ -448,9 +503,17 @@ async function runTurn(
   }
 
   write('\n');
-  if (totalIn > 0 || totalOut > 0) {
-    const cost = totalCostUsd > 0 ? ` ≈$${totalCostUsd.toFixed(4)}` : '';
-    write(`[↑${totalIn} ↓${totalOut} tokens${cost}]\n`);
+  // Per-provider token accounting for this turn, from the persisted session (so it includes spend by
+  // tools that ran their own completions — single_turn, ask_inner_voice, dream_time), eliding zero counts.
+  const turnUsage = usageByProvider(updated.messages.filter(m => m.traceId === turnTraceId));
+  const lines = [...turnUsage]
+    .map(([prov, u]) => ({ prov, parts: formatUsageParts(u) }))
+    .filter(e => e.parts.length > 0);
+  if (lines.length === 1 && lines[0] !== undefined) {
+    write(`[tokens · ${lines[0].prov}] ${lines[0].parts.join(' ')}\n`);
+  } else if (lines.length > 1) {
+    write('[tokens]\n');
+    for (const e of lines) write(`  ${e.prov}: ${e.parts.join(' ')}\n`);
   }
 
   return updated;
@@ -462,18 +525,29 @@ async function runTurn(
 
 interface ProviderPackage { type: string; name: string; dir: string; }
 
+// The provider adapters the CLI ships with (its dependencies). Resolved through the module graph
+// rather than a directory scan, so discovery works identically when installed (node_modules) and in
+// the monorepo (workspace symlinks). A user can `plugin add` other providers after setup.
+const BUNDLED_PROVIDERS = [
+  '@matatbread/matbot-provider-anthropic',
+  '@matatbread/matbot-provider-openai-compat',
+  '@matatbread/matbot-provider-customer-services',
+];
+
 async function discoverProviders(): Promise<ProviderPackage[]> {
-  const thisDir      = path.dirname(fileURLToPath(import.meta.url));
-  const providersDir = path.resolve(thisDir, '../../../packages/plugins/providers');
-  let entries: string[];
-  try { entries = await readdir(providersDir); } catch { return []; }
+  const require = createRequire(import.meta.url);
   const results: ProviderPackage[] = [];
-  for (const entry of entries) {
-    const dir = path.join(providersDir, entry);
+  for (const name of BUNDLED_PROVIDERS) {
+    let dir: string;
+    try {
+      // package root is two levels up from the entry (…/<pkg>/src/index.ts)
+      dir = path.dirname(path.dirname(require.resolve(name)));
+    } catch { continue; }  // not installed
     try {
       const pkg = JSON.parse(await readFile(path.join(dir, 'package.json'), 'utf8')) as Record<string, unknown>;
-      if (typeof pkg['name'] === 'string') results.push({ type: entry, name: pkg['name'] as string, dir });
-    } catch { /* skip entries without a readable package.json */ }
+      const type = name.slice('@matatbread/matbot-provider-'.length);
+      results.push({ type, name: (pkg['name'] as string) ?? name, dir });
+    } catch { /* unreadable package.json */ }
   }
   return results;
 }
@@ -560,9 +634,9 @@ async function runSetupWizard(configPath: string): Promise<import('./config.js')
     await writeFile(envPath, envLines.join('\n') + '\n', 'utf8');
     process.env[envVarName] = apiKey;
 
-    // Write a relative path so the config is self-contained regardless of where matbot is installed.
-    const relDir = path.relative(configDir, chosen.dir).replace(/\\/g, '/');
-    const moduleSpec = relDir.startsWith('.') ? relDir : `./${relDir}`;
+    // Reference the provider by package name: resolves via node_modules when installed and via the
+    // workspace symlink in the monorepo, so the config is portable either way.
+    const moduleSpec = chosen.name;
 
     const yaml = [
       'providers:',
@@ -684,7 +758,10 @@ async function main(): Promise<void> {
   // identity is resolved at this entry — flag → MATBOT_PRINCIPAL → config → system — so a pod or a
   // delegating parent (the background plugin) can supply it without any shared-package env reads.
   installPrincipalCarrier(createAlsPrincipalCarrier());
+  installUsageCarrier(createAlsUsageCarrier());
   enterPrincipal(resolveBootPrincipal(opts, matbotConfig));
+
+  process.stderr.write(`[${new Date().toISOString()} ${_pid}] [matbot] ${versionBanner()}\n`);
 
   // The vault is a capture-safe forwarding proxy over a swappable backend (mirrors StorageBackend):
   // EnvFileVault by default, replaced when a plugin calls register('Vault', impl). References to
@@ -911,13 +988,23 @@ async function main(): Promise<void> {
         : req.messages;
       const signal = req.signal ?? NEVER_ABORT_SIGNAL;
       let text = '';
-      let inputTokens = 0;
-      let outputTokens = 0;
+      let usage: Usage = { inputTokens: 0, outputTokens: 0 };
       for await (const ev of adpt.complete(msgs, resolved, [], signal)) {
         if (ev.type === 'text-delta') text += ev.delta;
-        if (ev.type === 'usage') { inputTokens = ev.inputTokens; outputTokens = ev.outputTokens; }
+        if (ev.type === 'usage') {
+          usage = {
+            inputTokens:  ev.inputTokens,
+            outputTokens: ev.outputTokens,
+            ...(ev.costUsd              !== undefined ? { costUsd:             ev.costUsd              } : {}),
+            ...(ev.cacheReadTokens     !== undefined ? { cacheReadTokens:     ev.cacheReadTokens     } : {}),
+            ...(ev.cacheCreationTokens !== undefined ? { cacheCreationTokens: ev.cacheCreationTokens } : {}),
+          };
+        }
       }
-      return { text, usage: { inputTokens, outputTokens } };
+      // Report into the ambient usage sink: a tool running this completion (singleTurn/complete) has
+      // its spend attributed to the tool call by the runner. No-op outside any tool scope.
+      recordUsage(req.provider, usage);
+      return { text, usage };
     },
     async singleTurn(req) {
       return this.complete(singleTurnRequest(req));

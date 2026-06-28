@@ -1,7 +1,8 @@
 packages:
-  - 'packages/*'
-  - 'packages/*/*'
-  - 'packages/*/*/*'
+  - 'plugin-api'
+  - 'core'
+  - 'plugins/*'
+  - 'plugins/*/*'
   - 'apps/*'
 
 catalog:

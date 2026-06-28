@@ -33,6 +33,21 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### API gaps filled
 
+- **Token/cost usage is now persisted on the session.** Two new fields carry per-call accounting that
+  was previously emitted live and dropped: `Message.usage?: Usage` records the provider call that
+  produced an assistant turn (billed provider is the message's `providerName`), and a `tool-result`
+  block gains `usage?: UsageRecord[]` for completions a tool runs itself (`single_turn`,
+  `ask_inner_voice`, each of `dream_time`'s ranker/merger calls), one provider-tagged entry per call.
+  Both are pure accounting — elided from provider submission (adapters serialise only
+  `id`/`result`/`isError`), so they never reach the model. Capture is automatic via a new ambient
+  **usage carrier** (`installUsageCarrier`/`recordUsage`/`currentUsageSink`/`withUsageScope`,
+  mirroring the principal carrier; node ALS-backed, browser serial): a tool reaches an LLM only
+  through `complete`/`singleTurn`, so reporting at that one choke point attributes every tool's spend
+  to its call with zero per-tool code. `single_turn`/`ask_inner_voice` no longer return usage in their
+  result (it was leaking accounting data to the model). `CompletionResponse.usage` widened from
+  `{ inputTokens, outputTokens }` to the full `Usage` (adds optional `costUsd`, cache token counts).
+  A session's total cost is now computable from its stored messages (an aggregation tool is a follow-up).
+
 - **`screen` hooks can now inject *durable* context, the persisted twin of `ephemeral`.** A new
   `ScreenResult.durable?: MessageContent[]`: where `ephemeral` informs only the turn about to run,
   `durable` is folded onto that turn's user message (the runner appends the blocks to the last
@@ -108,6 +123,16 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Bug fixes
 
+- **`session.updatedAt` now tracks conversational activity, not structural/metadata edits.** It is the
+  timestamp of the session's last message (its `createdAt`), or the session's own `createdAt` when empty —
+  a materialised field upholding a single invariant (new helper `lastActivityAt(session)`), not a fresh
+  `now()` stamped at each write. Previously `session_edit` (`compact`/`cut`/`split`), `fork`, and
+  `session` `rename`/`hide` each stamped `now()`, so compacting or renaming a session floated it to the
+  top of a recency-sorted list despite no new conversation. All session writers now derive `updatedAt`
+  from the final message via `lastActivityAt`; `appendMessage` uses the appended message's `createdAt`.
+  Kept as a stored field (not a getter): `Session` round-trips as plain JSON and is sorted on `updatedAt`
+  as a stored column.
+
 - **A bad `matbot.yaml` plugin entry no longer aborts startup.** `loadPlugins` only honoured its
   `skip`/`throw` mode (renamed `onIncompatibleRuntime` → `onLoadError`) for the runtime-compat gate;
   an import that rejected or a module that was not plugin-shaped (no `plugin` export, no `apiVersion`,
@@ -170,6 +195,39 @@ churn and less likely to affect a consumer who doesn't use them.
   (a missing secret) are still left in config to retry.
 
 ### Optional
+
+- **frontend/web** — new `web_user_environment` tool: the LLM evaluates a JavaScript expression in the
+  user's attached browser and gets the JSON-serialisable result back. It runs in a sandboxed Web Worker
+  (built from a blob URL, so it works from the `file://` bundle too) with no DOM, storage, cookies, or
+  permission-gated sensors — read-only introspection of the standard web platform for ambient facts like
+  timezone, locale, and user-agent, leaning on the model's own knowledge of browser APIs rather than a
+  per-capability tool. Round-trips over the session SSE stream (a new `web-env-eval` event answered via
+  `POST /sessions/:id/env-result`), registered identically in both UIs (the Node server and the
+  in-process browser bundle) from one shared tool definition — only the transport differs.
+
+- **frontend/web** — fixed a regression that broke the **browser bundle entirely**: `browser.js`
+  imported the removed `PromptCancelledError` class as a value (it is now a type-only export plus the
+  `promptCancelledError()` factory), so the in-process transport failed to link and the whole UI never
+  mounted. Now uses the factory, mirroring the Node server.
+
+- **edit-session** — new `compact_sessions` tool: applies the compaction policy across the *whole*
+  session store, in two tiers — **full compact** (archived or >28 days idle: strips all tool calls,
+  tool results, and thinking blocks) and **partial compact** (active sessions with >20 messages,
+  keeping the last 10 intact). Never touches the current session and is idempotent, so it is safe to
+  run on a schedule or as a background task; it should always be user-initiated, not model-invoked
+  mid-turn. Per-session compaction stays `session_edit({ action: 'compact' })`.
+
+- **apps/cli** — sub-agent status is now shown at startup.
+
+- **cognition** — the inner-voice (`ask_inner_voice`) tool now emits an empty output chunk so its
+  result reliably renders in the UI; and `dream_time`'s merge length-guard gains a 20-character buffer,
+  so trailing-whitespace edits the merger makes no longer trip a false truncation failure.
+
+- **apps/cli & frontend/web** — per-turn token usage is now reported **broken down by provider**,
+  computed from the persisted session at turn end (so it includes spend by tools that ran their own
+  completions — `single_turn`, `ask_inner_voice`, `dream_time`) rather than from the live main-turn
+  `usage` stream (now legacy). Zero counts are elided. The CLI prints one line per provider; the web
+  client's `tokens` block lists a row per provider. Backed by the new core helper `usageByProvider`.
 
 - **providers/openai-compat** — opt-in prompt caching. With `parameters.promptCache: true`,
   the adapter sends Anthropic-style `cache_control: {type:'ephemeral'}` breakpoints on the system
@@ -471,7 +529,9 @@ churn and less likely to affect a consumer who doesn't use them.
   playbooks on every fire.
 - **frontend/web** & **CLI** — render the new `matbot-hooks` marker live and on
   reload (amber warning pill / amber ⚠ line).
-- **telegram** — no longer polls in the background.
+- **telegram** — a sub-agent now runs send-only (skips `getUpdates` polling, so its long-poll can't
+  409-conflict with the foreground owner's), while still having a live `setup()` so it can send. The
+  foreground bot polls as before.
 - Plugin bug fixes: **background** correctly sets `allowed` on writes with a clearer
   HTTP error on disallowed; **frontend/web** send/stop button state on session switch
   + initial-message echo; mangled robo message; tool-store type-extraction regex;

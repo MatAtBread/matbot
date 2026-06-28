@@ -1,0 +1,59 @@
+{
+  "name": "@matatbread/matbot-frontend-web",
+  "matbotRuntime": [
+    "node",
+    "browser"
+  ],
+  "version": "0.2.4",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "files": [
+    "src",
+    "static/app.js",
+    "static/browser.js",
+    "static/favicon.svg",
+    "static/http-transport.js",
+    "static/index.html"
+  ],
+  "description": "Web UI with session management. Node entry serves it over HTTP+SSE; browser entry mounts the same UI in-process. Both share index.html + app.js.",
+  "keywords": [
+    "matbot",
+    "matbot-plugin",
+    "matbot-frontend",
+    "llm",
+    "ai",
+    "agent"
+  ],
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "browser": "./static/browser.js",
+      "import": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MatAtBread/matbot.git",
+    "directory": "plugins/frontend/web"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "@matatbread/matbot-plugin-api": "workspace:^",
+    "@matatbread/matbot-core": "workspace:^"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "@matatbread/matbot-plugin-api": "workspace:^",
+    "@matatbread/matbot-core": "workspace:^",
+    "@matatbread/matbot-skills": "workspace:^"
+  }
+}
