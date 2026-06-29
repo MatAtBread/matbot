@@ -438,11 +438,11 @@ export interface KnowledgeIndex {
 
 // ── Tools ─────────────────────────────────────────────────────────────────────
 
-export type ToolEvent =
+export type ToolEvent<Result = unknown> =
   | { type: 'stdout';   chunk: string }
   | { type: 'stderr';   chunk: string }
   | { type: 'progress'; pct: number; message?: string }
-  | { type: 'result';   value: unknown }
+  | { type: 'result';   value: Result }
   | { type: 'file';     handle: FileHandle }
   // A durable, LLM-invisible annotation the tool emits as it runs (a link, a status, a trace of a
   // side-effect). Persisted as a `marker`-role message; elided from provider submission like any
@@ -450,6 +450,26 @@ export type ToolEvent =
   // e.g. a trigger-fired tool), a result and no markers, or both.
   | { type: 'marker';   creator: string; data: unknown }
   | { type: 'error';    message: string; code?: number; stdout?: string; stderr?: string };
+
+/**
+ * Per-tool result-type registry: maps a tool's `name` to the type of the `value` it yields in its
+ * `result` event. Augment it exactly like {@link MarkerData} / `MatbotServices`, so a caller gets the
+ * concrete result type back from {@link invokeTool} + `toolResult` instead of `unknown`:
+ *
+ *   declare module '@matatbread/matbot-plugin-api' {
+ *     interface ToolResults { find_fact: string[] | null }
+ *   }
+ *
+ * The tool name is the discriminator: `invokeTool(machine, 'find_fact', …)` is typed
+ * `AsyncIterable<ToolEvent<string[] | null>>`, so `toolResult(…)` resolves to `string[] | null`. A
+ * name with no registered entry resolves to `unknown` (the caller must narrow). This is a pure
+ * type-level construct — no runtime validation; it pins, at the call site, the contract a tool's
+ * executor already produces. Keep the entry in sync with what the executor actually yields.
+ */
+export interface ToolResults {}
+
+/** The `result` value a tool named `K` yields, or `unknown` when `K` isn't registered in {@link ToolResults}. */
+export type ToolResultOf<K extends string> = K extends keyof ToolResults ? ToolResults[K] : unknown;
 
 /**
  * Ask the user a question and resolve with their answer. The host supplies the

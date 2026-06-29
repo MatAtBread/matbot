@@ -106,7 +106,7 @@ export function createSkillTool(manager: SkillManager): Tool {
       "  | { action: 'list' }                            // -> { skills: [{ id, name, toolBinding? }] }\n" +
       "  | { action: 'load';     name: string }          // raw content -> { id, name, content }\n" +
       "  | { action: 'use';      name: string }          // content as a directive to apply now -> { id, name, content }\n" +
-      "  | { action: 'metadata'; name: string }          // derived analysis -> { id, name, knowledge: { summary, entities, tags } | null, catalogue: boolean }\n" +
+      "  | { action: 'metadata'; name: string }          // derived analysis -> { id, name, knowledge: { summary, entities, tags, classification: { procedural, informational } } | null, catalogue: boolean }\n" +
       "  | { action: 'save';     name: string; content: string; catalogue?: boolean }  // create or update -> { id, name }; `catalogue` advertises the skill in the system prompt (omit to leave unchanged)\n" +
       "  | { action: 'delete';   name: string };         // -> { id, name }\n" +
       '```',

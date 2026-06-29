@@ -22,9 +22,11 @@
   "peerDependencies": {
     "@matatbread/matbot-plugin-api": "workspace:^"
   },
+  "dependencies": {
+    "typescript": "catalog:"
+  },
   "devDependencies": {
     "@types/node": "catalog:",
-    "typescript": "catalog:",
     "@matatbread/matbot-plugin-api": "workspace:^"
   }
 }

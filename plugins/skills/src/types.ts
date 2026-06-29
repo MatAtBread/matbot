@@ -31,6 +31,14 @@ export interface SkillDoc {
     entities:    string[];
     tags:        string[];
     summary:     string;
+    /**
+     * How the skill reads, as two independent 0–1 confidences (they need not sum to 1):
+     * `procedural` (steps/workflows/input-process-output — a method to execute) vs `informational`
+     * (reference/facts/narrative — material to read). The skill compiler gates on this (only a
+     * primarily-procedural skill compiles to a tool); contextual_search uses it to favour
+     * informational skills. Derived by the same analysis pass as the rest of this block.
+     */
+    classification: { procedural: number; informational: number };
   };
 }
 

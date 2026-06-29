@@ -2,7 +2,7 @@ import type { Store, KnowledgeIndex, KnowledgeEntry, MatbotMachine } from '@mata
 import { createBroadcaster } from '@matatbread/matbot-plugin-api';
 import type { SkillDoc, SkillEvent } from './types.js';
 
-type SkillAnalysis  = { entities: string[]; tags: string[]; summary: string };
+type SkillAnalysis  = { entities: string[]; tags: string[]; summary: string; classification: { procedural: number; informational: number } };
 type SkillKnowledge = NonNullable<SkillDoc['knowledge']>;
 
 async function sha256Hex(text: string): Promise<string> {
@@ -11,6 +11,14 @@ async function sha256Hex(text: string): Promise<string> {
   // SHA-256 `digest` shim before any module runs, so this stays clean and works in both runtimes.
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
   return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+/** A crude procedural/informational split from the shape of the content: three or more numbered
+ *  step lines reads as a method to execute, otherwise as material to read. Used as the heuristic
+ *  fallback and to fill the field when the analysis LLM omits it. */
+function heuristicClassification(content: string): { procedural: number; informational: number } {
+  const hasSteps = (content.match(/^\d+\.\s/gm) || []).length >= 3;
+  return hasSteps ? { procedural: 0.6, informational: 0.2 } : { procedural: 0.2, informational: 0.6 };
 }
 
 /** Cheap, deterministic analysis from the skill's name and tags — the fallback when no analysis
@@ -22,6 +30,7 @@ function heuristicAnalysis(doc: SkillDoc): SkillAnalysis {
     entities: [...new Set([doc.name, nameLower, ...nameTokens])],
     tags:     doc.tags ?? [],
     summary:  doc.content.slice(0, 500),
+    classification: heuristicClassification(doc.content),
   };
 }
 
@@ -34,7 +43,9 @@ const ANALYSIS_SYSTEM =
 
 3. **tags**: An array of broad category tags that describe the domain or topic area. Think of these as high-level classifiers. Aim for 5-12 tags. Examples: "home", "travel", "technology", "personal", "project", "reference", "automation", "France", "family", "architecture".
 
-Return your answer as valid JSON only — no markdown fences, no explanations. The JSON should have keys "summary" (string), "entities" (array of strings), "tags" (array of strings).`;
+4. **classification**: Two independent confidence scores in [0,1] (they need NOT sum to 1) for how the skill reads. \`procedural\`: a method to execute — steps, workflows, branching, input-process-output. \`informational\`: material to read — reference, facts, narratives. A step-by-step runbook scores high procedural / low informational; a reference note scores the reverse; a skill that is both can score high on both.
+
+Return your answer as valid JSON only — no markdown fences, no explanations. The JSON should have keys "summary" (string), "entities" (array of strings), "tags" (array of strings), "classification" (object with numeric "procedural" and "informational").`;
 
 const ANALYSIS_TIMEOUT_MS = 6000_000;
 
@@ -63,7 +74,17 @@ async function analyseSkill(
     const tags     = strings(parsed.tags);
     const summary  = typeof parsed.summary === 'string' ? parsed.summary : '';
     if (entities.length === 0 && summary === '') return undefined;
-    return { entities, tags, summary };
+    // The model can omit or malform the classification without invalidating the rest; clamp what it
+    // gave and fall back to the shape heuristic per-axis so the field is always present and sane.
+    const c = parsed.classification as { procedural?: unknown; informational?: unknown } | undefined;
+    const clamp = (v: unknown, fallback: number): number =>
+      typeof v === 'number' && v >= 0 && v <= 1 ? v : fallback;
+    const h = heuristicClassification(doc.content);
+    const classification = {
+      procedural:    clamp(c?.procedural,    h.procedural),
+      informational: clamp(c?.informational, h.informational),
+    };
+    return { entities, tags, summary, classification };
   } catch (e) {
     if (signal?.aborted) return undefined;   // superseded/timed out — reindex owns the message
     console.warn(`[skills] analysis for ${doc.name} failed:`, e);

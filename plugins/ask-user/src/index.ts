@@ -1,6 +1,13 @@
 import type { Tool, ToolEvent, ToolContext, MatbotPluginSpec, FormField } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 
+declare module '@matatbread/matbot-plugin-api' {
+  interface ToolResults {
+    // `answer` is the user's reply: the typed text, the chosen option, or "Yes"/"No" for a confirm.
+    ask_user: { name: string; answer: string };
+  }
+}
+
 const MAX_OPTIONS = 10;
 const VALID_TYPES: FormField['type'][] = ['text', 'password', 'select', 'confirm'];
 

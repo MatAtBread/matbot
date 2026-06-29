@@ -376,6 +376,10 @@ importers:
         version: 5.9.3
 
   plugins/skills_compiler:
+    dependencies:
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
     devDependencies:
       '@matatbread/matbot-plugin-api':
         specifier: workspace:^
@@ -383,9 +387,6 @@ importers:
       '@types/node':
         specifier: 'catalog:'
         version: 22.19.19
-      typescript:
-        specifier: 'catalog:'
-        version: 5.9.3
 
   plugins/storage/filesystem:
     dependencies:

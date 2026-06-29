@@ -5,7 +5,12 @@ import type { MatbotPluginSpec, MatbotMachine, ToolExecutor, ToolEvent, ToolCont
 // package. Only the slice this tool consumes is declared.
 declare module '@matatbread/matbot-plugin-api' {
   interface MatbotServices {
-    SkillManager?: { get(name: string): { content: string } | undefined };
+    SkillManager?: {
+      get(name: string): {
+        content: string;
+        knowledge?: { classification: { procedural: number; informational: number } };
+      } | undefined;
+    };
   }
 }
 
@@ -28,18 +33,49 @@ interface ToolContext {
   session:   Session;            // pass to invokeTool's opts.session
   signal:    AbortSignal;        // pass to fetch / singleTurn / invokeTool so the tool is cancellable
   provider?: string;             // the turn's LLM provider key; default singleTurn to this
+  prompt?:   PromptFn;           // interactive prompt channel from the calling turn; pass to invokeTool so interactive tools (ask_user) can reach the user
 }
 
 // LLM call. Resolves once; no streaming. Use for any "reason about" / "summarise" / "decide" step.
 services.singleTurn(req: { provider: string; prompt: string; system?: string; signal?: AbortSignal })
   => Promise<{ text: string; usage?: unknown }>;
 
-// Call another registered tool by name and collapse its event stream to a string result.
-invokeTool(services, name: string, params: unknown,
-           opts: { session: Session; signal: AbortSignal; provider?: string }): AsyncIterable<ToolEvent>;
-toolText(events: AsyncIterable<ToolEvent>): Promise<string>;   // throws on the tool's first error event
+// Call another registered tool by name. Pass the executor's OWN ctx straight through as the 4th
+// argument — session, signal, prompt AND provider all propagate, so a callee that needs an LLM
+// (find_fact, or anything using singleTurn) inherits this turn's provider. Never hand-pick a subset
+// like { session, signal }; that is how the provider gets dropped and the callee fails with "no provider".
+invokeTool(services, name: string, params: unknown, ctx: ToolContext): AsyncIterable<ToolEvent<Result>>;
+
+// Read a tool's result. Two readers — pick by what the tool returns:
+toolResult(events): Promise<Result>;   // the STRUCTURED result value, already typed by the tool name.
+toolText(events):   Promise<string>;   // the result collapsed to a string (prose tools, or plain text).
+// Both throw on the tool's first error event. Prefer toolResult for any tool that returns data — it is
+// typed, so you get real fields and the compiler catches misuse. NEVER JSON.parse a toolText string and
+// NEVER regex a value out of prose. Known result types (toolResult gives these, fully typed):
+//   find_fact          => string[] | null                      // matching facts, or null if none found
+//   ask_user           => { name: string; answer: string }     // answer = typed text / chosen option / "Yes"|"No"
+//   contextual_search  => { name: string; content: string }    // a whole knowledge document to read
+// Single specific datum (a city, id, threshold) → find_fact, NOT contextual_search. Forward ctx:
+//   const facts = await toolResult(invokeTool(services, 'find_fact',
+//     { question: string, terms: [{ term: string, context?: string }] }, ctx));   // facts: string[] | null
+//   const a = await toolResult(invokeTool(services, 'ask_user', { name, label, type: 'text' }, ctx)); // a.answer
+// For any other tool the result is "unknown" — narrow it before use (the compiler will force you to).
 
 // HTTP is the Web fetch() — no node http, no axios. JSON parsing/maths/dates/etc. are plain JS.`;
+
+// Augments the generated plugin's view of `ToolResults` so `toolResult(invokeTool(..., name, ...))` is
+// typed for the common tools it calls. The real augmentations live in those tools' own packages
+// (ask-user, rumsfeld), but the generated plugin is a separate compilation that only sees plugin-api —
+// so we ship this alongside it. Keep in step with those packages' ToolResults declarations.
+const TOOL_RESULTS_DTS = `import '@matatbread/matbot-plugin-api';
+declare module '@matatbread/matbot-plugin-api' {
+  interface ToolResults {
+    ask_user: { name: string; answer: string };
+    find_fact: string[] | null;
+    contextual_search: { name: string; content: string };
+  }
+}
+`;
 
 // Render a committed session as an ordered, readable trace: the agent's reasoning, narration, tool
 // calls and their results, interleaved as they happened. Tool results are paired to calls by id and
@@ -92,30 +128,17 @@ export function createSkillCompilerPlugin(): MatbotPluginSpec {
           }
           const skillContent = doc.content;
 
-          yield { type: 'progress', pct: 15, message: `Classifying...` };
-          const classResult = await services.singleTurn({
-            provider: codeProvider,
-            prompt: `Classify as "procedural" or "knowledge". Procedural: steps, workflows, branching, input-process-output. Knowledge: reference, narratives, facts to read.\n\nSkill: ${skill}\n---\n${skillContent}\n---\n\n{"classification":"procedural"|"knowledge","reasoning":"..."}`,
-            signal: ctx.signal,
-          });
-
-          let classification: string;
-          let classReason: string;
-          try {
-            const m = classResult.text.match(/\{[\s\S]*\}/);
-            const parsed = m ? JSON.parse(m[0]) : null;
-            classification = parsed?.classification ?? '';
-            classReason = parsed?.reasoning ?? '';
-          } catch { classification = ''; classReason = ''; }
-
+          // The procedural/informational split is derived once by the skills metadata pass and cached
+          // on the doc — we read it rather than re-classify. Absent only until that pass has run (it is
+          // detached from the save, and the no-provider/failure path persists nothing): re-saving the
+          // skill regenerates it. Only a primarily-procedural skill describes a method to compile.
+          const classification = doc.knowledge?.classification;
           if (!classification) {
-            const hasSteps = (skillContent.match(/^\d+\.\s/gm) || []).length >= 3;
-            classification = hasSteps ? 'procedural' : 'knowledge';
-            classReason = `heuristic: ${hasSteps ? 'numbered steps' : 'no numbered steps'}`;
+            yield { type: 'result', value: { status: 'no_metadata', skill, message: `Skill "${skill}" has no derived classification yet. Re-save the skill to generate its metadata, then retry.` } };
+            return;
           }
-
-          if (classification !== 'procedural') {
-            yield { type: 'result', value: { status: 'not_compilable', skill, classification, reasoning: classReason } };
+          if (classification.procedural <= classification.informational) {
+            yield { type: 'result', value: { status: 'not_compilable', skill, classification } };
             return;
           }
 
@@ -201,7 +224,7 @@ export function createSkillCompilerPlugin(): MatbotPluginSpec {
           try { const m = distillResult.text.match(/\{[\s\S]*\}/); if (m) design = { ...design, ...JSON.parse(m[0]) }; } catch {}
           const method: string = typeof design.method === 'string' && design.method.trim() ? design.method : transcript;
 
-          yield { type: 'progress', pct: 80, message: 'Generating code...' };
+          yield { type: 'progress', pct: 80, message: 'Preparing build...' };
 
           const safeName = sanitise(skill);
           const pluginPkgName = `@matatbread/matbot-tool-${safeName}`;
@@ -216,11 +239,19 @@ export function createSkillCompilerPlugin(): MatbotPluginSpec {
             peerDependencies: { "@matatbread/matbot-plugin-api": "workspace:^" },
           }, null, 2);
 
+          // Compute relative paths from the plugin build dir to tsconfig.base.json and the plugin-api
+          // package at the project root. The build dir is <projectRoot>/.data/files/skill_compiler/plg_<name>/
+          // which is outside the pnpm workspace packages, so tsc needs explicit paths to resolve the peer dep.
+          const { dirname: tsDirname, join: tsJoin, relative: tsRelative } = await import('node:path');
+          const projectRoot = tsDirname(services.configPath!);
+          const pluginBuildDir = tsJoin(projectRoot, '.data', 'files', 'skill_compiler', pluginDir);
+          const baseTsconfigPath = tsRelative(pluginBuildDir, tsJoin(projectRoot, 'tsconfig.base.json'));
+          const pluginApiPath = tsRelative(pluginBuildDir, tsJoin(projectRoot, 'plugin-api', 'src', 'index.ts'));
           const tsconfigJson = JSON.stringify({
+            extends: baseTsconfigPath,
             compilerOptions: {
-              target: "ESNext", module: "NodeNext", moduleResolution: "NodeNext",
-              strict: true, esModuleInterop: true, skipLibCheck: true,
-              outDir: "dist", rootDir: "src",
+              paths: { "@matatbread/matbot-plugin-api": [pluginApiPath] },
+              declaration: false, declarationMap: false, sourceMap: false,
             },
             include: ["src/**/*"],
           }, null, 2);
@@ -244,7 +275,7 @@ ${MACHINE_API}
 
 Template (fill IMPLEMENTATION):
 \`\`\`ts
-import { PLUGIN_API_VERSION, invokeTool, toolText } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, invokeTool, toolResult, toolText } from '@matatbread/matbot-plugin-api';
 import type { MatbotPluginSpec, MatbotMachine, ToolExecutor, ToolEvent, ToolContext } from '@matatbread/matbot-plugin-api';
 
 export const plugin: MatbotPluginSpec = {
@@ -270,70 +301,130 @@ export const plugin: MatbotPluginSpec = {
 };
 \`\`\`
 
-Rules: implement the SPEC, using the worked example's exact URLs/queries/field names to remove ambiguity. Reproduce only the steps that meet the spec — never the example's exploratory or discovery calls. Drive everything off the tool's input parameters; treat the example's specific values as illustrative, not constants (except genuine endpoints/queries the spec implies are fixed). Pass ctx.signal through every fetch/singleTurn/invokeTool. Yield progress/result/error events. Output ONLY src/index.ts in a typescript fence.`;
+Rules: implement the SPEC, using the worked example's exact URLs/queries/field names to remove ambiguity. Reproduce only the steps that meet the spec — never the example's exploratory or discovery calls. Implement EVERY branch the spec describes — each arm of an if/else, each conditional path — even when the worked example exercised only one. The example is a single trace through the spec; the spec defines all the paths. E.g. if Step 1 says "if no result, ask for free text; if more than one result, present a choice", implement both the text ask_user and the select ask_user, not just whichever the example happened to hit. Drive everything off the tool's input parameters; treat the example's specific values as illustrative, not constants (except genuine endpoints/queries the spec implies are fixed). Pass ctx.signal through every fetch/singleTurn/invokeTool. When calling another tool, forward the executor's whole ctx as invokeTool's 4th argument — invokeTool(services, name, params, ctx) — so session, signal, prompt AND provider propagate; never pass a hand-picked { session, signal } object, or a callee that needs an LLM (find_fact, singleTurn-based tools) will fail with "no provider". Yield progress/result/error events. NEVER extract a value from another tool's natural-language output with a regex or fixed-phrase string match (e.g. searchResult.match(/the location is (.+)/)) — that assumes an exact wording the tool will not reliably produce, so it silently fails. When a step needs a specific stored fact, use the find_fact tool (structured JSON { found, fact }), NOT contextual_search followed by string-parsing of its prose; if the spec names contextual_search for what is really a single-fact lookup, translate it to find_fact. Parse any tool result defensively — handle missing or differently-shaped data rather than assuming one rigid format. The project enforces strict TypeScript: verbatimModuleSyntax — use \ for type-only imports and \ for value imports; never use bare default imports unless the module has a real default export. The project also enables exactOptionalPropertyTypes — when a property is optional (key?: T), never pass undefined explicitly; omit the key instead. It enables noUncheckedIndexedAccess — array indexing returns T | undefined, so guard every array[i] access before using it. Output ONLY src/index.ts in a typescript fence.`;
 
-          const codeResult = await services.singleTurn({
-            provider: codeProvider,
-            prompt: codeGenPrompt,
-            signal: ctx.signal,
-          });
-
-          let indexSource: string;
-          const tsMatch = codeResult.text.match(/```(?:typescript|ts)\s*\n([\s\S]*?)```/) ||
-                         codeResult.text.match(/```\s*\n([\s\S]*?)```/);
-          indexSource = tsMatch ? tsMatch[1]!.trim() : codeResult.text.trim();
-          if (!indexSource.startsWith('import')) {
-            const i = indexSource.indexOf('\nimport ');
-            if (i >= 0) indexSource = indexSource.slice(i + 1);
-          }
-          if (!indexSource.includes('MatbotPluginSpec')) {
-            yield { type: 'error', message: `Invalid generated code. Preview: ${indexSource.slice(0, 500)}` };
-            return;
-          }
-
-          const files: Record<string, string> = { "package.json": packageJson, "tsconfig.json": tsconfigJson, "src/index.ts": indexSource };
-
-          // Write the generated plugin into the workspace via workspace_action — no hardcoded path.
-          // Workspace files land under <project>/.data/files/<path>, inside the project tree, so both
-          // tsc and the runtime loader resolve @matatbread/* by walking up to the host node_modules:
-          // no symlink, no machine-specific path.
+          // Set up the build dir once: the static files and the peer-dep symlink don't change between
+          // repair passes; only src/index.ts is regenerated. Workspace files land under
+          // <project>/.data/files/<path>, inside the project tree, so tsc and the runtime loader resolve
+          // @matatbread/* by walking up to the host node_modules — no machine-specific path.
           if (!services.configPath) {
             yield { type: 'error', message: 'No configPath available; cannot locate the workspace on disk to typecheck.' };
             return;
           }
           const wsRoot = `skill_compiler/${pluginDir}`;
-          yield { type: 'progress', pct: 88, message: 'Writing plugin to workspace...' };
+          const { dirname, join } = await import('node:path');
+          const buildDir = join(dirname(services.configPath), '.data', 'files', 'skill_compiler', pluginDir);
+
+          yield { type: 'progress', pct: 85, message: 'Writing plugin scaffold...' };
           try {
-            for (const [rel, content] of Object.entries(files)) {
-              await toolText(invokeTool(services, 'workspace_action',
-                { action: 'write', path: `${wsRoot}/${rel}`, content },
-                { session: ctx.session, signal: ctx.signal }));
-            }
+            await toolText(invokeTool(services, 'workspace_action',
+              { action: 'write', path: `${wsRoot}/package.json`, content: packageJson }, ctx));
+            await toolText(invokeTool(services, 'workspace_action',
+              { action: 'write', path: `${wsRoot}/tsconfig.json`, content: tsconfigJson }, ctx));
+            await toolText(invokeTool(services, 'workspace_action',
+              { action: 'write', path: `${wsRoot}/src/matbot-tools.d.ts`, content: TOOL_RESULTS_DTS }, ctx));
           } catch (e) {
             yield { type: 'error', message: `Could not write plugin to workspace: ${e instanceof Error ? e.message : String(e)}` };
             return;
           }
 
-          const { dirname, join } = await import('node:path');
-          const buildDir = join(dirname(services.configPath), '.data', 'files', 'skill_compiler', pluginDir);
+          // node_modules symlink so Node's ESM resolver finds the peer dep at runtime — the build dir is
+          // outside the pnpm workspace packages, so it has no node_modules of its own.
+          const { mkdir, symlink, readlink } = await import('node:fs/promises');
+          const linkDir = join(buildDir, 'node_modules', '@matatbread');
+          const linkPath = join(linkDir, 'matbot-plugin-api');
+          const linkTarget = join(dirname(services.configPath), 'plugin-api');
+          try {
+            await mkdir(linkDir, { recursive: true });
+            try { await readlink(linkPath); } catch { await symlink(linkTarget, linkPath); }
+          } catch (e) {
+            yield { type: 'error', message: `Could not create node_modules symlink: ${e instanceof Error ? e.message : String(e)}` };
+            return;
+          }
 
-          yield { type: 'progress', pct: 93, message: 'Typechecking...' };
+          // Generate → typecheck → on failure feed the tsc errors + current code back for repair, up to
+          // MAX_PASSES. The repair loop OWNS the broken file so the calling LLM never has to find or patch
+          // it by hand; only after the loop gives up do we surface the errors as a result.
+          // Typecheck via the real `tsc` binary (typescript is a dependency, so resolve its bin — no
+          // npx) as an AWAITED async subprocess. A synchronous typecheck — execSync, or an in-process
+          // createProgram — is CPU-heavy enough to block the event loop and freeze the web UI for its
+          // whole duration; an async child process keeps the loop free while it compiles.
+          const { createRequire } = await import('node:module');
+          const requireFrom = createRequire(import.meta.url);
+          const tscBin = join(dirname(requireFrom.resolve('typescript')), '..', 'bin', 'tsc');
+          const { execFile } = await import('node:child_process');
+          const { promisify } = await import('node:util');
+          const execFileAsync = promisify(execFile);
+          const runTypecheck = async (): Promise<{ ok: boolean; output: string }> => {
+            try {
+              await execFileAsync(process.execPath, [tscBin, '--noEmit'],
+                { cwd: buildDir, timeout: 120_000, maxBuffer: 10 * 1024 * 1024 });
+              return { ok: true, output: '' };
+            } catch (e: any) {
+              const out = ((e.stdout?.toString() ?? '') + (e.stderr?.toString() ?? '')).trim();
+              return { ok: false, output: out || String(e) };
+            }
+          };
+          const MAX_PASSES = 3;
+          const extractSource = (text: string): string => {
+            const m = text.match(/```(?:typescript|ts)\s*\n([\s\S]*?)```/) || text.match(/```\s*\n([\s\S]*?)```/);
+            let src = m ? m[1]!.trim() : text.trim();
+            if (!src.startsWith('import')) {
+              const i = src.indexOf('\nimport ');
+              if (i >= 0) src = src.slice(i + 1);
+            }
+            return src;
+          };
+
+          let indexSource = '';
           let typecheckOk = false;
           let typecheckOutput = '';
-          try {
-            const { execSync } = await import('node:child_process');
-            execSync('npx tsc --noEmit', { cwd: buildDir, timeout: 60_000, stdio: 'pipe' });
-            typecheckOk = true;
-          } catch (e: any) {
-            typecheckOutput = ((e.stdout?.toString() ?? '') + (e.stderr?.toString() ?? '')).trim() || String(e);
+          let pass = 0;
+          for (pass = 1; pass <= MAX_PASSES && !typecheckOk; pass++) {
+            yield { type: 'progress', pct: 86 + pass * 3, message: pass === 1 ? 'Generating code...' : `Typecheck failed — repairing (pass ${pass}/${MAX_PASSES})...` };
+
+            const prompt = pass === 1 ? codeGenPrompt :
+`The TypeScript you generated for this plugin does not compile. Return a corrected version.
+
+${MACHINE_API}
+
+--- CURRENT src/index.ts ---
+${indexSource}
+--- END CURRENT ---
+
+--- \`tsc --noEmit\` ERRORS ---
+${typecheckOutput}
+--- END ERRORS ---
+
+Fix every reported error. Change only what each error requires; keep the tool name, inputs and behaviour identical. Remember verbatimModuleSyntax (use \`import type\` for type-only imports), exactOptionalPropertyTypes (omit an optional key rather than passing undefined), and noUncheckedIndexedAccess (guard every array[i] before use). Output ONLY the complete corrected src/index.ts in a single \`\`\`typescript fence — the whole file, not a diff.`;
+
+            const codeResult = await services.singleTurn({ provider: codeProvider, prompt, signal: ctx.signal });
+            const src = extractSource(codeResult.text);
+            if (!src.includes('MatbotPluginSpec')) {
+              typecheckOutput = 'Your reply did not contain a valid plugin (no MatbotPluginSpec found). Output ONLY the complete src/index.ts in a single ```typescript fence.';
+              continue;
+            }
+            indexSource = src;
+
+            try {
+              await toolText(invokeTool(services, 'workspace_action',
+                { action: 'write', path: `${wsRoot}/src/index.ts`, content: indexSource }, ctx));
+            } catch (e) {
+              yield { type: 'error', message: `Could not write plugin to workspace: ${e instanceof Error ? e.message : String(e)}` };
+              return;
+            }
+
+            const tc = await runTypecheck();
+            if (tc.ok) typecheckOk = true;
+            else typecheckOutput = tc.output.trim() || 'typecheck failed';
           }
 
           if (!typecheckOk) {
-            yield { type: 'progress', pct: 100, message: 'Done — typecheck failed.' };
+            yield { type: 'progress', pct: 100, message: `Done — typecheck failed after ${MAX_PASSES} passes.` };
             yield {
               type: 'result',
               value: {
-                status: 'typecheck_failed', skill, toolName, workspaceDir: wsRoot,
+                status: 'typecheck_failed', skill, toolName, workspaceDir: wsRoot, passes: MAX_PASSES,
                 method, excluded: design.excluded, typecheckOutput: typecheckOutput.slice(0, 2000),
               },
             };
@@ -349,7 +440,7 @@ Rules: implement the SPEC, using the worked example's exact URLs/queries/field n
           try {
             installMessage = await toolText(invokeTool(services, 'plugin',
               { action: 'add', specifier },
-              { session: ctx.session, signal: ctx.signal, prompt: ctx.prompt }));
+              ctx));
           } catch (e) {
             yield {
               type: 'result',
@@ -366,7 +457,7 @@ Rules: implement the SPEC, using the worked example's exact URLs/queries/field n
           yield {
             type: 'result',
             value: {
-              status: 'installed', skill, classification: 'procedural', reasoning: classReason,
+              status: 'installed', skill, classification, passes: pass - 1,
               toolName, pluginName: pluginPkgName, workspaceDir: wsRoot, specifier, typecheckOk,
               method, excluded: design.excluded, install: installMessage,
             },
@@ -378,7 +469,7 @@ Rules: implement the SPEC, using the worked example's exact URLs/queries/field n
         name: 'skill_compiler',
         description: `Compile a procedural markdown skill into an executable TypeScript plugin, then install it.
 
-Methodology: load from SkillManager → classify (only procedural skills compile) → demonstrate in a scratch session capturing the real working trace → distil the trace to the method that worked → generate TypeScript → write into the workspace → typecheck with tsc → install via the plugin tool (asks for confirmation).
+Methodology: load from SkillManager → classify (only procedural skills compile) → demonstrate in a scratch session capturing the real working trace → distil the trace to the method that worked → generate TypeScript → write into the workspace → typecheck with tsc, feeding any errors back to the code generator to self-repair (up to 3 passes) → install via the plugin tool (asks for confirmation).
 
 Compiled plugins use: fetch() for HTTP, services.singleTurn() for LLM, invokeTool() for tools, plain JS for logic.`,
         inputSchema: {
