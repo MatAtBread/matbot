@@ -33,6 +33,14 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### API gaps filled
 
+- **Tool `progress` events now reach frontends.** A tool's `{ type: 'progress', pct, message? }`
+  `ToolEvent` was matched and dropped by the runner — the only `ToolEvent` variant that went nowhere.
+  The runner now forwards it as a new `tool:progress` `PipelineEvent` (`{ callId, pct, message?,
+  traceId }`), so it streams to every frontend like `tool:stdout`. The CLI prints `[pct%] message`;
+  the web frontend inverts the leading `pct`% of the tool block as a left→right wipe (cleared on
+  `tool:end`). Producers that already emitted progress (`edit-session` compaction, `skills_compiler`)
+  now surface it with no change.
+
 - **`invokeTool`/`toolText` — call a tool by name programmatically.** Two helpers exported from
   `@matatbread/matbot-plugin-api` formalise the resolve-then-drain pattern that callers (the triggers
   dispatcher) were hand-rolling. `invokeTool(machine, name, params, opts)` resolves the tool off

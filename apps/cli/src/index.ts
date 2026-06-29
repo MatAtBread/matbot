@@ -448,6 +448,7 @@ async function runTurn(
           break;
         case 'tool:stdout': write(ev.chunk); break;
         case 'tool:stderr': write(ev.chunk); break;
+        case 'tool:progress': write(`\r[${ev.pct}%]${ev.message ? ' ' + ev.message : ''}`); break;
         case 'tool:end':    write(`\n`); break;
         case 'done':        clearThinking(); updated = ev.session; break;
         case 'robo-user': {

@@ -904,6 +904,7 @@
     /* ── Tool blocks ───────────────────────────────────────────── */
 
     .tool-block {
+      position: relative;
       background: #0f172a;
       border-radius: 6px;
       overflow: hidden;
@@ -911,6 +912,15 @@
       font-family: 'SF Mono', 'Cascadia Code', ui-monospace, monospace;
       font-size: 0.86em;
       max-width: 100%;
+    }
+    /* Live tool progress: invert the left `pct`% of the block as a wipe. Removed on tool:end. */
+    .tool-progress {
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: 0;
+      pointer-events: none;
+      backdrop-filter: invert(1);
+      transition: width 0.2s ease;
     }
     .tool-header {
       padding: 6px 12px;

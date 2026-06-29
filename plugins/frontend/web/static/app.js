@@ -2033,8 +2033,24 @@ async function renderTurn(sid, traceId) {
           break;
         }
 
+        case 'tool:progress': {
+          // Locate by callId rather than `currentTool` so a late event can't bleed onto the wrong
+          // block. Invert `pct`% of the block (left→right wipe) and surface the message as a tooltip.
+          const block = ev.callId ? messagesEl.querySelector('[data-call-id="' + ev.callId + '"]') : currentTool;
+          if (block) {
+            let bar = block.querySelector(':scope > .tool-progress');
+            if (!bar) { bar = document.createElement('div'); bar.className = 'tool-progress'; block.appendChild(bar); }
+            bar.style.width = Math.max(0, Math.min(100, ev.pct)) + '%';
+            if (ev.message) block.title = ev.message;
+          }
+          break;
+        }
+
         case 'tool:end': {
           if (currentTool) {
+            const bar = currentTool.querySelector(':scope > .tool-progress');
+            if (bar) bar.remove();
+            currentTool.removeAttribute('title');
             currentTool.appendChild(makeToolResultBlock(ev.result, ev.isError));
             currentTool.open = false;
           }
