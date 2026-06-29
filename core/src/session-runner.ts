@@ -19,7 +19,7 @@ export interface SessionRunnerDeps {
   files?:          FileStore;
   workdir?:        string;
   configPath?:     string;
-  loadPlugin:      (specifier: string, prompt?: PromptFn) => Promise<MatbotPlugin>;
+  loadPlugin:      (specifier: string, prompt?: PromptFn, refresh?: boolean) => Promise<MatbotPlugin>;
   unloadPlugin:    (specifier: string) => Promise<boolean>;
 }
 

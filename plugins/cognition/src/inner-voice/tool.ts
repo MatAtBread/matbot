@@ -11,7 +11,7 @@
  * (the value is a *different-lineage* perspective) but functional. Pin a different-lineage model via
  * cognition_config to get the genuine second opinion.
  */
-import type { Tool, ToolExecutor, ToolContext, ToolEvent, MatbotMachine } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolContext, ToolEvent, MatbotMachine, Session } from '@matatbread/matbot-plugin-api';
 import {
   type DreamSettings,
   DEFAULT_DREAM_SETTINGS,
@@ -34,11 +34,52 @@ const PROVIDER_SETTING_KEYS = [
 /** Every DreamSettings field `cognition_config` understands, alongside the provider pins above. */
 const DREAM_SETTING_KEYS = ['strongThreshold', 'weakThreshold', 'maxClusterSize', 'blocklist', 'weakDeferralMs', 'maxMergesPerPass', 'maxEnrichmentsPerPass'] as const;
 
+/** How many back-to-back `ask_inner_voice` consults are allowed before further ones short-circuit.
+ *  At the (BACKOFF_LIMIT + 1)th consecutive call we stop critiquing and tell Matbot₁ to proceed —
+ *  the model has had its second opinion N times running without acting on it (a self-critique spin). */
+const BACKOFF_LIMIT = 3;
+
+const TOOL_NAME = 'ask_inner_voice';
+
+/**
+ * Count the trailing run of consecutive `ask_inner_voice` invocations ending at the current call
+ * (which is already appended to `session` before the tool executes). "Consecutive" means no other
+ * tool ran in between and no new user turn began: a different tool call, a user message, or an
+ * assistant turn that produced a final answer (no tool calls) all break the run. Markers and
+ * tool-result messages are transparent. So three separate user requests that each consult the inner
+ * voice once do NOT count as a run — only an uninterrupted self-critique spin within a turn does.
+ */
+function consecutiveInnerVoiceCalls(session: Session): number {
+  let count = 0;
+  for (let i = session.messages.length - 1; i >= 0; i--) {
+    const m = session.messages[i]!;
+    if (m.role === 'tool' || m.role === 'marker') continue;
+    if (m.role !== 'assistant') break; // user (or any non-assistant) turn resets the run
+    let aiv = 0, other = 0;
+    for (const c of m.content) {
+      if (c.type !== 'tool-call') continue;
+      if (c.name === TOOL_NAME) aiv++; else other++;
+    }
+    count += aiv;
+    if (other > 0 || aiv === 0) break; // a different tool, or a final answer, ends the run
+  }
+  return count;
+}
+
 export function createAskInnerVoiceTool(services: MatbotMachine): Tool {
   const executor: ToolExecutor = {
     async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
       const args = input as { prompt?: string; system?: string };
       if (typeof args.prompt !== 'string') { yield { type: 'error', message: 'ask_inner_voice requires a string "prompt".' }; return; }
+
+      if (consecutiveInnerVoiceCalls(ctx.session) > BACKOFF_LIMIT) {
+        yield { type: 'stdout', chunk: "" }; // keep the UI render parity with a real critique
+        yield { type: 'result', value: { text:
+          `You have already consulted the inner voice ${BACKOFF_LIMIT} times in a row without acting on ` +
+          `its feedback. Stop consulting it and proceed: act on the critiques you have already received ` +
+          `and deliver your answer directly.` } };
+        return;
+      }
 
       const pinned   = await services.settings().get<string>(INNER_VOICE_PROVIDER_KEY);
       const provider = (pinned !== undefined && services.providers.has(pinned)) ? pinned : ctx.provider;
