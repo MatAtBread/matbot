@@ -42,6 +42,38 @@ churn and less likely to affect a consumer who doesn't use them.
   caller to narrow. `ToolResults`, `ToolResultOf`, and `toolResult` are exported from
   `@matatbread/matbot-plugin-api`; `ask-user` and `rumsfeld` register their tools' result types.
 
+- **`ToolExecutor<R = unknown>` / `Tool<R = unknown>` carry the result type at the source.** The
+  producer side is now typed too: `ToolExecutor.execute` returns `AsyncIterable<ToolEvent<R>>`, so a
+  tool declares the type of the `value` it yields once, where it's written. Binding the executor to its
+  registry entry — `ToolExecutor<ToolResultOf<'my_tool'>>` (or `Tool<ToolResultOf<'my_tool'>>` on the
+  tool object) — makes the `ToolResults` augmentation the single source of truth: the executor's yields
+  and the registry entry can no longer silently drift, since the compiler checks the yields against it.
+  The `unknown` default keeps every untyped executor compiling untouched, and covariance means a
+  narrower `ToolExecutor<X>` still satisfies the heterogeneous `Tool[]` registry boundary. Most built-in
+  tools with a well-defined structured result now declare it (`whoami`, `session_action`, `session_edit`,
+  `compact_sessions`, `bash`, `bash_config`, `workspace_action`, `dream_time`, `ask_inner_voice`,
+  `cognition_config`, `skill_action`, `skills_config`, `trigger_action`, `triggers_config`, `provider`,
+  `plugin`, `mcp_action`, `store_action`, `background`, `every_action`, `single_turn`, the `url_for_resource`
+  / telegram tools); tools whose result is genuinely `unknown` (`http`, the MCP proxy, the runtime-named
+  store tool) keep the default and remain unregistered, forcing the caller to narrow.
+
+- **Per-call result discrimination for multi-action tools (`ToolResult<Result, Args>`).** A multi-action
+  tool is a weird overloaded function — it returns different shapes depending on its params. Its
+  `ToolResults` entry can now be a union of `ToolResult<Result, Args>` *arms*, each pairing a result with
+  the discriminating params *pattern* that selects it; `invokeTool` is generic over the params (`const P`)
+  and narrows the result to the matching arm. `invokeTool(machine, 'session_action', { action: 'get', … })`
+  is now typed to yield `Session`, not the union of every action's result. The discriminant is *any*
+  field(s), not just `action` (e.g. `background` keys on `interval`'s presence: `ToolResult<…, { interval:
+  string }>`); the pattern is the discriminant only, not the full input, so a call carrying just that field
+  still matches. When no arm matches (a non-literal discriminant, or an absence-discriminant the positive
+  patterns can't express) the result falls back to the union of all arms — always sound, just less narrow.
+  `ToolResultOf<K>` unwraps an arm-based entry to that union, so executors still bind unchanged
+  (`ToolExecutor<ToolResultOf<'my_tool'>>` must cover every arm). `ToolResult` and `ToolResultFor` are
+  exported from `@matatbread/matbot-plugin-api`. Every built-in multi-action tool adopts the arm form:
+  `session_action`, `session_edit`, `workspace_action`, `background`, `every_action`, `skill_action`,
+  `skills_config`, `cognition_config`, `trigger_action`, `triggers_config`, `provider`, `plugin`,
+  `mcp_action`, `store_action`, and `bash_config`. Behaviour is unchanged — type-level only.
+
 - **`invokeTool` opts are now a named `InvokeToolOptions` type derived from `ToolContext`.** A tool
   forwarding a call to another tool can pass its own `ctx` straight through as the 4th argument —
   `session`, `signal`, `prompt` and crucially `provider` all propagate, so a callee that needs an LLM

@@ -1,13 +1,22 @@
-import type { Tool, ToolEvent, ToolContext, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolResult, ToolResultOf, ToolContext, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import { RemoteMcpManager } from './manager.js';
+
+declare module '@matatbread/matbot-plugin-api' {
+  interface ToolResults {
+    mcp_action:
+      | ToolResult<{ message: string; tools: string[]; instructions?: string }, { action: 'add'    }>
+      | ToolResult<{ servers: unknown[] },                                       { action: 'list'   }>
+      | ToolResult<{ message: string },                                          { action: 'remove' }>;
+  }
+}
 
 type McpRemoteAction =
   | { action: 'add'; name: string; endpoint: string; headers?: Record<string, string> }
   | { action: 'list' }
   | { action: 'remove'; name: string };
 
-function remoteMcpActionTool(manager: RemoteMcpManager): Tool {
+function remoteMcpActionTool(manager: RemoteMcpManager): Tool<ToolResultOf<'mcp_action'>> {
   return {
     name: 'mcp_action',
     description: `Manage remote MCP (Model Context Protocol) server connections over HTTP. An MCP server
@@ -39,7 +48,7 @@ SHAPE  (TypeScript)
       },
     },
     executor: {
-      async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
+      async *execute(input: unknown, ctx: ToolContext) {
         const act = input as McpRemoteAction;
         switch (act.action) {
           case 'add': {

@@ -272,6 +272,8 @@ The user-surface kinds were one kind named `augment` (= today's `ephemeral`); st
 
 **Cross-references** may only point down the dependency graph — never to optional dependents.
 
+**Typed results.** A tool declares the type of its `result` `value` by augmenting the `ToolResults` registry (same pattern as `MarkerData`), keyed by tool name; binding the executor with `ToolExecutor<ToolResultOf<'name'>>` makes that augmentation the single source of truth (the compiler checks the yields against it). Callers recover the type via `invokeTool` + `toolResult`. A multi-action tool registers a union of `ToolResult<Result, Args>` arms — each a result paired with the discriminating params *pattern* — so the call's params narrow the result to the matching arm (the type-level mirror of the executor's `switch`). Unregistered ⇒ `unknown`.
+
 ---
 
 ## Thinking blocks (Anthropic)

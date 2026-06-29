@@ -1,8 +1,19 @@
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import type {
-  MatbotPluginSpec, MatbotMachine, Tool, ToolEvent, Store, StoreQuery,
+  MatbotPluginSpec, MatbotMachine, Tool, ToolEvent, ToolResult, ToolResultOf, Store, StoreQuery,
 } from '@matatbread/matbot-plugin-api';
 import type { StoreDef, StoreRecord } from './types.js';
+
+declare module '@matatbread/matbot-plugin-api' {
+  interface ToolResults {
+    store_action:
+      | ToolResult<StoreDef,             { action: 'create' }>
+      | ToolResult<StoreDef,             { action: 'expose' }>
+      | ToolResult<StoreDef | null,      { action: 'get'    }>
+      | ToolResult<{ removed: boolean }, { action: 'remove' }>
+      | ToolResult<{ stores: StoreDef[] }, { action: 'list' }>;
+  }
+}
 
 const META_NAMESPACE = 'store_tools';
 
@@ -175,12 +186,12 @@ interface StoreActionInput {
   shape?:       string;
 }
 
-function makeStoreActionTool(services: MatbotMachine, meta: Store<StoreDef>): Tool {
+function makeStoreActionTool(services: MatbotMachine, meta: Store<StoreDef>): Tool<ToolResultOf<'store_action'>> {
   const pluginName = services.self?.name;
 
   // Shared by create and expose: persist the def and (re)register its tool. Caller has already
   // settled the create-vs-expose existence check.
-  async function define(input: StoreActionInput): Promise<ToolEvent> {
+  async function define(input: StoreActionInput): Promise<ToolEvent<ToolResultOf<'store_action'>>> {
     if (!input.namespace)   return { type: 'error', message: 'requires "namespace".' };
     if (!input.description) return { type: 'error', message: 'requires "description" (what the store holds).' };
     if (!input.shape)       return { type: 'error', message: 'requires "shape" (a flattened TypeScript type/interface).' };
@@ -220,7 +231,7 @@ function makeStoreActionTool(services: MatbotMachine, meta: Store<StoreDef>): To
       required: ['action'],
     },
     executor: {
-      async *execute(rawInput: unknown): AsyncIterable<ToolEvent> {
+      async *execute(rawInput: unknown) {
         const input = (rawInput ?? {}) as StoreActionInput;
 
         switch (input.action) {

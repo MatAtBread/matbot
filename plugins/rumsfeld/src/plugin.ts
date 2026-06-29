@@ -1,5 +1,5 @@
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
-import type { MatbotPluginSpec, MatbotMachine, ToolExecutor, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
+import type { MatbotPluginSpec, MatbotMachine, ToolExecutor, ToolContext, ToolResultOf } from '@matatbread/matbot-plugin-api';
 
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolResults {
@@ -13,8 +13,8 @@ export function createRumsfeldPlugin(): MatbotPluginSpec {
     apiVersion: PLUGIN_API_VERSION,
 
     async setup(services: MatbotMachine) {
-      const executor: ToolExecutor = {
-        async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
+      const executor: ToolExecutor<ToolResultOf<'contextual_search'>> = {
+        async *execute(input: unknown, ctx: ToolContext) {
           const { terms } = input as { terms: Array<{ term: string; context?: string }> };
 
           if (terms.length === 0) {
@@ -83,8 +83,8 @@ export function createRumsfeldPlugin(): MatbotPluginSpec {
         executor,
       });
 
-      const findFactExecutor: ToolExecutor = {
-        async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent<string[] | null>> {
+      const findFactExecutor: ToolExecutor<ToolResultOf<'find_fact'>> = {
+        async *execute(input: unknown, ctx: ToolContext) {
           const { question, terms, provider: explicitProvider } =
             input as { question?: string; terms?: Array<{ term: string; context?: string }>; provider?: string };
 

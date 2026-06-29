@@ -1,4 +1,4 @@
-import type { Tool, ToolEvent, ToolContext, MatbotPlugin, FormField } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolResult, ToolResultOf, ToolContext, MatbotPlugin, FormField, Runtime } from '@matatbread/matbot-plugin-api';
 import { CONFIRM_YES, CONFIRM_NO } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins, getRegisteredTools, getRegisteredFrontendPlugins,
          getRegisteredServiceKeys, getHookPlugins, getSystemContextPlugins,
@@ -27,6 +27,33 @@ type PluginInput =
 // Baked-but-idle plugins the assembler inlined (config.availablePlugins): present in the artifact +
 // import map but not auto-loaded. The browser analogue of node's on-disk `plugins` scan.
 interface AvailablePlugin { name: string; specifier: string; matbotRuntime?: string[]; description?: string }
+
+interface ToolSummary { name: string; description: string }
+
+declare module '@matatbread/matbot-plugin-api' {
+  interface ToolResults {
+    plugin:
+      | ToolResult<{
+          loaded: Array<{
+            name:           string;
+            apiVersion:     string;
+            types:          string[];
+            tools:          ToolSummary[];
+            specifier:      string;
+            description?:   string;
+            matbotRuntime?: readonly Runtime[];
+          }>;
+          configured:   string[];
+          builtinTools?: ToolSummary[] | undefined;
+        }, { action: 'list' }>
+      | ToolResult<AvailablePlugin[], { action: 'discover_local' }>
+      | ToolResult<{ message: string; installationMessage?: string }, { action: 'add'       }>
+      | ToolResult<{ message: string; installationMessage?: string }, { action: 'remove'    }>
+      | ToolResult<{ message: string; installationMessage?: string }, { action: 'reload'    }>
+      | ToolResult<{ message: string; installationMessage?: string }, { action: 'store-key' }>;
+  }
+}
+
 function bakedAvailablePlugins(): AvailablePlugin[] {
   const mb = (globalThis as unknown as { __MB__?: { config?: { availablePlugins?: AvailablePlugin[] } } }).__MB__;
   return mb?.config?.availablePlugins ?? [];
@@ -62,9 +89,9 @@ function pluginTypes(p: MatbotPlugin, registeredToolPlugins: Set<string>): strin
  * specifiers (URL paths or import-map / inlined synthetic ids resolved by the host loader), and the
  * added set is persisted via the injected `extras` store so it survives a realm reload.
  */
-export function createBrowserPluginTool(extras: ExtraPlugins): Tool {
-  const executor = {
-    async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
+export function createBrowserPluginTool(extras: ExtraPlugins): Tool<ToolResultOf<'plugin'>> {
+  const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
+    async *execute(input: unknown, ctx: ToolContext) {
       const { action } = input as PluginInput;
 
       if (action === 'list') {

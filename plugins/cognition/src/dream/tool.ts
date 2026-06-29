@@ -27,12 +27,18 @@
  *     about why dream-time did what it did", which is exactly what this whole exercise was for.
  */
 
-import type { MatbotMachine, Tool, ToolExecutor, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
+import type { MatbotMachine, Tool, ToolExecutor, ToolResultOf, ToolContext } from '@matatbread/matbot-plugin-api';
 import { runOnce } from './runOnce.js';
 import { createLlmRanker } from './llmRanker.js';
 import { createLlmMerger } from './llmMerger.js';
 import type { DreamRun } from './types.js';
 import { DREAM_RANKER_PROVIDER_KEY, DREAM_MERGER_PROVIDER_KEY } from '../inner-voice/tool.js';
+
+declare module '@matatbread/matbot-plugin-api' {
+  interface ToolResults {
+    dream_time: DreamRun;
+  }
+}
 
 // Process-local mutex. A Promise the next caller awaits; the chain extends with every call and
 // settles in order. Simple, correct, no third-party dependency.
@@ -44,9 +50,9 @@ function serialise<T>(fn: () => Promise<T>): Promise<T> {
   return next;
 }
 
-export function createDreamTimeTool(services: MatbotMachine): Tool {
-  const executor: ToolExecutor = {
-    async *execute(_input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
+export function createDreamTimeTool(services: MatbotMachine): Tool<ToolResultOf<'dream_time'>> {
+  const executor: ToolExecutor<ToolResultOf<'dream_time'>> = {
+    async *execute(_input: unknown, ctx: ToolContext) {
       if (ctx.provider === undefined) {
         yield {
           type:    'error',

@@ -1,5 +1,14 @@
-import type { Tool, ToolEvent, ToolContext, MatbotPluginSpec, MatbotMachine, PluginSettings } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolEvent, ToolResult, ToolResultOf, ToolContext, MatbotPluginSpec, MatbotMachine, PluginSettings } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
+
+declare module '@matatbread/matbot-plugin-api' {
+  interface ToolResults {
+    mcp_action:
+      | ToolResult<{ message: string; tools: string[]; instructions?: string }, { action: 'add'    }>
+      | ToolResult<{ servers: unknown[] },                                       { action: 'list'   }>
+      | ToolResult<{ message: string },                                          { action: 'remove' }>;
+  }
+}
 import type { MCPClient, MCPToolDef, MCPRemoteConfig } from '@matatbread/matbot-mcp-http';
 import { makeProxyTool, proxyToolName, RemoteMcpManager } from '@matatbread/matbot-mcp-http';
 import process from 'node:process';
@@ -51,7 +60,7 @@ export function createMCPPlugin(): MatbotPluginSpec {
     | { action: 'list' }
     | { action: 'remove'; name: string };
 
-  async function* doAdd(raw: Extract<McpAction, { action: 'add' }>): AsyncIterable<ToolEvent> {
+  async function* doAdd(raw: Extract<McpAction, { action: 'add' }>): AsyncIterable<ToolEvent<ToolResultOf<'mcp_action'>>> {
     if (localActive.has(raw.name) || remote!.has(raw.name)) {
       yield { type: 'error', message: `An MCP server named "${raw.name}" is already connected. Remove it first.` };
       return;
@@ -100,7 +109,7 @@ export function createMCPPlugin(): MatbotPluginSpec {
     }
   }
 
-  async function* doRemove(name: string, ctx: ToolContext): AsyncIterable<ToolEvent> {
+  async function* doRemove(name: string, ctx: ToolContext): AsyncIterable<ToolEvent<ToolResultOf<'mcp_action'>>> {
     // Remote servers belong to the delegated service; everything else is local.
     if (remote!.has(name)) {
       const confirm = await ctx.prompt(`Remove MCP server "${name}"? [y/N]`, 'N');
@@ -127,7 +136,7 @@ export function createMCPPlugin(): MatbotPluginSpec {
     yield { type: 'result', value: { message: `"${name}" disconnected and removed. Its tools have been unregistered.` } };
   }
 
-  const mcpActionTool: Tool = {
+  const mcpActionTool: Tool<ToolResultOf<'mcp_action'>> = {
     name: 'mcp_action',
     description: `Manage MCP (Model Context Protocol) server connections. An MCP server exposes a set
 of tools over a transport; once connected, each is registered under \`mcp__<server>__<tool>\` and is
@@ -164,7 +173,7 @@ SHAPE  (TypeScript)
       },
     },
     executor: {
-      async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
+      async *execute(input: unknown, ctx: ToolContext) {
         const act = input as McpAction;
         switch (act.action) {
           case 'add':    yield* doAdd(act); return;

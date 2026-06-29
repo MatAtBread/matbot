@@ -1,5 +1,17 @@
-import type { Tool, ToolEvent, ToolContext, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolContext, ToolResult, ToolResultOf, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
+
+declare module '@matatbread/matbot-plugin-api' {
+  interface ToolResults {
+    // One arm per action: a caller of `invokeTool(machine, 'workspace_action', { action: '…' })` gets the
+    // matching result narrowed by the `action` it passed (see ToolResult / the multi-action note on ToolResults).
+    workspace_action:
+      | ToolResult<string,                            { action: 'read'   }>  // file contents (utf8 or base64)
+      | ToolResult<{ path: string; bytes: number },   { action: 'write'  }>  // stored path and byte count
+      | ToolResult<Array<{ path: string; size: number }>, { action: 'list' }>  // matching files
+      | ToolResult<{ path: string },                  { action: 'delete' }>; // the removed path
+  }
+}
 
 const WORKSPACE_NS = 'workspace';
 
@@ -69,7 +81,104 @@ type WorkspaceInput =
   | { action: 'list';   path?: string; recursive?: boolean }
   | { action: 'delete'; path: string };
 
-const workspaceTool: Tool = {
+const workspaceExecutor: ToolExecutor<ToolResultOf<'workspace_action'>> = {
+  async *execute(input: unknown, ctx: ToolContext) {
+    const args = input as Partial<WorkspaceInput> & { action?: string };
+    if (!ctx.files) { yield { type: 'error', message: 'No file store is configured for this session.' }; return; }
+
+    switch (args.action) {
+      case 'read': {
+        const { path: inputPath, encoding = 'utf8' } = args as Extract<WorkspaceInput, { action: 'read' }>;
+        if (!inputPath) { yield { type: 'error', message: 'action "read" requires "path".' }; return; }
+        const safe = safePath(inputPath);
+        if (!safe) { yield { type: 'error', message: 'Path escapes the workspace directory.' }; return; }
+
+        const handle = await ctx.files.getByName(safe, WORKSPACE_NS);
+        if (!handle) { yield { type: 'error', message: `File not found: "${safe}"` }; return; }
+
+        let bytes: Uint8Array;
+        try {
+          bytes = await collectStream(handle.stream(ctx.signal));
+        } catch (e) {
+          yield { type: 'error', message: String(e) };
+          return;
+        }
+
+        yield {
+          type:  'result',
+          value: encoding === 'base64' ? uint8ToBase64(bytes) : new TextDecoder().decode(bytes),
+        };
+        return;
+      }
+
+      case 'write': {
+        const { path: inputPath, content, encoding = 'utf8' } = args as Extract<WorkspaceInput, { action: 'write' }>;
+        if (!inputPath) { yield { type: 'error', message: 'action "write" requires "path".' }; return; }
+        if (content === undefined) { yield { type: 'error', message: 'action "write" requires "content".' }; return; }
+        const safe = safePath(inputPath);
+        if (!safe) { yield { type: 'error', message: 'Path escapes the workspace directory.' }; return; }
+
+        const bytes = encoding === 'base64'
+          ? base64ToUint8(content)
+          : new TextEncoder().encode(content);
+
+        async function* makeStream(): AsyncIterable<Uint8Array> { yield bytes; }
+
+        let handle;
+        try {
+          handle = await ctx.files.put(safe, mimeFromName(safe), makeStream(), { namespace: WORKSPACE_NS, allowed: true });
+        } catch (e) {
+          yield { type: 'error', message: String(e) };
+          return;
+        }
+
+        yield { type: 'result', value: { path: safe, bytes: handle.size } };
+        return;
+      }
+
+      case 'list': {
+        const { path: inputPath, recursive = false } = args as Extract<WorkspaceInput, { action: 'list' }>;
+        const prefix = inputPath ? `${safePath(inputPath) ?? ''}/` : '';
+
+        const files: Array<{ path: string; size: number }> = [];
+        try {
+          for await (const handle of ctx.files.list({ namespace: WORKSPACE_NS })) {
+            const name = handle.name;
+            if (prefix && !name.startsWith(prefix)) continue;
+            const rel = prefix ? name.slice(prefix.length) : name;
+            if (!recursive && rel.includes('/')) continue;
+            files.push({ path: name, size: handle.size });
+          }
+        } catch (e) {
+          yield { type: 'error', message: String(e) };
+          return;
+        }
+
+        yield { type: 'result', value: files };
+        return;
+      }
+
+      case 'delete': {
+        const { path: inputPath } = args as Extract<WorkspaceInput, { action: 'delete' }>;
+        if (!inputPath) { yield { type: 'error', message: 'action "delete" requires "path".' }; return; }
+        const safe = safePath(inputPath);
+        if (!safe) { yield { type: 'error', message: 'Path escapes the workspace directory.' }; return; }
+
+        const handle = await ctx.files.getByName(safe, WORKSPACE_NS);
+        if (!handle) { yield { type: 'error', message: `File not found: "${safe}"` }; return; }
+
+        await ctx.files.delete(handle.id);
+        yield { type: 'result', value: { path: safe } };
+        return;
+      }
+
+      default:
+        yield { type: 'error', message: `Unknown action "${String(args.action)}". Expected one of: read, write, list, delete.` };
+    }
+  },
+};
+
+const workspaceTool: Tool<ToolResultOf<'workspace_action'>> = {
   name: 'workspace_action',
   description:
     'Read, write, list, and delete files in the **workspace** — a small scratch ' +
@@ -97,102 +206,7 @@ const workspaceTool: Tool = {
       recursive: { type: 'boolean', default: false, description: 'list only: include files in subdirectories.' },
     },
   },
-  executor: {
-    async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
-      const args = input as Partial<WorkspaceInput> & { action?: string };
-      if (!ctx.files) { yield { type: 'error', message: 'No file store is configured for this session.' }; return; }
-
-      switch (args.action) {
-        case 'read': {
-          const { path: inputPath, encoding = 'utf8' } = args as Extract<WorkspaceInput, { action: 'read' }>;
-          if (!inputPath) { yield { type: 'error', message: 'action "read" requires "path".' }; return; }
-          const safe = safePath(inputPath);
-          if (!safe) { yield { type: 'error', message: 'Path escapes the workspace directory.' }; return; }
-
-          const handle = await ctx.files.getByName(safe, WORKSPACE_NS);
-          if (!handle) { yield { type: 'error', message: `File not found: "${safe}"` }; return; }
-
-          let bytes: Uint8Array;
-          try {
-            bytes = await collectStream(handle.stream(ctx.signal));
-          } catch (e) {
-            yield { type: 'error', message: String(e) };
-            return;
-          }
-
-          yield {
-            type:  'result',
-            value: encoding === 'base64' ? uint8ToBase64(bytes) : new TextDecoder().decode(bytes),
-          };
-          return;
-        }
-
-        case 'write': {
-          const { path: inputPath, content, encoding = 'utf8' } = args as Extract<WorkspaceInput, { action: 'write' }>;
-          if (!inputPath) { yield { type: 'error', message: 'action "write" requires "path".' }; return; }
-          if (content === undefined) { yield { type: 'error', message: 'action "write" requires "content".' }; return; }
-          const safe = safePath(inputPath);
-          if (!safe) { yield { type: 'error', message: 'Path escapes the workspace directory.' }; return; }
-
-          const bytes = encoding === 'base64'
-            ? base64ToUint8(content)
-            : new TextEncoder().encode(content);
-
-          async function* makeStream(): AsyncIterable<Uint8Array> { yield bytes; }
-
-          let handle;
-          try {
-            handle = await ctx.files.put(safe, mimeFromName(safe), makeStream(), { namespace: WORKSPACE_NS, allowed: true });
-          } catch (e) {
-            yield { type: 'error', message: String(e) };
-            return;
-          }
-
-          yield { type: 'result', value: { path: safe, bytes: handle.size } };
-          return;
-        }
-
-        case 'list': {
-          const { path: inputPath, recursive = false } = args as Extract<WorkspaceInput, { action: 'list' }>;
-          const prefix = inputPath ? `${safePath(inputPath) ?? ''}/` : '';
-
-          const files: Array<{ path: string; size: number }> = [];
-          try {
-            for await (const handle of ctx.files.list({ namespace: WORKSPACE_NS })) {
-              const name = handle.name;
-              if (prefix && !name.startsWith(prefix)) continue;
-              const rel = prefix ? name.slice(prefix.length) : name;
-              if (!recursive && rel.includes('/')) continue;
-              files.push({ path: name, size: handle.size });
-            }
-          } catch (e) {
-            yield { type: 'error', message: String(e) };
-            return;
-          }
-
-          yield { type: 'result', value: files };
-          return;
-        }
-
-        case 'delete': {
-          const { path: inputPath } = args as Extract<WorkspaceInput, { action: 'delete' }>;
-          if (!inputPath) { yield { type: 'error', message: 'action "delete" requires "path".' }; return; }
-          const safe = safePath(inputPath);
-          if (!safe) { yield { type: 'error', message: 'Path escapes the workspace directory.' }; return; }
-
-          const handle = await ctx.files.getByName(safe, WORKSPACE_NS);
-          if (!handle) { yield { type: 'error', message: `File not found: "${safe}"` }; return; }
-
-          await ctx.files.delete(handle.id);
-          yield { type: 'result', value: { path: safe } };
-          return;
-        }
-
-        default:
-          yield { type: 'error', message: `Unknown action "${String(args.action)}". Expected one of: read, write, list, delete.` };
-      }
-    },
-  },
+  executor: workspaceExecutor,
 };
 
 export const plugin: MatbotPluginSpec = {

@@ -465,11 +465,61 @@ export type ToolEvent<Result = unknown> =
  * name with no registered entry resolves to `unknown` (the caller must narrow). This is a pure
  * type-level construct — no runtime validation; it pins, at the call site, the contract a tool's
  * executor already produces. Keep the entry in sync with what the executor actually yields.
+ *
+ * **Multi-action tools** are a weird form of overloaded function: the same tool returns different
+ * shapes depending on its params. Register such a tool as a union of {@link ToolResult} *arms*, each
+ * pairing a result with the discriminating params *pattern* that selects it — `invokeTool` matches the
+ * call's literal params against the patterns and narrows the result to the matching arm:
+ *
+ *   declare module '@matatbread/matbot-plugin-api' {
+ *     interface ToolResults {
+ *       session_action:
+ *         | ToolResult<Session,                       { action: 'get' }>
+ *         | ToolResult<{ id: string; title: string }, { action: 'rename' }>;
+ *     }
+ *   }
+ *   // invokeTool(machine, 'session_action', { action: 'get', sessionId }) → result is Session
+ *
+ * The pattern is *any* discriminating field(s), not just `action` (a tool keying on `interval`'s
+ * presence registers `ToolResult<…, { interval: string }>`). It is a *pattern*, not the full input:
+ * key only on the discriminant so a call carrying just that field still matches. When no arm's pattern
+ * matches (a non-literal discriminant, or an absence-discriminant the positive patterns can't express),
+ * the result falls back to the union of every arm — always sound, just less narrow.
  */
 export interface ToolResults {}
 
-/** The `result` value a tool named `K` yields, or `unknown` when `K` isn't registered in {@link ToolResults}. */
-export type ToolResultOf<K extends string> = K extends keyof ToolResults ? ToolResults[K] : unknown;
+/**
+ * One overload arm of a multi-action tool registered in {@link ToolResults}: the `Result` it yields
+ * for a call whose params match the discriminating pattern `Args`. `Args` defaults to `unknown` (an
+ * arm that matches any params). Purely type-level — the `__` fields are phantom and never constructed.
+ */
+export interface ToolResult<Result, Args = unknown> {
+  readonly __result: Result;
+  readonly __args:   Args;
+}
+
+type ToolResultArmed<E>           = E extends ToolResult<unknown, unknown> ? true : false;
+type ToolResultUnion<E>           = E extends ToolResult<infer R, unknown> ? R : never;
+type ToolResultMatched<E, P>      = E extends ToolResult<infer R, infer A> ? (P extends A ? R : never) : never;
+
+/** The full set of `result` values a tool named `K` may yield — the union over all its arms (for an
+ *  arm-based entry), the entry itself (for a plain entry), or `unknown` when `K` is unregistered. This
+ *  is what an executor binds against (`ToolExecutor<ToolResultOf<'my_tool'>>`): it must cover every arm. */
+export type ToolResultOf<K extends string> =
+  K extends keyof ToolResults
+    ? ToolResultArmed<ToolResults[K]> extends true ? ToolResultUnion<ToolResults[K]> : ToolResults[K]
+    : unknown;
+
+/** The `result` a call to tool `K` with params `P` yields: for an arm-based entry, the arm whose
+ *  pattern `P` matches (or the full union when none match — always sound); otherwise {@link ToolResultOf}. */
+export type ToolResultFor<K extends string, P> =
+  K extends keyof ToolResults
+    ? ToolResultArmed<ToolResults[K]> extends true
+      ? ([ToolResultMatched<ToolResults[K], P>] extends [never]
+          ? ToolResultUnion<ToolResults[K]>
+          : ToolResultMatched<ToolResults[K], P>)
+      : ToolResults[K]
+    : unknown;
 
 /**
  * Ask the user a question and resolve with their answer. The host supplies the
@@ -520,15 +570,23 @@ export interface ToolContext {
   unloadPlugin(specifier: string): Promise<boolean>;
 }
 
-export interface ToolExecutor {
-  execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent>;
+/**
+ * A tool's runtime. `R` is the type of the `value` carried by its `result` event — declared once,
+ * at the source, so the executor's yields and the tool's {@link ToolResults} registry entry can't
+ * silently drift. The `unknown` default keeps untyped executors compiling untouched, and covariance
+ * means a narrower `ToolExecutor<X>` still satisfies `ToolExecutor` (i.e. `ToolExecutor<unknown>`),
+ * so the heterogeneous registry boundary (`Tool[]`) accepts any executor. Bind `R` to the registry
+ * entry with `ToolExecutor<ToolResultOf<'my_tool'>>` so the single augmentation is the source of truth.
+ */
+export interface ToolExecutor<R = unknown> {
+  execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent<R>>;
 }
 
-export interface Tool {
+export interface Tool<R = unknown> {
   name:         string;
   description:  string;
   inputSchema:  JSONSchema;
-  executor:     ToolExecutor;
+  executor:     ToolExecutor<R>;
   pluginName?:  string;
 }
 

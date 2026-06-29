@@ -1,5 +1,17 @@
-import type { Tool, ToolEvent, ToolContext, Session, Store } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolResult, ToolResultOf, ToolContext, Session, Store } from '@matatbread/matbot-plugin-api';
 import { lastActivityAt } from '@matatbread/matbot-plugin-api';
+
+declare module '@matatbread/matbot-plugin-api' {
+  interface ToolResults {
+    // One arm per action: a caller of `invokeTool(machine, 'session_action', { action: '…' })` gets the
+    // matching result narrowed by the `action` it passed (see ToolResult / the multi-action note on ToolResults).
+    session_action:
+      | ToolResult<Array<{ id: string; title: string | undefined; preview: string; updatedAt: string }>, { action: 'list'   }>
+      | ToolResult<Session,                          { action: 'get'    }>
+      | ToolResult<{ id: string; title: string },    { action: 'rename' }>
+      | ToolResult<{ id: string; status: 'archived' }, { action: 'hide'  }>;
+  }
+}
 
 function sessionPreview(session: Session): string {
   const first = session.messages.find(m => m.role === 'user');
@@ -22,7 +34,7 @@ type SessionInput =
   | { action: 'rename'; sessionId: string; title: string }
   | { action: 'hide';   sessionId: string };
 
-function makeSessionActionTool(store: Store<Session>): Tool {
+function makeSessionActionTool(store: Store<Session>): Tool<ToolResultOf<'session_action'>> {
   return {
     name: 'session_action',
     description:
@@ -49,7 +61,7 @@ function makeSessionActionTool(store: Store<Session>): Tool {
       },
     },
     executor: {
-      async *execute(input: unknown, _ctx: ToolContext): AsyncIterable<ToolEvent> {
+      async *execute(input: unknown, _ctx: ToolContext) {
         const args = input as Partial<SessionInput> & { action?: string };
 
         switch (args.action) {
@@ -117,3 +129,4 @@ function makeSessionActionTool(store: Store<Session>): Tool {
     },
   };
 }
+
