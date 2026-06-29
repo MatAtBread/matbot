@@ -77,6 +77,12 @@ declare module '@matatbread/matbot-plugin-api' {
 }
 `;
 
+// Where compiled plugins are written, installed from, and loaded — relative to the project root (the
+// dir holding matbot.yaml). NOT `.data/` (the LLM's read-write workspace) nor `.plugins/` (the
+// re-fetchable remote cache: a compiled plugin has no upstream, so a cache clear would lose it
+// forever). A dedicated, gitignored, durable home of its own. Change here if that decision changes.
+const COMPILED_PLUGINS_DIR = 'compiled-plugins';
+
 // Render a committed session as an ordered, readable trace: the agent's reasoning, narration, tool
 // calls and their results, interleaved as they happened. Tool results are paired to calls by id and
 // truncated — a distillation pass reads this to separate the working method from exploratory steps.
@@ -240,11 +246,11 @@ export function createSkillCompilerPlugin(): MatbotPluginSpec {
           }, null, 2);
 
           // Compute relative paths from the plugin build dir to tsconfig.base.json and the plugin-api
-          // package at the project root. The build dir is <projectRoot>/.data/files/skill_compiler/plg_<name>/
+          // package at the project root. The build dir is <projectRoot>/<COMPILED_PLUGINS_DIR>/plg_<name>/
           // which is outside the pnpm workspace packages, so tsc needs explicit paths to resolve the peer dep.
           const { dirname: tsDirname, join: tsJoin, relative: tsRelative } = await import('node:path');
           const projectRoot = tsDirname(services.configPath!);
-          const pluginBuildDir = tsJoin(projectRoot, '.data', 'files', 'skill_compiler', pluginDir);
+          const pluginBuildDir = tsJoin(projectRoot, COMPILED_PLUGINS_DIR, pluginDir);
           const baseTsconfigPath = tsRelative(pluginBuildDir, tsJoin(projectRoot, 'tsconfig.base.json'));
           const pluginApiPath = tsRelative(pluginBuildDir, tsJoin(projectRoot, 'plugin-api', 'src', 'index.ts'));
           const tsconfigJson = JSON.stringify({
@@ -303,34 +309,34 @@ export const plugin: MatbotPluginSpec = {
 
 Rules: implement the SPEC, using the worked example's exact URLs/queries/field names to remove ambiguity. Reproduce only the steps that meet the spec — never the example's exploratory or discovery calls. Implement EVERY branch the spec describes — each arm of an if/else, each conditional path — even when the worked example exercised only one. The example is a single trace through the spec; the spec defines all the paths. E.g. if Step 1 says "if no result, ask for free text; if more than one result, present a choice", implement both the text ask_user and the select ask_user, not just whichever the example happened to hit. Drive everything off the tool's input parameters; treat the example's specific values as illustrative, not constants (except genuine endpoints/queries the spec implies are fixed). Pass ctx.signal through every fetch/singleTurn/invokeTool. When calling another tool, forward the executor's whole ctx as invokeTool's 4th argument — invokeTool(services, name, params, ctx) — so session, signal, prompt AND provider propagate; never pass a hand-picked { session, signal } object, or a callee that needs an LLM (find_fact, singleTurn-based tools) will fail with "no provider". Yield progress/result/error events. NEVER extract a value from another tool's natural-language output with a regex or fixed-phrase string match (e.g. searchResult.match(/the location is (.+)/)) — that assumes an exact wording the tool will not reliably produce, so it silently fails. When a step needs a specific stored fact, use the find_fact tool (structured JSON { found, fact }), NOT contextual_search followed by string-parsing of its prose; if the spec names contextual_search for what is really a single-fact lookup, translate it to find_fact. Parse any tool result defensively — handle missing or differently-shaped data rather than assuming one rigid format. The project enforces strict TypeScript: verbatimModuleSyntax — use \ for type-only imports and \ for value imports; never use bare default imports unless the module has a real default export. The project also enables exactOptionalPropertyTypes — when a property is optional (key?: T), never pass undefined explicitly; omit the key instead. It enables noUncheckedIndexedAccess — array indexing returns T | undefined, so guard every array[i] access before using it. Output ONLY src/index.ts in a typescript fence.`;
 
-          // Set up the build dir once: the static files and the peer-dep symlink don't change between
-          // repair passes; only src/index.ts is regenerated. Workspace files land under
-          // <project>/.data/files/<path>, inside the project tree, so tsc and the runtime loader resolve
-          // @matatbread/* by walking up to the host node_modules — no machine-specific path.
+          // Write the plugin straight to disk with node:fs — NOT via workspace_action. The workspace is
+          // the user's artifact space, and routing build files through it created a hidden dependency on
+          // the workspace plugin (compile would fail if it wasn't loaded) plus a false assumption that the
+          // file store materialises on the local filesystem. The build needs a real local path it owns.
+          // The static files and the peer-dep symlink don't change between repair passes; only
+          // src/index.ts is regenerated.
           if (!services.configPath) {
-            yield { type: 'error', message: 'No configPath available; cannot locate the workspace on disk to typecheck.' };
+            yield { type: 'error', message: 'No configPath available; cannot locate the project root on disk.' };
             return;
           }
-          const wsRoot = `skill_compiler/${pluginDir}`;
           const { dirname, join } = await import('node:path');
-          const buildDir = join(dirname(services.configPath), '.data', 'files', 'skill_compiler', pluginDir);
+          const relDir   = `${COMPILED_PLUGINS_DIR}/${pluginDir}`;
+          const buildDir = join(dirname(services.configPath), COMPILED_PLUGINS_DIR, pluginDir);
 
+          const { mkdir, symlink, readlink, writeFile } = await import('node:fs/promises');
           yield { type: 'progress', pct: 85, message: 'Writing plugin scaffold...' };
           try {
-            await toolText(invokeTool(services, 'workspace_action',
-              { action: 'write', path: `${wsRoot}/package.json`, content: packageJson }, ctx));
-            await toolText(invokeTool(services, 'workspace_action',
-              { action: 'write', path: `${wsRoot}/tsconfig.json`, content: tsconfigJson }, ctx));
-            await toolText(invokeTool(services, 'workspace_action',
-              { action: 'write', path: `${wsRoot}/src/matbot-tools.d.ts`, content: TOOL_RESULTS_DTS }, ctx));
+            await mkdir(join(buildDir, 'src'), { recursive: true });
+            await writeFile(join(buildDir, 'package.json'), packageJson);
+            await writeFile(join(buildDir, 'tsconfig.json'), tsconfigJson);
+            await writeFile(join(buildDir, 'src', 'matbot-tools.d.ts'), TOOL_RESULTS_DTS);
           } catch (e) {
-            yield { type: 'error', message: `Could not write plugin to workspace: ${e instanceof Error ? e.message : String(e)}` };
+            yield { type: 'error', message: `Could not write plugin to ${relDir}: ${e instanceof Error ? e.message : String(e)}` };
             return;
           }
 
           // node_modules symlink so Node's ESM resolver finds the peer dep at runtime — the build dir is
           // outside the pnpm workspace packages, so it has no node_modules of its own.
-          const { mkdir, symlink, readlink } = await import('node:fs/promises');
           const linkDir = join(buildDir, 'node_modules', '@matatbread');
           const linkPath = join(linkDir, 'matbot-plugin-api');
           const linkTarget = join(dirname(services.configPath), 'plugin-api');
@@ -407,10 +413,9 @@ Fix every reported error. Change only what each error requires; keep the tool na
             indexSource = src;
 
             try {
-              await toolText(invokeTool(services, 'workspace_action',
-                { action: 'write', path: `${wsRoot}/src/index.ts`, content: indexSource }, ctx));
+              await writeFile(join(buildDir, 'src', 'index.ts'), indexSource);
             } catch (e) {
-              yield { type: 'error', message: `Could not write plugin to workspace: ${e instanceof Error ? e.message : String(e)}` };
+              yield { type: 'error', message: `Could not write ${relDir}/src/index.ts: ${e instanceof Error ? e.message : String(e)}` };
               return;
             }
 
@@ -424,17 +429,31 @@ Fix every reported error. Change only what each error requires; keep the tool na
             yield {
               type: 'result',
               value: {
-                status: 'typecheck_failed', skill, toolName, workspaceDir: wsRoot, passes: MAX_PASSES,
+                status: 'typecheck_failed', skill, toolName, dir: relDir, passes: MAX_PASSES,
                 method, excluded: design.excluded, typecheckOutput: typecheckOutput.slice(0, 2000),
               },
             };
             return;
           }
 
-          // Install it. `plugin add` is human-confirmation-gated by design, so forward ctx.prompt; the
-          // specifier is the local workspace dir (./-relative ⇒ classified 'local', package.json present)
-          // so it persists portably in matbot.yaml.
-          const specifier = `./.data/files/skill_compiler/${pluginDir}`;
+          // Install it via the `plugin` tool — but only if it's loaded. Installing (persisting to
+          // matbot.yaml + loading) is the plugin tool's job, a soft dependency: if it isn't present, the
+          // plugin is fully built on disk, so report compiled_not_installed with the specifier rather than
+          // failing. `plugin add` is human-confirmation-gated, so forward ctx.prompt (via ctx); the
+          // specifier is the local dir (./-relative ⇒ classified 'local', package.json present) so it
+          // persists portably in matbot.yaml.
+          const specifier = `./${relDir}`;
+          if (!services.tools.resolve('plugin')) {
+            yield {
+              type: 'result',
+              value: {
+                status: 'compiled_not_installed', skill, toolName, pluginName: pluginPkgName,
+                dir: relDir, specifier, typecheckOk, method, excluded: design.excluded,
+                installError: 'The `plugin` management tool is not loaded; install it manually with: plugin add ' + specifier,
+              },
+            };
+            return;
+          }
           yield { type: 'progress', pct: 97, message: 'Installing plugin...' };
           let installMessage: string;
           try {
@@ -446,7 +465,7 @@ Fix every reported error. Change only what each error requires; keep the tool na
               type: 'result',
               value: {
                 status: 'compiled_not_installed', skill, toolName, pluginName: pluginPkgName,
-                workspaceDir: wsRoot, specifier, typecheckOk, method, excluded: design.excluded,
+                dir: relDir, specifier, typecheckOk, method, excluded: design.excluded,
                 installError: e instanceof Error ? e.message : String(e),
               },
             };
@@ -458,7 +477,7 @@ Fix every reported error. Change only what each error requires; keep the tool na
             type: 'result',
             value: {
               status: 'installed', skill, classification, passes: pass - 1,
-              toolName, pluginName: pluginPkgName, workspaceDir: wsRoot, specifier, typecheckOk,
+              toolName, pluginName: pluginPkgName, dir: relDir, specifier, typecheckOk,
               method, excluded: design.excluded, install: installMessage,
             },
           };
@@ -469,7 +488,7 @@ Fix every reported error. Change only what each error requires; keep the tool na
         name: 'skill_compiler',
         description: `Compile a procedural markdown skill into an executable TypeScript plugin, then install it.
 
-Methodology: load from SkillManager → classify (only procedural skills compile) → demonstrate in a scratch session capturing the real working trace → distil the trace to the method that worked → generate TypeScript → write into the workspace → typecheck with tsc, feeding any errors back to the code generator to self-repair (up to 3 passes) → install via the plugin tool (asks for confirmation).
+Methodology: load from SkillManager → classify (only procedural skills compile) → demonstrate in a scratch session capturing the real working trace → distil the trace to the method that worked → generate TypeScript → write to ${COMPILED_PLUGINS_DIR}/ → typecheck with tsc, feeding any errors back to the code generator to self-repair (up to 3 passes) → install via the plugin tool (asks for confirmation).
 
 Compiled plugins use: fetch() for HTTP, services.singleTurn() for LLM, invokeTool() for tools, plain JS for logic.`,
         inputSchema: {

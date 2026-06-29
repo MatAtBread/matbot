@@ -252,6 +252,17 @@ churn and less likely to affect a consumer who doesn't use them.
   when the analysis pass hasn't run yet — re-saving the skill regenerates the metadata. Existing skills
   pick up the field on their next content change.
 
+- **skills_compiler** — compiled plugins are now written with `node:fs` to a dedicated, gitignored
+  `compiled-plugins/` directory (a module-level `COMPILED_PLUGINS_DIR` constant, relative to the project
+  root) and installed from there, instead of being routed through `workspace_action` into
+  `.data/files/`. That removed a hidden runtime dependency on the workspace plugin (the compile failed
+  if it wasn't loaded) and a false assumption that the file store materialises on the local filesystem;
+  it also drops the `.meta.json` sidecars the file store left in the build dir. The location is
+  deliberately neither `.data/` (the LLM's read-write space) nor `.plugins/` (the re-fetchable remote
+  cache — a compiled plugin has no upstream, so a cache clear would lose it). Install is now a *soft*
+  dependency on the `plugin` tool: if it isn't loaded, the plugin is fully built on disk and the result
+  is `compiled_not_installed` with the specifier, rather than a hard failure.
+
 - **skills_compiler** — typechecks the generated plugin by running the real `tsc` binary (resolved from
   the `typescript` dependency — no `npx`) as an **awaited async subprocess**, rather than a blocking
   `execSync`/in-process compile. Synchronous typechecking pinned the event loop and froze the web UI for
