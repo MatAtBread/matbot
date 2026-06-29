@@ -315,6 +315,16 @@ churn and less likely to affect a consumer who doesn't use them.
   silent runtime failure. Codegen is also now told to implement every branch the skill describes (each
   arm of a conditional), not just the path the worked example happened to exercise.
 
+- **skills_compiler** — the `matbot-tools.d.ts` shipped to each generated plugin is now **derived from the
+  live type graph** instead of a hardcoded three-tool list. At compile time the compiler builds a TS
+  program over the workspace's tool packages, reads the merged `ToolResults`, and emits a self-contained
+  `declare module` for every tool whose result type is *portable* (references only plugin-api / TS-lib
+  types) — so a generated plugin gets correct `toolResult` types (and, for multi-action tools, per-action
+  narrowing) across ~21 built-in tools rather than three. Tools whose result references a package-private
+  type are skipped (they resolve to `unknown`, as before); the build falls back to the static list when
+  the workspace sources aren't on disk. The derivation runs in-process (briefly blocks the event loop,
+  like the older in-process typecheck did) — a worker-thread move is the obvious next step.
+
 - **skills_compiler** — code-generation guidance now forbids extracting a value from another tool's
   natural-language output with a regex / fixed-phrase match (a brittle anti-pattern that silently fails
   when the wording differs), and directs single-fact lookups to the structured `find_fact` tool instead
