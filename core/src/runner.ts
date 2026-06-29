@@ -288,7 +288,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
             case 'file':     yield { type: 'file', handle: toolEv.handle, traceId }; break;
             case 'result':   result = toolEv.value; break;
             case 'marker':   toolMarkers.push({ type: 'marker', creator: toolEv.creator, data: toolEv.data }); break;
-            case 'progress': break;
+            case 'progress': yield { type: 'tool:progress', callId: tc.id, pct: toolEv.pct, ...(toolEv.message !== undefined ? { message: toolEv.message } : {}), traceId }; break;
             case 'error':    result = {
               error: toolEv.message,
               ...(toolEv.stdout !== undefined ? { stdout: toolEv.stdout } : {}),

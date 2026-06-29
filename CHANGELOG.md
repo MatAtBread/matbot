@@ -33,6 +33,32 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### API gaps filled
 
+- **Typed tool results: `ToolResults` registry + `toolResult` reader.** A tool's result type is now
+  recoverable at the call site. `ToolResults` is an augmentable interface (same pattern as `MarkerData`)
+  mapping a tool's `name` → the type of the `value` it yields; `invokeTool` is generic over the name, so
+  `invokeTool(machine, 'find_fact', …)` is typed `AsyncIterable<ToolEvent<string[] | null>>`. The new
+  `toolResult(events)` drains the stream to that typed `result` value (the structured counterpart to
+  `toolText`, which collapses to a string). Unregistered tool names resolve to `unknown`, forcing the
+  caller to narrow. `ToolResults`, `ToolResultOf`, and `toolResult` are exported from
+  `@matatbread/matbot-plugin-api`; `ask-user` and `rumsfeld` register their tools' result types.
+
+- **`invokeTool` opts are now a named `InvokeToolOptions` type derived from `ToolContext`.** A tool
+  forwarding a call to another tool can pass its own `ctx` straight through as the 4th argument —
+  `session`, `signal`, `prompt` and crucially `provider` all propagate, so a callee that needs an LLM
+  (e.g. `find_fact`, or anything using `singleTurn`) inherits the turn's provider instead of failing
+  with "no provider". Previously the opts were an inline literal type, which invited callers to
+  hand-pick `{ session, signal }` and silently drop `provider`. Runtime behaviour is unchanged (the
+  function always threaded `opts.provider`); this makes the correct, complete forwarding the obvious
+  typed path. `InvokeToolOptions` is exported from `@matatbread/matbot-plugin-api`.
+
+- **Tool `progress` events now reach frontends.** A tool's `{ type: 'progress', pct, message? }`
+  `ToolEvent` was matched and dropped by the runner — the only `ToolEvent` variant that went nowhere.
+  The runner now forwards it as a new `tool:progress` `PipelineEvent` (`{ callId, pct, message?,
+  traceId }`), so it streams to every frontend like `tool:stdout`. The CLI prints `[pct%] message`;
+  the web frontend inverts the leading `pct`% of the tool block as a left→right wipe (cleared on
+  `tool:end`). Producers that already emitted progress (`edit-session` compaction, `skills_compiler`)
+  now surface it with no change.
+
 - **`invokeTool`/`toolText` — call a tool by name programmatically.** Two helpers exported from
   `@matatbread/matbot-plugin-api` formalise the resolve-then-drain pattern that callers (the triggers
   dispatcher) were hand-rolling. `invokeTool(machine, name, params, opts)` resolves the tool off
@@ -134,6 +160,17 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Bug fixes
 
+- **`LookupKnowledgeIndex` (the default in-memory index) now scores against curated metadata, not just
+  raw content.** It previously counted query-term occurrences in `entry.content` alone — ignoring the
+  LLM-derived `entities`, `tags`, and `summary` entirely — so a long, wordy entry could out-score a
+  short one whose curated entities named the term outright. Search now weights an exact entity match
+  highest, then fuzzy-entity / tags / summary / content headings, with raw body occurrences saturated
+  (`tf/(tf+k)`) to remove the length bias. Free-text matching is word-boundary (so "matt" no longer
+  matches "matter", "owl" not "fowl"); curated entity/tag matching stays fuzzy-substring (so "matt"
+  still finds the entity "Matthew Woolf"). The returned window also guarantees a few alternatives
+  (min 3, max 10) rather than only the single coverage winner. (The reranking `persist-ki-bge` backend
+  already used metadata; this brings the zero-config default in line.)
+
 - **`session.updatedAt` now tracks conversational activity, not structural/metadata edits.** It is the
   timestamp of the session's last message (its `createdAt`), or the session's own `createdAt` when empty —
   a materialised field upholding a single invariant (new helper `lastActivityAt(session)`), not a fresh
@@ -206,6 +243,77 @@ churn and less likely to affect a consumer who doesn't use them.
   (a missing secret) are still left in config to retry.
 
 ### Optional
+
+- **skills / skills_compiler** — a skill's procedural/informational split is now derived once by the
+  skills metadata analysis pass and cached on `SkillDoc.knowledge.classification` (two independent 0–1
+  confidences, `{ procedural, informational }`), instead of being re-classified by the skill compiler on
+  every run. `skill_action metadata` surfaces it. The compiler reads the cached scores: it compiles a
+  skill only when `procedural > informational`, and returns `no_metadata` (no longer self-classifies)
+  when the analysis pass hasn't run yet — re-saving the skill regenerates the metadata. Existing skills
+  pick up the field on their next content change.
+
+- **skills_compiler** — compiled plugins are now written with `node:fs` to a dedicated, gitignored
+  `compiled-plugins/` directory (a module-level `COMPILED_PLUGINS_DIR` constant, relative to the project
+  root) and installed from there, instead of being routed through `workspace_action` into
+  `.data/files/`. That removed a hidden runtime dependency on the workspace plugin (the compile failed
+  if it wasn't loaded) and a false assumption that the file store materialises on the local filesystem;
+  it also drops the `.meta.json` sidecars the file store left in the build dir. The location is
+  deliberately neither `.data/` (the LLM's read-write space) nor `.plugins/` (the re-fetchable remote
+  cache — a compiled plugin has no upstream, so a cache clear would lose it). Install is now a *soft*
+  dependency on the `plugin` tool: if it isn't loaded, the plugin is fully built on disk and the result
+  is `compiled_not_installed` with the specifier, rather than a hard failure.
+
+- **skills_compiler** — typechecks the generated plugin by running the real `tsc` binary (resolved from
+  the `typescript` dependency — no `npx`) as an **awaited async subprocess**, rather than a blocking
+  `execSync`/in-process compile. Synchronous typechecking pinned the event loop and froze the web UI for
+  its whole duration; the async child process keeps the loop free. `typescript` is now a real
+  `dependency` (it was a devDependency despite being needed at runtime).
+
+- **skills_compiler** — typecheck failures now self-repair instead of being terminal. The
+  generate→write→`tsc --noEmit` step is a loop (up to 3 passes): on failure the tsc errors and the
+  current `src/index.ts` are fed back to the code generator, which returns a corrected whole file, and
+  it re-checks. The repair loop owns the broken file, so the calling LLM no longer has to hunt for and
+  hand-patch it. Only after the passes are exhausted does it return `status: 'typecheck_failed'` (now
+  with `passes`); the success result reports how many passes it took.
+
+- **skills_compiler** — generated code now reads tool results through the typed `toolResult` (not
+  `toolText` + `JSON.parse`/regex), and the compiler ships a `matbot-tools.d.ts` alongside the plugin so
+  its separate compilation sees the common tools' result types (`ask_user`, `find_fact`,
+  `contextual_search`) — so a wrong-shape access is a compile error the repair loop catches rather than a
+  silent runtime failure. Codegen is also now told to implement every branch the skill describes (each
+  arm of a conditional), not just the path the worked example happened to exercise.
+
+- **skills_compiler** — code-generation guidance now forbids extracting a value from another tool's
+  natural-language output with a regex / fixed-phrase match (a brittle anti-pattern that silently fails
+  when the wording differs), and directs single-fact lookups to the structured `find_fact` tool instead
+  of `contextual_search` + string-parsing — translating the spec's tool choice when it names
+  `contextual_search` for what is really a single-datum lookup. The machine-API surface handed to codegen
+  now documents `find_fact`'s structured shape. Generated code is also now told to forward the whole
+  `ctx` to `invokeTool` (4th arg) rather than a hand-picked `{ session, signal }` subset, so a callee
+  that needs an LLM inherits the turn's provider — fixing compiled tools failing with "no provider".
+
+- **rumsfeld** — new `find_fact` tool: a granular companion to `contextual_search`. Where
+  `contextual_search` returns the single best-matching knowledge *document* to read (right for "load me
+  this skill/context"), `find_fact` is for retrieving one specific *datum* (a city, URL, date). It
+  searches the `KnowledgeIndex`, reads across the top matches (so a fact in a lower-ranked entry isn't
+  lost the way `contextual_search`'s top-entry-only return loses it), extracts the answer via the turn's
+  provider, and returns `{ found: true, fact, source? }` or `{ found: false }` — never a guess. Falls
+  back to a configured provider when the caller doesn't thread one, so it degrades gracefully rather
+  than hard-failing.
+
+- **rumsfeld** — sharpened the `contextual_search` tool description: terms must be specific
+  identifiers (proper nouns, named systems, personal identifiers), not bare generic nouns that collide
+  with any document merely discussing the topic, and deictic/self-referential queries ("here", "where
+  am I?", "my location") should resolve to the *user* (search their identifier/profile) rather than the
+  common noun. Addresses the term-quality root cause of generic searches returning topically-adjacent
+  skills instead of the fact being sought.
+
+- **frontend/web** — a tool's live progress `message` is now shown as a floating pill in the top-right
+  of its `tool-block` (previously only a hover `title`), so step-by-step progress (e.g. the skill
+  compiler's "repairing (pass 2/3)…") is visible at a glance. The pill is removed on `tool:end`.
+
+- **frontend/web** — the skill editor's metadata pane now shows the procedural/informational
+  classification as two labelled 0–1 bars, alongside the existing summary/entities/tags.
 
 - **tool-plugin** — `plugin reload` now re-downloads a changed remote (github/http) plugin instead of
   silently re-importing stale code. The `.plugins/` cache is write-once (skip-if-present), and reload's

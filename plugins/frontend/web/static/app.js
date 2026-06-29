@@ -706,7 +706,7 @@ function renderSkillMetadata(catalogue, knowledge) {
   if (!knowledge) {
     const note = document.createElement('div');
     note.className = 'meta-note';
-    note.textContent = 'No analysis yet. Metadata (summary, entities, tags) is generated in the background after a skill is saved.';
+    note.textContent = 'No analysis yet. Metadata (summary, entities, tags, classification) is generated in the background after a skill is saved.';
     el.appendChild(note);
     return;
   }
@@ -753,6 +753,43 @@ function renderSkillMetadata(catalogue, knowledge) {
   });
   section('Entities', () => chips(knowledge.entities, 'entity'));
   section('Tags', () => chips(knowledge.tags, 'tag'));
+
+  // Procedural/informational split: two independent 0–1 confidences derived by the analysis pass.
+  // The skill compiler gates on these (only a primarily-procedural skill compiles to a tool).
+  section('Classification', () => {
+    const c = knowledge.classification;
+    if (!c || (typeof c.procedural !== 'number' && typeof c.informational !== 'number')) {
+      const empty = document.createElement('div');
+      empty.className = 'meta-empty';
+      empty.textContent = '(none)';
+      return empty;
+    }
+    const bar = (name, value, cls) => {
+      const v = typeof value === 'number' ? Math.max(0, Math.min(1, value)) : 0;
+      const row = document.createElement('div');
+      row.className = 'meta-class-row';
+      const label = document.createElement('span');
+      label.className = 'meta-class-name';
+      label.textContent = name;
+      const track = document.createElement('div');
+      track.className = 'meta-class-track';
+      const fill = document.createElement('div');
+      fill.className = 'meta-class-fill ' + cls;
+      fill.style.width = (v * 100) + '%';
+      track.appendChild(fill);
+      const val = document.createElement('span');
+      val.className = 'meta-class-val';
+      val.textContent = v.toFixed(2);
+      row.append(label, track, val);
+      return row;
+    };
+    const wrap = document.createElement('div');
+    wrap.append(
+      bar('Procedural', c.procedural, 'procedural'),
+      bar('Informational', c.informational, 'informational'),
+    );
+    return wrap;
+  });
 }
 
 // One condition row: a phase <select> + the rubric <textarea>, both disabled (read-only) until ✎ is
@@ -2033,8 +2070,32 @@ async function renderTurn(sid, traceId) {
           break;
         }
 
+        case 'tool:progress': {
+          // Locate by callId rather than `currentTool` so a late event can't bleed onto the wrong
+          // block. Invert `pct`% of the block (left→right wipe), and surface any message as a floating
+          // pill in the block (plus a title, so the full text is on hover when the pill truncates).
+          const block = ev.callId ? messagesEl.querySelector('[data-call-id="' + ev.callId + '"]') : currentTool;
+          if (block) {
+            let bar = block.querySelector(':scope > .tool-progress');
+            if (!bar) { bar = document.createElement('div'); bar.className = 'tool-progress'; block.appendChild(bar); }
+            bar.style.width = Math.max(0, Math.min(100, ev.pct)) + '%';
+            if (ev.message) {
+              let pill = block.querySelector(':scope > .tool-progress-pill');
+              if (!pill) { pill = document.createElement('div'); pill.className = 'tool-progress-pill'; block.appendChild(pill); }
+              pill.textContent = ev.message;
+              block.title = ev.message;
+            }
+          }
+          break;
+        }
+
         case 'tool:end': {
           if (currentTool) {
+            const bar = currentTool.querySelector(':scope > .tool-progress');
+            if (bar) bar.remove();
+            const pill = currentTool.querySelector(':scope > .tool-progress-pill');
+            if (pill) pill.remove();
+            currentTool.removeAttribute('title');
             currentTool.appendChild(makeToolResultBlock(ev.result, ev.isError));
             currentTool.open = false;
           }

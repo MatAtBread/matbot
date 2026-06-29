@@ -1,6 +1,13 @@
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import type { MatbotPluginSpec, MatbotMachine, ToolExecutor, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
 
+declare module '@matatbread/matbot-plugin-api' {
+  interface ToolResults {
+    find_fact: string[] | null;                            // the matching facts, or null if none found
+    contextual_search: { name: string; content: string };  // a whole knowledge document to read
+  }
+}
+
 export function createRumsfeldPlugin(): MatbotPluginSpec {
   return {
     apiVersion: PLUGIN_API_VERSION,
@@ -29,7 +36,9 @@ export function createRumsfeldPlugin(): MatbotPluginSpec {
 
       services.tools.register({
         name:        'contextual_search',
-        description: `Load context for an unknown concept, system, term, or entity.
+        description: `Load context for an unknown concept, system, term, or entity — returns a whole knowledge document to read.
+
+      For a single specific fact (a city, a URL, a date) rather than a document, use find_fact instead.
 
       Examples:
         - Is <unknown> currently working?
@@ -51,8 +60,9 @@ export function createRumsfeldPlugin(): MatbotPluginSpec {
       - when the user directly uses the term 'skill' in their query, for example "Use your skill about <unknown> to do <unknown>".
       - Deictic words such as "here", "there", "the other one", "home" which imply contextual knowledge, but none was present.
 
-      List one or more unknown terms you need more information about (without any qualifiers, demonstratives or possessives), together with the contextual phrase or sentence they were mentioned in.
-      If the qualifiers are specific, for example "Fred's car", include "Fred" and "car" as separate terms.`,
+      Each term must be SPECIFIC enough to identify a particular thing — a proper noun, a named system, or a personal identifier. Strip qualifiers from a named entity ("my Volvo" → "Volvo"; "Fred's car" → "Fred" and "car" as separate terms), but do NOT collapse a query down to a bare generic noun: searching a common word like "location", "weather" or "car" on its own matches any document that merely discusses that topic — including procedures about it — rather than the specific fact you need.
+      When the unknown is deictic or self-referential — "here", "home", "where am I?", "my location" — the thing you actually lack context about is the USER, not the common noun. Search for the user's own identifier (their name if you know it, otherwise terms like "user", "profile", "home") so you retrieve their stored personal facts, not material that merely mentions the concept.
+      Always include the contextual phrase or sentence each term was mentioned in.`,
         inputSchema: {
           type:     'object',
           required: ['terms'],
@@ -71,6 +81,96 @@ export function createRumsfeldPlugin(): MatbotPluginSpec {
           },
         },
         executor,
+      });
+
+      const findFactExecutor: ToolExecutor = {
+        async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent<string[] | null>> {
+          const { question, terms, provider: explicitProvider } =
+            input as { question?: string; terms?: Array<{ term: string; context?: string }>; provider?: string };
+
+          if (!question || typeof question !== 'string') {
+            yield { type: 'error', message: 'Parameter "question" (the specific fact you want) is required.' };
+            return;
+          }
+          if (!Array.isArray(terms) || terms.length === 0) {
+            yield { type: 'error', message: 'Parameter "terms" (search keys locating the fact) is required.' };
+            return;
+          }
+
+          // Prefer the caller's provider; fall back to any configured one so a tool that invokes
+          // find_fact without threading ctx.provider still works rather than hard-failing.
+          const provider = explicitProvider || ctx.provider || [...services.providers.keys()][0];
+          if (!provider) {
+            yield { type: 'error', message: 'No provider configured to extract the fact.' };
+            return;
+          }
+
+          const results = await services.KnowledgeIndex.search(terms, ctx.signal);
+          if (results.length === 0) {
+            yield { type: 'result', value: null };
+            return;
+          }
+
+          // Read across the top matches, not just the best one: the fact may live in a lower-ranked
+          // entry (the user's profile can rank below a how-to that merely mentions the topic). Cap the
+          // count and per-entry length so the extraction prompt stays bounded.
+          const considered = results.slice(0, 5);
+          const knowledgeEntries = considered
+            .map(e => `## ${e.entities[0] ?? e.id}\n${e.content.slice(0, 6000)}`)
+            .join('\n\n');
+
+          yield { type: 'progress', pct: 50, message: `Reading ${considered.length} source(s)...` };
+
+          const res = await services.singleTurn({
+            provider,
+            system: `Answer the specific question below using ONLY the supplied knowledge entries.
+Extract the precise fact or facts that answers the question. Multiple answers are permitted. If the supplied entries do not contain it, return \`null\` for the result.
+Never guess, infer, or fall back on outside knowledge to answer the question - the source of the answer must be in the supplied entries.
+Reply with JSON only, no prose: {"result": Array<{"fact": string, "source": string}> | null}
+"fact" contains only the concise answer, not any surrounding text or context - only the fact that answers the question.
+"source" is the heading of the entry it came from.`,
+            prompt: `Question: ${question}\n\n--- KNOWLEDGE ENTRIES ---\n${knowledgeEntries}\n--- END KNOWLEDGE ENTRIES ---`,
+            signal: ctx.signal,
+          });
+
+          try {
+            const m = res.text.match(/\{[\s\S]*\}/);
+            const parsed = m ? JSON.parse(m[0]) as {"result": Array<{"fact": string, "source": string}> | null} : null;
+            if (parsed?.result?.length) {
+              yield {
+                type: 'result',
+                value: parsed.result.map(e => e.fact)
+              };
+              return;
+            }
+          } catch { /* unparseable — treat as not found */ }
+
+          yield { type: 'result', value: null };
+          return ;
+        },
+      };
+
+      services.tools.register({
+        name: 'find_fact',
+        description: `Retrieve a specific FACT from stored knowledge — their home city, a system's URL, someone's birthday, a configured threshold.
+
+Use this, not contextual_search, when you want one precise datum rather than a whole document to read. It searches stored knowledge, reads across the best matches (the fact may not be in the top-ranked entry), and returns just the answers as an array of strings — or null if the knowledge doesn't contain it. It never invents an answer.
+
+Provide "question" (the specific fact sought, e.g. "the user's home city") and "terms" (specific search keys that locate it — proper nouns, named systems, or personal identifiers; for a personal or deictic fact, search the user's name or "user"/"profile", not a bare generic noun). Returns string[] or null`,
+        inputSchema: {
+          type: 'object',
+          required: ['question', 'terms'],
+          properties: {
+            question: { type: 'string', description: 'The specific fact you need, phrased as a question or noun phrase.' },
+            terms: {
+              type: 'array',
+              items: { type: 'object', properties: { term: { type: 'string' }, context: { type: 'string' } } },
+              description: 'Specific search keys locating the fact, each with the phrase it was mentioned in.',
+            },
+            provider: { type: 'string', description: 'Optional extraction provider. Defaults to the turn provider.' },
+          },
+        },
+        executor: findFactExecutor,
       });
     },
   };

@@ -264,19 +264,23 @@ async function buildEnrichedFact(
   services: MatbotMachine,
   fact:     RememberedFact,
 ): Promise<string | undefined> {
-  const session = await services.sessions?.get(fact.sessionId);
-  if (!session) return undefined;
-  const idx = session.messages.findIndex(m => m.id === fact.messageId);
-  if (idx <= 0) return undefined;   // not found, or it's the first message (nothing precedes it)
+  try {
+    const session = await services.sessions?.get(fact.sessionId);
+    if (!session) return undefined;
+    const idx = session.messages.findIndex(m => m.id === fact.messageId);
+    if (idx <= 0) return undefined;   // not found, or it's the first message (nothing precedes it)
 
-  const context = session.messages
-    .slice(Math.max(0, idx - ENRICHMENT_CONTEXT_MESSAGES), idx)
-    .map(textOf)
-    .filter(t => t.length > 0)
-    .join('\n');
-  if (context.length === 0) return undefined;
+    const context = session.messages
+      .slice(Math.max(0, idx - ENRICHMENT_CONTEXT_MESSAGES), idx)
+      .map(textOf)
+      .filter(t => t.length > 0)
+      .join('\n');
+    if (context.length === 0) return undefined;
 
-  return `${fact.fact}\n\n[Context from the surrounding conversation, for disambiguation only:]\n${context}`;
+    return `${fact.fact}\n\n[Context from the surrounding conversation, for disambiguation only:]\n${context}`;
+  } catch (ex) {
+    return undefined;
+  }
 }
 
 // ── The pipeline ──────────────────────────────────────────────────────────────

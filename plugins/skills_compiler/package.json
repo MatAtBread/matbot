@@ -1,0 +1,32 @@
+{
+  "name": "@matatbread/matbot-tool-skill-compiler",
+  "matbotRuntime": [
+    "node"
+  ],
+  "version": "0.2.5",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "description": "Compiles procedural markdown skills into executable TypeScript plugins with tool bindings.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@matatbread/matbot-plugin-api": "workspace:^"
+  },
+  "dependencies": {
+    "typescript": "catalog:"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "@matatbread/matbot-plugin-api": "workspace:^"
+  }
+}

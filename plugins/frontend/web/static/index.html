@@ -530,6 +530,14 @@
     }
     .meta-chip.entity { background: #ede9fe; color: #5b21b6; }
     .meta-chip.tag    { background: #dbeafe; color: #1e40af; }
+    .meta-class-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 0.85em; color: #4b5563; }
+    .meta-class-row:last-child { margin-bottom: 0; }
+    .meta-class-name { width: 92px; flex-shrink: 0; }
+    .meta-class-track { flex: 1; height: 6px; border-radius: 999px; background: #f3f4f6; overflow: hidden; }
+    .meta-class-fill { height: 100%; border-radius: 999px; }
+    .meta-class-fill.procedural    { background: #f59e0b; }
+    .meta-class-fill.informational { background: #3b82f6; }
+    .meta-class-val { width: 32px; text-align: right; font-variant-numeric: tabular-nums; color: #6b7280; }
     .meta-empty { font-size: 0.85em; color: #9ca3af; font-style: italic; }
     .meta-note {
       font-size: 0.82em;
@@ -904,6 +912,7 @@
     /* ── Tool blocks ───────────────────────────────────────────── */
 
     .tool-block {
+      position: relative;
       background: #0f172a;
       border-radius: 6px;
       overflow: hidden;
@@ -911,6 +920,33 @@
       font-family: 'SF Mono', 'Cascadia Code', ui-monospace, monospace;
       font-size: 0.86em;
       max-width: 100%;
+    }
+    /* Live tool progress: invert the left `pct`% of the block as a wipe. Removed on tool:end. */
+    .tool-progress {
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: 0;
+      pointer-events: none;
+      backdrop-filter: invert(1);
+      transition: width 0.2s ease;
+    }
+    /* Live progress message: a floating pill in the block's top-right. Removed on tool:end. */
+    .tool-progress-pill {
+      position: absolute;
+      top: 5px;
+      right: 8px;
+      z-index: 2;
+      max-width: 60%;
+      padding: 1px 9px;
+      border-radius: 999px;
+      background: rgb(111 93 165 / 80%);
+      color: #ddd6fe;
+      font-size: 0.82em;
+      line-height: 1.6;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      pointer-events: none;
     }
     .tool-header {
       padding: 6px 12px;
