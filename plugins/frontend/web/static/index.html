@@ -371,6 +371,9 @@
     }
     .skill-entry { cursor: pointer; }
     .skill-entry:hover { background: #f0f0f2; color: #111; }
+    /* Hidden skills (withheld from the model — e.g. compiled into a tool) sort below the visible ones
+       and read in the same paler grey as inactive plugins; still fully editable/deletable. */
+    .skill-entry-hidden { color: #9ca3af; }
     .skill-entry .skill-name-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .skill-entry .plugin-actions { display: none; }
     .skill-entry:hover .plugin-actions { display: flex; }

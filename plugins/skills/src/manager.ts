@@ -139,6 +139,7 @@ export interface SkillSummary {
   id:           string;
   name:         string;
   toolBinding?: string;
+  hidden:       boolean;
 }
 
 /**
@@ -167,6 +168,11 @@ export interface SkillManager {
   save(name: string, content: string, catalogue?: boolean): Promise<SkillDoc>;
   /** Delete a skill by name. Returns the removed doc, or `undefined`. */
   delete(name: string): Promise<SkillDoc | undefined>;
+  /** Hide or unhide a skill: hiding retracts it from the knowledge index and the catalogue
+   *  advertisement (withholding it from the model) while leaving it fully manageable; unhiding
+   *  re-indexes it. Orthogonal to `save` — a content edit never changes the hidden state. No-op if
+   *  already in the requested state. Returns the updated doc, or `undefined` if no such skill. */
+  setHidden(name: string, hidden: boolean): Promise<SkillDoc | undefined>;
   /** Import-only create: once a skill exists, the import is a no-op. Returns `true` if one was imported. */
   importIfAbsent(name: string, content: string, catalogSummary?: string): Promise<boolean>;
   /** Teardown: end the mounted-swap subscription and cancel detached analyses. */
@@ -237,9 +243,10 @@ export class SkillManagerImpl implements SkillManager {
 
   list(): SkillSummary[] {
     return this.all().map(s => ({
-      id:   s.id,
-      name: s.name,
+      id:     s.id,
+      name:   s.name,
       ...(s.toolBinding !== undefined ? { toolBinding: s.toolBinding } : {}),
+      hidden: s.hidden ?? false,
     }));
   }
 
@@ -291,9 +298,31 @@ export class SkillManagerImpl implements SkillManager {
     this.inflight.get(doc.id)?.abort();   // no point analysing a skill we're removing
     this.inflight.delete(doc.id);
     await this.store.delete(doc.id, doc.version);
+    await this.knowledge.remove(doc.id);  // retract its index entry — the store no longer owns it
     this.skills.delete(key);
     this.events.emit({ type: 'deleted', name: doc.name });
     return doc;
+  }
+
+  /** Hide or unhide a skill. Hiding is a real state change (bumps version) persisted on the doc, then
+   *  the index entry is retracted *awaited* — unlike the detached reindex path — so a search racing the
+   *  hide can't still surface it. Unhiding re-indexes through the normal detached path (analysis may
+   *  run). `hidden` is never touched by `save`, so this is the only way it changes. */
+  async setHidden(name: string, hidden: boolean): Promise<SkillDoc | undefined> {
+    const key = name.toLowerCase();
+    const doc = this.skills.get(key);
+    if (doc === undefined) return undefined;
+    if ((doc.hidden ?? false) === hidden) return doc;   // already in the requested state
+    const saved = await this.casMutate(doc, cur => this.bump({ ...cur, hidden }), false);
+    if (hidden) {
+      this.inflight.get(saved.id)?.abort();   // a pending analysis would re-index what we're retracting
+      this.inflight.delete(saved.id);
+      await this.knowledge.remove(saved.id);
+    } else {
+      void this.reindex(saved);
+    }
+    this.events.emit({ type: 'saved', name: saved.name });
+    return saved;
   }
 
   /**
@@ -346,6 +375,14 @@ export class SkillManagerImpl implements SkillManager {
   // so it doesn't re-trigger reindex) so subsequent restarts re-index from cache for free.
   private async reindex(doc: SkillDoc): Promise<void> {
     this.inflight.get(doc.id)?.abort();   // supersede any in-flight analysis for this skill
+    // A hidden skill is withheld from the index: retract any entry (cleans a stale persistent one on
+    // boot load) and skip analysis. This is the single funnel — a content `save` of a hidden skill
+    // (reindex=true) lands here too and stays retracted, so hidden survives edits.
+    if (doc.hidden) {
+      this.inflight.delete(doc.id);
+      await this.knowledge.remove(doc.id);
+      return;
+    }
     const ac = new AbortController();
     this.inflight.set(doc.id, ac);
     // Analysis should be quick; cap it so a hung provider can't pin the entry forever.

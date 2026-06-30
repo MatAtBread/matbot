@@ -11,6 +11,7 @@ declare module '@matatbread/matbot-plugin-api' {
         content: string;
         knowledge?: { classification: { procedural: number; informational: number } };
       } | undefined;
+      setHidden(name: string, hidden: boolean): Promise<unknown>;
     };
   }
 }
@@ -494,6 +495,31 @@ Fix every reported error. Change only what each error requires; keep the tool na
             return;
           }
 
+          // Rewire any triggers that fired the *skill* (`skill_action(use, <skill>)`) onto the new tool, so
+          // the deterministic tool answers the condition instead of the skill prose being injected. Soft
+          // dependency on `trigger_action` (orthogonal subsystem): if it isn't loaded, skip silently.
+          let movedTriggers: { id: string }[] = [];
+          if (services.tools.resolve('trigger_action')) {
+            try {
+              const moved = await toolResult(invokeTool(services, 'trigger_action',
+                { action: 'move', tool: 'skill_action', params: { action: 'use', name: skill }, toTool: toolName },
+                ctx)) as { triggers?: { id: string }[] };
+              movedTriggers = moved.triggers ?? [];
+            } catch { /* fails soft — install already succeeded */ }
+          }
+
+          // Retire the source skill from the model now its method lives in a deterministic tool (and any
+          // firing triggers point at that tool): hide it so its prose is no longer search-surfaced or
+          // catalogued. It stays for management and as the compiler's source. Soft — only the trigger move
+          // above made hiding safe, so do it after; if SkillManager is absent or it throws, install stands.
+          let hidden = false;
+          try {
+            if (services.SkillManager) {
+              await services.SkillManager.setHidden(skill, true);
+              hidden = true;
+            }
+          } catch { /* fails soft — install already succeeded */ }
+
           yield { type: 'progress', pct: 100, message: 'Done — compiled, typechecked, installed.' };
           yield {
             type: 'result',
@@ -501,6 +527,7 @@ Fix every reported error. Change only what each error requires; keep the tool na
               status: 'installed', skill, classification, passes: pass - 1,
               toolName, pluginName: pluginPkgName, dir: relDir, specifier, typecheckOk,
               method, excluded: design.excluded, install: installMessage,
+              movedTriggers: movedTriggers.map(t => t.id), hidden,
             },
           };
         },
@@ -510,7 +537,7 @@ Fix every reported error. Change only what each error requires; keep the tool na
         name: 'skill_compiler',
         description: `Compile a procedural markdown skill into an executable TypeScript plugin, then install it.
 
-Methodology: load from SkillManager → classify (only procedural skills compile) → demonstrate in a scratch session capturing the real working trace → distil the trace to the method that worked → generate TypeScript → write to ${COMPILED_PLUGINS_DIR}/ → typecheck with tsc, feeding any errors back to the code generator to self-repair (up to 3 passes) → install via the plugin tool (asks for confirmation).
+Methodology: load from SkillManager → classify (only procedural skills compile) → demonstrate in a scratch session capturing the real working trace → distil the trace to the method that worked → generate TypeScript → write to ${COMPILED_PLUGINS_DIR}/ → typecheck with tsc, feeding any errors back to the code generator to self-repair (up to 3 passes) → install via the plugin tool (asks for confirmation) → move any skill-firing triggers onto the new tool, then hide the source skill (retired from the model — no longer searchable or catalogued — but kept for management).
 
 Compiled plugins use: fetch() for HTTP, services.singleTurn() for LLM, invokeTool() for tools, plain JS for logic.`,
         inputSchema: {

@@ -10,9 +10,11 @@ declare module '@matatbread/matbot-plugin-api' {
       | ToolResult<{ skills: SkillSummary[] },                  { action: 'list'     }>
       | ToolResult<{ id: string; name: string; content: string }, { action: 'load' }>
       | ToolResult<{ id: string; name: string; content: string }, { action: 'use'  }>
-      | ToolResult<{ id: string; name: string; knowledge: NonNullable<SkillDoc['knowledge']> | null; catalogue: boolean }, { action: 'metadata' }>
+      | ToolResult<{ id: string; name: string; knowledge: NonNullable<SkillDoc['knowledge']> | null; catalogue: boolean; hidden: boolean }, { action: 'metadata' }>
       | ToolResult<{ id: string; name: string },               { action: 'save'     }>
-      | ToolResult<{ id: string; name: string },               { action: 'delete'   }>;
+      | ToolResult<{ id: string; name: string },               { action: 'delete'   }>
+      | ToolResult<{ id: string; name: string; hidden: boolean }, { action: 'hide'   }>
+      | ToolResult<{ id: string; name: string; hidden: boolean }, { action: 'unhide' }>;
     skills_config:
       | ToolResult<{ analysisProvider: string | null; fallback: string | null; available: string[] }, { action: 'get'   }>
       | ToolResult<{ analysisProvider: string },                { action: 'set'   }>
@@ -29,7 +31,9 @@ type SkillInput =
   | { action: 'use';      name: string }
   | { action: 'metadata'; name: string }
   | { action: 'save';     name: string; content: string; catalogue?: boolean }
-  | { action: 'delete';   name: string };
+  | { action: 'delete';   name: string }
+  | { action: 'hide';     name: string }
+  | { action: 'unhide';   name: string };
 
 export function createSkillTool(manager: SkillManager): Tool<ToolResultOf<'skill_action'>> {
   const executor: ToolExecutor<ToolResultOf<'skill_action'>> = {
@@ -76,7 +80,7 @@ export function createSkillTool(manager: SkillManager): Tool<ToolResultOf<'skill
           if (!doc) { yield { type: 'error', message: `Skill not found: "${name}"` }; return; }
           // Derived LLM analysis (absent until the background analysis has run and cached it), plus
           // `catalogue` — whether the skill is advertised in the system prompt.
-          yield { type: 'result', value: { id: doc.id, name: doc.name, knowledge: doc.knowledge ?? null, catalogue: doc.catalogue ?? false } };
+          yield { type: 'result', value: { id: doc.id, name: doc.name, knowledge: doc.knowledge ?? null, catalogue: doc.catalogue ?? false, hidden: doc.hidden ?? false } };
           return;
         }
 
@@ -99,8 +103,18 @@ export function createSkillTool(manager: SkillManager): Tool<ToolResultOf<'skill
           return;
         }
 
+        case 'hide':
+        case 'unhide': {
+          const { name } = args as Extract<SkillInput, { action: 'hide' | 'unhide' }>;
+          if (!name) { yield { type: 'error', message: `action "${args.action}" requires "name".` }; return; }
+          const doc = await manager.setHidden(name, args.action === 'hide');
+          if (doc === undefined) { yield { type: 'error', message: `Skill not found: "${name}"` }; return; }
+          yield { type: 'result', value: { id: doc.id, name: doc.name, hidden: doc.hidden ?? false } };
+          return;
+        }
+
         default:
-          yield { type: 'error', message: `Unknown action "${String(args.action)}". Expected one of: list, load, use, metadata, save, delete.` };
+          yield { type: 'error', message: `Unknown action "${String(args.action)}". Expected one of: list, load, use, metadata, save, delete, hide, unhide.` };
       }
     },
   };
@@ -119,22 +133,29 @@ export function createSkillTool(manager: SkillManager): Tool<ToolResultOf<'skill
       'Most skills are surfaced by content search; to make one apply automatically on a behavioural ' +
       'condition, create a trigger with the `trigger_action` tool whose `invoke` is this tool with ' +
       '`{ action: "use", name }`.\n\n' +
+      'A skill can be `hide`-den: it is then withheld from the model — retracted from content search ' +
+      '(contextual_search / find_fact) and from the catalogue — but stays fully manageable here ' +
+      '(list/load/metadata/save/delete still work). Use this to retire a skill that has been compiled ' +
+      'into a tool, without deleting its source. `unhide` reverses it. Hidden state is independent of ' +
+      '`save` — editing content never changes it.\n\n' +
       'Parameters depend on `action` (TypeScript):\n' +
       '```ts\n' +
       'type SkillAction =\n' +
-      "  | { action: 'list' }                            // -> { skills: [{ id, name, toolBinding? }] }\n" +
+      "  | { action: 'list' }                            // -> { skills: [{ id, name, toolBinding?, hidden }] }\n" +
       "  | { action: 'load';     name: string }          // raw content -> { id, name, content }\n" +
       "  | { action: 'use';      name: string }          // content as a directive to apply now -> { id, name, content }\n" +
-      "  | { action: 'metadata'; name: string }          // derived analysis -> { id, name, knowledge: { summary, entities, tags, classification: { procedural, informational } } | null, catalogue: boolean }\n" +
+      "  | { action: 'metadata'; name: string }          // derived analysis -> { id, name, knowledge: { summary, entities, tags, classification: { procedural, informational } } | null, catalogue: boolean, hidden: boolean }\n" +
       "  | { action: 'save';     name: string; content: string; catalogue?: boolean }  // create or update -> { id, name }; `catalogue` advertises the skill in the system prompt (omit to leave unchanged)\n" +
-      "  | { action: 'delete';   name: string };         // -> { id, name }\n" +
+      "  | { action: 'delete';   name: string }          // -> { id, name }\n" +
+      "  | { action: 'hide';     name: string }          // withhold from the model -> { id, name, hidden }\n" +
+      "  | { action: 'unhide';   name: string };         // restore to the model -> { id, name, hidden }\n" +
       '```',
     inputSchema: {
       type:       'object',
       required:   ['action'],
       properties: {
-        action:    { type: 'string', enum: ['list', 'load', 'use', 'metadata', 'save', 'delete'], description: 'The operation to perform.' },
-        name:      { type: 'string', description: 'Skill name (case-insensitive). Required for load/use/metadata/save/delete.' },
+        action:    { type: 'string', enum: ['list', 'load', 'use', 'metadata', 'save', 'delete', 'hide', 'unhide'], description: 'The operation to perform.' },
+        name:      { type: 'string', description: 'Skill name (case-insensitive). Required for load/use/metadata/save/delete/hide/unhide.' },
         content:   { type: 'string', description: 'Skill content in markdown — required for action "save".' },
         catalogue: { type: 'boolean', description: 'Optional for "save": advertise this skill in the system prompt (using its generated summary). Omit to leave unchanged.' },
       },

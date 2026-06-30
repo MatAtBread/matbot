@@ -33,6 +33,13 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### API gaps filled
 
+- **`KnowledgeIndex.remove(id)`.** The index gained a retraction primitive — idempotent, keyed by the
+  entry `id` (the index's sole primary key, the same key `index` replaces on). The index stays
+  source-blind: it never inspects an entry's opaque `source` to decide visibility; the party that
+  indexed an entry owns retracting it. Implemented by both backends (`LookupKnowledgeIndex`,
+  `persist-ki-bge`) and forwarded transparently by the swap proxy. Breaking only for a third-party
+  `KnowledgeIndex` implementation, which must now provide `remove`.
+
 - **`MatbotPlugin.resolvedUrl`.** The loader now retains the stable URL it actually imported (minus any
   reload cache-bust stamp) on each loaded plugin, instead of computing and discarding it. This lets a
   consumer map a loaded plugin back to its on-disk source without re-running specifier resolution — used
@@ -198,6 +205,12 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Bug fixes
 
+- **Deleting a skill no longer orphans its knowledge-index entry.** `skill_action(delete)` removed the
+  skill from its store but never retracted the `KnowledgeIndex` entry, so the deleted skill stayed
+  discoverable by `contextual_search` / `find_fact` indefinitely (durably so under the persistent
+  `persist-ki-bge` backend; until restart under the in-memory default). `delete` now also calls
+  `KnowledgeIndex.remove`, closing the leak in both backends.
+
 - **`LookupKnowledgeIndex` (the default in-memory index) now scores against curated metadata, not just
   raw content.** It previously counted query-term occurrences in `entry.content` alone — ignoring the
   LLM-derived `entities`, `tags`, and `summary` entirely — so a long, wordy entry could out-score a
@@ -281,6 +294,18 @@ churn and less likely to affect a consumer who doesn't use them.
   (a missing secret) are still left in config to retry.
 
 ### Optional
+
+- **skills / skills_compiler / frontend/web** — a skill can now be **hidden**: withheld from the model
+  (retracted from the knowledge index, so `contextual_search` / `find_fact` can't surface it, and
+  excluded from the system-prompt catalogue) while staying fully manageable. New `SkillDoc.hidden` flag,
+  set/cleared only by two new `skill_action` actions — `hide` / `unhide` — and **never touched by
+  `save`**, so a content edit preserves it; the manager retracts the index entry on hide (awaited, so a
+  racing search can't still surface it) and re-indexes on unhide. `skill_action list` and `metadata` now
+  report the `hidden` state. The **skill compiler** uses this to complete the retirement of a compiled
+  skill: after moving its firing triggers onto the new tool, it hides the source skill (kept as the
+  compiler's source), so the deterministic tool answers the condition instead of the skill prose being
+  injected or searched. The **web skills panel** lists hidden skills below the visible ones in the same
+  paler grey as inactive plugins, with a hide/unhide toggle on each row.
 
 - **skills / skills_compiler** — a skill's procedural/informational split is now derived once by the
   skills metadata analysis pass and cached on `SkillDoc.knowledge.classification` (two independent 0–1

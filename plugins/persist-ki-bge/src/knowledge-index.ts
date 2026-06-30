@@ -94,6 +94,10 @@ export class PersistBGEKnowledgeIndex implements KnowledgeIndex {
     await this.store.set(entry.id, { ...entry, contentHash: hash });
   }
 
+  async remove(id: string): Promise<void> {
+    await this.store.delete(id);
+  }
+
   async search(
     terms:  Array<{ term: string; context?: string }>,
     signal: AbortSignal,
