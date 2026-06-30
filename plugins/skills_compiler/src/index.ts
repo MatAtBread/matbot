@@ -494,6 +494,19 @@ Fix every reported error. Change only what each error requires; keep the tool na
             return;
           }
 
+          // Rewire any triggers that fired the *skill* (`skill_action(use, <skill>)`) onto the new tool, so
+          // the deterministic tool answers the condition instead of the skill prose being injected. Soft
+          // dependency on `trigger_action` (orthogonal subsystem): if it isn't loaded, skip silently.
+          let movedTriggers: { id: string }[] = [];
+          if (services.tools.resolve('trigger_action')) {
+            try {
+              const moved = await toolResult(invokeTool(services, 'trigger_action',
+                { action: 'move', tool: 'skill_action', params: { action: 'use', name: skill }, toTool: toolName },
+                ctx)) as { triggers?: { id: string }[] };
+              movedTriggers = moved.triggers ?? [];
+            } catch { /* fails soft — install already succeeded */ }
+          }
+
           yield { type: 'progress', pct: 100, message: 'Done — compiled, typechecked, installed.' };
           yield {
             type: 'result',
@@ -501,6 +514,7 @@ Fix every reported error. Change only what each error requires; keep the tool na
               status: 'installed', skill, classification, passes: pass - 1,
               toolName, pluginName: pluginPkgName, dir: relDir, specifier, typecheckOk,
               method, excluded: design.excluded, install: installMessage,
+              movedTriggers: movedTriggers.map(t => t.id),
             },
           };
         },
