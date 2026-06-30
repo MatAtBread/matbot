@@ -57,7 +57,8 @@ npx matbot                     # runs the locally-installed `matbot` bin
 
 > Just kicking the tyres, no plugins? `npx @matatbread/matbot-cli` runs it standalone.
 >
-> From source, which includes **all** the optional plugins and the web-bundler, or for development: 
+
+### From source, which includes **all** the optional plugins and the web-bundler, or for development: 
 > ```
 > git clone https://github.com/MatAtBread/matbot.git  # ...or fork your own
 > pnpm install 
