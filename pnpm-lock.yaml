@@ -10,8 +10,8 @@ catalogs:
       specifier: ^22.0.0
       version: 22.19.19
     typescript:
-      specifier: ^5.8.0
-      version: 5.9.3
+      specifier: ^6.0.3
+      version: 6.0.3
 
 importers:
 
@@ -21,8 +21,8 @@ importers:
         specifier: ^2.31.0
         version: 2.31.0(@types/node@22.19.19)
       typescript:
-        specifier: ^5.8.0
-        version: 5.9.3
+        specifier: ^6.0.3
+        version: 6.0.3
 
   apps/cli:
     dependencies:
@@ -53,7 +53,7 @@ importers:
         version: 22.19.19
       typescript:
         specifier: 'catalog:'
-        version: 5.9.3
+        version: 6.0.3
 
   apps/web-bundle:
     dependencies:
@@ -78,7 +78,7 @@ importers:
         version: 3.35.1
       typescript:
         specifier: 'catalog:'
-        version: 5.9.3
+        version: 6.0.3
 
   core:
     dependencies:
@@ -88,13 +88,13 @@ importers:
     devDependencies:
       typescript:
         specifier: 'catalog:'
-        version: 5.9.3
+        version: 6.0.3
 
   plugin-api:
     devDependencies:
       typescript:
         specifier: 'catalog:'
-        version: 5.9.3
+        version: 6.0.3
 
   plugins/ask-user:
     devDependencies:
@@ -103,7 +103,7 @@ importers:
         version: link:../../plugin-api
       typescript:
         specifier: 'catalog:'
-        version: 5.9.3
+        version: 6.0.3
 
   plugins/background:
     devDependencies:
@@ -115,7 +115,7 @@ importers:
         version: 22.19.19
       typescript:
         specifier: 'catalog:'
-        version: 5.9.3
+        version: 6.0.3
 
   plugins/bash:
     devDependencies:
@@ -127,7 +127,7 @@ importers:
         version: 22.19.19
       typescript:
         specifier: 'catalog:'
-        version: 5.9.3
+        version: 6.0.3
 
   plugins/browser:
     devDependencies:
@@ -139,7 +139,7 @@ importers:
         version: link:../../plugin-api
       typescript:
         specifier: 'catalog:'
-        version: 5.9.3
+        version: 6.0.3
 
   plugins/cognition:
     dependencies:
@@ -158,7 +158,7 @@ importers:
         version: link:../triggers
       typescript:
         specifier: 'catalog:'
-        version: 5.9.3
+        version: 6.0.3
 
   plugins/docker-bash:
     devDependencies:
@@ -170,7 +170,7 @@ importers:
         version: 22.19.19
       typescript:
         specifier: 'catalog:'
-        version: 5.9.3
+        version: 6.0.3
 
   plugins/edit-session:
     devDependencies:
@@ -179,7 +179,7 @@ importers:
         version: link:../../plugin-api
       typescript:
         specifier: 'catalog:'
-        version: 5.9.3
+        version: 6.0.3
 
   plugins/files:
     devDependencies:
@@ -191,7 +191,7 @@ importers:
         version: 22.19.19
       typescript:
         specifier: 'catalog:'
-        version: 5.9.3
+        version: 6.0.3
 
   plugins/frontend/dom:
     devDependencies:
@@ -203,7 +203,7 @@ importers:
         version: link:../../../plugin-api
       typescript:
         specifier: 'catalog:'
-        version: 5.9.3
+        version: 6.0.3
 
   plugins/frontend/telegram:
     devDependencies:
@@ -215,7 +215,7 @@ importers:
         version: link:../../../plugin-api
       typescript:
         specifier: 'catalog:'
-        version: 5.9.3
+        version: 6.0.3
 
   plugins/frontend/web:
     devDependencies:
@@ -233,7 +233,7 @@ importers:
         version: 22.19.19
       typescript:
         specifier: 'catalog:'
-        version: 5.9.3
+        version: 6.0.3
 
   plugins/hook-logger:
     devDependencies:
@@ -242,7 +242,7 @@ importers:
         version: link:../../plugin-api
       typescript:
         specifier: 'catalog:'
-        version: 5.9.3
+        version: 6.0.3
 
   plugins/http:
     devDependencies:
@@ -251,7 +251,7 @@ importers:
         version: link:../../plugin-api
       typescript:
         specifier: 'catalog:'
-        version: 5.9.3
+        version: 6.0.3
 
   plugins/json-validation:
     devDependencies:
@@ -260,7 +260,7 @@ importers:
         version: link:../../plugin-api
       typescript:
         specifier: 'catalog:'
-        version: 5.9.3
+        version: 6.0.3
 
   plugins/mcp:
     dependencies:
@@ -276,7 +276,7 @@ importers:
         version: 22.19.19
       typescript:
         specifier: 'catalog:'
-        version: 5.9.3
+        version: 6.0.3
 
   plugins/mcp-http:
     devDependencies:
@@ -285,7 +285,7 @@ importers:
         version: link:../../plugin-api
       typescript:
         specifier: 'catalog:'
-        version: 5.9.3
+        version: 6.0.3
 
   plugins/persist-ki-bge:
     devDependencies:
@@ -297,7 +297,7 @@ importers:
         version: 22.19.19
       typescript:
         specifier: 'catalog:'
-        version: 5.9.3
+        version: 6.0.3
 
   plugins/providers/anthropic:
     devDependencies:
@@ -309,7 +309,7 @@ importers:
         version: link:../../../plugin-api
       typescript:
         specifier: 'catalog:'
-        version: 5.9.3
+        version: 6.0.3
 
   plugins/providers/customer-services:
     devDependencies:
@@ -318,7 +318,7 @@ importers:
         version: link:../../../plugin-api
       typescript:
         specifier: 'catalog:'
-        version: 5.9.3
+        version: 6.0.3
 
   plugins/providers/openai-compat:
     devDependencies:
@@ -330,7 +330,7 @@ importers:
         version: link:../../../plugin-api
       typescript:
         specifier: 'catalog:'
-        version: 5.9.3
+        version: 6.0.3
 
   plugins/rumsfeld:
     devDependencies:
@@ -339,7 +339,7 @@ importers:
         version: link:../../plugin-api
       typescript:
         specifier: 'catalog:'
-        version: 5.9.3
+        version: 6.0.3
 
   plugins/sessions:
     devDependencies:
@@ -348,7 +348,7 @@ importers:
         version: link:../../plugin-api
       typescript:
         specifier: 'catalog:'
-        version: 5.9.3
+        version: 6.0.3
 
   plugins/skills:
     devDependencies:
@@ -357,7 +357,7 @@ importers:
         version: link:../../plugin-api
       typescript:
         specifier: 'catalog:'
-        version: 5.9.3
+        version: 6.0.3
 
   plugins/skills-node:
     dependencies:
@@ -373,13 +373,13 @@ importers:
         version: 22.19.19
       typescript:
         specifier: 'catalog:'
-        version: 5.9.3
+        version: 6.0.3
 
   plugins/skills_compiler:
     dependencies:
       typescript:
         specifier: 'catalog:'
-        version: 5.9.3
+        version: 6.0.3
     devDependencies:
       '@matatbread/matbot-plugin-api':
         specifier: workspace:^
@@ -405,7 +405,7 @@ importers:
         version: 22.19.19
       typescript:
         specifier: 'catalog:'
-        version: 5.9.3
+        version: 6.0.3
 
   plugins/storage/google-drive:
     dependencies:
@@ -421,7 +421,7 @@ importers:
         version: link:../../../plugin-api
       typescript:
         specifier: 'catalog:'
-        version: 5.9.3
+        version: 6.0.3
 
   plugins/storage/sqlite:
     devDependencies:
@@ -436,7 +436,7 @@ importers:
         version: 22.19.19
       typescript:
         specifier: 'catalog:'
-        version: 5.9.3
+        version: 6.0.3
 
   plugins/tool-plugin:
     devDependencies:
@@ -451,7 +451,7 @@ importers:
         version: 22.19.19
       typescript:
         specifier: 'catalog:'
-        version: 5.9.3
+        version: 6.0.3
 
   plugins/tool-store:
     devDependencies:
@@ -460,7 +460,7 @@ importers:
         version: link:../../plugin-api
       typescript:
         specifier: 'catalog:'
-        version: 5.9.3
+        version: 6.0.3
 
   plugins/triggers:
     devDependencies:
@@ -469,7 +469,7 @@ importers:
         version: link:../../plugin-api
       typescript:
         specifier: 'catalog:'
-        version: 5.9.3
+        version: 6.0.3
 
   plugins/web-principal-user:
     devDependencies:
@@ -484,7 +484,7 @@ importers:
         version: 22.19.19
       typescript:
         specifier: 'catalog:'
-        version: 5.9.3
+        version: 6.0.3
 
   plugins/whoami:
     devDependencies:
@@ -493,7 +493,7 @@ importers:
         version: link:../../plugin-api
       typescript:
         specifier: 'catalog:'
-        version: 5.9.3
+        version: 6.0.3
 
   plugins/workspace:
     devDependencies:
@@ -505,7 +505,7 @@ importers:
         version: 22.19.19
       typescript:
         specifier: 'catalog:'
-        version: 5.9.3
+        version: 6.0.3
 
 packages:
 
@@ -940,8 +940,8 @@ packages:
   ts-interface-checker@0.1.13:
     resolution: {integrity: sha512-Y/arvbn+rrz3JCKl9C4kVNfTfSm2/mEp5FSz5EsZSANGPSlQrpRI5M4PKF+mJnE52jOO90PnPSc3Ur3bTQw0gA==}
 
-  typescript@5.9.3:
-    resolution: {integrity: sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==}
+  typescript@6.0.3:
+    resolution: {integrity: sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw==}
     engines: {node: '>=14.17'}
     hasBin: true
 
@@ -1437,7 +1437,7 @@ snapshots:
 
   ts-interface-checker@0.1.13: {}
 
-  typescript@5.9.3: {}
+  typescript@6.0.3: {}
 
   undici-types@6.21.0: {}
 
