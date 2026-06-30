@@ -317,13 +317,20 @@ churn and less likely to affect a consumer who doesn't use them.
 
 - **skills_compiler** — the `matbot-tools.d.ts` shipped to each generated plugin is now **derived from the
   live type graph** instead of a hardcoded three-tool list. At compile time the compiler builds a TS
-  program over the workspace's tool packages, reads the merged `ToolResults`, and emits a self-contained
-  `declare module` for every tool whose result type is *portable* (references only plugin-api / TS-lib
-  types) — so a generated plugin gets correct `toolResult` types (and, for multi-action tools, per-action
-  narrowing) across ~21 built-in tools rather than three. Tools whose result references a package-private
-  type are skipped (they resolve to `unknown`, as before); the build falls back to the static list when
-  the workspace sources aren't on disk. The derivation runs in-process (briefly blocks the event loop,
-  like the older in-process typecheck did) — a worker-thread move is the obvious next step.
+  program over the workspace's tool/service packages, reads the merged `ToolResults` **and**
+  `MatbotServices`, and emits a self-contained `declare module` — **bundling** each referenced
+  package-private interface/type-alias into the DTS (recursively), importing plugin-api types, and
+  replacing any `node_modules`/class/enum/unresolved *leaf* in place with `unknown /* … */` (so a
+  signature like `(req: unknown /* IncomingMessage */) => …` stays usable rather than collapsing). The
+  result: a generated plugin gets correct `toolResult` types (with per-action narrowing for multi-action
+  tools) for **all** built-in tools, plus typed registry services on `services.*` (`SkillManager`,
+  `Triggers`, …). The build falls back to the static list when the workspace sources aren't on disk. The
+  derivation runs in-process (briefly blocks the event loop); driving it off the live loaded-plugin set
+  with a load-invalidated cache is the planned follow-up.
+
+- **skills** — `SkillManager` is now an **interface** (implemented by `SkillManagerImpl`) rather than a
+  class, so the registry key carries an interface like every other service (and the type is bundlable
+  into the generated-plugin DTS). Consumers are unaffected (all used `import type { SkillManager }`).
 
 - **skills_compiler** — code-generation guidance now forbids extracting a value from another tool's
   natural-language output with a regex / fixed-phrase match (a brittle anti-pattern that silently fails

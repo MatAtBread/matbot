@@ -1,6 +1,6 @@
 import { PLUGIN_API_VERSION, currentPrincipal, invokeTool, toolText } from '@matatbread/matbot-plugin-api';
 import type { MatbotPluginSpec, MatbotMachine, ToolExecutor, ToolEvent, ToolContext, Session, Message } from '@matatbread/matbot-plugin-api';
-import { buildToolResultsDts } from './tool-results-dts.js';
+import { buildMatbotToolsDts } from './build-matbot-dts.js';
 
 // Loose discovery of the skills plugin's SkillManager — optional, so no hard dependency on the
 // package. Only the slice this tool consumes is declared.
@@ -332,10 +332,10 @@ Rules: implement the SPEC, using the worked example's exact URLs/queries/field n
           yield { type: 'progress', pct: 84, message: 'Deriving tool result types...' };
           let toolResultsDts = TOOL_RESULTS_DTS;
           try {
-            const generated = await buildToolResultsDts(dirname(services.configPath));
+            const generated = await buildMatbotToolsDts(dirname(services.configPath));
             if (generated) {
               toolResultsDts = generated.dts;
-              yield { type: 'progress', pct: 85, message: `Typed ${generated.emitted.length} tool result(s)${generated.skipped.length ? `; ${generated.skipped.length} left untyped` : ''}.` };
+              yield { type: 'progress', pct: 85, message: `Typed ${generated.tools.emitted.length} tool result(s) and ${generated.services.emitted.length} service(s).` };
             }
           } catch { /* keep the static fallback */ }
 

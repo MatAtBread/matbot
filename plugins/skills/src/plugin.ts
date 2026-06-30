@@ -1,6 +1,6 @@
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import type { MatbotPluginSpec, MatbotMachine, Store } from '@matatbread/matbot-plugin-api';
-import { SkillManager } from './manager.js';
+import { SkillManagerImpl, type SkillManager } from './manager.js';
 import { createSkillTool, createSkillsConfigTool } from './tools.js';
 import type { SkillDoc } from './types.js';
 
@@ -42,7 +42,7 @@ export async function setupSkills(services: MatbotMachine): Promise<SkillManager
   if (services.SkillManager) return services.SkillManager;
 
   const store = services.createStore<SkillDoc>('skills') as Store<SkillDoc>;
-  const manager = new SkillManager(store, services);
+  const manager = new SkillManagerImpl(store, services);
   await manager.load();
   // Re-read after a deferred StorageBackend swap lands: the new backend's `skills` namespace replaces
   // the old in-memory set (and re-indexes). No `replay` — the initial load is the boot load above; this

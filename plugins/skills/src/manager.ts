@@ -142,6 +142,38 @@ export interface SkillSummary {
 }
 
 /**
+ * The live skill set's public contract — the service advertised under `MatbotServices.SkillManager`.
+ * Named after the interface (not the class) so the registry key carries an interface, per the service
+ * conventions; {@link SkillManagerImpl} is the cross-runtime implementation. Skills own content and
+ * catalogue advertisement only — firing a skill on a condition is the triggers subsystem's concern.
+ */
+export interface SkillManager {
+  /** Ends with the manager (teardown). Hand to `services.mounted.consume` so a StorageBackend swap
+   *  re-reads the new backend's skills, and the loop stops when the plugin unloads. */
+  readonly signal: AbortSignal;
+  /** The provider used to derive a skill's catalogue summary / knowledge analysis: the `analysisProvider`
+   *  setting if pinned and configured, else the first configured provider (works with zero config). */
+  resolveAnalysisProvider(): Promise<string>;
+  /** (Re)load persisted skills into memory and index each one. Re-runnable: boot load + each later
+   *  StorageBackend swap funnel through here. */
+  load(): Promise<void>;
+  all(): SkillDoc[];
+  list(): SkillSummary[];
+  get(name: string): SkillDoc | undefined;
+  /** Observe skill content CRUD (save/delete), including LLM mid-turn saves — the source a UI needs to
+   *  refresh a skills list live. */
+  watch(signal?: AbortSignal): AsyncIterable<SkillEvent>;
+  /** Create a new skill or update an existing one's content by name. `catalogue` omitted ⇒ unchanged. */
+  save(name: string, content: string, catalogue?: boolean): Promise<SkillDoc>;
+  /** Delete a skill by name. Returns the removed doc, or `undefined`. */
+  delete(name: string): Promise<SkillDoc | undefined>;
+  /** Import-only create: once a skill exists, the import is a no-op. Returns `true` if one was imported. */
+  importIfAbsent(name: string, content: string, catalogSummary?: string): Promise<boolean>;
+  /** Teardown: end the mounted-swap subscription and cancel detached analyses. */
+  clear(): void;
+}
+
+/**
  * Owns the live skill set: an in-memory index keyed by lower-cased name, backed by a
  * {@link Store} for persistence and mirrored into the active {@link KnowledgeIndex}. All
  * CRUD goes through here so the cross-runtime base plugin and the node specialization
@@ -152,7 +184,7 @@ export interface SkillSummary {
  * triggers subsystem's concern (@matatbread/matbot-triggers): a trigger invokes `skill_action(use)`
  * like any other tool, so skills carry no trigger data of their own.
  */
-export class SkillManager {
+export class SkillManagerImpl implements SkillManager {
   private readonly skills = new Map<string, SkillDoc>();
   // In-flight analysis per skill id, so a detached reindex can be cancelled: superseded by a newer
   // write, the skill being deleted, or teardown. Keeps it from outliving the skill or the process.
