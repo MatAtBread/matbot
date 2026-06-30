@@ -118,7 +118,7 @@ export async function loadPlugins(
     ),
   );
 
-  const toLoad: { spec: string; importSpec: string; name?: string; runtimes?: readonly Runtime[] }[] = [];
+  const toLoad: { spec: string; importSpec: string; resolvedUrl: string; name?: string; runtimes?: readonly Runtime[] }[] = [];
   for (let i = 0; i < reqs.length; i++) {
     const { spec, importSpec, name } = reqs[i]!;
     const runtimes = declared[i];
@@ -132,6 +132,10 @@ export async function loadPlugins(
     toLoad.push({
       spec,
       importSpec: freshImportSpec(spec, importSpec, bustCache),
+      // The resolved location WITHOUT the reload cache-bust stamp — a stable `file:`/bare URL a
+      // consumer can map back to source (e.g. skills_compiler building a types program over the
+      // live plugin set). Falls back to the bare spec when the host pre-resolved nothing.
+      resolvedUrl: importSpec ?? spec,
       ...(name     !== undefined ? { name }     : {}),
       ...(runtimes !== undefined ? { runtimes } : {}),
     });
@@ -211,7 +215,8 @@ export async function loadPlugins(
     const plugin: MatbotPlugin = {
       ...spec_obj,
       name,
-      specifier: spec,
+      specifier:   spec,
+      resolvedUrl: toLoad[i]!.resolvedUrl,
       ...(source   !== undefined ? { source }                 : {}),
       ...(runtimes !== undefined ? { matbotRuntime: runtimes } : {}),
     };

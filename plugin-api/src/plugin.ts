@@ -491,7 +491,13 @@ export interface MatbotPluginSpec {
  */
 export interface MatbotPlugin extends MatbotPluginSpec {
   readonly name:      string;   // resolver.identify(specifier)
-  readonly specifier: string;   // how it was loaded
+  readonly specifier: string;   // how it was loaded (config entry / pre-resolved)
+  /** The stable URL the loader actually imported, minus any reload cache-bust stamp — a `file:` URL
+   *  for local/remote-cached plugins, the bare specifier when nothing was pre-resolved. Lets a consumer
+   *  map a loaded plugin back to its on-disk source without re-running specifier resolution (e.g.
+   *  skills_compiler builds a types program over the live plugin set). Set by the loader; absent only
+   *  on hosts that construct MatbotPlugin by hand. */
+  readonly resolvedUrl?: string;
   readonly source?:   PluginSource;
   // The package.json `matbotRuntime`, captured at load from the same value used for the pre-import
   // gate (the host reads it once; downstream just reads this). Absent ⇒ undeclared. Stored rather

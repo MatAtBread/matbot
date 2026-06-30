@@ -40,41 +40,63 @@ type Classification =
   | { tag: 'bundle'; sym: TS.Symbol }
   | { tag: 'bail';   label: string };
 
-// Returns null when the workspace layout isn't present (e.g. a non-monorepo install where the sources
-// aren't on disk) — the caller then falls back to its static DTS.
-export async function buildMatbotToolsDts(projectRoot: string): Promise<MatbotToolsDts | null> {
+// `pluginEntryUrls` are the resolved import URLs of the LIVE loaded plugins (each plugin's `resolvedUrl`,
+// via the `plugin` tool's `list`). Each entry is used as a Program root: it pulls in that plugin's own
+// augmenting files transitively, so coverage follows the actual loaded set (npm / `.plugins/` / local),
+// not just the monorepo tree. When none resolve to on-disk source, falls back to globbing the monorepo
+// `plugins/` tree. Returns null when neither yields anything (the caller then uses its static DTS).
+export async function buildMatbotToolsDts(projectRoot: string, pluginEntryUrls?: readonly string[]): Promise<MatbotToolsDts | null> {
   const ts = (await import('typescript')).default as typeof TS;
   const { readFileSync, readdirSync, statSync, existsSync } = await import('node:fs');
   const { join } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const { createRequire } = await import('node:module');
 
-  const pluginApiIndex = join(projectRoot, 'plugin-api', 'src', 'index.ts');
-  if (!existsSync(pluginApiIndex)) return null;
+  // Anchor plugin-api at the monorepo source if present, else the installed package.
+  const monorepoApi = join(projectRoot, 'plugin-api', 'src', 'index.ts');
+  let pluginApiIndex: string | undefined = existsSync(monorepoApi) ? monorepoApi : undefined;
+  if (!pluginApiIndex) {
+    try { pluginApiIndex = createRequire(join(projectRoot, '_')).resolve('@matatbread/matbot-plugin-api'); } catch { /* unresolved */ }
+  }
+  if (!pluginApiIndex) return null;
 
-  // Files that augment ToolResults or MatbotServices. `skills_compiler` is skipped: its own
-  // loose-discovery `MatbotServices.SkillManager` slice would shadow the real interface. Generated
-  // `matbot-tools.d.ts` files are skipped so we don't feed prior output back in.
-  const SKIP = new Set(['node_modules', 'dist', '.git', 'compiled-plugins', 'skills_compiler']);
-  const augmenting: string[] = [];
-  const walk = (dir: string): void => {
-    let entries: string[];
-    try { entries = readdirSync(dir); } catch { return; }
-    for (const name of entries) {
-      if (SKIP.has(name)) continue;
-      const p = join(dir, name);
-      let isDir: boolean;
-      try { isDir = statSync(p).isDirectory(); } catch { continue; }
-      if (isDir) { walk(p); continue; }
-      if (!name.endsWith('.ts') || name.endsWith('matbot-tools.d.ts')) continue;
-      const src = readFileSync(p, 'utf8');
-      if (/declare\s+module\s+['"]@matatbread\/matbot-plugin-api['"]/.test(src) && /\binterface\s+(?:ToolResults|MatbotServices)\b/.test(src)) {
-        augmenting.push(p);
-      }
-    }
+  const roots = new Set<string>([pluginApiIndex]);
+
+  // A loaded plugin's `resolvedUrl` → an on-disk type-bearing source file. `.ts`/`.d.ts` used directly;
+  // an npm `.js` entry maps to its sibling `.d.ts`; anything else (blob:, bare specifier, missing) skipped.
+  const toSource = (u: string): string | undefined => {
+    let p: string;
+    try { p = u.startsWith('file:') ? fileURLToPath(u) : u; } catch { return undefined; }
+    if (/\.d\.ts$|(?<!\.d)\.ts$/.test(p)) return existsSync(p) ? p : undefined;
+    if (p.endsWith('.js')) { const d = p.replace(/\.js$/, '.d.ts'); return existsSync(d) ? d : undefined; }
+    return undefined;
   };
-  walk(join(projectRoot, 'plugins'));
-  if (augmenting.length === 0) return null;
+  for (const u of pluginEntryUrls ?? []) { const p = toSource(u); if (p) roots.add(p); }
 
-  const program = ts.createProgram([pluginApiIndex, ...augmenting], {
+  // Fallback: glob the monorepo `plugins/` tree for augmenting files. `skills_compiler` is skipped (its
+  // loose-discovery `MatbotServices.SkillManager` slice would shadow the real interface); generated
+  // `matbot-tools.d.ts` files too (don't feed prior output back in).
+  if (roots.size === 1 && existsSync(join(projectRoot, 'plugins'))) {
+    const SKIP = new Set(['node_modules', 'dist', '.git', 'compiled-plugins', 'skills_compiler']);
+    const walk = (dir: string): void => {
+      let entries: string[];
+      try { entries = readdirSync(dir); } catch { return; }
+      for (const name of entries) {
+        if (SKIP.has(name)) continue;
+        const p = join(dir, name);
+        let isDir: boolean;
+        try { isDir = statSync(p).isDirectory(); } catch { continue; }
+        if (isDir) { walk(p); continue; }
+        if (!name.endsWith('.ts') || name.endsWith('matbot-tools.d.ts')) continue;
+        const src = readFileSync(p, 'utf8');
+        if (/declare\s+module\s+['"]@matatbread\/matbot-plugin-api['"]/.test(src) && /\binterface\s+(?:ToolResults|MatbotServices)\b/.test(src)) roots.add(p);
+      }
+    };
+    walk(join(projectRoot, 'plugins'));
+  }
+  if (roots.size === 1) return null;                          // nothing to scan beyond plugin-api itself
+
+  const program = ts.createProgram([...roots], {
     target:                   ts.ScriptTarget.ES2022,
     module:                   ts.ModuleKind.NodeNext,
     moduleResolution:         ts.ModuleResolutionKind.NodeNext,
@@ -86,7 +108,8 @@ export async function buildMatbotToolsDts(projectRoot: string): Promise<MatbotTo
   });
   const checker = program.getTypeChecker();
 
-  const apiSf = program.getSourceFile(pluginApiIndex);
+  const apiSf = program.getSourceFile(pluginApiIndex)
+    ?? program.getSourceFiles().find(f => f.fileName.includes('/plugin-api/') && /\/index\.d?\.ts$/.test(f.fileName));
   if (!apiSf) return null;
   const apiModule = checker.getSymbolAtLocation(apiSf);
   if (!apiModule) return null;

@@ -439,6 +439,7 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
         types:       pluginTypes(p, pluginToolNames),
         tools:       toolsByPlugin.get(p.name) ?? [],
         specifier:   p.specifier,
+        ...(p.resolvedUrl   !== undefined ? { resolvedUrl:   p.resolvedUrl }   : {}),
         ...(p.manifest?.description ? { description: p.manifest.description } : {}),
         ...(p.matbotRuntime !== undefined ? { matbotRuntime: p.matbotRuntime } : {}),
       }));

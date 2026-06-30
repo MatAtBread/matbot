@@ -33,6 +33,12 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### API gaps filled
 
+- **`MatbotPlugin.resolvedUrl`.** The loader now retains the stable URL it actually imported (minus any
+  reload cache-bust stamp) on each loaded plugin, instead of computing and discarding it. This lets a
+  consumer map a loaded plugin back to its on-disk source without re-running specifier resolution — used
+  by `skills_compiler` to build a types program over the live plugin set. Optional (absent only on hosts
+  that hand-construct `MatbotPlugin`); the `plugin` tool's `list` reports it.
+
 - **Typed tool results: `ToolResults` registry + `toolResult` reader.** A tool's result type is now
   recoverable at the call site. `ToolResults` is an augmentable interface (same pattern as `MarkerData`)
   mapping a tool's `name` → the type of the `value` it yields; `invokeTool` is generic over the name, so
@@ -324,9 +330,11 @@ churn and less likely to affect a consumer who doesn't use them.
   signature like `(req: unknown /* IncomingMessage */) => …` stays usable rather than collapsing). The
   result: a generated plugin gets correct `toolResult` types (with per-action narrowing for multi-action
   tools) for **all** built-in tools, plus typed registry services on `services.*` (`SkillManager`,
-  `Triggers`, …). The build falls back to the static list when the workspace sources aren't on disk. The
-  derivation runs in-process (briefly blocks the event loop); driving it off the live loaded-plugin set
-  with a load-invalidated cache is the planned follow-up.
+  `Triggers`, …). The program roots are the **live loaded-plugin set** — each plugin's `resolvedUrl`
+  (obtained via the `plugin` tool's `list`, so it's replaceable and matches what the LLM sees), so
+  coverage follows the actually-loaded plugins (npm / `.plugins/` / local), not just the monorepo tree —
+  falling back to a monorepo `plugins/` glob, then to the static list, when neither is available. The
+  derivation runs in-process (briefly blocks the event loop); a build cache is a possible follow-up.
 
 - **skills** — `SkillManager` is now an **interface** (implemented by `SkillManagerImpl`) rather than a
   class, so the registry key carries an interface like every other service (and the type is bundlable

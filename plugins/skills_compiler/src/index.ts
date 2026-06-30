@@ -1,4 +1,4 @@
-import { PLUGIN_API_VERSION, currentPrincipal, invokeTool, toolText } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, currentPrincipal, invokeTool, toolResult, toolText } from '@matatbread/matbot-plugin-api';
 import type { MatbotPluginSpec, MatbotMachine, ToolExecutor, ToolEvent, ToolContext, Session, Message } from '@matatbread/matbot-plugin-api';
 import { buildMatbotToolsDts } from './build-matbot-dts.js';
 
@@ -326,13 +326,20 @@ Rules: implement the SPEC, using the worked example's exact URLs/queries/field n
 
           const { mkdir, symlink, readlink, writeFile } = await import('node:fs/promises');
 
-          // Derive the tool-result types from the live workspace so the generated plugin gets a correct,
-          // up-to-date `toolResult` type for every tool it can reach (not just the hardcoded few). Falls
-          // back to the static DTS when the workspace sources aren't on disk (non-monorepo install).
+          // Derive the tool-result / service types from the LIVE loaded plugins so the generated plugin
+          // gets correct `toolResult` types and typed `services.*` for everything it can reach. The set
+          // of plugins (and where their source lives) comes from the `plugin` tool's `list` — going via
+          // the tool keeps it replaceable and matches what the LLM sees. Falls back to a monorepo glob,
+          // then to the static DTS, when the live set or sources aren't available.
           yield { type: 'progress', pct: 84, message: 'Deriving tool result types...' };
           let toolResultsDts = TOOL_RESULTS_DTS;
           try {
-            const generated = await buildMatbotToolsDts(dirname(services.configPath));
+            let pluginUrls: string[] = [];
+            try {
+              const list = await toolResult(invokeTool(services, 'plugin', { action: 'list' }, ctx)) as { loaded?: Array<{ resolvedUrl?: string }> };
+              pluginUrls = (list.loaded ?? []).map(p => p.resolvedUrl).filter((u): u is string => typeof u === 'string');
+            } catch { /* `plugin` tool absent → buildMatbotToolsDts falls back to the monorepo glob */ }
+            const generated = await buildMatbotToolsDts(dirname(services.configPath), pluginUrls);
             if (generated) {
               toolResultsDts = generated.dts;
               yield { type: 'progress', pct: 85, message: `Typed ${generated.tools.emitted.length} tool result(s) and ${generated.services.emitted.length} service(s).` };
