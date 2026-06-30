@@ -665,10 +665,14 @@ const skillTriggerList   = document.getElementById('skill-trigger-list');
 const TRIGGER_KINDS = ['ephemeral', 'contextual', 'retract', 'followup'];
 let editingSkillName = null;
 let skillEditor = null;   // TinyMDE.Editor, created lazily on first open
-// A skill is fired by (at most) one Trigger whose invoke is skill_action(use, {name}); its
-// `conditions` are what the Triggers tab edits. `editingTriggerId` is that trigger's id (null when
-// the skill has no trigger yet — we create one on save if conditions are added).
+// A skill is fired by one or more Triggers whose invoke is skill_action(use, {name}); their
+// `conditions` are what the Triggers tab edits. Multiple such triggers are equivalent to a single
+// one holding the union of their conditions (conditions OR within a trigger, triggers OR with each
+// other), so the editor flattens them: `editingTriggerId` is the primary trigger we update (null
+// when the skill has no trigger yet — created on save if conditions are added) and
+// `editingTriggerExtraIds` are any redundant duplicates, removed on save to consolidate.
 let editingTriggerId = null;
+let editingTriggerExtraIds = [];
 
 function setSkillTab(tab) {
   for (const btn of document.querySelectorAll('.skill-tab')) btn.classList.toggle('active', btn.dataset.tab === tab);
@@ -848,9 +852,10 @@ function renderTriggers(conditions) {
   for (const c of conditions) skillTriggerList.appendChild(makeTriggerRow(c));
 }
 
-// Collect the live rows into a `conditions` array and reconcile the skill's single load-trigger:
-// update it (or create it if absent) when there are conditions, remove it when the last one is
-// cleared. Conditions have no stable id, so this is a wholesale replace, not a per-row diff.
+// Collect the live rows into a `conditions` array and reconcile the skill's load-trigger(s): update
+// the primary trigger (or create it if absent) when there are conditions, remove it when the last
+// one is cleared, and always drop any redundant duplicates so the skill is left with a single
+// trigger. Conditions have no stable id, so this is a wholesale replace, not a per-row diff.
 async function saveTriggers(name) {
   const conditions = [];
   for (const row of skillTriggerList.querySelectorAll('.trigger-row')) {
@@ -859,6 +864,11 @@ async function saveTriggers(name) {
     if (!rule) continue; // an empty row is a no-op, not a delete
     conditions.push({ kind, rule });
   }
+
+  // Consolidate: the editor flattened every matching trigger's conditions into the rows above, so
+  // the extras are now redundant — remove them regardless of what happens to the primary.
+  for (const id of editingTriggerExtraIds) await callTool('trigger_action', { action: 'remove', id });
+  editingTriggerExtraIds = [];
 
   if (editingTriggerId) {
     if (conditions.length) {
@@ -897,6 +907,7 @@ async function openSkillEditor(name) {
   skillEditorError.textContent = '';
   skillEditorTitle.textContent = name;
   editingTriggerId = null;
+  editingTriggerExtraIds = [];
   renderTriggers([]);
   renderSkillMetadata(false, null);
   setSkillTab('content');
@@ -905,9 +916,13 @@ async function openSkillEditor(name) {
   // this skill. Independent of the markdown editor, so load it even if TinyMDE is absent.
   callTool('trigger_action', { action: 'query', tool: 'skill_action', params: { action: 'use', name } })
     .then((res) => {
-      const trig = Array.isArray(res?.triggers) ? res.triggers[0] : undefined;
-      editingTriggerId = trig?.id ?? null;
-      renderTriggers(Array.isArray(trig?.conditions) ? trig.conditions : []);
+      // A skill may have accreted more than one trigger with this same invoke. They're equivalent to
+      // one trigger holding the union of their conditions, so flatten every match into the row list
+      // and remember the primary (updated on save) vs. the extras (removed on save to consolidate).
+      const trigs = Array.isArray(res?.triggers) ? res.triggers : [];
+      editingTriggerId = trigs[0]?.id ?? null;
+      editingTriggerExtraIds = trigs.slice(1).map((t) => t.id);
+      renderTriggers(trigs.flatMap((t) => (Array.isArray(t.conditions) ? t.conditions : [])));
     })
     .catch(() => { /* triggers plugin not loaded — leave the triggers tab empty. */ });
   // Derived analysis, likewise independent of TinyMDE; absent until the background pass has cached it.
