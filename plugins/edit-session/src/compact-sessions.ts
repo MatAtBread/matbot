@@ -19,8 +19,19 @@
  * Invoke via background tool or call directly as a tool.
  */
 
-import type { Tool, ToolExecutor, ToolContext, ToolEvent, Session, Store } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolContext, ToolResultOf, Session, Store } from '@matatbread/matbot-plugin-api';
 import { lastActivityAt } from '@matatbread/matbot-plugin-api';
+
+declare module '@matatbread/matbot-plugin-api' {
+  interface ToolResults {
+    compact_sessions: {
+      examined:  number;
+      pages:     number;
+      compacted: Array<{ sessionId: string; title: string; tier: 'full' | 'partial'; messagesStripped: number }>;
+      skipped:   Array<{ sessionId: string; title: string; reason: string }>;
+    };
+  }
+}
 
 /** Content types preserved through compaction (everything else — tool-call, tool-result, thinking,
  *  thinking-redacted, reasoning, image, document, audio — is stripped). Must match the set used by
@@ -54,9 +65,9 @@ function compactMessages(messages: Session['messages'], msgIndex: number): { mes
 // ── tool factory ──────────────────────────────────────────────────────────────
 
 const compactSessionDefaults: Required<CompactSessionsParams> = { activeMessages: 10, inactiveDays: 28 };
-export function makeCompactSessionsTool(store: Store<Session>): Tool {
-  const executor: ToolExecutor = {
-    async *execute(input: CompactSessionsParams | null | undefined, ctx: ToolContext): AsyncIterable<ToolEvent> {
+export function makeCompactSessionsTool(store: Store<Session>): Tool<ToolResultOf<'compact_sessions'>> {
+  const executor: ToolExecutor<ToolResultOf<'compact_sessions'>> = {
+    async *execute(input: CompactSessionsParams | null | undefined, ctx: ToolContext) {
       const currentSessionId = ctx.session.id;
       const compacted: Array<{ sessionId: string; title: string; tier: 'full' | 'partial'; messagesStripped: number }> = [];
       const skipped: Array<{ sessionId: string; title: string; reason: string }> = [];

@@ -1,4 +1,20 @@
-import type { Tool, ToolEvent, ToolContext, ProviderConfig, MatbotPlugin } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolResult, ToolResultOf, ToolContext, ProviderConfig, MatbotPlugin, ModelParameters } from '@matatbread/matbot-plugin-api';
+
+declare module '@matatbread/matbot-plugin-api' {
+  interface ToolResults {
+    provider:
+      | ToolResult<{ providers: Array<{
+            name:           string;
+            module:         string;
+            model:          string;
+            hasCredentials: boolean;
+            endpoint?:      string;
+            parameters?:    ModelParameters;
+          }> }, { action: 'list'   }>
+      | ToolResult<{ message: string }, { action: 'add'    }>
+      | ToolResult<{ message: string }, { action: 'remove' }>;
+  }
+}
 import { getRegisteredPlugins, getSpecifierForPlugin }       from '@matatbread/matbot-core';
 import { readFile, writeFile }                               from 'node:fs/promises';
 import { fileURLToPath }                                     from 'node:url';
@@ -197,9 +213,9 @@ function currentProviderName(ctx: ToolContext): string | undefined {
 
 // ── Executor ──────────────────────────────────────────────────────────────────
 
-function makeExecutor(liveProviders: Map<string, ProviderConfig>, pluginNameToOrigPath?: ReadonlyMap<string, string>) {
+function makeExecutor(liveProviders: Map<string, ProviderConfig>, pluginNameToOrigPath?: ReadonlyMap<string, string>): ToolExecutor<ToolResultOf<'provider'>> {
   return {
-    async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
+    async *execute(input: unknown, ctx: ToolContext) {
       const { action } = input as ProviderInput;
 
       const configPath = ctx.configPath;
@@ -399,7 +415,7 @@ function makeExecutor(liveProviders: Map<string, ProviderConfig>, pluginNameToOr
 export function createProviderTool(
   providers:          ReadonlyMap<string, ProviderConfig>,
   pluginNameToOrigPath?: ReadonlyMap<string, string>,
-): Tool {
+): Tool<ToolResultOf<'provider'>> {
   // Cast to mutable so add/remove can update the live map without a restart.
   const liveProviders = providers as Map<string, ProviderConfig>;
 

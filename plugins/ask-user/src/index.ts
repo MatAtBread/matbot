@@ -1,4 +1,4 @@
-import type { Tool, ToolEvent, ToolContext, MatbotPluginSpec, FormField } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolResultOf, ToolContext, MatbotPluginSpec, FormField } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 
 declare module '@matatbread/matbot-plugin-api' {
@@ -11,8 +11,8 @@ declare module '@matatbread/matbot-plugin-api' {
 const MAX_OPTIONS = 10;
 const VALID_TYPES: FormField['type'][] = ['text', 'password', 'select', 'confirm'];
 
-const executor = {
-  async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
+const executor: ToolExecutor<ToolResultOf<'ask_user'>> = {
+  async *execute(input: unknown, ctx: ToolContext) {
     const field = input as FormField;
 
     if (!field.name || typeof field.name !== 'string') {
@@ -47,7 +47,7 @@ const executor = {
   },
 };
 
-export const askUserTool: Tool = {
+export const askUserTool: Tool<ToolResultOf<'ask_user'>> = {
   name: 'ask_user',
   description: `Use this tool when you need the user to choose, confirm, or supply a value
    before proceeding. The frontend renders the question as an interactive control.

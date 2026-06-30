@@ -1,7 +1,16 @@
 import type {
   MatbotPluginSpec, MatbotMachine, Principal, ProviderAdapter, ProviderConfig, Session, PromptFn, FormField,
+  ToolExecutor, ToolResultOf,
 } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
+
+declare module '@matatbread/matbot-plugin-api' {
+  interface ToolResults {
+    telegram_provider:  { provider: string | null };  // the active provider name (null when none), or the one just set
+    telegram_open_door: { open_until: string };        // ISO time the join window stays open until
+    telegram_send:      { sent: number };              // how many chats the notification reached
+  }
+}
 import {
   createSession, resolveProviderFactory, runAs,
 } from '@matatbread/matbot-core';
@@ -90,7 +99,7 @@ export const plugin: MatbotPluginSpec = {
 
           yield { type: 'error' as const, message: `Unknown telegram_provider action "${(act as { action: string }).action}". Expected 'get' or 'set'.` };
         },
-      },
+      } satisfies ToolExecutor<ToolResultOf<'telegram_provider'>>,
     },
     {
       name:        'telegram_open_door',
@@ -101,7 +110,7 @@ export const plugin: MatbotPluginSpec = {
           openDoor = Date.now();
           yield { type: 'result' as const, value: { open_until: new Date(openDoor + 30_000).toISOString() } };
         },
-      },
+      } satisfies ToolExecutor<ToolResultOf<'telegram_open_door'>>,
     },
     {
       name:        'telegram_send',
@@ -139,7 +148,7 @@ export const plugin: MatbotPluginSpec = {
           }
           yield { type: 'result' as const, value: { sent } };
         },
-      },
+      } satisfies ToolExecutor<ToolResultOf<'telegram_send'>>,
     },
   ],
 

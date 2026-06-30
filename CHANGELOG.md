@@ -33,6 +33,12 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### API gaps filled
 
+- **`MatbotPlugin.resolvedUrl`.** The loader now retains the stable URL it actually imported (minus any
+  reload cache-bust stamp) on each loaded plugin, instead of computing and discarding it. This lets a
+  consumer map a loaded plugin back to its on-disk source without re-running specifier resolution — used
+  by `skills_compiler` to build a types program over the live plugin set. Optional (absent only on hosts
+  that hand-construct `MatbotPlugin`); the `plugin` tool's `list` reports it.
+
 - **Typed tool results: `ToolResults` registry + `toolResult` reader.** A tool's result type is now
   recoverable at the call site. `ToolResults` is an augmentable interface (same pattern as `MarkerData`)
   mapping a tool's `name` → the type of the `value` it yields; `invokeTool` is generic over the name, so
@@ -41,6 +47,38 @@ churn and less likely to affect a consumer who doesn't use them.
   `toolText`, which collapses to a string). Unregistered tool names resolve to `unknown`, forcing the
   caller to narrow. `ToolResults`, `ToolResultOf`, and `toolResult` are exported from
   `@matatbread/matbot-plugin-api`; `ask-user` and `rumsfeld` register their tools' result types.
+
+- **`ToolExecutor<R = unknown>` / `Tool<R = unknown>` carry the result type at the source.** The
+  producer side is now typed too: `ToolExecutor.execute` returns `AsyncIterable<ToolEvent<R>>`, so a
+  tool declares the type of the `value` it yields once, where it's written. Binding the executor to its
+  registry entry — `ToolExecutor<ToolResultOf<'my_tool'>>` (or `Tool<ToolResultOf<'my_tool'>>` on the
+  tool object) — makes the `ToolResults` augmentation the single source of truth: the executor's yields
+  and the registry entry can no longer silently drift, since the compiler checks the yields against it.
+  The `unknown` default keeps every untyped executor compiling untouched, and covariance means a
+  narrower `ToolExecutor<X>` still satisfies the heterogeneous `Tool[]` registry boundary. Most built-in
+  tools with a well-defined structured result now declare it (`whoami`, `session_action`, `session_edit`,
+  `compact_sessions`, `bash`, `bash_config`, `workspace_action`, `dream_time`, `ask_inner_voice`,
+  `cognition_config`, `skill_action`, `skills_config`, `trigger_action`, `triggers_config`, `provider`,
+  `plugin`, `mcp_action`, `store_action`, `background`, `every_action`, `single_turn`, the `url_for_resource`
+  / telegram tools); tools whose result is genuinely `unknown` (`http`, the MCP proxy, the runtime-named
+  store tool) keep the default and remain unregistered, forcing the caller to narrow.
+
+- **Per-call result discrimination for multi-action tools (`ToolResult<Result, Args>`).** A multi-action
+  tool is a weird overloaded function — it returns different shapes depending on its params. Its
+  `ToolResults` entry can now be a union of `ToolResult<Result, Args>` *arms*, each pairing a result with
+  the discriminating params *pattern* that selects it; `invokeTool` is generic over the params (`const P`)
+  and narrows the result to the matching arm. `invokeTool(machine, 'session_action', { action: 'get', … })`
+  is now typed to yield `Session`, not the union of every action's result. The discriminant is *any*
+  field(s), not just `action` (e.g. `background` keys on `interval`'s presence: `ToolResult<…, { interval:
+  string }>`); the pattern is the discriminant only, not the full input, so a call carrying just that field
+  still matches. When no arm matches (a non-literal discriminant, or an absence-discriminant the positive
+  patterns can't express) the result falls back to the union of all arms — always sound, just less narrow.
+  `ToolResultOf<K>` unwraps an arm-based entry to that union, so executors still bind unchanged
+  (`ToolExecutor<ToolResultOf<'my_tool'>>` must cover every arm). `ToolResult` and `ToolResultFor` are
+  exported from `@matatbread/matbot-plugin-api`. Every built-in multi-action tool adopts the arm form:
+  `session_action`, `session_edit`, `workspace_action`, `background`, `every_action`, `skill_action`,
+  `skills_config`, `cognition_config`, `trigger_action`, `triggers_config`, `provider`, `plugin`,
+  `mcp_action`, `store_action`, and `bash_config`. Behaviour is unchanged — type-level only.
 
 - **`invokeTool` opts are now a named `InvokeToolOptions` type derived from `ToolContext`.** A tool
   forwarding a call to another tool can pass its own `ctx` straight through as the 4th argument —
@@ -282,6 +320,25 @@ churn and less likely to affect a consumer who doesn't use them.
   `contextual_search`) — so a wrong-shape access is a compile error the repair loop catches rather than a
   silent runtime failure. Codegen is also now told to implement every branch the skill describes (each
   arm of a conditional), not just the path the worked example happened to exercise.
+
+- **skills_compiler** — the `matbot-tools.d.ts` shipped to each generated plugin is now **derived from the
+  live type graph** instead of a hardcoded three-tool list. At compile time the compiler builds a TS
+  program over the workspace's tool/service packages, reads the merged `ToolResults` **and**
+  `MatbotServices`, and emits a self-contained `declare module` — **bundling** each referenced
+  package-private interface/type-alias into the DTS (recursively), importing plugin-api types, and
+  replacing any `node_modules`/class/enum/unresolved *leaf* in place with `unknown /* … */` (so a
+  signature like `(req: unknown /* IncomingMessage */) => …` stays usable rather than collapsing). The
+  result: a generated plugin gets correct `toolResult` types (with per-action narrowing for multi-action
+  tools) for **all** built-in tools, plus typed registry services on `services.*` (`SkillManager`,
+  `Triggers`, …). The program roots are the **live loaded-plugin set** — each plugin's `resolvedUrl`
+  (obtained via the `plugin` tool's `list`, so it's replaceable and matches what the LLM sees), so
+  coverage follows the actually-loaded plugins (npm / `.plugins/` / local), not just the monorepo tree —
+  falling back to a monorepo `plugins/` glob, then to the static list, when neither is available. The
+  derivation runs in-process (briefly blocks the event loop); a build cache is a possible follow-up.
+
+- **skills** — `SkillManager` is now an **interface** (implemented by `SkillManagerImpl`) rather than a
+  class, so the registry key carries an interface like every other service (and the type is bundlable
+  into the generated-plugin DTS). Consumers are unaffected (all used `import type { SkillManager }`).
 
 - **skills_compiler** — code-generation guidance now forbids extracting a value from another tool's
   natural-language output with a regex / fixed-phrase match (a brittle anti-pattern that silently fails

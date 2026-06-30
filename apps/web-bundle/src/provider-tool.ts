@@ -1,5 +1,14 @@
-import type { Tool, ToolEvent, ToolContext } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolResult, ToolResultOf, ToolContext } from '@matatbread/matbot-plugin-api';
 import type { AvailableProvider, ProviderDraft } from './setup.js';
+
+declare module '@matatbread/matbot-plugin-api' {
+  interface ToolResults {
+    provider:
+      | ToolResult<{ providers: ProviderRow[]; adapters: AvailableProvider[] }, { action: 'list'   }>
+      | ToolResult<{ message: string }, { action: 'add'    }>
+      | ToolResult<{ message: string }, { action: 'remove' }>;
+  }
+}
 
 export interface ProviderRow {
   name:        string;
@@ -33,11 +42,11 @@ type ProviderInput =
  * than a YAML file. The API key is collected out-of-band via `ctx.prompt` (never in the transcript),
  * exactly like `plugin store-key`.
  */
-export function createBrowserProviderTool(admin: ProviderAdmin): Tool {
+export function createBrowserProviderTool(admin: ProviderAdmin): Tool<ToolResultOf<'provider'>> {
   const adapterList = () => admin.available.map((a, i) => `  ${i}. ${a.label}  (${a.module})`).join('\n');
 
-  const executor = {
-    async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
+  const executor: ToolExecutor<ToolResultOf<'provider'>> = {
+    async *execute(input: unknown, ctx: ToolContext) {
       const act = input as ProviderInput;
 
       if (act.action === 'list') {

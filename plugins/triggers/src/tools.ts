@@ -1,6 +1,24 @@
-import type { Tool, ToolExecutor, ToolContext, ToolEvent, MatbotMachine } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolResult, ToolResultOf, ToolContext, MatbotMachine } from '@matatbread/matbot-plugin-api';
 import type { TriggerManager } from './manager.js';
-import type { TriggerCondition, TriggerKind } from './types.js';
+import type { TriggerCondition, TriggerKind, Trigger } from './types.js';
+
+declare module '@matatbread/matbot-plugin-api' {
+  interface ToolResults {
+    // One arm per action: a caller of `invokeTool(machine, 'trigger_action', { action: '…' })` gets the
+    // matching result narrowed by the `action` it passed (see ToolResult / the multi-action note on ToolResults).
+    trigger_action:
+      | ToolResult<{ triggers: Trigger[] }, { action: 'list'   }>
+      | ToolResult<{ triggers: Trigger[] }, { action: 'query'  }>
+      | ToolResult<Trigger,                 { action: 'get'    }>
+      | ToolResult<{ id: string },          { action: 'add'    }>
+      | ToolResult<Trigger,                 { action: 'update' }>
+      | ToolResult<{ id: string },          { action: 'remove' }>;
+    triggers_config:
+      | ToolResult<{ classifierProvider: string | null; available: string[] }, { action: 'get'   }>
+      | ToolResult<{ classifierProvider: string },                             { action: 'set'   }>
+      | ToolResult<{ classifierProvider: null },                               { action: 'clear' }>;
+  }
+}
 
 const KINDS: readonly TriggerKind[] = ['ephemeral', 'contextual', 'retract', 'followup'];
 const isKind = (x: unknown): x is TriggerKind => typeof x === 'string' && (KINDS as readonly string[]).includes(x);
@@ -49,9 +67,9 @@ function validConditions(x: unknown): x is TriggerCondition[] {
     typeof (c as { rule?: unknown }).rule === 'string');
 }
 
-export function createTriggerActionTool(manager: TriggerManager): Tool {
-  const executor: ToolExecutor = {
-    async *execute(input: unknown, _ctx: ToolContext): AsyncIterable<ToolEvent> {
+export function createTriggerActionTool(manager: TriggerManager): Tool<ToolResultOf<'trigger_action'>> {
+  const executor: ToolExecutor<ToolResultOf<'trigger_action'>> = {
+    async *execute(input: unknown, _ctx: ToolContext) {
       const args = input as Partial<TriggerActionInput> & { action?: string };
 
       switch (args.action) {
@@ -168,10 +186,10 @@ export function createTriggerActionTool(manager: TriggerManager): Tool {
  * own provider (so triggers work with zero config); set it to pin a small/fast model. Resolved per
  * evaluation, so a change takes effect on the next turn without a restart.
  */
-export function createTriggersConfigTool(services: MatbotMachine): Tool {
+export function createTriggersConfigTool(services: MatbotMachine): Tool<ToolResultOf<'triggers_config'>> {
   const KEY = 'classifierProvider';
-  const executor: ToolExecutor = {
-    async *execute(input: unknown, _ctx: ToolContext): AsyncIterable<ToolEvent> {
+  const executor: ToolExecutor<ToolResultOf<'triggers_config'>> = {
+    async *execute(input: unknown, _ctx: ToolContext) {
       const args      = input as { action?: string; provider?: string };
       const settings  = services.settings();
       const available = [...services.providers.keys()];

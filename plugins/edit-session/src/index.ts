@@ -1,9 +1,21 @@
 import type {
-  MatbotPluginSpec, MatbotMachine, Tool, ToolEvent, Session, Store, Message, Marker,
+  MatbotPluginSpec, MatbotMachine, Tool, ToolResult, ToolResultOf, Session, Store, Message, Marker,
 } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION, lastActivityAt } from '@matatbread/matbot-plugin-api';
 
 import { makeCompactSessionsTool } from './compact-sessions.js'
+
+declare module '@matatbread/matbot-plugin-api' {
+  interface ToolResults {
+    // One arm per action: a caller of `invokeTool(machine, 'session_edit', { action: '…' })` gets the
+    // matching result narrowed by the `action` it passed (see ToolResult / the multi-action note on ToolResults).
+    session_edit:
+      | ToolResult<{ sessionId: string; messagesRemaining: number },                                                     { action: 'cut'     }>
+      | ToolResult<{ newSessionId: string; messagesCopied: number },                                                     { action: 'fork'    }>
+      | ToolResult<{ newSessionId: string; messagesSplit: number; currentSessionId: string; messagesRemaining: number }, { action: 'split'   }>
+      | ToolResult<{ sessionId: string; messagesStripped: number },                                                      { action: 'compact' }>;
+  }
+}
 
 const MARKER_CREATOR = '@matatbread/matbot-edit-session';
 
@@ -75,7 +87,7 @@ const KEEP_TYPES = new Set(['text', 'refusal', 'marker']);
 // this TypeScript signature, which the executor enforces.
 interface SessionEditInput { action: 'cut' | 'fork' | 'split' | 'compact'; sessionId: string; msgIndex: number }
 
-function makeSessionEditTool(store: Store<Session>): Tool {
+function makeSessionEditTool(store: Store<Session>): Tool<ToolResultOf<'session_edit'>> {
   return {
     name: 'session_edit',
     description:
@@ -101,7 +113,7 @@ function makeSessionEditTool(store: Store<Session>): Tool {
       },
     },
     executor: {
-      async *execute(input: unknown): AsyncIterable<ToolEvent> {
+      async *execute(input: unknown) {
         const { action, sessionId, msgIndex } = input as Partial<SessionEditInput>;
         if (!sessionId) { yield { type: 'error', message: 'session_edit requires "sessionId".' }; return; }
         if (typeof msgIndex !== 'number') { yield { type: 'error', message: 'session_edit requires "msgIndex" (number).' }; return; }

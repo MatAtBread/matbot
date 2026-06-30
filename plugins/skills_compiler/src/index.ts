@@ -1,5 +1,6 @@
-import { PLUGIN_API_VERSION, currentPrincipal, invokeTool, toolText } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, currentPrincipal, invokeTool, toolResult, toolText } from '@matatbread/matbot-plugin-api';
 import type { MatbotPluginSpec, MatbotMachine, ToolExecutor, ToolEvent, ToolContext, Session, Message } from '@matatbread/matbot-plugin-api';
+import { buildMatbotToolsDts } from './build-matbot-dts.js';
 
 // Loose discovery of the skills plugin's SkillManager — optional, so no hard dependency on the
 // package. Only the slice this tool consumes is declared.
@@ -233,8 +234,8 @@ export function createSkillCompilerPlugin(): MatbotPluginSpec {
           yield { type: 'progress', pct: 80, message: 'Preparing build...' };
 
           const safeName = sanitise(skill);
-          const pluginPkgName = `@matatbread/matbot-tool-${safeName}`;
-          const pluginDir = `plg_${safeName}`;
+          const pluginPkgName = `@matatbread/matbot-compiled-${safeName}`;
+          const pluginDir = safeName;
           const toolName = design.toolName as string;
           const toolDesc = (design.toolDescription as string).replace(/`/g, '\\`');
           const toolParams = (design.parameters || []) as Array<{name: string; type: string; description: string; required: boolean}>;
@@ -246,7 +247,7 @@ export function createSkillCompilerPlugin(): MatbotPluginSpec {
           }, null, 2);
 
           // Compute relative paths from the plugin build dir to tsconfig.base.json and the plugin-api
-          // package at the project root. The build dir is <projectRoot>/<COMPILED_PLUGINS_DIR>/plg_<name>/
+          // package at the project root. The build dir is <projectRoot>/<COMPILED_PLUGINS_DIR>/<name>/
           // which is outside the pnpm workspace packages, so tsc needs explicit paths to resolve the peer dep.
           const { dirname: tsDirname, join: tsJoin, relative: tsRelative } = await import('node:path');
           const projectRoot = tsDirname(services.configPath!);
@@ -324,12 +325,33 @@ Rules: implement the SPEC, using the worked example's exact URLs/queries/field n
           const buildDir = join(dirname(services.configPath), COMPILED_PLUGINS_DIR, pluginDir);
 
           const { mkdir, symlink, readlink, writeFile } = await import('node:fs/promises');
+
+          // Derive the tool-result / service types from the LIVE loaded plugins so the generated plugin
+          // gets correct `toolResult` types and typed `services.*` for everything it can reach. The set
+          // of plugins (and where their source lives) comes from the `plugin` tool's `list` — going via
+          // the tool keeps it replaceable and matches what the LLM sees. Falls back to a monorepo glob,
+          // then to the static DTS, when the live set or sources aren't available.
+          yield { type: 'progress', pct: 84, message: 'Deriving tool result types...' };
+          let toolResultsDts = TOOL_RESULTS_DTS;
+          try {
+            let pluginUrls: string[] = [];
+            try {
+              const list = await toolResult(invokeTool(services, 'plugin', { action: 'list' }, ctx)) as { loaded?: Array<{ resolvedUrl?: string }> };
+              pluginUrls = (list.loaded ?? []).map(p => p.resolvedUrl).filter((u): u is string => typeof u === 'string');
+            } catch { /* `plugin` tool absent → buildMatbotToolsDts falls back to the monorepo glob */ }
+            const generated = await buildMatbotToolsDts(dirname(services.configPath), pluginUrls);
+            if (generated) {
+              toolResultsDts = generated.dts;
+              yield { type: 'progress', pct: 85, message: `Typed ${generated.tools.emitted.length} tool result(s) and ${generated.services.emitted.length} service(s).` };
+            }
+          } catch { /* keep the static fallback */ }
+
           yield { type: 'progress', pct: 85, message: 'Writing plugin scaffold...' };
           try {
             await mkdir(join(buildDir, 'src'), { recursive: true });
             await writeFile(join(buildDir, 'package.json'), packageJson);
             await writeFile(join(buildDir, 'tsconfig.json'), tsconfigJson);
-            await writeFile(join(buildDir, 'src', 'matbot-tools.d.ts'), TOOL_RESULTS_DTS);
+            await writeFile(join(buildDir, 'src', 'matbot-tools.d.ts'), toolResultsDts);
           } catch (e) {
             yield { type: 'error', message: `Could not write plugin to ${relDir}: ${e instanceof Error ? e.message : String(e)}` };
             return;

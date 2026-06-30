@@ -1,4 +1,10 @@
-import type { Tool, ToolExecutor, ToolContext, ToolEvent, MatbotMachine } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolResultOf, ToolContext, MatbotMachine } from '@matatbread/matbot-plugin-api';
+
+declare module '@matatbread/matbot-plugin-api' {
+  interface ToolResults {
+    single_turn: { text: string };  // the consulted provider's reply text
+  }
+}
 
 /**
  * Exposes {@link MatbotMachine.singleTurn} to the model: a one-shot completion against a configured
@@ -12,9 +18,9 @@ import type { Tool, ToolExecutor, ToolContext, ToolEvent, MatbotMachine } from '
  * a core service (`singleTurn`); core is also the one cross-runtime home both the node app and the
  * browser bundle register it from — the tool-plugin barrel (where `plugin`/`provider` live) is node-only.
  */
-export function createSingleTurnTool(services: MatbotMachine): Tool {
-  const executor: ToolExecutor = {
-    async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
+export function createSingleTurnTool(services: MatbotMachine): Tool<ToolResultOf<'single_turn'>> {
+  const executor: ToolExecutor<ToolResultOf<'single_turn'>> = {
+    async *execute(input: unknown, ctx: ToolContext) {
       const args = input as { provider?: string; prompt?: string; system?: string };
       if (typeof args.prompt !== 'string') { yield { type: 'error', message: 'single_turn requires a string "prompt".' }; return; }
       const provider = args.provider ?? ctx.provider;

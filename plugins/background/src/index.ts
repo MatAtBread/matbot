@@ -6,9 +6,27 @@ import { pathToFileURL }    from 'node:url';
 import { randomUUID }       from 'node:crypto';
 import type { Readable }    from 'node:stream';
 import type {
-  MatbotPluginSpec, MatbotMachine, Tool, ToolEvent, ToolContext, FileStore, Store, Principal,
+  MatbotPluginSpec, MatbotMachine, Tool, ToolExecutor, ToolResult, ToolResultOf, ToolContext, FileStore, Store, Principal,
 } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION, currentPrincipal } from '@matatbread/matbot-plugin-api';
+
+declare module '@matatbread/matbot-plugin-api' {
+  interface ToolResults {
+    // `background` discriminates on `interval`'s presence, not an `action` field: a call passing an
+    // `interval` is a recurring schedule and narrows to that arm; a run-once call (no interval) matches
+    // no positive pattern and soundly falls back to the union of both arms (see ToolResult on ToolResults).
+    background:
+      | ToolResult<{ id: string; interval: string; name?: string }, { interval: string }>  // recurring (id is the handle)
+      | ToolResult<{ status: 'started'; output?: string }, { interval?: undefined }>;       // run-once
+    // `every_action` discriminates on `action`; resume/suspend further split on whether id is "*" (all)
+    // vs a single id, which a caller can't predeclare, so each keeps its two-shape arm.
+    every_action:
+      | ToolResult<Array<{ id: string; interval: string; nextRun: string; active: boolean; name?: string; lastRun?: string; output?: string }>, { action: 'list' }>
+      | ToolResult<{ resumed:   true; count: number; ids: string[] } | { resumed:   true; id: string }, { action: 'resume'  }>
+      | ToolResult<{ suspended: true; count: number; ids: string[] } | { suspended: true; id: string }, { action: 'suspend' }>
+      | ToolResult<{ cancelled: true; id: string }, { action: 'cancel' }>;
+  }
+}
 
 // ── MIME helpers ──────────────────────────────────────────────────────────────
 
@@ -264,7 +282,7 @@ function isRunOnce(interval: string | null | undefined): boolean {
   return interval === undefined || interval === null || interval.trim().toLowerCase() === 'once';
 }
 
-const backgroundTool: Tool = {
+const backgroundTool: Tool<ToolResultOf<'background'>> = {
   name: 'background',
   description: `Run a prompt in a detached background process. With no interval it runs once and
 returns immediately; with an interval it becomes a recurring schedule that persists across
@@ -310,7 +328,7 @@ wanted to see the result, they would have asked for it in the foreground.
     },
   },
   executor: {
-    async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
+    async *execute(input: unknown, ctx: ToolContext) {
       const { prompt, interval, name, output, provider } = input as BackgroundInput;
       // Default to the provider driving this turn, not the config default — a background task
       // inherits the model that spawned it unless the tool call names one explicitly.
@@ -347,7 +365,7 @@ wanted to see the result, they would have asked for it in the foreground.
       };
       await scheduleStore.set(sched.id, sched);
       armSchedule(sched);
-      yield { type: 'result', value: { id, interval, ...(name !== undefined ? { name } : {}) } };
+      yield { type: 'result', value: { id, interval: interval!, ...(name !== undefined ? { name } : {}) } };
     },
   },
 };
@@ -374,7 +392,7 @@ async function setActiveAll(active: boolean): Promise<string[]> {
   return ids;
 }
 
-const everyActionTool: Tool = {
+const everyActionTool: Tool<ToolResultOf<'every_action'>> = {
   name: 'every_action',
   description: `Manage recurring background schedules created by the background tool (when given an interval).
 
@@ -409,7 +427,7 @@ id "*" to act on ALL schedules at once. cancel requires a specific id — "*" is
     },
   },
   executor: {
-    async *execute(input: unknown, _ctx: ToolContext): AsyncIterable<ToolEvent> {
+    async *execute(input: unknown, _ctx: ToolContext) {
       const act = input as EveryAction;
 
       switch (act.action) {
@@ -436,14 +454,20 @@ id "*" to act on ALL schedules at once. cancel requires a specific id — "*" is
           const active = act.action === 'resume';
           if (act.id === '*') {
             const ids = await setActiveAll(active);
-            yield { type: 'result', value: { [act.action === 'resume' ? 'resumed' : 'suspended']: true, count: ids.length, ids } };
+            yield {
+              type:  'result',
+              value: active ? { resumed: true, count: ids.length, ids } : { suspended: true, count: ids.length, ids },
+            };
             return;
           }
           if (!(await setActive(act.id, active))) {
             yield { type: 'error', message: `Schedule ${act.id} not found.` };
             return;
           }
-          yield { type: 'result', value: { [act.action === 'resume' ? 'resumed' : 'suspended']: true, id: act.id } };
+          yield {
+            type:  'result',
+            value: active ? { resumed: true, id: act.id } : { suspended: true, id: act.id },
+          };
           return;
         }
 

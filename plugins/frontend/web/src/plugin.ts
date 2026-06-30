@@ -1,5 +1,11 @@
-import type { MatbotPluginSpec, MatbotMachine, Tool, ToolContext, ToolEvent, ToolRegistry } from '@matatbread/matbot-plugin-api';
+import type { MatbotPluginSpec, MatbotMachine, Tool, ToolContext, ToolResultOf, ToolRegistry } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION }                from '@matatbread/matbot-plugin-api';
+
+declare module '@matatbread/matbot-plugin-api' {
+  interface ToolResults {
+    url_for_resource: { url: string | null };  // a shareable URL for the file, or null if not publicly viewable
+  }
+}
 import { watchPlugins }                      from '@matatbread/matbot-core';
 // Type import also brings the `SkillManager` augmentation of MatbotMachine into scope.
 import type { SkillManager }                 from '@matatbread/matbot-skills';
@@ -13,7 +19,7 @@ const port = Number(process.env['MATBOT_WEB_PORT'] ?? 19778); // 19778 is "MB" i
 // Mint a shareable URL for a stored file — but only one this server actually serves: a file marked
 // `allowed` (default-deny). The path mirrors the GET /files/<namespace>/<name> route in server.ts.
 // Registered only when the server is up (below), so the tool is absent when nothing is serving.
-const urlForResourceTool: Tool = {
+const urlForResourceTool: Tool<ToolResultOf<'url_for_resource'>> = {
   name: 'url_for_resource',
   description:
     'Return a shareable HTTP URL for a stored file, or null when it is not publicly viewable. Use this ' +
@@ -30,7 +36,7 @@ const urlForResourceTool: Tool = {
     },
   },
   executor: {
-    async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
+    async *execute(input: unknown, ctx: ToolContext) {
       const { namespace, name } = input as { namespace?: string; name?: string };
       if (!namespace || !name) { yield { type: 'error', message: 'url_for_resource requires "namespace" and "name".' }; return; }
       if (!ctx.files) { yield { type: 'result', value: { url: null } }; return; }

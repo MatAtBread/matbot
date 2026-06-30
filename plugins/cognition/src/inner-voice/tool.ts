@@ -11,13 +11,26 @@
  * (the value is a *different-lineage* perspective) but functional. Pin a different-lineage model via
  * cognition_config to get the genuine second opinion.
  */
-import type { Tool, ToolExecutor, ToolContext, ToolEvent, MatbotMachine, Session } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolResult, ToolResultOf, ToolContext, MatbotMachine, Session } from '@matatbread/matbot-plugin-api';
 import {
   type DreamSettings,
   DEFAULT_DREAM_SETTINGS,
   DREAM_SETTINGS_KEY,
   validateDreamSettings,
 } from '../dream/types.js';
+
+declare module '@matatbread/matbot-plugin-api' {
+  interface ToolResults {
+    ask_inner_voice: { text: string };
+    // One arm per action: a caller of `invokeTool(machine, 'cognition_config', { action: '…' })` gets the
+    // matching result narrowed by the `action` it passed (see ToolResult / the multi-action note on ToolResults).
+    // get/set/clear all return the same effective-config snapshot.
+    cognition_config:
+      | ToolResult<CognitionConfig & { available: string[] }, { action: 'get'   }>
+      | ToolResult<CognitionConfig & { available: string[] }, { action: 'set'   }>
+      | ToolResult<CognitionConfig & { available: string[] }, { action: 'clear' }>;
+  }
+}
 
 export const INNER_VOICE_PROVIDER_KEY = 'innerVoiceProvider';
 export const DREAM_RANKER_PROVIDER_KEY = 'dreamRankerProvider';
@@ -66,9 +79,9 @@ function consecutiveInnerVoiceCalls(session: Session): number {
   return count;
 }
 
-export function createAskInnerVoiceTool(services: MatbotMachine): Tool {
-  const executor: ToolExecutor = {
-    async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
+export function createAskInnerVoiceTool(services: MatbotMachine): Tool<ToolResultOf<'ask_inner_voice'>> {
+  const executor: ToolExecutor<ToolResultOf<'ask_inner_voice'>> = {
+    async *execute(input: unknown, ctx: ToolContext) {
       const args = input as { prompt?: string; system?: string };
       if (typeof args.prompt !== 'string') { yield { type: 'error', message: 'ask_inner_voice requires a string "prompt".' }; return; }
 
@@ -160,9 +173,9 @@ async function readEffectiveConfig(services: MatbotMachine): Promise<CognitionCo
   };
 }
 
-export function createCognitionConfigTool(services: MatbotMachine): Tool {
-  const executor: ToolExecutor = {
-    async *execute(input: unknown, _ctx: ToolContext): AsyncIterable<ToolEvent> {
+export function createCognitionConfigTool(services: MatbotMachine): Tool<ToolResultOf<'cognition_config'>> {
+  const executor: ToolExecutor<ToolResultOf<'cognition_config'>> = {
+    async *execute(input: unknown, _ctx: ToolContext) {
       const args     = input as Record<string, unknown> & { action?: string };
       const settings = services.settings();
 

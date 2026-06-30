@@ -1,8 +1,14 @@
-import type { Tool, ToolEvent, ToolContext, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolEvent, ToolExecutor, ToolContext, ToolResultOf, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import { spawn } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
 import process from 'node:process';
+
+declare module '@matatbread/matbot-plugin-api' {
+  interface ToolResults {
+    bash: { exitCode: number; stdout: string; stderr: string };
+  }
+}
 
 export interface DockerConfig {
   image:    string;
@@ -22,11 +28,12 @@ function spawnAndStream(
   command: string,
   args:    string[],
   opts:    { cwd?: string; env: Record<string, string>; timeout?: number; signal: AbortSignal },
-): AsyncIterable<ToolEvent> {
-  const queue: Array<ToolEvent | null> = [];
+): AsyncIterable<ToolEvent<ToolResultOf<'bash'>>> {
+  type Ev = ToolEvent<ToolResultOf<'bash'>>;
+  const queue: Array<Ev | null> = [];
   let wakeup: (() => void) | null = null;
 
-  const push = (ev: ToolEvent | null): void => {
+  const push = (ev: Ev | null): void => {
     queue.push(ev);
     wakeup?.();
     wakeup = null;
@@ -74,7 +81,7 @@ function spawnAndStream(
   return {
     [Symbol.asyncIterator]() {
       return {
-        async next(): Promise<IteratorResult<ToolEvent>> {
+        async next(): Promise<IteratorResult<Ev>> {
           while (queue.length === 0) {
             await new Promise<void>(r => { wakeup = r; });
           }
@@ -86,7 +93,7 @@ function spawnAndStream(
           }
           return { done: false, value: item };
         },
-        async return(): Promise<IteratorResult<ToolEvent>> {
+        async return(): Promise<IteratorResult<Ev>> {
           if (timer !== undefined) clearTimeout(timer);
           opts.signal.removeEventListener('abort', killOnAbort);
           return { done: true, value: undefined as never };
@@ -98,9 +105,9 @@ function spawnAndStream(
 
 // ── Executors ─────────────────────────────────────────────────────────────────
 
-function createLocalExecutor() {
+function createLocalExecutor(): ToolExecutor<ToolResultOf<'bash'>> {
   return {
-    async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
+    async *execute(input: unknown, ctx: ToolContext) {
       const { script, cwd: cwdInput, env, timeout } = input as BashInput;
       const cwd = cwdInput ?? ctx.workdir;
       if (cwd !== undefined) await mkdir(cwd, { recursive: true });
@@ -120,9 +127,9 @@ function createLocalExecutor() {
   };
 }
 
-function createDockerExecutor(docker: DockerConfig) {
+function createDockerExecutor(docker: DockerConfig): ToolExecutor<ToolResultOf<'bash'>> {
   return {
-    async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
+    async *execute(input: unknown, ctx: ToolContext) {
       const { script, env, timeout } = input as BashInput;
 
       const args = ['run', '--rm', '-i'];
@@ -175,7 +182,7 @@ const INPUT_SCHEMA = {
  * The tool name and input schema are identical in both cases — callers (including
  * the LLM) cannot distinguish the two implementations.
  */
-export function createBashTool(docker?: DockerConfig): Tool {
+export function createBashTool(docker?: DockerConfig): Tool<ToolResultOf<'bash'>> {
   return {
     name:        'bash',
     description: TOOL_DESCRIPTION,    inputSchema: INPUT_SCHEMA,
@@ -185,7 +192,7 @@ export function createBashTool(docker?: DockerConfig): Tool {
 
 // ── Plugin ────────────────────────────────────────────────────────────────────
 
-export const bashTool: Tool = createBashTool();
+export const bashTool: Tool<ToolResultOf<'bash'>> = createBashTool();
 
 export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,

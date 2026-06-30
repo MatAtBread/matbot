@@ -1,5 +1,5 @@
 import type { MatbotMachine } from './plugin.js';
-import type { ToolContext, ToolEvent, ToolResultOf, PromptFn, FormField } from './types.js';
+import type { ToolContext, ToolEvent, ToolResultFor, PromptFn, FormField } from './types.js';
 
 /**
  * Inputs to {@link invokeTool} that a one-shot caller can't derive from the machine. A tool
@@ -25,12 +25,12 @@ export type InvokeToolOptions =
  * runs non-interactively: any attempt to prompt rejects, which a tool surfaces as a normal error
  * event. Pair with {@link toolText} to collapse the stream to its result string.
  */
-export function invokeTool<K extends string>(
+export function invokeTool<K extends string, const P>(
   machine: MatbotMachine,
   name:    K,
-  params:  unknown,
+  params:  P,
   opts:    InvokeToolOptions,
-): AsyncIterable<ToolEvent<ToolResultOf<K>>> {
+): AsyncIterable<ToolEvent<ToolResultFor<K, P>>> {
   const tool = machine.tools.resolve(name);
   if (tool === null) throw new Error(`Tool "${name}" is not registered`);
 
@@ -51,7 +51,7 @@ export function invokeTool<K extends string>(
 
   // The registry is name-keyed and untyped (`ToolExecutor.execute` yields `ToolEvent<unknown>`); the
   // `ToolResults` mapping is the call-site contract, asserted here so callers read a typed result.
-  return tool.executor.execute(params, ctx) as AsyncIterable<ToolEvent<ToolResultOf<K>>>;
+  return tool.executor.execute(params, ctx) as AsyncIterable<ToolEvent<ToolResultFor<K, P>>>;
 }
 
 /**

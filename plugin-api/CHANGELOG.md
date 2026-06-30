@@ -1,5 +1,11 @@
 # @matatbread/matbot-plugin-api
 
+## 0.2.6
+
+### Patch Changes
+
+- Thread the `ToolEvent<Result>` generic through the producer side and add per-call result discrimination for multi-action tools. `ToolExecutor<R>` / `Tool<R>` now carry the result type at the source; a tool declares it once by augmenting `ToolResults` (the executor binds via `ToolExecutor<ToolResultOf<'name'>>`, so the two can't drift). Multi-action tools register a union of `ToolResult<Result, Args>` arms, and `invokeTool` narrows the result by the params it's called with. Type-level only — no behaviour change.
+
 ## 0.2.4
 
 ## 0.2.3

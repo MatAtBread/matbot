@@ -1,4 +1,4 @@
-import type { Tool, ToolEvent, ToolContext, MatbotPlugin, FormField, Runtime, PluginSource } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolResult, ToolResultOf, ToolContext, MatbotPlugin, FormField, Runtime, PluginSource } from '@matatbread/matbot-plugin-api';
 import { CONFIRM_YES, CONFIRM_NO, isIncompatibleRuntimeError, isNotAPluginError } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins, getRegisteredTools, getRegisteredFrontendPlugins,
          getRegisteredServiceKeys, getHookPlugins, getSystemContextPlugins,
@@ -92,6 +92,32 @@ interface DiscoveredPlugin {
   // `file://…` on disk for a local plugin, the `https://…` it was fetched from for a cached one.
   source:    { type: PluginSource; uri: string };
   matbotRuntime?: Runtime[];
+}
+
+interface ToolSummary { name: string; description: string }
+
+declare module '@matatbread/matbot-plugin-api' {
+  interface ToolResults {
+    plugin:
+      | ToolResult<{
+          loaded: Array<{
+            name:           string;
+            apiVersion:     string;
+            types:          string[];
+            tools:          ToolSummary[];
+            specifier:      string;
+            description?:   string;
+            matbotRuntime?: readonly Runtime[];
+          }>;
+          configured:   string[];
+          builtinTools?: ToolSummary[] | undefined;
+        }, { action: 'list' }>
+      | ToolResult<Array<DiscoveredPlugin & { configuredVia: 'plugins' | 'providers' | null }>, { action: 'discover_local' }>
+      | ToolResult<{ message: string; installationMessage?: string }, { action: 'add'       }>
+      | ToolResult<{ message: string; installationMessage?: string }, { action: 'remove'    }>
+      | ToolResult<{ message: string; installationMessage?: string }, { action: 'reload'    }>
+      | ToolResult<{ message: string; installationMessage?: string }, { action: 'store-key' }>;
+  }
 }
 
 // Inspect one candidate directory: it is a plugin only if its entry module actually exports a
@@ -378,8 +404,8 @@ type PluginInput =
 
 // ── Executor ──────────────────────────────────────────────────────────────────
 
-const executor = {
-  async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
+const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
+  async *execute(input: unknown, ctx: ToolContext) {
     const { action } = input as PluginInput;
 
     const configPath = ctx.configPath;
@@ -413,6 +439,7 @@ const executor = {
         types:       pluginTypes(p, pluginToolNames),
         tools:       toolsByPlugin.get(p.name) ?? [],
         specifier:   p.specifier,
+        ...(p.resolvedUrl   !== undefined ? { resolvedUrl:   p.resolvedUrl }   : {}),
         ...(p.manifest?.description ? { description: p.manifest.description } : {}),
         ...(p.matbotRuntime !== undefined ? { matbotRuntime: p.matbotRuntime } : {}),
       }));
@@ -734,7 +761,7 @@ const executor = {
 
 // ── Tool definition ───────────────────────────────────────────────────────────
 
-export const pluginTool: Tool = {
+export const pluginTool: Tool<ToolResultOf<'plugin'>> = {
   name:        'plugin',
   description:
     'Manage matbot plugins — the units that contribute tools, providers, storage, hooks, and ' +

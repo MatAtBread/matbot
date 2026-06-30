@@ -1,5 +1,18 @@
-import type { MatbotPluginSpec, Tool, ToolEvent, ToolContext, PluginSettings } from '@matatbread/matbot-plugin-api';
+import type { MatbotPluginSpec, Tool, ToolEvent, ToolExecutor, ToolContext, ToolResult, ToolResultOf, PluginSettings } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
+
+declare module '@matatbread/matbot-plugin-api' {
+  interface ToolResults {
+    bash: { exitCode: number; stdout: string; stderr: string };
+    // result of a get/set/restart action on the container configuration
+    bash_config:
+      | ToolResult<{ message: string; overrides: BashConfigOverrides; restarted: boolean },                  { action: 'set'     }>
+      | ToolResult<{ message: string; restarted: boolean },                                                  { action: 'restart' }>
+      | ToolResult<{ defaults: ResolvedConfigView; overrides: BashConfigOverrides; effective: ResolvedConfigView }, { action: 'get' }>;
+  }
+}
+
+type ResolvedConfigView = { dns: string[] | null; name: string; maxOutputBytes: number };
 import { spawn, execFile } from 'node:child_process';
 import { mkdir, readFile, rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
@@ -195,7 +208,7 @@ type BashConfigInput = { action: string } & BashConfigOverrides;
 async function* bashConfigExecutor(
   input: unknown,
   settings: PluginSettings,
-): AsyncIterable<ToolEvent> {
+): AsyncIterable<ToolEvent<ToolResultOf<'bash_config'>>> {
   const { action, dns, name, maxOutputBytes } = input as BashConfigInput;
 
   if (action === 'set') {
@@ -292,11 +305,12 @@ function spawnAndStream(
     /** Best-effort kill of the in-container process group (docker exec won't propagate our kill). */
     terminate?: () => void;
   },
-): AsyncIterable<ToolEvent> {
-  const queue: Array<ToolEvent | null> = [];
+): AsyncIterable<ToolEvent<ToolResultOf<'bash'>>> {
+  type Ev = ToolEvent<ToolResultOf<'bash'>>;
+  const queue: Array<Ev | null> = [];
   let wakeup: (() => void) | null = null;
 
-  const push = (ev: ToolEvent | null): void => {
+  const push = (ev: Ev | null): void => {
     queue.push(ev);
     wakeup?.();
     wakeup = null;
@@ -381,7 +395,7 @@ function spawnAndStream(
   return {
     [Symbol.asyncIterator]() {
       return {
-        async next(): Promise<IteratorResult<ToolEvent>> {
+        async next(): Promise<IteratorResult<Ev>> {
           while (queue.length === 0) {
             await new Promise<void>(r => { wakeup = r; });
           }
@@ -393,7 +407,7 @@ function spawnAndStream(
           }
           return { done: false, value: item };
         },
-        async return(): Promise<IteratorResult<ToolEvent>> {
+        async return(): Promise<IteratorResult<Ev>> {
           stop('aborted'); // consumer abandoned us early — don't leave the command running
           if (timer !== undefined) clearTimeout(timer);
           opts.signal.removeEventListener('abort', killOnAbort);
@@ -412,9 +426,9 @@ interface BashInput {
   timeout?: number;
 }
 
-function createContainerExecutor(settings: PluginSettings) {
+function createContainerExecutor(settings: PluginSettings): ToolExecutor<ToolResultOf<'bash'>> {
   return {
-    async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
+    async *execute(input: unknown, ctx: ToolContext) {
       // settings is the source of truth; derive the effective config per call (a
       // cheap read, dwarfed by the docker exec it precedes — not a restart).
       const overrides = await settings.get<BashConfigOverrides>(SETTINGS_KEY) ?? {};
@@ -527,7 +541,7 @@ export const plugin: MatbotPluginSpec = {
     // bash_config set (dns/name) to force a rebuild.
 
     // Register the bash execution tool
-    const bashTool: Tool = {
+    const bashTool: Tool<ToolResultOf<'bash'>> = {
       name:        'bash',
       description: TOOL_DESCRIPTION,
       inputSchema: BASH_INPUT_SCHEMA,
@@ -536,7 +550,7 @@ export const plugin: MatbotPluginSpec = {
     services.tools.register(bashTool);
 
     // Register the configuration management tool
-    const configTool: Tool = {
+    const configTool: Tool<ToolResultOf<'bash_config'>> = {
       name:        'bash_config',
       description: BASH_CONFIG_DESCRIPTION,
       inputSchema: BASH_CONFIG_INPUT_SCHEMA,

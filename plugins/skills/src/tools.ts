@@ -1,5 +1,24 @@
-import type { Tool, ToolExecutor, ToolContext, ToolEvent, MatbotMachine } from '@matatbread/matbot-plugin-api';
-import type { SkillManager } from './manager.js';
+import type { Tool, ToolExecutor, ToolResult, ToolResultOf, ToolContext, MatbotMachine } from '@matatbread/matbot-plugin-api';
+import type { SkillManager, SkillSummary } from './manager.js';
+import type { SkillDoc } from './types.js';
+
+declare module '@matatbread/matbot-plugin-api' {
+  interface ToolResults {
+    // One arm per action: a caller of `invokeTool(machine, 'skill_action', { action: '…' })` gets the
+    // matching result narrowed by the `action` it passed (see ToolResult / the multi-action note on ToolResults).
+    skill_action:
+      | ToolResult<{ skills: SkillSummary[] },                  { action: 'list'     }>
+      | ToolResult<{ id: string; name: string; content: string }, { action: 'load' }>
+      | ToolResult<{ id: string; name: string; content: string }, { action: 'use'  }>
+      | ToolResult<{ id: string; name: string; knowledge: NonNullable<SkillDoc['knowledge']> | null; catalogue: boolean }, { action: 'metadata' }>
+      | ToolResult<{ id: string; name: string },               { action: 'save'     }>
+      | ToolResult<{ id: string; name: string },               { action: 'delete'   }>;
+    skills_config:
+      | ToolResult<{ analysisProvider: string | null; fallback: string | null; available: string[] }, { action: 'get'   }>
+      | ToolResult<{ analysisProvider: string },                { action: 'set'   }>
+      | ToolResult<{ analysisProvider: null; fallback: string | null }, { action: 'clear' }>;
+  }
+}
 
 // The precise per-action contract. JSON Schema can't express "content required only for save"
 // without an awkward oneOf, so the schema stays loose and the description carries this TypeScript
@@ -12,9 +31,9 @@ type SkillInput =
   | { action: 'save';     name: string; content: string; catalogue?: boolean }
   | { action: 'delete';   name: string };
 
-export function createSkillTool(manager: SkillManager): Tool {
-  const executor: ToolExecutor = {
-    async *execute(input: unknown, _ctx: ToolContext): AsyncIterable<ToolEvent> {
+export function createSkillTool(manager: SkillManager): Tool<ToolResultOf<'skill_action'>> {
+  const executor: ToolExecutor<ToolResultOf<'skill_action'>> = {
+    async *execute(input: unknown, _ctx: ToolContext) {
       const args = input as Partial<SkillInput> & { action?: string };
 
       switch (args.action) {
@@ -131,10 +150,10 @@ export function createSkillTool(manager: SkillManager): Tool {
  * with zero config); set it to pin a specific — e.g. cheap, fast — model. Resolved per analysis, so a
  * change takes effect on the next reindex without a restart.
  */
-export function createSkillsConfigTool(services: MatbotMachine): Tool {
+export function createSkillsConfigTool(services: MatbotMachine): Tool<ToolResultOf<'skills_config'>> {
   const KEY = 'analysisProvider';
-  const executor: ToolExecutor = {
-    async *execute(input: unknown, _ctx: ToolContext): AsyncIterable<ToolEvent> {
+  const executor: ToolExecutor<ToolResultOf<'skills_config'>> = {
+    async *execute(input: unknown, _ctx: ToolContext) {
       const args      = input as { action?: string; provider?: string };
       const settings  = services.settings();
       const available = [...services.providers.keys()];

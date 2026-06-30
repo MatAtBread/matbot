@@ -375,6 +375,57 @@ const mcpAction: Tool = {
 
 Throw only for unexpected failures; yield `{ type: 'error' }` for expected ones.
 
+### Typed results (`ToolResults`)
+
+`ToolEvent` is generic — `ToolExecutor<R>` yields `ToolEvent<R>` — so a tool can declare the type of
+the `value` it returns. Register it by augmenting the `ToolResults` interface (the same pattern as
+`MarkerData` / `MatbotServices`), keyed by the tool's `name`. That augmentation is the **single source
+of truth**: bind the executor to it with `ToolExecutor<ToolResultOf<'name'>>` (or `Tool<…>`), and the
+compiler checks every `result` yield against it — so the executor and the registry can't drift.
+
+```ts
+import type { Tool, ToolResultOf, ToolContext } from '@matatbread/matbot-plugin-api';
+
+declare module '@matatbread/matbot-plugin-api' {
+  interface ToolResults { search: { hits: string[] } }
+}
+
+const myTool: Tool<ToolResultOf<'search'>> = {
+  name: 'search', /* … */
+  executor: {
+    async *execute(input, ctx) {            // return type inferred: ToolEvent<{ hits: string[] }>
+      yield { type: 'result', value: { hits: [] } };
+    },
+  },
+};
+```
+
+A caller then recovers the concrete type without narrowing: `invokeTool(machine, 'search', …)` is typed
+`AsyncIterable<ToolEvent<{ hits: string[] }>>`, and `toolResult(events)` resolves to `{ hits: string[] }`
+(the structured counterpart to `toolText`, which collapses the result to a string). An unregistered name
+resolves to `unknown`. This is purely type-level — no runtime validation. Genuinely-`unknown` results
+(e.g. `http`'s parsed JSON) just stay unregistered.
+
+**Per-action narrowing.** A multi-action tool is a weird overloaded function — its result depends on its
+params. Register it as a union of `ToolResult<Result, Args>` *arms*, each pairing a result with the
+discriminating params *pattern* that selects it; `invokeTool` matches the call's params and narrows to
+the matching arm. The discriminant is any field(s), not just `action` (`background` keys on `interval`'s
+presence). Key on the discriminant only, not the full input, so a call carrying just that field matches;
+when no arm matches (a non-literal or absence discriminant), the result soundly falls back to the union of
+all arms. `ToolResultOf<'name'>` unwraps the arms to that union, so the executor binding is unchanged.
+
+```ts
+declare module '@matatbread/matbot-plugin-api' {
+  interface ToolResults {
+    mcp_action:
+      | ToolResult<{ message: string; tools: string[] }, { action: 'add'    }>
+      | ToolResult<{ servers: string[] },                { action: 'list'   }>
+      | ToolResult<{ message: string },                  { action: 'remove' }>;
+  }
+}
+// invokeTool(machine, 'mcp_action', { action: 'list' }) → result is { servers: string[] }
+```
+
 ### `ToolContext`
 
 ```ts
