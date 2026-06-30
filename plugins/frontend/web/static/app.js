@@ -602,11 +602,16 @@ function renderSkills(skills) {
   if (!el) return;
   el.innerHTML = '';
 
-  skills = [...skills].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+  // Visible skills first, hidden (withheld from the model) beneath; alphabetical within each band.
+  skills = [...skills].sort((a, b) => {
+    const ah = a.hidden ? 1 : 0, bh = b.hidden ? 1 : 0;
+    if (ah !== bh) return ah - bh;
+    return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+  });
 
   for (const s of skills) {
     const row = document.createElement('div');
-    row.className = 'skill-entry';
+    row.className = s.hidden ? 'skill-entry skill-entry-hidden' : 'skill-entry';
     row.onclick = () => openSkillEditor(s.name);
 
     // Skill names are short phrases, not long unbreakable identifiers — place them
@@ -618,6 +623,22 @@ function renderSkills(skills) {
 
     const actions = document.createElement('div');
     actions.className = 'plugin-actions';
+
+    const hideBtn = document.createElement('button');
+    hideBtn.className = 'plugin-action-btn';
+    hideBtn.textContent = s.hidden ? '⊙' : '⊘';
+    hideBtn.title = s.hidden ? 'Unhide skill (restore to the model)' : 'Hide skill (withhold from the model)';
+    hideBtn.onclick = async (e) => {
+      e.stopPropagation();
+      try {
+        await callTool('skill_action', { action: s.hidden ? 'unhide' : 'hide', name: s.name });
+      } catch (err) {
+        alert('Failed to update skill: ' + (err?.message ?? err));
+        return;
+      }
+      loadSkills();
+    };
+    actions.appendChild(hideBtn);
 
     const editBtn = document.createElement('button');
     editBtn.className = 'plugin-action-btn edit';

@@ -18,6 +18,15 @@ export interface SkillDoc {
    * summary fills the blank — but the field is here so authoring it later needs no schema change.
    */
   catalogSummary?: string;
+  /**
+   * Whether this skill is withheld from the model: retracted from the knowledge index (so
+   * `contextual_search` / `find_fact` can't surface it) and excluded from the catalogue
+   * advertisement. It stays fully manageable — list/load/use/metadata/save/delete all still operate
+   * on it — so a skill that has been compiled into a tool (or otherwise superseded) can be retired
+   * from the model's reach without being deleted, keeping its "source" for the compiler. Set/cleared
+   * only by the explicit hide/unhide actions; never touched by `save`, so a content edit preserves it.
+   */
+  hidden?: boolean;
   createdAt:    string;
   updatedAt:    string;
   /**

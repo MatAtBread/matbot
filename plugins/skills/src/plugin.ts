@@ -60,7 +60,7 @@ export async function setupSkills(services: MatbotMachine): Promise<SkillManager
   // flagged skill with neither yet (analysis still pending) is simply skipped until it has one.
   services.systemContext.register(() => {
     const lines = manager.all()
-      .filter(s => s.catalogue === true)
+      .filter(s => s.catalogue === true && !s.hidden)
       .map(s => ({ name: s.name, summary: (s.catalogSummary?.trim() || s.knowledge?.summary?.trim() || '') }))
       .filter(s => s.summary !== '')
       .map(s => `- ${s.name}: ${s.summary}`);

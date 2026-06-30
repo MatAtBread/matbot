@@ -114,6 +114,15 @@ export class LookupKnowledgeIndex implements KnowledgeIndex {
     this.docs.add(entry);
   }
 
+  async remove(id: string): Promise<void> {
+    for (const existing of this.docs) {
+      if (existing.id === id) {
+        this.docs.delete(existing);
+        return;
+      }
+    }
+  }
+
   async search(
     terms:   Array<{ term: string; context?: string }>,
     _signal: AbortSignal,
