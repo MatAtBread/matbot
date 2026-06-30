@@ -12,7 +12,9 @@ declare module '@matatbread/matbot-plugin-api' {
       | ToolResult<Trigger,                 { action: 'get'    }>
       | ToolResult<{ id: string },          { action: 'add'    }>
       | ToolResult<Trigger,                 { action: 'update' }>
-      | ToolResult<{ id: string },          { action: 'remove' }>;
+      | ToolResult<{ id: string },          { action: 'remove' }>
+      | ToolResult<{ triggers: Trigger[] }, { action: 'move'   }>
+      | ToolResult<{ triggers: Trigger[] }, { action: 'copy'   }>;
     triggers_config:
       | ToolResult<{ classifierProvider: string | null; available: string[] }, { action: 'get'   }>
       | ToolResult<{ classifierProvider: string },                             { action: 'set'   }>
@@ -57,7 +59,17 @@ type TriggerActionInput =
   | { action: 'get';    id: string }
   | { action: 'add';    conditions: TriggerCondition[]; tool: string; params?: unknown; enabled?: boolean }
   | { action: 'update'; id: string; conditions?: TriggerCondition[]; tool?: string; params?: unknown; enabled?: boolean }
-  | { action: 'remove'; id: string };
+  | { action: 'remove'; id: string }
+  | { action: 'move';   tool?: string; params?: unknown; toTool: string; toParams?: unknown }
+  | { action: 'copy';   tool?: string; params?: unknown; toTool: string; toParams?: unknown };
+
+// The query selector shared by query/move/copy: `tool`/`params` narrow the set by what a trigger invokes.
+function queryFilter(a: { tool?: unknown; params?: unknown }): { tool?: string; params?: unknown } {
+  return {
+    ...(typeof a.tool === 'string' ? { tool: a.tool } : {}),
+    ...(a.params !== undefined ? { params: a.params } : {}),
+  };
+}
 
 // A condition is valid if it has a recognised `kind` and a string `rule`.
 function validConditions(x: unknown): x is TriggerCondition[] {
@@ -80,10 +92,7 @@ export function createTriggerActionTool(manager: TriggerManager): Tool<ToolResul
 
         case 'query': {
           const a = args as Extract<TriggerActionInput, { action: 'query' }>;
-          yield { type: 'result', value: { triggers: manager.query({
-            ...(typeof a.tool === 'string' ? { tool: a.tool } : {}),
-            ...(a.params !== undefined ? { params: a.params } : {}),
-          }) } };
+          yield { type: 'result', value: { triggers: manager.query(queryFilter(a)) } };
           return;
         }
 
@@ -136,8 +145,39 @@ export function createTriggerActionTool(manager: TriggerManager): Tool<ToolResul
           return;
         }
 
+        case 'move': {
+          const a = args as Extract<TriggerActionInput, { action: 'move' }>;
+          if (typeof a.toTool !== 'string')                  { yield { type: 'error', message: 'action "move" requires a string "toTool" to re-target the selected triggers onto.' }; return; }
+          if (a.tool === undefined && a.params === undefined) { yield { type: 'error', message: 'action "move" requires a filter ("tool" and/or "params") selecting which triggers to re-target — refusing to move every trigger.' }; return; }
+          const invoke = { tool: a.toTool, ...(a.toParams !== undefined ? { params: a.toParams } : {}) };
+          const triggers: Trigger[] = [];
+          for (const t of manager.query(queryFilter(a))) {
+            const updated = await manager.update(t.id, { invoke });
+            if (updated !== undefined) triggers.push(updated);
+          }
+          yield { type: 'result', value: { triggers } };
+          return;
+        }
+
+        case 'copy': {
+          const a = args as Extract<TriggerActionInput, { action: 'copy' }>;
+          if (typeof a.toTool !== 'string')                  { yield { type: 'error', message: 'action "copy" requires a string "toTool" to point the duplicates at.' }; return; }
+          if (a.tool === undefined && a.params === undefined) { yield { type: 'error', message: 'action "copy" requires a filter ("tool" and/or "params") selecting which triggers to duplicate — refusing to duplicate every trigger.' }; return; }
+          const invoke = { tool: a.toTool, ...(a.toParams !== undefined ? { params: a.toParams } : {}) };
+          const triggers: Trigger[] = [];
+          for (const t of manager.query(queryFilter(a))) {
+            triggers.push(await manager.add({
+              conditions: t.conditions,
+              invoke,
+              ...(t.enabled !== undefined ? { enabled: t.enabled } : {}),
+            }));
+          }
+          yield { type: 'result', value: { triggers } };
+          return;
+        }
+
         default:
-          yield { type: 'error', message: `Unknown action "${String(args.action)}". Expected one of: list, query, get, add, update, remove.` };
+          yield { type: 'error', message: `Unknown action "${String(args.action)}". Expected one of: list, query, get, add, update, remove, move, copy.` };
       }
     },
   };
@@ -147,7 +187,8 @@ export function createTriggerActionTool(manager: TriggerManager): Tool<ToolResul
     description:
       'Manage triggers — data-driven hooks that invoke a tool when an LLM classifier judges one of ' +
       'their conditions matched against the current turn. Use this to list triggers, find the ones ' +
-      'that invoke a given tool (query), read one, create one, edit one by id, or delete one.\n\n' +
+      'that invoke a given tool (query), read one, create one, edit one by id, delete one, or bulk ' +
+      're-target a selected set onto a new tool — in place (move) or as duplicates (copy).\n\n' +
       GUIDANCE + '\n\n' +
       'A trigger has a stable `id` — address it by that, never by its conditions. To change one, ' +
       '"get" or "list" first to read the id, then "update" by id.\n\n' +
@@ -161,18 +202,25 @@ export function createTriggerActionTool(manager: TriggerManager): Tool<ToolResul
       "  | { action: 'get';    id: string }                                                // -> the trigger\n" +
       "  | { action: 'add';    conditions: TriggerCondition[]; tool: string; params?: object; enabled?: boolean }  // -> { id }\n" +
       "  | { action: 'update'; id: string; conditions?: TriggerCondition[]; tool?: string; params?: object; enabled?: boolean }  // edit by id\n" +
-      "  | { action: 'remove'; id: string };                                               // -> { id }\n" +
-      '```',
+      "  | { action: 'remove'; id: string }                                                // -> { id }\n" +
+      "  | { action: 'move';   tool?: string; params?: object; toTool: string; toParams?: object }   // re-target the queried set's invoke to toTool/toParams in place -> { triggers: [...] }\n" +
+      "  | { action: 'copy';   tool?: string; params?: object; toTool: string; toParams?: object };  // duplicate the queried set, the copies invoking toTool/toParams -> { triggers: [...] }\n" +
+      '```\n\n' +
+      'For `move`/`copy`, `tool`/`params` are the SAME selector as `query` (they pick which triggers ' +
+      'to act on); `toTool`/`toParams` are the new invocation. A filter is required — both refuse to ' +
+      'act on the entire trigger set.',
     inputSchema: {
       type:       'object',
       required:   ['action'],
       properties: {
-        action:     { type: 'string', enum: ['list', 'query', 'get', 'add', 'update', 'remove'], description: 'The operation to perform.' },
+        action:     { type: 'string', enum: ['list', 'query', 'get', 'add', 'update', 'remove', 'move', 'copy'], description: 'The operation to perform.' },
         id:         { type: 'string', description: 'Trigger id. Required for get/update/remove.' },
         conditions: { type: 'array', description: 'Conditions [{ kind: "ephemeral"|"contextual"|"retract"|"followup", rule: string }]. Required for add.',
           items: { type: 'object', properties: { kind: { type: 'string', enum: ['ephemeral', 'contextual', 'retract', 'followup'] }, rule: { type: 'string' } } } },
-        tool:       { type: 'string', description: 'Name of the tool to invoke when a condition matches. Required for add.' },
-        params:     { type: 'object', description: 'Params passed verbatim as the invoked tool\'s input.' },
+        tool:       { type: 'string', description: 'For add: the tool to invoke. For query/move/copy: the selector matching invoke.tool.' },
+        params:     { type: 'object', description: 'For add: params passed verbatim as the invoked tool\'s input. For query/move/copy: the selector matching invoke.params.' },
+        toTool:     { type: 'string', description: 'New tool the selected triggers should invoke. Required for move/copy.' },
+        toParams:   { type: 'object', description: 'New params for the selected triggers\' invocation (move/copy).' },
         enabled:    { type: 'boolean', description: 'Set false to keep but disable the trigger.' },
       },
     },
