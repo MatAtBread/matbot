@@ -29,6 +29,8 @@ export class RemoteMcpManager implements McpRemoteService {
   private async connect(config: MCPRemoteConfig): Promise<MCPToolDef[]> {
     const client = await createHttpClient(config);
     const tools  = await client.listTools();
+    // Record the probed protocol-version-header policy so callers can persist it (see add / reconnect).
+    if (client.protocolVersion !== undefined) config.protocolVersion = client.protocolVersion;
     this.active.set(config.name, {
       config, client, tools,
       ...(client.instructions !== undefined ? { instructions: client.instructions } : {}),
@@ -89,9 +91,16 @@ export class RemoteMcpManager implements McpRemoteService {
 
   async reconnectPersisted(onError: (name: string, err: unknown) => void): Promise<void> {
     const persisted = await this.settings.get<MCPPersistedRemote>(PERSIST_KEY);
-    for (const config of persisted?.servers ?? []) {
-      try { await this.connect(config); } catch (e) { onError(config.name, e); }
+    if (persisted === undefined) return;
+    let dirty = false;
+    for (const config of persisted.servers) {
+      const before = config.protocolVersion;
+      try {
+        await this.connect(config);
+        if (config.protocolVersion !== before) dirty = true;
+      } catch (e) { onError(config.name, e); }
     }
+    if (dirty) await this.settings.set(PERSIST_KEY, persisted);
   }
 
   closeAll(): void {

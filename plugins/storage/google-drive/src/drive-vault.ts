@@ -46,7 +46,11 @@ export class DriveVault implements Vault {
   }
 
   async writeSecret(name: string, value: string): Promise<void> {
-    this.secrets.set(name, value);
+    if (value === '') {
+      if (!this.secrets.delete(name)) return;
+    } else {
+      this.secrets.set(name, value);
+    }
     await this.persist();
   }
 

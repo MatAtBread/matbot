@@ -667,7 +667,11 @@ export interface VaultSpec {
   /** Resolve ${NAME} placeholders by looking up the named value; throws MissingSecretError for any miss. */
   resolve(ref: string): Promise<string>;
   scrub(text: string): string;
-  /** Store `value` under exactly `name`, overwriting. The literal write; no reference/dedup logic. */
+  /**
+   * Store `value` under exactly `name`, overwriting. The literal write; no reference/dedup logic.
+   * An empty `value` removes the key instead — there is no such thing as an empty secret, so the
+   * empty string is the removal signal (idempotent: removing an absent name is a no-op).
+   */
   writeSecret(name: string, value: string): Promise<void>;
   /** Whether a secret is stored under this exact name. */
   hasKey(name: string): boolean;

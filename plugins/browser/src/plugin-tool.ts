@@ -141,13 +141,15 @@ export function createBrowserPluginTool(extras: ExtraPlugins): Tool<ToolResultOf
           yield { type: 'error', message: 'store-key requires a "key" name.' };
           return;
         }
-        const value = await ctx.prompt(`Enter the value for secret "${key.trim()}" (not added to the conversation):`, '');
-        if (!value.trim()) {
-          yield { type: 'result', value: { message: `No value entered; "${key.trim()}" was not stored.` } };
-          return;
-        }
-        await ctx.vault.writeSecret(key.trim(), value.trim());
-        yield { type: 'result', value: { message: `Secret "${key.trim()}" stored in the vault.` } };
+        const name    = key.trim();
+        const value   = await ctx.prompt(`Enter the value for secret "${name}" (leave blank to remove it; not added to the conversation):`, '');
+        const trimmed = value.trim();
+        const existed = trimmed === '' && ctx.vault.hasKey(name);
+        await ctx.vault.writeSecret(name, trimmed);
+        yield { type: 'result', value: { message:
+          trimmed !== '' ? `Secret "${name}" stored in the vault.`
+          : existed       ? `Secret "${name}" removed from the vault.`
+          :                 `No value entered and no secret named "${name}"; nothing changed.` } };
         return;
       }
 
@@ -268,7 +270,7 @@ export function createBrowserPluginTool(extras: ExtraPlugins): Tool<ToolResultOf
       "  | { action: 'add';        specifier: string }  // activate a plugin (a bundled package name, or a URL to fetch)\n" +
       "  | { action: 'remove';     specifier: string }  // deactivate & forget (specifier = package name, preferred — or its configured specifier)\n" +
       "  | { action: 'reload';     specifier: string }  // re-import (specifier = package name, preferred — or its configured specifier)\n" +
-      "  | { action: 'store-key';  key: string };       // store a secret a plugin/provider needs; value entered out-of-band\n" +
+      "  | { action: 'store-key';  key: string };       // store a secret a plugin/provider needs; value entered out-of-band (blank value removes the key)\n" +
       '```\n\n' +
       'For add, a URL specifier is fetched as raw source and MUST resolve a package.json: the URL is one, ' +
       'OR points at a directory containing one, OR is a code entry (…/index.ts) with a package.json as its ' +
@@ -282,7 +284,7 @@ export function createBrowserPluginTool(extras: ExtraPlugins): Tool<ToolResultOf
       properties: {
         action:    { type: 'string', enum: ['list', 'discover_local', 'add', 'remove', 'reload', 'store-key'] },
         specifier: { type: 'string', description: 'For remove/reload: the plugin\'s package.json name (preferred — the `name` from `list`) or its configured specifier. For add: a bundled package name, an inlined synthetic id, or a URL to raw source (a package.json, a directory containing one, or a code entry with a sibling package.json that declares a "name").' },
-        key:       { type: 'string', description: 'Name of the secret to store (required for store-key); value prompted separately.' },
+        key:       { type: 'string', description: 'Name of the secret to store (required for store-key); value prompted separately. Entering a blank value removes the key.' },
       },
     },
     executor,

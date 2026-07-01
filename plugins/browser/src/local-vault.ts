@@ -30,7 +30,8 @@ export class LocalStorageVault extends WebCryptoVault implements Vault {
 
   override async writeSecret(name: string, value: string): Promise<void> {
     await super.writeSecret(name, value);
-    this.mirror[name] = value;
+    if (value === '') delete this.mirror[name];
+    else this.mirror[name] = value;
     try { globalThis.localStorage?.setItem(STORAGE_KEY, JSON.stringify(this.mirror)); } catch { /* storage full / unavailable */ }
   }
 }

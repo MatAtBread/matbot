@@ -33,6 +33,12 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### API gaps filled
 
+- **Removing a vault secret.** `Vault.writeSecret(name, '')` now removes the key rather than storing an
+  empty value — there is no meaningful empty secret, so the empty string is the removal signal (idempotent
+  across `VaultImpl`, `EnvFileVault`, `WebCryptoVault`, `LocalStorageVault`, `DriveVault`). No new interface
+  method or tool action: the LLM removes a secret through the existing `plugin` `store-key` action by
+  leaving the out-of-band value prompt blank.
+
 - **`KnowledgeIndex.remove(id)`.** The index gained a retraction primitive — idempotent, keyed by the
   entry `id` (the index's sole primary key, the same key `index` replaces on). The index stays
   source-blind: it never inspects an entry's opaque `source` to decide visibility; the party that
@@ -294,6 +300,18 @@ churn and less likely to affect a consumer who doesn't use them.
   (a missing secret) are still left in config to retry.
 
 ### Optional
+
+- **mcp-http** — remote HTTP MCP connections now **self-configure the `MCP-Protocol-Version` header**.
+  Browsers preflight that header, and servers that don't allow it rejected every request outright (a CORS
+  failure from a `github.io`-style origin). The client now probes on first connect: it tries **without**
+  the header (which satisfies the narrower preflight, so those servers work) and adds it back only for a
+  *reachable* server that rejects the header-less request with a non-ok HTTP status — never on an opaque
+  fetch/CORS throw, where a header can't help. When the header is needed, it carries the version the
+  server negotiated in `initialize` (previously a hardcoded constant), so servers on different protocol
+  versions get the right one. The resolved policy is cached on the client and persisted to the connection
+  store (`MCPRemoteConfig.protocolVersion`: a version string to send, or `null` to omit), so later
+  reconnects skip the probe. No new tool or add-time option: existing connections re-probe once on next
+  reconnect.
 
 - **skills / skills_compiler / frontend/web** — a skill can now be **hidden**: withheld from the model
   (retracted from the knowledge index, so `contextual_search` / `find_fact` can't surface it, and

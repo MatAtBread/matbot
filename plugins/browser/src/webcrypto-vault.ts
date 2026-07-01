@@ -29,7 +29,8 @@ export class WebCryptoVault implements Vault {
   }
 
   async writeSecret(name: string, value: string): Promise<void> {
-    this.plain.set(name, value);
+    if (value === '') this.plain.delete(name);
+    else this.plain.set(name, value);
   }
 
   hasKey(name: string): boolean {

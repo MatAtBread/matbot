@@ -26,7 +26,7 @@ export class EnvFileVault extends VaultImpl {
     const lines = existing
       ? existing.split('\n').filter(l => l !== '' && !l.startsWith(`${name}=`))
       : [];
-    lines.push(`${name}=${value}`);
-    await writeFile(this.envPath, lines.join('\n') + '\n', 'utf8');
+    if (value !== '') lines.push(`${name}=${value}`);
+    await writeFile(this.envPath, lines.length ? lines.join('\n') + '\n' : '', 'utf8');
   }
 }
