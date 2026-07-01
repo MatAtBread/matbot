@@ -1,7 +1,7 @@
-import type { Tool, ToolRegistry, Hook, PromptFn, FormField, FrontendInfo, PluginRegistryEvent } from './types.js';
+import type { Tool, ToolRegistry, Hook, PromptFn, FormField, FrontendInfo, PluginRegistryEvent, ProviderAdapter, ProviderConfig } from './types.js';
 import { createBroadcaster } from '@matatbread/matbot-plugin-api';
 import type {
-  MatbotPlugin, MatbotMachine, Mounted,
+  MatbotPlugin, MatbotMachine, MatbotRuntime, Mounted,
   ProviderAdapterFactory, StoreFactory,
 } from './plugin.js';
 import { PLUGIN_API_VERSION, unifyServices } from './plugin.js';
@@ -145,8 +145,12 @@ export function registerPlugin(plugin: MatbotPlugin): void {
 
 // ── Resolution ────────────────────────────────────────────────────────────────
 
+export function tryResolveProviderFactory(module: string): ProviderAdapterFactory | undefined {
+  return state.providers.get(module);
+}
+
 export function resolveProviderFactory(module: string): ProviderAdapterFactory {
-  const factory = state.providers.get(module);
+  const factory = tryResolveProviderFactory(module);
   if (factory === undefined) {
     const available = [...state.providers.keys()].join(', ') || 'none';
     throw new Error(
@@ -156,6 +160,45 @@ export function resolveProviderFactory(module: string): ProviderAdapterFactory {
     );
   }
   return factory;
+}
+
+/**
+ * Config → live adapter, loading the adapter module on demand. The fast path resolves an already
+ * registered factory — the boot pre-scan front-loads provider plugins, so this is the norm. When the
+ * factory is absent (a provider profile a storage backend replayed from its medium ahead of its adapter
+ * module, say) the module is force-loaded and the loaded plugin's own factory is used — sidestepping the
+ * canonical-name keying that `resolveProviderFactory` depends on. Returns `null` (and warns, never throws)
+ * if the module can't be loaded or carries no adapter, so one unusable profile can't abort a turn.
+ */
+export async function instantiateProvider(services: MatbotRuntime, config: ProviderConfig): Promise<ProviderAdapter | null> {
+  // Resolve the factory tolerantly. `config.module` may be the canonical plugin name or any specifier that
+  // identifies the plugin — the factory registry is keyed by plugin name, so when a raw specifier misses we
+  // map it to the loaded plugin's name (a sibling profile sharing this adapter module may have loaded it
+  // already). The stored profile is NEVER rewritten: it stays exactly as the source wrote it (yaml path,
+  // npm name, or a storage-backend manifest entry), so `provider list` reports the source truth rather than
+  // a mix of specifiers and package names that depends on which profiles happen to have been used.
+  const name = tryResolveProviderFactory(config.module) !== undefined
+    ? config.module
+    : getPluginNameForSpecifier(config.module);
+  if (name !== undefined) {
+    const factory = tryResolveProviderFactory(name);
+    if (factory !== undefined) return factory(config);
+  }
+
+  // Not loaded yet — force-load the adapter module on demand (a runtime-contributed profile, or a disabled
+  // pre-scan). Warn and return null rather than throw, so one unusable profile can't abort a turn. The next
+  // resolution hits the fast path above via specifier→name, so this loads at most once per adapter module.
+  try {
+    const plugin = await services.loadPlugin(config.module);
+    if (plugin.provider === undefined) {
+      console.warn(`[matbot] provider "${config.name}": module "${config.module}" loaded but registered no adapter.`);
+      return null;
+    }
+    return plugin.provider(config);
+  } catch (err) {
+    console.warn(`[matbot] provider "${config.name}": could not load adapter module "${config.module}":`, err);
+    return null;
+  }
 }
 
 export function getRegisteredTools(): readonly Tool[] {

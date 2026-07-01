@@ -11,8 +11,8 @@ import type { Principal, ProviderAdapter,
 import { appendMessage, createMessage,
          createSession,
          createSessionRunner,
-         HookRegistry, SystemContextRegistryImpl, ToolRegistryImpl,
-         resolveProviderFactory,
+         HookRegistry, SystemContextRegistryImpl, ToolRegistryImpl, ProviderRegistryImpl,
+         instantiateProvider,
          teardownPlugins,
          unloadPlugin as unloadPluginFn,
          getPluginNameForSpecifier, getRegisteredPlugins, recordServiceKey,
@@ -781,11 +781,16 @@ async function main(): Promise<void> {
   const workDir  = path.join(dotData, 'bash-cwd');
   const filesDir = path.join(dotData, 'files');
 
+  // The live provider registry: seeded from matbot.yaml, mutated in place by canonicalisation, the
+  // `provider` tool, and (once a storage backend takes over) profiles replayed from its medium. Its
+  // ReadonlyMap surface serves every read-only consumer; `register`/`remove` are the write path.
+  const providers = new ProviderRegistryImpl(matbotConfig.providers);
+
   // Resolve plugin specifiers here so we can pre-scan for a storage backend before
   // creating stores. Node caches the imported modules, so loadPlugins below is free.
   const providerModules: string[] = [];
   const seenProviderModules = new Set<string>();
-  for (const cfg of matbotConfig.providers.values()) {
+  for (const cfg of providers.values()) {
     const mod = cfg.module;
     if (!seenProviderModules.has(mod)) {
       seenProviderModules.add(mod);
@@ -965,11 +970,11 @@ async function main(): Promise<void> {
     registerFrontend() { /* bound per-plugin in setupPlugin's scopedServices; base is a no-op */ },
 
     async complete(req) {
-      const rawCfg = matbotConfig.providers.get(req.provider);
+      const rawCfg = providers.get(req.provider);
       if (rawCfg === undefined) {
         throw new Error(
           `complete(): unknown provider "${req.provider}". ` +
-          `Available: ${[...matbotConfig.providers.keys()].join(', ')}`,
+          `Available: ${[...providers.keys()].join(', ')}`,
         );
       }
       const resolved: ProviderConfig = {
@@ -977,7 +982,8 @@ async function main(): Promise<void> {
         ...(rawCfg.credentials !== undefined ? { credentials: await resolveCredentials(rawCfg.credentials, vault) } : {}),
         ...(rawCfg.endpoint    !== undefined ? { endpoint: await vault.resolve(rawCfg.endpoint) } : {}),
       };
-      const adpt = resolveProviderFactory(resolved.module)(resolved);
+      const adpt = await instantiateProvider(services, resolved);
+      if (adpt === null) throw new Error(`complete(): provider "${req.provider}" has no loadable adapter (module "${resolved.module}").`);
       const msgs = req.system !== undefined
         ? [
             createMessage({
@@ -1033,7 +1039,7 @@ async function main(): Promise<void> {
       return unloadPluginFn(name, services);
     },
     resolver:  nodePluginResolver(path.dirname(configPath)),
-    providers: matbotConfig.providers,
+    providers,
     mounted:   mountTable.mounted,
     get StorageBackend() { return activeStorageBackend === undefined ? undefined : storageBackendProxy; },
     sessions:  store,
@@ -1050,17 +1056,20 @@ async function main(): Promise<void> {
   };
   const services: MatbotMachine = unifyServices(baseServices);
 
-  // resolveProvider reads matbotConfig.providers lazily (per turn), so it sees both the
-  // canonicalised module names set below and any live `provider add/remove` edits.
+  // resolveProvider reads the registry lazily (per turn), so it sees both the canonicalised module
+  // names set below and any live `provider add/remove` edits. instantiateProvider force-loads the
+  // adapter module if its factory isn't registered yet (a runtime-contributed profile), warning and
+  // yielding null — rather than throwing — if it can't be found.
   const resolveProvider = async (name: string): Promise<{ adapter: ProviderAdapter; config: ProviderConfig } | null> => {
-    const cfg = matbotConfig.providers.get(name);
+    const cfg = providers.get(name);
     if (cfg === undefined) return null;
     const resolved: ProviderConfig = {
       ...cfg,
       ...(cfg.credentials !== undefined ? { credentials: await resolveCredentials(cfg.credentials, vault) } : {}),
       ...(cfg.endpoint    !== undefined ? { endpoint: await vault.resolve(cfg.endpoint) } : {}),
     };
-    return { adapter: resolveProviderFactory(resolved.module)(resolved), config: resolved };
+    const adapter = await instantiateProvider(services, resolved);
+    return adapter === null ? null : { adapter, config: resolved };
   };
 
   // One runner per store: frontends share this one over the persistent sessions store, but the CLI
@@ -1084,18 +1093,14 @@ async function main(): Promise<void> {
 
   // Load provider plugins first so module names can be canonicalised before any
   // frontend plugin's setup() calls resolveProviderFactory(cfg.module).
-  await loadPluginsWithDescriptions(resolvedProviderMods, services, path.dirname(configPath));
+  // TEST(provider-registry): pre-scan disabled — instantiateProvider now loads each adapter module
+  // on first use and canonicalises the profile, so this is a warm-up. Restore this line to re-enable it.
+  // await loadPluginsWithDescriptions(resolvedProviderMods, services, path.dirname(configPath));
 
-  // Canonicalise each provider config's module to the loaded plugin's name so that
-  // resolveProviderFactory() (keyed by plugin.name) finds the factory regardless of
-  // whether the config used an npm name, a relative path, or a file URL.
-  for (const [key, cfg] of matbotConfig.providers) {
-    // A loaded plugin records its config specifier (= cfg.module) as plugin.specifier.
-    const pluginName = getPluginNameForSpecifier(cfg.module);
-    if (pluginName !== undefined && pluginName !== cfg.module) {
-      matbotConfig.providers.set(key, { ...cfg, module: pluginName });
-    }
-  }
+  // No canonicalisation of stored profiles: `instantiateProvider` resolves a specifier to its loaded
+  // plugin's factory at use time and leaves the profile's `module` exactly as written, so `provider list`
+  // reports the source truth (a yaml path stays a yaml path) instead of drifting to the package name once
+  // a profile is touched.
 
   // Map plugin name → the original module specifier written in matbot.yaml.
   // Used by the provider tool so its description and list output show YAML-valid
@@ -1130,7 +1135,7 @@ async function main(): Promise<void> {
   // Register the provider management tool now that all adapter plugins are loaded and
   // their YAML specifiers are recorded — createProviderTool reads getRegisteredPlugins()
   // and pluginNameToOrigPath to build its description.
-  toolReg.register(createProviderTool(matbotConfig.providers, pluginNameToOrigPath));
+  toolReg.register(createProviderTool(providers, pluginNameToOrigPath));
 
   // single_turn: the model-facing surface of the core singleTurn service. Registered here beside the
   // other core service-management tools (it needs the live `services` for `singleTurn`/`providers`).
@@ -1153,11 +1158,11 @@ async function main(): Promise<void> {
 
   // ── Provider resolution ───────────────────────────────────────────────────────
 
-  const providerName = opts.provider ?? matbotConfig.defaultProvider ?? (matbotConfig.providers.keys().next().value as string);
-  const rawConfig    = matbotConfig.providers.get(providerName);
+  const providerName = opts.provider ?? matbotConfig.defaultProvider ?? (providers.keys().next().value as string);
+  const rawConfig    = providers.get(providerName);
   if (!rawConfig) {
     throw new Error(
-      `Unknown provider "${providerName}". Available: ${[...matbotConfig.providers.keys()].join(', ')}`
+      `Unknown provider "${providerName}". Available: ${[...providers.keys()].join(', ')}`
     );
   }
 

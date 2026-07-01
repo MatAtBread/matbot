@@ -39,6 +39,16 @@ churn and less likely to affect a consumer who doesn't use them.
   method or tool action: the LLM removes a secret through the existing `plugin` `store-key` action by
   leaving the out-of-band value prompt blank.
 
+- **`services.providers` is now a writable `ProviderRegistry`.** The runtime's `providers` member was a
+  read-only `ReadonlyMap`; it is now a `ProviderRegistry` (still a `ReadonlyMap`, so every existing reader
+  is unchanged) that adds `register(config)`/`remove(name)`. A plugin can now *contribute* named provider
+  profiles live — the sibling of contributing tools via `ToolRegistry` — which lets a storage backend
+  replay provider definitions it captured in its own medium, not just plugins. New core exports:
+  `ProviderRegistryImpl`, `tryResolveProviderFactory(module)` (non-throwing lookup), and
+  `instantiateProvider(services, config)` — config → adapter that force-loads the adapter module on demand
+  (warning and returning `null` rather than throwing if it can't be found), so a profile whose adapter
+  plugin isn't loaded yet resolves itself on first use instead of aborting the turn.
+
 - **`KnowledgeIndex.remove(id)`.** The index gained a retraction primitive — idempotent, keyed by the
   entry `id` (the index's sole primary key, the same key `index` replaces on). The index stays
   source-blind: it never inspects an entry's opaque `source` to decide visibility; the party that

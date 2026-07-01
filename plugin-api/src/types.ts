@@ -718,6 +718,18 @@ export interface ToolRegistry {
   watch(signal?: AbortSignal): AsyncIterable<ToolRegistryEvent>;
 }
 
+/**
+ * The named provider profiles the runtime resolves by name. A `ReadonlyMap` for the many read-only
+ * consumers (`services.providers.get`/`has`/`keys`/…), plus a sanctioned write path so a plugin can
+ * *contribute* profiles live — a storage backend replaying provider definitions it captured in its own
+ * medium, or the built-in `provider` tool — exactly as a plugin contributes tools via {@link ToolRegistry}.
+ * Keyed by `config.name`; `register` upserts.
+ */
+export interface ProviderRegistry extends ReadonlyMap<string, ProviderConfig> {
+  register(config: ProviderConfig): void;
+  remove(name: string): boolean;
+}
+
 export type PluginRegistryEvent =
   | { type: 'loaded';   name: string }
   | { type: 'unloaded'; name: string };

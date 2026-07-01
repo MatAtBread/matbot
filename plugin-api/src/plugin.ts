@@ -1,6 +1,6 @@
 import type {
   FileStore, Vault, Message, ModelParameters,
-  ProviderAdapter, ProviderConfig, Tool, ToolRegistry, FrontendInfo,
+  ProviderAdapter, ProviderConfig, ProviderRegistry, Tool, ToolRegistry, FrontendInfo,
   Store, Session, SystemContextRegistry, KnowledgeIndex, PromptFn, SessionRunner, Usage,
 } from './types.js';
 import type { HookRegistry } from './hooks.js';
@@ -97,7 +97,7 @@ export type MatbotMachine = MatbotServices & MatbotRuntime;
 /**
  * The fixed runtime — microcode, not a service: the agentic loop's primitives (`complete`,
  * `createStore`), the registries you mutate but never swap wholesale (`hooks`, `tools`,
- * `systemContext`), plugin lifecycle, and the registry API itself. Not augmentable, not registerable.
+ * `systemContext`, `providers`), plugin lifecycle, and the registry API itself. Not augmentable, not registerable.
  */
 export interface MatbotRuntime {
   complete(req: CompletionRequest): Promise<CompletionResponse>;
@@ -198,7 +198,7 @@ export interface MatbotRuntime {
   /** The calling plugin's own loader-established identity. Bound per-plugin inside setup(). */
   readonly self?:           PluginSelf;
 
-  readonly providers:       ReadonlyMap<string, ProviderConfig>;
+  readonly providers:       ProviderRegistry;
   readonly sessions?:       Store<Session>;
   /** Per-session turn serialiser. Frontends submit and observe through this rather than calling
    *  runSession directly, so concurrent submits queue instead of clobbering the session. */
