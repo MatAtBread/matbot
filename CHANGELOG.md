@@ -301,6 +301,18 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Optional
 
+- **mcp-http** — remote HTTP MCP connections now **self-configure the `MCP-Protocol-Version` header**.
+  Browsers preflight that header, and servers that don't allow it rejected every request outright (a CORS
+  failure from a `github.io`-style origin). The client now probes on first connect: it tries **without**
+  the header (which satisfies the narrower preflight, so those servers work) and adds it back only for a
+  *reachable* server that rejects the header-less request with a non-ok HTTP status — never on an opaque
+  fetch/CORS throw, where a header can't help. When the header is needed, it carries the version the
+  server negotiated in `initialize` (previously a hardcoded constant), so servers on different protocol
+  versions get the right one. The resolved policy is cached on the client and persisted to the connection
+  store (`MCPRemoteConfig.protocolVersion`: a version string to send, or `null` to omit), so later
+  reconnects skip the probe. No new tool or add-time option: existing connections re-probe once on next
+  reconnect.
+
 - **skills / skills_compiler / frontend/web** — a skill can now be **hidden**: withheld from the model
   (retracted from the knowledge index, so `contextual_search` / `find_fact` can't surface it, and
   excluded from the system-prompt catalogue) while staying fully manageable. New `SkillDoc.hidden` flag,

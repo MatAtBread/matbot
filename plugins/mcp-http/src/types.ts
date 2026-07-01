@@ -3,6 +3,13 @@ export interface MCPRemoteConfig {
   name:     string;
   endpoint: string;
   headers?: Record<string, string>;
+  /**
+   * MCP-Protocol-Version header policy for this endpoint, resolved automatically on first connect and
+   * recorded so later reconnects skip the probe: a version string to send (the version the server
+   * negotiated), `null` to omit it (some servers reject it at the browser CORS preflight), or absent =
+   * probe again.
+   */
+  protocolVersion?: string | null;
 }
 
 export interface MCPPersistedRemote {
