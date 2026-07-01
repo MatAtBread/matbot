@@ -727,7 +727,16 @@ export interface ToolRegistry {
  */
 export interface ProviderRegistry extends ReadonlyMap<string, ProviderConfig> {
   register(config: ProviderConfig): void;
+  /** Explicit delete (the `provider` tool's `remove`) — removes the profile outright. */
   remove(name: string): boolean;
+  /**
+   * Undo a contribution: restore the boot-baseline profile for `name` if one existed (a plugin-supplied
+   * profile that shadowed a configured one), otherwise delete it. A plugin that registers providers
+   * (e.g. a storage backend replaying them from its medium) calls this for each in its `teardown()`, so
+   * unloading it reverts the provider set to the host's boot condition — the multi-valued analogue of a
+   * swap-member reverting to its captured boot default.
+   */
+  revert(name: string): void;
 }
 
 export type PluginRegistryEvent =

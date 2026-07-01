@@ -16,7 +16,7 @@ import type {
 import { LookupKnowledgeIndex } from '@matatbread/matbot-core';
 import { BrowserStorageBackend, LocalStorageVault } from '@matatbread/matbot-browser';
 import { runProviderSetup, type AvailableProvider, type ProviderDraft } from './setup.js';
-import { createBrowserProviderTool } from './provider-tool.js';
+import { createBrowserProviderTool } from '@matatbread/matbot-browser';
 
 /** Shape of the inlined config baked into the artifact (the browser analogue of matbot.yaml). */
 export interface BrowserConfig {
@@ -145,12 +145,14 @@ export async function boot(env: BootEnv): Promise<void> {
     return cfg;
   };
 
-  // The live provider registry mirrors matbot.yaml's, name-keyed; canonicalised below once provider
-  // plugins load. Baked providers (if any) are overlaid by anything the user configured in a previous
-  // session. Its ReadonlyMap surface serves reads; `register`/`remove` are the sanctioned write path.
-  const providers = new ProviderRegistryImpl();
-  for (const [name, cfg] of Object.entries(config.providers))         providers.set(name, { ...cfg, name });
-  for (const [name, cfg] of Object.entries(loadPersistedProviders())) providers.set(name, { ...cfg, name });
+  // The live provider registry mirrors matbot.yaml's, name-keyed. Baked providers (if any) are overlaid
+  // by anything the user configured in a previous session. Build the seed map first so the registry
+  // snapshots it as the boot baseline (what `revert` restores to); its ReadonlyMap surface serves reads,
+  // and register/remove/revert are the sanctioned write path.
+  const providerSeed = new Map<string, ProviderConfig>();
+  for (const [name, cfg] of Object.entries(config.providers))         providerSeed.set(name, { ...cfg, name });
+  for (const [name, cfg] of Object.entries(loadPersistedProviders())) providerSeed.set(name, { ...cfg, name });
+  const providers = new ProviderRegistryImpl(providerSeed);
 
   // First run (or cleared storage): collect the full provider config — name, adapter, URL, model, key.
   if (providers.size === 0) {

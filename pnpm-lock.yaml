@@ -299,6 +299,15 @@ importers:
         specifier: 'catalog:'
         version: 6.0.3
 
+  plugins/provider-store-test:
+    devDependencies:
+      '@matatbread/matbot-plugin-api':
+        specifier: workspace:^
+        version: link:../../plugin-api
+      typescript:
+        specifier: 'catalog:'
+        version: 6.0.3
+
   plugins/providers/anthropic:
     devDependencies:
       '@matatbread/matbot-core':

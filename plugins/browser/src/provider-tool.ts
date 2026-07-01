@@ -1,5 +1,27 @@
 import type { Tool, ToolExecutor, ToolResult, ToolResultOf, ToolContext } from '@matatbread/matbot-plugin-api';
-import type { AvailableProvider, ProviderDraft } from './setup.js';
+
+/** An adapter type the provider tool / startup wizard can offer (baked from the build's providerModules). */
+export interface AvailableProvider {
+  label:         string;
+  module:        string;   // importable specifier of the adapter plugin
+  endpointHint?: string;
+  modelHint?:    string;
+  /** A provider that needs no endpoint/model/API key (e.g. a self-contained local adapter). The
+   *  wizard hides those fields and submits with just a name; `modelHint` (if any) is used as model. */
+  selfContained?: boolean;
+}
+
+/** Everything the user supplies for one provider — the browser equivalent of the CLI setup wizard. */
+export interface ProviderDraft {
+  name:     string;
+  module:   string;
+  endpoint: string;
+  model:    string;
+  apiKey:   string;
+  /** Generation parameters (maxTokens, temperature, thinking, …) — the wizard never sets this; the
+   *  `provider` tool's `add` action does, mirroring the node tool's `parameters` input. */
+  parameters?: Record<string, unknown>;
+}
 
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolResults {
@@ -20,14 +42,16 @@ export interface ProviderRow {
 }
 
 /**
- * The provider-admin surface the bootstrap owns. Mirrors what the node `provider` tool gets from
- * matbot.yaml + the loaded-plugin registry — but backed by the portable store/vault path instead of
- * filesystem YAML editing, which is the only reason the node tool wasn't reusable here.
+ * The provider-admin surface a host (the web bootstrap) or a storage-backend plugin (google-drive)
+ * owns. Mirrors what the node `provider` tool gets from matbot.yaml + the loaded-plugin registry — but
+ * backed by a portable store/vault path instead of filesystem YAML editing, which is the only reason
+ * the node tool wasn't reusable here. Swap the backing (localStorage vs a Drive manifest) and the same
+ * `provider` tool syncs across machines.
  */
 export interface ProviderAdmin {
   available: AvailableProvider[];
   list(): ProviderRow[];
-  add(draft: ProviderDraft): Promise<string>;   // persist + load adapter + canonicalise + register
+  add(draft: ProviderDraft): Promise<string>;   // persist + load adapter + register
   remove(name: string): Promise<boolean>;
 }
 
@@ -38,9 +62,9 @@ type ProviderInput =
 
 /**
  * Browser `provider` tool. The portable analogue of the node provider tool: it manages the same
- * named-LLM-profile concept, but reads/writes the live providers map + localStorage + vault rather
+ * named-LLM-profile concept, but reads/writes a live providers map + a backing store + the vault rather
  * than a YAML file. The API key is collected out-of-band via `ctx.prompt` (never in the transcript),
- * exactly like `plugin store-key`.
+ * exactly like `plugin store-key`. Persistence is entirely the injected {@link ProviderAdmin}'s concern.
  */
 export function createBrowserProviderTool(admin: ProviderAdmin): Tool<ToolResultOf<'provider'>> {
   const adapterList = () => admin.available.map((a, i) => `  ${i}. ${a.label}  (${a.module})`).join('\n');
