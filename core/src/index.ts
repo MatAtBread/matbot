@@ -41,6 +41,7 @@ export * from './tool-registry.js';
 export * from './provider-registry.js';
 export * from './system-context.js';
 export * from './single-turn.js';
+export * from './about.js';
 export * from './config/index.js';
 export * from './security/index.js';
 export * from './knowledge/index.js';

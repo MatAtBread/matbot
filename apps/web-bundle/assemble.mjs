@@ -84,7 +84,7 @@ async function entryForPath(rel) {
   const runtimes = Array.isArray(pkg.matbotRuntime)
     ? pkg.matbotRuntime.filter(r => r === 'node' || r === 'browser')
     : undefined;
-  return { id: idOf(path.join(dir, entry)), name: pkg.name ?? rel, runtimes, description: pkg.description };
+  return { id: idOf(path.join(dir, entry)), name: pkg.name ?? rel, runtimes, description: pkg.description, version: pkg.version };
 }
 
 const SPEC_RE = /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)(['"])([^'"]+)\1/g;
@@ -153,11 +153,14 @@ async function main() {
   // spec → declared matbotRuntime; the browser resolver reads this so the loader can skip a
   // node-only plugin before importing it (the build-time analogue of walking package.json on node).
   const specRuntimes = {};
+  // spec → package.json version; the browser resolver reads this to stamp plugin.version (the
+  // build-time analogue of walking package.json on node).
+  const specVersions = {};
   const rootIds = [bootstrapId];
 
   const pluginSpecs = [];
   for (const rel of config.plugins) {
-    const { id, name, runtimes } = await entryForPath(rel);
+    const { id, name, runtimes, version } = await entryForPath(rel);
     if (runtimes !== undefined && !runtimes.includes('browser')) {
       console.warn(`[matbot] assemble: plugin "${rel}" declares matbotRuntime [${runtimes.join(', ')}] — it cannot run in the browser; baking it anyway, but it will be skipped at boot.`);
     }
@@ -166,15 +169,17 @@ async function main() {
     pluginSpecs.push(spec);
     specNames[spec] = name;
     if (runtimes !== undefined) specRuntimes[spec] = runtimes;
+    if (version  !== undefined) specVersions[spec] = version;
   }
 
   const providers = {};
   for (const [pname, cfg] of Object.entries(config.providers ?? {})) {
-    const { id, name, runtimes } = await entryForPath(cfg.module);
+    const { id, name, runtimes, version } = await entryForPath(cfg.module);
     rootIds.push(id);
     const spec = SYN(id);
     specNames[spec] = name;
     if (runtimes !== undefined) specRuntimes[spec] = runtimes;
+    if (version  !== undefined) specVersions[spec] = version;
     providers[pname] = { ...cfg, module: spec };
   }
 
@@ -185,7 +190,7 @@ async function main() {
   const bundledSpecs = [];
   const availablePlugins = [];
   for (const rel of config.bundledPlugins ?? []) {
-    const { id, name, runtimes, description } = await entryForPath(rel);
+    const { id, name, runtimes, description, version } = await entryForPath(rel);
     if (runtimes !== undefined && !runtimes.includes('browser')) {
       console.warn(`[matbot] assemble: bundled plugin "${rel}" declares matbotRuntime [${runtimes.join(', ')}] — it cannot run in the browser; baking it anyway, but it will fail to load.`);
     }
@@ -194,6 +199,9 @@ async function main() {
     bundledSpecs.push(spec);
     specNames[spec] = name;
     if (runtimes !== undefined) specRuntimes[spec] = runtimes;
+    // Bundled plugins load by package name (availablePlugins[].specifier = name), so key the version
+    // by name too — that's the specifier the resolver.version() will be asked about.
+    if (version  !== undefined) { specVersions[spec] = version; specVersions[name] = version; }
     availablePlugins.push({
       name,
       specifier: name,                 // load by package name → import map → baked blob → persists
@@ -206,11 +214,12 @@ async function main() {
   // module is present even though no baked provider references it.
   const availableProviders = [];
   for (const pm of config.providerModules ?? []) {
-    const { id, name, runtimes } = await entryForPath(pm.module);
+    const { id, name, runtimes, version } = await entryForPath(pm.module);
     rootIds.push(id);
     const spec = SYN(id);
     specNames[spec] = name;
     if (runtimes !== undefined) specRuntimes[spec] = runtimes;
+    if (version  !== undefined) specVersions[spec] = version;
     availableProviders.push({
       label: pm.label ?? name,
       module: spec,
@@ -250,12 +259,17 @@ async function main() {
     assets[key] = await readFile(path.join(repoRoot, rel), 'utf8');
   }
 
+  // The web-bundle's own package version → reported by about_matbot as the harness version.
+  const harnessVersion = JSON.parse(await readFile(path.join(here, 'package.json'), 'utf8')).version;
+
   const payload = {
     sources,
     packageEntries,
     entry: bootstrapId,
     specNames,
     specRuntimes,
+    specVersions,
+    ...(harnessVersion !== undefined ? { harnessVersion } : {}),
     assets,
     config: {
       plugins:   pluginSpecs,

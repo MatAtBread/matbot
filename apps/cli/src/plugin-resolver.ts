@@ -53,6 +53,22 @@ export function nodePluginResolver(baseDir: string): PluginResolver {
       }
     },
 
+    // Read `version` off the plugin's package.json — the nearest named one, the same boundary
+    // identify() uses. Undefined when unreadable (no package.json / no version field).
+    async version(specifier: string): Promise<string | undefined> {
+      let dir = startDir(specifier, baseDir);
+      if (dir === undefined) return undefined;
+      while (true) {
+        try {
+          const pkg = JSON.parse(await readFile(path.join(dir, 'package.json'), 'utf8')) as { name?: string; version?: string };
+          if (pkg.name) return pkg.version;
+        } catch { /* no package.json here, keep walking up */ }
+        const parent = path.dirname(dir);
+        if (parent === dir) return undefined;
+        dir = parent;
+      }
+    },
+
     // Read `matbotRuntime` off the plugin's package.json — the nearest one with a `name`, the same
     // boundary identify() uses — so a declaration on the plugin (not an enclosing monorepo root) wins.
     // Undefined means "not declared": the loader then imports and falls back to load/rollback.

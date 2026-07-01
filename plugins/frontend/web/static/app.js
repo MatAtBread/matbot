@@ -829,7 +829,7 @@ function makeTriggerRow(c) {
   sel.className = 'trigger-kind';
   for (const k of TRIGGER_KINDS) {
     const o = document.createElement('option');
-    o.value = k; 
+    o.value = k;
     o.textContent = { 'ephemeral': 'User Ephemeral', 'contextual': 'User Contextual', 'retract': 'Agent Retract', 'followup': 'Agent Follow-up' }[k];
     sel.appendChild(o);
   }
@@ -2471,7 +2471,14 @@ async function init() {
     };
   }
 
-  const [sessions, providers] = await Promise.all([apiListSessions(), apiListProviders()]);
+  const [sessions, providers, aboutMatbot] = await Promise.all([apiListSessions(), apiListProviders(), callTool('about_matbot')]);
+  if (aboutMatbot?.version) {
+    const versionElt = document.getElementById('matbot-version');
+    if (versionElt) {
+      versionElt.textContent = 'v'+aboutMatbot.version;
+      versionElt.title = aboutMatbot.about;
+    }
+  }
 
   for (const p of providers) {
     const opt = document.createElement('option');

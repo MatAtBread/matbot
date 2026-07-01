@@ -5,7 +5,7 @@ import {
   installUsageCarrier, createSerialUsageCarrier, recordUsage,
   createMessage, isMissingSecretError, loadPlugins,
   unloadPlugin as unloadPluginFn, unifyServices,
-  forwardingProxy, makeSwappable, singleTurnRequest, createSingleTurnTool,
+  forwardingProxy, makeSwappable, singleTurnRequest, createSingleTurnTool, createAboutMatbotTool,
   createMountTable, onContextQuiesce, flushIfQuiescent,
 } from '@matatbread/matbot-core';
 import type {
@@ -69,6 +69,10 @@ export interface BootEnv {
   specNames: Record<string, string>;
   /** specifier → declared matbotRuntime, baked by the assembler; absent entry means "not declared". */
   specRuntimes?: Record<string, readonly Runtime[]>;
+  /** specifier → package.json version, baked by the assembler; absent entry means "couldn't read". */
+  specVersions?: Record<string, string>;
+  /** The web-bundle's own package version, baked by the assembler — reported by `about_matbot`. */
+  harnessVersion?: string;
   loader:    LoaderApi;
 }
 
@@ -100,6 +104,7 @@ async function resolveCredentials(creds: Record<string, string>, vault: Vault): 
 export async function boot(env: BootEnv): Promise<void> {
   const { config, specNames, loader } = env;
   const specRuntimes = env.specRuntimes ?? {};
+  const specVersions = env.specVersions ?? {};
 
   // One identity for the whole realm — the browser is single-principal, so the carrier is constant
   // and `runAs` is a passthrough (no AsyncLocalStorage needed; see CLAUDE.md "Platform split").
@@ -267,6 +272,10 @@ export async function boot(env: BootEnv): Promise<void> {
     // loader imports and falls back to load/rollback. A remote .ts added at runtime is undeclared.
     async runtimes(specifier: string): Promise<readonly Runtime[] | undefined> {
       return specRuntimes[specifier];
+    },
+    // Baked by the assembler from each plugin's package.json; absent means "couldn't read".
+    async version(specifier: string): Promise<string | undefined> {
+      return specVersions[specifier];
     },
   };
 
@@ -449,6 +458,10 @@ export async function boot(env: BootEnv): Promise<void> {
   // configured provider (or the current turn's, when omitted). Pure (services only), so it runs
   // identically in the browser realm.
   toolReg.register(createSingleTurnTool(services));
+
+  // about_matbot: the harness's own version + description. The harness isn't a plugin, so this singleton
+  // fact gets a dedicated tool; the assembler bakes the web-bundle's own package version into the env.
+  toolReg.register(createAboutMatbotTool(env.harnessVersion ?? '?'));
 
   // Let the frontend offer "add another provider" from the UI (runs the wizard form).
   (globalThis as unknown as Record<string, unknown>).__mbProviders = {

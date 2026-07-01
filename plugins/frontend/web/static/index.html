@@ -59,7 +59,13 @@
       border-bottom: 1px solid #e5e7eb;
       flex-shrink: 0;
       display: flex;
-      align-items: center;
+      align-items: baseline;
+    }
+    #matbot-version {
+      color: #9ca3af;
+      margin-left: 0.5em;
+      font-size: 75%;
+      font-weight: 300;
     }
     .fs-controls { margin-left: auto; display: flex; align-items: center; gap: 1px; }
     .fs-btn {
@@ -1661,7 +1667,7 @@
 <body>
   <div id="sidebar-overlay"></div>
   <nav id="sidebar">
-    <h1>matbot<span class="fs-controls"><button class="fs-btn" id="fs-down" title="Smaller">A</button><button class="fs-btn" id="fs-up" title="Larger">A</button></span></h1>
+    <h1>matbot <span id="matbot-version"></span><span class="fs-controls"><button class="fs-btn" id="fs-down" title="Smaller">A</button><button class="fs-btn" id="fs-up" title="Larger">A</button></span></h1>
     <a id="new-btn" href="#new">+ New conversation</a>
     <div class="sidebar-section" data-section="conversations">
       <div class="sidebar-heading">Conversations</div>

@@ -19,7 +19,7 @@ import { appendMessage, createMessage,
          installPrincipalCarrier, installUsageCarrier, recordUsage, usageByProvider, enterPrincipal, currentPrincipal,
          unifyServices, forwardingProxy, makeSwappable, singleTurnRequest,
          createMountTable, onContextQuiesce, flushIfQuiescent,
-         createSingleTurnTool,
+         createSingleTurnTool, createAboutMatbotTool,
          isMissingSecretError }            from '@matatbread/matbot-core';
 import type { MatbotMachine, MatbotServices, PluginSettings, Vault, SessionRunner,
               MatbotPlugin, StorageBackend, KnowledgeIndex, PromptFn, FormField, SwapFn } from '@matatbread/matbot-core';
@@ -1140,6 +1140,10 @@ async function main(): Promise<void> {
   // single_turn: the model-facing surface of the core singleTurn service. Registered here beside the
   // other core service-management tools (it needs the live `services` for `singleTurn`/`providers`).
   toolReg.register(createSingleTurnTool(services));
+
+  // about_matbot: the harness's own version + description. The harness isn't a plugin (no `plugin list`
+  // row), so this singleton fact gets a dedicated tool; the app passes its own package version.
+  toolReg.register(createAboutMatbotTool(selfVersion()));
 
   // ── Server mode ───────────────────────────────────────────────────────────────
 

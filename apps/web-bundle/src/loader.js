@@ -260,7 +260,7 @@
   // ── Boot ──────────────────────────────────────────────────────────────────────────────────────
   try {
     const mod = await import(SYN(ENTRY));
-    await mod.boot({ config: MB.config, specNames: MB.specNames, specRuntimes: MB.specRuntimes, loader });
+    await mod.boot({ config: MB.config, specNames: MB.specNames, specRuntimes: MB.specRuntimes, specVersions: MB.specVersions, harnessVersion: MB.harnessVersion, loader });
   } catch (err) {
     console.error('[matbot] boot failed:', err);
     const pre = document.createElement('pre');

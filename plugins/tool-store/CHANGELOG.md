@@ -1,5 +1,12 @@
 # @matatbread/matbot-tool-store
 
+## 0.2.8
+
+### Patch Changes
+
+- Updated dependencies
+  - @matatbread/matbot-plugin-api@0.2.8
+
 ## 0.2.7
 
 ### Patch Changes

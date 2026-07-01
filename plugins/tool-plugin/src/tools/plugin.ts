@@ -88,6 +88,7 @@ interface DiscoveredPlugin {
   specifier: string;
   name:      string;
   description: string;
+  version?:  string;
   // `type` categorises the origin; `uri` is the concrete source location as a scheme-qualified URI —
   // `file://…` on disk for a local plugin, the `https://…` it was fetched from for a cached one.
   source:    { type: PluginSource; uri: string };
@@ -103,6 +104,7 @@ declare module '@matatbread/matbot-plugin-api' {
           loaded: Array<{
             name:           string;
             apiVersion:     string;
+            version?:       string;
             types:          string[];
             tools:          ToolSummary[];
             specifier:      string;
@@ -127,7 +129,7 @@ declare module '@matatbread/matbot-plugin-api' {
 // then failing at install. Returns the discovery entry (with the caller-supplied specifier + source),
 // or null.
 async function inspectPluginDir(sub: string, specifier: string, source: { type: PluginSource; uri: string }): Promise<DiscoveredPlugin | null> {
-  let pkg: { name?: string; description?: string; dependencies?: Record<string, string>; peerDependencies?: Record<string, string>; exports?: unknown; matbotRuntime?: unknown };
+  let pkg: { name?: string; version?: string; description?: string; dependencies?: Record<string, string>; peerDependencies?: Record<string, string>; exports?: unknown; matbotRuntime?: unknown };
   try {
     pkg = JSON.parse(await readFile(path.join(sub, 'package.json'), 'utf8')) as typeof pkg;
   } catch {
@@ -159,6 +161,7 @@ async function inspectPluginDir(sub: string, specifier: string, source: { type: 
     name:        pkg.name ?? path.basename(sub),
     description,
     source,
+    ...(pkg.version !== undefined ? { version: pkg.version } : {}),
     ...(runtimes !== undefined ? { matbotRuntime: runtimes } : {}),
   };
 }
@@ -439,6 +442,7 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
         types:       pluginTypes(p, pluginToolNames),
         tools:       toolsByPlugin.get(p.name) ?? [],
         specifier:   p.specifier,
+        ...(p.version       !== undefined ? { version:       p.version }       : {}),
         ...(p.resolvedUrl   !== undefined ? { resolvedUrl:   p.resolvedUrl }   : {}),
         ...(p.manifest?.description ? { description: p.manifest.description } : {}),
         ...(p.matbotRuntime !== undefined ? { matbotRuntime: p.matbotRuntime } : {}),

@@ -212,6 +212,7 @@ export async function loadPlugins(
     const name     = toLoad[i]!.name ?? (services.resolver !== undefined ? await services.resolver.identify(spec) : defaultIdentify(spec));
     const source   = sourceOf(spec);
     const runtimes = toLoad[i]!.runtimes;
+    const version  = services.resolver?.version !== undefined ? await services.resolver.version(spec) : undefined;
     const plugin: MatbotPlugin = {
       ...spec_obj,
       name,
@@ -219,6 +220,7 @@ export async function loadPlugins(
       resolvedUrl: toLoad[i]!.resolvedUrl,
       ...(source   !== undefined ? { source }                 : {}),
       ...(runtimes !== undefined ? { matbotRuntime: runtimes } : {}),
+      ...(version  !== undefined ? { version }                 : {}),
     };
 
     // registered gates the rollback: only an attempt that *itself* registered the

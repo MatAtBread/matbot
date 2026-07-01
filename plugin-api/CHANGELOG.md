@@ -1,5 +1,11 @@
 # @matatbread/matbot-plugin-api
 
+## 0.2.8
+
+### Patch Changes
+
+- Patch release.
+
 ## 0.2.7
 
 ## 0.2.6

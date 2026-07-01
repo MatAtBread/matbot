@@ -57,6 +57,13 @@ export type Runtime = 'node' | 'browser';
 export interface PluginResolver {
   identify(specifier: string): Promise<string>;
   /**
+   * The plugin's package.json `version`, or `undefined` when it can't be read (no package.json, or a
+   * remote specifier whose version isn't baked). Read from the same nearest-named-package.json boundary
+   * as {@link identify}, so it lives here (host-specific: fs walk on node, baked manifest in the browser)
+   * rather than in the platform-neutral loader. Stamped onto {@link MatbotPlugin.version} at load.
+   */
+  version?(specifier: string): Promise<string | undefined>;
+  /**
    * The runtimes a plugin declares support for via its package.json `matbotRuntime`
    * (e.g. `["node"]`, `["browser"]`, `["node","browser"]`), or `undefined` when the field is
    * absent — meaning "don't know". The loader skips a plugin *before* importing it when this
@@ -504,4 +511,8 @@ export interface MatbotPlugin extends MatbotPluginSpec {
   // than re-derived so `list` can report it offline and for remote plugins, whose config-entry
   // specifier (a github:/https URL) can't be resolved back to a package.json after the fact.
   readonly matbotRuntime?: readonly Runtime[];
+  // The plugin's package.json `version`, read by the resolver at load (fs walk on node; baked manifest
+  // in the browser). Absent ⇒ couldn't be read (no package.json, or a remote whose version isn't baked).
+  // Loader-established provenance, like `name`/`matbotRuntime` — not the author's to declare.
+  readonly version?: string;
 }
