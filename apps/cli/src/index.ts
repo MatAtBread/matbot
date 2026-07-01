@@ -1091,10 +1091,10 @@ async function main(): Promise<void> {
 
   sessionRunner = makeRunner(store);
 
-  // Load provider plugins first so module names can be canonicalised before any
-  // frontend plugin's setup() calls resolveProviderFactory(cfg.module).
-  // TEST(provider-registry): pre-scan disabled — instantiateProvider now loads each adapter module
-  // on first use and canonicalises the profile, so this is a warm-up. Restore this line to re-enable it.
+  // Historically loaded provider plugins first so their factories were registered (by plugin name)
+  // before any frontend's setup() resolved an adapter. No consumer resolves adapters at setup() now —
+  // frontends and the central complete()/singleTurn() all go through instantiateProvider, which
+  // force-loads the adapter module on first use. Pre-scan disabled; restore this line to re-enable it.
   // await loadPluginsWithDescriptions(resolvedProviderMods, services, path.dirname(configPath));
 
   // No canonicalisation of stored profiles: `instantiateProvider` resolves a specifier to its loaded
