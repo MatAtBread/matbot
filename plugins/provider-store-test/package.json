@@ -1,0 +1,45 @@
+{
+  "name": "@matatbread/matbot-provider-store-test",
+  "matbotRuntime": [
+    "node",
+    "browser"
+  ],
+  "version": "0.2.7",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "files": [
+    "src"
+  ],
+  "description": "TEST/reference: a plugin that contributes LLM provider profiles from its own store and reverts them on unload — a node stand-in for a storage backend (e.g. google-drive) syncing providers, used to exercise the ProviderRegistry contribution + revert path.",
+  "keywords": [
+    "matbot",
+    "matbot-plugin",
+    "llm",
+    "ai",
+    "agent"
+  ],
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MatAtBread/matbot.git",
+    "directory": "plugins/provider-store-test"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "@matatbread/matbot-plugin-api": "workspace:^"
+  },
+  "devDependencies": {
+    "typescript": "catalog:",
+    "@matatbread/matbot-plugin-api": "workspace:^"
+  }
+}

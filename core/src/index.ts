@@ -38,6 +38,7 @@ export * from './registry.js';
 export * from './settings.js';
 export * from './loader.js';
 export * from './tool-registry.js';
+export * from './provider-registry.js';
 export * from './system-context.js';
 export * from './single-turn.js';
 export * from './config/index.js';

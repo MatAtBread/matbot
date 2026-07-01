@@ -13,6 +13,21 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Breaking changes
 
+- **`MatbotRuntime.providers` is now a `ProviderRegistry`, not a `ReadonlyMap`.** *Reading is
+  source-compatible* — `ProviderRegistry extends ReadonlyMap<string, ProviderConfig>`, so every existing
+  consumer (`services.providers.get`/`has`/`keys`/`values`/iteration) is untouched; a plugin that only
+  reads `services.providers` needs **no change**. Two things can bite:
+  1. **Anyone who *constructs* a `MatbotMachine`** (a custom host, a test harness) must now supply a
+     `ProviderRegistry` for the `providers` member — a bare `Map`/`ReadonlyMap` no longer satisfies it, as
+     it lacks `register`/`remove`/`revert`. Use the new `ProviderRegistryImpl` (exported from
+     `@matatbread/matbot-core`).
+  2. **Profile `module` values are no longer canonicalised to the plugin name.** Previously the host
+     rewrote each profile's `module` to the loaded adapter plugin's canonical name at boot; now the stored
+     `module` is left exactly as configured (a yaml path stays a yaml path). So `services.providers.get(x)
+     .module` returns the source specifier, not the resolved plugin name — code that relied on the
+     canonical name must map it with `getPluginNameForSpecifier(module)`. Resolution itself is unaffected:
+     `instantiateProvider` accepts either form.
+
 - **`MatbotServices` split into a registry bucket + `MatbotRuntime`, joined as `MatbotMachine`.** What a
   plugin's `setup(services)` receives is now `MatbotMachine` (the full object). `MatbotServices` itself
   shrank to only the *registerable* services — `StorageBackend?`, `Vault`, `KnowledgeIndex`, plus
@@ -38,6 +53,19 @@ churn and less likely to affect a consumer who doesn't use them.
   across `VaultImpl`, `EnvFileVault`, `WebCryptoVault`, `LocalStorageVault`, `DriveVault`). No new interface
   method or tool action: the LLM removes a secret through the existing `plugin` `store-key` action by
   leaving the out-of-band value prompt blank.
+
+- **Contributing provider profiles live** (see also the `MatbotRuntime.providers` contract change under
+  Breaking changes). The registry adds `register(config)`/`remove(name)`/`revert(name)`, so a plugin can
+  now contribute named provider profiles — the sibling of contributing tools via `ToolRegistry` — letting a
+  storage backend replay provider definitions from its own medium, not just plugins. `revert(name)` restores
+  the boot profile (or deletes if there was none), so a contributed — possibly shadowing — profile is undone
+  on unload; `remove` stays a true delete. New core exports: `ProviderRegistryImpl`,
+  `tryResolveProviderFactory(module)` (non-throwing lookup), and `instantiateProvider(services, config)` —
+  config → adapter that force-loads the adapter module on demand (warning and returning `null` rather than
+  throwing if it can't be found), so a profile whose adapter plugin isn't loaded yet resolves itself on first
+  use instead of aborting the turn (removing the need for the boot-time provider pre-scan). The reusable
+  browser provider tool (`createBrowserProviderTool` + `ProviderAdmin`) moved to `@matatbread/matbot-browser`
+  so a storage-backend plugin can back the same tool with its own persistence.
 
 - **`KnowledgeIndex.remove(id)`.** The index gained a retraction primitive — idempotent, keyed by the
   entry `id` (the index's sole primary key, the same key `index` replaces on). The index stays
@@ -300,6 +328,18 @@ churn and less likely to affect a consumer who doesn't use them.
   (a missing secret) are still left in config to retry.
 
 ### Optional
+
+- **storage/google-drive** — provider profiles now **sync to Drive**, mirroring the existing plugin sync.
+  `setup()` shadows the `provider` tool with one backed by a Drive `provider-manifest` store (the same
+  `createBrowserProviderTool`, now backed by a Drive `ProviderAdmin`), so `add`/`remove` write across
+  machines; the API key goes to the already-swapped DriveVault while the profile stores a `${NAME}`
+  placeholder. Stored profiles are replayed into `services.providers` on boot and reverted on unload,
+  restoring any boot profile they shadowed.
+
+- **provider-store-test** (new; demonstration/reference) — a node plugin that contributes provider
+  profiles from its own store and reverts them on unload. It has no real use in a node environment (it
+  just clones a configured provider); it exists as a runnable proof of the provider-contribution path and
+  as a template for centralising provider config in a shared resource (a database, a config service, …).
 
 - **mcp-http** — remote HTTP MCP connections now **self-configure the `MCP-Protocol-Version` header**.
   Browsers preflight that header, and servers that don't allow it rejected every request outright (a CORS

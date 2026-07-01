@@ -1,6 +1,6 @@
 import {
-  createSessionRunner, HookRegistry, SystemContextRegistryImpl, ToolRegistryImpl,
-  resolveProviderFactory, getPluginNameForSpecifier, recordServiceKey,
+  createSessionRunner, HookRegistry, SystemContextRegistryImpl, ToolRegistryImpl, ProviderRegistryImpl,
+  instantiateProvider, getPluginNameForSpecifier, recordServiceKey,
   installPrincipalCarrier, createConstantPrincipalCarrier,
   installUsageCarrier, createSerialUsageCarrier, recordUsage,
   createMessage, isMissingSecretError, loadPlugins,
@@ -16,7 +16,7 @@ import type {
 import { LookupKnowledgeIndex } from '@matatbread/matbot-core';
 import { BrowserStorageBackend, LocalStorageVault } from '@matatbread/matbot-browser';
 import { runProviderSetup, type AvailableProvider, type ProviderDraft } from './setup.js';
-import { createBrowserProviderTool } from './provider-tool.js';
+import { createBrowserProviderTool } from '@matatbread/matbot-browser';
 
 /** Shape of the inlined config baked into the artifact (the browser analogue of matbot.yaml). */
 export interface BrowserConfig {
@@ -145,11 +145,14 @@ export async function boot(env: BootEnv): Promise<void> {
     return cfg;
   };
 
-  // providers map mirrors matbot.yaml's, name-keyed; canonicalised below once provider plugins load.
-  // Baked providers (if any) are overlaid by anything the user configured in a previous session.
-  const providers = new Map<string, ProviderConfig>();
-  for (const [name, cfg] of Object.entries(config.providers))         providers.set(name, { ...cfg, name });
-  for (const [name, cfg] of Object.entries(loadPersistedProviders())) providers.set(name, { ...cfg, name });
+  // The live provider registry mirrors matbot.yaml's, name-keyed. Baked providers (if any) are overlaid
+  // by anything the user configured in a previous session. Build the seed map first so the registry
+  // snapshots it as the boot baseline (what `revert` restores to); its ReadonlyMap surface serves reads,
+  // and register/remove/revert are the sanctioned write path.
+  const providerSeed = new Map<string, ProviderConfig>();
+  for (const [name, cfg] of Object.entries(config.providers))         providerSeed.set(name, { ...cfg, name });
+  for (const [name, cfg] of Object.entries(loadPersistedProviders())) providerSeed.set(name, { ...cfg, name });
+  const providers = new ProviderRegistryImpl(providerSeed);
 
   // First run (or cleared storage): collect the full provider config — name, adapter, URL, model, key.
   if (providers.size === 0) {
@@ -305,7 +308,8 @@ export async function boot(env: BootEnv): Promise<void> {
         ...(rawCfg.credentials !== undefined ? { credentials: await resolveCredentials(rawCfg.credentials, vault) } : {}),
         ...(rawCfg.endpoint    !== undefined ? { endpoint: await resolveInteractive(rawCfg.endpoint, vault) } : {}),
       };
-      const adpt = resolveProviderFactory(resolved.module)(resolved);
+      const adpt = await instantiateProvider(services, resolved);
+      if (adpt === null) throw new Error(`complete(): provider "${req.provider}" has no loadable adapter (module "${resolved.module}").`);
       const msgs = req.system !== undefined
         ? [createMessage({ role: 'system', content: [{ type: 'text', text: req.system }], traceId: crypto.randomUUID() }), ...req.messages]
         : req.messages;
@@ -386,7 +390,8 @@ export async function boot(env: BootEnv): Promise<void> {
       ...(cfg.credentials !== undefined ? { credentials: await resolveCredentials(cfg.credentials, vault) } : {}),
       ...(cfg.endpoint    !== undefined ? { endpoint: await resolveInteractive(cfg.endpoint, vault) } : {}),
     };
-    return { adapter: resolveProviderFactory(resolved.module)(resolved), config: resolved };
+    const adapter = await instantiateProvider(services, resolved);
+    return adapter === null ? null : { adapter, config: resolved };
   };
 
   sessionRunner = createSessionRunner({
@@ -401,13 +406,11 @@ export async function boot(env: BootEnv): Promise<void> {
     unloadPlugin:  services.unloadPlugin.bind(services),
   });
 
-  // Load provider plugins first, then canonicalise each provider's module to the loaded plugin's
-  // name so resolveProviderFactory (keyed by plugin name) finds the adapter regardless of specifier.
-  await loadPlugins(providerSpecs, services);
-  for (const [key, cfg] of providers) {
-    const pluginName = getPluginNameForSpecifier(cfg.module);
-    if (pluginName !== undefined && pluginName !== cfg.module) providers.set(key, { ...cfg, module: pluginName });
-  }
+  // Load provider plugins first as a warm-up so the first turn needn't load its adapter mid-response.
+  // No canonicalisation: instantiateProvider resolves a specifier to its loaded plugin's factory at use
+  // time and leaves the profile's `module` as written, so the provider list reports the source truth.
+  // TEST(provider-registry): pre-scan disabled to exercise on-demand loading. Restore this line to re-enable.
+  // await loadPlugins(providerSpecs, services);
 
   // Apply a provider draft: persist it (config → localStorage, key → vault), load the adapter plugin
   // if new, canonicalise its module to the plugin name, and register it in the live providers map.
@@ -419,12 +422,12 @@ export async function boot(env: BootEnv): Promise<void> {
       await loadPlugins([cfg.module], services);
       name = getPluginNameForSpecifier(cfg.module);
     }
-    providers.set(cfg.name, name !== undefined ? { ...cfg, module: name } : cfg);
+    providers.register(name !== undefined ? { ...cfg, module: name } : cfg);
     return cfg.name;
   };
   const removeProvider = async (name: string): Promise<boolean> => {
     if (!providers.has(name)) return false;
-    providers.delete(name);
+    providers.remove(name);
     removePersistedProvider(name);
     return true;
   };

@@ -5,6 +5,8 @@ import { DriveAuth } from './drive-auth.js';
 import { runDriveSetup } from './drive-setup-overlay.js';
 import { DriveVault } from './drive-vault.js';
 import { DrivePluginSet, createSyncedPluginTool } from './drive-plugins.js';
+import { DriveProviderSet, driveProviderAdmin } from './drive-providers.js';
+import { createBrowserProviderTool } from '@matatbread/matbot-browser';
 
 // Config needed to *reach* Drive (client ID + root folder) lives in localStorage, not in matbot's
 // swappable settings store — settings would be backed by Drive once this plugin activates, so
@@ -52,6 +54,11 @@ async function authoriseAndBuild(): Promise<GoogleDriveStorageBackend> {
   writeLocal(ROOT_KEY, result.rootFolder);
   return GoogleDriveStorageBackend.fromAuth(result.auth, result.rootFolder);
 }
+
+// teardown() receives no services, so capture the Drive-synced provider set + machine here to revert
+// each contributed profile on unload (restoring any boot profile it shadowed) — the provider analogue
+// of the StorageBackend/Vault reverting to the host's boot default.
+let syncedProviders: { services: MatbotMachine; set: DriveProviderSet } | undefined;
 
 /**
  * Google Drive storage backend (browser). On activation it authorises the user's Google account
@@ -112,6 +119,26 @@ export const plugin: MatbotPluginSpec = {
         console.warn(`[matbot-gdrive] Could not restore Drive-synced plugin "${specifier}":`, e);
       }
     }
+
+    // Same story for provider profiles: shadow the `provider` tool with one whose add/remove sync to
+    // Drive, and restore the Drive-synced set. Registering a profile leaves its adapter module to load
+    // on demand (instantiateProvider self-heals on first use); the vault is already Drive-swapped above,
+    // so `${…}` credential placeholders resolve against Drive.
+    const providerSet = new DriveProviderSet(backend.createStore('provider-manifest'));
+    services.tools.register(createBrowserProviderTool(driveProviderAdmin(providerSet, services)));
+    for (const cfg of await providerSet.list()) {
+      services.providers.register(cfg);
+    }
+    syncedProviders = { services, set: providerSet };
+  },
+
+  // Revert every Drive-synced provider on unload, restoring any boot profile it shadowed — the vault and
+  // StorageBackend revert to their boot defaults via the service registry, and providers must follow.
+  async teardown(): Promise<void> {
+    if (syncedProviders === undefined) return;
+    const { services, set } = syncedProviders;
+    for (const cfg of await set.list()) services.providers.revert(cfg.name);
+    syncedProviders = undefined;
   },
 
   // Shown after a successful activation — confirms what happened and records the one-time Google
@@ -140,4 +167,5 @@ export { DriveStore }     from './drive-store.js';
 export { DriveFileStore } from './drive-file-store.js';
 export { DriveVault }     from './drive-vault.js';
 export { DrivePluginSet, createSyncedPluginTool } from './drive-plugins.js';
+export { DriveProviderSet, driveProviderAdmin } from './drive-providers.js';
 export { runDriveSetup }  from './drive-setup-overlay.js';

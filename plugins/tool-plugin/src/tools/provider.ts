@@ -1,4 +1,4 @@
-import type { Tool, ToolExecutor, ToolResult, ToolResultOf, ToolContext, ProviderConfig, MatbotPlugin, ModelParameters } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolResult, ToolResultOf, ToolContext, ProviderRegistry, MatbotPlugin, ModelParameters } from '@matatbread/matbot-plugin-api';
 
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolResults {
@@ -213,7 +213,7 @@ function currentProviderName(ctx: ToolContext): string | undefined {
 
 // ── Executor ──────────────────────────────────────────────────────────────────
 
-function makeExecutor(liveProviders: Map<string, ProviderConfig>, pluginNameToOrigPath?: ReadonlyMap<string, string>): ToolExecutor<ToolResultOf<'provider'>> {
+function makeExecutor(providers: ProviderRegistry, pluginNameToOrigPath?: ReadonlyMap<string, string>): ToolExecutor<ToolResultOf<'provider'>> {
   return {
     async *execute(input: unknown, ctx: ToolContext) {
       const { action } = input as ProviderInput;
@@ -229,9 +229,9 @@ function makeExecutor(liveProviders: Map<string, ProviderConfig>, pluginNameToOr
         yield {
           type:  'result',
           value: {
-            providers: [...liveProviders.values()].map(cfg => ({
+            providers: [...providers.values()].map(cfg => ({
               name:           cfg.name,
-              module:         pluginNameToOrigPath?.get(cfg.module) ?? cfg.module,
+              module:         cfg.module,
               model:          cfg.model,
               hasCredentials: (cfg.credentials !== undefined && Object.keys(cfg.credentials).length > 0),
               ...(cfg.endpoint   !== undefined ? { endpoint:   cfg.endpoint   } : {}),
@@ -247,19 +247,18 @@ function makeExecutor(liveProviders: Map<string, ProviderConfig>, pluginNameToOr
         const { name, module: mod, model, endpoint, credentialKey, credentialEnvVar, parameters } =
           input as Extract<ProviderInput, { action: 'add' }>;
 
-        if (liveProviders.has(name)) {
+        if (providers.has(name)) {
           yield { type: 'result', value: { message: `Profile "${name}" already exists. Use a different name or remove it first.` } };
           return;
         }
 
         const projectDir = path.dirname(configPath);
 
-        // Resolve and validate the module up front, before prompting for anything.
-        // canonicalModule drives the live map / resolveProviderFactory; yamlModule is
-        // the loader-resolvable specifier written to matbot.yaml. We never write the
-        // raw `mod` the LLM supplied.
-        let canonicalModule: string;
-        let yamlModule:      string;
+        // Resolve and validate the module up front, before prompting for anything. yamlModule is the
+        // loader-resolvable specifier written to matbot.yaml AND registered live — the stored `module` is
+        // always the source string, and instantiateProvider resolves it to the adapter factory at use time.
+        // We never write the raw `mod` the LLM supplied unless it resolves as-is.
+        let yamlModule: string;
 
         const loaded = findLoadedAdapter(mod, projectDir, pluginNameToOrigPath);
         if (loaded !== undefined) {
@@ -268,8 +267,7 @@ function makeExecutor(liveProviders: Map<string, ProviderConfig>, pluginNameToOr
             yield { type: 'error', message: `Adapter "${loaded.name}" is loaded but its module path could not be determined.` };
             return;
           }
-          canonicalModule = loaded.name;
-          yamlModule      = spec;
+          yamlModule = spec;
         } else {
           // Not yet loaded — try to load it (a new npm package or an unused path).
           try {
@@ -278,8 +276,7 @@ function makeExecutor(liveProviders: Map<string, ProviderConfig>, pluginNameToOr
               yield { type: 'error', message: `Module "${mod}" loaded but is not a provider adapter.` };
               return;
             }
-            canonicalModule = justLoaded.name;
-            yamlModule      = mod; // mod resolved and loaded, so it is YAML-valid as written
+            yamlModule = mod; // mod resolved and loaded, so it is YAML-valid as written
             if (pluginNameToOrigPath !== undefined) {
               (pluginNameToOrigPath as Map<string, string>).set(justLoaded.name, mod);
             }
@@ -347,10 +344,11 @@ function makeExecutor(liveProviders: Map<string, ProviderConfig>, pluginNameToOr
 
         await addProviderToConfig(configPath, block);
 
-        // Hot-update the live map — new profile is usable immediately without restart.
-        liveProviders.set(name, {
+        // Hot-update the live registry — new profile is usable immediately without restart. The stored
+        // module matches what was written to matbot.yaml; instantiateProvider resolves it at use time.
+        providers.register({
           name,
-          module: canonicalModule,
+          module: yamlModule,
           model,
           ...(endpoint   !== undefined ? { endpoint } : {}),
           ...(envVarName !== undefined
@@ -379,11 +377,11 @@ function makeExecutor(liveProviders: Map<string, ProviderConfig>, pluginNameToOr
           return;
         }
 
-        if (!liveProviders.has(name)) {
+        if (!providers.has(name)) {
           yield { type: 'result', value: { message: `No profile named "${name}" found.` } };
           return;
         }
-        if (liveProviders.size <= 1) {
+        if (providers.size <= 1) {
           yield {
             type:  'result',
             value: { message: `Cannot remove "${name}" — it is the only configured provider. Add a replacement profile first.` },
@@ -403,7 +401,7 @@ function makeExecutor(liveProviders: Map<string, ProviderConfig>, pluginNameToOr
           return;
         }
 
-        liveProviders.delete(name);
+        providers.remove(name);
         yield { type: 'result', value: { message: `Profile "${name}" removed.` } };
       }
     },
@@ -413,12 +411,9 @@ function makeExecutor(liveProviders: Map<string, ProviderConfig>, pluginNameToOr
 // ── Tool factory ──────────────────────────────────────────────────────────────
 
 export function createProviderTool(
-  providers:          ReadonlyMap<string, ProviderConfig>,
+  providers:          ProviderRegistry,
   pluginNameToOrigPath?: ReadonlyMap<string, string>,
 ): Tool<ToolResultOf<'provider'>> {
-  // Cast to mutable so add/remove can update the live map without a restart.
-  const liveProviders = providers as Map<string, ProviderConfig>;
-
   // Derive adapter list from provider plugins registered at call time.
   // Show the original YAML-valid module path (e.g. ./plugins/providers/anthropic)
   // rather than the internal plugin name that canonicalisation produces.
@@ -520,6 +515,6 @@ When a user asks to add a new LLM or provider, ask for:
       },
     },
 
-    executor: makeExecutor(liveProviders, pluginNameToOrigPath),
+    executor: makeExecutor(providers, pluginNameToOrigPath),
   };
 }
