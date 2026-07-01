@@ -37,7 +37,8 @@ export class VaultImpl implements Vault {
   }
 
   async writeSecret(name: string, value: string): Promise<void> {
-    this.store.set(name, value);
+    if (value === '') this.store.delete(name);
+    else this.store.set(name, value);
   }
 
   hasKey(name: string): boolean {

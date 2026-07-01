@@ -33,6 +33,12 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### API gaps filled
 
+- **Removing a vault secret.** `Vault.writeSecret(name, '')` now removes the key rather than storing an
+  empty value — there is no meaningful empty secret, so the empty string is the removal signal (idempotent
+  across `VaultImpl`, `EnvFileVault`, `WebCryptoVault`, `LocalStorageVault`, `DriveVault`). No new interface
+  method or tool action: the LLM removes a secret through the existing `plugin` `store-key` action by
+  leaving the out-of-band value prompt blank.
+
 - **`KnowledgeIndex.remove(id)`.** The index gained a retraction primitive — idempotent, keyed by the
   entry `id` (the index's sole primary key, the same key `index` replaces on). The index stays
   source-blind: it never inspects an entry's opaque `source` to decide visibility; the party that

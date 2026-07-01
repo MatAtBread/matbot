@@ -475,22 +475,26 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
     // ── store-key ──────────────────────────────────────────────────────────────
     // A plugin or provider that needs a secret raises MissingSecretError naming the
     // key; call this to supply it. The value is requested out-of-band via ctx.prompt
-    // so it never enters the conversation transcript, then stored in the vault.
+    // so it never enters the conversation transcript, then stored in the vault. An
+    // empty value is the removal signal — leaving the prompt blank deletes the key.
     if (action === 'store-key') {
       const { key } = input as { action: 'store-key'; key: string };
       if (!key || !key.trim()) {
         yield { type: 'error', message: 'store-key requires a "key" name.' };
         return;
       }
-      const value = await ctx.prompt(`Enter the value for secret "${key.trim()}" (not added to the conversation):`, '');
-      if (!value.trim()) {
-        yield { type: 'result', value: { message: `No value entered; "${key.trim()}" was not stored.` } };
-        return;
-      }
+      const name    = key.trim();
+      const value   = await ctx.prompt(`Enter the value for secret "${name}" (leave blank to remove it; not added to the conversation):`, '');
+      const trimmed = value.trim();
       // writeSecret, not createSecret: this answers a MissingSecretError naming an exact key,
       // so the value must land under that name verbatim — no reference/dedup canonicalisation.
-      await ctx.vault.writeSecret(key.trim(), value.trim());
-      yield { type: 'result', value: { message: `Secret "${key.trim()}" stored in the vault.` } };
+      // An empty value is writeSecret's removal signal.
+      const existed = trimmed === '' && ctx.vault.hasKey(name);
+      await ctx.vault.writeSecret(name, trimmed);
+      yield { type: 'result', value: { message:
+        trimmed !== '' ? `Secret "${name}" stored in the vault.`
+        : existed       ? `Secret "${name}" removed from the vault.`
+        :                 `No value entered and no secret named "${name}"; nothing changed.` } };
       return;
     }
 
@@ -829,7 +833,7 @@ export const pluginTool: Tool<ToolResultOf<'plugin'>> = {
       action: {
         type:        'string',
         enum:        ['list', 'add', 'remove', 'reload', 'discover_local', 'store-key'],
-        description: 'list: show configured plugins. add: install and register a plugin. remove: deregister and optionally uninstall. reload: unload and re-import (picks up code changes without restarting; for a remote plugin re-downloads the latest upstream source by default — see refresh). discover_local: scan plugins and the .plugins cache for installable plugins (each result reports its source). store-key: supply a secret (e.g. an API key) that a plugin or provider reported missing — you provide only the key name; the value is entered out-of-band.',
+        description: 'list: show configured plugins. add: install and register a plugin. remove: deregister and optionally uninstall. reload: unload and re-import (picks up code changes without restarting; for a remote plugin re-downloads the latest upstream source by default — see refresh). discover_local: scan plugins and the .plugins cache for installable plugins (each result reports its source). store-key: supply a secret (e.g. an API key) that a plugin or provider reported missing — you provide only the key name; the value is entered out-of-band. Leaving that value blank removes the named key instead.',
       },
       refresh: {
         type:        'boolean',
@@ -846,7 +850,7 @@ export const pluginTool: Tool<ToolResultOf<'plugin'>> = {
       },
       key: {
         type:        'string',
-        description: 'Name of the secret to store, e.g. SKILL_RANK_API_KEY (required for store-key). The value is prompted for separately and never enters the conversation.',
+        description: 'Name of the secret to store, e.g. SKILL_RANK_API_KEY (required for store-key). The value is prompted for separately and never enters the conversation; entering a blank value removes the key.',
       },
     },
   },
