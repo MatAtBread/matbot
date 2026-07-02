@@ -68,14 +68,16 @@ churn and less likely to affect a consumer who doesn't use them.
   both from each defined function's signature.
 
 - **`MatbotServices.ToolTypeIndex` (optional, node-only).** A new registerable service for typing what
-  tool calls resolve to: `dts()` returns a self-contained `.d.ts` of the loaded tools' result/service types
-  (derived by compiling each plugin's `declare module` augmentations); `contribute(name, {result, params})`
-  / `retract(name)` register types for runtime-defined tools that have no on-disk source; and `check(snippet)`
+  tool calls resolve to: `dts()` returns a self-contained `.d.ts` of the loaded tools' result/service types —
+  the source-derived augmentations (from compiling each plugin's `declare module` block) merged with the
+  types tools declare on themselves (`Tool.paramsType`/`resultType`), read off the live registry, for tools
+  the source scan can't reach (a `function-tools` function, or a compiled skill living off the tsconfig; a
+  name already covered by the source scan is skipped so it isn't declared twice). `check(snippet)`
   type-checks a snippet against a synthesized `declare const tool` proxy (each tool typed
-  `params → Promise<result>`) plus those types, returning snippet-scoped diagnostics. Lets tool-call code
-  generators/composers type — and verify — what `tool.x()` returns instead of guessing. Optional and absent
-  where no TypeScript program can run (the browser today), so consumers must degrade. Provided by the new
-  `tool-types` plugin.
+  `(params: paramsType) → Promise<result>`) plus those types, returning snippet-scoped diagnostics. Lets
+  tool-call code generators/composers type — and verify — what `tool.x()` returns and how to call it instead
+  of guessing. Optional and absent where no TypeScript program can run (the browser today), so consumers
+  must degrade. Provided by the new `tool-types` plugin.
 
 - **Removing a vault secret.** `Vault.writeSecret(name, '')` now removes the key rather than storing an
   empty value — there is no meaningful empty secret, so the empty string is the removal signal (idempotent

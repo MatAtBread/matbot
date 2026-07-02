@@ -4,7 +4,7 @@ import type {
   Tool, ToolContext, ToolEvent, ToolResult, ToolResultOf,
 } from '@matatbread/matbot-plugin-api';
 import { buildAsyncFn, runFunction, type CompiledFn } from './compile.js';
-import { parseSignature, paramsSchema, type ParsedParam, type ParsedSignature } from './signature.js';
+import { parseSignature, paramsSchema, type ParsedParam } from './signature.js';
 
 const TOOL_NAME   = 'tool_function';
 const PLUGIN_NAME = 'function-tools';
@@ -92,15 +92,13 @@ class FunctionStore {
   async remove(name: string): Promise<boolean> {
     if (!this.defined.has(name)) return false;
     this.machine.tools.remove(name);
-    this.machine.ToolTypeIndex?.retract(name);
     this.defined.delete(name);
     await this.persist();
     return true;
   }
 
   removeAll(): void {
-    const index = this.machine.ToolTypeIndex;
-    for (const name of this.defined.keys()) { this.machine.tools.remove(name); index?.retract(name); }
+    for (const name of this.defined.keys()) this.machine.tools.remove(name);
   }
 
   private async registerTool(rec: FunctionRecord): Promise<void> {
@@ -124,15 +122,6 @@ class FunctionStore {
     };
     this.machine.tools.remove(rec.name);   // replace on re-define; no-op when absent
     this.machine.tools.register(tool);
-    this.contributeTypes(sig, rec.name);
-  }
-
-  // Feed this (already type-checked) function's result + param types into the ToolTypeIndex, so a later
-  // function composing `await tool.<name>(…)` sees real types. Runs for both define and reload; idempotent.
-  private contributeTypes(sig: ParsedSignature, name: string): void {
-    const index = this.machine.ToolTypeIndex;
-    if (index === undefined) return;
-    index.contribute(name, { result: sig.returnType ?? 'unknown', params: paramsTypeText(sig.params) });
   }
 
   private async persist(): Promise<void> {

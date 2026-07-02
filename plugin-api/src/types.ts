@@ -469,22 +469,19 @@ export interface TypeScriptStripper {
  * isn't guessing return shapes. Absent where no TypeScript program can run (the browser today) — a consumer
  * must degrade (guess-and-run) when `services.ToolTypeIndex` is undefined.
  *
- * The result is rebuilt lazily and cached, invalidated when the tool set changes. Runtime-defined tools
- * that have no on-disk source (e.g. a `function-tools` function) register their types via {@link contribute}.
+ * The result is rebuilt lazily and cached, invalidated when the tool set changes. Tools the source scan
+ * can't reach (a `function-tools` function, or a compiled skill living off the tsconfig) contribute their
+ * types by declaring `paramsType`/`resultType` on their registered {@link Tool}; the index reads those off
+ * the live registry, so no separate registration step is needed.
  */
 export interface ToolTypeIndex {
-  /** Self-contained type declarations as a `.d.ts` string: the source-derived augmentations merged with any
-   *  {@link contribute}d types. */
+  /** Self-contained type declarations as a `.d.ts` string: the source-derived augmentations merged with the
+   *  types declared on registered tools (`paramsType`/`resultType`) that the source scan doesn't cover. */
   dts(): Promise<string>;
-  /** Register types for a runtime-defined tool that has no on-disk source, merged into {@link dts}. `result`
-   *  and `params` are TypeScript type expressions (e.g. `string`, `{ city: string }`). Idempotent by name. */
-  contribute(name: string, types: { result?: string; params?: string }): void;
-  /** Drop a previously {@link contribute}d tool's types. */
-  retract(name: string): void;
   /** Type-check a TypeScript `snippet` in a context where the tool proxy is available as `declare const
-   *  tool` — each registered tool typed `(params?) => Promise<result>` from the live tool set — and the
-   *  derived result types are in scope. Returns human-readable diagnostics scoped to the snippet ([] means
-   *  clean). A composer uses it to catch bad tool-result access before running/registering code. */
+   *  tool` — each registered tool typed `(params: paramsType) => Promise<result>` from the live tool set —
+   *  and the derived result types are in scope. Returns human-readable diagnostics scoped to the snippet
+   *  ([] means clean). A composer uses it to catch bad tool-call code before running/registering it. */
   check(snippet: string): Promise<string[]>;
 }
 

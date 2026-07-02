@@ -8,18 +8,19 @@ import { buildMatbotToolsDts } from './build-dts.js';
 
 export { buildMatbotToolsDts, type MatbotToolsDts } from './build-dts.js';
 
-interface Contribution { result?: string; params?: string }
-
 /**
  * Derives (via {@link buildMatbotToolsDts}) and caches the `.d.ts` of what the loaded tools' calls resolve
- * to, invalidating on any tool-registry change. Runtime-defined tools with no on-disk source register their
- * types through {@link contribute}; those are merged in as a second augmentation block using inline import
- * types (no top-level import, so it never collides with the derived block's own imports).
+ * to, invalidating on any tool-registry change. Tools the source scan can't reach (a `function-tools`
+ * function, or a compiled skill living off the tsconfig) carry their types on the registered `Tool`
+ * (`paramsType`/`resultType`); those are read off the live registry and merged in as a second augmentation
+ * block using inline import types (no top-level import, so it never collides with the derived block's own
+ * imports). A name the source scan already declares is skipped, so a tool that also sets `resultType` for
+ * its wire description doesn't get declared twice.
  */
 class ToolTypeIndexImpl implements ToolTypeIndex {
   private readonly machine: MatbotMachine;
   private readonly ac = new AbortController();
-  private readonly contributions = new Map<string, Contribution>();
+  private covered = new Set<string>();   // tool names the source scan already declares (registry-block dedup)
   private cache: string | null = null;   // null ⇒ (re)build needed
   private dirty = true;
 
@@ -37,23 +38,23 @@ class ToolTypeIndexImpl implements ToolTypeIndex {
 
   async dts(): Promise<string> {
     if (this.dirty || this.cache === null) {
-      const root  = this.machine.configPath !== undefined ? dirname(this.machine.configPath) : '.';
-      const built = await buildMatbotToolsDts(root);
-      this.cache  = built?.dts ?? '';
-      this.dirty  = false;
+      const root   = this.machine.configPath !== undefined ? dirname(this.machine.configPath) : '.';
+      const built  = await buildMatbotToolsDts(root);
+      this.cache   = built?.dts ?? '';
+      this.covered = new Set([...(built?.tools.emitted ?? []), ...(built?.tools.unknown ?? [])]);
+      this.dirty   = false;
     }
-    return this.merge(this.cache);
+    return this.registryBlock(this.cache);
   }
 
-  contribute(name: string, types: Contribution): void { this.contributions.set(name, types); }
-  retract(name: string): void { this.contributions.delete(name); }
-
   /** `declare const tool` typed from the live tool set: each result is `ToolResultOf<'name'>` (resolved via
-   *  the ToolResults augmentations in the dts prefix); params stay loose (`any`) — a first cut that catches
-   *  result-shape mistakes, the main source of guess-and-iterate. */
+   *  the ToolResults augmentations in the dts prefix); params use the tool's declared `paramsType` when it
+   *  has one, else stay loose (`any`) for foreign tools carrying only a JSON-Schema `inputSchema`. */
   private toolProxy(): string {
-    const methods = this.machine.tools.list().map(t =>
-      `  ${JSON.stringify(t.name)}(params?: any): Promise<import('@matatbread/matbot-plugin-api').ToolResultOf<${JSON.stringify(t.name)}>>;`).join('\n');
+    const methods = this.machine.tools.list().map(t => {
+      const params = t.paramsType !== undefined ? `params: ${t.paramsType}` : 'params?: any';
+      return `  ${JSON.stringify(t.name)}(${params}): Promise<import('@matatbread/matbot-plugin-api').ToolResultOf<${JSON.stringify(t.name)}>>;`;
+    }).join('\n');
     return `declare const tool: {\n${methods}\n};`;
   }
 
@@ -100,11 +101,19 @@ class ToolTypeIndexImpl implements ToolTypeIndex {
     return out;
   }
 
-  private merge(derived: string): string {
-    if (this.contributions.size === 0) return derived;
-    const arms = [...this.contributions].map(([name, t]) =>
-      `    ${name}: import('@matatbread/matbot-plugin-api').ToolResult<${t.result ?? 'unknown'}, ${t.params ?? 'unknown'}>;`).join('\n');
-    return `${derived}\ndeclare module '@matatbread/matbot-plugin-api' {\n  interface ToolResults {\n${arms}\n  }\n}\n`;
+  // The types tools carry on themselves (`paramsType`/`resultType`), for tools the source scan can't reach
+  // (function-tools functions, compiled skills off the tsconfig). Merged as a second augmentation block
+  // using inline import types (no top-level import → no collision with the derived block's imports). Names
+  // the source scan already declares are skipped so no interface member is declared twice.
+  private registryBlock(derived: string): string {
+    const arms: string[] = [];
+    for (const t of this.machine.tools.list()) {
+      if (this.covered.has(t.name)) continue;
+      if (t.resultType === undefined && t.paramsType === undefined) continue;
+      arms.push(`    ${JSON.stringify(t.name)}: import('@matatbread/matbot-plugin-api').ToolResult<${t.resultType ?? 'unknown'}, ${t.paramsType ?? 'unknown'}>;`);
+    }
+    if (arms.length === 0) return derived;
+    return `${derived}\ndeclare module '@matatbread/matbot-plugin-api' {\n  interface ToolResults {\n${arms.join('\n')}\n  }\n}\n`;
   }
 }
 
