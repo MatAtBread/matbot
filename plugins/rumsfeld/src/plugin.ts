@@ -80,6 +80,8 @@ export function createRumsfeldPlugin(): MatbotPluginSpec {
             },
           },
         },
+        paramsType:  '{ terms: { term: string; context?: string }[] }',
+        resultType:  '{ name: string; content: string }',
         executor,
       });
 
@@ -170,6 +172,8 @@ Provide "question" (the specific fact sought, e.g. "the user's home city") and "
             provider: { type: 'string', description: 'Optional extraction provider. Defaults to the turn provider.' },
           },
         },
+        paramsType: '{ question: string; terms: { term: string; context?: string }[]; provider?: string }',
+        resultType: 'string[] | null',
         executor: findFactExecutor,
       });
     },
