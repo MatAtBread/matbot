@@ -391,9 +391,13 @@ churn and less likely to affect a consumer who doesn't use them.
   self-contained). Both are emitted into the generated `register(...)` call. Because a compiled plugin lives
   off the tsconfig — invisible to the source-derived `.d.ts` — this is what lets `ToolTypeIndex` type a
   compiled skill's call and result off the *live registry*, so another tool composing `await tool.<name>(…)`
-  gets real types instead of `unknown`. `resultType` is a declared contract (not runtime-verified, as with
-  any tool's result type); the implementation is left free rather than bound to it, to avoid regressing the
-  compile-and-repair success rate.
+  gets real types instead of `unknown`. When `resultType` is concrete, the generated executor is bound to it
+  (`ToolExecutor<…>`), so the existing typecheck **verifies the implementation actually yields that shape** —
+  the declared type is checked, not merely claimed. It's left unbound only when the type can't be determined
+  (`unknown`), so an undetermined shape imposes no false constraint; and the distiller is told to include
+  every observed field, so the verified type is complete. Because the distiller's type and the generated
+  implementation both derive from the same demonstration run, this does not cost extra repair passes in
+  practice.
 
 - **skills_compiler** — the compiled plugin's **package name and tool name are now configurable**, and
   recompiling to the same destination **bumps the version**. `skill_compiler` takes optional
