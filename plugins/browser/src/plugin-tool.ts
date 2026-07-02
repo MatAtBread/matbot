@@ -262,16 +262,6 @@ export function createBrowserPluginTool(extras: ExtraPlugins): Tool<ToolResultOf
       'This is the browser build: there is no config file and no package manager, so a specifier is ' +
       'a URL path or an inlined synthetic id the host loader can import (not an npm name to install). ' +
       'Added plugins persist across reloads.\n\n' +
-      'Parameters depend on `action` (TypeScript):\n' +
-      '```ts\n' +
-      'type PluginAction =\n' +
-      "  | { action: 'list' }                           // configured + loaded plugins, with types and tools\n" +
-      "  | { action: 'discover_local' }                 // plugins bundled in this build but not yet loaded; add by the package name they report\n" +
-      "  | { action: 'add';        specifier: string }  // activate a plugin (a bundled package name, or a URL to fetch)\n" +
-      "  | { action: 'remove';     specifier: string }  // deactivate & forget (specifier = package name, preferred — or its configured specifier)\n" +
-      "  | { action: 'reload';     specifier: string }  // re-import (specifier = package name, preferred — or its configured specifier)\n" +
-      "  | { action: 'store-key';  key: string };       // store a secret a plugin/provider needs; value entered out-of-band (blank value removes the key)\n" +
-      '```\n\n' +
       'For add, a URL specifier is fetched as raw source and MUST resolve a package.json: the URL is one, ' +
       'OR points at a directory containing one, OR is a code entry (…/index.ts) with a package.json as its ' +
       'direct sibling. The package.json must declare a "name"; absence is a hard error.\n\n' +
@@ -287,6 +277,8 @@ export function createBrowserPluginTool(extras: ExtraPlugins): Tool<ToolResultOf
         key:       { type: 'string', description: 'Name of the secret to store (required for store-key); value prompted separately. Entering a blank value removes the key.' },
       },
     },
+    paramsType: "{ action: 'list' } | { action: 'discover_local' } | { action: 'add'; specifier: string } | { action: 'remove'; specifier: string } | { action: 'reload'; specifier: string } | { action: 'store-key'; key: string }",
+    resultType: "{ loaded: Array<{ name: string; apiVersion: string; types: string[]; tools: ToolSummary[]; specifier: string; description?: string; matbotRuntime?: readonly Runtime[] }>; configured: string[]; builtinTools?: ToolSummary[] | undefined } | AvailablePlugin[] | { message: string; installationMessage?: string }",
     executor,
   };
 }

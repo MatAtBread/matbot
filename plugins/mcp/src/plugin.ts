@@ -152,14 +152,7 @@ Two transport types:
 ACTIONS
   add    — Connect a server and register its tools (validated before saving).
   list   — Show connected servers, their tools, and any server instructions.
-  remove — Disconnect a server and forget it; its proxy tools are unregistered.
-
-SHAPE  (TypeScript)
-  type McpAction =
-    | { action: 'add'; name: string; type: 'local';  command: string; args?: string[]; env?: Record<string,string>; proxyToolName?: string }
-    | { action: 'add'; name: string; type: 'remote'; endpoint: string; headers?: Record<string,string>; proxyToolName?: string }
-    | { action: 'list' }
-    | { action: 'remove'; name: string };`,
+  remove — Disconnect a server and forget it; its proxy tools are unregistered.`,
     inputSchema: {
       type: 'object',
       required: ['action'],
@@ -175,6 +168,8 @@ SHAPE  (TypeScript)
         proxyToolName: { type: 'string', description: 'add only: prefix for this server\'s tool names, replacing the default "mcp__<name>__". Persisted; reconnects keep it.' },
       },
     },
+    paramsType: "{ action: 'add'; name: string; type: 'local'; command: string; args?: string[]; env?: Record<string, string>; proxyToolName?: string } | { action: 'add'; name: string; type: 'remote'; endpoint: string; headers?: Record<string, string>; proxyToolName?: string } | { action: 'list' } | { action: 'remove'; name: string }",
+    resultType: '{ message: string; tools: string[]; instructions?: string } | { servers: unknown[] } | { message: string }',
     executor: {
       async *execute(input: unknown, ctx: ToolContext) {
         const act = input as McpAction;

@@ -170,15 +170,7 @@ Functions use method-shorthand syntax — NOT arrow functions:
 
   lambda (definition + params):
     definition: (args: { names: string[] }): string[] { return args.names.map(n => n.toUpperCase()); }
-    params:     { "names": ["a", "b"] }
-
-SHAPE  (TypeScript)
-  type ToolFunction =
-    | { action: 'define'; definition: string; description?: string }
-    | { action: 'lambda'; definition: string; params?: object }
-    | { action: 'list' }
-    | { action: 'types' }
-    | { action: 'remove'; name: string };`;
+    params:     { "names": ["a", "b"] }`;
 
 const INPUT_SCHEMA: JSONSchema = {
   type: 'object',
@@ -199,6 +191,8 @@ function functionTool(machine: MatbotMachine, store: FunctionStore): Tool<ToolRe
     name:        TOOL_NAME,
     description: DESCRIPTION,
     inputSchema: INPUT_SCHEMA,
+    paramsType:  "{ action: 'define'; definition: string; description?: string } | { action: 'lambda'; definition: string; params?: object } | { action: 'list' } | { action: 'types' } | { action: 'remove'; name: string }",
+    resultType:  '{ message: string; tool: string; parameters: ParsedParam[] } | unknown | { functions: FunctionRecord[] } | { available: boolean; dts: string } | { message: string }',
     executor: {
       async *execute(input: unknown, ctx: ToolContext) {
         const act = (input ?? {}) as ToolFunctionAction;

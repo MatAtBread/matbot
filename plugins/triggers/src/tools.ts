@@ -192,20 +192,6 @@ export function createTriggerActionTool(manager: TriggerManager): Tool<ToolResul
       GUIDANCE + '\n\n' +
       'A trigger has a stable `id` — address it by that, never by its conditions. To change one, ' +
       '"get" or "list" first to read the id, then "update" by id.\n\n' +
-      'Parameters depend on `action` (TypeScript):\n' +
-      '```ts\n' +
-      "type TriggerKind = 'ephemeral' | 'contextual' | 'retract' | 'followup';  // ephemeral=judge user msg+inject for this turn; contextual=judge user msg+fold durably onto it; retract=wrong, redo; followup=stands, add steer turn\n" +
-      'type TriggerCondition = { kind: TriggerKind; rule: string };\n' +
-      'type TriggerAction =\n' +
-      "  | { action: 'list' }                                                              // -> { triggers: [...] }\n" +
-      "  | { action: 'query';  tool?: string; params?: object }                            // triggers invoking that tool -> { triggers: [...] }\n" +
-      "  | { action: 'get';    id: string }                                                // -> the trigger\n" +
-      "  | { action: 'add';    conditions: TriggerCondition[]; tool: string; params?: object; enabled?: boolean }  // -> { id }\n" +
-      "  | { action: 'update'; id: string; conditions?: TriggerCondition[]; tool?: string; params?: object; enabled?: boolean }  // edit by id\n" +
-      "  | { action: 'remove'; id: string }                                                // -> { id }\n" +
-      "  | { action: 'move';   tool?: string; params?: object; toTool: string; toParams?: object }   // re-target the queried set's invoke to toTool/toParams in place -> { triggers: [...] }\n" +
-      "  | { action: 'copy';   tool?: string; params?: object; toTool: string; toParams?: object };  // duplicate the queried set, the copies invoking toTool/toParams -> { triggers: [...] }\n" +
-      '```\n\n' +
       'For `move`/`copy`, `tool`/`params` are the SAME selector as `query` (they pick which triggers ' +
       'to act on); `toTool`/`toParams` are the new invocation. A filter is required — both refuse to ' +
       'act on the entire trigger set.',
@@ -224,6 +210,8 @@ export function createTriggerActionTool(manager: TriggerManager): Tool<ToolResul
         enabled:    { type: 'boolean', description: 'Set false to keep but disable the trigger.' },
       },
     },
+    paramsType: "{ action: 'list' } | { action: 'query'; tool?: string; params?: object } | { action: 'get'; id: string } | { action: 'add'; conditions: TriggerCondition[]; tool: string; params?: object; enabled?: boolean } | { action: 'update'; id: string; conditions?: TriggerCondition[]; tool?: string; params?: object; enabled?: boolean } | { action: 'remove'; id: string } | { action: 'move'; tool?: string; params?: object; toTool: string; toParams?: object } | { action: 'copy'; tool?: string; params?: object; toTool: string; toParams?: object }",
+    resultType: "{ triggers: Trigger[] } | Trigger | { id: string }",
     executor,
   };
 }
@@ -275,14 +263,7 @@ export function createTriggersConfigTool(services: MatbotMachine): Tool<ToolResu
       'provider judges trigger conditions. It is an alias for an existing provider, not a new one. Unset, ' +
       "the classifier uses the current turn's own provider; set it to pin a small/fast model. `get` " +
       'reports the current pin and the available provider names; `set` pins one (it must already be ' +
-      'configured — see the provider tool); `clear` reverts to the turn provider.\n\n' +
-      'Parameters (TypeScript):\n' +
-      '```ts\n' +
-      "type TriggersConfig =\n" +
-      "  | { action: 'get' }                       // -> { classifierProvider: string | null, available }\n" +
-      "  | { action: 'set'; provider: string }     // pin a provider -> { classifierProvider }\n" +
-      "  | { action: 'clear' };                     // revert to the turn provider -> { classifierProvider: null }\n" +
-      '```',
+      'configured — see the provider tool); `clear` reverts to the turn provider.',
     inputSchema: {
       type:       'object',
       required:   ['action'],
@@ -291,6 +272,8 @@ export function createTriggersConfigTool(services: MatbotMachine): Tool<ToolResu
         provider: { type: 'string', description: 'Name of an already-configured provider — required for "set".' },
       },
     },
+    paramsType: "{ action: 'get' } | { action: 'set'; provider: string } | { action: 'clear' }",
+    resultType: "{ classifierProvider: string | null; available: string[] } | { classifierProvider: string } | { classifierProvider: null }",
     executor,
   };
 }

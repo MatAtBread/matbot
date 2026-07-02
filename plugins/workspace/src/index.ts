@@ -186,14 +186,7 @@ const workspaceTool: Tool<ToolResultOf<'workspace_action'>> = {
     'generated artifacts (reports, charts, exports), and working notes or to-do lists. It is not a code ' +
     'workspace: files here are not executable. Workspace files are publicly viewable; if a tool is available ' +
     'to mint a shareable link for a stored file, prefer it over guessing a URL.\n\n' +
-    'Parameters depend on `action` (TypeScript):\n' +
-    '```ts\n' +
-    'type WorkspaceAction =\n' +
-    "  | { action: 'read';   path: string; encoding?: 'utf8' | 'base64' }              // -> file contents\n" +
-    "  | { action: 'write';  path: string; content: string; encoding?: 'utf8' | 'base64' } // -> { path, bytes }\n" +
-    "  | { action: 'list';   path?: string; recursive?: boolean }                      // -> [{ path, size }] NOTE: `path` is a filename prefix - \".\" and \"/\" won't work.\n" +
-    "  | { action: 'delete'; path: string };                                           // -> { path }\n" +
-    '```\n' +
+    'For `list`, `path` is a filename prefix, not a directory — "." and "/" match nothing.\n' +
     "Use encoding 'base64' for binary files (images, PDFs, zips); 'utf8' (the default) for text.",
   inputSchema: {
     type:       'object',
@@ -206,6 +199,8 @@ const workspaceTool: Tool<ToolResultOf<'workspace_action'>> = {
       recursive: { type: 'boolean', default: false, description: 'list only: include files in subdirectories.' },
     },
   },
+  paramsType: "{ action: 'read'; path: string; encoding?: 'utf8' | 'base64' } | { action: 'write'; path: string; content: string; encoding?: 'utf8' | 'base64' } | { action: 'list'; path?: string; recursive?: boolean } | { action: 'delete'; path: string }",
+  resultType: 'string | { path: string; bytes: number } | Array<{ path: string; size: number }> | { path: string }',
   executor: workspaceExecutor,
 };
 

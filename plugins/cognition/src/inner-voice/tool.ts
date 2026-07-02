@@ -121,11 +121,7 @@ export function createAskInnerVoiceTool(services: MatbotMachine): Tool<ToolResul
       '`prompt` summarising the problem and your draft, plus an optional `system` framing, and get back ' +
       'its text. Which provider answers is configured (cognition_config `innerVoiceProvider`) ' +
       "— ideally a different training lineage; absent, it uses the current turn's model. You do not name a " +
-      'provider here.\n\n' +
-      'Parameters (TypeScript):\n' +
-      '```ts\n' +
-      '{ prompt: string; system?: string }  // -> { text }\n' +
-      '```',
+      'provider here.',
     inputSchema: {
       type:       'object',
       required:   ['prompt'],
@@ -134,6 +130,8 @@ export function createAskInnerVoiceTool(services: MatbotMachine): Tool<ToolResul
         system: { type: 'string', description: 'Optional system prompt framing the inner voice (e.g. the Matbot₂ instructions).' },
       },
     },
+    paramsType: '{ prompt: string; system?: string }',
+    resultType: '{ text: string }',
     executor,
   };
 }
@@ -336,7 +334,7 @@ export function createCognitionConfigTool(services: MatbotMachine): Tool<ToolRes
       'maxClusterSize < 1) is rejected with an error and nothing from that call is persisted — `set` ' +
       'is all-or-nothing, never partially applied.\n\n' +
       '`clear` takes no parameters and resets every setting above to its default in one call.\n\n' +
-      'Parameters (TypeScript):\n' +
+      'The `CognitionConfig` object it reads and writes (TypeScript):\n' +
       '```ts\n' +
       'interface CognitionConfig {\n' +
       '  innerVoiceProvider:  string | null;\n' +
@@ -349,12 +347,7 @@ export function createCognitionConfigTool(services: MatbotMachine): Tool<ToolRes
       '  maxEnrichmentsPerPass: number;   // integer >= 0\n' +
       '  blocklist:           string[];\n' +
       '  weakDeferralMs:      number;   // milliseconds, >= 0\n' +
-      '}\n\n' +
-      'type CognitionConfigAction =\n' +
-      "  | { action: 'get' }    // -> CognitionConfig & { available: string[] }\n" +
-      "  | ({ action: 'set' } & Partial<{ [K in keyof CognitionConfig]: CognitionConfig[K] | null }>)\n" +
-      '                         // -> CognitionConfig & { available: string[] }; throws on an invalid combination\n' +
-      "  | { action: 'clear' }; // -> CognitionConfig & { available: string[] }\n" +
+      '}\n' +
       '```',
     inputSchema: {
       type:       'object',
@@ -373,6 +366,8 @@ export function createCognitionConfigTool(services: MatbotMachine): Tool<ToolRes
         weakDeferralMs:      { type: ['number', 'null'], description: '"set": deferral window in milliseconds, or null to reset to default. Omit to leave unchanged.' },
       },
     },
+    paramsType: "{ action: 'get' } | ({ action: 'set' } & Partial<{ [K in keyof CognitionConfig]: CognitionConfig[K] | null }>) | { action: 'clear' }",
+    resultType: "CognitionConfig & { available: string[] }",
     executor,
   };
 }

@@ -186,6 +186,8 @@ export function createBashTool(docker?: DockerConfig): Tool<ToolResultOf<'bash'>
   return {
     name:        'bash',
     description: TOOL_DESCRIPTION,    inputSchema: INPUT_SCHEMA,
+    paramsType:  '{ script: string; cwd?: string; env?: Record<string, string>; timeout?: number }',
+    resultType:  '{ exitCode: number; stdout: string; stderr: string }',
     executor:    docker ? createDockerExecutor(docker) : createLocalExecutor(),
   };
 }

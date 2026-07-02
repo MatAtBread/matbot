@@ -444,13 +444,6 @@ ACTIONS
   remove — Delete a profile by name. Refuses if it is the only profile or
            the one powering the current turn.
 
-SHAPE  (TypeScript; see PARAMETERS below for the parameters object)
-  type ProviderAction =
-    | { action: 'list' }
-    | { action: 'add'; name: string; module: string; model: string;
-        endpoint?: string; credentialKey?: string; credentialEnvVar?: string; parameters?: object }
-    | { action: 'remove'; name: string };
-
 AVAILABLE ADAPTER MODULES  (use one of these as the module value when adding)
 ${adapterSection}
 
@@ -515,6 +508,8 @@ When a user asks to add a new LLM or provider, ask for:
       },
     },
 
+    paramsType: "{ action: 'list' } | { action: 'add'; name: string; module: string; model: string; endpoint?: string; credentialKey?: string; credentialEnvVar?: string; parameters?: Record<string, unknown> } | { action: 'remove'; name: string }",
+    resultType: "{ providers: Array<{ name: string; module: string; model: string; hasCredentials: boolean; endpoint?: string; parameters?: ModelParameters }> } | { message: string }",
     executor: makeExecutor(providers, pluginNameToOrigPath),
   };
 }

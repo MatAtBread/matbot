@@ -35,6 +35,8 @@ const urlForResourceTool: Tool<ToolResultOf<'url_for_resource'>> = {
       name:      { type: 'string', description: 'The file path/name within the namespace.' },
     },
   },
+  paramsType: '{ namespace: string; name: string }',
+  resultType: '{ url: string | null }',
   executor: {
     async *execute(input: unknown, ctx: ToolContext) {
       const { namespace, name } = input as { namespace?: string; name?: string };

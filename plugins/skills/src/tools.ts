@@ -137,19 +137,7 @@ export function createSkillTool(manager: SkillManager): Tool<ToolResultOf<'skill
       '(contextual_search / find_fact) and from the catalogue — but stays fully manageable here ' +
       '(list/load/metadata/save/delete still work). Use this to retire a skill that has been compiled ' +
       'into a tool, without deleting its source. `unhide` reverses it. Hidden state is independent of ' +
-      '`save` — editing content never changes it.\n\n' +
-      'Parameters depend on `action` (TypeScript):\n' +
-      '```ts\n' +
-      'type SkillAction =\n' +
-      "  | { action: 'list' }                            // -> { skills: [{ id, name, toolBinding?, hidden }] }\n" +
-      "  | { action: 'load';     name: string }          // raw content -> { id, name, content }\n" +
-      "  | { action: 'use';      name: string }          // content as a directive to apply now -> { id, name, content }\n" +
-      "  | { action: 'metadata'; name: string }          // derived analysis -> { id, name, knowledge: { summary, entities, tags, classification: { procedural, informational } } | null, catalogue: boolean, hidden: boolean }\n" +
-      "  | { action: 'save';     name: string; content: string; catalogue?: boolean }  // create or update -> { id, name }; `catalogue` advertises the skill in the system prompt (omit to leave unchanged)\n" +
-      "  | { action: 'delete';   name: string }          // -> { id, name }\n" +
-      "  | { action: 'hide';     name: string }          // withhold from the model -> { id, name, hidden }\n" +
-      "  | { action: 'unhide';   name: string };         // restore to the model -> { id, name, hidden }\n" +
-      '```',
+      '`save` — editing content never changes it.',
     inputSchema: {
       type:       'object',
       required:   ['action'],
@@ -160,6 +148,8 @@ export function createSkillTool(manager: SkillManager): Tool<ToolResultOf<'skill
         catalogue: { type: 'boolean', description: 'Optional for "save": advertise this skill in the system prompt (using its generated summary). Omit to leave unchanged.' },
       },
     },
+    paramsType: "{ action: 'list' } | { action: 'load'; name: string } | { action: 'use'; name: string } | { action: 'metadata'; name: string } | { action: 'save'; name: string; content: string; catalogue?: boolean } | { action: 'delete'; name: string } | { action: 'hide'; name: string } | { action: 'unhide'; name: string }",
+    resultType: "{ skills: SkillSummary[] } | { id: string; name: string; content: string } | { id: string; name: string; knowledge: NonNullable<SkillDoc['knowledge']> | null; catalogue: boolean; hidden: boolean } | { id: string; name: string } | { id: string; name: string; hidden: boolean }",
     executor,
   };
 }
@@ -214,14 +204,7 @@ export function createSkillsConfigTool(services: MatbotMachine): Tool<ToolResult
       'existing provider, not a new one. Unset, analysis uses the first configured provider; set it to ' +
       'pin a small/fast model. `get` reports the current pin, the fallback, and the available provider ' +
       'names; `set` pins one (it must already be configured — see the provider tool); `clear` reverts ' +
-      'to the fallback.\n\n' +
-      'Parameters (TypeScript):\n' +
-      '```ts\n' +
-      "type SkillsConfig =\n" +
-      "  | { action: 'get' }                       // -> { analysisProvider: string | null, fallback, available }\n" +
-      "  | { action: 'set'; provider: string }     // pin a provider -> { analysisProvider }\n" +
-      "  | { action: 'clear' };                     // revert to fallback -> { analysisProvider: null, fallback }\n" +
-      '```',
+      'to the fallback.',
     inputSchema: {
       type:       'object',
       required:   ['action'],
@@ -230,6 +213,8 @@ export function createSkillsConfigTool(services: MatbotMachine): Tool<ToolResult
         provider: { type: 'string', description: 'Name of an already-configured provider — required for "set".' },
       },
     },
+    paramsType: "{ action: 'get' } | { action: 'set'; provider: string } | { action: 'clear' }",
+    resultType: "{ analysisProvider: string | null; fallback: string | null; available: string[] } | { analysisProvider: string } | { analysisProvider: null; fallback: string | null }",
     executor,
   };
 }

@@ -360,6 +360,21 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Optional
 
+- **All built-in tools now declare their TypeScript contract.** Every built-in tool across the plugin
+  suite — `plugin`/`provider`, `session_edit`/`compact_sessions`, `session_action`, `skill_action`/
+  `skills_config`, `skill_compiler`, `trigger_action`/`triggers_config`, `store_action` (+ the dynamic
+  per-store tool), `remember_fact`/`dream_time`/`ask_inner_voice`/`cognition_config`, `bash`/`bash_config`,
+  `http`, `workspace_action`, `background`/`every_action`, `whoami`, `ask_user`, `mcp_action`,
+  `tool_function`, and the browser/frontend tools — now sets `paramsType`/`resultType` on its `Tool`, and
+  the redundant `type XAction`/`SHAPE` blocks were removed from descriptions. The contract is now rendered
+  onto the wire from the fields (`toolWireDescription`) and read off the live registry by `ToolTypeIndex`,
+  so there is a single source of truth instead of a hand-maintained duplicate in prose. Multi-action tools
+  carry the discriminated union as `paramsType` and the flattened, deduped union of their `ToolResults`
+  arms as `resultType`; tools with no augmentation derive `resultType` from their yields (`void` for silent
+  side-effects, `unknown` when dynamic). Documentation blocks that were not mere param restatements were
+  kept (the `plugin` specifier grammar, `ask_user`'s field examples, `store_action`'s `StoreQuery` grammar,
+  `cognition_config`'s field-range interface). Net effect: leaner descriptions, one typed contract per tool.
+
 - **tool-types** (new plugin, node-only) — provides the `ToolTypeIndex` service (see API gaps filled): it
   derives and caches a `.d.ts` of the loaded tools' result/service types, invalidating on any tool-registry
   change (`tools.watch()`), and merges in types contributed by runtime-defined tools. The tool-result-type

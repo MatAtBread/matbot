@@ -123,6 +123,8 @@ timestamp) from context — takes no parameters. Writes one document per fact to
 remembered_facts store. Returns nothing: fired by a trigger it runs as a silent side-effect
 (you are not involved). You may also call it directly to capture the current message.`,
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    paramsType: '{}',
+    resultType: 'void',
     executor,
   };
 }

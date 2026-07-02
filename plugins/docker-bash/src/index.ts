@@ -545,6 +545,8 @@ export const plugin: MatbotPluginSpec = {
       name:        'bash',
       description: TOOL_DESCRIPTION,
       inputSchema: BASH_INPUT_SCHEMA,
+      paramsType:  '{ script: string; env?: Record<string, string>; timeout?: number }',
+      resultType:  '{ exitCode: number; stdout: string; stderr: string }',
       executor:    createContainerExecutor(settings),
     };
     services.tools.register(bashTool);
@@ -554,6 +556,8 @@ export const plugin: MatbotPluginSpec = {
       name:        'bash_config',
       description: BASH_CONFIG_DESCRIPTION,
       inputSchema: BASH_CONFIG_INPUT_SCHEMA,
+      paramsType:  "{ action: 'get' } | { action: 'set'; dns?: string[]; name?: string; maxOutputBytes?: number } | { action: 'restart' }",
+      resultType:  '{ message: string; overrides: BashConfigOverrides; restarted: boolean } | { message: string; restarted: boolean } | { defaults: ResolvedConfigView; overrides: BashConfigOverrides; effective: ResolvedConfigView }',
       executor:    { execute: (input) => bashConfigExecutor(input, settings) },
     };
     services.tools.register(configTool);

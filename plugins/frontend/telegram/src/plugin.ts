@@ -53,11 +53,7 @@ export const plugin: MatbotPluginSpec = {
   tools: [
     {
       name:        'telegram_provider',
-      description: `Get or set the LLM provider the Telegram bot uses. A 'set' is persisted and restored on restart.
-
-  type TelegramProvider =
-    | { action: 'get' }
-    | { action: 'set'; provider: string };  // provider name as defined in matbot.yaml`,
+      description: `Get or set the LLM provider the Telegram bot uses. A 'set' is persisted and restored on restart.`,
       inputSchema: {
         type: 'object',
         required: ['action'],
@@ -73,6 +69,8 @@ export const plugin: MatbotPluginSpec = {
           },
         },
       },
+      paramsType: "{ action: 'get' } | { action: 'set'; provider: string }",
+      resultType: '{ provider: string | null }',
       executor: {
         async *execute(input: unknown) {
           const act = input as { action: 'get' | 'set'; provider?: string };
@@ -105,6 +103,8 @@ export const plugin: MatbotPluginSpec = {
       name:        'telegram_open_door',
       description: 'Open the door for new chats to join the bot channel. The door remains open for 30 seconds or until the first message from a new user is received, whichever comes first.',
       inputSchema: { type: 'object', properties: {} },
+      paramsType: '{}',
+      resultType: '{ open_until: string }',
       executor: {
         async *execute() {
           openDoor = Date.now();
@@ -123,6 +123,8 @@ export const plugin: MatbotPluginSpec = {
         },
         required: ['text'],
       },
+      paramsType: '{ text: string; chatId?: number }',
+      resultType: '{ sent: number }',
       executor: {
         async *execute(input: unknown) {
           const token = botTokenRef;

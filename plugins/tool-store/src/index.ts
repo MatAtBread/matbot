@@ -89,15 +89,8 @@ function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Sto
       `Access the "${def.namespace}" store — ${def.description}\n\n` +
       'Documents have this shape:\n' +
       '```ts\n' + def.shape + '\n```\n\n' +
-      'Actions map onto the matbot `Store<'+ typeGuess + '>` interface:\n' +
-      '```ts\n' +
-      'type Action =\n' +
-      "  | { action: 'get';    id: string }\n" +
-      "  | { action: 'set';    id?: string; data: " + typeGuess + " }                  // upsert; id omitted ⇒ created\n" +
-      "  | { action: 'cas';    id: string; expected: string; data: " + typeGuess + " } // compare-and-swap on version\n" +
-      "  | { action: 'delete'; id: string; expected?: string }\n" +
-      "  | { action: 'query';  query?: StoreQuery };  // omit query ⇒ match all\n" +
-      '```\n\n' +
+      'Actions map onto the matbot `Store<' + typeGuess + '>` interface (get/set/cas/delete/query), with ' +
+      '`set` doubling as upsert (omit `id` to create) and `query` matching all when omitted.\n\n' +
       'The `query` grammar:\n' +
       '```ts\n' +
       "type FieldPath = string | string[];  // a bare string is ONE key (never split on '.'); use an array for a nested path\n" +
@@ -132,6 +125,13 @@ function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Sto
       },
       required: ['action'],
     },
+    paramsType:
+      "{ action: 'get'; id: string } | { action: 'set'; id?: string; data: " + typeGuess + " }" +
+      " | { action: 'cas'; id: string; expected: string; data: " + typeGuess + " }" +
+      " | { action: 'delete'; id: string; expected?: string } | { action: 'query'; query?: StoreQuery }",
+    resultType:
+      typeGuess + " | null | { ok: true; doc: " + typeGuess + " } | { ok: false; current: " + typeGuess + " | null }" +
+      " | { deleted: boolean } | { items: " + typeGuess + "[]; total?: number; cursor?: string }",
     executor: {
       async *execute(rawInput: unknown): AsyncIterable<ToolEvent> {
         const input = (rawInput ?? {}) as ActionInput;
@@ -211,15 +211,10 @@ function makeStoreActionTool(services: MatbotMachine, meta: Store<StoreDef>): To
       'Both `create` and `expose` require a plain-English `description` of what the store holds and ' +
       'a `shape` — the document type written as a flattened TypeScript type/interface — which is ' +
       'shown to the model in the generated tool.\n\n' +
-      'Actions (TypeScript):\n' +
-      '```ts\n' +
-      'type StoreAction =\n' +
-      "  | { action: 'create'; namespace: string; description: string; shape: string }  // new store + tool; fails if it already exists\n" +
-      "  | { action: 'expose'; namespace: string; description: string; shape: string }  // tool over an EXISTING store (incl. ones created elsewhere); fails if absent\n" +
-      "  | { action: 'get';    namespace: string }\n" +
-      "  | { action: 'remove'; namespace: string }   // drops the definition and its tool (store data is left intact)\n" +
-      "  | { action: 'list' };\n" +
-      '```',
+      '`create` mints a new store + tool and fails if one already exists; `expose` mints a tool over an ' +
+      'EXISTING store (including one created elsewhere) and fails if absent; `remove` drops the ' +
+      "definition and its tool but leaves the store's data intact; `get` reads one definition; `list` " +
+      'returns them all.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -230,6 +225,8 @@ function makeStoreActionTool(services: MatbotMachine, meta: Store<StoreDef>): To
       },
       required: ['action'],
     },
+    paramsType: "{ action: 'create'; namespace: string; description: string; shape: string } | { action: 'expose'; namespace: string; description: string; shape: string } | { action: 'get'; namespace: string } | { action: 'remove'; namespace: string } | { action: 'list' }",
+    resultType: "StoreDef | null | { removed: boolean } | { stores: StoreDef[] }",
     executor: {
       async *execute(rawInput: unknown) {
         const input = (rawInput ?? {}) as StoreActionInput;

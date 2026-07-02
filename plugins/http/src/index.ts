@@ -65,6 +65,8 @@ export const httpTool: Tool = {
       responseType: { type: 'string', enum: ['text', 'json'], default: 'text' },
     },
   },
+  paramsType:  "{ url: string; method?: string; headers?: Record<string, string>; body?: string; responseType?: 'text' | 'json' }",
+  resultType:  'unknown',
   executor,
 };
 

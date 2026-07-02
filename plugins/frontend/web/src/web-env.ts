@@ -34,6 +34,8 @@ export function makeWebEnvTool(evalInBrowser: EvalInBrowser): Tool {
         expression: { type: 'string', description: 'A JavaScript expression, evaluated in a sandboxed browser Worker, whose JSON-serialisable value is returned.' },
       },
     },
+    paramsType: '{ expression: string }',
+    resultType: 'unknown',
     executor: {
       async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
         const { expression } = (input ?? {}) as { expression?: unknown };

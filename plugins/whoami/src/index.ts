@@ -13,6 +13,8 @@ const whoamiTool: Tool<ToolResultOf<'whoami'>> = {
 the runtime is acting as right now. Returns { id, type } where type is "user", "agent", or
 "system". Useful for confirming who a turn (or a delegated background job) is running as.`,
   inputSchema: { type: 'object', properties: {} },
+  paramsType:  '{}',
+  resultType:  'Principal',
   executor: {
     async *execute() {
       yield { type: 'result', value: currentPrincipal() };

@@ -140,6 +140,8 @@ export function createDreamTimeTool(services: MatbotMachine): Tool<ToolResultOf<
       properties: {},
       additionalProperties: false,
     },
+    paramsType: '{}',
+    resultType: 'DreamRun',
     executor,
   };
 }

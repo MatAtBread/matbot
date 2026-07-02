@@ -99,10 +99,7 @@ function makeSessionEditTool(store: Store<Session>): Tool<ToolResultOf<'session_
       '  split   — Move: messages before msgIndex move to a new session; the current session keeps\n' +
       '            msgIndex onward. Both sides get cross-link markers.\n' +
       '  compact — Shrink: strip thinking blocks, tool calls, and tool results from messages before\n' +
-      '            msgIndex, keeping user/assistant text — fewer tokens, same thread.\n\n' +
-      '```ts\n' +
-      "interface SessionEditInput { action: 'cut' | 'fork' | 'split' | 'compact'; sessionId: string; msgIndex: number /* like slice index, negative is an offset from the end of the session */ };\n" +
-      '```',
+      '            msgIndex, keeping user/assistant text — fewer tokens, same thread.',
     inputSchema: {
       type:       'object',
       required:   ['action', 'sessionId', 'msgIndex'],
@@ -112,6 +109,8 @@ function makeSessionEditTool(store: Store<Session>): Tool<ToolResultOf<'session_
         msgIndex:  { type: 'number', description: 'Index into session.messages the action pivots on (see per-action meaning in the description). Like slice index, negative is an offset from the end of the session.' },
       },
     },
+    paramsType: "{ action: 'cut' | 'fork' | 'split' | 'compact'; sessionId: string; msgIndex: number }",
+    resultType: "{ sessionId: string; messagesRemaining: number } | { newSessionId: string; messagesCopied: number } | { newSessionId: string; messagesSplit: number; currentSessionId: string; messagesRemaining: number } | { sessionId: string; messagesStripped: number }",
     executor: {
       async *execute(input: unknown) {
         const { action, sessionId, msgIndex } = input as Partial<SessionEditInput>;

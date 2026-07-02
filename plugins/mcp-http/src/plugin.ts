@@ -31,13 +31,7 @@ ACTIONS
   add    — Connect a remote server and register its tools. Validated before saving; some servers
            return usage 'instructions' on connect, surfaced in the result and by 'list'.
   list   — Show connected servers, their tools, and any instructions.
-  remove — Disconnect a server and forget it; its proxy tools are unregistered immediately.
-
-SHAPE  (TypeScript)
-  type McpAction =
-    | { action: 'add'; name: string; endpoint: string; headers?: Record<string,string>; proxyToolName?: string }
-    | { action: 'list' }
-    | { action: 'remove'; name: string };`,
+  remove — Disconnect a server and forget it; its proxy tools are unregistered immediately.`,
     inputSchema: {
       type: 'object',
       required: ['action'],
@@ -49,6 +43,8 @@ SHAPE  (TypeScript)
         proxyToolName: { type: 'string', description: 'add only: prefix for this server\'s tool names, replacing the default "mcp__<name>__". Persisted; reconnects keep it.' },
       },
     },
+    paramsType: "{ action: 'add'; name: string; endpoint: string; headers?: Record<string, string>; proxyToolName?: string } | { action: 'list' } | { action: 'remove'; name: string }",
+    resultType: '{ message: string; tools: string[]; instructions?: string } | { servers: unknown[] } | { message: string }',
     executor: {
       async *execute(input: unknown, ctx: ToolContext) {
         const act = input as McpRemoteAction;

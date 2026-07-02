@@ -167,12 +167,7 @@ Two tiers:
   Tier 2 — Partial compact: active sessions with >20 messages, keeping the last 10 intact.
     Strips tool calls / tool results / thinking from all earlier messages.
 The current session is never touched. Idempotent — safe to run on a schedule.
-Returns a summary of what was compacted and skipped. Parameters:
-  interface CompactSessionsParams {
-    inactiveDays?: number;
-    activeMessages?: number;
-  }
-`,
+Returns a summary of what was compacted and skipped.`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -181,6 +176,8 @@ Returns a summary of what was compacted and skipped. Parameters:
       },
       additionalProperties: false,
     },
+    paramsType: '{ inactiveDays?: number; activeMessages?: number }',
+    resultType: "{ examined: number; pages: number; compacted: Array<{ sessionId: string; title: string; tier: 'full' | 'partial'; messagesStripped: number }>; skipped: Array<{ sessionId: string; title: string; reason: string }> }",
     executor,
   };
 }

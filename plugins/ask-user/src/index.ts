@@ -133,6 +133,8 @@ These are different and you should design for the first one. If the user might l
       cancelable: { type: 'boolean', description: 'Default true. Set false to forbid cancelling — a graceful "decline" should be an option/confirm value, not a cancel.' },
     },
   },
+  paramsType: "{ name: string; label: string; type: 'text' | 'password' | 'select' | 'confirm'; options?: string[]; allowOther?: boolean; default?: string; required?: boolean; cancelable?: boolean }",
+  resultType: '{ name: string; answer: string }',
   executor,
 };
 

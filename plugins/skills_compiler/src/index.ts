@@ -581,6 +581,8 @@ Compiled plugins use: fetch() for HTTP, services.singleTurn() for LLM, invokeToo
             packageNamePrefix: { type: 'string', description: 'Prefix for the generated npm package name, prepended to the tool name. Defaults to "@local/compiled-".' },
           },
         },
+        paramsType: '{ skill: string; provider?: string; toolName?: string; packageNamePrefix?: string }',
+        resultType: "{ status: 'not_found'; message: string } | { status: 'no_metadata'; skill: string; message: string } | { status: 'not_compilable'; skill: string; classification: { procedural: number; informational: number } } | { status: 'typecheck_failed'; skill: string; toolName: string; version: string; dir: string; passes: number; method: string; excluded: string[]; typecheckOutput: string } | { status: 'compiled_not_installed'; skill: string; toolName: string; pluginName: string; version: string; dir: string; specifier: string; typecheckOk: boolean; method: string; excluded: string[]; installError: string } | { status: 'installed'; skill: string; classification: { procedural: number; informational: number }; passes: number; toolName: string; pluginName: string; version: string; dir: string; specifier: string; typecheckOk: boolean; method: string; excluded: string[]; install: string; movedTriggers: string[]; hidden: boolean }",
         executor,
       });
     },

@@ -41,15 +41,7 @@ function makeSessionActionTool(store: Store<Session>): Tool<ToolResultOf<'sessio
       'Manage conversation sessions. A session is a stored conversation — an chronological list of ' +
       'messages identified by a unique ID, with a title and a status (active or archived). This ' +
       'tool covers the lifecycle: list sessions, fetch one in full, rename one, or hide (archive) ' +
-      'one.\n\n' +
-      'Parameters depend on `action` (TypeScript):\n' +
-      '```ts\n' +
-      'type SessionAction =\n' +
-      "  | { action: 'list';   includeArchived?: boolean }          // -> [{ id, title, preview, updatedAt }]\n" +
-      "  | { action: 'get';    sessionId: string }                  // -> the full session\n" +
-      "  | { action: 'rename'; sessionId: string; title: string }   // -> { id, title }\n" +
-      "  | { action: 'hide';   sessionId: string };                 // -> { id, status: 'archived' }\n" +
-      '```',
+      'one.',
     inputSchema: {
       type:       'object',
       required:   ['action'],
@@ -60,6 +52,8 @@ function makeSessionActionTool(store: Store<Session>): Tool<ToolResultOf<'sessio
         includeArchived: { type: 'boolean', description: 'list only: include archived sessions. Default false.' },
       },
     },
+    paramsType: "{ action: 'list'; includeArchived?: boolean } | { action: 'get'; sessionId: string } | { action: 'rename'; sessionId: string; title: string } | { action: 'hide'; sessionId: string }",
+    resultType: "Array<{ id: string; title: string | undefined; preview: string; updatedAt: string }> | Session | { id: string; title: string } | { id: string; status: 'archived' }",
     executor: {
       async *execute(input: unknown, _ctx: ToolContext) {
         const args = input as Partial<SessionInput> & { action?: string };

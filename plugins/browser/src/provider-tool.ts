@@ -174,14 +174,6 @@ export function createBrowserProviderTool(admin: ProviderAdmin): Tool<ToolResult
       'them and the tool will not prompt for a key either. `remove` refuses to delete the only ' +
       'configured profile or the one powering the current turn — add a replacement first or switch ' +
       'providers.\n\n' +
-      'Parameters depend on `action` (TypeScript):\n' +
-      '```ts\n' +
-      'type ProviderAction =\n' +
-      "  | { action: 'list' }                                                          // profiles + available adapters\n" +
-      "  | { action: 'add'; name: string; adapter: string; endpoint?: string; model?: string;\n" +
-      '      parameters?: object }   // endpoint/model required unless the adapter is selfContained; key requested separately\n' +
-      "  | { action: 'remove'; name: string };\n" +
-      '```\n\n' +
       'PARAMETERS  (pass as the `parameters` object on add)\n' +
       '  maxTokens   — integer, maximum output tokens\n' +
       '  temperature — float 0.0–1.0\n' +
@@ -204,6 +196,8 @@ export function createBrowserProviderTool(admin: ProviderAdmin): Tool<ToolResult
         },
       },
     },
+    paramsType: "{ action: 'list' } | { action: 'add'; name: string; adapter: string; endpoint?: string; model?: string; parameters?: Record<string, unknown> } | { action: 'remove'; name: string }",
+    resultType: "{ providers: ProviderRow[]; adapters: AvailableProvider[] } | { message: string }",
     executor,
   };
 }

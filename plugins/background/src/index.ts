@@ -294,10 +294,6 @@ file to capture the process's stdout; without an output file, stdout is discarde
 When the user asks for something in the background, do not wait for the output — notify them the
 task has started (and the output filename, if any); they will check the result themselves later.
 
-  type Background =
-    | { prompt: string; output?: string; provider?: string }                                  // run once
-    | { prompt: string; interval: string; name?: string; output?: string; provider?: string } // repeat every <interval>
-
 interval is a duration like "30s", "5m", "1h", "24h". Omitting it — or passing "once" or null —
 runs the prompt a single time.
 
@@ -327,6 +323,8 @@ wanted to see the result, they would have asked for it in the foreground.
       },
     },
   },
+  paramsType: "{ prompt: string; output?: string; provider?: string } | { prompt: string; interval: string; name?: string; output?: string; provider?: string }",
+  resultType: "{ id: string; interval: string; name?: string } | { status: 'started'; output?: string }",
   executor: {
     async *execute(input: unknown, ctx: ToolContext) {
       const { prompt, interval, name, output, provider } = input as BackgroundInput;
@@ -404,13 +402,7 @@ ACTIONS
 
 The id is a schedule id from 'list' or from the background tool. For suspend and resume, pass
 id "*" to act on ALL schedules at once. cancel requires a specific id — "*" is not accepted
-(no bulk delete).
-
-  type EveryAction =
-    | { action: 'list' }
-    | { action: 'suspend'; id: string }   // id "*" = all
-    | { action: 'resume';  id: string }   // id "*" = all
-    | { action: 'cancel';  id: string };  // specific id only`,
+(no bulk delete).`,
   inputSchema: {
     type:       'object',
     required:   ['action'],
@@ -426,6 +418,8 @@ id "*" to act on ALL schedules at once. cancel requires a specific id — "*" is
       },
     },
   },
+  paramsType: "{ action: 'list' } | { action: 'suspend'; id: string } | { action: 'resume'; id: string } | { action: 'cancel'; id: string }",
+  resultType: "Array<{ id: string; interval: string; nextRun: string; active: boolean; name?: string; lastRun?: string; output?: string }> | { resumed: true; count: number; ids: string[] } | { resumed: true; id: string } | { suspended: true; count: number; ids: string[] } | { suspended: true; id: string } | { cancelled: true; id: string }",
   executor: {
     async *execute(input: unknown, _ctx: ToolContext) {
       const act = input as EveryAction;
