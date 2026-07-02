@@ -65,6 +65,7 @@ class FunctionStore {
     const sig = parseSignature(definition);
     if (sig.name === undefined) throw new Error('define requires a NAMED function, e.g. `weather(city: string): string { … }`.');
     if (sig.name === TOOL_NAME) throw new Error(`"${TOOL_NAME}" is reserved.`);
+    if (sig.returnType === undefined) throw new Error('define requires an explicit return type — it is verified against the body and becomes the tool\'s result contract, e.g. `weather(city: string): string { … }`. Use `: void` for a side-effect-only tool, or `: unknown` if the result is genuinely dynamic.');
     const clash = this.machine.tools.resolve(sig.name);
     if (clash !== null && !this.defined.has(sig.name)) {
       throw new Error(`A tool named "${sig.name}" already exists and wasn't defined here — choose another name.`);
@@ -143,7 +144,9 @@ calls resolve to — write \`await tool.x(...)\` against those real return types
 
 ACTIONS
   define — Persist a NAMED function and register it as a new tool of the same name. Parameters are
-           derived from the signature and become the tool's inputs. Pass an optional \`description\` to
+           derived from the signature and become the tool's inputs. You MUST declare an explicit return
+           type — it is verified against the body and becomes the tool's result contract (use void for a
+           side-effect-only tool). Pass an optional \`description\` to
            document the new tool (shown to the model). Survives restart. Re-defining the same name
            recompiles it. Never shadows a tool you didn't define here. Note: tools defined this way become
            visible on the *next turn*.
