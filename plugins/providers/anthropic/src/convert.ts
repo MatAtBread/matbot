@@ -1,4 +1,5 @@
 import type { Message, Tool, JSONSchema } from '@matatbread/matbot-plugin-api';
+import { toolWireDescription } from '@matatbread/matbot-core/providers-base';
 
 // ── Internal Anthropic API types ──────────────────────────────────────────────
 
@@ -113,7 +114,7 @@ export function toAnthropicSystem(messages: Message[]): string | undefined {
 export function toAnthropicTools(tools: readonly Tool[]): AnthropicToolDef[] {
   const defs: AnthropicToolDef[] = tools.map(t => ({
     name:         t.name,
-    description:  t.description,
+    description:  toolWireDescription(t),
     input_schema: t.inputSchema,
   }));
 

@@ -15,6 +15,13 @@ interface FunctionRecord { name: string; definition: string; description?: strin
 // Placeholder used as a defined tool's description when the caller supplies none — fill in as desired.
 const PLACEHOLDER_DESCRIPTION = 'A user-defined function tool.';
 
+/** The params object's TypeScript type as text — one property per parameter (optional ⇒ `?`). */
+function paramsTypeText(params: ParsedParam[]): string {
+  return params.length === 0
+    ? '{}'
+    : `{ ${params.map(p => `${p.name}${p.optional ? '?' : ''}: ${p.type ?? 'unknown'}`).join('; ')} }`;
+}
+
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolResults {
     tool_function:
@@ -105,6 +112,8 @@ class FunctionStore {
       name:        rec.name,
       description: `${rec.description ? rec.description : (`${PLACEHOLDER_DESCRIPTION}\n\nSource:\n${rec.definition}`)}\n\nDefined via ${TOOL_NAME}.`,
       inputSchema: paramsSchema(sig.params),
+      paramsType:  paramsTypeText(sig.params),
+      resultType:  sig.returnType ?? 'unknown',
       pluginName:  PLUGIN_NAME,
       executor: {
         execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
@@ -123,10 +132,7 @@ class FunctionStore {
   private contributeTypes(sig: ParsedSignature, name: string): void {
     const index = this.machine.ToolTypeIndex;
     if (index === undefined) return;
-    const params = sig.params.length === 0
-      ? '{}'
-      : `{ ${sig.params.map(p => `${p.name}${p.optional ? '?' : ''}: ${p.type ?? 'unknown'}`).join('; ')} }`;
-    index.contribute(name, { result: sig.returnType ?? 'unknown', params });
+    index.contribute(name, { result: sig.returnType ?? 'unknown', params: paramsTypeText(sig.params) });
   }
 
   private async persist(): Promise<void> {

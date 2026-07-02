@@ -638,6 +638,14 @@ export interface Tool<R = unknown> {
   name:         string;
   description:  string;
   inputSchema:  JSONSchema;
+  /** The call contract as TypeScript source: `paramsType` is the type of the params object,
+   *  `resultType` the type of the result `value`. Matbot-native tools SHOULD declare both — they are
+   *  rendered into the wire description (see `toolWireDescription` in `providers-base`) so the model
+   *  reasons about real shapes, and are read off the live registry to type `await tool.<name>(…)` for
+   *  composers. `inputSchema` is the loose fallback foreign tools (e.g. MCP proxies) carry instead;
+   *  those omit these fields. */
+  paramsType?:  string;
+  resultType?:  string;
   executor:     ToolExecutor<R>;
   pluginName?:  string;
 }

@@ -58,6 +58,15 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### API gaps filled
 
+- **`Tool.paramsType`/`resultType` — the call contract as TypeScript text.** A matbot-native tool can now
+  declare the type of its params object and its result `value` as source strings on the `Tool` itself (both
+  optional; foreign tools such as MCP proxies omit them and keep only the loose JSON-Schema `inputSchema`).
+  Providers render them onto the wire via the new `toolWireDescription(tool)` helper (exported from
+  `@matatbread/matbot-core/providers-base`, adopted by the anthropic and openai-compat adapters), appending a
+  `TypeScript:` block so the model reasons about real shapes rather than only the schema. A tool declaring
+  neither renders byte-identically to its `description`, so adoption is per-tool. `function-tools` populates
+  both from each defined function's signature.
+
 - **`MatbotServices.ToolTypeIndex` (optional, node-only).** A new registerable service for typing what
   tool calls resolve to: `dts()` returns a self-contained `.d.ts` of the loaded tools' result/service types
   (derived by compiling each plugin's `declare module` augmentations); `contribute(name, {result, params})`
