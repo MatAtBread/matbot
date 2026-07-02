@@ -381,9 +381,19 @@ churn and less likely to affect a consumer who doesn't use them.
   When the `ToolTypeIndex` service is present (node), the plugin is type-aware end-to-end: a `types` action
   returns the `.d.ts` of what the available tools return (so the model composes against real types instead
   of guessing); `define` **type-checks the function body** against those types before registering, rejecting
-  it with diagnostics on error; and a successful define **contributes the function's own result/param types
-  back** to the index, so later functions compose it with real types too. Where the service is absent (the
+  it with diagnostics on error; and a defined function carries its own result/param types on its registered
+  tool, so later functions compose it with real types too. Where the service is absent (the
   browser), it degrades to guess-and-run — the function still compiles and executes.
+
+- **skills_compiler** — a compiled plugin now **declares its tool's TypeScript contract** on the registered
+  tool: `paramsType` (mirrors the generated `inputSchema`, so accurate by construction) and `resultType`
+  (the distiller's reading of the result value actually observed in the demonstration trace, kept
+  self-contained). Both are emitted into the generated `register(...)` call. Because a compiled plugin lives
+  off the tsconfig — invisible to the source-derived `.d.ts` — this is what lets `ToolTypeIndex` type a
+  compiled skill's call and result off the *live registry*, so another tool composing `await tool.<name>(…)`
+  gets real types instead of `unknown`. `resultType` is a declared contract (not runtime-verified, as with
+  any tool's result type); the implementation is left free rather than bound to it, to avoid regressing the
+  compile-and-repair success rate.
 
 - **skills_compiler** — the compiled plugin's **package name and tool name are now configurable**, and
   recompiling to the same destination **bumps the version**. `skill_compiler` takes optional
