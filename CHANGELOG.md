@@ -329,6 +329,22 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Optional
 
+- **skills_compiler** — the compiled plugin's **package name and tool name are now configurable**, and
+  recompiling to the same destination **bumps the version**. `skill_compiler` takes optional
+  `packageNamePrefix` (default `@local/compiled-`, changed from `@matatbread/matbot-compiled-`) and
+  `toolName` (default the skill's safe name, e.g. `Send To Telegram` → `send_to_telegram`); the package
+  name is `<prefix><toolName>` and the on-disk directory follows the tool name, so a given skill compiles
+  to a stable, predictable destination. A recompile reads the version already on disk and bumps its patch
+  (first compile: `0.1.0`) rather than silently rewriting the same version. The distiller is no longer
+  asked to name the tool — naming is now deterministic, which is what makes the stable destination (and
+  thus the version bump) meaningful.
+
+- **mcp / mcp-http** — the `mcp__<server>__` proxy-tool-name prefix is now **overridable per server**.
+  `mcp_action add` takes an optional `proxyToolName` — the prefix each of a server's tools is registered
+  under, replacing the default `mcp__<name>__` — persisted on the connection config (`MCPRemoteConfig` /
+  `MCPServerConfigLocal`) so `list`, `remove`, and reconnect all recompute the same names. Absent ⇒ the
+  previous default, so existing connections are unchanged.
+
 - **storage/google-drive** — provider profiles now **sync to Drive**, mirroring the existing plugin sync.
   `setup()` shadows the `provider` tool with one backed by a Drive `provider-manifest` store (the same
   `createBrowserProviderTool`, now backed by a Drive `ProviderAdmin`), so `add`/`remove` write across

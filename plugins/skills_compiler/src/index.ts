@@ -116,7 +116,9 @@ export function createSkillCompilerPlugin(): MatbotPluginSpec {
     async setup(services: MatbotMachine) {
       const executor: ToolExecutor = {
         async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
-          const { skill, provider: explicitProvider } = input as { skill: string; provider?: string };
+          const { skill, provider: explicitProvider, packageNamePrefix, toolName: toolNameInput } = input as {
+            skill: string; provider?: string; packageNamePrefix?: string; toolName?: string;
+          };
           if (!skill || typeof skill !== 'string') {
             yield { type: 'error', message: 'Parameter "skill" is required.' };
             return;
@@ -224,28 +226,27 @@ export function createSkillCompilerPlugin(): MatbotPluginSpec {
           const distillResult = await services.singleTurn({
             provider: codeProvider,
             system: `You analyse a trace of an AI agent working out how to perform a task. The trace interleaves the agent's reasoning ([THINKING]), narration ([SAYS]), tool calls ([CALLS]) and results ([RESULT]). Agents explore: they run discovery calls (listing plugins/servers, searching for context), make false starts, and hit dead-ends before finding what actually produces the answer. Extract the MINIMAL CORRECT METHOD — only the steps on the path that worked — and inline what discovery taught (a concrete URL, query, threshold or field name learned mid-run) as constants rather than re-deriving it. Discard every exploratory or incorrect step.`,
-            prompt: `Skill being performed:\n${skillContent}\n\n--- AGENT TRACE ---\n${transcript}\n--- END TRACE ---\n\nReturn ONLY JSON:\n{"toolName":"snake_case","toolDescription":"one line","parameters":[{"name":"...","type":"string|number|boolean","description":"...","required":true|false}],"method":"Numbered, ordered steps the compiled tool must perform, with the exact mechanism for each: an HTTP step gives method + URL + body with discovered constants inlined; a tool step gives the tool name and exact args; a compute step gives the JS data-processing logic lifted from the reasoning. Exclude every exploratory/discovery/dead-end step.","excluded":["one short note per discarded exploratory step and why"]}`,
+            prompt: `Skill being performed:\n${skillContent}\n\n--- AGENT TRACE ---\n${transcript}\n--- END TRACE ---\n\nReturn ONLY JSON:\n{"toolDescription":"one line","parameters":[{"name":"...","type":"string|number|boolean","description":"...","required":true|false}],"method":"Numbered, ordered steps the compiled tool must perform, with the exact mechanism for each: an HTTP step gives method + URL + body with discovered constants inlined; a tool step gives the tool name and exact args; a compute step gives the JS data-processing logic lifted from the reasoning. Exclude every exploratory/discovery/dead-end step.","excluded":["one short note per discarded exploratory step and why"]}`,
             signal: ctx.signal,
           });
 
-          let design: any = { toolName: sanitise(skill), toolDescription: `Compiled from "${skill}"`, parameters: [], method: transcript, excluded: [] };
+          let design: any = { toolDescription: `Compiled from "${skill}"`, parameters: [], method: transcript, excluded: [] };
           try { const m = distillResult.text.match(/\{[\s\S]*\}/); if (m) design = { ...design, ...JSON.parse(m[0]) }; } catch {}
           const method: string = typeof design.method === 'string' && design.method.trim() ? design.method : transcript;
 
           yield { type: 'progress', pct: 80, message: 'Preparing build...' };
 
-          const safeName = sanitise(skill);
-          const pluginPkgName = `@matatbread/matbot-compiled-${safeName}`;
-          const pluginDir = safeName;
-          const toolName = design.toolName as string;
+          // Tool name (and, as its suffix, the package name) default to the skill's safe name — a
+          // deterministic derivation, so recompiling the same skill targets the same destination whose
+          // package version can be bumped, rather than a differently-named package appearing each time.
+          // Both are overridable via input. The distiller is not asked to name the tool: naming is
+          // deterministic so a given skill always compiles to the same destination.
+          const toolName = sanitise(typeof toolNameInput === 'string' && toolNameInput.trim() ? toolNameInput : skill);
+          const packagePrefix = typeof packageNamePrefix === 'string' && packageNamePrefix.trim() ? packageNamePrefix.trim() : '@local/compiled-';
+          const pluginPkgName = `${packagePrefix}${toolName}`;
+          const pluginDir = toolName;
           const toolDesc = (design.toolDescription as string).replace(/`/g, '\\`');
           const toolParams = (design.parameters || []) as Array<{name: string; type: string; description: string; required: boolean}>;
-
-          const packageJson = JSON.stringify({
-            name: pluginPkgName, matbotRuntime: ["node"], version: "0.1.0", type: "module",
-            exports: { ".": "./src/index.ts" }, files: ["src"],
-            peerDependencies: { "@matatbread/matbot-plugin-api": "workspace:^" },
-          }, null, 2);
 
           // Compute relative paths from the plugin build dir to tsconfig.base.json and the plugin-api
           // package at the project root. The build dir is <projectRoot>/<COMPILED_PLUGINS_DIR>/<name>/
@@ -325,7 +326,7 @@ Rules: implement the SPEC, using the worked example's exact URLs/queries/field n
           const relDir   = `${COMPILED_PLUGINS_DIR}/${pluginDir}`;
           const buildDir = join(dirname(services.configPath), COMPILED_PLUGINS_DIR, pluginDir);
 
-          const { mkdir, symlink, readlink, writeFile } = await import('node:fs/promises');
+          const { mkdir, readFile, symlink, readlink, writeFile } = await import('node:fs/promises');
 
           // Derive the tool-result / service types from the LIVE loaded plugins so the generated plugin
           // gets correct `toolResult` types and typed `services.*` for everything it can reach. The set
@@ -346,6 +347,21 @@ Rules: implement the SPEC, using the worked example's exact URLs/queries/field n
               yield { type: 'progress', pct: 85, message: `Typed ${generated.tools.emitted.length} tool result(s) and ${generated.services.emitted.length} service(s).` };
             }
           } catch { /* keep the static fallback */ }
+
+          // Recompiling to the same destination is a new version, not a silent overwrite: read the
+          // version already on disk (if any) and bump its patch. A first compile — or an unparseable /
+          // absent package.json — starts at 0.1.0.
+          let version = '0.1.0';
+          try {
+            const existing = JSON.parse(await readFile(join(buildDir, 'package.json'), 'utf8')) as { version?: string };
+            const m = typeof existing.version === 'string' ? existing.version.match(/^(\d+)\.(\d+)\.(\d+)$/) : null;
+            if (m) version = `${m[1]}.${m[2]}.${Number(m[3]) + 1}`;
+          } catch { /* no existing package.json → first version */ }
+          const packageJson = JSON.stringify({
+            name: pluginPkgName, matbotRuntime: ["node"], version, type: "module",
+            exports: { ".": "./src/index.ts" }, files: ["src"],
+            peerDependencies: { "@matatbread/matbot-plugin-api": "workspace:^" },
+          }, null, 2);
 
           yield { type: 'progress', pct: 85, message: 'Writing plugin scaffold...' };
           try {
@@ -452,7 +468,7 @@ Fix every reported error. Change only what each error requires; keep the tool na
             yield {
               type: 'result',
               value: {
-                status: 'typecheck_failed', skill, toolName, dir: relDir, passes: MAX_PASSES,
+                status: 'typecheck_failed', skill, toolName, version, dir: relDir, passes: MAX_PASSES,
                 method, excluded: design.excluded, typecheckOutput: typecheckOutput.slice(0, 2000),
               },
             };
@@ -470,7 +486,7 @@ Fix every reported error. Change only what each error requires; keep the tool na
             yield {
               type: 'result',
               value: {
-                status: 'compiled_not_installed', skill, toolName, pluginName: pluginPkgName,
+                status: 'compiled_not_installed', skill, toolName, pluginName: pluginPkgName, version,
                 dir: relDir, specifier, typecheckOk, method, excluded: design.excluded,
                 installError: 'The `plugin` management tool is not loaded; install it manually with: plugin add ' + specifier,
               },
@@ -487,7 +503,7 @@ Fix every reported error. Change only what each error requires; keep the tool na
             yield {
               type: 'result',
               value: {
-                status: 'compiled_not_installed', skill, toolName, pluginName: pluginPkgName,
+                status: 'compiled_not_installed', skill, toolName, pluginName: pluginPkgName, version,
                 dir: relDir, specifier, typecheckOk, method, excluded: design.excluded,
                 installError: e instanceof Error ? e.message : String(e),
               },
@@ -525,7 +541,7 @@ Fix every reported error. Change only what each error requires; keep the tool na
             type: 'result',
             value: {
               status: 'installed', skill, classification, passes: pass - 1,
-              toolName, pluginName: pluginPkgName, dir: relDir, specifier, typecheckOk,
+              toolName, pluginName: pluginPkgName, version, dir: relDir, specifier, typecheckOk,
               method, excluded: design.excluded, install: installMessage,
               movedTriggers: movedTriggers.map(t => t.id), hidden,
             },
@@ -546,6 +562,8 @@ Compiled plugins use: fetch() for HTTP, services.singleTurn() for LLM, invokeToo
           properties: {
             skill: { type: 'string', description: 'Skill name from SkillManager.' },
             provider: { type: 'string', description: 'Optional code-gen provider. Defaults to turn provider.' },
+            toolName: { type: 'string', description: 'Name of the compiled tool, and the suffix of its package name. Defaults to the skill\'s safe name (e.g. "Send To Telegram" → send_to_telegram). Non-identifier characters collapse to underscores.' },
+            packageNamePrefix: { type: 'string', description: 'Prefix for the generated npm package name, prepended to the tool name. Defaults to "@local/compiled-".' },
           },
         },
         executor,

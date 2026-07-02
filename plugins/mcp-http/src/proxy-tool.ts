@@ -1,8 +1,12 @@
 import type { Tool, ToolEvent, ToolContext } from '@matatbread/matbot-plugin-api';
 import type { MCPClient, MCPToolDef } from './types.js';
 
-/** The matbot tool name a server's tool is registered under. */
-export const proxyToolName = (serverName: string, tool: string): string => `mcp__${serverName}__${tool}`;
+/**
+ * The matbot tool name a server's tool is registered under. `prefix` overrides the default
+ * `mcp__<server>__` (persisted per server), so all of a server's tools share whatever prefix it chose.
+ */
+export const proxyToolName = (serverName: string, tool: string, prefix?: string): string =>
+  `${prefix ?? `mcp__${serverName}__`}${tool}`;
 
 /**
  * Build the matbot proxy tool for one MCP tool. `resolveClient` is called per invocation so the tool
@@ -13,9 +17,10 @@ export function makeProxyTool(
   serverName:    string,
   toolDef:       MCPToolDef,
   resolveClient: (serverName: string) => MCPClient | undefined,
+  prefix?:       string,
 ): Tool {
   return {
-    name:        proxyToolName(serverName, toolDef.name),
+    name:        proxyToolName(serverName, toolDef.name, prefix),
     description: `[MCP:${serverName}] ${toolDef.description ?? toolDef.name}`,
     inputSchema: toolDef.inputSchema ?? { type: 'object', properties: {} },
     executor: {

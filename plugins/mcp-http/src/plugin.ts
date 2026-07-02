@@ -12,7 +12,7 @@ declare module '@matatbread/matbot-plugin-api' {
 }
 
 type McpRemoteAction =
-  | { action: 'add'; name: string; endpoint: string; headers?: Record<string, string> }
+  | { action: 'add'; name: string; endpoint: string; headers?: Record<string, string>; proxyToolName?: string }
   | { action: 'list' }
   | { action: 'remove'; name: string };
 
@@ -20,8 +20,9 @@ function remoteMcpActionTool(manager: RemoteMcpManager): Tool<ToolResultOf<'mcp_
   return {
     name: 'mcp_action',
     description: `Manage remote MCP (Model Context Protocol) server connections over HTTP. An MCP server
-exposes a set of tools; once connected, each is registered under \`mcp__<server>__<tool>\` and is
-callable for the rest of the session.
+exposes a set of tools; once connected, each is registered under \`mcp__<server>__<tool>\` (the
+\`mcp__<server>__\` prefix is overridable per server via \`proxyToolName\`) and is callable for the
+rest of the session.
 
 This is the cross-platform (browser + Node) build: it speaks JSON-RPC over HTTP POST (with optional
 SSE response streaming). Local stdio servers are not available here — they need the Node mcp plugin.
@@ -34,7 +35,7 @@ ACTIONS
 
 SHAPE  (TypeScript)
   type McpAction =
-    | { action: 'add'; name: string; endpoint: string; headers?: Record<string,string> }
+    | { action: 'add'; name: string; endpoint: string; headers?: Record<string,string>; proxyToolName?: string }
     | { action: 'list' }
     | { action: 'remove'; name: string };`,
     inputSchema: {
@@ -45,6 +46,7 @@ SHAPE  (TypeScript)
         name:     { type: 'string', pattern: '^[a-z][a-z0-9_-]*$', description: 'Short lowercase server id (add/remove); becomes the tool-name prefix.' },
         endpoint: { type: 'string', description: 'add only: the MCP HTTP endpoint URL.' },
         headers:  { type: 'object', additionalProperties: { type: 'string' }, description: 'add only: HTTP headers, e.g. {"Authorization":"Bearer …"}.' },
+        proxyToolName: { type: 'string', description: 'add only: prefix for this server\'s tool names, replacing the default "mcp__<name>__". Persisted; reconnects keep it.' },
       },
     },
     executor: {
@@ -55,7 +57,7 @@ SHAPE  (TypeScript)
             if (!act.name || !act.endpoint) { yield { type: 'error', message: 'add requires "name" and "endpoint".' }; return; }
             yield { type: 'stdout', chunk: `Connecting to MCP server "${act.name}"...\n` };
             try {
-              const r = await manager.add({ name: act.name, endpoint: act.endpoint, ...(act.headers !== undefined ? { headers: act.headers } : {}) });
+              const r = await manager.add({ name: act.name, endpoint: act.endpoint, ...(act.headers !== undefined ? { headers: act.headers } : {}), ...(act.proxyToolName !== undefined ? { proxyToolName: act.proxyToolName } : {}) });
               yield { type: 'result', value: { message: `Connected. ${r.tools.length} tool(s) registered.`, tools: r.tools, ...(r.instructions !== undefined ? { instructions: r.instructions } : {}) } };
             } catch (e) { yield { type: 'error', message: `Failed to connect to "${act.name}": ${String(e)}` }; }
             return;
