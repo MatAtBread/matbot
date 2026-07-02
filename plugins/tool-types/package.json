@@ -1,0 +1,49 @@
+{
+  "name": "@matatbread/matbot-tool-types",
+  "matbotRuntime": [
+    "node"
+  ],
+  "version": "0.1.0",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "files": [
+    "src"
+  ],
+  "description": "Node-only ToolTypeIndex service: derives a self-contained .d.ts of the loaded tools' result/service types (by compiling their `declare module` augmentations) so tool-call code generators and composers can type what `tool` calls resolve to.",
+  "keywords": [
+    "matbot",
+    "matbot-plugin",
+    "llm",
+    "ai",
+    "agent",
+    "typescript"
+  ],
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MatAtBread/matbot.git",
+    "directory": "plugins/tool-types"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "typescript": "catalog:"
+  },
+  "peerDependencies": {
+    "@matatbread/matbot-plugin-api": "workspace:^"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "@matatbread/matbot-plugin-api": "workspace:^"
+  }
+}

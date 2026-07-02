@@ -18,6 +18,20 @@ import { BrowserStorageBackend, LocalStorageVault } from '@matatbread/matbot-bro
 import { runProviderSetup, type AvailableProvider, type ProviderDraft } from './setup.js';
 import { createBrowserProviderTool } from '@matatbread/matbot-browser';
 
+// Browser TypeScript type-stripper (the TypeScriptStripper the realm provides). The bundle deliberately
+// does not inline sucrase (~700 KB per page); mirror the loader and lazy-load it from a CDN on first use,
+// then cache. Node uses its built-in stripTypeScriptTypes instead. Async because of the lazy fetch.
+const SUCRASE_URL = 'https://esm.sh/sucrase@3.35.1';
+type SucraseTransform = (src: string, opts: { transforms: string[] }) => { code: string };
+let _sucraseTransform: SucraseTransform | undefined;
+const stripTypeScript = async (source: string): Promise<string> => {
+  if (_sucraseTransform === undefined) {
+    const mod = await import(SUCRASE_URL) as { transform: SucraseTransform };
+    _sucraseTransform = mod.transform;
+  }
+  return _sucraseTransform(source, { transforms: ['typescript'] }).code;
+};
+
 /** Shape of the inlined config baked into the artifact (the browser analogue of matbot.yaml). */
 export interface BrowserConfig {
   plugins:   string[];                                    // importable specifiers (synthetic ids)
@@ -388,6 +402,7 @@ export async function boot(env: BootEnv): Promise<void> {
     systemContext: systemContextReg,
     isSubAgent: () => false,
     get KnowledgeIndex() { return knowledgeProxy; },
+    TypeScriptStripper: { strip: stripTypeScript },
   };
   const services: MatbotMachine = unifyServices(baseServices);
 

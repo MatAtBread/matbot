@@ -2,6 +2,7 @@ import type {
   FileStore, Vault, Message, ModelParameters,
   ProviderAdapter, ProviderConfig, ProviderRegistry, Tool, ToolRegistry, FrontendInfo,
   Store, Session, SystemContextRegistry, KnowledgeIndex, PromptFn, SessionRunner, Usage,
+  TypeScriptStripper, ToolTypeIndex,
 } from './types.js';
 import type { HookRegistry } from './hooks.js';
 
@@ -92,6 +93,10 @@ export interface PluginSelf {
  */
 export interface MatbotServices {
   readonly StorageBackend?: StorageBackend | undefined;
+  /** Optional, node-only tool-type index (a `.d.ts` of what tool calls resolve to), used by code
+   *  generators/composers so the model isn't guessing return shapes. Absent where no TS program can run
+   *  (the browser); consumers must degrade. Provided by the `tool-types` plugin. See {@link ToolTypeIndex}. */
+  readonly ToolTypeIndex?: ToolTypeIndex | undefined;
   /** The live vault — also the `register('Vault', impl)` swap key. Capture-safe behind a proxy, so a
    *  reference held across a swap keeps resolving to the live backend. Always present (boot default). */
   readonly Vault: Vault;
@@ -118,6 +123,11 @@ export interface MatbotRuntime {
 
   /** The calling plugin's own settings store. Scoped to the plugin — it cannot reach another's. */
   settings(): PluginSettings;
+
+  /** Host-provided, per-platform TypeScript type-stripper. Always present (every execution environment
+   *  supplies one); not registerable/swappable. Use it to erase types from source you compile at runtime
+   *  rather than importing a platform-specific stripper. See {@link TypeScriptStripper}. */
+  readonly TypeScriptStripper: TypeScriptStripper;
 
   /**
    * Hot-load a plugin by specifier into the running process. Returns the loaded plugin.

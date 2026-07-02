@@ -13,6 +13,16 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Breaking changes
 
+- **`MatbotRuntime` gains a required `TypeScriptStripper` member.** Type-stripping is now a first-class,
+  always-present host capability rather than something each consumer reinvents: `services.TypeScriptStripper
+  .strip(source)` erases TypeScript types from a source string and returns runnable JS (may be async). It is
+  provided per platform by the host — `apps/cli` wires node's built-in `stripTypeScriptTypes` (erasable-only),
+  `apps/web-bundle` lazy-loads sucrase on first use — and is *not* a registry/swap key (it lives on the fixed
+  runtime, not `MatbotServices`). Impact: anyone who *constructs* a `MatbotMachine` (a custom host or test
+  harness) must now supply a `TypeScriptStripper`; a plugin that merely reads services is unaffected. Consumers
+  that compile source at runtime should call `services.TypeScriptStripper` instead of importing a
+  platform-specific stripper (this is what makes `function-tools` cross-platform with no stripper of its own).
+
 - **`MatbotRuntime.providers` is now a `ProviderRegistry`, not a `ReadonlyMap`.** *Reading is
   source-compatible* — `ProviderRegistry extends ReadonlyMap<string, ProviderConfig>`, so every existing
   consumer (`services.providers.get`/`has`/`keys`/`values`/iteration) is untouched; a plugin that only
@@ -47,6 +57,16 @@ churn and less likely to affect a consumer who doesn't use them.
   tool-context field `ctx.vault` is a separate surface and is unchanged.
 
 ### API gaps filled
+
+- **`MatbotServices.ToolTypeIndex` (optional, node-only).** A new registerable service for typing what
+  tool calls resolve to: `dts()` returns a self-contained `.d.ts` of the loaded tools' result/service types
+  (derived by compiling each plugin's `declare module` augmentations); `contribute(name, {result, params})`
+  / `retract(name)` register types for runtime-defined tools that have no on-disk source; and `check(snippet)`
+  type-checks a snippet against a synthesized `declare const tool` proxy (each tool typed
+  `params → Promise<result>`) plus those types, returning snippet-scoped diagnostics. Lets tool-call code
+  generators/composers type — and verify — what `tool.x()` returns instead of guessing. Optional and absent
+  where no TypeScript program can run (the browser today), so consumers must degrade. Provided by the new
+  `tool-types` plugin.
 
 - **Removing a vault secret.** `Vault.writeSecret(name, '')` now removes the key rather than storing an
   empty value — there is no meaningful empty secret, so the empty string is the removal signal (idempotent
@@ -328,6 +348,31 @@ churn and less likely to affect a consumer who doesn't use them.
   (a missing secret) are still left in config to retry.
 
 ### Optional
+
+- **tool-types** (new plugin, node-only) — provides the `ToolTypeIndex` service (see API gaps filled): it
+  derives and caches a `.d.ts` of the loaded tools' result/service types, invalidating on any tool-registry
+  change (`tools.watch()`), and merges in types contributed by runtime-defined tools. The tool-result-type
+  derivation (`buildMatbotToolsDts`) moved here from `skills_compiler`, which now consumes it as a dependency
+  (unchanged behaviour; still falls back to its static DTS when the derivation yields nothing).
+
+- **function-tools** (new plugin, cross-platform) — a single `tool_function` tool that lets the model author
+  and run small TypeScript functions which orchestrate other tools in one pass, so several tool calls can
+  be composed (filter, count, reshape) without routing each intermediate result back through the model.
+  Inside a function, `await tool.<name>(params)` runs any registered tool through an injected `tool` proxy
+  and resolves to its structured result. `define` persists a **named** function and registers it as a new
+  tool of the same name (parameters derived from the signature; optional `description` documents the tool;
+  survives restart; re-defining recompiles);
+  `lambda` compiles and runs an **anonymous** one-argument function once against given `params`; plus
+  `list` / `remove`. Types are erased by the host's `TypeScriptStripper` (node's native stripper; the
+  browser bundle's sucrase), so the plugin is cross-platform with no stripper of its own, and the body is
+  compiled via the async function constructor as an immediately-invoked expression, so tool calls (and
+  recursion) are awaited; each sub-call is echoed to stdout for an observable trace.
+  When the `ToolTypeIndex` service is present (node), the plugin is type-aware end-to-end: a `types` action
+  returns the `.d.ts` of what the available tools return (so the model composes against real types instead
+  of guessing); `define` **type-checks the function body** against those types before registering, rejecting
+  it with diagnostics on error; and a successful define **contributes the function's own result/param types
+  back** to the index, so later functions compose it with real types too. Where the service is absent (the
+  browser), it degrades to guess-and-run — the function still compiles and executes.
 
 - **skills_compiler** — the compiled plugin's **package name and tool name are now configurable**, and
   recompiling to the same destination **bumps the version**. `skill_compiler` takes optional

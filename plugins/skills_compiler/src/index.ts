@@ -1,6 +1,6 @@
 import { PLUGIN_API_VERSION, currentPrincipal, invokeTool, toolResult, toolText } from '@matatbread/matbot-plugin-api';
 import type { MatbotPluginSpec, MatbotMachine, ToolExecutor, ToolEvent, ToolContext, Session, Message } from '@matatbread/matbot-plugin-api';
-import { buildMatbotToolsDts } from './build-matbot-dts.js';
+import { buildMatbotToolsDts } from '@matatbread/matbot-tool-types';
 
 // Loose discovery of the skills plugin's SkillManager — optional, so no hard dependency on the
 // package. Only the slice this tool consumes is declared.

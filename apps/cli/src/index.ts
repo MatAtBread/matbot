@@ -34,7 +34,7 @@ import { LookupKnowledgeIndex }               from '@matatbread/matbot-core';
 import { access, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { readFileSync }                     from 'node:fs';
 import { createInterface }                 from 'node:readline/promises';
-import { createRequire }                   from 'node:module';
+import { createRequire, stripTypeScriptTypes } from 'node:module';
 import { fileURLToPath, pathToFileURL }     from 'node:url';
 import process                             from 'node:process';
 import path                                from 'node:path';
@@ -1053,6 +1053,7 @@ async function main(): Promise<void> {
     configPath,
     isSubAgent: () => isBackground,
     get KnowledgeIndex() { return knowledgeProxy; },
+    TypeScriptStripper: { strip: (source: string) => stripTypeScriptTypes(source) },
   };
   const services: MatbotMachine = unifyServices(baseServices);
 

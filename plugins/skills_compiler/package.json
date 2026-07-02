@@ -23,7 +23,8 @@
     "@matatbread/matbot-plugin-api": "workspace:^"
   },
   "dependencies": {
-    "typescript": "catalog:"
+    "typescript": "catalog:",
+    "@matatbread/matbot-tool-types": "workspace:^"
   },
   "devDependencies": {
     "@types/node": "catalog:",

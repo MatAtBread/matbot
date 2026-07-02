@@ -441,6 +441,53 @@ export interface KnowledgeIndex {
   entries?(): Iterable<KnowledgeEntry>;
 }
 
+// ── TypeScript ──────────────────────────────────────────────────────────────
+
+/**
+ * Erases TypeScript types from a source string, returning runnable JavaScript. Type-stripping is
+ * foundational — the harness ships raw `.ts` and any code compiled at runtime must have its types
+ * removed before it can execute — so every execution environment provides one, and it lives as a fixed
+ * runtime capability (on {@link MatbotRuntime}) the host supplies per platform, not a swappable service:
+ * node uses its built-in `stripTypeScriptTypes`, the browser bundle uses sucrase. A consumer that
+ * compiles source at runtime (e.g. `tool_function`) calls this instead of importing a platform stripper.
+ *
+ * `strip` may be async: a platform whose stripper loads lazily (the browser fetches sucrase on first use)
+ * returns a promise; a synchronous stripper (node) returns the string directly — callers `await` either.
+ * It is type-erasure, not full transpilation: node's stripper is erasable-only (enums/namespaces throw),
+ * sucrase is more permissive, so authors should keep to erasable TypeScript to stay portable.
+ */
+export interface TypeScriptStripper {
+  strip(source: string): string | Promise<string>;
+}
+
+/**
+ * Optional, node-only developer-experience service: the live `.d.ts` of the types the loaded tools
+ * expose — what `toolResult(invokeTool(…, name, …))`, or a `function-tools` `await tool.name(…)`, resolves
+ * to — derived by compiling each loaded plugin's `declare module '@matatbread/matbot-plugin-api'`
+ * augmentations. The runtime registry can't supply this (result types are erased); only a TypeScript
+ * program reading the source can. Consumers that generate or compose tool-calling code use it so the model
+ * isn't guessing return shapes. Absent where no TypeScript program can run (the browser today) — a consumer
+ * must degrade (guess-and-run) when `services.ToolTypeIndex` is undefined.
+ *
+ * The result is rebuilt lazily and cached, invalidated when the tool set changes. Runtime-defined tools
+ * that have no on-disk source (e.g. a `function-tools` function) register their types via {@link contribute}.
+ */
+export interface ToolTypeIndex {
+  /** Self-contained type declarations as a `.d.ts` string: the source-derived augmentations merged with any
+   *  {@link contribute}d types. */
+  dts(): Promise<string>;
+  /** Register types for a runtime-defined tool that has no on-disk source, merged into {@link dts}. `result`
+   *  and `params` are TypeScript type expressions (e.g. `string`, `{ city: string }`). Idempotent by name. */
+  contribute(name: string, types: { result?: string; params?: string }): void;
+  /** Drop a previously {@link contribute}d tool's types. */
+  retract(name: string): void;
+  /** Type-check a TypeScript `snippet` in a context where the tool proxy is available as `declare const
+   *  tool` — each registered tool typed `(params?) => Promise<result>` from the live tool set — and the
+   *  derived result types are in scope. Returns human-readable diagnostics scoped to the snippet ([] means
+   *  clean). A composer uses it to catch bad tool-result access before running/registering code. */
+  check(snippet: string): Promise<string[]>;
+}
+
 // ── Tools ─────────────────────────────────────────────────────────────────────
 
 export type ToolEvent<Result = unknown> =
