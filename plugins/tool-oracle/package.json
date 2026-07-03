@@ -1,0 +1,45 @@
+{
+  "name": "@matatbread/matbot-tool-oracle",
+  "matbotRuntime": [
+    "node"
+  ],
+  "version": "0.3.0",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "files": [
+    "src"
+  ],
+  "description": "Oracle instrument: presents ALL tools unchanged (unbiased) and appends (request -> picked tool) records to a JSONL, so which cheap filter reproduces the model's own tool choices can be analysed offline. The pass-through ToolPresenter is the scaffold the real relevance filter drops into later.",
+  "keywords": [
+    "matbot",
+    "matbot-plugin",
+    "llm",
+    "ai",
+    "agent"
+  ],
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MatAtBread/matbot.git",
+    "directory": "plugins/tool-oracle"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "@matatbread/matbot-plugin-api": "workspace:^"
+  },
+  "devDependencies": {
+    "typescript": "catalog:",
+    "@types/node": "catalog:",
+    "@matatbread/matbot-plugin-api": "workspace:^"
+  }
+}
