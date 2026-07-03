@@ -1,14 +1,16 @@
-import type { MatbotPluginSpec, Tool, ToolEvent, ToolExecutor, ToolContext, ToolResult, ToolResultOf, PluginSettings } from '@matatbread/matbot-plugin-api';
+import type { MatbotPluginSpec, Tool, ToolEvent, ToolExecutor, ToolContext, ToolContract, ToolResultOf, PluginSettings } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
-    bash: { exitCode: number; stdout: string; stderr: string };
+  interface ToolContracts {
+    // Declared identically to the local `bash` plugin (same tool name ⇒ one merged entry). `cwd` rides in
+    // the shared params superset but is ignored by this container variant.
+    bash: ToolContract<{ exitCode: number; stdout: string; stderr: string }, { script: string; cwd?: string; env?: Record<string, string>; timeout?: number }>;
     // result of a get/set/restart action on the container configuration
     bash_config:
-      | ToolResult<{ message: string; overrides: BashConfigOverrides; restarted: boolean },                  { action: 'set'     }>
-      | ToolResult<{ message: string; restarted: boolean },                                                  { action: 'restart' }>
-      | ToolResult<{ defaults: ResolvedConfigView; overrides: BashConfigOverrides; effective: ResolvedConfigView }, { action: 'get' }>;
+      | ToolContract<{ message: string; overrides: BashConfigOverrides; restarted: boolean },                  { action: 'set'; dns?: string[]; name?: string; maxOutputBytes?: number }>
+      | ToolContract<{ message: string; restarted: boolean },                                                  { action: 'restart' }>
+      | ToolContract<{ defaults: ResolvedConfigView; overrides: BashConfigOverrides; effective: ResolvedConfigView }, { action: 'get' }>;
   }
 }
 
@@ -545,8 +547,6 @@ export const plugin: MatbotPluginSpec = {
       name:        'bash',
       description: TOOL_DESCRIPTION,
       inputSchema: BASH_INPUT_SCHEMA,
-      paramsType:  '{ script: string; env?: Record<string, string>; timeout?: number }',
-      resultType:  '{ exitCode: number; stdout: string; stderr: string }',
       executor:    createContainerExecutor(settings),
     };
     services.tools.register(bashTool);
@@ -556,8 +556,6 @@ export const plugin: MatbotPluginSpec = {
       name:        'bash_config',
       description: BASH_CONFIG_DESCRIPTION,
       inputSchema: BASH_CONFIG_INPUT_SCHEMA,
-      paramsType:  "{ action: 'get' } | { action: 'set'; dns?: string[]; name?: string; maxOutputBytes?: number } | { action: 'restart' }",
-      resultType:  '{ message: string; overrides: BashConfigOverrides; restarted: boolean } | { message: string; restarted: boolean } | { defaults: ResolvedConfigView; overrides: BashConfigOverrides; effective: ResolvedConfigView }',
       executor:    { execute: (input) => bashConfigExecutor(input, settings) },
     };
     services.tools.register(configTool);

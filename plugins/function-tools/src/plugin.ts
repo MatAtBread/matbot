@@ -1,7 +1,7 @@
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import type {
   JSONSchema, MatbotMachine, MatbotPluginSpec, PluginSettings,
-  Tool, ToolContext, ToolEvent, ToolResult, ToolResultOf,
+  Tool, ToolContext, ToolEvent, ToolContract, ToolResultOf,
 } from '@matatbread/matbot-plugin-api';
 import { buildAsyncFn, runFunction, type CompiledFn } from './compile.js';
 import { parseSignature, paramsSchema, type ParsedParam } from './signature.js';
@@ -23,13 +23,13 @@ function paramsTypeText(params: ParsedParam[]): string {
 }
 
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
+  interface ToolContracts {
     tool_function:
-      | ToolResult<{ message: string; tool: string; parameters: ParsedParam[] }, { action: 'define' }>
-      | ToolResult<unknown,                                                      { action: 'lambda' }>
-      | ToolResult<{ functions: FunctionRecord[] },                             { action: 'list'   }>
-      | ToolResult<{ available: boolean; dts: string },                         { action: 'types'  }>
-      | ToolResult<{ message: string },                                         { action: 'remove' }>;
+      | ToolContract<{ message: string; tool: string; parameters: ParsedParam[] }, { action: 'define'; definition: string; description?: string }>
+      | ToolContract<unknown,                                                      { action: 'lambda'; definition: string; params?: object }>
+      | ToolContract<{ functions: FunctionRecord[] },                             { action: 'list'   }>
+      | ToolContract<{ available: boolean; dts: string },                         { action: 'types'  }>
+      | ToolContract<{ message: string },                                         { action: 'remove'; name: string }>;
   }
 }
 
@@ -111,8 +111,11 @@ class FunctionStore {
       name:        rec.name,
       description: `${rec.description ? rec.description : (`${PLACEHOLDER_DESCRIPTION}\n\nSource:\n${rec.definition}`)}\n\nDefined via ${TOOL_NAME}.`,
       inputSchema: paramsSchema(sig.params),
-      paramsType:  paramsTypeText(sig.params),
-      resultType:  sig.returnType ?? 'unknown',
+      // A defined function has no augmentation source; it carries its own contract. Same shape as a
+      // ToolContracts arm — the params object paired with the declared return type — so tool-types splices
+      // it into the dts registry block (bare `ToolContract` rewritten to an inline import) and derives the
+      // wire text from it, exactly as it does from a source tool's arms.
+      toolContract: `ToolContract<${sig.returnType ?? 'unknown'}, ${paramsTypeText(sig.params)}>`,
       pluginName:  PLUGIN_NAME,
       executor: {
         execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
@@ -191,8 +194,6 @@ function functionTool(machine: MatbotMachine, store: FunctionStore): Tool<ToolRe
     name:        TOOL_NAME,
     description: DESCRIPTION,
     inputSchema: INPUT_SCHEMA,
-    paramsType:  "{ action: 'define'; definition: string; description?: string } | { action: 'lambda'; definition: string; params?: object } | { action: 'list' } | { action: 'types' } | { action: 'remove'; name: string }",
-    resultType:  '{ message: string; tool: string; parameters: ParsedParam[] } | unknown | { functions: FunctionRecord[] } | { available: boolean; dts: string } | { message: string }',
     executor: {
       async *execute(input: unknown, ctx: ToolContext) {
         const act = (input ?? {}) as ToolFunctionAction;

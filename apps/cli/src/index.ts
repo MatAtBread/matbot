@@ -1080,6 +1080,7 @@ async function main(): Promise<void> {
     store:         sessionStore,
     resolveProvider,
     tools:         toolReg,
+    toolTypeIndex: () => services.ToolTypeIndex,   // resolved live: the tool-types plugin registers it after boot
     hooks:         hookReg,
     systemContext: systemContextReg,
     vault,

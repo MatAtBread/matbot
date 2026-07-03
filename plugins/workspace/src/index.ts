@@ -1,15 +1,15 @@
-import type { Tool, ToolExecutor, ToolContext, ToolResult, ToolResultOf, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolContext, ToolContract, ToolResultOf, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
+  interface ToolContracts {
     // One arm per action: a caller of `invokeTool(machine, 'workspace_action', { action: '…' })` gets the
-    // matching result narrowed by the `action` it passed (see ToolResult / the multi-action note on ToolResults).
+    // matching result narrowed by the `action` it passed (see ToolContract / the multi-action note on ToolContracts).
     workspace_action:
-      | ToolResult<string,                            { action: 'read'   }>  // file contents (utf8 or base64)
-      | ToolResult<{ path: string; bytes: number },   { action: 'write'  }>  // stored path and byte count
-      | ToolResult<Array<{ path: string; size: number }>, { action: 'list' }>  // matching files
-      | ToolResult<{ path: string },                  { action: 'delete' }>; // the removed path
+      | ToolContract<string,                                { action: 'read';   path: string; encoding?: 'utf8' | 'base64' }>              // file contents (utf8 or base64)
+      | ToolContract<{ path: string; bytes: number },       { action: 'write';  path: string; content: string; encoding?: 'utf8' | 'base64' }>  // stored path and byte count
+      | ToolContract<Array<{ path: string; size: number }>, { action: 'list';   path?: string; recursive?: boolean }>                     // matching files
+      | ToolContract<{ path: string },                      { action: 'delete'; path: string }>;                                          // the removed path
   }
 }
 
@@ -199,8 +199,6 @@ const workspaceTool: Tool<ToolResultOf<'workspace_action'>> = {
       recursive: { type: 'boolean', default: false, description: 'list only: include files in subdirectories.' },
     },
   },
-  paramsType: "{ action: 'read'; path: string; encoding?: 'utf8' | 'base64' } | { action: 'write'; path: string; content: string; encoding?: 'utf8' | 'base64' } | { action: 'list'; path?: string; recursive?: boolean } | { action: 'delete'; path: string }",
-  resultType: 'string | { path: string; bytes: number } | Array<{ path: string; size: number }> | { path: string }',
   executor: workspaceExecutor,
 };
 

@@ -1,15 +1,15 @@
-import type { Tool, ToolResult, ToolResultOf, ToolContext, Session, Store } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolContract, ToolResultOf, ToolContext, Session, Store } from '@matatbread/matbot-plugin-api';
 import { lastActivityAt } from '@matatbread/matbot-plugin-api';
 
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
+  interface ToolContracts {
     // One arm per action: a caller of `invokeTool(machine, 'session_action', { action: '…' })` gets the
-    // matching result narrowed by the `action` it passed (see ToolResult / the multi-action note on ToolResults).
+    // matching result narrowed by the `action` it passed (see ToolContract / the multi-action note on ToolContracts).
     session_action:
-      | ToolResult<Array<{ id: string; title: string | undefined; preview: string; updatedAt: string }>, { action: 'list'   }>
-      | ToolResult<Session,                          { action: 'get'    }>
-      | ToolResult<{ id: string; title: string },    { action: 'rename' }>
-      | ToolResult<{ id: string; status: 'archived' }, { action: 'hide'  }>;
+      | ToolContract<Array<{ id: string; title: string | undefined; preview: string; updatedAt: string }>, { action: 'list'; includeArchived?: boolean }>
+      | ToolContract<Session,                          { action: 'get'; sessionId: string }>
+      | ToolContract<{ id: string; title: string },    { action: 'rename'; sessionId: string; title: string }>
+      | ToolContract<{ id: string; status: 'archived' }, { action: 'hide'; sessionId: string }>;
   }
 }
 
@@ -52,8 +52,6 @@ function makeSessionActionTool(store: Store<Session>): Tool<ToolResultOf<'sessio
         includeArchived: { type: 'boolean', description: 'list only: include archived sessions. Default false.' },
       },
     },
-    paramsType: "{ action: 'list'; includeArchived?: boolean } | { action: 'get'; sessionId: string } | { action: 'rename'; sessionId: string; title: string } | { action: 'hide'; sessionId: string }",
-    resultType: "Array<{ id: string; title: string | undefined; preview: string; updatedAt: string }> | Session | { id: string; title: string } | { id: string; status: 'archived' }",
     executor: {
       async *execute(input: unknown, _ctx: ToolContext) {
         const args = input as Partial<SessionInput> & { action?: string };

@@ -1,8 +1,8 @@
-import type { Tool, ToolExecutor, ToolResultOf, ToolContext } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext } from '@matatbread/matbot-plugin-api';
 
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
-    about_matbot: { version: string; about: string };
+  interface ToolContracts {
+    about_matbot: ToolContract<{ version: string; about: string }, Record<string, never>>;
   }
 }
 
@@ -27,11 +27,7 @@ export function createAboutMatbotTool(version: string): Tool<ToolResultOf<'about
     description:
       'Report what you are running: the matbot harness version and a one-line description. Use it when ' +
       'asked what version of matbot this is, or for an "about" of the harness itself (distinct from the ' +
-      'plugin tool, which lists loaded plugins).\n\n' +
-      'Parameters (TypeScript):\n' +
-      '```ts\n' +
-      '{}  // -> { version, about }\n' +
-      '```',
+      'plugin tool, which lists loaded plugins).',
     inputSchema: { type: 'object', properties: {} },
     executor,
   };

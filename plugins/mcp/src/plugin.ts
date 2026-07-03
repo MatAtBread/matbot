@@ -1,12 +1,12 @@
-import type { Tool, ToolEvent, ToolResult, ToolResultOf, ToolContext, MatbotPluginSpec, MatbotMachine, PluginSettings } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolEvent, ToolContract, ToolResultOf, ToolContext, MatbotPluginSpec, MatbotMachine, PluginSettings } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
+  interface ToolContracts {
     mcp_action:
-      | ToolResult<{ message: string; tools: string[]; instructions?: string }, { action: 'add'    }>
-      | ToolResult<{ servers: unknown[] },                                       { action: 'list'   }>
-      | ToolResult<{ message: string },                                          { action: 'remove' }>;
+      | ToolContract<{ message: string; tools: string[]; instructions?: string }, { action: 'add'; name: string; type: 'local'; command: string; args?: string[]; env?: Record<string, string>; proxyToolName?: string } | { action: 'add'; name: string; type: 'remote'; endpoint: string; headers?: Record<string, string>; proxyToolName?: string }>
+      | ToolContract<{ servers: unknown[] },                                       { action: 'list' }>
+      | ToolContract<{ message: string },                                          { action: 'remove'; name: string }>;
   }
 }
 import type { MCPClient, MCPToolDef, MCPRemoteConfig } from '@matatbread/matbot-mcp-http';
@@ -168,8 +168,6 @@ ACTIONS
         proxyToolName: { type: 'string', description: 'add only: prefix for this server\'s tool names, replacing the default "mcp__<name>__". Persisted; reconnects keep it.' },
       },
     },
-    paramsType: "{ action: 'add'; name: string; type: 'local'; command: string; args?: string[]; env?: Record<string, string>; proxyToolName?: string } | { action: 'add'; name: string; type: 'remote'; endpoint: string; headers?: Record<string, string>; proxyToolName?: string } | { action: 'list' } | { action: 'remove'; name: string }",
-    resultType: '{ message: string; tools: string[]; instructions?: string } | { servers: unknown[] } | { message: string }',
     executor: {
       async *execute(input: unknown, ctx: ToolContext) {
         const act = input as McpAction;

@@ -1,9 +1,9 @@
-import type { Tool, ToolExecutor, ToolResult, ToolResultOf, ToolContext, ProviderRegistry, MatbotPlugin, ModelParameters } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext, ProviderRegistry, MatbotPlugin, ModelParameters } from '@matatbread/matbot-plugin-api';
 
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
+  interface ToolContracts {
     provider:
-      | ToolResult<{ providers: Array<{
+      | ToolContract<{ providers: Array<{
             name:           string;
             module:         string;
             model:          string;
@@ -11,8 +11,8 @@ declare module '@matatbread/matbot-plugin-api' {
             endpoint?:      string;
             parameters?:    ModelParameters;
           }> }, { action: 'list'   }>
-      | ToolResult<{ message: string }, { action: 'add'    }>
-      | ToolResult<{ message: string }, { action: 'remove' }>;
+      | ToolContract<{ message: string }, { action: 'add'; name: string; module: string; model: string; endpoint?: string; credentialKey?: string; credentialEnvVar?: string; parameters?: Record<string, unknown> }>
+      | ToolContract<{ message: string }, { action: 'remove'; name: string }>;
   }
 }
 import { getRegisteredPlugins, getSpecifierForPlugin }       from '@matatbread/matbot-core';
@@ -508,8 +508,6 @@ When a user asks to add a new LLM or provider, ask for:
       },
     },
 
-    paramsType: "{ action: 'list' } | { action: 'add'; name: string; module: string; model: string; endpoint?: string; credentialKey?: string; credentialEnvVar?: string; parameters?: Record<string, unknown> } | { action: 'remove'; name: string }",
-    resultType: "{ providers: Array<{ name: string; module: string; model: string; hasCredentials: boolean; endpoint?: string; parameters?: ModelParameters }> } | { message: string }",
     executor: makeExecutor(providers, pluginNameToOrigPath),
   };
 }

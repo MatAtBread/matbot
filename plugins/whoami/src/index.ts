@@ -1,9 +1,9 @@
-import type { Tool, ToolResultOf, Principal, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolContract, ToolResultOf, Principal, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION, currentPrincipal } from '@matatbread/matbot-plugin-api';
 
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
-    whoami: Principal;
+  interface ToolContracts {
+    whoami: ToolContract<Principal, Record<string, never>>;
   }
 }
 
@@ -13,8 +13,6 @@ const whoamiTool: Tool<ToolResultOf<'whoami'>> = {
 the runtime is acting as right now. Returns { id, type } where type is "user", "agent", or
 "system". Useful for confirming who a turn (or a delegated background job) is running as.`,
   inputSchema: { type: 'object', properties: {} },
-  paramsType:  '{}',
-  resultType:  'Principal',
   executor: {
     async *execute() {
       yield { type: 'result', value: currentPrincipal() };

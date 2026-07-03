@@ -27,8 +27,14 @@
  * Silent for now — the durable trace is a `marker` (yielded below); a frontend may surface it.
  */
 
-import type { MatbotMachine, Tool, ToolExecutor, ToolContext, ToolEvent, Message } from '@matatbread/matbot-plugin-api';
+import type { MatbotMachine, Tool, ToolExecutor, ToolContract, ToolContext, ToolEvent, Message } from '@matatbread/matbot-plugin-api';
 import type { RememberedFact } from '../dream/types.js';
+
+declare module '@matatbread/matbot-plugin-api' {
+  interface ToolContracts {
+    remember_fact: ToolContract<void, Record<string, never>>;  // silent side-effect: extracts + persists, yields nothing
+  }
+}
 
 const EXTRACT_SYSTEM =
 `You capture durable facts EXPLICITLY asserted about the user or their world, from a single message,
@@ -123,8 +129,6 @@ timestamp) from context — takes no parameters. Writes one document per fact to
 remembered_facts store. Returns nothing: fired by a trigger it runs as a silent side-effect
 (you are not involved). You may also call it directly to capture the current message.`,
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-    paramsType: '{}',
-    resultType: 'void',
     executor,
   };
 }

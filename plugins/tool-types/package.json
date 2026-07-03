@@ -39,11 +39,13 @@
     "typescript": "catalog:"
   },
   "peerDependencies": {
-    "@matatbread/matbot-plugin-api": "workspace:^"
+    "@matatbread/matbot-plugin-api": "workspace:^",
+    "@matatbread/matbot-core": "workspace:^"
   },
   "devDependencies": {
     "@types/node": "catalog:",
     "typescript": "catalog:",
-    "@matatbread/matbot-plugin-api": "workspace:^"
+    "@matatbread/matbot-plugin-api": "workspace:^",
+    "@matatbread/matbot-core": "workspace:^"
   }
 }

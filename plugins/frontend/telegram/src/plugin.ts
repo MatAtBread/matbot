@@ -1,14 +1,17 @@
 import type {
   MatbotPluginSpec, MatbotMachine, Principal, ProviderAdapter, ProviderConfig, Session, PromptFn, FormField,
-  ToolExecutor, ToolResultOf,
+  ToolExecutor, ToolContract, ToolResultOf,
 } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
-    telegram_provider:  { provider: string | null };  // the active provider name (null when none), or the one just set
-    telegram_open_door: { open_until: string };        // ISO time the join window stays open until
-    telegram_send:      { sent: number };              // how many chats the notification reached
+  interface ToolContracts {
+    // telegram_provider discriminates on `action`; get and set both return the active provider name.
+    telegram_provider:
+      | ToolContract<{ provider: string | null }, { action: 'get' }>
+      | ToolContract<{ provider: string | null }, { action: 'set'; provider: string }>;
+    telegram_open_door: ToolContract<{ open_until: string }, Record<string, never>>;  // ISO time the join window stays open until
+    telegram_send:      ToolContract<{ sent: number }, { text: string; chatId?: number }>;  // how many chats the notification reached
   }
 }
 import {
@@ -69,8 +72,6 @@ export const plugin: MatbotPluginSpec = {
           },
         },
       },
-      paramsType: "{ action: 'get' } | { action: 'set'; provider: string }",
-      resultType: '{ provider: string | null }',
       executor: {
         async *execute(input: unknown) {
           const act = input as { action: 'get' | 'set'; provider?: string };
@@ -103,8 +104,6 @@ export const plugin: MatbotPluginSpec = {
       name:        'telegram_open_door',
       description: 'Open the door for new chats to join the bot channel. The door remains open for 30 seconds or until the first message from a new user is received, whichever comes first.',
       inputSchema: { type: 'object', properties: {} },
-      paramsType: '{}',
-      resultType: '{ open_until: string }',
       executor: {
         async *execute() {
           openDoor = Date.now();
@@ -123,8 +122,6 @@ export const plugin: MatbotPluginSpec = {
         },
         required: ['text'],
       },
-      paramsType: '{ text: string; chatId?: number }',
-      resultType: '{ sent: number }',
       executor: {
         async *execute(input: unknown) {
           const token = botTokenRef;

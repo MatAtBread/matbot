@@ -1,5 +1,4 @@
 import type { Message, Tool, JSONSchema } from '@matatbread/matbot-plugin-api';
-import { toolWireDescription } from '@matatbread/matbot-core/providers-base';
 
 // ── Internal OpenAI API types ─────────────────────────────────────────────────
 
@@ -155,7 +154,7 @@ export function toOAIMessages(messages: Message[], cache = false): OAIMessage[] 
 export function toOAITools(tools: readonly Tool[], cache = false): OAIToolDef[] {
   const defs: OAIToolDef[] = tools.map(t => ({
     type:     'function' as const,
-    function: { name: t.name, description: toolWireDescription(t), parameters: t.inputSchema },
+    function: { name: t.name, description: t.description, parameters: t.inputSchema },
   }));
   // Tool defs are stable across turns — cache them too (last breakpoint covers the whole array).
   if (cache && defs.length > 0) defs[defs.length - 1]!.cache_control = { type: 'ephemeral' };

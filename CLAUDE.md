@@ -266,13 +266,21 @@ The user-surface kinds were one kind named `augment` (= today's `ephemeral`); st
 
 ## Tool design — multi-action tools
 
-**Preferred:** collapse related operations into one tool with an `action` discriminator. One description teaches the domain once; per-action contract as a TypeScript discriminated union in the description; `inputSchema` loose (`required: ['action']`), executor enforces. Use when operations share a domain or parameter shape.
+**Preferred:** collapse related operations into one tool with an `action` discriminator. One description teaches the domain once; the per-action contract lives in the `ToolContracts` arms (below) and is rendered on the wire; `inputSchema` loose (`required: ['action']`), executor enforces. Use when operations share a domain or parameter shape.
 
 **Keep separate:** genuinely standalone tools (`http`, `bash`, `ask_user`) or qualitatively different concerns (telegram's `send`/`provider`/`open_door`).
 
 **Cross-references** may only point down the dependency graph — never to optional dependents.
 
-**Typed results.** A tool declares the type of its `result` `value` by augmenting the `ToolResults` registry (same pattern as `MarkerData`), keyed by tool name; binding the executor with `ToolExecutor<ToolResultOf<'name'>>` makes that augmentation the single source of truth (the compiler checks the yields against it). Callers recover the type via `invokeTool` + `toolResult`. A multi-action tool registers a union of `ToolResult<Result, Args>` arms — each a result paired with the discriminating params *pattern* — so the call's params narrow the result to the matching arm (the type-level mirror of the executor's `switch`). Unregistered ⇒ `unknown`.
+**Typed contract — single source.** A tool's call contract lives in ONE place. **If the tool has scannable source, that place is its `ToolContracts` augmentation** (same pattern as `MarkerData`), keyed by tool name: a union of `ToolContract<Result, Params>` arms — one arm per action for a multi-action tool, a single arm for a single-action one — each pairing a result with the **full** params for that action (the discriminant lives *inside* the params, not as a separate pattern). Even a single-action tool uses an arm (`name: ToolContract<Result, Params>`), never a bare `name: Result` — the bare form yields no callable `ToolProxy` signature. From this single source everything derives:
+- the executor binds `ToolExecutor<ToolResultOf<'name'>>` (compiler checks the yields);
+- callers recover the result via `invokeTool` + `toolResult` (`ToolResultFor` narrows by the call's params);
+- the injected `tool` proxy that code generators (`function-tools`, compiled skills) call is typed `ToolProxy` — each arm becomes a call-signature **overload**, so `await tool.name(params)` narrows its result by the params. This overloaded form is what makes generated tool-call code reliable first-try across model tiers (see the tool-typing probe: a single-signature/union proxy produced model-fragile and even silently-broken codegen);
+- the flat wire `params`/`result` text is flattened back from the arms by `ToolTypeIndex.wireContracts()` and folded into the outgoing tool descriptions at the turn's dispatch edge (`session-runner`) — nothing hand-authored on the wire.
+
+**If the tool has NO scannable source — its name and/or shape are built at runtime** (a `function-tools` function, the `tool-store` per-namespace CRUD tool) — it can't carry a static augmentation, so it declares its contract on the registered `Tool` as a single `toolContract` **string**, identical in shape to a `ToolContracts` arm (`'ToolContract<Result, Args>'`, or a `|`-union of arms). The `ToolTypeIndex` splices it into the generated dts's `ToolContracts` (rewriting bare `ToolContract` to an inline `import(...)` so the block stays self-contained) and derives the wire text from it, exactly as it does a source tool's arms.
+
+There are **no** `paramsType`/`resultType` fields — they are fully retired. A foreign tool (e.g. an MCP proxy) that carries neither an augmentation nor a `toolContract` falls back to its loose `inputSchema`, and the registry block emits `ToolContract<unknown, unknown>` so it stays in `keyof ToolContracts` (hence callable, loosely, through `ToolProxy`). Unregistered ⇒ `unknown`.
 
 ---
 

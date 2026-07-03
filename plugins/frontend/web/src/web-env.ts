@@ -1,4 +1,10 @@
-import type { Tool, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolContext, ToolEvent, ToolContract } from '@matatbread/matbot-plugin-api';
+
+declare module '@matatbread/matbot-plugin-api' {
+  interface ToolContracts {
+    web_user_environment: ToolContract<unknown, { expression: string }>;  // the expression's JSON-serialisable value
+  }
+}
 
 // Round-trip a JavaScript expression to the session's attached browser, where it runs in a sandboxed
 // Worker, and resolve with the (JSON-serialisable) value. Rejects on timeout, abort, a non-attached
@@ -34,8 +40,6 @@ export function makeWebEnvTool(evalInBrowser: EvalInBrowser): Tool {
         expression: { type: 'string', description: 'A JavaScript expression, evaluated in a sandboxed browser Worker, whose JSON-serialisable value is returned.' },
       },
     },
-    paramsType: '{ expression: string }',
-    resultType: 'unknown',
     executor: {
       async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
         const { expression } = (input ?? {}) as { expression?: unknown };

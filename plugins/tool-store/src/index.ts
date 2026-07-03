@@ -1,17 +1,17 @@
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import type {
-  MatbotPluginSpec, MatbotMachine, Tool, ToolEvent, ToolResult, ToolResultOf, Store, StoreQuery,
+  MatbotPluginSpec, MatbotMachine, Tool, ToolEvent, ToolContract, ToolResultOf, Store, StoreQuery,
 } from '@matatbread/matbot-plugin-api';
 import type { StoreDef, StoreRecord } from './types.js';
 
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
+  interface ToolContracts {
     store_action:
-      | ToolResult<StoreDef,             { action: 'create' }>
-      | ToolResult<StoreDef,             { action: 'expose' }>
-      | ToolResult<StoreDef | null,      { action: 'get'    }>
-      | ToolResult<{ removed: boolean }, { action: 'remove' }>
-      | ToolResult<{ stores: StoreDef[] }, { action: 'list' }>;
+      | ToolContract<StoreDef,             { action: 'create'; namespace: string; description: string; shape: string }>
+      | ToolContract<StoreDef,             { action: 'expose'; namespace: string; description: string; shape: string }>
+      | ToolContract<StoreDef | null,      { action: 'get';    namespace: string }>
+      | ToolContract<{ removed: boolean }, { action: 'remove'; namespace: string }>
+      | ToolContract<{ stores: StoreDef[] }, { action: 'list' }>;
   }
 }
 
@@ -125,13 +125,19 @@ function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Sto
       },
       required: ['action'],
     },
-    paramsType:
-      "{ action: 'get'; id: string } | { action: 'set'; id?: string; data: " + typeGuess + " }" +
-      " | { action: 'cas'; id: string; expected: string; data: " + typeGuess + " }" +
-      " | { action: 'delete'; id: string; expected?: string } | { action: 'query'; query?: StoreQuery }",
-    resultType:
-      typeGuess + " | null | { ok: true; doc: " + typeGuess + " } | { ok: false; current: " + typeGuess + " | null }" +
-      " | { deleted: boolean } | { items: " + typeGuess + "[]; total?: number; cursor?: string }",
+    // Source-less: the tool's name and its `typeGuess` shape are per-store, built at runtime, so it can't
+    // carry a static `ToolContracts` augmentation. It declares its contract as a `toolContract` string —
+    // identical in shape to an augmentation arm (result, params) — which the tool-types index splices into
+    // the dts and flattens for the wire, exactly as it does a source tool's arms.
+    toolContract:
+      "ToolContract<" +
+        typeGuess + " | null | { ok: true; doc: " + typeGuess + " } | { ok: false; current: " + typeGuess + " | null }" +
+        " | { deleted: boolean } | { items: " + typeGuess + "[]; total?: number; cursor?: string }" +
+      ", " +
+        "{ action: 'get'; id: string } | { action: 'set'; id?: string; data: " + typeGuess + " }" +
+        " | { action: 'cas'; id: string; expected: string; data: " + typeGuess + " }" +
+        " | { action: 'delete'; id: string; expected?: string } | { action: 'query'; query?: StoreQuery }" +
+      ">",
     executor: {
       async *execute(rawInput: unknown): AsyncIterable<ToolEvent> {
         const input = (rawInput ?? {}) as ActionInput;
@@ -225,8 +231,6 @@ function makeStoreActionTool(services: MatbotMachine, meta: Store<StoreDef>): To
       },
       required: ['action'],
     },
-    paramsType: "{ action: 'create'; namespace: string; description: string; shape: string } | { action: 'expose'; namespace: string; description: string; shape: string } | { action: 'get'; namespace: string } | { action: 'remove'; namespace: string } | { action: 'list' }",
-    resultType: "StoreDef | null | { removed: boolean } | { stores: StoreDef[] }",
     executor: {
       async *execute(rawInput: unknown) {
         const input = (rawInput ?? {}) as StoreActionInput;

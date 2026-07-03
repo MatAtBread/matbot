@@ -6,25 +6,25 @@ import { pathToFileURL }    from 'node:url';
 import { randomUUID }       from 'node:crypto';
 import type { Readable }    from 'node:stream';
 import type {
-  MatbotPluginSpec, MatbotMachine, Tool, ToolExecutor, ToolResult, ToolResultOf, ToolContext, FileStore, Store, Principal,
+  MatbotPluginSpec, MatbotMachine, Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext, FileStore, Store, Principal,
 } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION, currentPrincipal } from '@matatbread/matbot-plugin-api';
 
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
+  interface ToolContracts {
     // `background` discriminates on `interval`'s presence, not an `action` field: a call passing an
-    // `interval` is a recurring schedule and narrows to that arm; a run-once call (no interval) matches
-    // no positive pattern and soundly falls back to the union of both arms (see ToolResult on ToolResults).
+    // `interval` is a recurring schedule (narrows to the recurring arm); a run-once call omits it and
+    // matches the run-once arm — the recurring arm requires `interval`, so the two don't overlap.
     background:
-      | ToolResult<{ id: string; interval: string; name?: string }, { interval: string }>  // recurring (id is the handle)
-      | ToolResult<{ status: 'started'; output?: string }, { interval?: undefined }>;       // run-once
-    // `every_action` discriminates on `action`; resume/suspend further split on whether id is "*" (all)
-    // vs a single id, which a caller can't predeclare, so each keeps its two-shape arm.
+      | ToolContract<{ id: string; interval: string; name?: string }, { prompt: string; interval: string; name?: string; output?: string; provider?: string }>  // recurring (id is the handle)
+      | ToolContract<{ status: 'started'; output?: string }, { prompt: string; output?: string; provider?: string }>;                                            // run-once
+    // `every_action` discriminates on `action`; resume/suspend results further split on whether id is "*"
+    // (all) vs a single id, which a caller can't predeclare, so each keeps its two-shape result union.
     every_action:
-      | ToolResult<Array<{ id: string; interval: string; nextRun: string; active: boolean; name?: string; lastRun?: string; output?: string }>, { action: 'list' }>
-      | ToolResult<{ resumed:   true; count: number; ids: string[] } | { resumed:   true; id: string }, { action: 'resume'  }>
-      | ToolResult<{ suspended: true; count: number; ids: string[] } | { suspended: true; id: string }, { action: 'suspend' }>
-      | ToolResult<{ cancelled: true; id: string }, { action: 'cancel' }>;
+      | ToolContract<Array<{ id: string; interval: string; nextRun: string; active: boolean; name?: string; lastRun?: string; output?: string }>, { action: 'list' }>
+      | ToolContract<{ resumed:   true; count: number; ids: string[] } | { resumed:   true; id: string }, { action: 'resume';  id: string }>
+      | ToolContract<{ suspended: true; count: number; ids: string[] } | { suspended: true; id: string }, { action: 'suspend'; id: string }>
+      | ToolContract<{ cancelled: true; id: string }, { action: 'cancel'; id: string }>;
   }
 }
 
@@ -323,8 +323,6 @@ wanted to see the result, they would have asked for it in the foreground.
       },
     },
   },
-  paramsType: "{ prompt: string; output?: string; provider?: string } | { prompt: string; interval: string; name?: string; output?: string; provider?: string }",
-  resultType: "{ id: string; interval: string; name?: string } | { status: 'started'; output?: string }",
   executor: {
     async *execute(input: unknown, ctx: ToolContext) {
       const { prompt, interval, name, output, provider } = input as BackgroundInput;
@@ -418,8 +416,6 @@ id "*" to act on ALL schedules at once. cancel requires a specific id — "*" is
       },
     },
   },
-  paramsType: "{ action: 'list' } | { action: 'suspend'; id: string } | { action: 'resume'; id: string } | { action: 'cancel'; id: string }",
-  resultType: "Array<{ id: string; interval: string; nextRun: string; active: boolean; name?: string; lastRun?: string; output?: string }> | { resumed: true; count: number; ids: string[] } | { resumed: true; id: string } | { suspended: true; count: number; ids: string[] } | { suspended: true; id: string } | { cancelled: true; id: string }",
   executor: {
     async *execute(input: unknown, _ctx: ToolContext) {
       const act = input as EveryAction;

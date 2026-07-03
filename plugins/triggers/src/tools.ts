@@ -1,24 +1,24 @@
-import type { Tool, ToolExecutor, ToolResult, ToolResultOf, ToolContext, MatbotMachine } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext, MatbotMachine } from '@matatbread/matbot-plugin-api';
 import type { TriggerManager } from './manager.js';
 import type { TriggerCondition, TriggerKind, Trigger } from './types.js';
 
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
+  interface ToolContracts {
     // One arm per action: a caller of `invokeTool(machine, 'trigger_action', { action: '…' })` gets the
-    // matching result narrowed by the `action` it passed (see ToolResult / the multi-action note on ToolResults).
+    // matching result narrowed by the `action` it passed (see ToolContract / the multi-action note on ToolContracts).
     trigger_action:
-      | ToolResult<{ triggers: Trigger[] }, { action: 'list'   }>
-      | ToolResult<{ triggers: Trigger[] }, { action: 'query'  }>
-      | ToolResult<Trigger,                 { action: 'get'    }>
-      | ToolResult<{ id: string },          { action: 'add'    }>
-      | ToolResult<Trigger,                 { action: 'update' }>
-      | ToolResult<{ id: string },          { action: 'remove' }>
-      | ToolResult<{ triggers: Trigger[] }, { action: 'move'   }>
-      | ToolResult<{ triggers: Trigger[] }, { action: 'copy'   }>;
+      | ToolContract<{ triggers: Trigger[] }, { action: 'list' }>
+      | ToolContract<{ triggers: Trigger[] }, { action: 'query'; tool?: string; params?: object }>
+      | ToolContract<Trigger,                 { action: 'get'; id: string }>
+      | ToolContract<{ id: string },          { action: 'add'; conditions: TriggerCondition[]; tool: string; params?: object; enabled?: boolean }>
+      | ToolContract<Trigger,                 { action: 'update'; id: string; conditions?: TriggerCondition[]; tool?: string; params?: object; enabled?: boolean }>
+      | ToolContract<{ id: string },          { action: 'remove'; id: string }>
+      | ToolContract<{ triggers: Trigger[] }, { action: 'move'; tool?: string; params?: object; toTool: string; toParams?: object }>
+      | ToolContract<{ triggers: Trigger[] }, { action: 'copy'; tool?: string; params?: object; toTool: string; toParams?: object }>;
     triggers_config:
-      | ToolResult<{ classifierProvider: string | null; available: string[] }, { action: 'get'   }>
-      | ToolResult<{ classifierProvider: string },                             { action: 'set'   }>
-      | ToolResult<{ classifierProvider: null },                               { action: 'clear' }>;
+      | ToolContract<{ classifierProvider: string | null; available: string[] }, { action: 'get' }>
+      | ToolContract<{ classifierProvider: string },                             { action: 'set'; provider: string }>
+      | ToolContract<{ classifierProvider: null },                               { action: 'clear' }>;
   }
 }
 
@@ -210,8 +210,6 @@ export function createTriggerActionTool(manager: TriggerManager): Tool<ToolResul
         enabled:    { type: 'boolean', description: 'Set false to keep but disable the trigger.' },
       },
     },
-    paramsType: "{ action: 'list' } | { action: 'query'; tool?: string; params?: object } | { action: 'get'; id: string } | { action: 'add'; conditions: TriggerCondition[]; tool: string; params?: object; enabled?: boolean } | { action: 'update'; id: string; conditions?: TriggerCondition[]; tool?: string; params?: object; enabled?: boolean } | { action: 'remove'; id: string } | { action: 'move'; tool?: string; params?: object; toTool: string; toParams?: object } | { action: 'copy'; tool?: string; params?: object; toTool: string; toParams?: object }",
-    resultType: "{ triggers: Trigger[] } | Trigger | { id: string }",
     executor,
   };
 }
@@ -272,8 +270,6 @@ export function createTriggersConfigTool(services: MatbotMachine): Tool<ToolResu
         provider: { type: 'string', description: 'Name of an already-configured provider — required for "set".' },
       },
     },
-    paramsType: "{ action: 'get' } | { action: 'set'; provider: string } | { action: 'clear' }",
-    resultType: "{ classifierProvider: string | null; available: string[] } | { classifierProvider: string } | { classifierProvider: null }",
     executor,
   };
 }

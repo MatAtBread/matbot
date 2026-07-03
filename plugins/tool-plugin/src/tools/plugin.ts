@@ -1,4 +1,4 @@
-import type { Tool, ToolExecutor, ToolResult, ToolResultOf, ToolContext, MatbotPlugin, FormField, Runtime, PluginSource } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext, MatbotPlugin, FormField, Runtime, PluginSource } from '@matatbread/matbot-plugin-api';
 import { CONFIRM_YES, CONFIRM_NO, isIncompatibleRuntimeError, isNotAPluginError } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins, getRegisteredTools, getRegisteredFrontendPlugins,
          getRegisteredServiceKeys, getHookPlugins, getSystemContextPlugins,
@@ -98,9 +98,9 @@ interface DiscoveredPlugin {
 interface ToolSummary { name: string; description: string }
 
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
+  interface ToolContracts {
     plugin:
-      | ToolResult<{
+      | ToolContract<{
           loaded: Array<{
             name:           string;
             apiVersion:     string;
@@ -114,11 +114,11 @@ declare module '@matatbread/matbot-plugin-api' {
           configured:   string[];
           builtinTools?: ToolSummary[] | undefined;
         }, { action: 'list' }>
-      | ToolResult<Array<DiscoveredPlugin & { configuredVia: 'plugins' | 'providers' | null }>, { action: 'discover_local' }>
-      | ToolResult<{ message: string; installationMessage?: string }, { action: 'add'       }>
-      | ToolResult<{ message: string; installationMessage?: string }, { action: 'remove'    }>
-      | ToolResult<{ message: string; installationMessage?: string }, { action: 'reload'    }>
-      | ToolResult<{ message: string; installationMessage?: string }, { action: 'store-key' }>;
+      | ToolContract<Array<DiscoveredPlugin & { configuredVia: 'plugins' | 'providers' | null }>, { action: 'discover_local' }>
+      | ToolContract<{ message: string; installationMessage?: string }, { action: 'add';       specifier: string }>
+      | ToolContract<{ message: string; installationMessage?: string }, { action: 'remove';    specifier: string }>
+      | ToolContract<{ message: string; installationMessage?: string }, { action: 'reload';    specifier: string; refresh?: boolean }>
+      | ToolContract<{ message: string; installationMessage?: string }, { action: 'store-key'; key: string }>;
   }
 }
 
@@ -847,7 +847,5 @@ export const pluginTool: Tool<ToolResultOf<'plugin'>> = {
       },
     },
   },
-  paramsType: "{ action: 'list' } | { action: 'add'; specifier: string } | { action: 'remove'; specifier: string } | { action: 'reload'; specifier: string; refresh?: boolean } | { action: 'store-key'; key: string } | { action: 'discover_local' }",
-  resultType: "{ loaded: Array<{ name: string; apiVersion: string; version?: string; types: string[]; tools: ToolSummary[]; specifier: string; description?: string; matbotRuntime?: readonly Runtime[] }>; configured: string[]; builtinTools?: ToolSummary[] | undefined } | Array<DiscoveredPlugin & { configuredVia: 'plugins' | 'providers' | null }> | { message: string; installationMessage?: string }",
   executor,
 };

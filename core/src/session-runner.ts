@@ -5,6 +5,7 @@ import type {
 } from './types.js';
 import type { MatbotPlugin } from './plugin.js';
 import type { HookRegistry } from './hooks.js';
+import type { ToolTypeIndex } from '@matatbread/matbot-plugin-api';
 import { appendMessage, createMessage } from './session.js';
 import { contextSwitch, withUsageScope } from '@matatbread/matbot-plugin-api';
 import { runSession } from './runner.js';
@@ -13,6 +14,11 @@ export interface SessionRunnerDeps {
   store:           Store<Session>;
   resolveProvider: (name: string) => Promise<{ adapter: ProviderAdapter; config: ProviderConfig } | null>;
   tools?:          ToolRegistry;
+  // Resolved live (the service registers after boot): supplies the per-tool wire contract derived from each
+  // tool's single contract source (the `ToolContracts` arms, or a source-less tool's `toolContract`), folded
+  // into the turn-start tool snapshot's description so the wire carries params/result text. Absent (e.g.
+  // browser) ⇒ tools keep their plain description.
+  toolTypeIndex?:  () => ToolTypeIndex | undefined;
   hooks?:          HookRegistry;
   systemContext?:  SystemContextRegistry;
   vault?:          Vault;
@@ -207,8 +213,19 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
 
         const ac = new AbortController();
         s.ac = ac;
+        // Fold each tool's wire contract — the `params`/`result` text flattened from its single contract
+        // (a source tool's ToolContracts arms, or a source-less tool's `toolContract`) — into its description
+        // for this turn, so the model reasons about the real TS shapes, not just the loose inputSchema.
+        // Derived here because `services`/ToolTypeIndex are live at dispatch. Tools with only a loose
+        // inputSchema (no contract) are left as-is; absent ToolTypeIndex (browser) ⇒ plain descriptions.
+        const wire = await deps.toolTypeIndex?.()?.wireContracts();
         const toolMap = deps.tools !== undefined
-          ? new Map<string, Tool>(deps.tools.list().map(t => [t.name, t]))
+          ? new Map<string, Tool>(deps.tools.list().map(t => {
+              const wc = wire?.[t.name];
+              return [t.name, wc !== undefined
+                ? { ...t, description: `${t.description}\n\nTypeScript:\n  params: ${wc.params}\n  result: ${wc.result}` }
+                : t];
+            }))
           : undefined;
 
         try {

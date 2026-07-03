@@ -1,4 +1,4 @@
-import type { Tool, ToolExecutor, ToolResult, ToolResultOf, ToolContext } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext } from '@matatbread/matbot-plugin-api';
 
 /** An adapter type the provider tool / startup wizard can offer (baked from the build's providerModules). */
 export interface AvailableProvider {
@@ -24,11 +24,11 @@ export interface ProviderDraft {
 }
 
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
+  interface ToolContracts {
     provider:
-      | ToolResult<{ providers: ProviderRow[]; adapters: AvailableProvider[] }, { action: 'list'   }>
-      | ToolResult<{ message: string }, { action: 'add'    }>
-      | ToolResult<{ message: string }, { action: 'remove' }>;
+      | ToolContract<{ providers: ProviderRow[]; adapters: AvailableProvider[] }, { action: 'list' }>
+      | ToolContract<{ message: string }, { action: 'add'; name: string; adapter: string; endpoint?: string; model?: string; parameters?: Record<string, unknown> }>
+      | ToolContract<{ message: string }, { action: 'remove'; name: string }>;
   }
 }
 
@@ -196,8 +196,6 @@ export function createBrowserProviderTool(admin: ProviderAdmin): Tool<ToolResult
         },
       },
     },
-    paramsType: "{ action: 'list' } | { action: 'add'; name: string; adapter: string; endpoint?: string; model?: string; parameters?: Record<string, unknown> } | { action: 'remove'; name: string }",
-    resultType: "{ providers: ProviderRow[]; adapters: AvailableProvider[] } | { message: string }",
     executor,
   };
 }

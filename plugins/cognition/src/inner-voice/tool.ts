@@ -11,7 +11,7 @@
  * (the value is a *different-lineage* perspective) but functional. Pin a different-lineage model via
  * cognition_config to get the genuine second opinion.
  */
-import type { Tool, ToolExecutor, ToolResult, ToolResultOf, ToolContext, MatbotMachine, Session } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext, MatbotMachine, Session } from '@matatbread/matbot-plugin-api';
 import {
   type DreamSettings,
   DEFAULT_DREAM_SETTINGS,
@@ -20,15 +20,15 @@ import {
 } from '../dream/types.js';
 
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
-    ask_inner_voice: { text: string };
+  interface ToolContracts {
+    ask_inner_voice: ToolContract<{ text: string }, { prompt: string; system?: string }>;
     // One arm per action: a caller of `invokeTool(machine, 'cognition_config', { action: '…' })` gets the
-    // matching result narrowed by the `action` it passed (see ToolResult / the multi-action note on ToolResults).
+    // matching result narrowed by the `action` it passed (see ToolContract / the multi-action note on ToolContracts).
     // get/set/clear all return the same effective-config snapshot.
     cognition_config:
-      | ToolResult<CognitionConfig & { available: string[] }, { action: 'get'   }>
-      | ToolResult<CognitionConfig & { available: string[] }, { action: 'set'   }>
-      | ToolResult<CognitionConfig & { available: string[] }, { action: 'clear' }>;
+      | ToolContract<CognitionConfig & { available: string[] }, { action: 'get' }>
+      | ToolContract<CognitionConfig & { available: string[] }, ({ action: 'set' } & Partial<{ [K in keyof CognitionConfig]: CognitionConfig[K] | null }>)>
+      | ToolContract<CognitionConfig & { available: string[] }, { action: 'clear' }>;
   }
 }
 
@@ -130,8 +130,6 @@ export function createAskInnerVoiceTool(services: MatbotMachine): Tool<ToolResul
         system: { type: 'string', description: 'Optional system prompt framing the inner voice (e.g. the Matbot₂ instructions).' },
       },
     },
-    paramsType: '{ prompt: string; system?: string }',
-    resultType: '{ text: string }',
     executor,
   };
 }
@@ -366,8 +364,6 @@ export function createCognitionConfigTool(services: MatbotMachine): Tool<ToolRes
         weakDeferralMs:      { type: ['number', 'null'], description: '"set": deferral window in milliseconds, or null to reset to default. Omit to leave unchanged.' },
       },
     },
-    paramsType: "{ action: 'get' } | ({ action: 'set' } & Partial<{ [K in keyof CognitionConfig]: CognitionConfig[K] | null }>) | { action: 'clear' }",
-    resultType: "CognitionConfig & { available: string[] }",
     executor,
   };
 }

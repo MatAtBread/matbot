@@ -1,24 +1,24 @@
-import type { Tool, ToolExecutor, ToolResult, ToolResultOf, ToolContext, MatbotMachine } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext, MatbotMachine } from '@matatbread/matbot-plugin-api';
 import type { SkillManager, SkillSummary } from './manager.js';
 import type { SkillDoc } from './types.js';
 
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
+  interface ToolContracts {
     // One arm per action: a caller of `invokeTool(machine, 'skill_action', { action: '…' })` gets the
-    // matching result narrowed by the `action` it passed (see ToolResult / the multi-action note on ToolResults).
+    // matching result narrowed by the `action` it passed (see ToolContract / the multi-action note on ToolContracts).
     skill_action:
-      | ToolResult<{ skills: SkillSummary[] },                  { action: 'list'     }>
-      | ToolResult<{ id: string; name: string; content: string }, { action: 'load' }>
-      | ToolResult<{ id: string; name: string; content: string }, { action: 'use'  }>
-      | ToolResult<{ id: string; name: string; knowledge: NonNullable<SkillDoc['knowledge']> | null; catalogue: boolean; hidden: boolean }, { action: 'metadata' }>
-      | ToolResult<{ id: string; name: string },               { action: 'save'     }>
-      | ToolResult<{ id: string; name: string },               { action: 'delete'   }>
-      | ToolResult<{ id: string; name: string; hidden: boolean }, { action: 'hide'   }>
-      | ToolResult<{ id: string; name: string; hidden: boolean }, { action: 'unhide' }>;
+      | ToolContract<{ skills: SkillSummary[] },                  { action: 'list' }>
+      | ToolContract<{ id: string; name: string; content: string }, { action: 'load'; name: string }>
+      | ToolContract<{ id: string; name: string; content: string }, { action: 'use'; name: string }>
+      | ToolContract<{ id: string; name: string; knowledge: NonNullable<SkillDoc['knowledge']> | null; catalogue: boolean; hidden: boolean }, { action: 'metadata'; name: string }>
+      | ToolContract<{ id: string; name: string },               { action: 'save'; name: string; content: string; catalogue?: boolean }>
+      | ToolContract<{ id: string; name: string },               { action: 'delete'; name: string }>
+      | ToolContract<{ id: string; name: string; hidden: boolean }, { action: 'hide'; name: string }>
+      | ToolContract<{ id: string; name: string; hidden: boolean }, { action: 'unhide'; name: string }>;
     skills_config:
-      | ToolResult<{ analysisProvider: string | null; fallback: string | null; available: string[] }, { action: 'get'   }>
-      | ToolResult<{ analysisProvider: string },                { action: 'set'   }>
-      | ToolResult<{ analysisProvider: null; fallback: string | null }, { action: 'clear' }>;
+      | ToolContract<{ analysisProvider: string | null; fallback: string | null; available: string[] }, { action: 'get' }>
+      | ToolContract<{ analysisProvider: string },                { action: 'set'; provider: string }>
+      | ToolContract<{ analysisProvider: null; fallback: string | null }, { action: 'clear' }>;
   }
 }
 
@@ -148,8 +148,6 @@ export function createSkillTool(manager: SkillManager): Tool<ToolResultOf<'skill
         catalogue: { type: 'boolean', description: 'Optional for "save": advertise this skill in the system prompt (using its generated summary). Omit to leave unchanged.' },
       },
     },
-    paramsType: "{ action: 'list' } | { action: 'load'; name: string } | { action: 'use'; name: string } | { action: 'metadata'; name: string } | { action: 'save'; name: string; content: string; catalogue?: boolean } | { action: 'delete'; name: string } | { action: 'hide'; name: string } | { action: 'unhide'; name: string }",
-    resultType: "{ skills: SkillSummary[] } | { id: string; name: string; content: string } | { id: string; name: string; knowledge: NonNullable<SkillDoc['knowledge']> | null; catalogue: boolean; hidden: boolean } | { id: string; name: string } | { id: string; name: string; hidden: boolean }",
     executor,
   };
 }
@@ -213,8 +211,6 @@ export function createSkillsConfigTool(services: MatbotMachine): Tool<ToolResult
         provider: { type: 'string', description: 'Name of an already-configured provider — required for "set".' },
       },
     },
-    paramsType: "{ action: 'get' } | { action: 'set'; provider: string } | { action: 'clear' }",
-    resultType: "{ analysisProvider: string | null; fallback: string | null; available: string[] } | { analysisProvider: string } | { analysisProvider: null; fallback: string | null }",
     executor,
   };
 }

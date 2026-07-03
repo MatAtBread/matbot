@@ -1,4 +1,4 @@
-import type { Tool, ToolExecutor, ToolResult, ToolResultOf, ToolContext, MatbotPlugin, FormField, Runtime } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext, MatbotPlugin, FormField, Runtime } from '@matatbread/matbot-plugin-api';
 import { CONFIRM_YES, CONFIRM_NO } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins, getRegisteredTools, getRegisteredFrontendPlugins,
          getRegisteredServiceKeys, getHookPlugins, getSystemContextPlugins,
@@ -31,9 +31,9 @@ interface AvailablePlugin { name: string; specifier: string; matbotRuntime?: str
 interface ToolSummary { name: string; description: string }
 
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
+  interface ToolContracts {
     plugin:
-      | ToolResult<{
+      | ToolContract<{
           loaded: Array<{
             name:           string;
             apiVersion:     string;
@@ -46,11 +46,11 @@ declare module '@matatbread/matbot-plugin-api' {
           configured:   string[];
           builtinTools?: ToolSummary[] | undefined;
         }, { action: 'list' }>
-      | ToolResult<AvailablePlugin[], { action: 'discover_local' }>
-      | ToolResult<{ message: string; installationMessage?: string }, { action: 'add'       }>
-      | ToolResult<{ message: string; installationMessage?: string }, { action: 'remove'    }>
-      | ToolResult<{ message: string; installationMessage?: string }, { action: 'reload'    }>
-      | ToolResult<{ message: string; installationMessage?: string }, { action: 'store-key' }>;
+      | ToolContract<AvailablePlugin[], { action: 'discover_local' }>
+      | ToolContract<{ message: string; installationMessage?: string }, { action: 'add'; specifier: string }>
+      | ToolContract<{ message: string; installationMessage?: string }, { action: 'remove'; specifier: string }>
+      | ToolContract<{ message: string; installationMessage?: string }, { action: 'reload'; specifier: string }>
+      | ToolContract<{ message: string; installationMessage?: string }, { action: 'store-key'; key: string }>;
   }
 }
 
@@ -277,8 +277,6 @@ export function createBrowserPluginTool(extras: ExtraPlugins): Tool<ToolResultOf
         key:       { type: 'string', description: 'Name of the secret to store (required for store-key); value prompted separately. Entering a blank value removes the key.' },
       },
     },
-    paramsType: "{ action: 'list' } | { action: 'discover_local' } | { action: 'add'; specifier: string } | { action: 'remove'; specifier: string } | { action: 'reload'; specifier: string } | { action: 'store-key'; key: string }",
-    resultType: "{ loaded: Array<{ name: string; apiVersion: string; types: string[]; tools: ToolSummary[]; specifier: string; description?: string; matbotRuntime?: readonly Runtime[] }>; configured: string[]; builtinTools?: ToolSummary[] | undefined } | AvailablePlugin[] | { message: string; installationMessage?: string }",
     executor,
   };
 }
