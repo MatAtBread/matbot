@@ -77,11 +77,26 @@ interface ActionInput {
   query?:    StoreQuery;
 }
 
+// The store's declared `shape` as an INLINE structural type, so the synthesised `toolContract` references
+// no external name (the shape type is defined only in this string, not in any scannable source). An
+// `interface X { … }` → `{ … }`; a `type X = T` → `T`; anything else → `Record<string, unknown>`.
+// Whitespace is collapsed to keep the emitted contract on one line. A shape that itself references a named
+// type would leave that name dangling — the fix there is to export that type (so the dts can import it),
+// not to inline it here.
+function shapeType(shape: string): string {
+  const iface = shape.match(/interface\s+\w+\s*(\{[\s\S]*\})\s*$/);
+  if (iface) return iface[1]!.replace(/\s+/g, ' ').trim();
+  const alias = shape.match(/type\s+\w+\s*=\s*([\s\S]+?);?\s*$/);
+  if (alias) return alias[1]!.replace(/\s+/g, ' ').trim();
+  return 'Record<string, unknown>';
+}
+
 // A tool over one managed store whose verbs are the Store<T> interface (get/set/cas/delete/query),
 // with set doubling as upsert. Loose schema (action + the union of every action's optional fields);
 // the executor enforces per-action requirements, matching the multi-action convention in CLAUDE.md.
 function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Store<StoreRecord>): Tool {
-  const typeGuess = def.shape.match(/(interface|type\s*=)\s+(\w+)/)?.[2] ?? 'Record<string, unknown>';
+  const typeGuess = def.shape.match(/(interface|type\s*=)\s+(\w+)/)?.[2] ?? 'Record<string, unknown>';  // the shape's NAME, for prose
+  const doc       = shapeType(def.shape);                                                               // the shape as an inline type, for the toolContract
   return {
     name: actionToolName(def.namespace),
     ...(pluginName !== undefined ? { pluginName } : {}),
@@ -125,17 +140,18 @@ function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Sto
       },
       required: ['action'],
     },
-    // Source-less: the tool's name and its `typeGuess` shape are per-store, built at runtime, so it can't
-    // carry a static `ToolContracts` augmentation. It declares its contract as a `toolContract` string —
-    // identical in shape to an augmentation arm (result, params) — which the tool-types index splices into
-    // the dts and flattens for the wire, exactly as it does a source tool's arms.
+    // Source-less: the tool's name and its shape are per-store, built at runtime, so it can't carry a static
+    // `ToolContracts` augmentation. It declares its contract as a `toolContract` string — identical in shape
+    // to an augmentation arm (result, params) — which the tool-types index splices into the dts and flattens
+    // for the wire. The result/data shape is inlined structurally (`doc`) so it references no name the dts
+    // lacks; `StoreQuery` stays a name — it's a plugin-api export, so the dts imports it.
     toolContract:
       "ToolContract<" +
-        typeGuess + " | null | { ok: true; doc: " + typeGuess + " } | { ok: false; current: " + typeGuess + " | null }" +
-        " | { deleted: boolean } | { items: " + typeGuess + "[]; total?: number; cursor?: string }" +
+        doc + " | null | { ok: true; doc: " + doc + " } | { ok: false; current: " + doc + " | null }" +
+        " | { deleted: boolean } | { items: " + doc + "[]; total?: number; cursor?: string }" +
       ", " +
-        "{ action: 'get'; id: string } | { action: 'set'; id?: string; data: " + typeGuess + " }" +
-        " | { action: 'cas'; id: string; expected: string; data: " + typeGuess + " }" +
+        "{ action: 'get'; id: string } | { action: 'set'; id?: string; data: " + doc + " }" +
+        " | { action: 'cas'; id: string; expected: string; data: " + doc + " }" +
         " | { action: 'delete'; id: string; expected?: string } | { action: 'query'; query?: StoreQuery }" +
       ">",
     executor: {

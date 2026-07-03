@@ -38,6 +38,60 @@ function splitContract(contract: string): { params: string; result: string } {
   return { result: results.join(' | ') || 'unknown', params: params.join(' | ') || 'unknown' };
 }
 
+// Best-effort JSON-Schema → TypeScript type text. Used only for the params half of a tool that has neither
+// a source augmentation nor a `toolContract` (a foreign/MCP proxy): its `inputSchema` is always present, so
+// we synthesise *something* structural rather than leaving `unknown` — so a composer sees real fields. There
+// is no 1:1 JSON-Schema↔TS mapping; this is deliberately shallow and total — anything unrecognised degrades
+// to `unknown` (never throws), and the output is purely structural (no named refs) so the dts stays
+// self-contained. `unknown` here flows back through `ArmCallSig`'s `unknown extends P` branch to an
+// optional param, so an opaque schema still leaves the tool callable arg-less.
+//   Enhancement (parked, not needed now): a fuller conversion — $ref/allOf/format/pattern/const/tuples —
+//   could be delegated to a package like `json-schema-to-typescript`. This dependency-free shallow pass is
+//   enough to give a composer real fields for the common MCP shapes.
+function schemaToTs(schema: unknown, depth = 0): string {
+  if (depth > 6 || schema === null || typeof schema !== 'object') return 'unknown';
+  const s = schema as Record<string, unknown>;
+  const lit = (v: unknown): string =>
+    typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean' || v === null ? JSON.stringify(v) : 'unknown';
+
+  const union = s['anyOf'] ?? s['oneOf'];
+  if (Array.isArray(union)) {
+    const parts = [...new Set(union.map(u => schemaToTs(u, depth + 1)))];
+    return parts.length ? parts.join(' | ') : 'unknown';
+  }
+  if (Array.isArray(s['enum'])) {
+    const parts = [...new Set(s['enum'].map(lit))];
+    return parts.length ? parts.join(' | ') : 'unknown';
+  }
+  const type = s['type'];
+  if (Array.isArray(type)) return [...new Set(type.map(t => schemaToTs({ ...s, type: t }, depth)))].join(' | ') || 'unknown';
+  switch (type) {
+    case 'string':  return 'string';
+    case 'integer':
+    case 'number':  return 'number';
+    case 'boolean': return 'boolean';
+    case 'null':    return 'null';
+    case 'array': {
+      const items = Array.isArray(s['items']) ? 'unknown' : schemaToTs(s['items'], depth + 1);
+      return /[ |&]/.test(items) ? `Array<${items}>` : `${items}[]`;
+    }
+  }
+  const props = s['properties'] && typeof s['properties'] === 'object' ? s['properties'] as Record<string, unknown> : undefined;
+  if (props && Object.keys(props).length > 0) {
+    const required = new Set(Array.isArray(s['required']) ? s['required'] as unknown[] : []);
+    const members = Object.entries(props).map(([k, v]) => {
+      const key = /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(k) ? k : JSON.stringify(k);
+      return `${key}${required.has(k) ? '' : '?'}: ${schemaToTs(v, depth + 1)}`;
+    });
+    return `{ ${members.join('; ')} }`;
+  }
+  if (type === 'object') {
+    const ap = s['additionalProperties'];
+    return ap !== null && typeof ap === 'object' ? `Record<string, ${schemaToTs(ap, depth + 1)}>` : 'Record<string, unknown>';
+  }
+  return 'unknown';
+}
+
 /**
  * Derives (via {@link buildMatbotToolsDts}) and caches the `.d.ts` of what the loaded tools' calls resolve
  * to, invalidating on any tool-registry change. The scan is driven off the loaded plugins' `resolvedUrl`s —
@@ -54,6 +108,7 @@ class ToolTypeIndexImpl implements ToolTypeIndex {
   private covered = new Set<string>();   // tool names the source scan already declares (registry-block dedup)
   private cache: string | null = null;   // null ⇒ (re)build needed
   private contracts: Record<string, { params: string; result: string }> = {};   // per-tool wire contract
+  private apiExports: string[] = [];     // plugin-api type export names (for importing those a toolContract names)
   private dirty = true;
 
   constructor(machine: MatbotMachine) {
@@ -77,10 +132,11 @@ class ToolTypeIndexImpl implements ToolTypeIndex {
       // resolves to on-disk source (a host that constructed its plugins by hand).
       const urls   = getRegisteredPlugins().map(p => p.resolvedUrl).filter((u): u is string => u !== undefined);
       const built  = await buildMatbotToolsDts(root, urls);
-      this.cache     = built?.dts ?? '';
-      this.covered   = new Set([...(built?.tools.emitted ?? []), ...(built?.tools.unknown ?? [])]);
-      this.contracts = built?.contracts ?? {};
-      this.dirty     = false;
+      this.cache      = built?.dts ?? '';
+      this.covered    = new Set([...(built?.tools.emitted ?? []), ...(built?.tools.unknown ?? [])]);
+      this.contracts  = built?.contracts ?? {};
+      this.apiExports = built?.apiExports ?? [];
+      this.dirty      = false;
     }
   }
 
@@ -150,21 +206,35 @@ class ToolTypeIndexImpl implements ToolTypeIndex {
   // Every live tool the source scan didn't already declare: a source-less tool that carries its contract as
   // a `toolContract` string (a `function-tools` function; the `tool-store` per-namespace tool), spliced
   // verbatim; plus any tool with neither augmentation nor `toolContract` (a foreign/MCP proxy, or a plugin
-  // with no resolvable source) — emitted `ToolContract<unknown, unknown>` so it still appears in
-  // `keyof ToolContracts`, hence in `ToolProxy`, and stays loosely callable. Names the source scan already
-  // declared are skipped, so nothing is declared twice. `ToolContract` is referenced bare — it resolves to
-  // the top-of-file import the derived block emits (every arm references it); when the scan produced nothing
-  // to import it (no source resolved, or an all-`MatbotServices` block), this block supplies that one import.
+  // with no resolvable source) — for which the result stays `unknown` but the params are synthesised from
+  // the tool's (always-present) `inputSchema` (see {@link schemaToTs}), so it isn't a bare
+  // `ToolContract<unknown, unknown>` and a composer sees real fields. Either way it appears in
+  // `keyof ToolContracts`, hence in `ToolProxy`, and stays callable. Names the source scan already declared
+  // are skipped, so nothing is declared twice. `ToolContract` is referenced bare — it resolves to the
+  // top-of-file import the derived block emits (every arm references it); when the scan produced nothing to
+  // import it (no source resolved, or an all-`MatbotServices` block), this block supplies that one import.
   private registryBlock(derived: string): string {
     const arms: string[] = [];
     for (const t of this.machine.tools.list()) {
       if (this.covered.has(t.name)) continue;
-      arms.push(`    ${JSON.stringify(t.name)}: ${t.toolContract ?? 'ToolContract<unknown, unknown>'};`);
+      arms.push(`    ${JSON.stringify(t.name)}: ${t.toolContract ?? `ToolContract<unknown, ${schemaToTs(t.inputSchema)}>`};`);
     }
     if (arms.length === 0) return derived;
-    const imported = /^import type \{[^}]*\bToolContract\b[^}]*\} from '@matatbread\/matbot-plugin-api'/m.test(derived);
-    const head = imported ? '' : `${derived === '' ? "import '@matatbread/matbot-plugin-api';\n" : ''}import type { ToolContract } from '@matatbread/matbot-plugin-api';\n`;
-    return `${head}${derived}\ndeclare module '@matatbread/matbot-plugin-api' {\n  interface ToolContracts {\n${arms.join('\n')}\n  }\n}\n`;
+    const body = arms.join('\n');
+    // Import the plugin-api types these arms reference — `ToolContract` always, plus any plugin-api export a
+    // source-less `toolContract` names (e.g. `StoreQuery`) — minus whatever the derived block already imports
+    // (importing a name twice is a redeclaration error). A synthetic tool inlines its own shape types, so the
+    // only names left here are genuine plugin-api exports.
+    const alreadyImported = new Set(
+      (derived.match(/^import type \{([^}]*)\} from '@matatbread\/matbot-plugin-api'/m)?.[1] ?? '')
+        .split(',').map(s => s.trim()).filter(Boolean),
+    );
+    const referenced = ['ToolContract', ...this.apiExports.filter(n => new RegExp(`\\b${n}\\b`).test(body))];
+    const needed = [...new Set(referenced)].filter(n => !alreadyImported.has(n));
+    const head = needed.length
+      ? `${derived === '' ? "import '@matatbread/matbot-plugin-api';\n" : ''}import type { ${needed.join(', ')} } from '@matatbread/matbot-plugin-api';\n`
+      : '';
+    return `${head}${derived}\ndeclare module '@matatbread/matbot-plugin-api' {\n  interface ToolContracts {\n${body}\n  }\n}\n`;
   }
 }
 

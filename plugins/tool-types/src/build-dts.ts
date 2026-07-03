@@ -35,6 +35,10 @@ export interface MatbotToolsDts {
   // from the `ToolContracts` arms. The single authored contract (the arms) is thus also the source of the
   // wire description, so a source tool's `ToolContracts` augmentation is its single contract.
   contracts: Record<string, { params: string; result: string }>;
+  // The names of every plugin-api type export. A source-less tool's `toolContract` string may name one
+  // (e.g. `StoreQuery`); the consumer (ToolTypeIndex) uses this to import the ones it references so those
+  // references resolve rather than dangle.
+  apiExports: string[];
 }
 
 type Classification =
@@ -311,5 +315,6 @@ ${block('ToolContracts', tools.lines)}${block('MatbotServices', services.lines)}
     tools:    { emitted: tools.emitted,    unknown: tools.unknown },
     services: { emitted: services.emitted, unknown: services.unknown },
     contracts,
+    apiExports: [...apiTypeNames],
   };
 }
