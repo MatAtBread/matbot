@@ -428,7 +428,9 @@ churn and less likely to affect a consumer who doesn't use them.
   of guessing); `define` **type-checks the function body** against those types before registering, rejecting
   it with diagnostics on error; and a defined function carries its own result/param types on its registered
   tool, so later functions compose it with real types too. Where the service is absent (the
-  browser), it degrades to guess-and-run — the function still compiles and executes.
+  browser), it degrades to guess-and-run — the function still compiles and executes. Bundled into the
+  browser artifact (`web-bundle`), where it runs in exactly that degraded mode (`tool-types` is node-only, so
+  no pre-registration type-check and `types` returns an empty dts).
 
 - **skills_compiler** — a compiled plugin now **declares its tool's contract as a `ToolContracts`
   augmentation** in its generated `src/index.ts`: `${toolName}: ToolContract<Result, Params>`, where `Params`
