@@ -1,9 +1,9 @@
-import type { MatbotPluginSpec, MatbotMachine, Tool, ToolContext, ToolResultOf, ToolRegistry } from '@matatbread/matbot-plugin-api';
+import type { MatbotPluginSpec, MatbotMachine, Tool, ToolContext, ToolContract, ToolResultOf, ToolRegistry } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION }                from '@matatbread/matbot-plugin-api';
 
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
-    url_for_resource: { url: string | null };  // a shareable URL for the file, or null if not publicly viewable
+  interface ToolContracts {
+    url_for_resource: ToolContract<{ url: string | null }, { namespace: string; name: string }>;  // a shareable URL for the file, or null if not publicly viewable
   }
 }
 import { watchPlugins }                      from '@matatbread/matbot-core';

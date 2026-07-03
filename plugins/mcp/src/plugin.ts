@@ -1,12 +1,12 @@
-import type { Tool, ToolEvent, ToolResult, ToolResultOf, ToolContext, MatbotPluginSpec, MatbotMachine, PluginSettings } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolEvent, ToolContract, ToolResultOf, ToolContext, MatbotPluginSpec, MatbotMachine, PluginSettings } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
+  interface ToolContracts {
     mcp_action:
-      | ToolResult<{ message: string; tools: string[]; instructions?: string }, { action: 'add'    }>
-      | ToolResult<{ servers: unknown[] },                                       { action: 'list'   }>
-      | ToolResult<{ message: string },                                          { action: 'remove' }>;
+      | ToolContract<{ message: string; tools: string[]; instructions?: string }, { action: 'add'; name: string; type: 'local'; command: string; args?: string[]; env?: Record<string, string>; proxyToolName?: string } | { action: 'add'; name: string; type: 'remote'; endpoint: string; headers?: Record<string, string>; proxyToolName?: string }>
+      | ToolContract<{ servers: unknown[] },                                       { action: 'list' }>
+      | ToolContract<{ message: string },                                          { action: 'remove'; name: string }>;
   }
 }
 import type { MCPClient, MCPToolDef, MCPRemoteConfig } from '@matatbread/matbot-mcp-http';
@@ -50,13 +50,13 @@ export function createMCPPlugin(): MatbotPluginSpec {
       config, client, tools,
       ...(client.instructions !== undefined ? { instructions: client.instructions } : {}),
     });
-    for (const t of tools) registry!.register(makeProxyTool(config.name, t, resolveLocalClient));
+    for (const t of tools) registry!.register(makeProxyTool(config.name, t, resolveLocalClient, config.proxyToolName));
     return tools;
   }
 
   type McpAction =
-    | { action: 'add'; name: string; type: 'local';  command: string; args?: string[]; env?: Record<string, string> }
-    | { action: 'add'; name: string; type: 'remote'; endpoint: string; headers?: Record<string, string> }
+    | { action: 'add'; name: string; type: 'local';  command: string; args?: string[]; env?: Record<string, string>; proxyToolName?: string }
+    | { action: 'add'; name: string; type: 'remote'; endpoint: string; headers?: Record<string, string>; proxyToolName?: string }
     | { action: 'list' }
     | { action: 'remove'; name: string };
 
@@ -70,7 +70,7 @@ export function createMCPPlugin(): MatbotPluginSpec {
       if (!raw.endpoint) { yield { type: 'error', message: 'Remote MCP servers require an "endpoint".' }; return; }
       yield { type: 'stdout', chunk: `Connecting to remote MCP server "${raw.name}"...\n` };
       try {
-        const r = await remote!.add({ name: raw.name, endpoint: raw.endpoint, ...(raw.headers !== undefined ? { headers: raw.headers } : {}) });
+        const r = await remote!.add({ name: raw.name, endpoint: raw.endpoint, ...(raw.headers !== undefined ? { headers: raw.headers } : {}), ...(raw.proxyToolName !== undefined ? { proxyToolName: raw.proxyToolName } : {}) });
         yield { type: 'result', value: { message: `Connected. ${r.tools.length} tool(s) registered.`, tools: r.tools, ...(r.instructions !== undefined ? { instructions: r.instructions } : {}) } };
       } catch (e) { yield { type: 'error', message: `Failed to connect to "${raw.name}": ${String(e)}` }; }
       return;
@@ -81,6 +81,7 @@ export function createMCPPlugin(): MatbotPluginSpec {
       type: 'local', name: raw.name, command: raw.command,
       ...(raw.args !== undefined ? { args: raw.args } : {}),
       ...(raw.env  !== undefined ? { env:  raw.env  } : {}),
+      ...(raw.proxyToolName !== undefined ? { proxyToolName: raw.proxyToolName } : {}),
     };
     yield { type: 'stdout', chunk: `Spawning local MCP server "${raw.name}"...\n` };
     let tools: MCPToolDef[];
@@ -94,7 +95,7 @@ export function createMCPPlugin(): MatbotPluginSpec {
     const instructions = localActive.get(raw.name)?.instructions;
     yield { type: 'result', value: {
       message: `Connected. ${tools.length} tool(s) registered.`,
-      tools: tools.map(t => proxyToolName(raw.name, t.name)),
+      tools: tools.map(t => proxyToolName(raw.name, t.name, config.proxyToolName)),
       ...(instructions !== undefined ? { instructions } : {}),
     } };
   }
@@ -104,7 +105,7 @@ export function createMCPPlugin(): MatbotPluginSpec {
       yield {
         name: s.config.name, type: 'local', command: s.config.command,
         ...(s.instructions !== undefined ? { instructions: s.instructions } : {}),
-        tools: s.tools.map(t => ({ toolName: proxyToolName(s.config.name, t.name), description: t.description ?? '' })),
+        tools: s.tools.map(t => ({ toolName: proxyToolName(s.config.name, t.name, s.config.proxyToolName), description: t.description ?? '' })),
       };
     }
   }
@@ -129,7 +130,7 @@ export function createMCPPlugin(): MatbotPluginSpec {
     const server = localActive.get(name);
     if (server) {
       server.client.close();
-      for (const t of server.tools) registry!.remove(proxyToolName(name, t.name));
+      for (const t of server.tools) registry!.remove(proxyToolName(name, t.name, server.config.proxyToolName));
       localActive.delete(name);
     }
     if (persisted) { persisted.servers = persisted.servers.filter(s => s.name !== name); await settings!.set('servers', persisted); }
@@ -139,8 +140,9 @@ export function createMCPPlugin(): MatbotPluginSpec {
   const mcpActionTool: Tool<ToolResultOf<'mcp_action'>> = {
     name: 'mcp_action',
     description: `Manage MCP (Model Context Protocol) server connections. An MCP server exposes a set
-of tools over a transport; once connected, each is registered under \`mcp__<server>__<tool>\` and is
-callable for the rest of the session.
+of tools over a transport; once connected, each is registered under \`mcp__<server>__<tool>\` (the
+\`mcp__<server>__\` prefix is overridable per server via \`proxyToolName\`) and is callable for the
+rest of the session.
 
 Two transport types:
 - **local** — spawns a process on this machine speaking JSON-RPC over stdio
@@ -150,14 +152,7 @@ Two transport types:
 ACTIONS
   add    — Connect a server and register its tools (validated before saving).
   list   — Show connected servers, their tools, and any server instructions.
-  remove — Disconnect a server and forget it; its proxy tools are unregistered.
-
-SHAPE  (TypeScript)
-  type McpAction =
-    | { action: 'add'; name: string; type: 'local';  command: string; args?: string[]; env?: Record<string,string> }
-    | { action: 'add'; name: string; type: 'remote'; endpoint: string; headers?: Record<string,string> }
-    | { action: 'list' }
-    | { action: 'remove'; name: string };`,
+  remove — Disconnect a server and forget it; its proxy tools are unregistered.`,
     inputSchema: {
       type: 'object',
       required: ['action'],
@@ -170,6 +165,7 @@ SHAPE  (TypeScript)
         env:      { type: 'object', additionalProperties: { type: 'string' }, description: 'add, local only: environment variables for the server process.' },
         endpoint: { type: 'string', description: 'add, remote only: the MCP HTTP endpoint URL.' },
         headers:  { type: 'object', additionalProperties: { type: 'string' }, description: 'add, remote only: HTTP headers, e.g. {"Authorization":"Bearer …"}.' },
+        proxyToolName: { type: 'string', description: 'add only: prefix for this server\'s tool names, replacing the default "mcp__<name>__". Persisted; reconnects keep it.' },
       },
     },
     executor: {
@@ -215,7 +211,7 @@ SHAPE  (TypeScript)
           try {
             if (config.type === 'remote') {
               if (!remote.has(config.name)) {
-                await remote.add({ name: config.name, endpoint: config.endpoint, ...(config.headers !== undefined ? { headers: config.headers } : {}) });
+                await remote.add({ name: config.name, endpoint: config.endpoint, ...(config.headers !== undefined ? { headers: config.headers } : {}), ...(config.proxyToolName !== undefined ? { proxyToolName: config.proxyToolName } : {}) });
               }
             } else {
               await connectLocal(config);

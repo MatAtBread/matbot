@@ -36,16 +36,17 @@ export class RemoteMcpManager implements McpRemoteService {
       ...(client.instructions !== undefined ? { instructions: client.instructions } : {}),
     });
     for (const toolDef of tools) {
-      this.services.tools.register(makeProxyTool(config.name, toolDef, this.resolveClient));
+      this.services.tools.register(makeProxyTool(config.name, toolDef, this.resolveClient, config.proxyToolName));
     }
     return tools;
   }
 
-  async add(input: { name: string; endpoint: string; headers?: Record<string, string> }): Promise<{ tools: string[]; instructions?: string }> {
+  async add(input: { name: string; endpoint: string; headers?: Record<string, string>; proxyToolName?: string }): Promise<{ tools: string[]; instructions?: string }> {
     if (this.active.has(input.name)) throw new Error(`An MCP server named "${input.name}" is already connected.`);
     const config: MCPRemoteConfig = {
       type: 'remote', name: input.name, endpoint: input.endpoint,
       ...(input.headers !== undefined ? { headers: input.headers } : {}),
+      ...(input.proxyToolName !== undefined ? { proxyToolName: input.proxyToolName } : {}),
     };
     const tools = await this.connect(config);
 
@@ -55,7 +56,7 @@ export class RemoteMcpManager implements McpRemoteService {
 
     const instructions = this.active.get(input.name)?.instructions;
     return {
-      tools: tools.map(t => proxyToolName(input.name, t.name)),
+      tools: tools.map(t => proxyToolName(input.name, t.name, config.proxyToolName)),
       ...(instructions !== undefined ? { instructions } : {}),
     };
   }
@@ -65,7 +66,7 @@ export class RemoteMcpManager implements McpRemoteService {
       name:     s.config.name,
       endpoint: s.config.endpoint,
       ...(s.instructions !== undefined ? { instructions: s.instructions } : {}),
-      tools:    s.tools.map(t => ({ toolName: proxyToolName(s.config.name, t.name), description: t.description ?? '' })),
+      tools:    s.tools.map(t => ({ toolName: proxyToolName(s.config.name, t.name, s.config.proxyToolName), description: t.description ?? '' })),
     }));
   }
 
@@ -79,7 +80,7 @@ export class RemoteMcpManager implements McpRemoteService {
 
     if (server) {
       server.client.close();
-      for (const toolDef of server.tools) this.services.tools.remove(proxyToolName(name, toolDef.name));
+      for (const toolDef of server.tools) this.services.tools.remove(proxyToolName(name, toolDef.name, server.config.proxyToolName));
       this.active.delete(name);
     }
     if (persisted) {

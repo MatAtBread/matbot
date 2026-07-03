@@ -27,7 +27,7 @@
  *     about why dream-time did what it did", which is exactly what this whole exercise was for.
  */
 
-import type { MatbotMachine, Tool, ToolExecutor, ToolResultOf, ToolContext } from '@matatbread/matbot-plugin-api';
+import type { MatbotMachine, Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext } from '@matatbread/matbot-plugin-api';
 import { runOnce } from './runOnce.js';
 import { createLlmRanker } from './llmRanker.js';
 import { createLlmMerger } from './llmMerger.js';
@@ -35,8 +35,8 @@ import type { DreamRun } from './types.js';
 import { DREAM_RANKER_PROVIDER_KEY, DREAM_MERGER_PROVIDER_KEY } from '../inner-voice/tool.js';
 
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
-    dream_time: DreamRun;
+  interface ToolContracts {
+    dream_time: ToolContract<DreamRun, Record<string, never>>;
   }
 }
 

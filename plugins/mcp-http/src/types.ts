@@ -3,6 +3,8 @@ export interface MCPRemoteConfig {
   name:     string;
   endpoint: string;
   headers?: Record<string, string>;
+  /** Prefix for this server's proxy-tool names. Default `mcp__<name>__`; persisted so reconnects keep the same names. */
+  proxyToolName?: string;
   /**
    * MCP-Protocol-Version header policy for this endpoint, resolved automatically on first connect and
    * recorded so later reconnects skip the probe: a version string to send (the version the server
@@ -55,7 +57,7 @@ export interface MCPRemoteServerInfo {
  */
 export interface McpRemoteService {
   /** Connect a remote MCP server, register its proxy tools, and persist it. */
-  add(config: { name: string; endpoint: string; headers?: Record<string, string> }): Promise<{ tools: string[]; instructions?: string }>;
+  add(config: { name: string; endpoint: string; headers?: Record<string, string>; proxyToolName?: string }): Promise<{ tools: string[]; instructions?: string }>;
   /** Connected remote servers (for `list`). */
   list(): MCPRemoteServerInfo[];
   /** Whether `name` is a remote server this service manages. */

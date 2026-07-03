@@ -1,4 +1,4 @@
-import type { Tool, ToolExecutor, ToolResult, ToolResultOf, ToolContext, MatbotPlugin, FormField, Runtime, PluginSource } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext, MatbotPlugin, FormField, Runtime, PluginSource } from '@matatbread/matbot-plugin-api';
 import { CONFIRM_YES, CONFIRM_NO, isIncompatibleRuntimeError, isNotAPluginError } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins, getRegisteredTools, getRegisteredFrontendPlugins,
          getRegisteredServiceKeys, getHookPlugins, getSystemContextPlugins,
@@ -98,9 +98,9 @@ interface DiscoveredPlugin {
 interface ToolSummary { name: string; description: string }
 
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
+  interface ToolContracts {
     plugin:
-      | ToolResult<{
+      | ToolContract<{
           loaded: Array<{
             name:           string;
             apiVersion:     string;
@@ -114,11 +114,11 @@ declare module '@matatbread/matbot-plugin-api' {
           configured:   string[];
           builtinTools?: ToolSummary[] | undefined;
         }, { action: 'list' }>
-      | ToolResult<Array<DiscoveredPlugin & { configuredVia: 'plugins' | 'providers' | null }>, { action: 'discover_local' }>
-      | ToolResult<{ message: string; installationMessage?: string }, { action: 'add'       }>
-      | ToolResult<{ message: string; installationMessage?: string }, { action: 'remove'    }>
-      | ToolResult<{ message: string; installationMessage?: string }, { action: 'reload'    }>
-      | ToolResult<{ message: string; installationMessage?: string }, { action: 'store-key' }>;
+      | ToolContract<Array<DiscoveredPlugin & { configuredVia: 'plugins' | 'providers' | null }>, { action: 'discover_local' }>
+      | ToolContract<{ message: string; installationMessage?: string }, { action: 'add';       specifier: string }>
+      | ToolContract<{ message: string; installationMessage?: string }, { action: 'remove';    specifier: string }>
+      | ToolContract<{ message: string; installationMessage?: string }, { action: 'reload';    specifier: string; refresh?: boolean }>
+      | ToolContract<{ message: string; installationMessage?: string }, { action: 'store-key'; key: string }>;
   }
 }
 
@@ -776,17 +776,6 @@ export const pluginTool: Tool<ToolResultOf<'plugin'>> = {
     'frontends to the running process. List or discover them, install or remove one, reload one ' +
     'to pick up code changes without restarting, or supply a secret a plugin or provider ' +
     'reported missing.\n\n' +
-    'Parameters depend on `action` (TypeScript):\n' +
-    '```ts\n' +
-    'type PluginAction =\n' +
-    "  | { action: 'list' }                            // configured + loaded plugins, with types, tools, and matbotRuntime\n" +
-    "  | { action: 'discover_local' }                  // scan plugins + the .plugins cache; each result carries source {type: local|github|cdn, uri} + matbotRuntime\n" +
-    "  | { action: 'add';        specifier: string }   // install & activate (specifier = a Specifier, below)\n" +
-    "  | { action: 'remove';     specifier: string }   // deactivate & remove (specifier = package name, preferred — or its matbot.yaml entry)\n" +
-    "  | { action: 'reload';     specifier: string; refresh?: boolean }   // re-import without restarting (specifier = package name, preferred — or its matbot.yaml entry).\n" +
-    "      // refresh (default true) re-downloads a remote (github/http) plugin's latest upstream source; pass false to re-run against the cached copy (reset state / offline). No effect on local/npm plugins.\n" +
-    "  | { action: 'store-key';  key: string };        // store a secret a plugin/provider needs; value entered out-of-band\n" +
-    '```\n\n' +
     'A `specifier` (for add/remove/reload) is EXACTLY ONE of these forms — pass a concrete string, ' +
     'not a fuzzy name (run `discover_local` first to find the exact specifier). If the user gives you a ' +
     'specifier, pass it through VERBATIM — never reformat it (especially a github: one):\n' +

@@ -1,6 +1,6 @@
 import type TS from 'typescript';
 
-// Derive a self-contained `declare module … { interface ToolResults {…} interface MatbotServices {…} }`
+// Derive a self-contained `declare module … { interface ToolContracts {…} interface MatbotServices {…} }`
 // from the live type graph, so a compiled (or hand-rolled) plugin's compilation sees correct types for
 // the tools it can call (`toolResult`) AND the registry services on its `MatbotMachine` (`services.X`) —
 // the practical goal being that the codegen/typecheck loop gets the earliest possible warning that
@@ -31,6 +31,14 @@ export interface MatbotToolsDts {
   dts:      string;
   tools:    { emitted: string[]; unknown: string[] };
   services: { emitted: string[]; unknown: string[] };
+  // Per source-scanned tool: its wire contract — the flattened `params`/`result` union text, extracted
+  // from the `ToolContracts` arms. The single authored contract (the arms) is thus also the source of the
+  // wire description, so a source tool's `ToolContracts` augmentation is its single contract.
+  contracts: Record<string, { params: string; result: string }>;
+  // The names of every plugin-api type export. A source-less tool's `toolContract` string may name one
+  // (e.g. `StoreQuery`); the consumer (ToolTypeIndex) uses this to import the ones it references so those
+  // references resolve rather than dangle.
+  apiExports: string[];
 }
 
 type Classification =
@@ -73,11 +81,18 @@ export async function buildMatbotToolsDts(projectRoot: string, pluginEntryUrls?:
   };
   for (const u of pluginEntryUrls ?? []) { const p = toSource(u); if (p) roots.add(p); }
 
-  // Fallback: glob the monorepo `plugins/` tree for augmenting files. `skills_compiler` is skipped (its
-  // loose-discovery `MatbotServices.SkillManager` slice would shadow the real interface); generated
-  // `matbot-tools.d.ts` files too (don't feed prior output back in).
-  if (roots.size === 1 && existsSync(join(projectRoot, 'plugins'))) {
-    const SKIP = new Set(['node_modules', 'dist', '.git', 'compiled-plugins', 'skills_compiler']);
+  // UNION with a glob of the monorepo `plugins/` tree (not a fallback): the resolvedUrl roots above cover
+  // every *loaded* plugin (builtin, compiled, installed), but miss monorepo source that isn't loaded as a
+  // plugin with a resolvedUrl — notably the app-embedded `plugin`/`provider` builtins in `plugins/tool-plugin/`,
+  // which the host constructs directly. The glob catches those. In a real deployment there is no `plugins/`
+  // tree, so this no-ops and the scan is purely resolvedUrl-driven. Dedup is by path (a Set of roots).
+  // Generated `matbot-tools.d.ts` files are skipped (don't feed prior output back in). `skills_compiler` IS
+  // scanned — it declares its own `skill_compiler` ToolContracts arm, which must be seen; its loose
+  // `MatbotServices.SkillManager` slice is a harmless duplicate of the real one (the skills package is
+  // walked first, so its full declaration wins the emit; and `services.SkillManager` isn't referenced by
+  // generated/compiled plugin code anyway).
+  if (existsSync(join(projectRoot, 'plugins'))) {
+    const SKIP = new Set(['node_modules', 'dist', '.git', 'compiled-plugins']);
     const walk = (dir: string): void => {
       let entries: string[];
       try { entries = readdirSync(dir); } catch { return; }
@@ -89,7 +104,7 @@ export async function buildMatbotToolsDts(projectRoot: string, pluginEntryUrls?:
         if (isDir) { walk(p); continue; }
         if (!name.endsWith('.ts') || name.endsWith('matbot-tools.d.ts')) continue;
         const src = readFileSync(p, 'utf8');
-        if (/declare\s+module\s+['"]@matatbread\/matbot-plugin-api['"]/.test(src) && /\binterface\s+(?:ToolResults|MatbotServices)\b/.test(src)) roots.add(p);
+        if (/declare\s+module\s+['"]@matatbread\/matbot-plugin-api['"]/.test(src) && /\binterface\s+(?:ToolContracts|MatbotServices)\b/.test(src)) roots.add(p);
       }
     };
     walk(join(projectRoot, 'plugins'));
@@ -225,7 +240,7 @@ export async function buildMatbotToolsDts(projectRoot: string, pluginEntryUrls?:
   };
 
   // Emit one augmentable interface's plugin-contributed members. `onlyAugmented` skips base members
-  // already visible via plugin-api (no-op for ToolResults).
+  // already visible via plugin-api (no-op for ToolContracts).
   const emitInterface = (interfaceName: string, onlyAugmented: boolean): { lines: string[]; emitted: string[]; unknown: string[] } => {
     const sym = findCanonicalSymbol(interfaceName);
     const lines: string[] = [], emitted: string[] = [], unknownNames: string[] = [];
@@ -258,8 +273,33 @@ export async function buildMatbotToolsDts(projectRoot: string, pluginEntryUrls?:
     return { lines, emitted, unknown: unknownNames };
   };
 
-  const tools    = emitInterface('ToolResults',    false);
+  const tools    = emitInterface('ToolContracts',    false);
   const services = emitInterface('MatbotServices', true);
+
+  // Per-tool wire contract: flatten each `ToolContracts` arm to its `params`/`result` union source text.
+  // Only pure `ToolContract<R, P>`-arm entries yield one (a bare/plain entry is skipped — it keeps whatever
+  // the tool authored). This is the flat params/result union the wire description needs, from the arms.
+  const extractArms = (ann: TS.TypeNode): { params: string; result: string } | undefined => {
+    const arms = ts.isUnionTypeNode(ann) ? [...ann.types] : [ann];
+    const params: string[] = [], results: string[] = [];
+    for (const a of arms) {
+      if (!ts.isTypeReferenceNode(a) || a.typeName.getText() !== 'ToolContract' || a.typeArguments?.length !== 2) return undefined;
+      results.push(a.typeArguments[0]!.getText());
+      params.push(a.typeArguments[1]!.getText());
+    }
+    return { result: results.join(' | '), params: params.join(' | ') };
+  };
+  const contracts: Record<string, { params: string; result: string }> = {};
+  const toolContractsSym = findCanonicalSymbol('ToolContracts');
+  if (toolContractsSym) {
+    for (const prop of checker.getPropertiesOfType(checker.getDeclaredTypeOfSymbol(toolContractsSym))) {
+      const decl = (prop.declarations ?? []).find(d => ts.isPropertySignature(d));
+      const ann  = decl && ts.isPropertySignature(decl) ? decl.type : undefined;
+      if (!ann) continue;
+      const c = extractArms(ann);
+      if (c) contracts[prop.name] = c;
+    }
+  }
 
   const block = (name: string, lines: string[]): string =>
     lines.length ? `  interface ${name} {\n${lines.join('\n')}\n  }\n` : '';
@@ -268,11 +308,13 @@ export async function buildMatbotToolsDts(projectRoot: string, pluginEntryUrls?:
   const bundleBlock = bundledDecls.size ? `${[...bundledDecls.values()].join('\n\n')}\n\n` : '';
   const dts = `import '@matatbread/matbot-plugin-api';
 ${importLine}${bundleBlock}declare module '@matatbread/matbot-plugin-api' {
-${block('ToolResults', tools.lines)}${block('MatbotServices', services.lines)}}
+${block('ToolContracts', tools.lines)}${block('MatbotServices', services.lines)}}
 `;
   return {
     dts,
     tools:    { emitted: tools.emitted,    unknown: tools.unknown },
     services: { emitted: services.emitted, unknown: services.unknown },
+    contracts,
+    apiExports: [...apiTypeNames],
   };
 }

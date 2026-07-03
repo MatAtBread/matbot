@@ -1,15 +1,15 @@
-import type { Tool, ToolResult, ToolResultOf, ToolContext, Session, Store } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolContract, ToolResultOf, ToolContext, Session, Store } from '@matatbread/matbot-plugin-api';
 import { lastActivityAt } from '@matatbread/matbot-plugin-api';
 
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
+  interface ToolContracts {
     // One arm per action: a caller of `invokeTool(machine, 'session_action', { action: '…' })` gets the
-    // matching result narrowed by the `action` it passed (see ToolResult / the multi-action note on ToolResults).
+    // matching result narrowed by the `action` it passed (see ToolContract / the multi-action note on ToolContracts).
     session_action:
-      | ToolResult<Array<{ id: string; title: string | undefined; preview: string; updatedAt: string }>, { action: 'list'   }>
-      | ToolResult<Session,                          { action: 'get'    }>
-      | ToolResult<{ id: string; title: string },    { action: 'rename' }>
-      | ToolResult<{ id: string; status: 'archived' }, { action: 'hide'  }>;
+      | ToolContract<Array<{ id: string; title: string | undefined; preview: string; updatedAt: string }>, { action: 'list'; includeArchived?: boolean }>
+      | ToolContract<Session,                          { action: 'get'; sessionId: string }>
+      | ToolContract<{ id: string; title: string },    { action: 'rename'; sessionId: string; title: string }>
+      | ToolContract<{ id: string; status: 'archived' }, { action: 'hide'; sessionId: string }>;
   }
 }
 
@@ -41,15 +41,7 @@ function makeSessionActionTool(store: Store<Session>): Tool<ToolResultOf<'sessio
       'Manage conversation sessions. A session is a stored conversation — an chronological list of ' +
       'messages identified by a unique ID, with a title and a status (active or archived). This ' +
       'tool covers the lifecycle: list sessions, fetch one in full, rename one, or hide (archive) ' +
-      'one.\n\n' +
-      'Parameters depend on `action` (TypeScript):\n' +
-      '```ts\n' +
-      'type SessionAction =\n' +
-      "  | { action: 'list';   includeArchived?: boolean }          // -> [{ id, title, preview, updatedAt }]\n" +
-      "  | { action: 'get';    sessionId: string }                  // -> the full session\n" +
-      "  | { action: 'rename'; sessionId: string; title: string }   // -> { id, title }\n" +
-      "  | { action: 'hide';   sessionId: string };                 // -> { id, status: 'archived' }\n" +
-      '```',
+      'one.',
     inputSchema: {
       type:       'object',
       required:   ['action'],

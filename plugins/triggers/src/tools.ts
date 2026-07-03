@@ -1,24 +1,24 @@
-import type { Tool, ToolExecutor, ToolResult, ToolResultOf, ToolContext, MatbotMachine } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext, MatbotMachine } from '@matatbread/matbot-plugin-api';
 import type { TriggerManager } from './manager.js';
 import type { TriggerCondition, TriggerKind, Trigger } from './types.js';
 
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
+  interface ToolContracts {
     // One arm per action: a caller of `invokeTool(machine, 'trigger_action', { action: '…' })` gets the
-    // matching result narrowed by the `action` it passed (see ToolResult / the multi-action note on ToolResults).
+    // matching result narrowed by the `action` it passed (see ToolContract / the multi-action note on ToolContracts).
     trigger_action:
-      | ToolResult<{ triggers: Trigger[] }, { action: 'list'   }>
-      | ToolResult<{ triggers: Trigger[] }, { action: 'query'  }>
-      | ToolResult<Trigger,                 { action: 'get'    }>
-      | ToolResult<{ id: string },          { action: 'add'    }>
-      | ToolResult<Trigger,                 { action: 'update' }>
-      | ToolResult<{ id: string },          { action: 'remove' }>
-      | ToolResult<{ triggers: Trigger[] }, { action: 'move'   }>
-      | ToolResult<{ triggers: Trigger[] }, { action: 'copy'   }>;
+      | ToolContract<{ triggers: Trigger[] }, { action: 'list' }>
+      | ToolContract<{ triggers: Trigger[] }, { action: 'query'; tool?: string; params?: object }>
+      | ToolContract<Trigger,                 { action: 'get'; id: string }>
+      | ToolContract<{ id: string },          { action: 'add'; conditions: TriggerCondition[]; tool: string; params?: object; enabled?: boolean }>
+      | ToolContract<Trigger,                 { action: 'update'; id: string; conditions?: TriggerCondition[]; tool?: string; params?: object; enabled?: boolean }>
+      | ToolContract<{ id: string },          { action: 'remove'; id: string }>
+      | ToolContract<{ triggers: Trigger[] }, { action: 'move'; tool?: string; params?: object; toTool: string; toParams?: object }>
+      | ToolContract<{ triggers: Trigger[] }, { action: 'copy'; tool?: string; params?: object; toTool: string; toParams?: object }>;
     triggers_config:
-      | ToolResult<{ classifierProvider: string | null; available: string[] }, { action: 'get'   }>
-      | ToolResult<{ classifierProvider: string },                             { action: 'set'   }>
-      | ToolResult<{ classifierProvider: null },                               { action: 'clear' }>;
+      | ToolContract<{ classifierProvider: string | null; available: string[] }, { action: 'get' }>
+      | ToolContract<{ classifierProvider: string },                             { action: 'set'; provider: string }>
+      | ToolContract<{ classifierProvider: null },                               { action: 'clear' }>;
   }
 }
 
@@ -192,20 +192,6 @@ export function createTriggerActionTool(manager: TriggerManager): Tool<ToolResul
       GUIDANCE + '\n\n' +
       'A trigger has a stable `id` — address it by that, never by its conditions. To change one, ' +
       '"get" or "list" first to read the id, then "update" by id.\n\n' +
-      'Parameters depend on `action` (TypeScript):\n' +
-      '```ts\n' +
-      "type TriggerKind = 'ephemeral' | 'contextual' | 'retract' | 'followup';  // ephemeral=judge user msg+inject for this turn; contextual=judge user msg+fold durably onto it; retract=wrong, redo; followup=stands, add steer turn\n" +
-      'type TriggerCondition = { kind: TriggerKind; rule: string };\n' +
-      'type TriggerAction =\n' +
-      "  | { action: 'list' }                                                              // -> { triggers: [...] }\n" +
-      "  | { action: 'query';  tool?: string; params?: object }                            // triggers invoking that tool -> { triggers: [...] }\n" +
-      "  | { action: 'get';    id: string }                                                // -> the trigger\n" +
-      "  | { action: 'add';    conditions: TriggerCondition[]; tool: string; params?: object; enabled?: boolean }  // -> { id }\n" +
-      "  | { action: 'update'; id: string; conditions?: TriggerCondition[]; tool?: string; params?: object; enabled?: boolean }  // edit by id\n" +
-      "  | { action: 'remove'; id: string }                                                // -> { id }\n" +
-      "  | { action: 'move';   tool?: string; params?: object; toTool: string; toParams?: object }   // re-target the queried set's invoke to toTool/toParams in place -> { triggers: [...] }\n" +
-      "  | { action: 'copy';   tool?: string; params?: object; toTool: string; toParams?: object };  // duplicate the queried set, the copies invoking toTool/toParams -> { triggers: [...] }\n" +
-      '```\n\n' +
       'For `move`/`copy`, `tool`/`params` are the SAME selector as `query` (they pick which triggers ' +
       'to act on); `toTool`/`toParams` are the new invocation. A filter is required — both refuse to ' +
       'act on the entire trigger set.',
@@ -275,14 +261,7 @@ export function createTriggersConfigTool(services: MatbotMachine): Tool<ToolResu
       'provider judges trigger conditions. It is an alias for an existing provider, not a new one. Unset, ' +
       "the classifier uses the current turn's own provider; set it to pin a small/fast model. `get` " +
       'reports the current pin and the available provider names; `set` pins one (it must already be ' +
-      'configured — see the provider tool); `clear` reverts to the turn provider.\n\n' +
-      'Parameters (TypeScript):\n' +
-      '```ts\n' +
-      "type TriggersConfig =\n" +
-      "  | { action: 'get' }                       // -> { classifierProvider: string | null, available }\n" +
-      "  | { action: 'set'; provider: string }     // pin a provider -> { classifierProvider }\n" +
-      "  | { action: 'clear' };                     // revert to the turn provider -> { classifierProvider: null }\n" +
-      '```',
+      'configured — see the provider tool); `clear` reverts to the turn provider.',
     inputSchema: {
       type:       'object',
       required:   ['action'],

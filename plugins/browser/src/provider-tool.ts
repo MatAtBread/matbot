@@ -1,4 +1,4 @@
-import type { Tool, ToolExecutor, ToolResult, ToolResultOf, ToolContext } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext } from '@matatbread/matbot-plugin-api';
 
 /** An adapter type the provider tool / startup wizard can offer (baked from the build's providerModules). */
 export interface AvailableProvider {
@@ -24,11 +24,11 @@ export interface ProviderDraft {
 }
 
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
+  interface ToolContracts {
     provider:
-      | ToolResult<{ providers: ProviderRow[]; adapters: AvailableProvider[] }, { action: 'list'   }>
-      | ToolResult<{ message: string }, { action: 'add'    }>
-      | ToolResult<{ message: string }, { action: 'remove' }>;
+      | ToolContract<{ providers: ProviderRow[]; adapters: AvailableProvider[] }, { action: 'list' }>
+      | ToolContract<{ message: string }, { action: 'add'; name: string; adapter: string; endpoint?: string; model?: string; parameters?: Record<string, unknown> }>
+      | ToolContract<{ message: string }, { action: 'remove'; name: string }>;
   }
 }
 
@@ -174,14 +174,6 @@ export function createBrowserProviderTool(admin: ProviderAdmin): Tool<ToolResult
       'them and the tool will not prompt for a key either. `remove` refuses to delete the only ' +
       'configured profile or the one powering the current turn — add a replacement first or switch ' +
       'providers.\n\n' +
-      'Parameters depend on `action` (TypeScript):\n' +
-      '```ts\n' +
-      'type ProviderAction =\n' +
-      "  | { action: 'list' }                                                          // profiles + available adapters\n" +
-      "  | { action: 'add'; name: string; adapter: string; endpoint?: string; model?: string;\n" +
-      '      parameters?: object }   // endpoint/model required unless the adapter is selfContained; key requested separately\n' +
-      "  | { action: 'remove'; name: string };\n" +
-      '```\n\n' +
       'PARAMETERS  (pass as the `parameters` object on add)\n' +
       '  maxTokens   — integer, maximum output tokens\n' +
       '  temperature — float 0.0–1.0\n' +

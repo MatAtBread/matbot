@@ -1,10 +1,10 @@
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
-import type { MatbotPluginSpec, MatbotMachine, ToolExecutor, ToolContext, ToolResultOf } from '@matatbread/matbot-plugin-api';
+import type { MatbotPluginSpec, MatbotMachine, ToolExecutor, ToolContext, ToolContract, ToolResultOf } from '@matatbread/matbot-plugin-api';
 
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
-    find_fact: string[] | null;                            // the matching facts, or null if none found
-    contextual_search: { name: string; content: string };  // a whole knowledge document to read
+  interface ToolContracts {
+    find_fact:         ToolContract<string[] | null,            { question: string; terms: { term: string; context?: string }[]; provider?: string }>;  // matching facts, or null
+    contextual_search: ToolContract<{ name: string; content: string }, { terms: { term: string; context?: string }[] }>;                                // a whole knowledge document to read
   }
 }
 

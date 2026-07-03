@@ -1,10 +1,10 @@
-import type { Tool, ToolExecutor, ToolResultOf, ToolContext, MatbotPluginSpec, FormField } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext, MatbotPluginSpec, FormField } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
+  interface ToolContracts {
     // `answer` is the user's reply: the typed text, the chosen option, or "Yes"/"No" for a confirm.
-    ask_user: { name: string; answer: string };
+    ask_user: ToolContract<{ name: string; answer: string }, { name: string; label: string; type: 'text' | 'password' | 'select' | 'confirm'; options?: string[]; allowOther?: boolean; default?: string; required?: boolean; cancelable?: boolean }>;
   }
 }
 

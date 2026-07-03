@@ -13,6 +13,16 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Breaking changes
 
+- **`MatbotRuntime` gains a required `TypeScriptStripper` member.** Type-stripping is now a first-class,
+  always-present host capability rather than something each consumer reinvents: `services.TypeScriptStripper
+  .strip(source)` erases TypeScript types from a source string and returns runnable JS (may be async). It is
+  provided per platform by the host — `apps/cli` wires node's built-in `stripTypeScriptTypes` (erasable-only),
+  `apps/web-bundle` lazy-loads sucrase on first use — and is *not* a registry/swap key (it lives on the fixed
+  runtime, not `MatbotServices`). Impact: anyone who *constructs* a `MatbotMachine` (a custom host or test
+  harness) must now supply a `TypeScriptStripper`; a plugin that merely reads services is unaffected. Consumers
+  that compile source at runtime should call `services.TypeScriptStripper` instead of importing a
+  platform-specific stripper (this is what makes `function-tools` cross-platform with no stripper of its own).
+
 - **`MatbotRuntime.providers` is now a `ProviderRegistry`, not a `ReadonlyMap`.** *Reading is
   source-compatible* — `ProviderRegistry extends ReadonlyMap<string, ProviderConfig>`, so every existing
   consumer (`services.providers.get`/`has`/`keys`/`values`/iteration) is untouched; a plugin that only
@@ -48,6 +58,52 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### API gaps filled
 
+- **`Tool.toolContract` — the call contract as TypeScript text, for tools with no scannable source.** A tool
+  whose name and/or shape are built at runtime (a `function-tools` function; the `tool-store` per-namespace
+  CRUD tool) can't carry a static `ToolContracts` augmentation, so it declares its contract as a single
+  `toolContract` string on the `Tool` — identical in shape to an augmentation arm (`'ToolContract<Result,
+  Args>'`, or a `|`-union of arms). `ToolTypeIndex` splices it into the generated dts's `ToolContracts` (bare
+  `ToolContract` rewritten to an inline `import(...)` for self-containment) and derives the wire text from it,
+  exactly as it does a source tool's arms. `function-tools` populates it from each defined function's
+  signature (`ToolContract<return, { …params }>`). A tool WITH source declares an augmentation instead and omits
+  this; a foreign tool (MCP proxy) with neither keeps only its loose `inputSchema`. The wire `params`/`result`
+  text is no longer authored on the `Tool` (the retired `paramsType`/`resultType`) nor rendered by a
+  `toolWireDescription` helper — it is derived from the one contract and folded into the tool description at
+  the dispatch edge (see below).
+
+- **`MatbotServices.ToolTypeIndex` (optional, node-only).** A new registerable service for typing what
+  tool calls resolve to: `dts()` returns a self-contained `.d.ts` of the loaded tools' result/service types —
+  the source-derived augmentations (from compiling each plugin's `declare module` block) merged with the
+  `toolContract` string a source-less tool declares on itself, read off the live registry, for tools
+  the source scan can't reach (a `function-tools` function; a name already covered by the source scan is
+  skipped so it isn't declared twice). The scan is driven off the **loaded plugins' `resolvedUrl`s** — the
+  real source each tool was loaded from, so builtin, compiled, and installed plugins are covered uniformly —
+  unioned with a monorepo `plugins/` glob that catches app-embedded builtins (`plugin`/`provider`) which are
+  constructed by the host and so carry no `resolvedUrl`; in a real deployment there is no `plugins/` tree, so
+  the scan is purely `resolvedUrl`-driven. `dts()` declares the
+  injected proxy as `declare const tool: ToolProxy` — the new `ToolProxy` mapped type turns each tool's
+  `ToolContracts` arms into call-signature **overloads**, so `await tool.name(params)` narrows its result by
+  the params passed. `check(snippet)` grades the snippet against exactly that `dts()` (what a generator is
+  shown ≡ what it is graded against), returning snippet-scoped diagnostics. `wireContracts()` returns each
+  source-scanned tool's flat `params`/`result` text flattened back from its arms. Lets tool-call code
+  generators/composers type — and verify — what `tool.x()` returns and how to call it instead of guessing.
+  Optional and absent where no TypeScript program can run (the browser today), so consumers must degrade.
+  Provided by the new `tool-types` plugin.
+
+- **The `ToolContracts` augmentation is the single contract source for every source tool; `paramsType`/
+  `resultType` are retired.** Each `ToolContract<Result, Params>` arm carries the **full** params for that
+  action (the discriminant lives *inside* the params, not as a separate pattern), so one authored declaration
+  drives everything: the executor binding (`ToolExecutor<ToolResultOf<'name'>>`), `invokeTool`/`toolResult`
+  narrowing (`ToolResultFor`), the overloaded `tool` proxy (`ToolProxy`, above), and the flat wire
+  `params`/`result` text — derived from the arms by `ToolTypeIndex.wireContracts()` and folded into the
+  outgoing tool descriptions at the turn's dispatch edge (`session-runner`, wired via the new optional
+  `SessionRunnerDeps.toolTypeIndex`). This holds for **single-action tools too**: each declares one arm
+  (`name: ToolContract<Result, Params>`), never a bare `name: Result` — the bare form yields no callable
+  `ToolProxy` signature. Tools with no scannable source carry a `toolContract` string instead (above); the
+  `Tool.paramsType`/`resultType` fields are gone entirely. Motivated by a model probe: an overloaded proxy
+  generates reliable tool-call code first-try across model tiers where the earlier single-signature/union
+  proxy was model-fragile and could even produce a silently-broken tool that still type-checked.
+
 - **Removing a vault secret.** `Vault.writeSecret(name, '')` now removes the key rather than storing an
   empty value — there is no meaningful empty secret, so the empty string is the removal signal (idempotent
   across `VaultImpl`, `EnvFileVault`, `WebCryptoVault`, `LocalStorageVault`, `DriveVault`). No new interface
@@ -80,20 +136,20 @@ churn and less likely to affect a consumer who doesn't use them.
   by `skills_compiler` to build a types program over the live plugin set. Optional (absent only on hosts
   that hand-construct `MatbotPlugin`); the `plugin` tool's `list` reports it.
 
-- **Typed tool results: `ToolResults` registry + `toolResult` reader.** A tool's result type is now
-  recoverable at the call site. `ToolResults` is an augmentable interface (same pattern as `MarkerData`)
+- **Typed tool results: `ToolContracts` registry + `toolResult` reader.** A tool's result type is now
+  recoverable at the call site. `ToolContracts` is an augmentable interface (same pattern as `MarkerData`)
   mapping a tool's `name` → the type of the `value` it yields; `invokeTool` is generic over the name, so
   `invokeTool(machine, 'find_fact', …)` is typed `AsyncIterable<ToolEvent<string[] | null>>`. The new
   `toolResult(events)` drains the stream to that typed `result` value (the structured counterpart to
   `toolText`, which collapses to a string). Unregistered tool names resolve to `unknown`, forcing the
-  caller to narrow. `ToolResults`, `ToolResultOf`, and `toolResult` are exported from
+  caller to narrow. `ToolContracts`, `ToolResultOf`, and `toolResult` are exported from
   `@matatbread/matbot-plugin-api`; `ask-user` and `rumsfeld` register their tools' result types.
 
 - **`ToolExecutor<R = unknown>` / `Tool<R = unknown>` carry the result type at the source.** The
   producer side is now typed too: `ToolExecutor.execute` returns `AsyncIterable<ToolEvent<R>>`, so a
   tool declares the type of the `value` it yields once, where it's written. Binding the executor to its
   registry entry — `ToolExecutor<ToolResultOf<'my_tool'>>` (or `Tool<ToolResultOf<'my_tool'>>` on the
-  tool object) — makes the `ToolResults` augmentation the single source of truth: the executor's yields
+  tool object) — makes the `ToolContracts` augmentation the single source of truth: the executor's yields
   and the registry entry can no longer silently drift, since the compiler checks the yields against it.
   The `unknown` default keeps every untyped executor compiling untouched, and covariance means a
   narrower `ToolExecutor<X>` still satisfies the heterogeneous `Tool[]` registry boundary. Most built-in
@@ -104,18 +160,18 @@ churn and less likely to affect a consumer who doesn't use them.
   / telegram tools); tools whose result is genuinely `unknown` (`http`, the MCP proxy, the runtime-named
   store tool) keep the default and remain unregistered, forcing the caller to narrow.
 
-- **Per-call result discrimination for multi-action tools (`ToolResult<Result, Args>`).** A multi-action
+- **Per-call result discrimination for multi-action tools (`ToolContract<Result, Args>`).** A multi-action
   tool is a weird overloaded function — it returns different shapes depending on its params. Its
-  `ToolResults` entry can now be a union of `ToolResult<Result, Args>` *arms*, each pairing a result with
+  `ToolContracts` entry can now be a union of `ToolContract<Result, Args>` *arms*, each pairing a result with
   the discriminating params *pattern* that selects it; `invokeTool` is generic over the params (`const P`)
   and narrows the result to the matching arm. `invokeTool(machine, 'session_action', { action: 'get', … })`
   is now typed to yield `Session`, not the union of every action's result. The discriminant is *any*
-  field(s), not just `action` (e.g. `background` keys on `interval`'s presence: `ToolResult<…, { interval:
+  field(s), not just `action` (e.g. `background` keys on `interval`'s presence: `ToolContract<…, { interval:
   string }>`); the pattern is the discriminant only, not the full input, so a call carrying just that field
   still matches. When no arm matches (a non-literal discriminant, or an absence-discriminant the positive
   patterns can't express) the result falls back to the union of all arms — always sound, just less narrow.
   `ToolResultOf<K>` unwraps an arm-based entry to that union, so executors still bind unchanged
-  (`ToolExecutor<ToolResultOf<'my_tool'>>` must cover every arm). `ToolResult` and `ToolResultFor` are
+  (`ToolExecutor<ToolResultOf<'my_tool'>>` must cover every arm). `ToolContract` and `ToolResultFor` are
   exported from `@matatbread/matbot-plugin-api`. Every built-in multi-action tool adopts the arm form:
   `session_action`, `session_edit`, `workspace_action`, `background`, `every_action`, `skill_action`,
   `skills_config`, `cognition_config`, `trigger_action`, `triggers_config`, `provider`, `plugin`,
@@ -329,6 +385,100 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Optional
 
+- **Every built-in tool declares its TypeScript contract as a `ToolContracts` arm (or `toolContract`).** Every
+  built-in tool across the plugin suite — `plugin`/`provider`, `session_edit`/`compact_sessions`,
+  `session_action`, `skill_action`/`skills_config`, `skill_compiler`, `trigger_action`/`triggers_config`,
+  `store_action` (+ the dynamic per-store tool), `remember_fact`/`dream_time`/`ask_inner_voice`/
+  `cognition_config`, `bash`/`bash_config`, `http`, `workspace_action`, `background`/`every_action`,
+  `whoami`, `ask_user`, `mcp_action`, `tool_function`, `single_turn`, `about_matbot`, and the
+  browser/frontend tools — now declares one `ToolContract<Result, Params>` arm per action (single-action tools
+  get a single arm), and the redundant `type XAction`/`SHAPE` blocks were removed from descriptions. The
+  contract is the augmentation alone: the wire `params`/`result` text is derived from the arms and folded
+  into the description at the dispatch edge, and read off the live registry by `ToolTypeIndex` — one source
+  of truth instead of a hand-maintained duplicate in prose. The two genuinely source-less tools (the
+  `tool-store` per-namespace CRUD tool, whose name and shape are per-store; a `function-tools` function)
+  carry a `toolContract` string instead. Documentation blocks that were not mere param restatements were
+  kept (the `plugin` specifier grammar, `ask_user`'s field examples, `store_action`'s `StoreQuery` grammar,
+  `cognition_config`'s field-range interface). Net effect: leaner descriptions, one typed contract per tool.
+
+- **tool-types** (new plugin, node-only) — provides the `ToolTypeIndex` service (see API gaps filled): it
+  derives and caches a `.d.ts` of the loaded tools' result/service types, invalidating on any tool-registry
+  change (`tools.watch()`). The scan is driven off the loaded plugins' `resolvedUrl`s (via `getRegisteredPlugins`,
+  hence a `matbot-core` dependency) so compiled (`compiled-plugins/`) and installed (`.plugins/`) plugins are
+  read from their real source, unioned with a monorepo `plugins/` glob for host-constructed builtins. A
+  source-less tool's `toolContract` string is appended, referencing `ToolContract` bare against the dts's own
+  top-level import (no per-entry inline `import(...)`). The tool-result-type derivation (`buildMatbotToolsDts`)
+  moved here from `skills_compiler`, which now consumes it as a dependency (still falls back to its static DTS
+  when the derivation yields nothing).
+
+- **browser** — a registry-driven `ToolTypeIndex` (`createBrowserToolTypeIndex`), the browser counterpart to
+  the node-only `tool-types` plugin. With no TypeScript compiler or filesystem in the browser, it derives the
+  `.d.ts` from the **live registry alone**: a source-less tool's `toolContract` verbatim, and for every other
+  tool a params type synthesised from its `inputSchema` (result stays `unknown`) — so `tool_function`'s `types`
+  action returns real declarations instead of an empty dts. `check()` is a no-op (`[]`) since there's nothing
+  to compile against, and `wireContracts()` flattens each `toolContract` for the dispatch-edge fold. Wired into
+  `web-bundle` and passed to the session runner.
+
+- **web-bundle** — the sucrase type-stripper now runs with `disableESTransforms` + `keepUnusedImports`, i.e.
+  it strips types and nothing else: `??`/`?.` stay native (previously sucrase rewrote them to
+  `_nullishCoalesce`/`_optionalChain` helpers) and imports are kept verbatim, matching node's stripper and the
+  evergreen target the bundle assumes. Fixes a `_nullishCoalesce is not defined` crash when `tool_function`
+  compiled a user function containing `??`/`?.`: the wrapping `return (async function …)(…)` turned sucrase's
+  injected top-level helper declarations into named function *expressions*, out of scope for the body's calls.
+
+- **function-tools** (new plugin, cross-platform) — a single `tool_function` tool that lets the model author
+  and run small TypeScript functions which orchestrate other tools in one pass, so several tool calls can
+  be composed (filter, count, reshape) without routing each intermediate result back through the model.
+  Inside a function, `await tool.<name>(params)` runs any registered tool through an injected `tool` proxy
+  and resolves to its structured result. `define` persists a **named** function and registers it as a new
+  tool of the same name (parameters derived from the signature; optional `description` documents the tool;
+  survives restart; re-defining recompiles);
+  `lambda` compiles and runs an **anonymous** one-argument function once against given `params`; plus
+  `list` / `remove`. Types are erased by the host's `TypeScriptStripper` (node's native stripper; the
+  browser bundle's sucrase), so the plugin is cross-platform with no stripper of its own, and the body is
+  compiled via the async function constructor as an immediately-invoked expression, so tool calls (and
+  recursion) are awaited; each sub-call is echoed to stdout for an observable trace.
+  When the `ToolTypeIndex` service is present (node), the plugin is type-aware end-to-end: a `types` action
+  returns the `.d.ts` of what the available tools return (so the model composes against real types instead
+  of guessing); `define` **type-checks the function body** against those types before registering, rejecting
+  it with diagnostics on error; and a defined function carries its own result/param types on its registered
+  tool, so later functions compose it with real types too. Where the service is absent (the
+  browser), the pre-registration type-check is skipped and the function still compiles and executes.
+  Bundled into the browser artifact (`web-bundle`), backed there by `@matatbread/matbot-browser`'s
+  registry-driven `ToolTypeIndex` (below): `types` returns real declarations derived from live tools'
+  `toolContract`/`inputSchema`, so composition is type-aware even in the browser — only `check()` is a no-op
+  (no compiler), leaving `define` permissive.
+
+- **skills_compiler** — a compiled plugin now **declares its tool's contract as a `ToolContracts`
+  augmentation** in its generated `src/index.ts`: `${toolName}: ToolContract<Result, Params>`, where `Params`
+  mirrors the generated `inputSchema` (accurate by construction) and `Result` is the distiller's reading of
+  the value actually observed in the demonstration trace (kept self-contained). Because a compiled plugin has
+  real source on disk, that augmentation IS its single contract — the same form every built-in tool uses —
+  so another tool composing `await tool.<name>(…)` gets real types once the compiled plugin's source is
+  scanned. The generated executor binds `ToolExecutor<ToolResultOf<'${toolName}'>>`, so the existing
+  typecheck **verifies the implementation actually yields that shape** — the declared type is checked, not
+  merely claimed (uniform whether the result is concrete or `unknown`). The distiller is told to include
+  every observed field, so the verified type is complete; because its type and the generated implementation
+  both derive from the same demonstration run, this does not cost extra repair passes in practice. The
+  consumer `.d.ts` baked alongside the plugin excludes any prior compiled version of the same tool, so its
+  fresh augmentation is the sole declarant of its own name.
+
+- **skills_compiler** — the compiled plugin's **package name and tool name are now configurable**, and
+  recompiling to the same destination **bumps the version**. `skill_compiler` takes optional
+  `packageNamePrefix` (default `@local/compiled-`, changed from `@matatbread/matbot-compiled-`) and
+  `toolName` (default the skill's safe name, e.g. `Send To Telegram` → `send_to_telegram`); the package
+  name is `<prefix><toolName>` and the on-disk directory follows the tool name, so a given skill compiles
+  to a stable, predictable destination. A recompile reads the version already on disk and bumps its patch
+  (first compile: `0.1.0`) rather than silently rewriting the same version. The distiller is no longer
+  asked to name the tool — naming is now deterministic, which is what makes the stable destination (and
+  thus the version bump) meaningful.
+
+- **mcp / mcp-http** — the `mcp__<server>__` proxy-tool-name prefix is now **overridable per server**.
+  `mcp_action add` takes an optional `proxyToolName` — the prefix each of a server's tools is registered
+  under, replacing the default `mcp__<name>__` — persisted on the connection config (`MCPRemoteConfig` /
+  `MCPServerConfigLocal`) so `list`, `remove`, and reconnect all recompute the same names. Absent ⇒ the
+  previous default, so existing connections are unchanged.
+
 - **frontend/telegram** — fixed a boot crash (`No provider registered for module "…". Available: none`)
   that unloaded the plugin at startup. It called the removed `resolveProviderFactory(config.module)` from
   `setup()` to eagerly build an adapter, but with the provider pre-scan disabled no factory is registered
@@ -414,7 +564,7 @@ churn and less likely to affect a consumer who doesn't use them.
 
 - **skills_compiler** — the `matbot-tools.d.ts` shipped to each generated plugin is now **derived from the
   live type graph** instead of a hardcoded three-tool list. At compile time the compiler builds a TS
-  program over the workspace's tool/service packages, reads the merged `ToolResults` **and**
+  program over the workspace's tool/service packages, reads the merged `ToolContracts` **and**
   `MatbotServices`, and emits a self-contained `declare module` — **bundling** each referenced
   package-private interface/type-alias into the DTS (recursively), importing plugin-api types, and
   replacing any `node_modules`/class/enum/unresolved *leaf* in place with `unknown /* … */` (so a

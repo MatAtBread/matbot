@@ -1,4 +1,4 @@
-import type { Tool, ToolExecutor, ToolResult, ToolResultOf, ToolContext, MatbotPlugin, FormField, Runtime } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext, MatbotPlugin, FormField, Runtime } from '@matatbread/matbot-plugin-api';
 import { CONFIRM_YES, CONFIRM_NO } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins, getRegisteredTools, getRegisteredFrontendPlugins,
          getRegisteredServiceKeys, getHookPlugins, getSystemContextPlugins,
@@ -31,9 +31,9 @@ interface AvailablePlugin { name: string; specifier: string; matbotRuntime?: str
 interface ToolSummary { name: string; description: string }
 
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
+  interface ToolContracts {
     plugin:
-      | ToolResult<{
+      | ToolContract<{
           loaded: Array<{
             name:           string;
             apiVersion:     string;
@@ -46,11 +46,11 @@ declare module '@matatbread/matbot-plugin-api' {
           configured:   string[];
           builtinTools?: ToolSummary[] | undefined;
         }, { action: 'list' }>
-      | ToolResult<AvailablePlugin[], { action: 'discover_local' }>
-      | ToolResult<{ message: string; installationMessage?: string }, { action: 'add'       }>
-      | ToolResult<{ message: string; installationMessage?: string }, { action: 'remove'    }>
-      | ToolResult<{ message: string; installationMessage?: string }, { action: 'reload'    }>
-      | ToolResult<{ message: string; installationMessage?: string }, { action: 'store-key' }>;
+      | ToolContract<AvailablePlugin[], { action: 'discover_local' }>
+      | ToolContract<{ message: string; installationMessage?: string }, { action: 'add'; specifier: string }>
+      | ToolContract<{ message: string; installationMessage?: string }, { action: 'remove'; specifier: string }>
+      | ToolContract<{ message: string; installationMessage?: string }, { action: 'reload'; specifier: string }>
+      | ToolContract<{ message: string; installationMessage?: string }, { action: 'store-key'; key: string }>;
   }
 }
 
@@ -262,16 +262,6 @@ export function createBrowserPluginTool(extras: ExtraPlugins): Tool<ToolResultOf
       'This is the browser build: there is no config file and no package manager, so a specifier is ' +
       'a URL path or an inlined synthetic id the host loader can import (not an npm name to install). ' +
       'Added plugins persist across reloads.\n\n' +
-      'Parameters depend on `action` (TypeScript):\n' +
-      '```ts\n' +
-      'type PluginAction =\n' +
-      "  | { action: 'list' }                           // configured + loaded plugins, with types and tools\n" +
-      "  | { action: 'discover_local' }                 // plugins bundled in this build but not yet loaded; add by the package name they report\n" +
-      "  | { action: 'add';        specifier: string }  // activate a plugin (a bundled package name, or a URL to fetch)\n" +
-      "  | { action: 'remove';     specifier: string }  // deactivate & forget (specifier = package name, preferred — or its configured specifier)\n" +
-      "  | { action: 'reload';     specifier: string }  // re-import (specifier = package name, preferred — or its configured specifier)\n" +
-      "  | { action: 'store-key';  key: string };       // store a secret a plugin/provider needs; value entered out-of-band (blank value removes the key)\n" +
-      '```\n\n' +
       'For add, a URL specifier is fetched as raw source and MUST resolve a package.json: the URL is one, ' +
       'OR points at a directory containing one, OR is a code entry (…/index.ts) with a package.json as its ' +
       'direct sibling. The package.json must declare a "name"; absence is a hard error.\n\n' +

@@ -50,13 +50,13 @@ export function invokeTool<K extends string, const P>(
   };
 
   // The registry is name-keyed and untyped (`ToolExecutor.execute` yields `ToolEvent<unknown>`); the
-  // `ToolResults` mapping is the call-site contract, asserted here so callers read a typed result.
+  // `ToolContracts` mapping is the call-site contract, asserted here so callers read a typed result.
   return tool.executor.execute(params, ctx) as AsyncIterable<ToolEvent<ToolResultFor<K, P>>>;
 }
 
 /**
  * Drain a tool event stream (e.g. {@link invokeTool}'s return) to its raw `result` *value*, typed:
- * paired with `invokeTool(machine, name, …)` it returns whatever `ToolResults[name]` declares (or
+ * paired with `invokeTool(machine, name, …)` it returns whatever `ToolContracts[name]` declares (or
  * `unknown` for an unregistered tool). This is the structured counterpart to {@link toolText} — use it
  * for any tool that returns data; use `toolText` when you want the result collapsed to a string.
  * Stops and throws on the first `error` event, or if the tool finished without yielding a `result`.

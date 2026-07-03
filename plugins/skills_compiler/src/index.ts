@@ -1,6 +1,6 @@
 import { PLUGIN_API_VERSION, currentPrincipal, invokeTool, toolResult, toolText } from '@matatbread/matbot-plugin-api';
-import type { MatbotPluginSpec, MatbotMachine, ToolExecutor, ToolEvent, ToolContext, Session, Message } from '@matatbread/matbot-plugin-api';
-import { buildMatbotToolsDts } from './build-matbot-dts.js';
+import type { MatbotPluginSpec, MatbotMachine, ToolExecutor, ToolEvent, ToolContext, ToolContract, ToolResultOf, Session, Message } from '@matatbread/matbot-plugin-api';
+import { buildMatbotToolsDts } from '@matatbread/matbot-tool-types';
 
 // Loose discovery of the skills plugin's SkillManager — optional, so no hard dependency on the
 // package. Only the slice this tool consumes is declared.
@@ -13,6 +13,19 @@ declare module '@matatbread/matbot-plugin-api' {
       } | undefined;
       setHidden(name: string, hidden: boolean): Promise<unknown>;
     };
+  }
+  // The `skill_compiler` tool's own call contract — a source tool, so its contract is a ToolContracts arm
+  // (the single source): the executor binds off it (ToolResultOf) and the wire text derives from it.
+  interface ToolContracts {
+    skill_compiler: ToolContract<
+      | { status: 'not_found';    message: string }
+      | { status: 'no_metadata';  skill: string; message: string }
+      | { status: 'not_compilable'; skill: string; classification: { procedural: number; informational: number } }
+      | { status: 'typecheck_failed'; skill: string; toolName: string; version: string; dir: string; passes: number; method: string; excluded: string[]; typecheckOutput: string }
+      | { status: 'compiled_not_installed'; skill: string; toolName: string; pluginName: string; version: string; dir: string; specifier: string; typecheckOk: boolean; method: string; excluded: string[]; installError: string }
+      | { status: 'installed'; skill: string; classification: { procedural: number; informational: number }; passes: number; toolName: string; pluginName: string; version: string; dir: string; specifier: string; typecheckOk: boolean; method: string; excluded: string[]; install: string; movedTriggers: string[]; hidden: boolean },
+      { skill: string; provider?: string; toolName?: string; packageNamePrefix?: string }
+    >;
   }
 }
 
@@ -65,16 +78,19 @@ toolText(events):   Promise<string>;   // the result collapsed to a string (pros
 
 // HTTP is the Web fetch() — no node http, no axios. JSON parsing/maths/dates/etc. are plain JS.`;
 
-// Augments the generated plugin's view of `ToolResults` so `toolResult(invokeTool(..., name, ...))` is
+// Augments the generated plugin's view of `ToolContracts` so `toolResult(invokeTool(..., name, ...))` is
 // typed for the common tools it calls. The real augmentations live in those tools' own packages
 // (ask-user, rumsfeld), but the generated plugin is a separate compilation that only sees plugin-api —
-// so we ship this alongside it. Keep in step with those packages' ToolResults declarations.
-const TOOL_RESULTS_DTS = `import '@matatbread/matbot-plugin-api';
+// so we ship this alongside it. This is only the FALLBACK, used when no plugin source is scannable;
+// normally buildMatbotToolsDts derives these arms from the live source. Kept in step (arm form) with
+// those packages' ToolContracts declarations.
+const TOOL_CONTRACTS_DTS = `import '@matatbread/matbot-plugin-api';
+import type { ToolContract } from '@matatbread/matbot-plugin-api';
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
-    ask_user: { name: string; answer: string };
-    find_fact: string[] | null;
-    contextual_search: { name: string; content: string };
+  interface ToolContracts {
+    ask_user: ToolContract<{ name: string; answer: string }, { name: string; label: string; type: 'text' | 'password' | 'select' | 'confirm'; options?: string[]; allowOther?: boolean; default?: string; required?: boolean; cancelable?: boolean }>;
+    find_fact: ToolContract<string[] | null, { question: string; terms: { term: string; context?: string }[]; provider?: string }>;
+    contextual_search: ToolContract<{ name: string; content: string }, { terms: { term: string; context?: string }[] }>;
   }
 }
 `;
@@ -114,9 +130,11 @@ export function createSkillCompilerPlugin(): MatbotPluginSpec {
     apiVersion: PLUGIN_API_VERSION,
 
     async setup(services: MatbotMachine) {
-      const executor: ToolExecutor = {
-        async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
-          const { skill, provider: explicitProvider } = input as { skill: string; provider?: string };
+      const executor: ToolExecutor<ToolResultOf<'skill_compiler'>> = {
+        async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent<ToolResultOf<'skill_compiler'>>> {
+          const { skill, provider: explicitProvider, packageNamePrefix, toolName: toolNameInput } = input as {
+            skill: string; provider?: string; packageNamePrefix?: string; toolName?: string;
+          };
           if (!skill || typeof skill !== 'string') {
             yield { type: 'error', message: 'Parameter "skill" is required.' };
             return;
@@ -224,28 +242,27 @@ export function createSkillCompilerPlugin(): MatbotPluginSpec {
           const distillResult = await services.singleTurn({
             provider: codeProvider,
             system: `You analyse a trace of an AI agent working out how to perform a task. The trace interleaves the agent's reasoning ([THINKING]), narration ([SAYS]), tool calls ([CALLS]) and results ([RESULT]). Agents explore: they run discovery calls (listing plugins/servers, searching for context), make false starts, and hit dead-ends before finding what actually produces the answer. Extract the MINIMAL CORRECT METHOD — only the steps on the path that worked — and inline what discovery taught (a concrete URL, query, threshold or field name learned mid-run) as constants rather than re-deriving it. Discard every exploratory or incorrect step.`,
-            prompt: `Skill being performed:\n${skillContent}\n\n--- AGENT TRACE ---\n${transcript}\n--- END TRACE ---\n\nReturn ONLY JSON:\n{"toolName":"snake_case","toolDescription":"one line","parameters":[{"name":"...","type":"string|number|boolean","description":"...","required":true|false}],"method":"Numbered, ordered steps the compiled tool must perform, with the exact mechanism for each: an HTTP step gives method + URL + body with discovered constants inlined; a tool step gives the tool name and exact args; a compute step gives the JS data-processing logic lifted from the reasoning. Exclude every exploratory/discovery/dead-end step.","excluded":["one short note per discarded exploratory step and why"]}`,
+            prompt: `Skill being performed:\n${skillContent}\n\n--- AGENT TRACE ---\n${transcript}\n--- END TRACE ---\n\nReturn ONLY JSON:\n{"toolDescription":"one line","parameters":[{"name":"...","type":"string|number|boolean","description":"...","required":true|false}],"resultType":"A self-contained TypeScript type for the value the compiled tool yields in its { type: 'result', value } event — derive it from the actual [RESULT] values seen in the trace, and include EVERY field observed (the generated implementation is type-checked against this exact type, so an omitted or wrong field fails the build). Primitives and inline object/array types only, no named types (e.g. 'string' or '{ total: number; items: string[] }'). 'unknown' if indeterminate.","method":"Numbered, ordered steps the compiled tool must perform, with the exact mechanism for each: an HTTP step gives method + URL + body with discovered constants inlined; a tool step gives the tool name and exact args; a compute step gives the JS data-processing logic lifted from the reasoning. Exclude every exploratory/discovery/dead-end step.","excluded":["one short note per discarded exploratory step and why"]}`,
             signal: ctx.signal,
           });
 
-          let design: any = { toolName: sanitise(skill), toolDescription: `Compiled from "${skill}"`, parameters: [], method: transcript, excluded: [] };
+          let design: any = { toolDescription: `Compiled from "${skill}"`, parameters: [], resultType: 'unknown', method: transcript, excluded: [] };
           try { const m = distillResult.text.match(/\{[\s\S]*\}/); if (m) design = { ...design, ...JSON.parse(m[0]) }; } catch {}
           const method: string = typeof design.method === 'string' && design.method.trim() ? design.method : transcript;
 
           yield { type: 'progress', pct: 80, message: 'Preparing build...' };
 
-          const safeName = sanitise(skill);
-          const pluginPkgName = `@matatbread/matbot-compiled-${safeName}`;
-          const pluginDir = safeName;
-          const toolName = design.toolName as string;
+          // Tool name (and, as its suffix, the package name) default to the skill's safe name — a
+          // deterministic derivation, so recompiling the same skill targets the same destination whose
+          // package version can be bumped, rather than a differently-named package appearing each time.
+          // Both are overridable via input. The distiller is not asked to name the tool: naming is
+          // deterministic so a given skill always compiles to the same destination.
+          const toolName = sanitise(typeof toolNameInput === 'string' && toolNameInput.trim() ? toolNameInput : skill);
+          const packagePrefix = typeof packageNamePrefix === 'string' && packageNamePrefix.trim() ? packageNamePrefix.trim() : '@local/compiled-';
+          const pluginPkgName = `${packagePrefix}${toolName}`;
+          const pluginDir = toolName;
           const toolDesc = (design.toolDescription as string).replace(/`/g, '\\`');
           const toolParams = (design.parameters || []) as Array<{name: string; type: string; description: string; required: boolean}>;
-
-          const packageJson = JSON.stringify({
-            name: pluginPkgName, matbotRuntime: ["node"], version: "0.1.0", type: "module",
-            exports: { ".": "./src/index.ts" }, files: ["src"],
-            peerDependencies: { "@matatbread/matbot-plugin-api": "workspace:^" },
-          }, null, 2);
 
           // Compute relative paths from the plugin build dir to tsconfig.base.json and the plugin-api
           // package at the project root. The build dir is <projectRoot>/<COMPILED_PLUGINS_DIR>/<name>/
@@ -267,6 +284,16 @@ export function createSkillCompilerPlugin(): MatbotPluginSpec {
           const reqd = toolParams.filter(p => p.required).map(p => JSON.stringify(p.name)).join(', ');
           const props = JSON.stringify(Object.fromEntries(toolParams.map(p => [p.name, { type: p.type, description: p.description }]))) || '{}';
 
+          // The compiled tool's single-source contract, emitted into its src/index.ts as a ToolContracts arm
+          // `ToolContract<Result, Params>`. The params half mirrors `inputSchema` exactly (same source, so
+          // accurate by construction); the result half is the distiller's reading of the observed result
+          // value. The generated executor binds off it via `ToolResultOf`, so the typecheck verifies the
+          // impl actually yields the declared shape — the contract becomes checked, not just a claim.
+          const paramsTypeText = toolParams.length === 0
+            ? '{}'
+            : `{ ${toolParams.map(p => `${p.name}${p.required ? '' : '?'}: ${p.type}`).join('; ')} }`;
+          const resultTypeText = typeof design.resultType === 'string' && design.resultType.trim() ? design.resultType.trim() : 'unknown';
+
           const codeGenPrompt = `Generate TypeScript for a matbot plugin that implements the following skill as a deterministic tool.
 
 THE SPECIFICATION — this is what the tool must achieve. It is authoritative:
@@ -284,13 +311,22 @@ ${MACHINE_API}
 Template (fill IMPLEMENTATION):
 \`\`\`ts
 import { PLUGIN_API_VERSION, invokeTool, toolResult, toolText } from '@matatbread/matbot-plugin-api';
-import type { MatbotPluginSpec, MatbotMachine, ToolExecutor, ToolEvent, ToolContext } from '@matatbread/matbot-plugin-api';
+import type { MatbotPluginSpec, MatbotMachine, ToolExecutor, ToolEvent, ToolContext, ToolContract, ToolResultOf } from '@matatbread/matbot-plugin-api';
+
+// This tool's call contract — a single ToolContracts arm pairing its result with its params. It is the
+// ONE source: the executor binds its result off it (ToolResultOf), and a composer typing
+// \`await tool.${toolName}(params)\` reads it. Keep this block exactly as generated.
+declare module '@matatbread/matbot-plugin-api' {
+  interface ToolContracts {
+    ${toolName}: ToolContract<${resultTypeText}, ${paramsTypeText}>;
+  }
+}
 
 export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,
   async setup(services: MatbotMachine) {
-    const executor: ToolExecutor = {
-      async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
+    const executor: ToolExecutor<ToolResultOf<'${toolName}'>> = {
+      async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent<ToolResultOf<'${toolName}'>>> {
         try {
           // IMPLEMENTATION
           yield { type: 'result', value: { done: true } };
@@ -309,7 +345,7 @@ export const plugin: MatbotPluginSpec = {
 };
 \`\`\`
 
-Rules: implement the SPEC, using the worked example's exact URLs/queries/field names to remove ambiguity. Reproduce only the steps that meet the spec — never the example's exploratory or discovery calls. Implement EVERY branch the spec describes — each arm of an if/else, each conditional path — even when the worked example exercised only one. The example is a single trace through the spec; the spec defines all the paths. E.g. if Step 1 says "if no result, ask for free text; if more than one result, present a choice", implement both the text ask_user and the select ask_user, not just whichever the example happened to hit. Drive everything off the tool's input parameters; treat the example's specific values as illustrative, not constants (except genuine endpoints/queries the spec implies are fixed). Pass ctx.signal through every fetch/singleTurn/invokeTool. When calling another tool, forward the executor's whole ctx as invokeTool's 4th argument — invokeTool(services, name, params, ctx) — so session, signal, prompt AND provider propagate; never pass a hand-picked { session, signal } object, or a callee that needs an LLM (find_fact, singleTurn-based tools) will fail with "no provider". Yield progress/result/error events. NEVER extract a value from another tool's natural-language output with a regex or fixed-phrase string match (e.g. searchResult.match(/the location is (.+)/)) — that assumes an exact wording the tool will not reliably produce, so it silently fails. When a step needs a specific stored fact, use the find_fact tool (structured JSON { found, fact }), NOT contextual_search followed by string-parsing of its prose; if the spec names contextual_search for what is really a single-fact lookup, translate it to find_fact. Parse any tool result defensively — handle missing or differently-shaped data rather than assuming one rigid format. The project enforces strict TypeScript: verbatimModuleSyntax — use \ for type-only imports and \ for value imports; never use bare default imports unless the module has a real default export. The project also enables exactOptionalPropertyTypes — when a property is optional (key?: T), never pass undefined explicitly; omit the key instead. It enables noUncheckedIndexedAccess — array indexing returns T | undefined, so guard every array[i] access before using it. Output ONLY src/index.ts in a typescript fence.`;
+Rules: implement the SPEC, using the worked example's exact URLs/queries/field names to remove ambiguity. Reproduce only the steps that meet the spec — never the example's exploratory or discovery calls. Implement EVERY branch the spec describes — each arm of an if/else, each conditional path — even when the worked example exercised only one. The example is a single trace through the spec; the spec defines all the paths. E.g. if Step 1 says "if no result, ask for free text; if more than one result, present a choice", implement both the text ask_user and the select ask_user, not just whichever the example happened to hit. Drive everything off the tool's input parameters; treat the example's specific values as illustrative, not constants (except genuine endpoints/queries the spec implies are fixed). Pass ctx.signal through every fetch/singleTurn/invokeTool. When calling another tool, forward the executor's whole ctx as invokeTool's 4th argument — invokeTool(services, name, params, ctx) — so session, signal, prompt AND provider propagate; never pass a hand-picked { session, signal } object, or a callee that needs an LLM (find_fact, singleTurn-based tools) will fail with "no provider". Yield progress/result/error events. NEVER extract a value from another tool's natural-language output with a regex or fixed-phrase string match (e.g. searchResult.match(/the location is (.+)/)) — that assumes an exact wording the tool will not reliably produce, so it silently fails. When a step needs a specific stored fact, use the find_fact tool (structured JSON { found, fact }), NOT contextual_search followed by string-parsing of its prose; if the spec names contextual_search for what is really a single-fact lookup, translate it to find_fact. A toolResult(invokeTool(...)) value is already precisely typed by the tool's contract (declared in the ambient matbot-tools.d.ts) — use it directly, or, when the tool has several result shapes, narrow with a runtime guard ('field' in r, or Array.isArray). Do NOT cast it away and then re-assert a shape onto it — neither 'as unknown as X', nor 'as Record<string, unknown>' followed by '[key] as X'. Re-asserting a shape that TypeScript can no longer check is an unvalidated assumption: if the guess is wrong it still compiles and the tool is silently broken. The ONLY genuinely-unknown values are EXTERNAL inputs (e.g. await resp.json()); validate those with runtime checks before use rather than asserting a type onto them. The project enforces strict TypeScript: verbatimModuleSyntax — use \ for type-only imports and \ for value imports; never use bare default imports unless the module has a real default export. The project also enables exactOptionalPropertyTypes — when a property is optional (key?: T), never pass undefined explicitly; omit the key instead. It enables noUncheckedIndexedAccess — array indexing returns T | undefined, so guard every array[i] access before using it. The executor is typed to the tool's result type (\`ToolExecutor<ToolResultOf<'${toolName}'>>\`), so the value you yield in the result event must be assignable to it — the typecheck enforces this. Keep the \`declare module … interface ToolContracts { ${toolName}: ToolContract<…> }\` block and the register call's \`name\` and \`inputSchema\` exactly as in the template — that augmentation IS the tool's declared contract, the single source other tools compose against. Output ONLY src/index.ts in a typescript fence.`;
 
           // Write the plugin straight to disk with node:fs — NOT via workspace_action. The workspace is
           // the user's artifact space, and routing build files through it created a hidden dependency on
@@ -325,7 +361,7 @@ Rules: implement the SPEC, using the worked example's exact URLs/queries/field n
           const relDir   = `${COMPILED_PLUGINS_DIR}/${pluginDir}`;
           const buildDir = join(dirname(services.configPath), COMPILED_PLUGINS_DIR, pluginDir);
 
-          const { mkdir, symlink, readlink, writeFile } = await import('node:fs/promises');
+          const { mkdir, readFile, symlink, readlink, writeFile } = await import('node:fs/promises');
 
           // Derive the tool-result / service types from the LIVE loaded plugins so the generated plugin
           // gets correct `toolResult` types and typed `services.*` for everything it can reach. The set
@@ -333,26 +369,48 @@ Rules: implement the SPEC, using the worked example's exact URLs/queries/field n
           // the tool keeps it replaceable and matches what the LLM sees. Falls back to a monorepo glob,
           // then to the static DTS, when the live set or sources aren't available.
           yield { type: 'progress', pct: 84, message: 'Deriving tool result types...' };
-          let toolResultsDts = TOOL_RESULTS_DTS;
+          let toolContractsDts = TOOL_CONTRACTS_DTS;
           try {
             let pluginUrls: string[] = [];
             try {
               const list = await toolResult(invokeTool(services, 'plugin', { action: 'list' }, ctx)) as { loaded?: Array<{ resolvedUrl?: string }> };
-              pluginUrls = (list.loaded ?? []).map(p => p.resolvedUrl).filter((u): u is string => typeof u === 'string');
+              pluginUrls = (list.loaded ?? [])
+                .map(p => p.resolvedUrl)
+                .filter((u): u is string => typeof u === 'string')
+                // Drop a prior compiled version of THIS tool: its source now carries a ToolContracts arm for
+                // `${toolName}`, which would collide with the fresh src/index.ts's own arm in the same
+                // typecheck ("subsequent property declarations must have the same type"). The new source is
+                // the sole declarant of its own contract.
+                .filter(u => !u.includes(`${COMPILED_PLUGINS_DIR}/${pluginDir}/`));
             } catch { /* `plugin` tool absent → buildMatbotToolsDts falls back to the monorepo glob */ }
             const generated = await buildMatbotToolsDts(dirname(services.configPath), pluginUrls);
             if (generated) {
-              toolResultsDts = generated.dts;
+              toolContractsDts = generated.dts;
               yield { type: 'progress', pct: 85, message: `Typed ${generated.tools.emitted.length} tool result(s) and ${generated.services.emitted.length} service(s).` };
             }
           } catch { /* keep the static fallback */ }
+
+          // Recompiling to the same destination is a new version, not a silent overwrite: read the
+          // version already on disk (if any) and bump its patch. A first compile — or an unparseable /
+          // absent package.json — starts at 0.1.0.
+          let version = '0.1.0';
+          try {
+            const existing = JSON.parse(await readFile(join(buildDir, 'package.json'), 'utf8')) as { version?: string };
+            const m = typeof existing.version === 'string' ? existing.version.match(/^(\d+)\.(\d+)\.(\d+)$/) : null;
+            if (m) version = `${m[1]}.${m[2]}.${Number(m[3]) + 1}`;
+          } catch { /* no existing package.json → first version */ }
+          const packageJson = JSON.stringify({
+            name: pluginPkgName, matbotRuntime: ["node"], version, type: "module",
+            exports: { ".": "./src/index.ts" }, files: ["src"],
+            peerDependencies: { "@matatbread/matbot-plugin-api": "workspace:^" },
+          }, null, 2);
 
           yield { type: 'progress', pct: 85, message: 'Writing plugin scaffold...' };
           try {
             await mkdir(join(buildDir, 'src'), { recursive: true });
             await writeFile(join(buildDir, 'package.json'), packageJson);
             await writeFile(join(buildDir, 'tsconfig.json'), tsconfigJson);
-            await writeFile(join(buildDir, 'src', 'matbot-tools.d.ts'), toolResultsDts);
+            await writeFile(join(buildDir, 'src', 'matbot-tools.d.ts'), toolContractsDts);
           } catch (e) {
             yield { type: 'error', message: `Could not write plugin to ${relDir}: ${e instanceof Error ? e.message : String(e)}` };
             return;
@@ -384,6 +442,12 @@ Rules: implement the SPEC, using the worked example's exact URLs/queries/field n
           const { execFile } = await import('node:child_process');
           const { promisify } = await import('node:util');
           const execFileAsync = promisify(execFile);
+          // PARKED (potential safety enhancement): add a structural gate alongside this typecheck that
+          // rejects re-assertion of a shape onto a `toolResult(...)`-derived value — `as unknown as X`, or
+          // `as Record<string, unknown>` then `[k] as X` — and feeds it back into the repair loop like a tsc
+          // error. `tsc` PASSES those casts (they are valid TS), so today only the codegen prompt rule
+          // discourages them, and prompt-tuning has shown diminishing returns. Deterministic enforcement
+          // beats prose if the guarantee is wanted. See memory `skills-compiler-cast-structural-guarantee`.
           const runTypecheck = async (): Promise<{ ok: boolean; output: string }> => {
             try {
               await execFileAsync(process.execPath, [tscBin, '--noEmit'],
@@ -452,7 +516,7 @@ Fix every reported error. Change only what each error requires; keep the tool na
             yield {
               type: 'result',
               value: {
-                status: 'typecheck_failed', skill, toolName, dir: relDir, passes: MAX_PASSES,
+                status: 'typecheck_failed', skill, toolName, version, dir: relDir, passes: MAX_PASSES,
                 method, excluded: design.excluded, typecheckOutput: typecheckOutput.slice(0, 2000),
               },
             };
@@ -470,7 +534,7 @@ Fix every reported error. Change only what each error requires; keep the tool na
             yield {
               type: 'result',
               value: {
-                status: 'compiled_not_installed', skill, toolName, pluginName: pluginPkgName,
+                status: 'compiled_not_installed', skill, toolName, pluginName: pluginPkgName, version,
                 dir: relDir, specifier, typecheckOk, method, excluded: design.excluded,
                 installError: 'The `plugin` management tool is not loaded; install it manually with: plugin add ' + specifier,
               },
@@ -487,7 +551,7 @@ Fix every reported error. Change only what each error requires; keep the tool na
             yield {
               type: 'result',
               value: {
-                status: 'compiled_not_installed', skill, toolName, pluginName: pluginPkgName,
+                status: 'compiled_not_installed', skill, toolName, pluginName: pluginPkgName, version,
                 dir: relDir, specifier, typecheckOk, method, excluded: design.excluded,
                 installError: e instanceof Error ? e.message : String(e),
               },
@@ -525,7 +589,7 @@ Fix every reported error. Change only what each error requires; keep the tool na
             type: 'result',
             value: {
               status: 'installed', skill, classification, passes: pass - 1,
-              toolName, pluginName: pluginPkgName, dir: relDir, specifier, typecheckOk,
+              toolName, pluginName: pluginPkgName, version, dir: relDir, specifier, typecheckOk,
               method, excluded: design.excluded, install: installMessage,
               movedTriggers: movedTriggers.map(t => t.id), hidden,
             },
@@ -546,6 +610,8 @@ Compiled plugins use: fetch() for HTTP, services.singleTurn() for LLM, invokeToo
           properties: {
             skill: { type: 'string', description: 'Skill name from SkillManager.' },
             provider: { type: 'string', description: 'Optional code-gen provider. Defaults to turn provider.' },
+            toolName: { type: 'string', description: 'Name of the compiled tool, and the suffix of its package name. Defaults to the skill\'s safe name (e.g. "Send To Telegram" → send_to_telegram). Non-identifier characters collapse to underscores.' },
+            packageNamePrefix: { type: 'string', description: 'Prefix for the generated npm package name, prepended to the tool name. Defaults to "@local/compiled-".' },
           },
         },
         executor,

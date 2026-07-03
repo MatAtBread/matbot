@@ -1,12 +1,14 @@
-import type { Tool, ToolEvent, ToolExecutor, ToolContext, ToolResultOf, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolEvent, ToolExecutor, ToolContext, ToolContract, ToolResultOf, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import { spawn } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
 import process from 'node:process';
 
+// Single arm. `cwd` is in the params superset shared with the `docker-bash` variant (same tool name ⇒ one
+// merged entry, so both must declare it identically); the docker variant ignores `cwd`.
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
-    bash: { exitCode: number; stdout: string; stderr: string };
+  interface ToolContracts {
+    bash: ToolContract<{ exitCode: number; stdout: string; stderr: string }, { script: string; cwd?: string; env?: Record<string, string>; timeout?: number }>;
   }
 }
 

@@ -11,7 +11,7 @@
  * (the value is a *different-lineage* perspective) but functional. Pin a different-lineage model via
  * cognition_config to get the genuine second opinion.
  */
-import type { Tool, ToolExecutor, ToolResult, ToolResultOf, ToolContext, MatbotMachine, Session } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext, MatbotMachine, Session } from '@matatbread/matbot-plugin-api';
 import {
   type DreamSettings,
   DEFAULT_DREAM_SETTINGS,
@@ -20,15 +20,15 @@ import {
 } from '../dream/types.js';
 
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
-    ask_inner_voice: { text: string };
+  interface ToolContracts {
+    ask_inner_voice: ToolContract<{ text: string }, { prompt: string; system?: string }>;
     // One arm per action: a caller of `invokeTool(machine, 'cognition_config', { action: '…' })` gets the
-    // matching result narrowed by the `action` it passed (see ToolResult / the multi-action note on ToolResults).
+    // matching result narrowed by the `action` it passed (see ToolContract / the multi-action note on ToolContracts).
     // get/set/clear all return the same effective-config snapshot.
     cognition_config:
-      | ToolResult<CognitionConfig & { available: string[] }, { action: 'get'   }>
-      | ToolResult<CognitionConfig & { available: string[] }, { action: 'set'   }>
-      | ToolResult<CognitionConfig & { available: string[] }, { action: 'clear' }>;
+      | ToolContract<CognitionConfig & { available: string[] }, { action: 'get' }>
+      | ToolContract<CognitionConfig & { available: string[] }, ({ action: 'set' } & Partial<{ [K in keyof CognitionConfig]: CognitionConfig[K] | null }>)>
+      | ToolContract<CognitionConfig & { available: string[] }, { action: 'clear' }>;
   }
 }
 
@@ -121,11 +121,7 @@ export function createAskInnerVoiceTool(services: MatbotMachine): Tool<ToolResul
       '`prompt` summarising the problem and your draft, plus an optional `system` framing, and get back ' +
       'its text. Which provider answers is configured (cognition_config `innerVoiceProvider`) ' +
       "— ideally a different training lineage; absent, it uses the current turn's model. You do not name a " +
-      'provider here.\n\n' +
-      'Parameters (TypeScript):\n' +
-      '```ts\n' +
-      '{ prompt: string; system?: string }  // -> { text }\n' +
-      '```',
+      'provider here.',
     inputSchema: {
       type:       'object',
       required:   ['prompt'],
@@ -336,7 +332,7 @@ export function createCognitionConfigTool(services: MatbotMachine): Tool<ToolRes
       'maxClusterSize < 1) is rejected with an error and nothing from that call is persisted — `set` ' +
       'is all-or-nothing, never partially applied.\n\n' +
       '`clear` takes no parameters and resets every setting above to its default in one call.\n\n' +
-      'Parameters (TypeScript):\n' +
+      'The `CognitionConfig` object it reads and writes (TypeScript):\n' +
       '```ts\n' +
       'interface CognitionConfig {\n' +
       '  innerVoiceProvider:  string | null;\n' +
@@ -349,12 +345,7 @@ export function createCognitionConfigTool(services: MatbotMachine): Tool<ToolRes
       '  maxEnrichmentsPerPass: number;   // integer >= 0\n' +
       '  blocklist:           string[];\n' +
       '  weakDeferralMs:      number;   // milliseconds, >= 0\n' +
-      '}\n\n' +
-      'type CognitionConfigAction =\n' +
-      "  | { action: 'get' }    // -> CognitionConfig & { available: string[] }\n" +
-      "  | ({ action: 'set' } & Partial<{ [K in keyof CognitionConfig]: CognitionConfig[K] | null }>)\n" +
-      '                         // -> CognitionConfig & { available: string[] }; throws on an invalid combination\n' +
-      "  | { action: 'clear' }; // -> CognitionConfig & { available: string[] }\n" +
+      '}\n' +
       '```',
     inputSchema: {
       type:       'object',

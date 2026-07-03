@@ -6,25 +6,25 @@ import { pathToFileURL }    from 'node:url';
 import { randomUUID }       from 'node:crypto';
 import type { Readable }    from 'node:stream';
 import type {
-  MatbotPluginSpec, MatbotMachine, Tool, ToolExecutor, ToolResult, ToolResultOf, ToolContext, FileStore, Store, Principal,
+  MatbotPluginSpec, MatbotMachine, Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext, FileStore, Store, Principal,
 } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION, currentPrincipal } from '@matatbread/matbot-plugin-api';
 
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
+  interface ToolContracts {
     // `background` discriminates on `interval`'s presence, not an `action` field: a call passing an
-    // `interval` is a recurring schedule and narrows to that arm; a run-once call (no interval) matches
-    // no positive pattern and soundly falls back to the union of both arms (see ToolResult on ToolResults).
+    // `interval` is a recurring schedule (narrows to the recurring arm); a run-once call omits it and
+    // matches the run-once arm — the recurring arm requires `interval`, so the two don't overlap.
     background:
-      | ToolResult<{ id: string; interval: string; name?: string }, { interval: string }>  // recurring (id is the handle)
-      | ToolResult<{ status: 'started'; output?: string }, { interval?: undefined }>;       // run-once
-    // `every_action` discriminates on `action`; resume/suspend further split on whether id is "*" (all)
-    // vs a single id, which a caller can't predeclare, so each keeps its two-shape arm.
+      | ToolContract<{ id: string; interval: string; name?: string }, { prompt: string; interval: string; name?: string; output?: string; provider?: string }>  // recurring (id is the handle)
+      | ToolContract<{ status: 'started'; output?: string }, { prompt: string; output?: string; provider?: string }>;                                            // run-once
+    // `every_action` discriminates on `action`; resume/suspend results further split on whether id is "*"
+    // (all) vs a single id, which a caller can't predeclare, so each keeps its two-shape result union.
     every_action:
-      | ToolResult<Array<{ id: string; interval: string; nextRun: string; active: boolean; name?: string; lastRun?: string; output?: string }>, { action: 'list' }>
-      | ToolResult<{ resumed:   true; count: number; ids: string[] } | { resumed:   true; id: string }, { action: 'resume'  }>
-      | ToolResult<{ suspended: true; count: number; ids: string[] } | { suspended: true; id: string }, { action: 'suspend' }>
-      | ToolResult<{ cancelled: true; id: string }, { action: 'cancel' }>;
+      | ToolContract<Array<{ id: string; interval: string; nextRun: string; active: boolean; name?: string; lastRun?: string; output?: string }>, { action: 'list' }>
+      | ToolContract<{ resumed:   true; count: number; ids: string[] } | { resumed:   true; id: string }, { action: 'resume';  id: string }>
+      | ToolContract<{ suspended: true; count: number; ids: string[] } | { suspended: true; id: string }, { action: 'suspend'; id: string }>
+      | ToolContract<{ cancelled: true; id: string }, { action: 'cancel'; id: string }>;
   }
 }
 
@@ -294,10 +294,6 @@ file to capture the process's stdout; without an output file, stdout is discarde
 When the user asks for something in the background, do not wait for the output — notify them the
 task has started (and the output filename, if any); they will check the result themselves later.
 
-  type Background =
-    | { prompt: string; output?: string; provider?: string }                                  // run once
-    | { prompt: string; interval: string; name?: string; output?: string; provider?: string } // repeat every <interval>
-
 interval is a duration like "30s", "5m", "1h", "24h". Omitting it — or passing "once" or null —
 runs the prompt a single time.
 
@@ -404,13 +400,7 @@ ACTIONS
 
 The id is a schedule id from 'list' or from the background tool. For suspend and resume, pass
 id "*" to act on ALL schedules at once. cancel requires a specific id — "*" is not accepted
-(no bulk delete).
-
-  type EveryAction =
-    | { action: 'list' }
-    | { action: 'suspend'; id: string }   // id "*" = all
-    | { action: 'resume';  id: string }   // id "*" = all
-    | { action: 'cancel';  id: string };  // specific id only`,
+(no bulk delete).`,
   inputSchema: {
     type:       'object',
     required:   ['action'],

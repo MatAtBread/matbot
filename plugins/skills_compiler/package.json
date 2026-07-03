@@ -3,7 +3,7 @@
   "matbotRuntime": [
     "node"
   ],
-  "version": "0.2.9",
+  "version": "0.3.0",
   "engines": {
     "node": ">=24.0.0"
   },
@@ -23,7 +23,8 @@
     "@matatbread/matbot-plugin-api": "workspace:^"
   },
   "dependencies": {
-    "typescript": "catalog:"
+    "typescript": "catalog:",
+    "@matatbread/matbot-tool-types": "workspace:^"
   },
   "devDependencies": {
     "@types/node": "catalog:",

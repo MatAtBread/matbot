@@ -1,19 +1,19 @@
 import type {
-  MatbotPluginSpec, MatbotMachine, Tool, ToolResult, ToolResultOf, Session, Store, Message, Marker,
+  MatbotPluginSpec, MatbotMachine, Tool, ToolContract, ToolResultOf, Session, Store, Message, Marker,
 } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION, lastActivityAt } from '@matatbread/matbot-plugin-api';
 
 import { makeCompactSessionsTool } from './compact-sessions.js'
 
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
+  interface ToolContracts {
     // One arm per action: a caller of `invokeTool(machine, 'session_edit', { action: '…' })` gets the
-    // matching result narrowed by the `action` it passed (see ToolResult / the multi-action note on ToolResults).
+    // matching result narrowed by the `action` it passed (see ToolContract / the multi-action note on ToolContracts).
     session_edit:
-      | ToolResult<{ sessionId: string; messagesRemaining: number },                                                     { action: 'cut'     }>
-      | ToolResult<{ newSessionId: string; messagesCopied: number },                                                     { action: 'fork'    }>
-      | ToolResult<{ newSessionId: string; messagesSplit: number; currentSessionId: string; messagesRemaining: number }, { action: 'split'   }>
-      | ToolResult<{ sessionId: string; messagesStripped: number },                                                      { action: 'compact' }>;
+      | ToolContract<{ sessionId: string; messagesRemaining: number },                                                     { action: 'cut';     sessionId: string; msgIndex: number }>
+      | ToolContract<{ newSessionId: string; messagesCopied: number },                                                     { action: 'fork';    sessionId: string; msgIndex: number }>
+      | ToolContract<{ newSessionId: string; messagesSplit: number; currentSessionId: string; messagesRemaining: number }, { action: 'split';   sessionId: string; msgIndex: number }>
+      | ToolContract<{ sessionId: string; messagesStripped: number },                                                      { action: 'compact'; sessionId: string; msgIndex: number }>;
   }
 }
 
@@ -99,10 +99,7 @@ function makeSessionEditTool(store: Store<Session>): Tool<ToolResultOf<'session_
       '  split   — Move: messages before msgIndex move to a new session; the current session keeps\n' +
       '            msgIndex onward. Both sides get cross-link markers.\n' +
       '  compact — Shrink: strip thinking blocks, tool calls, and tool results from messages before\n' +
-      '            msgIndex, keeping user/assistant text — fewer tokens, same thread.\n\n' +
-      '```ts\n' +
-      "interface SessionEditInput { action: 'cut' | 'fork' | 'split' | 'compact'; sessionId: string; msgIndex: number /* like slice index, negative is an offset from the end of the session */ };\n" +
-      '```',
+      '            msgIndex, keeping user/assistant text — fewer tokens, same thread.',
     inputSchema: {
       type:       'object',
       required:   ['action', 'sessionId', 'msgIndex'],

@@ -1,17 +1,17 @@
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import type {
-  MatbotPluginSpec, MatbotMachine, Tool, ToolEvent, ToolResult, ToolResultOf, Store, StoreQuery,
+  MatbotPluginSpec, MatbotMachine, Tool, ToolEvent, ToolContract, ToolResultOf, Store, StoreQuery,
 } from '@matatbread/matbot-plugin-api';
 import type { StoreDef, StoreRecord } from './types.js';
 
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
+  interface ToolContracts {
     store_action:
-      | ToolResult<StoreDef,             { action: 'create' }>
-      | ToolResult<StoreDef,             { action: 'expose' }>
-      | ToolResult<StoreDef | null,      { action: 'get'    }>
-      | ToolResult<{ removed: boolean }, { action: 'remove' }>
-      | ToolResult<{ stores: StoreDef[] }, { action: 'list' }>;
+      | ToolContract<StoreDef,             { action: 'create'; namespace: string; description: string; shape: string }>
+      | ToolContract<StoreDef,             { action: 'expose'; namespace: string; description: string; shape: string }>
+      | ToolContract<StoreDef | null,      { action: 'get';    namespace: string }>
+      | ToolContract<{ removed: boolean }, { action: 'remove'; namespace: string }>
+      | ToolContract<{ stores: StoreDef[] }, { action: 'list' }>;
   }
 }
 
@@ -77,11 +77,26 @@ interface ActionInput {
   query?:    StoreQuery;
 }
 
+// The store's declared `shape` as an INLINE structural type, so the synthesised `toolContract` references
+// no external name (the shape type is defined only in this string, not in any scannable source). An
+// `interface X { … }` → `{ … }`; a `type X = T` → `T`; anything else → `Record<string, unknown>`.
+// Whitespace is collapsed to keep the emitted contract on one line. A shape that itself references a named
+// type would leave that name dangling — the fix there is to export that type (so the dts can import it),
+// not to inline it here.
+function shapeType(shape: string): string {
+  const iface = shape.match(/interface\s+\w+\s*(\{[\s\S]*\})\s*$/);
+  if (iface) return iface[1]!.replace(/\s+/g, ' ').trim();
+  const alias = shape.match(/type\s+\w+\s*=\s*([\s\S]+?);?\s*$/);
+  if (alias) return alias[1]!.replace(/\s+/g, ' ').trim();
+  return 'Record<string, unknown>';
+}
+
 // A tool over one managed store whose verbs are the Store<T> interface (get/set/cas/delete/query),
 // with set doubling as upsert. Loose schema (action + the union of every action's optional fields);
 // the executor enforces per-action requirements, matching the multi-action convention in CLAUDE.md.
 function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Store<StoreRecord>): Tool {
-  const typeGuess = def.shape.match(/(interface|type\s*=)\s+(\w+)/)?.[2] ?? 'Record<string, unknown>';
+  const typeGuess = def.shape.match(/(interface|type\s*=)\s+(\w+)/)?.[2] ?? 'Record<string, unknown>';  // the shape's NAME, for prose
+  const doc       = shapeType(def.shape);                                                               // the shape as an inline type, for the toolContract
   return {
     name: actionToolName(def.namespace),
     ...(pluginName !== undefined ? { pluginName } : {}),
@@ -89,15 +104,8 @@ function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Sto
       `Access the "${def.namespace}" store — ${def.description}\n\n` +
       'Documents have this shape:\n' +
       '```ts\n' + def.shape + '\n```\n\n' +
-      'Actions map onto the matbot `Store<'+ typeGuess + '>` interface:\n' +
-      '```ts\n' +
-      'type Action =\n' +
-      "  | { action: 'get';    id: string }\n" +
-      "  | { action: 'set';    id?: string; data: " + typeGuess + " }                  // upsert; id omitted ⇒ created\n" +
-      "  | { action: 'cas';    id: string; expected: string; data: " + typeGuess + " } // compare-and-swap on version\n" +
-      "  | { action: 'delete'; id: string; expected?: string }\n" +
-      "  | { action: 'query';  query?: StoreQuery };  // omit query ⇒ match all\n" +
-      '```\n\n' +
+      'Actions map onto the matbot `Store<' + typeGuess + '>` interface (get/set/cas/delete/query), with ' +
+      '`set` doubling as upsert (omit `id` to create) and `query` matching all when omitted.\n\n' +
       'The `query` grammar:\n' +
       '```ts\n' +
       "type FieldPath = string | string[];  // a bare string is ONE key (never split on '.'); use an array for a nested path\n" +
@@ -132,6 +140,20 @@ function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Sto
       },
       required: ['action'],
     },
+    // Source-less: the tool's name and its shape are per-store, built at runtime, so it can't carry a static
+    // `ToolContracts` augmentation. It declares its contract as a `toolContract` string — identical in shape
+    // to an augmentation arm (result, params) — which the tool-types index splices into the dts and flattens
+    // for the wire. The result/data shape is inlined structurally (`doc`) so it references no name the dts
+    // lacks; `StoreQuery` stays a name — it's a plugin-api export, so the dts imports it.
+    toolContract:
+      "ToolContract<" +
+        doc + " | null | { ok: true; doc: " + doc + " } | { ok: false; current: " + doc + " | null }" +
+        " | { deleted: boolean } | { items: " + doc + "[]; total?: number; cursor?: string }" +
+      ", " +
+        "{ action: 'get'; id: string } | { action: 'set'; id?: string; data: " + doc + " }" +
+        " | { action: 'cas'; id: string; expected: string; data: " + doc + " }" +
+        " | { action: 'delete'; id: string; expected?: string } | { action: 'query'; query?: StoreQuery }" +
+      ">",
     executor: {
       async *execute(rawInput: unknown): AsyncIterable<ToolEvent> {
         const input = (rawInput ?? {}) as ActionInput;
@@ -211,15 +233,10 @@ function makeStoreActionTool(services: MatbotMachine, meta: Store<StoreDef>): To
       'Both `create` and `expose` require a plain-English `description` of what the store holds and ' +
       'a `shape` — the document type written as a flattened TypeScript type/interface — which is ' +
       'shown to the model in the generated tool.\n\n' +
-      'Actions (TypeScript):\n' +
-      '```ts\n' +
-      'type StoreAction =\n' +
-      "  | { action: 'create'; namespace: string; description: string; shape: string }  // new store + tool; fails if it already exists\n" +
-      "  | { action: 'expose'; namespace: string; description: string; shape: string }  // tool over an EXISTING store (incl. ones created elsewhere); fails if absent\n" +
-      "  | { action: 'get';    namespace: string }\n" +
-      "  | { action: 'remove'; namespace: string }   // drops the definition and its tool (store data is left intact)\n" +
-      "  | { action: 'list' };\n" +
-      '```',
+      '`create` mints a new store + tool and fails if one already exists; `expose` mints a tool over an ' +
+      'EXISTING store (including one created elsewhere) and fails if absent; `remove` drops the ' +
+      "definition and its tool but leaves the store's data intact; `get` reads one definition; `list` " +
+      'returns them all.',
     inputSchema: {
       type: 'object',
       properties: {

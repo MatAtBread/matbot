@@ -19,17 +19,20 @@
  * Invoke via background tool or call directly as a tool.
  */
 
-import type { Tool, ToolExecutor, ToolContext, ToolResultOf, Session, Store } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolContract, ToolContext, ToolResultOf, Session, Store } from '@matatbread/matbot-plugin-api';
 import { lastActivityAt } from '@matatbread/matbot-plugin-api';
 
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
-    compact_sessions: {
-      examined:  number;
-      pages:     number;
-      compacted: Array<{ sessionId: string; title: string; tier: 'full' | 'partial'; messagesStripped: number }>;
-      skipped:   Array<{ sessionId: string; title: string; reason: string }>;
-    };
+  interface ToolContracts {
+    compact_sessions: ToolContract<
+      {
+        examined:  number;
+        pages:     number;
+        compacted: Array<{ sessionId: string; title: string; tier: 'full' | 'partial'; messagesStripped: number }>;
+        skipped:   Array<{ sessionId: string; title: string; reason: string }>;
+      },
+      { inactiveDays?: number; activeMessages?: number }
+    >;
   }
 }
 
@@ -167,12 +170,7 @@ Two tiers:
   Tier 2 — Partial compact: active sessions with >20 messages, keeping the last 10 intact.
     Strips tool calls / tool results / thinking from all earlier messages.
 The current session is never touched. Idempotent — safe to run on a schedule.
-Returns a summary of what was compacted and skipped. Parameters:
-  interface CompactSessionsParams {
-    inactiveDays?: number;
-    activeMessages?: number;
-  }
-`,
+Returns a summary of what was compacted and skipped.`,
     inputSchema: {
       type: 'object',
       properties: {

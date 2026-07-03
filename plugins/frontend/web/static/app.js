@@ -31,8 +31,8 @@ const updatedFiles   = new Set();
 //   4. Any manual scroll by the user suppresses ALL auto-scrolling for 10 s.
 
 let scrollSuppressUntil = 0;    // epoch ms — suppress auto-scroll until this time
-let programmaticScroll = false; // true while *we* are moving scrollTop (so the
-                                // 'scroll' event handler can ignore it)
+let expectedScrollTop = 0;      // messagesEl.scrollTop as we last set it; a 'scroll'
+                                // landing elsewhere means the user moved it, not us
 
 function isScrollSuppressed() {
   return Date.now() < scrollSuppressUntil;
@@ -41,11 +41,13 @@ function isScrollSuppressed() {
 // Call this wrapper before any programmatic scroll so the scroll-listener can
 // distinguish user-initiated scrolls from our own.
 function programmaticScrollTo(fn) {
-  programmaticScroll = true;
   fn();
-  // Reset the flag asynchronously — the browser fires 'scroll' synchronously
-  // (or at least before the next rAF), so this is safe.
-  requestAnimationFrame(() => { programmaticScroll = false; });
+  // Record where we left messagesEl so the 'scroll' handler can tell our own move from
+  // the user's. A boolean flag can't: during streaming scrollToOutputStart re-sets it
+  // every delta — faster than its rAF reset — so it stays true and every user scroll
+  // reads as ours. Comparing the settled position has no such race; instant
+  // scrollIntoView / scrollTop assignment both update scrollTop synchronously here.
+  expectedScrollTop = messagesEl.scrollTop;
 }
 
 // Listen for user-initiated scrolls on the messages pane.
@@ -53,9 +55,11 @@ function programmaticScrollTo(fn) {
 // 'touchmove' catches finger-drags on touch screens.
 // Together they cover the vast majority of deliberate user scrolls.
 function onUserScroll() {
-  if (!programmaticScroll) {
-    scrollSuppressUntil = Date.now() + 5000;   // 100ms suppression (temp for testing)
-  }
+  // wheel/touchmove fire synchronously at input time, so arm suppression immediately:
+  // the next streaming delta's auto-scroll then bails before it can override — and
+  // thereby mask — the user's move. The 'scroll' handler's position check is the
+  // backstop for scrollbar drags and keyboard paging, which emit no wheel/touch event.
+  scrollSuppressUntil = Date.now() + 5000;
 }
 
 // True when the bottom edge of #messages is at or above the bottom of the
@@ -2447,17 +2451,15 @@ async function init() {
   };
 
   // ── Attach scroll listeners for user-scroll detection ─────────
-  // 'wheel' catches mouse wheel + trackpad gestures.
-  // 'touchmove' catches finger-drags on touch screens.
-  // The 'scroll' event on #messages catches scrollbar dragging and
-  // keyboard scrolling (PgUp / PgDn / arrows when messagesEl is focused).
-  // We use the programmaticScroll flag to ignore scrolls we triggered.
+  // 'wheel' / 'touchmove' catch mouse-wheel, trackpad and touch gestures at input time.
+  // The 'scroll' event additionally catches scrollbar drags and keyboard paging (PgUp /
+  // PgDn / arrows) — which emit no wheel/touch event — by noticing the position landed
+  // somewhere we didn't put it (see programmaticScrollTo). 4px absorbs sub-pixel jitter.
   messagesEl.addEventListener('wheel', onUserScroll, { passive: true });
   messagesEl.addEventListener('touchmove', onUserScroll, { passive: true });
-    messagesEl.addEventListener('scroll', () => {
-    if (!programmaticScroll) {
-      scrollSuppressUntil = Date.now() + 5000;   // 100ms (testing)
-      // Update floating ▼ button visibility.
+  messagesEl.addEventListener('scroll', () => {
+    if (Math.abs(messagesEl.scrollTop - expectedScrollTop) > 4) {
+      scrollSuppressUntil = Date.now() + 5000;
       updateScrollDownButton();
     }
   });

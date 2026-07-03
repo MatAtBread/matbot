@@ -1,0 +1,46 @@
+{
+  "name": "@matatbread/matbot-function-tools",
+  "matbotRuntime": [
+    "node",
+    "browser"
+  ],
+  "version": "0.3.0",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "files": [
+    "src"
+  ],
+  "description": "Author and run TypeScript functions that compose registered tools in one pass — `tool_function` (define persists a named tool; lambda runs once). Cross-platform; TypeScript is erased via the host-provided TypeScriptStripper.",
+  "keywords": [
+    "matbot",
+    "matbot-plugin",
+    "llm",
+    "ai",
+    "agent",
+    "tools"
+  ],
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MatAtBread/matbot.git",
+    "directory": "plugins/function-tools"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "@matatbread/matbot-plugin-api": "workspace:^"
+  },
+  "devDependencies": {
+    "typescript": "catalog:",
+    "@matatbread/matbot-plugin-api": "workspace:^"
+  }
+}

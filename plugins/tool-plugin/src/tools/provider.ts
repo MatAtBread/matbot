@@ -1,9 +1,9 @@
-import type { Tool, ToolExecutor, ToolResult, ToolResultOf, ToolContext, ProviderRegistry, MatbotPlugin, ModelParameters } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext, ProviderRegistry, MatbotPlugin, ModelParameters } from '@matatbread/matbot-plugin-api';
 
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
+  interface ToolContracts {
     provider:
-      | ToolResult<{ providers: Array<{
+      | ToolContract<{ providers: Array<{
             name:           string;
             module:         string;
             model:          string;
@@ -11,8 +11,8 @@ declare module '@matatbread/matbot-plugin-api' {
             endpoint?:      string;
             parameters?:    ModelParameters;
           }> }, { action: 'list'   }>
-      | ToolResult<{ message: string }, { action: 'add'    }>
-      | ToolResult<{ message: string }, { action: 'remove' }>;
+      | ToolContract<{ message: string }, { action: 'add'; name: string; module: string; model: string; endpoint?: string; credentialKey?: string; credentialEnvVar?: string; parameters?: Record<string, unknown> }>
+      | ToolContract<{ message: string }, { action: 'remove'; name: string }>;
   }
 }
 import { getRegisteredPlugins, getSpecifierForPlugin }       from '@matatbread/matbot-core';
@@ -443,13 +443,6 @@ ACTIONS
            out-of-band for security and never stored in session history.
   remove — Delete a profile by name. Refuses if it is the only profile or
            the one powering the current turn.
-
-SHAPE  (TypeScript; see PARAMETERS below for the parameters object)
-  type ProviderAction =
-    | { action: 'list' }
-    | { action: 'add'; name: string; module: string; model: string;
-        endpoint?: string; credentialKey?: string; credentialEnvVar?: string; parameters?: object }
-    | { action: 'remove'; name: string };
 
 AVAILABLE ADAPTER MODULES  (use one of these as the module value when adding)
 ${adapterSection}

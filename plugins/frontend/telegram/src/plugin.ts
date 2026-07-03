@@ -1,14 +1,17 @@
 import type {
   MatbotPluginSpec, MatbotMachine, Principal, Session, PromptFn, FormField,
-  ToolExecutor, ToolResultOf,
+  ToolExecutor, ToolContract, ToolResultOf,
 } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
-    telegram_provider:  { provider: string | null };  // the active provider name (null when none), or the one just set
-    telegram_open_door: { open_until: string };        // ISO time the join window stays open until
-    telegram_send:      { sent: number };              // how many chats the notification reached
+  interface ToolContracts {
+    // telegram_provider discriminates on `action`; get and set both return the active provider name.
+    telegram_provider:
+      | ToolContract<{ provider: string | null }, { action: 'get' }>
+      | ToolContract<{ provider: string | null }, { action: 'set'; provider: string }>;
+    telegram_open_door: ToolContract<{ open_until: string }, Record<string, never>>;  // ISO time the join window stays open until
+    telegram_send:      ToolContract<{ sent: number }, { text: string; chatId?: number }>;  // how many chats the notification reached
   }
 }
 import {
@@ -36,11 +39,7 @@ export const plugin: MatbotPluginSpec = {
   tools: [
     {
       name:        'telegram_provider',
-      description: `Get or set the LLM provider the Telegram bot uses. A 'set' is persisted and restored on restart.
-
-  type TelegramProvider =
-    | { action: 'get' }
-    | { action: 'set'; provider: string };  // provider name as defined in matbot.yaml`,
+      description: `Get or set the LLM provider the Telegram bot uses. A 'set' is persisted and restored on restart.`,
       inputSchema: {
         type: 'object',
         required: ['action'],

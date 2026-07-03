@@ -1,5 +1,13 @@
-import type { Tool, ToolEvent, ToolContext, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolEvent, ToolContext, ToolContract, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
+
+// Single arm: the request params paired with `unknown` (the body is parsed text or arbitrary JSON). The
+// params are inlined structurally (not a `HttpInput` reference) so the derived wire text shows real fields.
+declare module '@matatbread/matbot-plugin-api' {
+  interface ToolContracts {
+    http: ToolContract<unknown, { url: string; method?: string; headers?: Record<string, string>; body?: string; responseType?: 'text' | 'json' }>;
+  }
+}
 
 interface HttpInput {
   url:           string;

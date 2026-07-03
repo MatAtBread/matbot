@@ -441,6 +441,57 @@ export interface KnowledgeIndex {
   entries?(): Iterable<KnowledgeEntry>;
 }
 
+// ── TypeScript ──────────────────────────────────────────────────────────────
+
+/**
+ * Erases TypeScript types from a source string, returning runnable JavaScript. Type-stripping is
+ * foundational — the harness ships raw `.ts` and any code compiled at runtime must have its types
+ * removed before it can execute — so every execution environment provides one, and it lives as a fixed
+ * runtime capability (on {@link MatbotRuntime}) the host supplies per platform, not a swappable service:
+ * node uses its built-in `stripTypeScriptTypes`, the browser bundle uses sucrase. A consumer that
+ * compiles source at runtime (e.g. `tool_function`) calls this instead of importing a platform stripper.
+ *
+ * `strip` may be async: a platform whose stripper loads lazily (the browser fetches sucrase on first use)
+ * returns a promise; a synchronous stripper (node) returns the string directly — callers `await` either.
+ * It is type-erasure, not full transpilation: node's stripper is erasable-only (enums/namespaces throw),
+ * sucrase is more permissive, so authors should keep to erasable TypeScript to stay portable.
+ */
+export interface TypeScriptStripper {
+  strip(source: string): string | Promise<string>;
+}
+
+/**
+ * Optional, node-only developer-experience service: the live `.d.ts` of the types the loaded tools
+ * expose — what `toolResult(invokeTool(…, name, …))`, or a `function-tools` `await tool.name(…)`, resolves
+ * to — derived by compiling each loaded plugin's `declare module '@matatbread/matbot-plugin-api'`
+ * augmentations. The runtime registry can't supply this (result types are erased); only a TypeScript
+ * program reading the source can. Consumers that generate or compose tool-calling code use it so the model
+ * isn't guessing return shapes. Absent where no TypeScript program can run (the browser today) — a consumer
+ * must degrade (guess-and-run) when `services.ToolTypeIndex` is undefined.
+ *
+ * The result is rebuilt lazily and cached, invalidated when the tool set changes. Tools the source scan
+ * can't reach (a `function-tools` function) contribute their types by declaring a `toolContract` string on
+ * their registered {@link Tool} — identical in shape to a `ToolContracts` arm; the index splices it off the
+ * live registry, so no separate registration step is needed.
+ */
+export interface ToolTypeIndex {
+  /** Self-contained type declarations as a `.d.ts` string: the source-derived `ToolContracts` augmentations
+   *  merged with the arms of every other live tool, plus `declare const tool: ToolProxy` — the overloaded
+   *  proxy a generator writes `await tool.x(params)` against. */
+  dts(): Promise<string>;
+  /** Type-check a TypeScript `snippet` against exactly the {@link dts} above — the `tool` proxy ({@link
+   *  ToolProxy}: each multi-action tool an overload set, so `await tool.x(params)` narrows its result by the
+   *  params) is in scope. Returns human-readable diagnostics scoped to the snippet ([] means clean). A
+   *  composer uses it to catch bad tool-call code before running/registering it. */
+  check(snippet: string): Promise<string[]>;
+  /** Per live tool (that has a contract): the `params`/`result` wire text, flattened from the one contract —
+   *  a source tool's `ToolContracts` arms (via the source scan) or a source-less tool's `toolContract` string.
+   *  The single contract is thus also the source of the wire description; the host folds this into the
+   *  outgoing tool descriptions at the turn's dispatch edge. A tool with only a loose `inputSchema` (no
+   *  contract) is absent. */
+  wireContracts(): Promise<Record<string, { params: string; result: string }>>;
+}
+
 // ── Tools ─────────────────────────────────────────────────────────────────────
 
 export type ToolEvent<Result = unknown> =
@@ -462,7 +513,7 @@ export type ToolEvent<Result = unknown> =
  * concrete result type back from {@link invokeTool} + `toolResult` instead of `unknown`:
  *
  *   declare module '@matatbread/matbot-plugin-api' {
- *     interface ToolResults { find_fact: string[] | null }
+ *     interface ToolContracts { find_fact: string[] | null }
  *   }
  *
  * The tool name is the discriminator: `invokeTool(machine, 'find_fact', …)` is typed
@@ -472,59 +523,84 @@ export type ToolEvent<Result = unknown> =
  * executor already produces. Keep the entry in sync with what the executor actually yields.
  *
  * **Multi-action tools** are a weird form of overloaded function: the same tool returns different
- * shapes depending on its params. Register such a tool as a union of {@link ToolResult} *arms*, each
+ * shapes depending on its params. Register such a tool as a union of {@link ToolContract} *arms*, each
  * pairing a result with the discriminating params *pattern* that selects it — `invokeTool` matches the
  * call's literal params against the patterns and narrows the result to the matching arm:
  *
  *   declare module '@matatbread/matbot-plugin-api' {
- *     interface ToolResults {
+ *     interface ToolContracts {
  *       session_action:
- *         | ToolResult<Session,                       { action: 'get' }>
- *         | ToolResult<{ id: string; title: string }, { action: 'rename' }>;
+ *         | ToolContract<Session,                       { action: 'get' }>
+ *         | ToolContract<{ id: string; title: string }, { action: 'rename' }>;
  *     }
  *   }
  *   // invokeTool(machine, 'session_action', { action: 'get', sessionId }) → result is Session
  *
  * The pattern is *any* discriminating field(s), not just `action` (a tool keying on `interval`'s
- * presence registers `ToolResult<…, { interval: string }>`). It is a *pattern*, not the full input:
+ * presence registers `ToolContract<…, { interval: string }>`). It is a *pattern*, not the full input:
  * key only on the discriminant so a call carrying just that field still matches. When no arm's pattern
  * matches (a non-literal discriminant, or an absence-discriminant the positive patterns can't express),
  * the result falls back to the union of every arm — always sound, just less narrow.
  */
-export interface ToolResults {}
+export interface ToolContracts {}
 
 /**
- * One overload arm of a multi-action tool registered in {@link ToolResults}: the `Result` it yields
+ * One overload arm of a multi-action tool registered in {@link ToolContracts}: the `Result` it yields
  * for a call whose params match the discriminating pattern `Args`. `Args` defaults to `unknown` (an
  * arm that matches any params). Purely type-level — the `__` fields are phantom and never constructed.
  */
-export interface ToolResult<Result, Args = unknown> {
+export interface ToolContract<Result, Args = unknown> {
   readonly __result: Result;
   readonly __args:   Args;
 }
 
-type ToolResultArmed<E>           = E extends ToolResult<unknown, unknown> ? true : false;
-type ToolResultUnion<E>           = E extends ToolResult<infer R, unknown> ? R : never;
-type ToolResultMatched<E, P>      = E extends ToolResult<infer R, infer A> ? (P extends A ? R : never) : never;
+type ToolResultArmed<E>           = E extends ToolContract<unknown, unknown> ? true : false;
+type ToolResultUnion<E>           = E extends ToolContract<infer R, unknown> ? R : never;
+type ToolResultMatched<E, P>      = E extends ToolContract<infer R, infer A> ? (P extends A ? R : never) : never;
 
 /** The full set of `result` values a tool named `K` may yield — the union over all its arms (for an
  *  arm-based entry), the entry itself (for a plain entry), or `unknown` when `K` is unregistered. This
  *  is what an executor binds against (`ToolExecutor<ToolResultOf<'my_tool'>>`): it must cover every arm. */
 export type ToolResultOf<K extends string> =
-  K extends keyof ToolResults
-    ? ToolResultArmed<ToolResults[K]> extends true ? ToolResultUnion<ToolResults[K]> : ToolResults[K]
+  K extends keyof ToolContracts
+    ? ToolResultArmed<ToolContracts[K]> extends true ? ToolResultUnion<ToolContracts[K]> : ToolContracts[K]
     : unknown;
 
 /** The `result` a call to tool `K` with params `P` yields: for an arm-based entry, the arm whose
  *  pattern `P` matches (or the full union when none match — always sound); otherwise {@link ToolResultOf}. */
 export type ToolResultFor<K extends string, P> =
-  K extends keyof ToolResults
-    ? ToolResultArmed<ToolResults[K]> extends true
-      ? ([ToolResultMatched<ToolResults[K], P>] extends [never]
-          ? ToolResultUnion<ToolResults[K]>
-          : ToolResultMatched<ToolResults[K], P>)
-      : ToolResults[K]
+  K extends keyof ToolContracts
+    ? ToolResultArmed<ToolContracts[K]> extends true
+      ? ([ToolResultMatched<ToolContracts[K], P>] extends [never]
+          ? ToolResultUnion<ToolContracts[K]>
+          : ToolResultMatched<ToolContracts[K], P>)
+      : ToolContracts[K]
     : unknown;
+
+// Distribute a union to its intersection: `A | B` → `A & B`. An intersection of function types is an
+// overload set, so this turns a union of per-arm call signatures into an overloaded function.
+type UnionToIntersection<U> =
+  (U extends unknown ? (k: U) => void : never) extends (k: infer I) => void ? I : never;
+
+// One `ToolContracts` arm → its call signature. A fully-untyped arm (`ToolContract<unknown, unknown>`, the
+// fallback for a foreign/MCP tool carrying only a JSON-Schema `inputSchema`) keeps a loose, optional-param
+// signature so it stays callable; a typed arm requires its declared params.
+type ArmCallSig<E> =
+  E extends ToolContract<infer R, infer P>
+    ? (unknown extends P ? (params?: unknown) => Promise<R> : (params: P) => Promise<R>)
+    : never;
+
+/**
+ * The type of the injected `tool` proxy that `function-tools` and compiled skills call
+ * (`await tool.name(params)`). Each key is derived from its {@link ToolContracts} entry: a multi-arm
+ * (multi-action) entry becomes an **overload set** — one `(params) => Promise<result>` signature per arm —
+ * so `await tool.name(params)` narrows its result by the params passed, exactly the contract a code
+ * generator needs to write a correct call first time. A single-arm entry is one signature. This is what the
+ * generated `dts()` declares `tool` as; it is *derived* — never hand-authored — from the same `ToolContracts`
+ * augmentation that types authors' `invokeTool`/`toolResult` calls, so the human editor and the LLM see one
+ * source of truth.
+ */
+export type ToolProxy = { [K in keyof ToolContracts]: UnionToIntersection<ArmCallSig<ToolContracts[K]>> };
 
 /**
  * Ask the user a question and resolve with their answer. The host supplies the
@@ -577,7 +653,7 @@ export interface ToolContext {
 
 /**
  * A tool's runtime. `R` is the type of the `value` carried by its `result` event — declared once,
- * at the source, so the executor's yields and the tool's {@link ToolResults} registry entry can't
+ * at the source, so the executor's yields and the tool's {@link ToolContracts} registry entry can't
  * silently drift. The `unknown` default keeps untyped executors compiling untouched, and covariance
  * means a narrower `ToolExecutor<X>` still satisfies `ToolExecutor` (i.e. `ToolExecutor<unknown>`),
  * so the heterogeneous registry boundary (`Tool[]`) accepts any executor. Bind `R` to the registry
@@ -591,6 +667,14 @@ export interface Tool<R = unknown> {
   name:         string;
   description:  string;
   inputSchema:  JSONSchema;
+  /** The call contract as TypeScript source — a {@link ToolContract}`<Result, Params>` (or a union of arms
+   *  for a multi-action tool), *identical in shape* to what a `ToolContracts` augmentation declares. Only a
+   *  tool with **no scannable source** carries this — a `function-tools` function (whose signature supplies
+   *  both halves), and any similarly runtime-defined tool: the host splices it verbatim into the generated
+   *  dts's `ToolContracts`, and derives the wire `params`/`result` text from it. A tool WITH source declares
+   *  its contract as a `ToolContracts` augmentation instead and omits this. Foreign tools (e.g. MCP proxies)
+   *  that have neither fall back to the loose `inputSchema`. */
+  toolContract?: string;
   executor:     ToolExecutor<R>;
   pluginName?:  string;
 }

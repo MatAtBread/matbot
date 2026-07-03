@@ -375,19 +375,21 @@ const mcpAction: Tool = {
 
 Throw only for unexpected failures; yield `{ type: 'error' }` for expected ones.
 
-### Typed results (`ToolResults`)
+### Typed results (`ToolContracts`)
 
-`ToolEvent` is generic — `ToolExecutor<R>` yields `ToolEvent<R>` — so a tool can declare the type of
-the `value` it returns. Register it by augmenting the `ToolResults` interface (the same pattern as
-`MarkerData` / `MatbotServices`), keyed by the tool's `name`. That augmentation is the **single source
-of truth**: bind the executor to it with `ToolExecutor<ToolResultOf<'name'>>` (or `Tool<…>`), and the
-compiler checks every `result` yield against it — so the executor and the registry can't drift.
+`ToolEvent` is generic — `ToolExecutor<R>` yields `ToolEvent<R>` — so a tool declares its call contract
+by augmenting the `ToolContracts` interface (the same pattern as `MarkerData` / `MatbotServices`), keyed
+by the tool's `name`. Each entry is a `ToolContract<Result, Params>` arm pairing the result with the
+params that produce it — a single-action tool declares **one** arm (never a bare `name: Result`, which
+yields no callable `tool` proxy signature). That augmentation is the **single source of truth**: bind the
+executor to it with `ToolExecutor<ToolResultOf<'name'>>` (or `Tool<…>`), and the compiler checks every
+`result` yield against it — so the executor and the registry can't drift.
 
 ```ts
-import type { Tool, ToolResultOf, ToolContext } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolContract, ToolResultOf, ToolContext } from '@matatbread/matbot-plugin-api';
 
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults { search: { hits: string[] } }
+  interface ToolContracts { search: ToolContract<{ hits: string[] }, { query: string }> }
 }
 
 const myTool: Tool<ToolResultOf<'search'>> = {
@@ -403,11 +405,12 @@ const myTool: Tool<ToolResultOf<'search'>> = {
 A caller then recovers the concrete type without narrowing: `invokeTool(machine, 'search', …)` is typed
 `AsyncIterable<ToolEvent<{ hits: string[] }>>`, and `toolResult(events)` resolves to `{ hits: string[] }`
 (the structured counterpart to `toolText`, which collapses the result to a string). An unregistered name
-resolves to `unknown`. This is purely type-level — no runtime validation. Genuinely-`unknown` results
-(e.g. `http`'s parsed JSON) just stay unregistered.
+resolves to `unknown`. This is purely type-level — no runtime validation. A genuinely-`unknown` result
+(e.g. `http`'s parsed JSON) still declares an arm, just with `unknown` as its result:
+`ToolContract<unknown, { url: string; … }>`.
 
 **Per-action narrowing.** A multi-action tool is a weird overloaded function — its result depends on its
-params. Register it as a union of `ToolResult<Result, Args>` *arms*, each pairing a result with the
+params. Register it as a union of `ToolContract<Result, Args>` *arms*, each pairing a result with the
 discriminating params *pattern* that selects it; `invokeTool` matches the call's params and narrows to
 the matching arm. The discriminant is any field(s), not just `action` (`background` keys on `interval`'s
 presence). Key on the discriminant only, not the full input, so a call carrying just that field matches;
@@ -416,11 +419,11 @@ all arms. `ToolResultOf<'name'>` unwraps the arms to that union, so the executor
 
 ```ts
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
+  interface ToolContracts {
     mcp_action:
-      | ToolResult<{ message: string; tools: string[] }, { action: 'add'    }>
-      | ToolResult<{ servers: string[] },                { action: 'list'   }>
-      | ToolResult<{ message: string },                  { action: 'remove' }>;
+      | ToolContract<{ message: string; tools: string[] }, { action: 'add'    }>
+      | ToolContract<{ servers: string[] },                { action: 'list'   }>
+      | ToolContract<{ message: string },                  { action: 'remove' }>;
   }
 }
 // invokeTool(machine, 'mcp_action', { action: 'list' }) → result is { servers: string[] }

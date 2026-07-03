@@ -1,8 +1,8 @@
-import type { Tool, ToolExecutor, ToolResultOf, ToolContext, MatbotMachine } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext, MatbotMachine } from '@matatbread/matbot-plugin-api';
 
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
-    single_turn: { text: string };  // the consulted provider's reply text
+  interface ToolContracts {
+    single_turn: ToolContract<{ text: string }, { provider?: string; prompt: string; system?: string }>;  // the consulted provider's reply text
   }
 }
 
@@ -53,11 +53,7 @@ export function createSingleTurnTool(services: MatbotMachine): Tool<ToolResultOf
       'back its text. Use it to consult a different model — e.g. a second, ' +
       'different-lineage model critiquing your draft, or any generation that should run on a specific ' +
       'provider. `provider` is OPTIONAL: omit it to run on the current conversation\'s model, or name ' +
-      'a configured provider to switch models (list or add providers with the provider tool).\n\n' +
-      'Parameters (TypeScript):\n' +
-      '```ts\n' +
-      '{ provider?: string; prompt: string; system?: string }  // -> { text }\n' +
-      '```',
+      'a configured provider to switch models (list or add providers with the provider tool).',
     inputSchema: {
       type:       'object',
       required:   ['prompt'],

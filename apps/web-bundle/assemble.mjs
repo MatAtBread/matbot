@@ -15,8 +15,12 @@ const localRequire = createRequire(import.meta.url);
 
 // Build-time type stripper: sucrase (pure JS — no native binary, no postinstall, invisible to anyone
 // installing matbot). Used per-module so each stays a separate module the import map wires up.
+// disableESTransforms + keepUnusedImports ⇒ strip types ONLY: no down-levelling of `??`/`?.` (which
+// sucrase otherwise rewrites to `_nullishCoalesce`/`_optionalChain` helpers) and no import elision, so
+// the output is byte-for-byte the source minus type syntax — matching node's native stripper and the
+// evergreen target the bundle already assumes.
 const stripTypes = (src, filePath) =>
-  localRequire('sucrase').transform(src, { transforms: ['typescript'], filePath, preserveDynamicImport: true }).code;
+  localRequire('sucrase').transform(src, { transforms: ['typescript'], disableESTransforms: true, keepUnusedImports: true, filePath, preserveDynamicImport: true }).code;
 
 const here     = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '../..');

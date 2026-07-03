@@ -1,24 +1,24 @@
-import type { Tool, ToolExecutor, ToolResult, ToolResultOf, ToolContext, MatbotMachine } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext, MatbotMachine } from '@matatbread/matbot-plugin-api';
 import type { SkillManager, SkillSummary } from './manager.js';
 import type { SkillDoc } from './types.js';
 
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
+  interface ToolContracts {
     // One arm per action: a caller of `invokeTool(machine, 'skill_action', { action: '…' })` gets the
-    // matching result narrowed by the `action` it passed (see ToolResult / the multi-action note on ToolResults).
+    // matching result narrowed by the `action` it passed (see ToolContract / the multi-action note on ToolContracts).
     skill_action:
-      | ToolResult<{ skills: SkillSummary[] },                  { action: 'list'     }>
-      | ToolResult<{ id: string; name: string; content: string }, { action: 'load' }>
-      | ToolResult<{ id: string; name: string; content: string }, { action: 'use'  }>
-      | ToolResult<{ id: string; name: string; knowledge: NonNullable<SkillDoc['knowledge']> | null; catalogue: boolean; hidden: boolean }, { action: 'metadata' }>
-      | ToolResult<{ id: string; name: string },               { action: 'save'     }>
-      | ToolResult<{ id: string; name: string },               { action: 'delete'   }>
-      | ToolResult<{ id: string; name: string; hidden: boolean }, { action: 'hide'   }>
-      | ToolResult<{ id: string; name: string; hidden: boolean }, { action: 'unhide' }>;
+      | ToolContract<{ skills: SkillSummary[] },                  { action: 'list' }>
+      | ToolContract<{ id: string; name: string; content: string }, { action: 'load'; name: string }>
+      | ToolContract<{ id: string; name: string; content: string }, { action: 'use'; name: string }>
+      | ToolContract<{ id: string; name: string; knowledge: NonNullable<SkillDoc['knowledge']> | null; catalogue: boolean; hidden: boolean }, { action: 'metadata'; name: string }>
+      | ToolContract<{ id: string; name: string },               { action: 'save'; name: string; content: string; catalogue?: boolean }>
+      | ToolContract<{ id: string; name: string },               { action: 'delete'; name: string }>
+      | ToolContract<{ id: string; name: string; hidden: boolean }, { action: 'hide'; name: string }>
+      | ToolContract<{ id: string; name: string; hidden: boolean }, { action: 'unhide'; name: string }>;
     skills_config:
-      | ToolResult<{ analysisProvider: string | null; fallback: string | null; available: string[] }, { action: 'get'   }>
-      | ToolResult<{ analysisProvider: string },                { action: 'set'   }>
-      | ToolResult<{ analysisProvider: null; fallback: string | null }, { action: 'clear' }>;
+      | ToolContract<{ analysisProvider: string | null; fallback: string | null; available: string[] }, { action: 'get' }>
+      | ToolContract<{ analysisProvider: string },                { action: 'set'; provider: string }>
+      | ToolContract<{ analysisProvider: null; fallback: string | null }, { action: 'clear' }>;
   }
 }
 
@@ -137,19 +137,7 @@ export function createSkillTool(manager: SkillManager): Tool<ToolResultOf<'skill
       '(contextual_search / find_fact) and from the catalogue — but stays fully manageable here ' +
       '(list/load/metadata/save/delete still work). Use this to retire a skill that has been compiled ' +
       'into a tool, without deleting its source. `unhide` reverses it. Hidden state is independent of ' +
-      '`save` — editing content never changes it.\n\n' +
-      'Parameters depend on `action` (TypeScript):\n' +
-      '```ts\n' +
-      'type SkillAction =\n' +
-      "  | { action: 'list' }                            // -> { skills: [{ id, name, toolBinding?, hidden }] }\n" +
-      "  | { action: 'load';     name: string }          // raw content -> { id, name, content }\n" +
-      "  | { action: 'use';      name: string }          // content as a directive to apply now -> { id, name, content }\n" +
-      "  | { action: 'metadata'; name: string }          // derived analysis -> { id, name, knowledge: { summary, entities, tags, classification: { procedural, informational } } | null, catalogue: boolean, hidden: boolean }\n" +
-      "  | { action: 'save';     name: string; content: string; catalogue?: boolean }  // create or update -> { id, name }; `catalogue` advertises the skill in the system prompt (omit to leave unchanged)\n" +
-      "  | { action: 'delete';   name: string }          // -> { id, name }\n" +
-      "  | { action: 'hide';     name: string }          // withhold from the model -> { id, name, hidden }\n" +
-      "  | { action: 'unhide';   name: string };         // restore to the model -> { id, name, hidden }\n" +
-      '```',
+      '`save` — editing content never changes it.',
     inputSchema: {
       type:       'object',
       required:   ['action'],
@@ -214,14 +202,7 @@ export function createSkillsConfigTool(services: MatbotMachine): Tool<ToolResult
       'existing provider, not a new one. Unset, analysis uses the first configured provider; set it to ' +
       'pin a small/fast model. `get` reports the current pin, the fallback, and the available provider ' +
       'names; `set` pins one (it must already be configured — see the provider tool); `clear` reverts ' +
-      'to the fallback.\n\n' +
-      'Parameters (TypeScript):\n' +
-      '```ts\n' +
-      "type SkillsConfig =\n" +
-      "  | { action: 'get' }                       // -> { analysisProvider: string | null, fallback, available }\n" +
-      "  | { action: 'set'; provider: string }     // pin a provider -> { analysisProvider }\n" +
-      "  | { action: 'clear' };                     // revert to fallback -> { analysisProvider: null, fallback }\n" +
-      '```',
+      'to the fallback.',
     inputSchema: {
       type:       'object',
       required:   ['action'],

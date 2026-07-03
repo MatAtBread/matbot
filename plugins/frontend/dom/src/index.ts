@@ -1,10 +1,12 @@
-import type { MatbotPluginSpec, MatbotMachine, Tool, ToolContext, ToolResultOf } from '@matatbread/matbot-plugin-api';
+import type { MatbotPluginSpec, MatbotMachine, Tool, ToolContext, ToolContract, ToolResultOf } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import { ChatUI } from './ui.js';
 
+// Same tool name (and therefore the same one merged entry) as the served web frontend — declared
+// identically so the two augmentations agree.
 declare module '@matatbread/matbot-plugin-api' {
-  interface ToolResults {
-    url_for_resource: { url: string | null };  // a URL for the file, or null if not publicly viewable
+  interface ToolContracts {
+    url_for_resource: ToolContract<{ url: string | null }, { namespace: string; name: string }>;  // a URL for the file, or null if not publicly viewable
   }
 }
 
