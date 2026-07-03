@@ -452,6 +452,28 @@
     #skill-editor.tab-triggers #skill-editor-toolbar,
     #skill-editor.tab-metadata #skill-editor-toolbar { display: none; }
     #skill-editor-pane-triggers { padding: 16px; }
+    .trigger-suspend {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+      font-size: 0.82em;
+      color: #6b7280;
+      user-select: none;
+      padding: 8px 10px;
+      margin-bottom: 12px;
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      background: #f9fafb;
+    }
+    .trigger-suspend input { cursor: pointer; margin: 0; }
+    /* When suspended, make it visually loud (amber) so a stopped trigger is obvious at a glance. */
+    .trigger-suspend.on {
+      color: #92400e;
+      border-color: #fcd34d;
+      background: #fffbeb;
+      font-weight: 600;
+    }
     #skill-trigger-list { flex: 1; min-height: 0; overflow-y: auto; }
     #skill-trigger-add { align-self: flex-start; margin-top: 10px; }
     #skill-trigger-list:empty::after {
@@ -1705,6 +1727,10 @@
           <textarea id="skill-editor-text" spellcheck="false" placeholder="Skill content (markdown)…"></textarea>
         </div>
         <div id="skill-editor-pane-triggers" class="skill-pane">
+          <label id="skill-trigger-suspend-row" class="trigger-suspend" title="Keep the trigger and its conditions, but stop it from firing until re-enabled">
+            <input type="checkbox" id="skill-trigger-suspend">
+            <span>Suspend — keep the conditions but stop this trigger from firing</span>
+          </label>
           <div id="skill-trigger-list"></div>
           <button id="skill-trigger-add" class="skill-editor-btn">+ Add condition</button>
         </div>

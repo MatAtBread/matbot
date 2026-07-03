@@ -686,7 +686,8 @@ const skillEditorTitle   = document.getElementById('skill-editor-title');
 const skillEditorError   = document.getElementById('skill-editor-error');
 const skillEditorSave    = document.getElementById('skill-editor-save');
 const skillEditorRoot    = document.getElementById('skill-editor');
-const skillTriggerList   = document.getElementById('skill-trigger-list');
+const skillTriggerList    = document.getElementById('skill-trigger-list');
+const skillTriggerSuspend = document.getElementById('skill-trigger-suspend');
 const TRIGGER_KINDS = ['ephemeral', 'contextual', 'retract', 'followup'];
 let editingSkillName = null;
 let skillEditor = null;   // TinyMDE.Editor, created lazily on first open
@@ -877,6 +878,15 @@ function renderTriggers(conditions) {
   for (const c of conditions) skillTriggerList.appendChild(makeTriggerRow(c));
 }
 
+// Reflect the suspend toggle: check the box and light up the amber "on" styling. A suspended trigger
+// keeps its conditions but is excluded from evaluation (the `disable` action), so it stops firing
+// without being deleted — the fix for a trigger that matches too eagerly.
+function setTriggerSuspend(suspended) {
+  if (!skillTriggerSuspend) return;
+  skillTriggerSuspend.checked = suspended;
+  skillTriggerSuspend.closest('.trigger-suspend')?.classList.toggle('on', suspended);
+}
+
 // Collect the live rows into a `conditions` array and reconcile the skill's load-trigger(s): update
 // the primary trigger (or create it if absent) when there are conditions, remove it when the last
 // one is cleared, and always drop any redundant duplicates so the skill is left with a single
@@ -908,6 +918,15 @@ async function saveTriggers(name) {
     });
     editingTriggerId = res?.id ?? null;
   }
+
+  // Apply the suspend toggle to the reconciled primary trigger. `disable`/`enable` only flip whether
+  // the trigger is evaluated — the conditions saved above are untouched — so this is orthogonal to
+  // the condition edit. Nothing to suspend if the skill has no trigger (all conditions cleared).
+  if (editingTriggerId) {
+    await callTool('trigger_action', {
+      action: skillTriggerSuspend?.checked ? 'disable' : 'enable', id: editingTriggerId,
+    });
+  }
 }
 
 function ensureSkillEditor() {
@@ -934,6 +953,7 @@ async function openSkillEditor(name) {
   editingTriggerId = null;
   editingTriggerExtraIds = [];
   renderTriggers([]);
+  setTriggerSuspend(false);
   renderSkillMetadata(false, null);
   setSkillTab('content');
   skillEditorOverlay.classList.add('open');
@@ -948,6 +968,9 @@ async function openSkillEditor(name) {
       editingTriggerId = trigs[0]?.id ?? null;
       editingTriggerExtraIds = trigs.slice(1).map((t) => t.id);
       renderTriggers(trigs.flatMap((t) => (Array.isArray(t.conditions) ? t.conditions : [])));
+      // Suspended only when every trigger firing this skill is disabled — since save consolidates them
+      // to one, a mixed state resolves to that single primary's state on the next save anyway.
+      setTriggerSuspend(trigs.length > 0 && trigs.every((t) => t.enabled === false));
     })
     .catch(() => { /* triggers plugin not loaded — leave the triggers tab empty. */ });
   // Derived analysis, likewise independent of TinyMDE; absent until the background pass has cached it.
@@ -992,6 +1015,7 @@ if (skillEditorOverlay) {
     skillTriggerList.appendChild(row);
     row.querySelector('.trigger-text').focus();
   };
+  if (skillTriggerSuspend) skillTriggerSuspend.onchange = () => setTriggerSuspend(skillTriggerSuspend.checked);
   skillEditorSave.onclick = async () => {
     if (editingSkillName === null) return;
     skillEditorSave.disabled = true;

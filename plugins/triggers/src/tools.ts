@@ -12,6 +12,8 @@ declare module '@matatbread/matbot-plugin-api' {
       | ToolContract<Trigger,                 { action: 'get'; id: string }>
       | ToolContract<{ id: string },          { action: 'add'; conditions: TriggerCondition[]; tool: string; params?: object; enabled?: boolean }>
       | ToolContract<Trigger,                 { action: 'update'; id: string; conditions?: TriggerCondition[]; tool?: string; params?: object; enabled?: boolean }>
+      | ToolContract<Trigger,                 { action: 'disable'; id: string }>
+      | ToolContract<Trigger,                 { action: 'enable'; id: string }>
       | ToolContract<{ id: string },          { action: 'remove'; id: string }>
       | ToolContract<{ triggers: Trigger[] }, { action: 'move'; tool?: string; params?: object; toTool: string; toParams?: object }>
       | ToolContract<{ triggers: Trigger[] }, { action: 'copy'; tool?: string; params?: object; toTool: string; toParams?: object }>;
@@ -59,6 +61,8 @@ type TriggerActionInput =
   | { action: 'get';    id: string }
   | { action: 'add';    conditions: TriggerCondition[]; tool: string; params?: unknown; enabled?: boolean }
   | { action: 'update'; id: string; conditions?: TriggerCondition[]; tool?: string; params?: unknown; enabled?: boolean }
+  | { action: 'disable'; id: string }
+  | { action: 'enable';  id: string }
   | { action: 'remove'; id: string }
   | { action: 'move';   tool?: string; params?: unknown; toTool: string; toParams?: unknown }
   | { action: 'copy';   tool?: string; params?: unknown; toTool: string; toParams?: unknown };
@@ -136,6 +140,19 @@ export function createTriggerActionTool(manager: TriggerManager): Tool<ToolResul
           return;
         }
 
+        // Suspend/resume: keep the trigger but flip whether `evaluate` considers it. Less aggressive
+        // than `remove` — the conditions and invocation are preserved, so re-enabling restores it
+        // exactly. The go-to when a trigger fires too eagerly and you want to stop it without losing it.
+        case 'disable':
+        case 'enable': {
+          const { id } = args as Extract<TriggerActionInput, { action: 'disable' | 'enable' }>;
+          if (!id) { yield { type: 'error', message: `action "${args.action}" requires "id".` }; return; }
+          const t = await manager.update(id, { enabled: args.action === 'enable' });
+          if (t === undefined) { yield { type: 'error', message: `Trigger not found: "${id}"` }; return; }
+          yield { type: 'result', value: t };
+          return;
+        }
+
         case 'remove': {
           const { id } = args as Extract<TriggerActionInput, { action: 'remove' }>;
           if (!id) { yield { type: 'error', message: 'action "remove" requires "id".' }; return; }
@@ -177,7 +194,7 @@ export function createTriggerActionTool(manager: TriggerManager): Tool<ToolResul
         }
 
         default:
-          yield { type: 'error', message: `Unknown action "${String(args.action)}". Expected one of: list, query, get, add, update, remove, move, copy.` };
+          yield { type: 'error', message: `Unknown action "${String(args.action)}". Expected one of: list, query, get, add, update, disable, enable, remove, move, copy.` };
       }
     },
   };
@@ -187,8 +204,11 @@ export function createTriggerActionTool(manager: TriggerManager): Tool<ToolResul
     description:
       'Manage triggers — data-driven hooks that invoke a tool when an LLM classifier judges one of ' +
       'their conditions matched against the current turn. Use this to list triggers, find the ones ' +
-      'that invoke a given tool (query), read one, create one, edit one by id, delete one, or bulk ' +
-      're-target a selected set onto a new tool — in place (move) or as duplicates (copy).\n\n' +
+      'that invoke a given tool (query), read one, create one, edit one by id, suspend one so it stops ' +
+      'firing while keeping it (disable) or bring it back (enable), delete one, or bulk re-target a ' +
+      'selected set onto a new tool — in place (move) or as duplicates (copy).\n\n' +
+      'When a trigger fires too eagerly, prefer "disable" over "remove": it keeps the conditions and ' +
+      'invocation intact (so "enable" restores it exactly) but excludes it from evaluation entirely.\n\n' +
       GUIDANCE + '\n\n' +
       'A trigger has a stable `id` — address it by that, never by its conditions. To change one, ' +
       '"get" or "list" first to read the id, then "update" by id.\n\n' +
@@ -199,15 +219,15 @@ export function createTriggerActionTool(manager: TriggerManager): Tool<ToolResul
       type:       'object',
       required:   ['action'],
       properties: {
-        action:     { type: 'string', enum: ['list', 'query', 'get', 'add', 'update', 'remove', 'move', 'copy'], description: 'The operation to perform.' },
-        id:         { type: 'string', description: 'Trigger id. Required for get/update/remove.' },
+        action:     { type: 'string', enum: ['list', 'query', 'get', 'add', 'update', 'disable', 'enable', 'remove', 'move', 'copy'], description: 'The operation to perform.' },
+        id:         { type: 'string', description: 'Trigger id. Required for get/update/disable/enable/remove.' },
         conditions: { type: 'array', description: 'Conditions [{ kind: "ephemeral"|"contextual"|"retract"|"followup", rule: string }]. Required for add.',
           items: { type: 'object', properties: { kind: { type: 'string', enum: ['ephemeral', 'contextual', 'retract', 'followup'] }, rule: { type: 'string' } } } },
         tool:       { type: 'string', description: 'For add: the tool to invoke. For query/move/copy: the selector matching invoke.tool.' },
         params:     { type: 'object', description: 'For add: params passed verbatim as the invoked tool\'s input. For query/move/copy: the selector matching invoke.params.' },
         toTool:     { type: 'string', description: 'New tool the selected triggers should invoke. Required for move/copy.' },
         toParams:   { type: 'object', description: 'New params for the selected triggers\' invocation (move/copy).' },
-        enabled:    { type: 'boolean', description: 'Set false to keep but disable the trigger.' },
+        enabled:    { type: 'boolean', description: 'On add/update, set false to keep but suspend the trigger (absent ⇒ enabled). To toggle an existing trigger, prefer the dedicated "disable"/"enable" actions.' },
       },
     },
     executor,

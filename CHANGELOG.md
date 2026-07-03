@@ -401,6 +401,12 @@ churn and less likely to affect a consumer who doesn't use them.
   kept (the `plugin` specifier grammar, `ask_user`'s field examples, `store_action`'s `StoreQuery` grammar,
   `cognition_config`'s field-range interface). Net effect: leaner descriptions, one typed contract per tool.
 
+- **triggers** — `trigger_action` gains first-class **`disable`**/**`enable`** actions (both take `id`,
+  return the updated trigger). A disabled trigger is kept but excluded from evaluation entirely, so it stops
+  firing without losing its conditions and invocation — the "less aggressive than `remove`" option for a
+  trigger that fires too eagerly; `enable` restores it exactly. This surfaces the existing `enabled` flag
+  (already honoured by `evaluate`) as discoverable intent rather than a param on `update`.
+
 - **tool-types** (new plugin, node-only) — provides the `ToolTypeIndex` service (see API gaps filled): it
   derives and caches a `.d.ts` of the loaded tools' result/service types, invalidating on any tool-registry
   change (`tools.watch()`). The scan is driven off the loaded plugins' `resolvedUrl`s (via `getRegisteredPlugins`,
@@ -829,7 +835,10 @@ churn and less likely to affect a consumer who doesn't use them.
 - **frontend/web** — skill editor's Triggers tab rewired to the triggers store: it finds
   the skill's use-trigger via `trigger_action query` and edits that trigger's conditions
   (a wholesale replace on save). Each condition is a `kind` (`augment`/`retract`/`followup`)
-  + rule, defaulting new rows to `augment` (the user-message routing case).
+  + rule, defaulting new rows to `augment` (the user-message routing case). The tab also
+  has a **Suspend** toggle that keeps the trigger and its conditions but stops it firing —
+  applied on save via the new `trigger_action` `disable`/`enable` actions. It reflects the
+  trigger's `enabled` state on open (suspended only when every matching trigger is disabled).
 
 - **frontend/web** — a `matbot-retraction` marker now drops the superseded assistant
   response from the live thread (matching the post-refresh state, where it's popped from
