@@ -1,5 +1,5 @@
 import type {
-  MatbotPluginSpec, MatbotMachine, Principal, ProviderAdapter, ProviderConfig, Session, PromptFn, FormField,
+  MatbotPluginSpec, MatbotMachine, Principal, Session, PromptFn, FormField,
   ToolExecutor, ToolContract, ToolResultOf,
 } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
@@ -15,7 +15,7 @@ declare module '@matatbread/matbot-plugin-api' {
   }
 }
 import {
-  createSession, resolveProviderFactory, runAs,
+  createSession, runAs,
 } from '@matatbread/matbot-core';
 import { getUpdates, sendChatAction, sendMessage } from './bot.js';
 
@@ -23,32 +23,15 @@ const PLUGIN_NAME = 'frontend-telegram';
 const SETTINGS_KEY_PROVIDER = 'provider';
 const SETTINGS_KEY_KNOWN = 'knownChats';
 
-interface ActiveProvider {
-  name:   string;
-  adapter: ProviderAdapter;
-  config: ProviderConfig;
-}
-
 // Module-level state: readable/writable by the tools regardless of where setup() is in scope.
+// We hold only the active provider *name* — the adapter is resolved (and loaded on demand) at the
+// bottom of the stack by the runner/complete(), so a frontend never instantiates one itself.
 let teardownAc:    AbortController | undefined;
-let activeProvider: ActiveProvider;
+let activeProviderName: string;
 let servicesRef:   MatbotMachine | undefined;
 let botTokenRef:   string | undefined;
 const knownChats = new Set<number>(); // populated as chats interact with the bot
 let openDoor = 0;
-
-async function buildProvider(name: string, services: MatbotMachine): Promise<ActiveProvider> {
-  const rawConfig = services.providers.get(name);
-  if (!rawConfig) throw new Error(`Provider "${name}" not found`);
-
-  const resolvedCreds: Record<string, string> = {};
-  for (const [k, v] of Object.entries(rawConfig.credentials ?? {})) {
-    resolvedCreds[k] = await services.Vault.resolve(v);
-  }
-  const config: ProviderConfig = { ...rawConfig, credentials: resolvedCreds };
-  const adapter = resolveProviderFactory(config.module)(config);
-  return { name, adapter, config };
-}
 
 export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,
@@ -77,7 +60,7 @@ export const plugin: MatbotPluginSpec = {
           const act = input as { action: 'get' | 'set'; provider?: string };
 
           if (act.action === 'get') {
-            yield { type: 'result' as const, value: { provider: activeProvider?.name ?? null } };
+            yield { type: 'result' as const, value: { provider: activeProviderName ?? null } };
             return;
           }
 
@@ -86,13 +69,14 @@ export const plugin: MatbotPluginSpec = {
             if (!svc) { yield { type: 'error' as const, message: 'Plugin not active' }; return; }
             if (!act.provider) { yield { type: 'error' as const, message: "'set' requires a provider name." }; return; }
 
-            try {
-              activeProvider = await buildProvider(act.provider, svc);
-              await svc.settings().set(SETTINGS_KEY_PROVIDER, act.provider);
-              yield { type: 'result' as const, value: { provider: act.provider } };
-            } catch (e) {
-              yield { type: 'error' as const, message: String(e) };
+            if (!svc.providers.has(act.provider)) {
+              const available = [...svc.providers.keys()].join(', ') || '(none configured)';
+              yield { type: 'error' as const, message: `Unknown provider "${act.provider}". Configured: ${available}.` };
+              return;
             }
+            activeProviderName = act.provider;
+            await svc.settings().set(SETTINGS_KEY_PROVIDER, act.provider);
+            yield { type: 'result' as const, value: { provider: act.provider } };
             return;
           }
 
@@ -184,7 +168,7 @@ export const plugin: MatbotPluginSpec = {
       ? savedName
       : fallbackName;
 
-    activeProvider = await buildProvider(initialName, services);
+    activeProviderName = initialName;
 
 
     const ac   = new AbortController();
@@ -204,7 +188,7 @@ export const plugin: MatbotPluginSpec = {
 
       // Snapshot the active provider name so a mid-run switch doesn't affect this call. The runner
       // resolves the adapter from the name, so we no longer build it here.
-      const providerName = activeProvider.name;
+      const providerName = activeProviderName;
       const principal: Principal = { id: `telegram-${senderName ?? chatId}`, type: 'user'};
       try {
         sendChatAction(botToken, chatId, 'typing').catch(() => {});

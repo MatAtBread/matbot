@@ -460,6 +460,14 @@ churn and less likely to affect a consumer who doesn't use them.
   `MCPServerConfigLocal`) so `list`, `remove`, and reconnect all recompute the same names. Absent ⇒ the
   previous default, so existing connections are unchanged.
 
+- **frontend/telegram** — fixed a boot crash (`No provider registered for module "…". Available: none`)
+  that unloaded the plugin at startup. It called the removed `resolveProviderFactory(config.module)` from
+  `setup()` to eagerly build an adapter, but with the provider pre-scan disabled no factory is registered
+  yet, and the factory registry is keyed by plugin name rather than the profile's module specifier. The
+  frontend now holds only the active provider **name** (validated against `services.providers`) and lets
+  the runner resolve the adapter per turn via `complete()` → `instantiateProvider` — the eagerly-built
+  adapter was never used. Also removed the now-dead `resolveProviderFactory` export from `core`.
+
 - **storage/google-drive** — provider profiles now **sync to Drive**, mirroring the existing plugin sync.
   `setup()` shadows the `provider` tool with one backed by a Drive `provider-manifest` store (the same
   `createBrowserProviderTool`, now backed by a Drive `ProviderAdmin`), so `add`/`remove` write across

@@ -52,8 +52,8 @@ function escapeRegex(s: string): string {
 // The LLM interchanges the canonical package name, the YAML path, and the resolved
 // file URL for the same adapter "according to the weather". All resolution and
 // validation therefore happens here, before anything is written: we resolve whatever
-// form arrives to (a) the canonical plugin name for the live map and
-// resolveProviderFactory, and (b) a specifier the loader can resolve at startup.
+// form arrives to (a) the canonical plugin name for the live map, and (b) a
+// specifier the loader (via instantiateProvider) can resolve at use time.
 // We never echo the raw input into matbot.yaml — a bare package name for a local
 // plugin is not resolvable at load time and crashes startup.
 

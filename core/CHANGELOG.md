@@ -1,5 +1,12 @@
 # @matatbread/matbot-core
 
+## 0.2.9
+
+### Patch Changes
+
+- frontend/telegram: fix a boot crash (`No provider registered for module "…". Available: none`) that unloaded the plugin at startup. It eagerly built a provider adapter in `setup()` via the removed `resolveProviderFactory(config.module)`, but with the pre-scan disabled no factory is registered yet. The frontend now holds only the active provider name and lets the runner resolve the adapter per turn via `complete()` → `instantiateProvider`. Also removes the dead `resolveProviderFactory` export from core.
+  - @matatbread/matbot-plugin-api@0.2.9
+
 ## 0.2.8
 
 ### Patch Changes

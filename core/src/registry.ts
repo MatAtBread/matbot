@@ -149,26 +149,13 @@ export function tryResolveProviderFactory(module: string): ProviderAdapterFactor
   return state.providers.get(module);
 }
 
-export function resolveProviderFactory(module: string): ProviderAdapterFactory {
-  const factory = tryResolveProviderFactory(module);
-  if (factory === undefined) {
-    const available = [...state.providers.keys()].join(', ') || 'none';
-    throw new Error(
-      `No provider registered for module "${module}". ` +
-      `Available: ${available}. ` +
-      `Install and load the provider plugin.`,
-    );
-  }
-  return factory;
-}
-
 /**
  * Config → live adapter, loading the adapter module on demand. The fast path resolves an already
- * registered factory — the boot pre-scan front-loads provider plugins, so this is the norm. When the
- * factory is absent (a provider profile a storage backend replayed from its medium ahead of its adapter
- * module, say) the module is force-loaded and the loaded plugin's own factory is used — sidestepping the
- * canonical-name keying that `resolveProviderFactory` depends on. Returns `null` (and warns, never throws)
- * if the module can't be loaded or carries no adapter, so one unusable profile can't abort a turn.
+ * registered factory. When the factory is absent (the common case now the boot pre-scan is disabled, or
+ * a provider profile a storage backend replayed from its medium ahead of its adapter module) the module
+ * is force-loaded and the loaded plugin's own factory is used — sidestepping the canonical-name keying the
+ * factory registry uses. Returns `null` (and warns, never throws) if the module can't be loaded or carries
+ * no adapter, so one unusable profile can't abort a turn.
  */
 export async function instantiateProvider(services: MatbotRuntime, config: ProviderConfig): Promise<ProviderAdapter | null> {
   // Resolve the factory tolerantly. `config.module` may be the canonical plugin name or any specifier that

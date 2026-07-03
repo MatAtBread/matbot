@@ -1,5 +1,11 @@
 # @matatbread/matbot-triggers
 
+## 0.2.9
+
+### Patch Changes
+
+- @matatbread/matbot-plugin-api@0.2.9
+
 ## 0.2.8
 
 ### Patch Changes
