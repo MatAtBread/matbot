@@ -16,20 +16,25 @@ import type {
 import { LookupKnowledgeIndex } from '@matatbread/matbot-core';
 import { BrowserStorageBackend, LocalStorageVault } from '@matatbread/matbot-browser';
 import { runProviderSetup, type AvailableProvider, type ProviderDraft } from './setup.js';
-import { createBrowserProviderTool } from '@matatbread/matbot-browser';
+import { createBrowserProviderTool, createBrowserToolTypeIndex } from '@matatbread/matbot-browser';
 
 // Browser TypeScript type-stripper (the TypeScriptStripper the realm provides). The bundle deliberately
 // does not inline sucrase (~700 KB per page); mirror the loader and lazy-load it from a CDN on first use,
 // then cache. Node uses its built-in stripTypeScriptTypes instead. Async because of the lazy fetch.
 const SUCRASE_URL = 'https://esm.sh/sucrase@3.35.1';
-type SucraseTransform = (src: string, opts: { transforms: string[] }) => { code: string };
+type SucraseOptions = { transforms: string[]; disableESTransforms?: boolean; keepUnusedImports?: boolean };
+type SucraseTransform = (src: string, opts: SucraseOptions) => { code: string };
 let _sucraseTransform: SucraseTransform | undefined;
 const stripTypeScript = async (source: string): Promise<string> => {
   if (_sucraseTransform === undefined) {
     const mod = await import(SUCRASE_URL) as { transform: SucraseTransform };
     _sucraseTransform = mod.transform;
   }
-  return _sucraseTransform(source, { transforms: ['typescript'] }).code;
+  // Strip types ONLY: disableESTransforms leaves `??`/`?.` as native syntax (else sucrase rewrites them to
+  // `_nullishCoalesce`/`_optionalChain` helpers — which break when the output is wrapped as an expression,
+  // e.g. function-tools' `return (async function …)`, since the injected helper decls become named function
+  // expressions out of scope). keepUnusedImports keeps value imports verbatim, matching node's stripper.
+  return _sucraseTransform(source, { transforms: ['typescript'], disableESTransforms: true, keepUnusedImports: true }).code;
 };
 
 /** Shape of the inlined config baked into the artifact (the browser analogue of matbot.yaml). */
@@ -406,6 +411,11 @@ export async function boot(env: BootEnv): Promise<void> {
   };
   const services: MatbotMachine = unifyServices(baseServices);
 
+  // Registry-driven ToolTypeIndex (the node tool-types plugin is node-only): derives a .d.ts from live
+  // tools' toolContract/inputSchema so function-tools' `types` action returns real declarations. No tsc,
+  // so check() is a no-op (guess-and-run). Registered before turns run; function-tools reads it per-call.
+  void services.register('ToolTypeIndex', createBrowserToolTypeIndex(services));
+
   const resolveProvider = async (name: string): Promise<{ adapter: ProviderAdapter; config: ProviderConfig } | null> => {
     const cfg = providers.get(name);
     if (cfg === undefined) return null;
@@ -428,6 +438,7 @@ export async function boot(env: BootEnv): Promise<void> {
     files:         fileStore,
     loadPlugin:    services.loadPlugin.bind(services),
     unloadPlugin:  services.unloadPlugin.bind(services),
+    toolTypeIndex: () => services.ToolTypeIndex,   // fold each tool's wire contract into its description at dispatch
   });
 
   // Load provider plugins first as a warm-up so the first turn needn't load its adapter mid-response.

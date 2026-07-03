@@ -411,6 +411,21 @@ churn and less likely to affect a consumer who doesn't use them.
   moved here from `skills_compiler`, which now consumes it as a dependency (still falls back to its static DTS
   when the derivation yields nothing).
 
+- **browser** — a registry-driven `ToolTypeIndex` (`createBrowserToolTypeIndex`), the browser counterpart to
+  the node-only `tool-types` plugin. With no TypeScript compiler or filesystem in the browser, it derives the
+  `.d.ts` from the **live registry alone**: a source-less tool's `toolContract` verbatim, and for every other
+  tool a params type synthesised from its `inputSchema` (result stays `unknown`) — so `tool_function`'s `types`
+  action returns real declarations instead of an empty dts. `check()` is a no-op (`[]`) since there's nothing
+  to compile against, and `wireContracts()` flattens each `toolContract` for the dispatch-edge fold. Wired into
+  `web-bundle` and passed to the session runner.
+
+- **web-bundle** — the sucrase type-stripper now runs with `disableESTransforms` + `keepUnusedImports`, i.e.
+  it strips types and nothing else: `??`/`?.` stay native (previously sucrase rewrote them to
+  `_nullishCoalesce`/`_optionalChain` helpers) and imports are kept verbatim, matching node's stripper and the
+  evergreen target the bundle assumes. Fixes a `_nullishCoalesce is not defined` crash when `tool_function`
+  compiled a user function containing `??`/`?.`: the wrapping `return (async function …)(…)` turned sucrase's
+  injected top-level helper declarations into named function *expressions*, out of scope for the body's calls.
+
 - **function-tools** (new plugin, cross-platform) — a single `tool_function` tool that lets the model author
   and run small TypeScript functions which orchestrate other tools in one pass, so several tool calls can
   be composed (filter, count, reshape) without routing each intermediate result back through the model.
@@ -428,9 +443,11 @@ churn and less likely to affect a consumer who doesn't use them.
   of guessing); `define` **type-checks the function body** against those types before registering, rejecting
   it with diagnostics on error; and a defined function carries its own result/param types on its registered
   tool, so later functions compose it with real types too. Where the service is absent (the
-  browser), it degrades to guess-and-run — the function still compiles and executes. Bundled into the
-  browser artifact (`web-bundle`), where it runs in exactly that degraded mode (`tool-types` is node-only, so
-  no pre-registration type-check and `types` returns an empty dts).
+  browser), the pre-registration type-check is skipped and the function still compiles and executes.
+  Bundled into the browser artifact (`web-bundle`), backed there by `@matatbread/matbot-browser`'s
+  registry-driven `ToolTypeIndex` (below): `types` returns real declarations derived from live tools'
+  `toolContract`/`inputSchema`, so composition is type-aware even in the browser — only `check()` is a no-op
+  (no compiler), leaving `define` permissive.
 
 - **skills_compiler** — a compiled plugin now **declares its tool's contract as a `ToolContracts`
   augmentation** in its generated `src/index.ts`: `${toolName}: ToolContract<Result, Params>`, where `Params`

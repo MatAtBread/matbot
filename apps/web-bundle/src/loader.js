@@ -185,7 +185,8 @@
     if (!res.ok) throw new Error(`matbot: failed to fetch "${absUrl}" (${res.status})`);
 
     const raw      = await res.text();
-    const stripped = url.endsWith('.ts') ? (await getTransform())(raw, { transforms: ['typescript'], filePath: url, preserveDynamicImport: true }).code : raw;
+    // Strip types ONLY (disableESTransforms + keepUnusedImports): keep `??`/`?.` native and imports verbatim.
+    const stripped = url.endsWith('.ts') ? (await getTransform())(raw, { transforms: ['typescript'], disableESTransforms: true, keepUnusedImports: true, filePath: url, preserveDynamicImport: true }).code : raw;
     const rewritten = await rewrite(stripped, async (spec) => {
       if (spec.startsWith('node:')) {
         throw new Error(`remote plugin "${absUrl}" imports the Node-only module "${spec}" and cannot run in the browser`);
