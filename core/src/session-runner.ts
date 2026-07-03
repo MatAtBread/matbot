@@ -5,7 +5,7 @@ import type {
 } from './types.js';
 import type { MatbotPlugin } from './plugin.js';
 import type { HookRegistry } from './hooks.js';
-import type { ToolTypeIndex } from '@matatbread/matbot-plugin-api';
+import type { ToolTypeIndex, ToolPresenter } from '@matatbread/matbot-plugin-api';
 import { appendMessage, createMessage } from './session.js';
 import { contextSwitch, withUsageScope } from '@matatbread/matbot-plugin-api';
 import { runSession } from './runner.js';
@@ -19,6 +19,9 @@ export interface SessionRunnerDeps {
   // into the turn-start tool snapshot's description so the wire carries params/result text. Absent (e.g.
   // browser) ⇒ tools keep their plain description.
   toolTypeIndex?:  () => ToolTypeIndex | undefined;
+  // Resolved live (registers after boot): picks which tools are advertised to the model per provider
+  // call. Absent ⇒ the whole turn snapshot is advertised. Threaded into runSession per turn.
+  toolPresenter?:  () => ToolPresenter | undefined;
   hooks?:          HookRegistry;
   systemContext?:  SystemContextRegistry;
   vault?:          Vault;
@@ -219,6 +222,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
         // Derived here because `services`/ToolTypeIndex are live at dispatch. Tools with only a loose
         // inputSchema (no contract) are left as-is; absent ToolTypeIndex (browser) ⇒ plain descriptions.
         const wire = await deps.toolTypeIndex?.()?.wireContracts();
+        const toolPresenter = deps.toolPresenter?.();
         const toolMap = deps.tools !== undefined
           ? new Map<string, Tool>(deps.tools.list().map(t => {
               const wc = wire?.[t.name];
@@ -248,6 +252,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
               unloadPlugin:   deps.unloadPlugin,
               ...(toolMap            !== undefined ? { tools:         toolMap            } : {}),
               ...(deps.tools         !== undefined ? { toolRegistry:  deps.tools         } : {}),
+              ...(toolPresenter      !== undefined ? { toolPresenter                     } : {}),
               ...(deps.hooks         !== undefined ? { hooks:         deps.hooks         } : {}),
               ...(deps.systemContext !== undefined ? { systemContext: deps.systemContext } : {}),
               ...(deps.workdir       !== undefined ? { workdir:       deps.workdir       } : {}),

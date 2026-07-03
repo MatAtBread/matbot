@@ -1081,6 +1081,7 @@ async function main(): Promise<void> {
     resolveProvider,
     tools:         toolReg,
     toolTypeIndex: () => services.ToolTypeIndex,   // resolved live: the tool-types plugin registers it after boot
+    toolPresenter: () => services.ToolPresenter,   // resolved live: a tool-search/deferral plugin registers it after boot
     hooks:         hookReg,
     systemContext: systemContextReg,
     vault,

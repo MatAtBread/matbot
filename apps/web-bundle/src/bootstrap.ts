@@ -439,6 +439,7 @@ export async function boot(env: BootEnv): Promise<void> {
     loadPlugin:    services.loadPlugin.bind(services),
     unloadPlugin:  services.unloadPlugin.bind(services),
     toolTypeIndex: () => services.ToolTypeIndex,   // fold each tool's wire contract into its description at dispatch
+    toolPresenter: () => services.ToolPresenter,   // resolved live: a tool-search/deferral plugin registers it after boot
   });
 
   // Load provider plugins first as a warm-up so the first turn needn't load its adapter mid-response.
