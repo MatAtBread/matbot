@@ -16,9 +16,16 @@ import { dirname, join } from 'node:path';
 //   { t:'turn',   request, toolCount }   — every turn (incl. no-search = negatives)
 //   { t:'search', request, query }       — the model's tool_search query (b)
 //   { t:'call',   request, tool, input } — the tool it then picked from the full set (the label)
+//   { t:'nouns',  tool, nouns, source }  — a tool's extracted nouns (feeds the tool_search catalogue)
 
 const TAG = '[tool-oracle]';
 const SEARCH = 'tool_search';
+
+// Tools always presented alongside tool_search — the "wired pages": general fallbacks that catch queries
+// no specific tool matches (e.g. contextual_search). EMPTY for now. Their nouns are excluded from the
+// catalogue (they're already on the table); with this empty, the un-presented set = everything but
+// tool_search.
+const ALWAYS_PRESENT: readonly string[] = [];
 
 function textOf(content: readonly MessageContent[]): string {
   return content
@@ -58,7 +65,22 @@ function hash(s: string): string {
   for (let i = 0; i < s.length; i++) h = (((h << 5) + h) ^ s.charCodeAt(i)) >>> 0;
   return h.toString(36);
 }
-const NOUN_PROMPT = 'Extract the central noun(s) discussed in this description. Respond with ONLY the noun(s), comma-separated, no explanation.';
+// System framing keeps the model in extractor-mode — a bare user prompt sometimes makes it converse
+// ("please provide the description", "I notice this is an MCP tool…") or add markdown instead of nouns.
+const NOUN_SYSTEM =
+  'You are a keyword extractor. Given a tool name and description, respond with ONLY the central domain ' +
+  'nouns the tool manages, queries, or acts on — a short comma-separated list. No prose, no markdown, ' +
+  'no questions, no labels, no explanation.';
+// Safety net: reject anything that still looks like prose/refusal/markdown so it never reaches the
+// catalogue (fall back to the tool name instead). A real noun list has commas, not sentences/questions.
+function cleanNouns(raw: string): string | null {
+  const s = raw.replace(/\*\*/g, '').replace(/^\s*nouns?\s*:\s*/i, '').trim();
+  if (!s || s.length > 800) return null;
+  if (/[?!]/.test(s)) return null;                                    // questions / refusals
+  if (/\.\s/.test(s)) return null;                                    // sentence prose (lists use ", ")
+  if (/\b(please|provide|i notice|i'?ll|for example|would give|sorry|unable|cannot|can'?t|no actual)\b/i.test(s)) return null;
+  return s;
+}
 interface NounRec { id: string; version: string; tool: string; nouns: string; source: string }
 
 export const plugin: MatbotPluginSpec = {
@@ -100,6 +122,26 @@ export const plugin: MatbotPluginSpec = {
     };
     services.tools.register(toolSearch);
 
+    // Nouns of the UN-PRESENTED (deferred) tools, de-duped, form the tool_search catalogue line — so the
+    // model is told what areas it can search for. Rebuilt as extraction fills `nounsByTool`; injected at
+    // present() time (reflects exactly what THIS turn defers) rather than baked into the registered
+    // description. Empty until extraction has run (and stays empty in sub-agents, where extraction is
+    // skipped) — then tool_search shows its plain description.
+    const nounsByTool = new Map<string, string>();     // tool name → its extracted nouns (comma-separated)
+    let catalogLine = '';
+    const rebuildCatalog = (): void => {
+      const uniq = new Map<string, string>();          // lowercased key → first-seen original casing
+      for (const [name, nouns] of nounsByTool) {
+        if (name === SEARCH || ALWAYS_PRESENT.includes(name)) continue;
+        for (const raw of nouns.split(',')) {
+          const n = raw.trim();
+          if (n && !uniq.has(n.toLowerCase())) uniq.set(n.toLowerCase(), n);
+        }
+      }
+      const list = [...uniq.values()].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+      catalogLine = list.length ? `Tools are available for managing & querying: ${list.join(', ')}.` : '';
+    };
+
     // Present only tool_search until it has been called this turn; then present everything.
     const presenter: ToolPresenter = {
       present(tools: readonly Tool[], ctx: PresentContext): readonly Tool[] {
@@ -109,8 +151,14 @@ export const plugin: MatbotPluginSpec = {
             log({ t: 'turn', ts: new Date().toISOString(), session: ctx.session.id, provider: ctx.provider, request: lastUserText(msgs), toolCount: tools.length });
           }
           if (!searched.has(turnKey(ctx.session))) {
-            const only = tools.filter(t => t.name === SEARCH);
-            if (only.length > 0) return only;                          // search-first: show just tool_search
+            const ts = tools.find(t => t.name === SEARCH);
+            if (ts) {
+              // search-first: present tool_search (description augmented with the catalogue of the
+              // un-presented set) + any always-present fallbacks.
+              const search = catalogLine ? { ...ts, description: `${ts.description}\n\n${catalogLine}` } : ts;
+              const pinned = tools.filter(t => t.name !== SEARCH && ALWAYS_PRESENT.includes(t.name));
+              return [search, ...pinned];
+            }
           }
         } catch { /* never let instrumentation break a turn */ }
         return tools;                                                  // revealed (or defensive): present all
@@ -158,28 +206,38 @@ export const plugin: MatbotPluginSpec = {
       const key = hash(`${tool.name}\n${tool.description}`);
       if (seen.has(key)) return;
       seen.add(key);
+      let nouns: string;
+      let source: string;
       const cached = await nounStore.get(key).catch(() => null);
-      if (cached) { log({ t: 'nouns', ts: new Date().toISOString(), tool: tool.name, hash: key, nouns: cached.nouns, source: 'cache' }); return; }
-      let text: string | undefined;
-      const prov = await nounProvider();
-      if (prov) {
-        try { text = (await services.singleTurn({ provider: prov, prompt: `${NOUN_PROMPT}\n\n${tool.name}: ${tool.description}` })).text; }
-        catch { text = undefined; }
+      if (cached) {
+        nouns = cached.nouns; source = 'cache';
+      } else {
+        let text: string | undefined;
+        const prov = await nounProvider();
+        if (prov) {
+          try { text = (await services.singleTurn({ provider: prov, system: NOUN_SYSTEM, prompt: `${tool.name}: ${tool.description}` })).text; }
+          catch { text = undefined; }
+        }
+        if (text !== undefined) {                                 // call returned → validate; cache the resolved value
+          const cleaned = cleanNouns(text);
+          nouns  = cleaned ?? humanize(tool.name);                 // reject prose/refusal → fall back to the name
+          source = cleaned ? 'llm' : 'fallback';
+          await nounStore.set(key, { id: key, version: key, tool: tool.name, nouns, source }).catch(() => {});
+        } else {                                                  // no provider / transient failure → don't cache; retry next boot
+          nouns = humanize(tool.name); source = 'uncached-fallback';
+        }
       }
-      if (text !== undefined) {                                   // call returned (even if blank) → resolve + cache
-        const nouns  = text.replace(/\s+/g, ' ').trim() || humanize(tool.name);
-        const source = text.trim() ? 'llm' : 'fallback';
-        await nounStore.set(key, { id: key, version: key, tool: tool.name, nouns, source }).catch(() => {});
-        log({ t: 'nouns', ts: new Date().toISOString(), tool: tool.name, hash: key, nouns, source });
-      } else {                                                    // no provider / transient failure → don't cache; retry next boot
-        log({ t: 'nouns', ts: new Date().toISOString(), tool: tool.name, hash: key, nouns: humanize(tool.name), source: 'uncached-fallback' });
-      }
+      nounsByTool.set(tool.name, nouns);                          // feed the catalogue
+      rebuildCatalog();
+      log({ t: 'nouns', ts: new Date().toISOString(), tool: tool.name, hash: key, nouns, source });
     };
     const pump = async (): Promise<void> => {
       if (pumping) return;
       pumping = true;
-      try { while (queue.length) { const n = queue.shift(); if (n) await extractOne(n).catch(() => {}); } }
-      finally { pumping = false; }
+      try {
+        while (queue.length) { const n = queue.shift(); if (n) await extractOne(n).catch(() => {}); }
+        console.warn(`${TAG} catalogue (${nounsByTool.size} tools): ${catalogLine || '(empty)'}`);
+      } finally { pumping = false; }
     };
     const enqueue = (name: string): void => { queue.push(name); void pump(); };
     for (const t of services.tools.list()) enqueue(t.name);
