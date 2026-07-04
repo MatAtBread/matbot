@@ -459,8 +459,11 @@ importers:
         specifier: 'catalog:'
         version: 6.0.3
 
-  plugins/tool-oracle:
+  plugins/tool-plugin:
     devDependencies:
+      '@matatbread/matbot-core':
+        specifier: workspace:^
+        version: link:../../core
       '@matatbread/matbot-plugin-api':
         specifier: workspace:^
         version: link:../../plugin-api
@@ -471,11 +474,8 @@ importers:
         specifier: 'catalog:'
         version: 6.0.3
 
-  plugins/tool-plugin:
+  plugins/tool-router:
     devDependencies:
-      '@matatbread/matbot-core':
-        specifier: workspace:^
-        version: link:../../core
       '@matatbread/matbot-plugin-api':
         specifier: workspace:^
         version: link:../../plugin-api

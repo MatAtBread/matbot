@@ -1,5 +1,5 @@
 {
-  "name": "@matatbread/matbot-tool-oracle",
+  "name": "@matatbread/matbot-tool-router",
   "matbotRuntime": [
     "node"
   ],
@@ -10,7 +10,7 @@
   "files": [
     "src"
   ],
-  "description": "Oracle instrument: presents ALL tools unchanged (unbiased) and appends (request -> picked tool) records to a JSONL, so which cheap filter reproduces the model's own tool choices can be analysed offline. The pass-through ToolPresenter is the scaffold the real relevance filter drops into later.",
+  "description": "Routes the model to the tools it needs from a large library: a ToolPresenter that presents a tool_search entry point and a de-duped noun catalogue to prime discovery. Currently in instrument mode (present-only-tool_search, returns all, logs request/query/pick to JSONL) so a filter can be tuned offline against the model's own choices; the pass-through presenter is the scaffold the real relevance filter drops into.",
   "keywords": [
     "matbot",
     "matbot-plugin",
@@ -29,7 +29,7 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/MatAtBread/matbot.git",
-    "directory": "plugins/tool-oracle"
+    "directory": "plugins/tool-router"
   },
   "publishConfig": {
     "access": "public"

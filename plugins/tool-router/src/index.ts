@@ -3,22 +3,22 @@ import type { MatbotPluginSpec, Message, MessageContent, Tool, ToolPresenter, Pr
 import { appendFile, mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
-// Oracle instrument, SEARCH-FIRST. The model is shown only `tool_search`; to do anything it must
+// tool-router — SEARCH-FIRST instrument. The model is shown only `tool_search`; to do anything it must
 // describe the capability it needs (that query is input (b) — the model's own sanitised rephrasing of
-// the user message (a)). `tool_search` returns EVERY tool (no filtering = the unbiased oracle) and
+// the user message (a)). `tool_search` returns EVERY tool (no filtering = the unbiased baseline) and
 // reveals them for the turn, so the model then picks from the full set. This does two things a
 // present-everything instrument can't: it captures the query, and — running live — it is the first
 // mechanical proof that routing tool-use through search→reveal→pick is a TRANSPARENT SUBSTITUTION for
 // direct presentation. It's also the real production scaffold: swap tool_search's "return all" for
 // "rank + cull" and the presenter's reveal-set becomes the live filter.
 //
-// JSONL (.data/tool-oracle.jsonl):
+// JSONL (.data/tool-router.jsonl):
 //   { t:'turn',   request, toolCount }   — every turn (incl. no-search = negatives)
 //   { t:'search', request, query }       — the model's tool_search query (b)
 //   { t:'call',   request, tool, input } — the tool it then picked from the full set (the label)
 //   { t:'nouns',  tool, nouns, source }  — a tool's extracted nouns (feeds the tool_search catalogue)
 
-const TAG = '[tool-oracle]';
+const TAG = '[tool-router]';
 const SEARCH = 'tool_search';
 
 // Tools always presented alongside tool_search — the "wired pages": general fallbacks that catch queries
@@ -88,7 +88,7 @@ export const plugin: MatbotPluginSpec = {
 
   async setup(services) {
     const dir     = join(dirname(services.configPath ?? '.'), '.data');
-    const logPath = join(dir, 'tool-oracle.jsonl');
+    const logPath = join(dir, 'tool-router.jsonl');
     await mkdir(dir, { recursive: true }).catch(() => {});
     const log = (rec: unknown): void => { void appendFile(logPath, JSON.stringify(rec) + '\n', 'utf8').catch(() => {}); };
 
@@ -96,9 +96,9 @@ export const plugin: MatbotPluginSpec = {
     const searched  = new Set<string>();                               // `${sessionId}|${lastUserMsgId}`
     const turnKey   = (s: Session): string => `${s.id}|${lastUserMsgId(s.messages)}`;
 
-    console.warn(`${TAG} active — SEARCH-FIRST oracle: present only ${SEARCH}; it returns ALL tools; logging → ${logPath}`);
+    console.warn(`${TAG} active — SEARCH-FIRST: present only ${SEARCH}; it returns ALL tools; logging → ${logPath}`);
 
-    // tool_search: the entry point. Returns every tool (oracle: no filtering) and reveals them.
+    // tool_search: the entry point. Returns every tool (no filtering here) and reveals them.
     const toolSearch: Tool = {
       name: SEARCH,
       description:
@@ -166,7 +166,7 @@ export const plugin: MatbotPluginSpec = {
     };
     await services.register('ToolPresenter', presenter);
 
-    // Record the query (b) and the subsequent pick (the oracle label).
+    // Record the query (b) and the subsequent pick (the label for the offline analysis).
     services.hooks.register({
       on: 'toolcall',
       handler(ctx) {
@@ -193,7 +193,7 @@ export const plugin: MatbotPluginSpec = {
     // {t:'nouns'} so the analysis can relate a tool's description ↔ its nouns ↔ the queries the model
     // forms. Runs on load + services.tools.watch(); sequential (rate-limit-safe); one-time per unique
     // description (cached across reloads).
-    const nounStore    = services.createStore<NounRec>('tool-oracle-nouns');
+    const nounStore    = services.createStore<NounRec>('tool_router_nouns');
     const settings     = services.settings();
     const nounProvider = async (): Promise<string | undefined> =>
       (await settings.get<string>('nounProvider').catch(() => undefined)) ?? [...services.providers.keys()][0];
