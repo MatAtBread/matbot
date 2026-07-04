@@ -22,6 +22,11 @@ function toQuery(p: PageState): StoreQuery {
 // disjoint cover (page N re-applies the same sort as page 1, so the total order never shifts). A
 // cursor is untrusted input, so its decoded query is validated exactly like a fresh one.
 export function executeQuery<T extends { id: string; version: string }>(docs: T[], q: StoreQuery): QueryResult<T> {
+  // Validate the caller's RAW query first. The projection below keeps only where/sort/limit, so an
+  // unknown top-level key (e.g. `filter` instead of `where`) would otherwise be silently discarded
+  // and the query would degrade to match-everything with no feedback to the author.
+  validateQuery(q);
+
   const page: PageState = q.cursor !== undefined
     ? decodeCursor(q.cursor)
     : {
@@ -31,7 +36,8 @@ export function executeQuery<T extends { id: string; version: string }>(docs: T[
         ...(q.limit !== undefined ? { limit: q.limit } : {}),
       };
 
-  validateQuery(toQuery(page));
+  // A cursor is untrusted input, so its decoded query is validated exactly like a fresh one.
+  if (q.cursor !== undefined) validateQuery(toQuery(page));
 
   const predicate = page.where !== undefined ? compileFilter(page.where) : () => true;
   const ordered   = applySort(docs.filter(predicate), page.sort);

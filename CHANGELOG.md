@@ -304,6 +304,18 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Bug fixes
 
+- **A store query with an unknown top-level key is now rejected instead of silently matching
+  everything.** `validateQuery` only checked the values inside `where`/`sort`/`limit`, and
+  `executeQuery` validated the *projected* query — which keeps only those three keys — so a clause
+  placed under any other key (e.g. `{ filter: { … } }`, an SQL-ism LLMs reach for despite the grammar
+  in every tool-store description) was dropped before validation ran. The query degraded to
+  match-everything and the author got a plausible full result with no error. `validateQuery` now
+  rejects a non-object query and any unknown top-level key (`MALFORMED`, naming the bad key and the
+  valid set: `where`, `sort`, `limit`, `cursor`), and `executeQuery` validates the caller's raw query
+  before projecting it (a decoded cursor is still validated as before). The generated `tool-store`
+  CRUD tools catch the resulting `StoreQueryError` and frame it for the model, pointing back at the
+  `query` grammar in the tool's own description.
+
 - **Deleting a skill no longer orphans its knowledge-index entry.** `skill_action(delete)` removed the
   skill from its store but never retracted the `KnowledgeIndex` entry, so the deleted skill stayed
   discoverable by `contextual_search` / `find_fact` indefinitely (durably so under the persistent
