@@ -468,7 +468,7 @@ async function loadPlugins() {
   try {
     localResult = await callTool('plugin', { action: 'discover_local' });
   } catch { /* discover_local optional */ }
-  renderPlugins(listResult.loaded ?? [], Array.isArray(localResult) ? localResult : []);
+  renderPlugins(listResult.loaded ?? [], Array.isArray(localResult) ? localResult : [], listResult.failed ?? []);
 }
 
 // A plugin can run here only if its declared matbotRuntime includes the host runtime. The transport
@@ -482,12 +482,72 @@ function runsHere(p) {
   return rt.includes(HOST_RUNTIME);
 }
 
-function renderPlugins(loaded, local) {
+function renderPlugins(loaded, local, failed) {
   const el = document.getElementById('plugin-list');
   if (!el) return;
   el.innerHTML = '';
 
   const loadedNames = new Set(loaded.map(p => p.name));
+
+  // Configured plugins the loader skipped (bad source, wrong runtime, setup() threw). Graceful failure
+  // keeps them out of `loaded`, but not silent: show them with a failed badge and the reason, plus a
+  // retry (reload) and a remove action. A fixed + reloaded plugin clears itself off the backend list.
+  for (const f of failed || []) {
+    const det = document.createElement('details');
+    det.className = 'plugin-entry plugin-entry-failed';
+    const sum = document.createElement('summary');
+    sum.title = f.error || 'Failed to load';
+    const main = document.createElement('div');
+    main.className = 'plugin-summary-main';
+    main.appendChild(makePluginLabel(f.name || f.specifier));
+    const badges = document.createElement('div');
+    badges.className = 'plugin-badges';
+    const badge = document.createElement('span');
+    badge.className = 'plugin-badge';
+    badge.dataset.type = 'failed';
+    badge.textContent = 'failed';
+    badges.appendChild(badge);
+    main.appendChild(badges);
+    sum.appendChild(main);
+    const actions = document.createElement('div');
+    actions.className = 'plugin-actions';
+    const retryBtn = document.createElement('button');
+    retryBtn.className = 'plugin-action-btn';
+    retryBtn.textContent = '↻';
+    retryBtn.title = 'Retry load';
+    retryBtn.onclick = (e) => {
+      e.stopPropagation();
+      closeSidebar();
+      submit(`Reload the plugin '${f.specifier}'`);
+    };
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'plugin-action-btn remove';
+    removeBtn.textContent = '×';
+    removeBtn.title = 'Remove from configuration';
+    removeBtn.onclick = (e) => {
+      e.stopPropagation();
+      closeSidebar();
+      submit(`Remove the plugin '${f.specifier}'`);
+    };
+    actions.appendChild(retryBtn);
+    actions.appendChild(removeBtn);
+    sum.appendChild(actions);
+    det.appendChild(sum);
+    const body = document.createElement('div');
+    body.className = 'plugin-tool-list';
+    const reason = document.createElement('div');
+    reason.className = 'plugin-fail-reason';
+    reason.textContent = f.error || 'Failed to load.';
+    body.appendChild(reason);
+    if (f.name && f.specifier && f.name !== f.specifier) {
+      const spec = document.createElement('div');
+      spec.className = 'plugin-fail-reason';
+      spec.textContent = f.specifier;
+      body.appendChild(spec);
+    }
+    det.appendChild(body);
+    el.appendChild(det);
+  }
 
   for (const p of loaded) {
     const det = document.createElement('details');
@@ -579,7 +639,7 @@ function renderPlugins(loaded, local) {
     el.appendChild(row);
   }
 
-  if (!loaded.length && !local.length) {
+  if (!loaded.length && !local.length && !(failed || []).length) {
     const empty = document.createElement('div');
     empty.style.cssText = 'color:#9ca3af;font-size:12px;padding:4px 10px;';
     empty.textContent = '(none)';

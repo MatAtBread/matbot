@@ -1,7 +1,7 @@
 import type { MatbotPlugin, MatbotPluginSpec, MatbotMachine, PluginSource, Runtime } from './plugin.js';
 import type { PromptFn } from './types.js';
 import { incompatibleRuntimeError, notAPluginError } from '@matatbread/matbot-plugin-api';
-import { registerPlugin, setupPlugin, unloadPlugin } from './registry.js';
+import { registerPlugin, setupPlugin, unloadPlugin, recordFailedPlugin, clearFailedPlugin } from './registry.js';
 
 /**
  * The runtime this process is executing in. Detected the same way the rejected-import branch below
@@ -126,7 +126,9 @@ export async function loadPlugins(
       if (onLoadError === 'throw') {
         throw incompatibleRuntimeError(spec, runtimes, CURRENT_RUNTIME);
       }
-      console.warn(`[matbot] Skipping plugin "${spec}": declares matbotRuntime [${runtimes.join(', ')}], host runtime is "${CURRENT_RUNTIME}".`);
+      const reason = `declares matbotRuntime [${runtimes.join(', ')}], host runtime is "${CURRENT_RUNTIME}".`;
+      console.warn(`[matbot] Skipping plugin "${spec}": ${reason}`);
+      recordFailedPlugin({ specifier: spec, error: reason, ...(name !== undefined ? { name } : {}) });
       continue;
     }
     toLoad.push({
@@ -158,6 +160,7 @@ export async function loadPlugins(
   const failLoad = (spec: string, reason: string, kind: 'load' | 'shape' = 'load'): void => {
     if (onLoadError === 'throw') throw kind === 'shape' ? notAPluginError(spec, reason) : new Error(reason);
     console.warn(`[matbot] Skipping plugin "${spec}": ${reason}`);
+    recordFailedPlugin({ specifier: spec, error: reason });
   };
 
   for (let i = 0; i < toLoad.length; i++) {
@@ -169,6 +172,7 @@ export async function loadPlugins(
       if (typeof window !== 'undefined') {
         // Browser: warn and skip — browser environments have no node_modules fallback.
         console.warn(`[matbot] Could not load plugin "${spec}" (browser: use a URL path or configure an import map): ${reason}`);
+        recordFailedPlugin({ specifier: spec, error: reason });
         continue;
       }
       console.error(`[matbot] Failed to load plugin "${spec}":`, result.reason);
@@ -233,8 +237,15 @@ export async function loadPlugins(
       registered = true;
       await setupPlugin(plugin, services, prompt);
       loaded.push(plugin);
+      // Successful (re)load: a fixed plugin drops off the failed list (reload runs this same path).
+      clearFailedPlugin(spec);
     } catch (err) {
-      console.error(`[matbot] Ignoring plugin "${plugin.name}" from "${spec}" due to an error:`, err instanceof Error ? err.message : err);
+      const reason = err instanceof Error ? err.message : String(err);
+      console.error(`[matbot] Ignoring plugin "${plugin.name}" from "${spec}" due to an error:`, reason);
+      // Graceful but not silent: record the setup failure (skip mode — the boot batch) so the `plugin`
+      // tool and web UI can show it. Explicit single loads (`onLoadError: 'throw'`) surface the error to
+      // the caller directly, so they are not added to the persistent failed list.
+      if (onLoadError === 'skip') recordFailedPlugin({ specifier: spec, name: plugin.name, error: reason });
       // Roll back partial registration so a failed load leaves no ghost state. setupPlugin
       // can throw after the plugin is already in the registry with some of its tools / hooks /
       // services / provider / storage wired (a wrong-platform plugin touching a missing

@@ -315,6 +315,21 @@
     .plugin-badge[data-type="hooks"]           { background: #cffafe; color: #155e75; }
     .plugin-badge[data-type="system-context"]  { background: #fce7f3; color: #9d174f; }
     .plugin-badge[data-type="service"]         { background: #e2e8f0; color: #475569; }
+    .plugin-badge[data-type="failed"]          { background: #fee2e2; color: #b91c1c; }
+    /* A configured plugin the loader skipped: graceful failure, surfaced not swallowed. Tinted red,
+       with the reason in the expandable body. */
+    .plugin-entry-failed > summary .plugin-name-label { color: #b91c1c; }
+    .plugin-entry-failed > summary:hover { background: #fef2f2; }
+    .plugin-fail-reason {
+      padding: 2px 10px;
+      font-size: 0.82em;
+      color: #b91c1c;
+      border-radius: 3px;
+      font-family: 'SF Mono', 'Cascadia Code', ui-monospace, monospace;
+      white-space: pre-wrap;
+      word-break: break-word;
+      cursor: default;
+    }
     .plugin-tool-list {
       padding: 1px 0 3px 22px;
     }

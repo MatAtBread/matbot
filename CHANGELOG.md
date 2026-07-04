@@ -58,6 +58,15 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### API gaps filled
 
+- **Plugin load failures are recorded, not swallowed (`getFailedPlugins`).** A plugin the loader skips —
+  an incompatible `matbotRuntime`, an import that rejects, a module that isn't plugin-shaped, or a `setup()`
+  that throws — still fails *gracefully* (the boot batch skips it and continues; only an explicit single load
+  throws), but no longer *silently*. The loader records `{ specifier, name?, error }` on the registry at each
+  skip point; a subsequent successful (re)load of the same specifier clears its entry. New core accessors:
+  `getFailedPlugins()`, `recordFailedPlugin(entry)`, `clearFailedPlugin(specifier)`. The `plugin` tool's
+  `list` result gains an optional `failed` array, and the web plugins panel renders the failed set (with the
+  reason and retry/remove actions) so a mis-configured plugin is visible instead of vanishing into a console line.
+
 - **`Tool.toolContract` — the call contract as TypeScript text, for tools with no scannable source.** A tool
   whose name and/or shape are built at runtime (a `function-tools` function; the `tool-store` per-namespace
   CRUD tool) can't carry a static `ToolContracts` augmentation, so it declares its contract as a single
@@ -384,6 +393,16 @@ churn and less likely to affect a consumer who doesn't use them.
   (a missing secret) are still left in config to retry.
 
 ### Optional
+
+- **tool-plugin / browser — `plugin add` no longer skips the config write on a prefix-sibling, and `remove`
+  clears a failed-load record.** Two fixes to the plugin-management tools, both surfaced by the new
+  failed-plugin recording: (1) `addPlugin` matched the specifier as a *substring* (`text.includes('- ' +
+  specifier)`), so adding `./plugins/tool-router` while `./plugins/tool-routerx` was already configured was
+  treated as already-present — the plugin loaded (active in-memory) but was never persisted to `matbot.yaml`,
+  vanishing on restart. It now matches the specifier as a whole list item (anchored, end-of-line). (2)
+  `remove` (node + browser) now calls `clearFailedPlugin(specifier)` after dropping the config/extras entry,
+  so removing a plugin that never loaded (a bad path, an incompatible runtime, a `setup()` throw) also clears
+  its `failed` record instead of leaving a ghost in `plugin list` / the web panel.
 
 - **Every built-in tool declares its TypeScript contract as a `ToolContracts` arm (or `toolContract`).** Every
   built-in tool across the plugin suite — `plugin`/`provider`, `session_edit`/`compact_sessions`,

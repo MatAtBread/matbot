@@ -11,6 +11,15 @@ import type { SettingsDoc } from './settings.js';
 
 // ── Internal state ────────────────────────────────────────────────────────────
 
+/**
+ * A plugin the loader could not bring up — an incompatible runtime, an import that rejected, a
+ * module that is not plugin-shaped, or a setup() throw. Recorded (not discarded) so the failure is
+ * *graceful but not silent*: the `plugin` tool and web UI can show which configured plugins failed
+ * and why, instead of the failure vanishing into a boot-time console line. `error` is pre-stringified
+ * (sidesteps the `unknown` catch-var); `name` is present only when known before the failure.
+ */
+export type FailedPlugin = { specifier: string; name?: string; error: string };
+
 // Mutable arrays/maps held in a single object to make _resetRegistry() simple.
 const state = {
   plugins:         [] as MatbotPlugin[],
@@ -21,6 +30,7 @@ const state = {
   serviceKeys:     new Map<string, string[]>(),  // pluginName → MatbotMachine keys it registered
   hookPlugins:        new Set<string>(),         // plugins that registered at least one hook
   systemContextPlugins: new Set<string>(),       // plugins that registered a system-context contributor
+  failedPlugins:   [] as FailedPlugin[],         // plugins the loader skipped, keyed by specifier (last failure wins)
   overwriteAllTools: undefined as boolean | undefined,  // persisted "overwrite on collision, this install" choice, loaded lazily
 };
 
@@ -194,6 +204,28 @@ export function getRegisteredTools(): readonly Tool[] {
 
 export function getRegisteredPlugins(): readonly MatbotPlugin[] {
   return state.plugins;
+}
+
+/**
+ * Plugins the loader skipped rather than loaded — the graceful-but-not-silent record. One entry per
+ * specifier (a repeated failure overwrites the prior one; a subsequent successful load clears it via
+ * clearFailedPlugin). Surfaced by the `plugin` tool's `list` and the web plugins panel.
+ */
+export function getFailedPlugins(): readonly FailedPlugin[] {
+  return state.failedPlugins;
+}
+
+/** Record (or replace, by specifier) a plugin the loader skipped. Called from loader.ts skip points. */
+export function recordFailedPlugin(entry: FailedPlugin): void {
+  const idx = state.failedPlugins.findIndex(f => f.specifier === entry.specifier);
+  if (idx === -1) state.failedPlugins.push(entry);
+  else            state.failedPlugins[idx] = entry;
+}
+
+/** Drop any recorded failure for a specifier — a fixed + reloaded plugin drops off the failed list. */
+export function clearFailedPlugin(specifier: string): void {
+  const idx = state.failedPlugins.findIndex(f => f.specifier === specifier);
+  if (idx !== -1) state.failedPlugins.splice(idx, 1);
 }
 
 export function getRegisteredFrontendPlugins(): ReadonlyMap<string, FrontendInfo> {
