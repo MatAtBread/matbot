@@ -49,6 +49,17 @@ function queryOf(input: unknown): string {
   return input && typeof input === 'object' && typeof (input as { query?: unknown }).query === 'string'
     ? (input as { query: string }).query : '';
 }
+function humanize(name: string): string {
+  return name.replace(/^mcp__[^_]+__/, '').replace(/_(action|config)$/, '').replace(/_/g, ' ').trim();
+}
+// djb2-xor; a content-hash cache key over name+description (collisions negligible for tool defs).
+function hash(s: string): string {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = (((h << 5) + h) ^ s.charCodeAt(i)) >>> 0;
+  return h.toString(36);
+}
+const NOUN_PROMPT = 'Extract the central noun(s) discussed in this description. Respond with ONLY the noun(s), comma-separated, no explanation.';
+interface NounRec { id: string; version: string; tool: string; nouns: string; source: string }
 
 export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,
@@ -119,5 +130,59 @@ export const plugin: MatbotPluginSpec = {
         } catch { /* observer only */ }
       },
     });
+
+    // Noun extraction below is background warm-up (~one single-turn per uncached tool). Skip it in
+    // spawned sub-agents (the `background` tool's detached one-shots) — they must exit promptly, not
+    // linger doing N single-turns. Left running for the long-lived server/REPL, where it warms the
+    // cache over the first minute and is a no-op on subsequent boots. (A manual single-turn CLI run is
+    // not a sub-agent, so it will still warm the cache and linger accordingly — rare/dev only.)
+    if (services.isSubAgent()) return;
+
+    // ── Noun extraction (DATA for the analysis, not presentation) ──────────────────
+    // hash(name+description) → nouns store → single-turn on miss. Caches the RESOLVED nouns (so a
+    // genuine blank falls back to the tool name and a transient boot failure doesn't poison the cache
+    // — it retries next boot). De-duped these become the tool_search catalogue later; logged as
+    // {t:'nouns'} so the analysis can relate a tool's description ↔ its nouns ↔ the queries the model
+    // forms. Runs on load + services.tools.watch(); sequential (rate-limit-safe); one-time per unique
+    // description (cached across reloads).
+    const nounStore    = services.createStore<NounRec>('tool-oracle-nouns');
+    const settings     = services.settings();
+    const nounProvider = async (): Promise<string | undefined> =>
+      (await settings.get<string>('nounProvider').catch(() => undefined)) ?? [...services.providers.keys()][0];
+    const seen  = new Set<string>();
+    const queue: string[] = [];
+    let pumping = false;
+    const extractOne = async (name: string): Promise<void> => {
+      const tool = services.tools.resolve(name);
+      if (!tool || tool.name === SEARCH) return;
+      const key = hash(`${tool.name}\n${tool.description}`);
+      if (seen.has(key)) return;
+      seen.add(key);
+      const cached = await nounStore.get(key).catch(() => null);
+      if (cached) { log({ t: 'nouns', ts: new Date().toISOString(), tool: tool.name, hash: key, nouns: cached.nouns, source: 'cache' }); return; }
+      let text: string | undefined;
+      const prov = await nounProvider();
+      if (prov) {
+        try { text = (await services.singleTurn({ provider: prov, prompt: `${NOUN_PROMPT}\n\n${tool.name}: ${tool.description}` })).text; }
+        catch { text = undefined; }
+      }
+      if (text !== undefined) {                                   // call returned (even if blank) → resolve + cache
+        const nouns  = text.replace(/\s+/g, ' ').trim() || humanize(tool.name);
+        const source = text.trim() ? 'llm' : 'fallback';
+        await nounStore.set(key, { id: key, version: key, tool: tool.name, nouns, source }).catch(() => {});
+        log({ t: 'nouns', ts: new Date().toISOString(), tool: tool.name, hash: key, nouns, source });
+      } else {                                                    // no provider / transient failure → don't cache; retry next boot
+        log({ t: 'nouns', ts: new Date().toISOString(), tool: tool.name, hash: key, nouns: humanize(tool.name), source: 'uncached-fallback' });
+      }
+    };
+    const pump = async (): Promise<void> => {
+      if (pumping) return;
+      pumping = true;
+      try { while (queue.length) { const n = queue.shift(); if (n) await extractOne(n).catch(() => {}); } }
+      finally { pumping = false; }
+    };
+    const enqueue = (name: string): void => { queue.push(name); void pump(); };
+    for (const t of services.tools.list()) enqueue(t.name);
+    void (async () => { try { for await (const ev of services.tools.watch()) if (ev.type === 'registered') enqueue(ev.name); } catch { /* watch ended */ } })();
   },
 };
