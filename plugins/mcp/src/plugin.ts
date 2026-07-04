@@ -40,6 +40,9 @@ export function createMCPPlugin(): MatbotPluginSpec {
   let settings: PluginSettings | undefined;
   let remote:   RemoteMcpManager | undefined;
   let registry: MatbotMachine['tools'] | undefined;
+  // Set by teardown so a backgrounded reconnect (below) that is still in flight stops and cleans up
+  // rather than registering tools / spawning a process that outlive the plugin.
+  let disposed = false;
 
   const resolveLocalClient = (name: string): MCPClient | undefined => localActive.get(name)?.client;
 
@@ -52,6 +55,55 @@ export function createMCPPlugin(): MatbotPluginSpec {
     });
     for (const t of tools) registry!.register(makeProxyTool(config.name, t, resolveLocalClient, config.proxyToolName));
     return tools;
+  }
+
+  // Close a local server's client, unregister its proxy tools, and forget it. Used by teardown and by
+  // the dispose path of the background reconnect (to undo a connect that completed after teardown ran).
+  function closeLocal(name: string): void {
+    const s = localActive.get(name);
+    if (s === undefined) return;
+    s.client.close();
+    for (const t of s.tools) registry?.remove(proxyToolName(name, t.name, s.config.proxyToolName));
+    localActive.delete(name);
+  }
+
+  // Reconnect persisted servers in the background so a slow or unreachable server never blocks boot —
+  // each server's proxy tools register as it comes online (the tool registry, and the web /tools gate,
+  // tolerate tools that appear late). Also self-heals the pre-split layout where local *and* remote
+  // servers shared the 'servers' key: remote entries found there are handed to the manager (which
+  // re-persists them under its sub-key) and dropped from this list; locals reconnect and stay. Never
+  // throws; `disposed` is checked after every await so a teardown mid-flight stops promptly and undoes
+  // anything just connected.
+  async function reconnectAll(): Promise<void> {
+    await remote!.reconnectPersisted((name, e) =>
+      process.stderr.write(`[mcp] Failed to reconnect remote "${name}": ${String(e)}\n`));
+    if (disposed) { remote!.closeAll(); return; }
+
+    type PersistedMixed = { servers: Array<MCPServerConfigLocal | MCPRemoteConfig> };
+    const persisted = await settings!.get<PersistedMixed>('servers');
+    if (disposed || !persisted?.servers?.length) return;
+
+    const keep: Array<MCPServerConfigLocal | MCPRemoteConfig> = [];
+    for (const config of persisted.servers) {
+      if (disposed) return;
+      try {
+        if (config.type === 'remote') {
+          if (!remote!.has(config.name)) {
+            await remote!.add({ name: config.name, endpoint: config.endpoint, ...(config.headers !== undefined ? { headers: config.headers } : {}), ...(config.proxyToolName !== undefined ? { proxyToolName: config.proxyToolName } : {}) });
+            if (disposed) { remote!.closeAll(); return; }
+          }
+        } else {
+          await connectLocal(config);
+          if (disposed) { closeLocal(config.name); return; }
+          keep.push(config);
+        }
+      } catch (e) {
+        process.stderr.write(`[mcp] Failed to reconnect "${config.name}": ${String(e)}\n`);
+        keep.push(config);   // keep on failure so a transient outage doesn't lose the config
+      }
+    }
+    if (disposed) return;
+    if (keep.length !== persisted.servers.length) await settings!.set('servers', { servers: keep });
   }
 
   type McpAction =
@@ -188,6 +240,7 @@ ACTIONS
     // for its executor to delegate remote work to.
 
     async setup(services) {
+      disposed = false;
       registry = services.tools;
       settings = services.settings();
 
@@ -196,39 +249,15 @@ ACTIONS
       remote = new RemoteMcpManager(services, remoteSettings(settings));
       registry.register(mcpActionTool);
 
-      // Reconnect remote servers from the manager's own (sub-scoped) store.
-      await remote.reconnectPersisted((name, e) =>
-        process.stderr.write(`[mcp] Failed to reconnect remote "${name}": ${String(e)}\n`));
-
-      // Reconnect locals, and self-heal the pre-split layout where local *and* remote servers shared
-      // our 'servers' key. Remote entries found there are handed to the manager (which re-persists them
-      // under its sub-key) and dropped from this list; locals reconnect and stay.
-      type PersistedMixed = { servers: Array<MCPServerConfigLocal | MCPRemoteConfig> };
-      const persisted = await settings.get<PersistedMixed>('servers');
-      if (persisted?.servers?.length) {
-        const keep: Array<MCPServerConfigLocal | MCPRemoteConfig> = [];
-        for (const config of persisted.servers) {
-          try {
-            if (config.type === 'remote') {
-              if (!remote.has(config.name)) {
-                await remote.add({ name: config.name, endpoint: config.endpoint, ...(config.headers !== undefined ? { headers: config.headers } : {}), ...(config.proxyToolName !== undefined ? { proxyToolName: config.proxyToolName } : {}) });
-              }
-            } else {
-              await connectLocal(config);
-              keep.push(config);
-            }
-          } catch (e) {
-            process.stderr.write(`[mcp] Failed to reconnect "${config.name}": ${String(e)}\n`);
-            keep.push(config);   // keep on failure so a transient outage doesn't lose the config
-          }
-        }
-        if (keep.length !== persisted.servers.length) await settings.set('servers', { servers: keep });
-      }
+      // Reconnect persisted servers WITHOUT awaiting: setup() returns immediately so a slow server
+      // handshake (an npx cold-spawn, an unreachable remote endpoint) can't stall boot. Their proxy
+      // tools appear as each server comes online.
+      void reconnectAll().catch(e => process.stderr.write(`[mcp] Background reconnect failed: ${String(e)}\n`));
     },
 
     async teardown() {
-      for (const s of localActive.values()) s.client.close();
-      localActive.clear();
+      disposed = true;   // stop any in-flight background reconnect from resurrecting state
+      for (const name of [...localActive.keys()]) closeLocal(name);
       remote?.closeAll();
     },
   };

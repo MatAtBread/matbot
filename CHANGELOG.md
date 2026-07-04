@@ -394,6 +394,17 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Optional
 
+- **mcp — persisted servers now reconnect in the background instead of blocking boot.** `setup()` used to
+  `await` reconnecting every persisted MCP server (each a full `initialize` + `tools/list` handshake — an
+  `npx` cold-spawn for a local, an HTTP round-trip for a remote) before returning, so one slow or unreachable
+  server stalled the *entire* startup sequence (measured: a single-digit-ms boot dominated by ~6.4s of MCP
+  reconnects). It now registers `mcp_action` synchronously and fires the reconnect without awaiting it; each
+  server's proxy tools appear as it comes online (the tool registry and the web `/tools` gate tolerate
+  late-arriving tools). The background task is dispose-aware — teardown/unload sets a flag it checks after
+  every await, closing any client and unregistering any tools it connected after teardown ran, so an
+  in-flight reconnect can't outlive the plugin. `teardown` now also unregisters local proxy tools (previously
+  it closed the clients but left the tools registered).
+
 - **frontend-web — the `/tools/:name` HTTP endpoints no longer 404 a tool that is merely late to register
   at boot.** The web server starts listening inside frontend-web's `setup()`, which runs before the plugins
   configured after it (and before the core tools registered once loading finishes) have populated the tool
