@@ -1,37 +1,38 @@
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
-import type { MatbotPluginSpec, Message, MessageContent, Tool, ToolPresenter, PresentContext } from '@matatbread/matbot-plugin-api';
+import type { MatbotPluginSpec, Message, MessageContent, Tool, ToolPresenter, PresentContext, Session } from '@matatbread/matbot-plugin-api';
 import { appendFile, mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
-// Oracle instrument. Presents ALL tools unchanged so the model's tool choice is UNBIASED (nothing is
-// hidden or reordered by us), and appends two record types to a JSONL for offline analysis:
-//   { t:'turn', ... request }        — every turn's request (incl. no-tool turns = negatives)
-//   { t:'call', ... request, tool }  — the tool the model actually picked (the oracle label)
-// From this we can bake off cheap local filters (keyword/tf-idf/BM25/embedding) against what the model
-// itself chose, and mine the disagreements (where a filter might beat the model). The pass-through
-// ToolPresenter is deliberately the same seam the real relevance filter will later occupy — swap the
-// body from "return tools" to "rank + cull" and the instrument becomes the production filter.
+// Oracle instrument, SEARCH-FIRST. The model is shown only `tool_search`; to do anything it must
+// describe the capability it needs (that query is input (b) — the model's own sanitised rephrasing of
+// the user message (a)). `tool_search` returns EVERY tool (no filtering = the unbiased oracle) and
+// reveals them for the turn, so the model then picks from the full set. This does two things a
+// present-everything instrument can't: it captures the query, and — running live — it is the first
+// mechanical proof that routing tool-use through search→reveal→pick is a TRANSPARENT SUBSTITUTION for
+// direct presentation. It's also the real production scaffold: swap tool_search's "return all" for
+// "rank + cull" and the presenter's reveal-set becomes the live filter.
+//
+// JSONL (.data/tool-oracle.jsonl):
+//   { t:'turn',   request, toolCount }   — every turn (incl. no-search = negatives)
+//   { t:'search', request, query }       — the model's tool_search query (b)
+//   { t:'call',   request, tool, input } — the tool it then picked from the full set (the label)
 
 const TAG = '[tool-oracle]';
+const SEARCH = 'tool_search';
 
 function textOf(content: readonly MessageContent[]): string {
   return content
     .filter((c): c is { type: 'text'; text: string } => c.type === 'text' && (c as { origin?: string }).origin !== 'robo')
-    .map(c => c.text)
-    .join(' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+    .map(c => c.text).join(' ').replace(/\s+/g, ' ').trim();
 }
-
 function lastUserText(messages: readonly Message[]): string {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i]?.role === 'user') return textOf(messages[i]!.content);
-  }
+  for (let i = messages.length - 1; i >= 0; i--) if (messages[i]?.role === 'user') return textOf(messages[i]!.content);
   return '';
 }
-
-// A turn's first provider call: the freshest non-marker message is the user turn (later iterations end
-// in a tool-result). Lets us log one 'turn' record per turn rather than one per agentic iteration.
+function lastUserMsgId(messages: readonly Message[]): string {
+  for (let i = messages.length - 1; i >= 0; i--) if (messages[i]?.role === 'user') return messages[i]!.id;
+  return '';
+}
 function isTurnStart(messages: readonly Message[]): boolean {
   for (let i = messages.length - 1; i >= 0; i--) {
     const role = messages[i]?.role;
@@ -39,6 +40,14 @@ function isTurnStart(messages: readonly Message[]): boolean {
     return role === 'user';
   }
   return false;
+}
+function firstLine(s: string): string {
+  const line = s.split('\n', 1)[0] ?? '';
+  return line.length > 120 ? line.slice(0, 117) + '…' : line;
+}
+function queryOf(input: unknown): string {
+  return input && typeof input === 'object' && typeof (input as { query?: unknown }).query === 'string'
+    ? (input as { query: string }).query : '';
 }
 
 export const plugin: MatbotPluginSpec = {
@@ -48,30 +57,65 @@ export const plugin: MatbotPluginSpec = {
     const dir     = join(dirname(services.configPath ?? '.'), '.data');
     const logPath = join(dir, 'tool-oracle.jsonl');
     await mkdir(dir, { recursive: true }).catch(() => {});
-    // Best-effort, fire-and-forget: instrumentation must never slow or break a turn.
     const log = (rec: unknown): void => { void appendFile(logPath, JSON.stringify(rec) + '\n', 'utf8').catch(() => {}); };
-    console.warn(`${TAG} active — presenting ALL tools (unbiased); logging (request -> tool) to ${logPath}`);
 
+    // Per-turn reveal: once tool_search runs this turn, present ALL tools so the model can pick.
+    const searched  = new Set<string>();                               // `${sessionId}|${lastUserMsgId}`
+    const turnKey   = (s: Session): string => `${s.id}|${lastUserMsgId(s.messages)}`;
+
+    console.warn(`${TAG} active — SEARCH-FIRST oracle: present only ${SEARCH}; it returns ALL tools; logging → ${logPath}`);
+
+    // tool_search: the entry point. Returns every tool (oracle: no filtering) and reveals them.
+    const toolSearch: Tool = {
+      name: SEARCH,
+      description:
+        `Find and load tools you don't currently have. Most tools aren't shown up front — when a request ` +
+        `needs an action or data and you don't already have a suitable tool, describe the capability you ` +
+        `need in natural language and matching tools are returned and become callable. Prefer searching ` +
+        `over declining or improvising.`,
+      inputSchema: {
+        type: 'object',
+        properties: { query: { type: 'string', description: 'Describe the capability you need — the action to perform or data to fetch.' } },
+        required: ['query'],
+      },
+      executor: {
+        async *execute(_input, ctx) {
+          if (ctx.session) searched.add(turnKey(ctx.session));         // reveal all tools for this turn
+          const all = services.tools.list().filter(t => t.name !== SEARCH);
+          const found = all.map(t => ({ name: t.name, summary: firstLine(t.description) }));
+          yield { type: 'result', value: { found, note: `${found.length} tools available (all returned — no filtering). Call whichever fits the request.` } };
+        },
+      },
+    };
+    services.tools.register(toolSearch);
+
+    // Present only tool_search until it has been called this turn; then present everything.
     const presenter: ToolPresenter = {
       present(tools: readonly Tool[], ctx: PresentContext): readonly Tool[] {
         try {
           const msgs = ctx.session.messages;
           if (isTurnStart(msgs)) {
-            log({ t: 'turn', ts: new Date().toISOString(), session: ctx.session.id, provider: ctx.provider,
-                  request: lastUserText(msgs), toolCount: tools.length });
+            log({ t: 'turn', ts: new Date().toISOString(), session: ctx.session.id, provider: ctx.provider, request: lastUserText(msgs), toolCount: tools.length });
+          }
+          if (!searched.has(turnKey(ctx.session))) {
+            const only = tools.filter(t => t.name === SEARCH);
+            if (only.length > 0) return only;                          // search-first: show just tool_search
           }
         } catch { /* never let instrumentation break a turn */ }
-        return tools;   // oracle: unbiased, present everything
+        return tools;                                                  // revealed (or defensive): present all
       },
     };
     await services.register('ToolPresenter', presenter);
 
+    // Record the query (b) and the subsequent pick (the oracle label).
     services.hooks.register({
       on: 'toolcall',
       handler(ctx) {
         try {
-          log({ t: 'call', ts: new Date().toISOString(), session: ctx.session.id, provider: ctx.config.provider,
-                request: lastUserText(ctx.session.messages), tool: ctx.toolCall.name, input: ctx.toolCall.input });
+          const request = lastUserText(ctx.session.messages);
+          const base = { ts: new Date().toISOString(), session: ctx.session.id, provider: ctx.config.provider, request };
+          if (ctx.toolCall.name === SEARCH) log({ t: 'search', ...base, query: queryOf(ctx.toolCall.input) });
+          else                               log({ t: 'call',   ...base, tool: ctx.toolCall.name, input: ctx.toolCall.input });
         } catch { /* observer only */ }
       },
     });
