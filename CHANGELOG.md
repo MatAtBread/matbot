@@ -406,6 +406,21 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Optional
 
+- **sessions — `session_action` gains a `query` action that searches session *contents*.** Previously the tool
+  could only `list` sessions (returning a `preview` — just the first user message truncated to 60 chars), so a
+  model hunting for a past conversation had to eyeball previews or `get` sessions one by one; the description now
+  also states plainly that `preview` is a display label, not a summary. `query` exposes two *synthesized* string
+  fields to the existing store-query grammar — `user` (everything the user said) and `assistant` (everything the
+  assistant said), each the concatenation of that role's `type:'text'` blocks with tool calls/results, thinking,
+  images and markers dropped as noise — so e.g. `{ where: { op: 'stringContains', field: 'user', value: 'invoice'
+  } }` finds sessions where the user mentioned invoices, and the two fields OR/AND freely with each other and with
+  the real stored fields (`status`, `title`, `createdAt`, `updatedAt`). Matching on the synthesized fields is
+  case-insensitive (they are lowercased and the tool lowercases `stringContains` operands aimed at them, recursing
+  through `and`/`or`/`not`). Optional `sort` (stored fields only), `limit`, and an opaque `cursor` paginate; a low
+  `limit` **early-exits** — the search stops synthesizing/scanning the moment the page is full, so "find the 3
+  sessions mentioning X" over hundreds of sessions never searches the tail. Adds a `@matatbread/matbot-core`
+  dependency (the plugin now reuses `compileFilter`/`applySort`/`validateQuery` from `./storage-base`).
+
 - **mcp — persisted servers now reconnect in the background instead of blocking boot.** `setup()` used to
   `await` reconnecting every persisted MCP server (each a full `initialize` + `tools/list` handshake — an
   `npx` cold-spawn for a local, an HTTP round-trip for a remote) before returning, so one slow or unreachable
