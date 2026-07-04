@@ -394,6 +394,18 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Optional
 
+- **frontend-web — the `/tools/:name` HTTP endpoints no longer 404 a tool that is merely late to register
+  at boot.** The web server starts listening inside frontend-web's `setup()`, which runs before the plugins
+  configured after it (and before the core tools registered once loading finishes) have populated the tool
+  registry. A page refresh during that window fired its bootstrap calls (`session_action`, `provider`,
+  `about_matbot`, `skill_action`, …) ahead of those tools' registration, so they 404'd as if unloaded; a
+  later refresh worked. Both `POST /tools/:name` and `POST /stream/tools/:name` now resolve against the live
+  registry and, if the name is absent within a grace window from server start, wait for its `registered`
+  event (subscribing before re-checking, so a registration in the gap can't be missed) rather than 404. After
+  the window an unknown name is still an immediate 404, and a client disconnect aborts the wait. Resolution is
+  unchanged otherwise — this is a race guard on the registry, never the `ToolPresenter` (which only culls what
+  the *model* is shown; HTTP references tools by name).
+
 - **tool-plugin / browser — `plugin add` no longer skips the config write on a prefix-sibling, and `remove`
   clears a failed-load record.** Two fixes to the plugin-management tools, both surfaced by the new
   failed-plugin recording: (1) `addPlugin` matched the specifier as a *substring* (`text.includes('- ' +
