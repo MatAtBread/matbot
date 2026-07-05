@@ -48,10 +48,6 @@ function isTurnStart(messages: readonly Message[]): boolean {
   }
   return false;
 }
-function firstLine(s: string): string {
-  const line = s.split('\n', 1)[0] ?? '';
-  return line.length > 120 ? line.slice(0, 117) + '…' : line;
-}
 function queryOf(input: unknown): string {
   return input && typeof input === 'object' && typeof (input as { query?: unknown }).query === 'string'
     ? (input as { query: string }).query : '';
@@ -117,9 +113,25 @@ other tools that can resolve the data or capability gap. Prefer searching over d
       executor: {
         async *execute(_input, ctx) {
           if (ctx.session) searched.add(turnKey(ctx.session));         // reveal all tools for this turn
+          // Return the FULL tool specification for each match — not a summary. This mirrors what a directly
+          // presented tool carries on the wire (and what `--dump-tools` renders): the description with the
+          // tool's TS contract (`params`/`result`, flattened from its ToolContracts arms / `toolContract`)
+          // folded in, plus its inputSchema. The model reasons from THIS result when choosing/constructing a
+          // call, so anything omitted here (as the old {name, summary} did) forces it to guess or report
+          // "no type definitions". ToolTypeIndex is absent in the browser ⇒ description + inputSchema only.
+          const wire = await services.ToolTypeIndex?.wireContracts();
           const all = services.tools.list().filter(t => t.name !== SEARCH);
-          const found = all.map(t => ({ name: t.name, summary: firstLine(t.description) }));
-          yield { type: 'result', value: { found, note: `${found.length} tools available (all returned — no filtering). Call whichever fits the request.` } };
+          const found = all.map(t => {
+            const wc = wire?.[t.name];
+            return {
+              name: t.name,
+              description: wc !== undefined
+                ? `${t.description}\n\nTypeScript:\n  params: ${wc.params}\n  result: ${wc.result}`
+                : t.description,
+              inputSchema: t.inputSchema,
+            };
+          });
+          yield { type: 'result', value: { found, note: `${found.length} tools available (all returned — no filtering). Each entry is the full tool specification; call whichever fits the request.` } };
         },
       },
     };
