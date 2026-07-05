@@ -1,5 +1,6 @@
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import type { MatbotPluginSpec, Message, MessageContent, Tool, ToolPresenter, PresentContext, Session } from '@matatbread/matbot-plugin-api';
+import { wireDescription } from '@matatbread/matbot-core';
 import { appendFile, mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
@@ -125,9 +126,7 @@ other tools that can resolve the data or capability gap. Prefer searching over d
             const wc = wire?.[t.name];
             return {
               name: t.name,
-              description: wc !== undefined
-                ? `${t.description}\n\nTypeScript:\n  params: ${wc.params}\n  result: ${wc.result}`
-                : t.description,
+              description: wireDescription(t.description, wc),
               inputSchema: t.inputSchema,
             };
           });

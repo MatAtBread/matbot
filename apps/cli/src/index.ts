@@ -20,7 +20,8 @@ import { appendMessage, createMessage,
          unifyServices, forwardingProxy, makeSwappable, singleTurnRequest,
          createMountTable, onContextQuiesce, flushIfQuiescent,
          createSingleTurnTool, createAboutMatbotTool,
-         isMissingSecretError }            from '@matatbread/matbot-core';
+         isMissingSecretError,
+         wireDescription}            from '@matatbread/matbot-core';
 import type { MatbotMachine, MatbotServices, PluginSettings, Vault, SessionRunner,
               MatbotPlugin, StorageBackend, KnowledgeIndex, PromptFn, FormField, SwapFn } from '@matatbread/matbot-core';
 import { systemPrincipal }                 from '@matatbread/matbot-core';
@@ -1169,9 +1170,7 @@ async function main(): Promise<void> {
       const wc = wire?.[t.name];
       return {
         name:        t.name,
-        description: wc !== undefined
-          ? `${t.description}\n\nTypeScript:\n  params: ${wc.params}\n  result: ${wc.result}`
-          : t.description,
+        description: wireDescription(t.description, wc),
         inputSchema: t.inputSchema,
         ...(t.toolContract !== undefined ? { toolContract: t.toolContract } : {}),
       };

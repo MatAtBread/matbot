@@ -122,6 +122,12 @@ function createSink(dispose: () => void): Sink {
   };
 }
 
+export function wireDescription(description: string, wc: { params: string; result: string } | undefined) {
+  return wc
+    ? `${description}\n\nTypeScript params:\n\`\`\`\n${wc.params}\n\`\`\`\n\nTypeScript result:\`\`\`${wc.result}\n\`\`\``
+    : description;
+}
+
 export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
   const states = new Map<string, SessionState>();
 
@@ -227,7 +233,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
           ? new Map<string, Tool>(deps.tools.list().map(t => {
               const wc = wire?.[t.name];
               return [t.name, wc !== undefined
-                ? { ...t, description: `${t.description}\n\nTypeScript:\n  params: ${wc.params}\n  result: ${wc.result}` }
+                ? { ...t, description: wireDescription(t.description, wc) }
                 : t];
             }))
           : undefined;
