@@ -468,7 +468,19 @@ async function loadPlugins() {
   try {
     localResult = await callTool('plugin', { action: 'discover_local' });
   } catch { /* discover_local optional */ }
-  renderPlugins(listResult.loaded ?? [], Array.isArray(localResult) ? localResult : [], listResult.failed ?? []);
+  // Per-tool trigger counts drive the trigger icon on each tool row (blue = has triggers, grey = none).
+  // One `list` call, grouped by invoke.tool. If the triggers plugin isn't loaded the call throws and we
+  // pass null, so renderPlugins omits the icon entirely rather than showing an inert one.
+  let triggerCounts = null;
+  try {
+    const tr = await callTool('trigger_action', { action: 'list' });
+    triggerCounts = new Map();
+    for (const t of (Array.isArray(tr?.triggers) ? tr.triggers : [])) {
+      const tool = t?.invoke?.tool;
+      if (typeof tool === 'string') triggerCounts.set(tool, (triggerCounts.get(tool) ?? 0) + 1);
+    }
+  } catch { /* triggers plugin not loaded — no icons */ }
+  renderPlugins(listResult.loaded ?? [], Array.isArray(localResult) ? localResult : [], listResult.failed ?? [], triggerCounts);
 }
 
 // A plugin can run here only if its declared matbotRuntime includes the host runtime. The transport
@@ -482,7 +494,7 @@ function runsHere(p) {
   return rt.includes(HOST_RUNTIME);
 }
 
-function renderPlugins(loaded, local, failed) {
+function renderPlugins(loaded, local, failed, triggerCounts) {
   const el = document.getElementById('plugin-list');
   if (!el) return;
   el.innerHTML = '';
@@ -599,8 +611,14 @@ function renderPlugins(loaded, local, failed) {
         const desc = typeof t === 'object' && t !== null ? t.description : undefined;
         const row = document.createElement('div');
         row.className = 'plugin-tool-row';
-        row.textContent = name;
-        if (desc) row.title = desc;
+        const label = document.createElement('span');
+        label.className = 'plugin-tool-name';
+        label.textContent = name;
+        if (desc) label.title = desc;
+        row.appendChild(label);
+        // The trigger icon is only meaningful when the triggers plugin is loaded (else there's nothing
+        // to manage). triggerCounts is null in that case; grey vs. blue is driven by the per-tool count.
+        if (triggerCounts) row.appendChild(makeTriggerIcon(name, triggerCounts.get(name) ?? 0));
         toolList.appendChild(row);
       }
       det.appendChild(toolList);
@@ -1099,6 +1117,193 @@ if (skillEditorOverlay) {
   };
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && skillEditorOverlay.classList.contains('open')) closeSkillEditor();
+  });
+}
+
+// ── Tool-trigger manager ──────────────────────────────────────────────────────
+// The trigger icon on every tool row opens this modal, which lists/edits the triggers that invoke that
+// tool (via trigger_action's query/add/update/remove keyed on invoke.tool). A skill's load-trigger is
+// edited in the skill editor; this is the general surface for every other tool (and works for those too).
+
+// Material "flash on" bolt — inherits currentColor so the .empty class can grey it out.
+const BOLT_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M11 21h-1l1-7H7.5c-.58 0-.57-.32-.38-.66.19-.34.05-.08.07-.12C8.48 10.94 10.42 7.54 13 3h1l-1 7h3.5c.49 0 .56.33.47.51l-.07.15C12.96 17.55 11 21 11 21z"/></svg>';
+
+const toolTriggerOverlay = document.getElementById('tool-trigger-overlay');
+const toolTriggerTitle   = document.getElementById('tool-trigger-title');
+const toolTriggerCards   = document.getElementById('tool-trigger-cards');
+const toolTriggerError   = document.getElementById('tool-trigger-error');
+const toolTriggerSave    = document.getElementById('tool-trigger-save');
+let toolTriggerTool = null;
+let toolTriggerOriginals = [];   // triggers as loaded, so save can remove the ones whose card was deleted
+
+function makeTriggerIcon(toolName, count) {
+  const btn = document.createElement('button');
+  btn.className = count > 0 ? 'tool-trigger-icon' : 'tool-trigger-icon empty';
+  btn.innerHTML = BOLT_SVG;
+  btn.title = count > 0
+    ? `${count} trigger${count === 1 ? '' : 's'} — click to manage`
+    : 'No triggers — click to add one';
+  // The row is otherwise inert; stop propagation so a future row click handler wouldn't also fire.
+  btn.onclick = (e) => { e.stopPropagation(); openToolTriggers(toolName); };
+  return btn;
+}
+
+// One card = one trigger: its enabled toggle, the params passed to the tool on fire (JSON, since params
+// are tool-specific and can't be formed), and its OR-ed conditions (reusing the skill editor's row). A
+// card with no id is a new trigger; deleting a card drops the trigger on save.
+function makeToolTriggerCard(trigger) {
+  const card = document.createElement('div');
+  card.className = 'tt-card';
+  if (trigger?.id) card.dataset.triggerId = trigger.id;
+
+  const head = document.createElement('div');
+  head.className = 'tt-card-head';
+  const enabledLbl = document.createElement('label');
+  enabledLbl.className = 'tt-enabled';
+  const cb = document.createElement('input');
+  cb.type = 'checkbox';
+  cb.checked = trigger ? trigger.enabled !== false : true;
+  const enabledTxt = document.createElement('span');
+  enabledTxt.textContent = 'Enabled';
+  enabledLbl.append(cb, enabledTxt);
+  const del = document.createElement('button');
+  del.className = 'tt-card-del';
+  del.textContent = 'Delete trigger';
+  del.title = 'Remove this trigger on Save';
+  del.onclick = () => card.remove();
+  head.append(enabledLbl, del);
+  card.appendChild(head);
+
+  const pLbl = document.createElement('label');
+  pLbl.className = 'tt-field-label';
+  pLbl.textContent = 'Parameters (JSON) — passed to the tool when it fires';
+  const params = document.createElement('textarea');
+  params.className = 'tt-params';
+  params.rows = 2;
+  params.spellcheck = false;
+  params.placeholder = '{ } — leave blank for none';
+  const p = trigger?.invoke?.params;
+  params.value = p !== undefined && p !== null ? JSON.stringify(p, null, 2) : '';
+  card.append(pLbl, params);
+
+  const cLbl = document.createElement('label');
+  cLbl.className = 'tt-field-label';
+  cLbl.textContent = 'Conditions — fire when ANY matches';
+  const conds = document.createElement('div');
+  conds.className = 'tt-conditions';
+  const list = Array.isArray(trigger?.conditions) ? trigger.conditions : [];
+  if (list.length) for (const c of list) conds.appendChild(makeTriggerRow(c));
+  else conds.appendChild(makeTriggerRow());   // start a new trigger with one editable row
+  card.append(cLbl, conds);
+
+  const addCond = document.createElement('button');
+  addCond.className = 'tt-add-cond skill-editor-btn';
+  addCond.textContent = '+ Add condition';
+  addCond.onclick = () => {
+    const row = makeTriggerRow();
+    conds.appendChild(row);
+    row.querySelector('.trigger-text').focus();
+  };
+  card.appendChild(addCond);
+  return card;
+}
+
+async function openToolTriggers(toolName) {
+  toolTriggerTool = toolName;
+  toolTriggerOriginals = [];
+  toolTriggerError.textContent = '';
+  toolTriggerTitle.textContent = 'Triggers · ';
+  const toolSpan = document.createElement('span');
+  toolSpan.className = 'tt-tool';
+  toolSpan.textContent = toolName;
+  toolTriggerTitle.appendChild(toolSpan);
+  toolTriggerCards.innerHTML = '';
+  toolTriggerSave.disabled = false;
+  toolTriggerOverlay.classList.add('open');
+  try {
+    const res = await callTool('trigger_action', { action: 'query', tool: toolName });
+    const trigs = Array.isArray(res?.triggers) ? res.triggers : [];
+    toolTriggerOriginals = trigs;
+    if (trigs.length) for (const t of trigs) toolTriggerCards.appendChild(makeToolTriggerCard(t));
+    else toolTriggerCards.appendChild(makeToolTriggerCard());   // land ready to author the first one
+  } catch (err) {
+    toolTriggerError.textContent = 'Failed to load triggers: ' + (err?.message ?? err);
+  }
+}
+
+// Reconcile the cards against what was loaded: update/add cards that have conditions, remove any original
+// whose card was deleted or emptied. Always pass `tool` on update so the invoke is rebuilt — that's how
+// clearing the params field clears the stored params (tools.ts rebuilds invoke from tool + params).
+async function saveToolTriggers() {
+  const keptIds = new Set();
+  for (const card of toolTriggerCards.querySelectorAll('.tt-card')) {
+    const id = card.dataset.triggerId || null;
+    const conditions = [];
+    for (const row of card.querySelectorAll('.trigger-row')) {
+      const kind = row.querySelector('.trigger-kind').value;
+      const rule = row.querySelector('.trigger-text').value.trim();
+      if (!rule) continue;   // an empty row is a no-op, not a condition
+      conditions.push({ kind, rule });
+    }
+    const raw = card.querySelector('.tt-params').value.trim();
+    let params;
+    if (raw) {
+      try { params = JSON.parse(raw); }
+      catch { throw new Error('Parameters must be valid JSON (or left blank).'); }
+    }
+    const enabled = card.querySelector('.tt-enabled input').checked;
+
+    if (!conditions.length) continue;   // no conditions ⇒ never fires; not persisted (removed below if it had an id)
+    if (id) {
+      keptIds.add(id);
+      await callTool('trigger_action', {
+        action: 'update', id, conditions, tool: toolTriggerTool, enabled,
+        ...(params !== undefined ? { params } : {}),
+      });
+    } else {
+      await callTool('trigger_action', {
+        action: 'add', conditions, tool: toolTriggerTool, enabled,
+        ...(params !== undefined ? { params } : {}),
+      });
+    }
+  }
+  for (const t of toolTriggerOriginals) {
+    if (!keptIds.has(t.id)) await callTool('trigger_action', { action: 'remove', id: t.id });
+  }
+}
+
+function closeToolTriggers() {
+  toolTriggerOverlay.classList.remove('open');
+  toolTriggerTool = null;
+}
+
+if (toolTriggerOverlay) {
+  toolTriggerOverlay.addEventListener('click', (e) => {
+    if (e.target === toolTriggerOverlay) closeToolTriggers();
+  });
+  document.getElementById('tool-trigger-close').onclick  = closeToolTriggers;
+  document.getElementById('tool-trigger-cancel').onclick = closeToolTriggers;
+  document.getElementById('tool-trigger-add').onclick = () => {
+    const card = makeToolTriggerCard();
+    toolTriggerCards.appendChild(card);
+    card.querySelector('.trigger-text')?.focus();
+  };
+  toolTriggerSave.onclick = async () => {
+    if (toolTriggerTool === null) return;
+    toolTriggerSave.disabled = true;
+    toolTriggerError.textContent = '';
+    try {
+      await saveToolTriggers();
+    } catch (err) {
+      toolTriggerError.textContent = 'Failed to save: ' + (err?.message ?? err);
+      toolTriggerSave.disabled = false;
+      return;
+    }
+    closeToolTriggers();
+    loadPlugins();   // refresh the icon states (counts changed)
+  };
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && toolTriggerOverlay.classList.contains('open')) closeToolTriggers();
   });
 }
 

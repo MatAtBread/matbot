@@ -406,6 +406,17 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Optional
 
+- **frontend-web — every tool row in the sidebar now has a trigger (⚡) icon that manages that tool's
+  triggers.** The icon is blue when the tool has one or more triggers and grey/translucent when it has none
+  (always clickable — that's how you add the first one); per-tool counts come from a single
+  `trigger_action { action: 'list' }` grouped by `invoke.tool` (absent triggers plugin ⇒ no icons). Clicking
+  opens a new popup listing the triggers whose `invoke.tool` is that tool (`query`), one card each: an Enabled
+  toggle, a **Parameters (JSON)** field (params are tool-specific, so free-form JSON rather than a per-tool
+  form), and the OR-ed condition rows reused from the skill editor. Save reconciles against what was loaded —
+  `add`/`update` cards with conditions, `remove` any deleted card — and always passes `tool` on `update` so
+  clearing the params field clears the stored params. This is the general trigger-management surface for every
+  tool; the skill editor's Triggers tab remains the skill-specific path (both edit the same store).
+
 - **sessions — `session_action` gains a `query` action that searches session *contents*.** Previously the tool
   could only `list` sessions (returning a `preview` — just the first user message truncated to 60 chars), so a
   model hunting for a past conversation had to eyeball previews or `get` sessions one by one; the description now
