@@ -102,10 +102,13 @@ export const plugin: MatbotPluginSpec = {
     const toolSearch: Tool = {
       name: SEARCH,
       description:
-        `Find and load tools you don't currently have. Most tools aren't shown up front — when a request ` +
-        `needs an action or data and you don't already have a suitable tool, describe the capability you ` +
-        `need in natural language and matching tools are returned and become callable. Prefer searching ` +
-        `over declining or improvising.`,
+`Find and load tools you don't currently have.
+
+When any type of message  (statement, question, narrative, complaint) appears to lack context
+or data, or infers knowledge, data or a capability that for which you don't already have a
+suitable tool, describe the capability you need as simple verb-noun phrases such as "find sessions",
+"configure dreams", "update recent users" or "identify Pradesh". This tool will present a catalog of
+other tools that can resolve the data or capability gap. Prefer searching over declining or improvising.`,
       inputSchema: {
         type: 'object',
         properties: { query: { type: 'string', description: 'Describe the capability you need — the action to perform or data to fetch.' } },
