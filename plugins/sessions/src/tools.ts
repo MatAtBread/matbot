@@ -14,7 +14,8 @@ declare module '@matatbread/matbot-plugin-api' {
         >
       | ToolContract<Session,                          { action: 'get'; sessionId: string }>
       | ToolContract<{ id: string; title: string },    { action: 'rename'; sessionId: string; title: string }>
-      | ToolContract<{ id: string; status: 'archived' }, { action: 'hide'; sessionId: string }>;
+      | ToolContract<{ id: string; status: 'archived' }, { action: 'hide'; sessionId: string }>
+      | ToolContract<{ id: string; status: 'active' },   { action: 'unhide'; sessionId: string }>;
   }
 }
 
@@ -79,7 +80,8 @@ type SessionInput =
   | ({ action: 'query' } & StoreQuery)
   | { action: 'get';    sessionId: string }
   | { action: 'rename'; sessionId: string; title: string }
-  | { action: 'hide';   sessionId: string };
+  | { action: 'hide';   sessionId: string }
+  | { action: 'unhide'; sessionId: string };
 
 function makeSessionActionTool(store: Store<Session>): Tool<ToolResultOf<'session_action'>> {
   return {
@@ -88,7 +90,7 @@ function makeSessionActionTool(store: Store<Session>): Tool<ToolResultOf<'sessio
       'Manage conversation sessions. A session is a stored conversation — a chronological list of ' +
       'messages identified by a unique ID, with a title and a status (active or archived). This tool ' +
       'covers the lifecycle: list sessions, search their contents (query), fetch one in full (get), ' +
-      'rename one, or hide (archive) one.\n\n' +
+      'rename one, hide (archive) one, or unhide (unarchive) one.\n\n' +
       '"list" and "query" return lightweight summaries — each item\'s "preview" is just the session\'s ' +
       'first user message truncated to 60 characters (empty if it has no text), a display label, not a ' +
       'summary of the conversation. To read a session\'s contents, use "get".\n\n' +
@@ -104,8 +106,8 @@ function makeSessionActionTool(store: Store<Session>): Tool<ToolResultOf<'sessio
       type:       'object',
       required:   ['action'],
       properties: {
-        action:          { type: 'string', enum: ['list', 'query', 'get', 'rename', 'hide'], description: 'The operation to perform.' },
-        sessionId:       { type: 'string', description: 'ID of the target session. Required for get/rename/hide.' },
+        action:          { type: 'string', enum: ['list', 'query', 'get', 'rename', 'hide', 'unhide'], description: 'The operation to perform.' },
+        sessionId:       { type: 'string', description: 'ID of the target session. Required for get/rename/hide/unhide.' },
         title:           { type: 'string', description: 'New title — required for action "rename".' },
         includeArchived: { type: 'boolean', description: 'list only: include archived sessions. Default false.' },
         where:           { type: 'object', description: 'query only: a store-query Filter over "user"/"assistant" (session text) and stored fields. See description.' },
@@ -225,8 +227,21 @@ function makeSessionActionTool(store: Store<Session>): Tool<ToolResultOf<'sessio
             return;
           }
 
+          case 'unhide': {
+            const { sessionId } = args as Extract<SessionInput, { action: 'unhide' }>;
+            if (!sessionId) { yield { type: 'error', message: 'action "unhide" requires "sessionId".' }; return; }
+            const session = await store.get(sessionId);
+            if (!session) { yield { type: 'error', message: `Session "${sessionId}" not found.` }; return; }
+            // Unarchiving is a status edit, not conversational activity — preserve updatedAt (lastActivityAt).
+            const next = { ...session, status: 'active' as const, version: crypto.randomUUID(), updatedAt: lastActivityAt(session) };
+            const res  = await store.cas(sessionId, session.version, next);
+            if (!res.ok) { yield { type: 'error', message: 'Concurrent modification — please retry.' }; return; }
+            yield { type: 'result', value: { id: sessionId, status: 'active' } };
+            return;
+          }
+
           default:
-            yield { type: 'error', message: `Unknown action "${String(args.action)}". Expected one of: list, query, get, rename, hide.` };
+            yield { type: 'error', message: `Unknown action "${String(args.action)}". Expected one of: list, query, get, rename, hide, unhide.` };
         }
       },
     },
