@@ -1,4 +1,4 @@
-import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, StoreQueryError } from '@matatbread/matbot-plugin-api';
 import type {
   MatbotPluginSpec, MatbotMachine, Tool, ToolEvent, ToolContract, ToolResultOf, Store, StoreQuery,
 } from '@matatbread/matbot-plugin-api';
@@ -187,7 +187,16 @@ function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Sto
             return;
           }
           case 'query': {
-            const res = await store.query(input.query ?? {});
+            let res;
+            try {
+              res = await store.query(input.query ?? {});
+            } catch (e) {
+              if (e instanceof StoreQueryError) {
+                yield { type: 'error', message: `Invalid query at ${e.pointer}: ${e.message}. See the \`query\` grammar in this tool's description for the exact StoreQuery shape.` };
+                return;
+              }
+              throw e;
+            }
             yield { type: 'result', value: { items: res.items, ...(res.total !== undefined ? { total: res.total } : {}), ...(res.cursor !== undefined ? { cursor: res.cursor } : {}) } };
             return;
           }

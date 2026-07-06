@@ -4,6 +4,7 @@ import type {
   Tool, ToolRegistry, ToolContext, Store, FileStore, SystemContextRegistry, Vault, PromptFn, FormField,
 } from './types.js';
 import type { MatbotPlugin } from './plugin.js';
+import type { ToolPresenter } from '@matatbread/matbot-plugin-api';
 import { currentUsageSink } from '@matatbread/matbot-plugin-api';
 import { HookRegistry } from './hooks.js';
 import { appendMessage, createMessage } from './session.js';
@@ -25,6 +26,14 @@ export interface RunSessionOpts {
    * `tools`).
    */
   toolRegistry?:  ToolRegistry;
+  /**
+   * Optional presenter that picks which tools are advertised to the model on each provider call — a
+   * read-only view over the `tools` snapshot (e.g. deferring a large library behind a search tool and
+   * revealing matches mid-turn). Consulted *per provider call* so a reveal takes effect on the next
+   * loop iteration; absent ⇒ the whole snapshot is advertised (unchanged behaviour). Presentation never
+   * affects execution — a withheld tool still resolves by name through `toolRegistry`.
+   */
+  toolPresenter?: ToolPresenter;
   store:          Store<Session>;
   hooks?:         HookRegistry;
   systemContext?: SystemContextRegistry;
@@ -149,8 +158,14 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
       outgoing: [...systemMsg, ...history],
       session, config, signal,
     });
+    // Tools advertised for THIS call. A presenter (optional) may present a subset of the snapshot and
+    // grow it across iterations as the model discovers tools; absent ⇒ the whole snapshot. Withheld
+    // tools stay callable — execution resolves against the live registry (opts.toolRegistry), not this.
+    const advertised = opts.toolPresenter
+      ? await opts.toolPresenter.present([...tools.values()], { session, provider: config.provider })
+      : [...tools.values()];
     try {
-      for await (const ev of provider.complete(outgoing, providerConfig, [...tools.values()], signal)) {
+      for await (const ev of provider.complete(outgoing, providerConfig, advertised, signal)) {
         switch (ev.type) {
           case 'text-delta':
             textAcc += ev.delta;

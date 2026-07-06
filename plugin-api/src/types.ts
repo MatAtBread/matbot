@@ -802,6 +802,32 @@ export interface ToolRegistry {
   watch(signal?: AbortSignal): AsyncIterable<ToolRegistryEvent>;
 }
 
+/** What the runner tells a {@link ToolPresenter} about the call it's about to make. */
+export interface PresentContext {
+  /** The session as of this provider call — the persisted user turn plus any assistant/tool turns
+   *  taken so far this turn. A presenter ranks the tool set against this. */
+  session:  Session;
+  /** The provider profile name this turn runs under, so a presenter can tailor to provider
+   *  capabilities (e.g. Anthropic's in-context tool_reference expansion). */
+  provider: string;
+}
+
+/**
+ * Chooses which tools are advertised to the model for a single provider call — a read-only *view* over
+ * the turn's tool snapshot, NOT tool management. Presentation is orthogonal to the {@link ToolRegistry},
+ * which stays the single source of registration, resolution, and type-contracts (its fragile, load-bearing
+ * machinery is never a swap surface). The runner consults the presenter before *every* provider call, so
+ * an impl may present a subset (deferring a large library behind a search tool) and grow it mid-turn as the
+ * model discovers tools. Executor resolution is unaffected — a tool withheld here stays callable by name
+ * through the live registry — so presentation only ever changes what the model is *told about*.
+ *
+ * Optional {@link MatbotServices} member (offer-loosely): absent ⇒ the runner advertises the whole
+ * snapshot, byte-identical to today. `present` may return synchronously or async (a reranker).
+ */
+export interface ToolPresenter {
+  present(tools: readonly Tool[], ctx: PresentContext): readonly Tool[] | Promise<readonly Tool[]>;
+}
+
 /**
  * The named provider profiles the runtime resolves by name. A `ReadonlyMap` for the many read-only
  * consumers (`services.providers.get`/`has`/`keys`/…), plus a sanctioned write path so a plugin can

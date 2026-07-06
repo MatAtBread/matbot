@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type {
-  MatbotPlugin, Principal, Session, Store, ToolRegistry, FileStore, Vault,
+  MatbotPlugin, Principal, Session, Store, Tool, ToolRegistry, FileStore, Vault,
   FormField, PromptFn, SessionRunner, PluginRegistryEvent,
 } from '@matatbread/matbot-core';
 import { createSession, promptCancelledError, runAs, tryCurrentPrincipal } from '@matatbread/matbot-core';
@@ -118,6 +118,17 @@ const nonInteractivePrompt: PromptFn = ((p: string | FormField, def?: string) =>
 export function createWebServer(deps: WebServerDeps) {
   const origin = deps.cors ?? '*';
   const resolvePrincipal = deps.resolvePrincipal ?? defaultWebPrincipal;
+
+  // Boot race guard for the /tools endpoints. This server starts listening inside frontend-web's
+  // setup(), which runs before the plugins configured after it — and before the core tools registered
+  // once loading finishes — have populated the tool registry. So a tool call arriving during boot can
+  // outrun its tool's registration (the UI's bootstrap fires several: session_action, provider,
+  // about_matbot, skill_action…), and a plain resolve() would 404 a tool that is merely late. Within a
+  // grace window from server start we wait for the name to register instead; after it, an unknown name
+  // is a genuine 404 returned at once, so a bad name never hangs. Measured from server construction
+  // (== frontend-web setup == boot start); 30s comfortably covers a slow/cold boot.
+  const BOOT_TOOL_GRACE_MS = 30_000;
+  const bootGraceUntil = Date.now() + BOOT_TOOL_GRACE_MS;
 
   // Persistent per-session event subscribers (the GET /events/sessions/:id SSE streams). Submits are
   // fire-and-forget — all turn output, and interactive prompts, reach clients over these. Holding one
@@ -288,6 +299,40 @@ export function createWebServer(deps: WebServerDeps) {
       ...(deps.files      !== undefined ? { files:      deps.files      } : {}),
       ...(deps.configPath !== undefined ? { configPath: deps.configPath } : {}),
     };
+  }
+
+  // Resolve a tool by name against the *live registry* — never the ToolPresenter (which only culls what
+  // the model is shown; HTTP references tools by name). If absent during the boot grace window, wait for
+  // its `registered` event rather than 404 a tool that hasn't loaded yet. The subscription is taken
+  // before re-checking so a registration landing in that gap can't be missed.
+  async function resolveToolReady(name: string, signal: AbortSignal): Promise<Tool | null> {
+    const reg = deps.tools;
+    const immediate = reg?.resolve(name) ?? null;
+    if (immediate || reg === undefined || Date.now() >= bootGraceUntil) return immediate;
+
+    const ac = new AbortController();
+    const onAbort = () => ac.abort();
+    signal.addEventListener('abort', onAbort, { once: true });
+    const timer = setTimeout(() => ac.abort(), Math.max(0, bootGraceUntil - Date.now()));
+    const it = reg.watch(ac.signal)[Symbol.asyncIterator]();
+    try {
+      const first = it.next();                     // subscribes synchronously (before the first await)
+      const raced = reg.resolve(name);             // catch a register() landing between the check above and subscribe
+      if (raced) return raced;
+      let r = await first;
+      while (r.done !== true) {
+        if (r.value.type === 'registered' && r.value.name === name) {
+          const t = reg.resolve(name);
+          if (t) return t;
+        }
+        r = await it.next();
+      }
+      return reg.resolve(name);
+    } finally {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      await it.return?.();                          // end the watch subscription
+    }
   }
 
   function static200(res: ServerResponse, contentType: string, path: string) {
@@ -536,11 +581,11 @@ export function createWebServer(deps: WebServerDeps) {
       try { input = raw ? JSON.parse(raw) : null; }
       catch { json(res, 400, { error: 'Invalid JSON' }); return; }
 
-      const tool = deps.tools?.resolve(toolName);
-      if (!tool) { json(res, 404, { error: `Tool "${toolName}" not found` }); return; }
-
       const ac = new AbortController();
       req.on('close', () => ac.abort());
+
+      const tool = await resolveToolReady(toolName, ac.signal);
+      if (!tool) { json(res, 404, { error: `Tool "${toolName}" not found` }); return; }
 
       const toolCtx = makeToolCtx(ac, principal);
       let stdout = '';
@@ -580,11 +625,11 @@ export function createWebServer(deps: WebServerDeps) {
       try { input = raw ? JSON.parse(raw) : null; }
       catch { json(res, 400, { error: 'Invalid JSON' }); return; }
 
-      const tool = deps.tools?.resolve(toolName);
-      if (!tool) { json(res, 404, { error: `Tool "${toolName}" not found` }); return; }
-
       const ac = new AbortController();
       req.on('close', () => ac.abort());
+
+      const tool = await resolveToolReady(toolName, ac.signal);
+      if (!tool) { json(res, 404, { error: `Tool "${toolName}" not found` }); return; }
 
       res.writeHead(200, {
         'content-type':  'text/event-stream',

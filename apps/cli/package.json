@@ -3,7 +3,7 @@
   "matbotRuntime": [
     "node"
   ],
-  "version": "0.3.0",
+  "version": "0.3.1",
   "engines": {
     "node": ">=24.0.0"
   },
@@ -30,7 +30,7 @@
   "scripts": {
     "repl": "node bin.js",
     "start": "node bin.js start",
-    "test": "node --import ./register.js --test test/loader.test.ts",
+    "test": "node --import ./register.js --test test/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "repository": {

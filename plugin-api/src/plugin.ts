@@ -2,7 +2,7 @@ import type {
   FileStore, Vault, Message, ModelParameters,
   ProviderAdapter, ProviderConfig, ProviderRegistry, Tool, ToolRegistry, FrontendInfo,
   Store, Session, SystemContextRegistry, KnowledgeIndex, PromptFn, SessionRunner, Usage,
-  TypeScriptStripper, ToolTypeIndex,
+  TypeScriptStripper, ToolTypeIndex, ToolPresenter,
 } from './types.js';
 import type { HookRegistry } from './hooks.js';
 
@@ -101,6 +101,11 @@ export interface MatbotServices {
    *  reference held across a swap keeps resolving to the live backend. Always present (boot default). */
   readonly Vault: Vault;
   readonly KnowledgeIndex: KnowledgeIndex;
+  /** Optional tool-presentation policy: chooses which tools are advertised to the model per provider
+   *  call (a large-library search/deferral plugin registers one). Absent ⇒ the runner advertises the
+   *  whole turn snapshot. A plain registered service (not a swap-member); consumed as a member. See
+   *  {@link ToolPresenter}. */
+  readonly ToolPresenter?: ToolPresenter | undefined;
 }
 
 /** The assembled machine: registry services wired to the fixed runtime — what `setup()` receives. */

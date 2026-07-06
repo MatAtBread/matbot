@@ -93,7 +93,21 @@ function validateFilter(f: Filter, ptr: string): void {
   }
 }
 
+const QUERY_KEYS = new Set(['where', 'sort', 'limit', 'cursor']);
+
 export function validateQuery(q: StoreQuery): void {
+  if (q === null || typeof q !== 'object' || Array.isArray(q))
+    throw new StoreQueryError('query must be an object with optional keys: where, sort, limit, cursor', '/', 'MALFORMED');
+
+  // Reject unknown top-level keys. Without this the envelope is silently permissive: a clause placed
+  // under a wrong key (e.g. `filter` instead of `where`, an SQL-ism LLMs reach for) is dropped, the
+  // query degrades to match-everything, and the author gets a plausible result with no signal it was
+  // malformed. Naming the bad key and the valid set turns a silent miss into a fixable error.
+  for (const key of Object.keys(q)) {
+    if (!QUERY_KEYS.has(key))
+      throw new StoreQueryError(`unknown query key '${key}' — valid keys are: where, sort, limit, cursor`, `/${key}`, 'MALFORMED');
+  }
+
   if (q.where !== undefined) validateFilter(q.where, '/where');
 
   if (q.sort !== undefined) {

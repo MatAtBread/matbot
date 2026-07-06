@@ -1,0 +1,41 @@
+{
+  "name": "@matatbread/matbot-tool-router",
+  "matbotRuntime": [
+    "node", "browser"
+  ],
+  "version": "0.3.1",
+  "files": [
+    "src"
+  ],
+  "description": "Serves the model a bounded per-turn window from a large tool library via a ToolPresenter: always-present wide fallbacks (pins) + the BM25-top tools for the current message + a tool_search entry point (with a de-duped noun catalogue) for the tail. Tool width (pin vs rank) and the catalogue are derived per tool from its description + inputSchema and cached in a store; tools already used or revealed are read back from the session transcript rather than re-presented, so the wire stays cache-friendly and coherent under session edits. Cross-platform (node + browser).",
+  "keywords": [
+    "matbot",
+    "matbot-plugin",
+    "llm",
+    "ai",
+    "agent"
+  ],
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MatAtBread/matbot.git",
+    "directory": "plugins/tool-router"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "@matatbread/matbot-plugin-api": "workspace:^"
+  },
+  "devDependencies": {
+    "typescript": "catalog:",
+    "@matatbread/matbot-plugin-api": "workspace:^"
+  }
+}

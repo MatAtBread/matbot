@@ -20,7 +20,8 @@ import { appendMessage, createMessage,
          unifyServices, forwardingProxy, makeSwappable, singleTurnRequest,
          createMountTable, onContextQuiesce, flushIfQuiescent,
          createSingleTurnTool, createAboutMatbotTool,
-         isMissingSecretError }            from '@matatbread/matbot-core';
+         isMissingSecretError,
+         wireDescription}            from '@matatbread/matbot-core';
 import type { MatbotMachine, MatbotServices, PluginSettings, Vault, SessionRunner,
               MatbotPlugin, StorageBackend, KnowledgeIndex, PromptFn, FormField, SwapFn } from '@matatbread/matbot-core';
 import { systemPrincipal }                 from '@matatbread/matbot-core';
@@ -255,6 +256,8 @@ interface CliOpts {
   promptFile?: string;
   ephemeral:   boolean;
   principal?:  string;
+  /** `--dump-tools [path]`: serialize the live tool registry to this file and exit (default tools-dump.json). */
+  dumpTools?:  string;
 }
 
 function parseArgs(argv: string[]): { opts: CliOpts; prompt: string | undefined } {
@@ -272,6 +275,11 @@ function parseArgs(argv: string[]): { opts: CliOpts; prompt: string | undefined 
       case '--prompt-file': { const v = args[++i]; if (v !== undefined) opts.promptFile = v; } break;
       case '--principal':   { const v = args[++i]; if (v !== undefined) opts.principal  = v; } break;
       case '--ephemeral':   opts.ephemeral = true; break;
+      case '--dump-tools':  {
+        const v = args[i + 1];
+        if (v !== undefined && !v.startsWith('-')) { opts.dumpTools = v; i++; }
+        else opts.dumpTools = 'tools-dump.json';
+      } break;
       case '--help': printHelp(); process.exit(0);
       case '--version': case '-v': process.stdout.write(versionBanner() + '\n'); process.exit(0);
       default:
@@ -380,6 +388,8 @@ Options:
   --config      <path>      Config file path (default: ./matbot.yaml)
   --prompt-file <path>      Read prompt from file; run single turn and exit
   --ephemeral               Force ephemeral even when --session is given
+  --dump-tools  [path]      Serialize the live tool registry (wire descriptions with folded TS
+                            contracts + inputSchema) to a JSON file and exit (default tools-dump.json)
   --principal   <id|json>   Boot identity: an id (type "user") or JSON {"id","type"}.
                             Overrides MATBOT_PRINCIPAL and config principal:.
   --help                    Show this help
@@ -1081,6 +1091,7 @@ async function main(): Promise<void> {
     resolveProvider,
     tools:         toolReg,
     toolTypeIndex: () => services.ToolTypeIndex,   // resolved live: the tool-types plugin registers it after boot
+    toolPresenter: () => services.ToolPresenter,   // resolved live: a tool-search/deferral plugin registers it after boot
     hooks:         hookReg,
     systemContext: systemContextReg,
     vault,
@@ -1146,6 +1157,29 @@ async function main(): Promise<void> {
   // about_matbot: the harness's own version + description. The harness isn't a plugin (no `plugin list`
   // row), so this singleton fact gets a dedicated tool; the app passes its own package version.
   toolReg.register(createAboutMatbotTool(selfVersion()));
+
+  // ── Dump tools (one-shot) ───────────────────────────────────────────────────────
+  // `--dump-tools [path]`: serialize the live registry and exit. Each tool's `description` is the WIRE
+  // description — its raw description with the ToolContracts / `toolContract` TS shapes folded in by
+  // ToolTypeIndex.wireContracts(), exactly as the model sees it — plus its `inputSchema` and any
+  // soft-tool `toolContract`. Runs here so every plugin + core tool is registered and the type index is
+  // populated; exits before the server/REPL. Used to build corpora for the tool-search work.
+  if (opts.dumpTools !== undefined) {
+    const wire = await services.ToolTypeIndex?.wireContracts();
+    const dump = toolReg.list().map(t => {
+      const wc = wire?.[t.name];
+      return {
+        name:        t.name,
+        description: wireDescription(t.description, wc),
+        inputSchema: t.inputSchema,
+        ...(t.toolContract !== undefined ? { toolContract: t.toolContract } : {}),
+      };
+    });
+    const outPath = path.resolve(opts.dumpTools);
+    await writeFile(outPath, JSON.stringify(dump, null, 2), 'utf8');
+    process.stderr.write(`[matbot] dumped ${dump.length} tools → ${outPath}\n`);
+    process.exit(0);
+  }
 
   // ── Server mode ───────────────────────────────────────────────────────────────
 

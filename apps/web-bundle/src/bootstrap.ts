@@ -16,7 +16,8 @@ import type {
 import { LookupKnowledgeIndex } from '@matatbread/matbot-core';
 import { BrowserStorageBackend, LocalStorageVault } from '@matatbread/matbot-browser';
 import { runProviderSetup, type AvailableProvider, type ProviderDraft } from './setup.js';
-import { createBrowserProviderTool, createBrowserToolTypeIndex } from '@matatbread/matbot-browser';
+import { createBrowserProviderTool, createBrowserToolTypeIndex, extractToolContracts } from '@matatbread/matbot-browser';
+import type { BrowserToolTypeIndexHandle } from '@matatbread/matbot-browser';
 
 // Browser TypeScript type-stripper (the TypeScriptStripper the realm provides). The bundle deliberately
 // does not inline sucrase (~700 KB per page); mirror the loader and lazy-load it from a CDN on first use,
@@ -78,8 +79,9 @@ function removePersistedProvider(name: string): void {
 /** Host services the in-page loader provides to the bootstrap (see loader.js / __mbLoader). */
 export interface LoaderApi {
   /** Fetch a remote .ts plugin, type-strip it, and return a specifier importable right now, plus the
-   *  name and declared matbotRuntime read from its sibling package.json. */
-  loadRemote(url: string): Promise<{ spec: string; name: string; runtimes?: readonly Runtime[] }>;
+   *  name and declared matbotRuntime read from its sibling package.json, plus the RAW (pre-strip) source
+   *  of each fetched module — so the host can scan `ToolContracts` augmentations for wire contracts. */
+  loadRemote(url: string): Promise<{ spec: string; name: string; sources?: string[]; runtimes?: readonly Runtime[] }>;
 }
 
 export interface BootEnv {
@@ -92,6 +94,10 @@ export interface BootEnv {
   specVersions?: Record<string, string>;
   /** The web-bundle's own package version, baked by the assembler — reported by `about_matbot`. */
   harnessVersion?: string;
+  /** Per-tool wire contracts ({ params, result }) the assembler derived with the node TypeScript compiler
+   *  at build time (the browser has no compiler/fs). Fed to the browser ToolTypeIndex so built-in tools
+   *  carry the SAME real TS contracts in their wire descriptions as on node. */
+  toolContracts?: Record<string, { params: string; result: string }>;
   loader:    LoaderApi;
 }
 
@@ -375,6 +381,9 @@ export async function boot(env: BootEnv): Promise<void> {
       if (/^https?:\/\//.test(specifier) || (specifier.startsWith('/') && !specifier.startsWith('mbmod:'))) {
         const remote = await loader.loadRemote(specifier);
         specNames[specifier] = remote.name;   // identify()/unload resolve by the source URL (= spec)
+        // Scan the remote's RAW source for `ToolContracts` augmentations (type-only — stripped from the
+        // executable blob) so its tools get real params+result TS in their wire descriptions, like built-ins.
+        for (const s of remote.sources ?? []) toolTypeIndex.addContracts(extractToolContracts(s));
         // Carry the declared matbotRuntime so the loader can gate a node-only remote before import and
         // stamp plugin.matbotRuntime (which `list` reports — a blob: importSpec can't be re-read later).
         req = { spec: specifier, importSpec: remote.spec, ...(remote.runtimes !== undefined ? { runtimes: remote.runtimes } : {}) };
@@ -412,9 +421,11 @@ export async function boot(env: BootEnv): Promise<void> {
   const services: MatbotMachine = unifyServices(baseServices);
 
   // Registry-driven ToolTypeIndex (the node tool-types plugin is node-only): derives a .d.ts from live
-  // tools' toolContract/inputSchema so function-tools' `types` action returns real declarations. No tsc,
-  // so check() is a no-op (guess-and-run). Registered before turns run; function-tools reads it per-call.
-  void services.register('ToolTypeIndex', createBrowserToolTypeIndex(services));
+  // tools' toolContract/inputSchema so function-tools' `types` action returns real declarations. Seeded with
+  // the assembler-baked contracts so built-in tools carry real params+result (not just `unknown`) — the same
+  // wire TS as node. No tsc, so check() is a no-op (guess-and-run). function-tools reads it per-call.
+  const toolTypeIndex: BrowserToolTypeIndexHandle = createBrowserToolTypeIndex(services, env.toolContracts);
+  void services.register('ToolTypeIndex', toolTypeIndex);
 
   const resolveProvider = async (name: string): Promise<{ adapter: ProviderAdapter; config: ProviderConfig } | null> => {
     const cfg = providers.get(name);
@@ -439,6 +450,7 @@ export async function boot(env: BootEnv): Promise<void> {
     loadPlugin:    services.loadPlugin.bind(services),
     unloadPlugin:  services.unloadPlugin.bind(services),
     toolTypeIndex: () => services.ToolTypeIndex,   // fold each tool's wire contract into its description at dispatch
+    toolPresenter: () => services.ToolPresenter,   // resolved live: a tool-search/deferral plugin registers it after boot
   });
 
   // Load provider plugins first as a warm-up so the first turn needn't load its adapter mid-response.

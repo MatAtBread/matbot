@@ -27,3 +27,6 @@ matbot.*.yaml
 apps/web-bundle/dist/*
 !apps/web-bundle/dist/matbot.html
 !apps/web-bundle/dist/matbot-demo.html
+
+# local tool-search eval artifacts (contain private session-derived request text)
+research/tool-search/*.local.*

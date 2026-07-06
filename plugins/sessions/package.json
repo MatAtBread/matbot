@@ -4,7 +4,7 @@
     "node",
     "browser"
   ],
-  "version": "0.3.0",
+  "version": "0.3.1",
   "engines": {
     "node": ">=24.0.0"
   },
@@ -36,10 +36,12 @@
     "access": "public"
   },
   "peerDependencies": {
-    "@matatbread/matbot-plugin-api": "workspace:^"
+    "@matatbread/matbot-plugin-api": "workspace:^",
+    "@matatbread/matbot-core": "workspace:^"
   },
   "devDependencies": {
     "typescript": "catalog:",
-    "@matatbread/matbot-plugin-api": "workspace:^"
+    "@matatbread/matbot-plugin-api": "workspace:^",
+    "@matatbread/matbot-core": "workspace:^"
   }
 }

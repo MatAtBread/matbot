@@ -2,12 +2,15 @@ import type { MatbotMachine, ToolTypeIndex } from '@matatbread/matbot-plugin-api
 
 // A browser ToolTypeIndex. The node one (@matatbread/matbot-tool-types) runs the real TypeScript compiler
 // over each tool's on-disk source to recover its `ToolContracts` augmentation; the browser has neither the
-// compiler nor a filesystem, so this derives the dts from the LIVE REGISTRY alone — the graceful fallback:
-//   • a source-less tool (a function-tools function, the tool-store per-namespace tool) carries its contract
-//     as a `toolContract` string on the registered Tool → spliced verbatim;
-//   • any other tool has no reachable contract here, so its result stays `unknown` but its params are
-//     synthesised from the (always-present) `inputSchema` (see schemaToTs), so a composer still sees real
-//     fields rather than a bare `ToolContract<unknown, unknown>`.
+// compiler nor a filesystem, so it derives contracts from two sources, in precedence order:
+//   • EMBEDDED — the assembler runs the node compiler at BUILD time and bakes the per-tool { params, result }
+//     for every built-in tool into the artifact; passed in here. This is what gives the browser the SAME
+//     real result types (not just `unknown`) as node for the built-in library.
+//   • a source-less tool (a function-tools function, the tool-store per-namespace tool) registered at
+//     runtime — absent from the embedded map — carries its contract as a `toolContract` string → spliced.
+//   • any remaining tool (e.g. an MCP proxy) has no reachable contract; `dts()` still synthesises its params
+//     from the (always-present) `inputSchema` (see schemaToTs) so a composer sees real fields, but
+//     `wireContracts()` omits it (no misleading `unknown` result in the wire description) — mirroring node.
 // `check()` is a no-op ([] = clean): there is no compiler to grade a snippet against, so function-tools
 // degrades to guess-and-run (define/lambda still compile and run via the sucrase TypeScriptStripper).
 
@@ -26,18 +29,63 @@ function splitTopLevel(s: string, sep: string): string[] {
   return parts;
 }
 
-// Flatten a `toolContract` (`ToolContract<Result, Args>`, or a `|`-union of arms) to the wire's
-// `params`/`result` union text.
-function splitContract(contract: string): { params: string; result: string } {
+// Parse a `ToolContract<Result, Args>` type (or a `|`-union of such arms) to its `params`/`result` union
+// text. Returns null unless EVERY arm is a `ToolContract<R, P>` — mirroring the node compiler's extractArms
+// (a bare/plain entry yields no wire contract). This is the shape check; splitContract wraps it with a
+// permissive fallback for the always-a-contract `toolContract` string case.
+function parseContractArms(type: string): { params: string; result: string } | null {
   const results: string[] = [], params: string[] = [];
-  for (const armText of splitTopLevel(contract, '|')) {
-    const m = armText.trim().match(/^ToolContract\s*<([\s\S]*)>$/);
-    if (!m) continue;
+  for (const armText of splitTopLevel(type, '|')) {
+    const t = armText.trim();
+    if (t === '') continue;                          // leading/trailing `|` in a multi-arm union
+    const m = t.match(/^ToolContract\s*<([\s\S]*)>$/);
+    if (!m) return null;
     const inner = splitTopLevel(m[1]!, ',');
-    if (inner[0] !== undefined) results.push(inner[0].trim());
-    if (inner[1] !== undefined) params.push(inner[1].trim());
+    results.push((inner[0] ?? 'unknown').trim());
+    params.push((inner[1] ?? 'unknown').trim());
   }
-  return { result: results.join(' | ') || 'unknown', params: params.join(' | ') || 'unknown' };
+  return results.length ? { result: results.join(' | '), params: params.join(' | ') } : null;
+}
+
+// Flatten a `toolContract` (`ToolContract<Result, Args>`, or a `|`-union of arms) to the wire's
+// `params`/`result` union text. Permissive: a non-contract falls back to `unknown`/`unknown`.
+function splitContract(contract: string): { params: string; result: string } {
+  return parseContractArms(contract) ?? { result: 'unknown', params: 'unknown' };
+}
+
+// Extract per-tool wire contracts from RAW .ts source, compiler-free: find each `interface ToolContracts
+// { … }` augmentation block and read each arm's `ToolContract<Result, Params>` type-argument TEXT. This is
+// exactly what the node compiler path does (it merges the augmentation declarations via the checker, then
+// reads `.getText()` on the two type args) — the checker is only needed to MERGE declarations across files,
+// not to extract, so a source scan is equivalent per-file. Runs at assemble time over built-in source AND at
+// runtime over http-fetched plugin source, so a remotely-loaded plugin's tools carry real TS too. Best-effort
+// (shares splitTopLevel's `>`-as-close-bracket limitation, so an arrow type inside a contract arg can confuse
+// depth); an unparseable arm simply yields no contract for that tool, which degrades to its base description.
+export function extractToolContracts(src: string): Record<string, { params: string; result: string }> {
+  const out: Record<string, { params: string; result: string }> = {};
+  const clean = src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ');   // drop comments
+  const RE = /interface\s+ToolContracts\s*\{/g;
+  for (let m = RE.exec(clean); m !== null; m = RE.exec(clean)) {
+    let depth = 1, i = RE.lastIndex;
+    for (; i < clean.length && depth > 0; i++) {
+      const c = clean[i];
+      if (c === '{') depth++; else if (c === '}') depth--;
+    }
+    const body = clean.slice(RE.lastIndex, i - 1);
+    for (const member of splitTopLevel(body, ';')) {
+      const text = member.trim();
+      if (!text.includes('ToolContract')) continue;
+      const q = text.match(/^(['"])(.*?)\1\s*:\s*([\s\S]*)$/);          // quoted key
+      const b = q ? null : text.match(/^([A-Za-z_$][\w$]*)\s*:\s*([\s\S]*)$/);   // bare key
+      const key  = q?.[2] ?? b?.[1];
+      const type = q?.[3] ?? b?.[2];
+      if (key === undefined || type === undefined) continue;
+      const c = parseContractArms(type.trim());
+      if (c) out[key] = c;
+    }
+    RE.lastIndex = i;
+  }
+  return out;
 }
 
 // Best-effort JSON-Schema → TypeScript type text. Deliberately shallow and total (never throws; anything
@@ -88,12 +136,21 @@ function schemaToTs(schema: unknown, depth = 0): string {
 
 class BrowserToolTypeIndex implements ToolTypeIndex {
   private readonly machine: MatbotMachine;
-  constructor(machine: MatbotMachine) { this.machine = machine; }
+  // Assembler-baked per-tool { params, result } (node compiler run at build time), keyed by tool name.
+  // Empty when a bundle didn't bake them, in which case behaviour falls back to the pre-embed path.
+  private readonly embedded: Record<string, { params: string; result: string }>;
+  constructor(machine: MatbotMachine, embedded?: Record<string, { params: string; result: string }>) {
+    this.machine  = machine;
+    this.embedded = embedded ?? {};
+  }
 
   async dts(): Promise<string> {
-    const arms = this.machine.tools.list().map(
-      t => `    ${JSON.stringify(t.name)}: ${t.toolContract ?? `ToolContract<unknown, ${schemaToTs(t.inputSchema)}>`};`,
-    );
+    const arms = this.machine.tools.list().map(t => {
+      const emb = this.embedded[t.name];
+      const contract = t.toolContract
+        ?? (emb ? `ToolContract<${emb.result}, ${emb.params}>` : `ToolContract<unknown, ${schemaToTs(t.inputSchema)}>`);
+      return `    ${JSON.stringify(t.name)}: ${contract};`;
+    });
     // `ToolContract` and the overloaded `tool` proxy resolve against plugin-api (textually — this dts is
     // shown to the model, not compiled here). A `toolContract` may name a plugin-api type (e.g. StoreQuery)
     // left bare; harmless in the shown text, which is enough for a composer to write `await tool.x(params)`.
@@ -107,12 +164,26 @@ class BrowserToolTypeIndex implements ToolTypeIndex {
   async wireContracts(): Promise<Record<string, { params: string; result: string }>> {
     const out: Record<string, { params: string; result: string }> = {};
     for (const t of this.machine.tools.list()) {
-      if (t.toolContract !== undefined) out[t.name] = splitContract(t.toolContract);
+      if (t.toolContract !== undefined) out[t.name] = splitContract(t.toolContract);   // runtime source-less tool
+      else if (this.embedded[t.name] !== undefined) out[t.name] = this.embedded[t.name]!;   // built-in / remote: baked
     }
     return out;
   }
+
+  // Merge more contracts (e.g. extractToolContracts() over a remotely-loaded plugin's source). Idempotent.
+  addContracts(contracts: Record<string, { params: string; result: string }>): void {
+    Object.assign(this.embedded, contracts);
+  }
 }
 
-export function createBrowserToolTypeIndex(machine: MatbotMachine): ToolTypeIndex {
-  return new BrowserToolTypeIndex(machine);
+/** The browser ToolTypeIndex plus its runtime-merge hook (used by the host to add http-loaded plugins). */
+export type BrowserToolTypeIndexHandle = ToolTypeIndex & {
+  addContracts(contracts: Record<string, { params: string; result: string }>): void;
+};
+
+export function createBrowserToolTypeIndex(
+  machine: MatbotMachine,
+  embedded?: Record<string, { params: string; result: string }>,
+): BrowserToolTypeIndexHandle {
+  return new BrowserToolTypeIndex(machine, embedded);
 }

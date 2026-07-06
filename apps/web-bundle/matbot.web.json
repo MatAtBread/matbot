@@ -29,6 +29,7 @@
     "plugins/json-validation",
     "plugins/tool-store",
     "plugins/function-tools",
+    "plugins/tool-router",
     "plugins/cognition",
     "plugins/storage/google-drive"
   ],

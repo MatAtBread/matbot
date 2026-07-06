@@ -2,7 +2,7 @@ import type { Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext, Matbo
 import { CONFIRM_YES, CONFIRM_NO } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins, getRegisteredTools, getRegisteredFrontendPlugins,
          getRegisteredServiceKeys, getHookPlugins, getSystemContextPlugins,
-         getSpecifierForPlugin } from '@matatbread/matbot-core';
+         getSpecifierForPlugin, getFailedPlugins, clearFailedPlugin } from '@matatbread/matbot-core';
 
 /**
  * Persistence of user-added plugin specifiers across realm reloads. The browser has no matbot.yaml,
@@ -44,6 +44,7 @@ declare module '@matatbread/matbot-plugin-api' {
             matbotRuntime?: readonly Runtime[];
           }>;
           configured:   string[];
+          failed?:      Array<{ specifier: string; name?: string; error: string }> | undefined;
           builtinTools?: ToolSummary[] | undefined;
         }, { action: 'list' }>
       | ToolContract<AvailablePlugin[], { action: 'discover_local' }>
@@ -115,11 +116,13 @@ export function createBrowserPluginTool(extras: ExtraPlugins): Tool<ToolResultOf
           ...(p.manifest?.description ? { description: p.manifest.description } : {}),
           ...(p.matbotRuntime !== undefined ? { matbotRuntime: p.matbotRuntime } : {}),
         }));
+        const failed = getFailedPlugins();
         yield {
           type:  'result',
           value: {
             loaded,
             configured,
+            ...(failed.length ? { failed: failed.map(f => ({ specifier: f.specifier, error: f.error, ...(f.name !== undefined ? { name: f.name } : {}) })) } : {}),
             ...(toolsByPlugin.has(undefined) ? { builtinTools: toolsByPlugin.get(undefined) } : {}),
           },
         };
@@ -226,6 +229,9 @@ export function createBrowserPluginTool(extras: ExtraPlugins): Tool<ToolResultOf
           yield { type: 'stderr', chunk: `Deactivation failed: ${String(e)}\n` };
         }
         await extras.remove(entry);
+        // Drop any recorded load failure for this specifier — a removed plugin must not linger as a
+        // failed ghost in `plugin list` / the web UI once its config entry is gone.
+        clearFailedPlugin(entry);
         yield { type: 'result', value: { message: `"${entry}" removed and deactivated.` } };
         return;
       }

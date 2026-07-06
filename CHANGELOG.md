@@ -58,6 +58,15 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### API gaps filled
 
+- **Plugin load failures are recorded, not swallowed (`getFailedPlugins`).** A plugin the loader skips —
+  an incompatible `matbotRuntime`, an import that rejects, a module that isn't plugin-shaped, or a `setup()`
+  that throws — still fails *gracefully* (the boot batch skips it and continues; only an explicit single load
+  throws), but no longer *silently*. The loader records `{ specifier, name?, error }` on the registry at each
+  skip point; a subsequent successful (re)load of the same specifier clears its entry. New core accessors:
+  `getFailedPlugins()`, `recordFailedPlugin(entry)`, `clearFailedPlugin(specifier)`. The `plugin` tool's
+  `list` result gains an optional `failed` array, and the web plugins panel renders the failed set (with the
+  reason and retry/remove actions) so a mis-configured plugin is visible instead of vanishing into a console line.
+
 - **`Tool.toolContract` — the call contract as TypeScript text, for tools with no scannable source.** A tool
   whose name and/or shape are built at runtime (a `function-tools` function; the `tool-store` per-namespace
   CRUD tool) can't carry a static `ToolContracts` augmentation, so it declares its contract as a single
@@ -70,6 +79,14 @@ churn and less likely to affect a consumer who doesn't use them.
   text is no longer authored on the `Tool` (the retired `paramsType`/`resultType`) nor rendered by a
   `toolWireDescription` helper — it is derived from the one contract and folded into the tool description at
   the dispatch edge (see below).
+
+- **`MatbotServices.ToolPresenter` (optional) — per-call tool advertisement.** A plugin may register a
+  `ToolPresenter` whose `present(tools, { session, provider })` chooses which tools are advertised to the model
+  on each provider call. The runner consults it before *every* call, so a presenter may advertise a subset
+  (deferring a large library behind a search tool) and grow it mid-turn as the model discovers tools. Absent ⇒
+  the whole turn snapshot is advertised, byte-identical to before. Presentation is orthogonal to the
+  `ToolRegistry`: a withheld tool still resolves by name at execution, so this only changes what the model is
+  *told about*, never what it can call.
 
 - **`MatbotServices.ToolTypeIndex` (optional, node-only).** A new registerable service for typing what
   tool calls resolve to: `dts()` returns a self-contained `.d.ts` of the loaded tools' result/service types —
@@ -295,6 +312,18 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Bug fixes
 
+- **A store query with an unknown top-level key is now rejected instead of silently matching
+  everything.** `validateQuery` only checked the values inside `where`/`sort`/`limit`, and
+  `executeQuery` validated the *projected* query — which keeps only those three keys — so a clause
+  placed under any other key (e.g. `{ filter: { … } }`, an SQL-ism LLMs reach for despite the grammar
+  in every tool-store description) was dropped before validation ran. The query degraded to
+  match-everything and the author got a plausible full result with no error. `validateQuery` now
+  rejects a non-object query and any unknown top-level key (`MALFORMED`, naming the bad key and the
+  valid set: `where`, `sort`, `limit`, `cursor`), and `executeQuery` validates the caller's raw query
+  before projecting it (a decoded cursor is still validated as before). The generated `tool-store`
+  CRUD tools catch the resulting `StoreQueryError` and frame it for the model, pointing back at the
+  `query` grammar in the tool's own description.
+
 - **Deleting a skill no longer orphans its knowledge-index entry.** `skill_action(delete)` removed the
   skill from its store but never retracted the `KnowledgeIndex` entry, so the deleted skill stayed
   discoverable by `contextual_search` / `find_fact` indefinitely (durably so under the persistent
@@ -385,6 +414,89 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Optional
 
+- **tool-router — windowed presentation of a large tool library (cross-platform).** A new plugin that keeps
+  selection sharp as the tool set grows past the ~30–50 where models start mis-picking. It registers a
+  `ToolPresenter` that advertises only `tool_search` plus a bounded *working set* — the tools called this
+  session ∪ the latest search's candidates — pulling full specs (description + folded TS contract) from the
+  live registry so the model always selects and calls from complete definitions, never a bare summary.
+  `tool_search` ranks the whole library (BM25 over name/description/params, plus a per-tool noun + "width"
+  derivation) and returns a lean discovery record; the presenter promotes the matches into the working set on
+  the next loop iteration, where they become natively callable. A turn-distance *cull* bounds the working set,
+  and parallel `tool_search` calls in one turn are unioned so a strict (first-party) provider can call every
+  surfaced tool.
+
+- **browser / web-bundle — browser tools now carry their real TypeScript wire contracts (params AND result),
+  not just a call shape.** The browser `ToolTypeIndex` previously emitted a wire contract only for tools with a
+  runtime `toolContract` string, so every source-augmented native tool reached the model with its base
+  description and `inputSchema` alone — no TS — because a `ToolContracts` augmentation is type-only and is
+  stripped from the baked bundle (the model was left guessing parameter shapes). Contracts are now recovered by
+  a compiler-free source scan (`extractToolContracts`): node's extraction is purely textual (read the
+  `ToolContract<Result, Params>` type-argument text; the compiler is only needed to *merge* declarations), so
+  the browser does the same. The assembler bakes contracts for the built-in graph into the artifact
+  (`payload.toolContracts`, from the raw pre-strip sources), and http-loaded plugins are scanned at load time
+  (`loadRemote` returns each module's raw source; `loadPlugin` merges via `ToolTypeIndex.addContracts`) — so a
+  remotely-loaded plugin's tools get real TS too. `wireContracts()`/`dts()` now prefer a baked/loaded contract,
+  then a `toolContract` string, then schema-derived params. The node runtime is unchanged.
+
+- **frontend-web — every tool row in the sidebar now has a trigger (⚡) icon that manages that tool's
+  triggers.** The icon is blue when the tool has one or more triggers and grey/translucent when it has none
+  (always clickable — that's how you add the first one); per-tool counts come from a single
+  `trigger_action { action: 'list' }` grouped by `invoke.tool` (absent triggers plugin ⇒ no icons). Clicking
+  opens a new popup listing the triggers whose `invoke.tool` is that tool (`query`), one card each: an Enabled
+  toggle, a **Parameters (JSON)** field (params are tool-specific, so free-form JSON rather than a per-tool
+  form), and the OR-ed condition rows reused from the skill editor. Save reconciles against what was loaded —
+  `add`/`update` cards with conditions, `remove` any deleted card — and always passes `tool` on `update` so
+  clearing the params field clears the stored params. This is the general trigger-management surface for every
+  tool; the skill editor's Triggers tab remains the skill-specific path (both edit the same store).
+
+- **sessions — `session_action` gains a `query` action that searches session *contents*.** Previously the tool
+  could only `list` sessions (returning a `preview` — just the first user message truncated to 60 chars), so a
+  model hunting for a past conversation had to eyeball previews or `get` sessions one by one; the description now
+  also states plainly that `preview` is a display label, not a summary. `query` exposes two *synthesized* string
+  fields to the existing store-query grammar — `user` (everything the user said) and `assistant` (everything the
+  assistant said), each the concatenation of that role's `type:'text'` blocks with tool calls/results, thinking,
+  images and markers dropped as noise — so e.g. `{ where: { op: 'stringContains', field: 'user', value: 'invoice'
+  } }` finds sessions where the user mentioned invoices, and the two fields OR/AND freely with each other and with
+  the real stored fields (`status`, `title`, `createdAt`, `updatedAt`). Matching on the synthesized fields is
+  case-insensitive (they are lowercased and the tool lowercases `stringContains` operands aimed at them, recursing
+  through `and`/`or`/`not`). Optional `sort` (stored fields only), `limit`, and an opaque `cursor` paginate; a low
+  `limit` **early-exits** — the search stops synthesizing/scanning the moment the page is full, so "find the 3
+  sessions mentioning X" over hundreds of sessions never searches the tail. Adds a `@matatbread/matbot-core`
+  dependency (the plugin now reuses `compileFilter`/`applySort`/`validateQuery` from `./storage-base`).
+
+- **mcp — persisted servers now reconnect in the background instead of blocking boot.** `setup()` used to
+  `await` reconnecting every persisted MCP server (each a full `initialize` + `tools/list` handshake — an
+  `npx` cold-spawn for a local, an HTTP round-trip for a remote) before returning, so one slow or unreachable
+  server stalled the *entire* startup sequence (measured: a single-digit-ms boot dominated by ~6.4s of MCP
+  reconnects). It now registers `mcp_action` synchronously and fires the reconnect without awaiting it; each
+  server's proxy tools appear as it comes online (the tool registry and the web `/tools` gate tolerate
+  late-arriving tools). The background task is dispose-aware — teardown/unload sets a flag it checks after
+  every await, closing any client and unregistering any tools it connected after teardown ran, so an
+  in-flight reconnect can't outlive the plugin. `teardown` now also unregisters local proxy tools (previously
+  it closed the clients but left the tools registered).
+
+- **frontend-web — the `/tools/:name` HTTP endpoints no longer 404 a tool that is merely late to register
+  at boot.** The web server starts listening inside frontend-web's `setup()`, which runs before the plugins
+  configured after it (and before the core tools registered once loading finishes) have populated the tool
+  registry. A page refresh during that window fired its bootstrap calls (`session_action`, `provider`,
+  `about_matbot`, `skill_action`, …) ahead of those tools' registration, so they 404'd as if unloaded; a
+  later refresh worked. Both `POST /tools/:name` and `POST /stream/tools/:name` now resolve against the live
+  registry and, if the name is absent within a grace window from server start, wait for its `registered`
+  event (subscribing before re-checking, so a registration in the gap can't be missed) rather than 404. After
+  the window an unknown name is still an immediate 404, and a client disconnect aborts the wait. Resolution is
+  unchanged otherwise — this is a race guard on the registry, never the `ToolPresenter` (which only culls what
+  the *model* is shown; HTTP references tools by name).
+
+- **tool-plugin / browser — `plugin add` no longer skips the config write on a prefix-sibling, and `remove`
+  clears a failed-load record.** Two fixes to the plugin-management tools, both surfaced by the new
+  failed-plugin recording: (1) `addPlugin` matched the specifier as a *substring* (`text.includes('- ' +
+  specifier)`), so adding `./plugins/tool-router` while `./plugins/tool-routerx` was already configured was
+  treated as already-present — the plugin loaded (active in-memory) but was never persisted to `matbot.yaml`,
+  vanishing on restart. It now matches the specifier as a whole list item (anchored, end-of-line). (2)
+  `remove` (node + browser) now calls `clearFailedPlugin(specifier)` after dropping the config/extras entry,
+  so removing a plugin that never loaded (a bad path, an incompatible runtime, a `setup()` throw) also clears
+  its `failed` record instead of leaving a ghost in `plugin list` / the web panel.
+
 - **Every built-in tool declares its TypeScript contract as a `ToolContracts` arm (or `toolContract`).** Every
   built-in tool across the plugin suite — `plugin`/`provider`, `session_edit`/`compact_sessions`,
   `session_action`, `skill_action`/`skills_config`, `skill_compiler`, `trigger_action`/`triggers_config`,
@@ -400,6 +512,12 @@ churn and less likely to affect a consumer who doesn't use them.
   carry a `toolContract` string instead. Documentation blocks that were not mere param restatements were
   kept (the `plugin` specifier grammar, `ask_user`'s field examples, `store_action`'s `StoreQuery` grammar,
   `cognition_config`'s field-range interface). Net effect: leaner descriptions, one typed contract per tool.
+
+- **triggers** — `trigger_action` gains first-class **`disable`**/**`enable`** actions (both take `id`,
+  return the updated trigger). A disabled trigger is kept but excluded from evaluation entirely, so it stops
+  firing without losing its conditions and invocation — the "less aggressive than `remove`" option for a
+  trigger that fires too eagerly; `enable` restores it exactly. This surfaces the existing `enabled` flag
+  (already honoured by `evaluate`) as discoverable intent rather than a param on `update`.
 
 - **tool-types** (new plugin, node-only) — provides the `ToolTypeIndex` service (see API gaps filled): it
   derives and caches a `.d.ts` of the loaded tools' result/service types, invalidating on any tool-registry
@@ -829,7 +947,10 @@ churn and less likely to affect a consumer who doesn't use them.
 - **frontend/web** — skill editor's Triggers tab rewired to the triggers store: it finds
   the skill's use-trigger via `trigger_action query` and edits that trigger's conditions
   (a wholesale replace on save). Each condition is a `kind` (`augment`/`retract`/`followup`)
-  + rule, defaulting new rows to `augment` (the user-message routing case).
+  + rule, defaulting new rows to `augment` (the user-message routing case). The tab also
+  has a **Suspend** toggle that keeps the trigger and its conditions but stops it firing —
+  applied on save via the new `trigger_action` `disable`/`enable` actions. It reflects the
+  trigger's `enabled` state on open (suspended only when every matching trigger is disabled).
 
 - **frontend/web** — a `matbot-retraction` marker now drops the superseded assistant
   response from the live thread (matching the post-refresh state, where it's popped from

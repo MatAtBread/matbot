@@ -2,7 +2,7 @@ import type { Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext, Matbo
 import { CONFIRM_YES, CONFIRM_NO, isIncompatibleRuntimeError, isNotAPluginError } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins, getRegisteredTools, getRegisteredFrontendPlugins,
          getRegisteredServiceKeys, getHookPlugins, getSystemContextPlugins,
-         getSpecifierForPlugin, getPluginNameForSpecifier } from '@matatbread/matbot-core';
+         getSpecifierForPlugin, getPluginNameForSpecifier, getFailedPlugins, clearFailedPlugin } from '@matatbread/matbot-core';
 import { readFile, writeFile, access, readdir } from 'node:fs/promises';
 import { spawn }                             from 'node:child_process';
 import { pathToFileURL, fileURLToPath }       from 'node:url';
@@ -24,7 +24,11 @@ async function readPluginsList(configPath: string): Promise<string[]> {
 
 async function addPlugin(configPath: string, specifier: string): Promise<void> {
   const text  = await readFile(configPath, 'utf8');
-  if (text.includes(`- ${specifier}`)) return;
+  // Match the specifier as a whole list item, not a substring: `- ./plugins/tool-router` must NOT count
+  // as already-present just because `- ./plugins/tool-routerx` shares its prefix. The old
+  // `text.includes('- ' + specifier)` false-positived on any prefix, silently skipping the write — the
+  // plugin then loaded (active in-memory) but never persisted to the config, so it vanished on restart.
+  if (new RegExp(`^[ \\t]+-[ \\t]+${escapeRegex(specifier)}[ \\t]*$`, 'm').test(text)) return;
 
   let updated: string;
   const blockMatch = text.match(/^(plugins:\s*\n(?:[ \t]+-[^\n]*\n)*)/m);
@@ -112,6 +116,7 @@ declare module '@matatbread/matbot-plugin-api' {
             matbotRuntime?: readonly Runtime[];
           }>;
           configured:   string[];
+          failed?:      Array<{ specifier: string; name?: string; error: string }> | undefined;
           builtinTools?: ToolSummary[] | undefined;
         }, { action: 'list' }>
       | ToolContract<Array<DiscoveredPlugin & { configuredVia: 'plugins' | 'providers' | null }>, { action: 'discover_local' }>
@@ -448,11 +453,14 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
         ...(p.matbotRuntime !== undefined ? { matbotRuntime: p.matbotRuntime } : {}),
       }));
 
+      const failed = getFailedPlugins();
+
       yield {
         type:  'result',
         value: {
           loaded,
           configured,
+          ...(failed.length ? { failed: failed.map(f => ({ specifier: f.specifier, error: f.error, ...(f.name !== undefined ? { name: f.name } : {}) })) } : {}),
           ...(toolsByPlugin.has(undefined) ? { builtinTools: toolsByPlugin.get(undefined) } : {}),
         },
       };
@@ -697,6 +705,11 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
         yield { type: 'error', message: `Failed to remove "${entry}" from ${path.basename(configPath)}.` };
         return;
       }
+
+      // A configured plugin that never loaded (a bad path, an incompatible runtime, a setup() throw)
+      // has a recorded load failure but no live registration. Removing it from config must also drop
+      // that failure record, or it lingers in `plugin list` / the web UI as a ghost with no config entry.
+      clearFailedPlugin(entry);
 
       // Capture the canonical package name before deactivation drops it from the registry: it gates
       // the uninstall offer below and is the correct handle for `pnpm remove` (the config entry may
