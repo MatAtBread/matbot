@@ -1,16 +1,13 @@
 {
   "name": "@matatbread/matbot-tool-router",
   "matbotRuntime": [
-    "node"
+    "node", "browser"
   ],
   "version": "0.3.0",
-  "engines": {
-    "node": ">=24.0.0"
-  },
   "files": [
     "src"
   ],
-  "description": "Routes the model to the tools it needs from a large library: a ToolPresenter that presents a tool_search entry point and a de-duped noun catalogue to prime discovery. Currently in instrument mode (present-only-tool_search, returns all, logs request/query/pick to JSONL) so a filter can be tuned offline against the model's own choices; the pass-through presenter is the scaffold the real relevance filter drops into.",
+  "description": "Serves the model a bounded per-turn window from a large tool library via a ToolPresenter: always-present wide fallbacks (pins) + the BM25-top tools for the current message + a tool_search entry point (with a de-duped noun catalogue) for the tail. Tool width (pin vs rank) and the catalogue are derived per tool from its description + inputSchema and cached in a store; tools already used or revealed are read back from the session transcript rather than re-presented, so the wire stays cache-friendly and coherent under session edits. Cross-platform (node + browser).",
   "keywords": [
     "matbot",
     "matbot-plugin",
@@ -40,7 +37,6 @@
   },
   "devDependencies": {
     "typescript": "catalog:",
-    "@types/node": "catalog:",
     "@matatbread/matbot-plugin-api": "workspace:^",
     "@matatbread/matbot-core": "workspace:^"
   }

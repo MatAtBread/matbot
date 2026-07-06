@@ -152,11 +152,11 @@ Reply with JSON only, no prose: {"result": Array<{"fact": string, "source": stri
 
       services.tools.register({
         name: 'find_fact',
-        description: `Retrieve a specific FACT from stored knowledge — their home city, a system's URL, someone's birthday, a configured threshold.
+        description: `Retrieve a fact from stored knowledge — whatever the knowledge index happens to hold. Its contents are open-ended: personal details, a system's URL, a configured threshold, someone's birthday, domain-specific knowledge — or anything else that has been stored. Whenever a request turns on some fact that might be recorded, this can likely answer it.
 
-Use this, not contextual_search, when you want one precise datum rather than a whole document to read. It searches stored knowledge, reads across the best matches (the fact may not be in the top-ranked entry), and returns just the answers as an array of strings — or null if the knowledge doesn't contain it. It never invents an answer.
+Use this, not contextual_search, when you want the precise answer rather than a whole document to read. It searches the index, reads across the best matches (the fact may not be in the top-ranked entry), and returns just the answers as an array of strings — or null if the knowledge doesn't contain it. It never invents an answer.
 
-Provide "question" (the specific fact sought, e.g. "the user's home city") and "terms" (specific search keys that locate it — proper nouns, named systems, or personal identifiers; for a personal or deictic fact, search the user's name or "user"/"profile", not a bare generic noun). Returns string[] or null`,
+Provide "question" (the fact sought, e.g. "the user's home city") and "terms" (specific search keys that locate it — proper nouns, named systems, or personal identifiers; for a personal or deictic fact, search the user's name or "user"/"profile", not a bare generic noun). Returns string[] or null`,
         inputSchema: {
           type: 'object',
           required: ['question', 'terms'],
