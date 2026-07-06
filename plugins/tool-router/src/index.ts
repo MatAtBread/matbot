@@ -322,8 +322,7 @@ searching over declining or improvising.`,
     // Presenter — build the per-iteration window: `tool_search` + the WORKING SET (full specs, TS already
     // folded by session-runner). The working set = {tools called this session} ∪ {the latest search's
     // candidates}, both read back from the transcript. Hidden tools never appear. When the whole library
-    // fits the budget, present all of it (minus hidden). Logged (on change) so the tools array is eyeballable.
-    let lastWindowSig = '';
+    // fits the budget, present all of it (minus hidden).
     const presenter: ToolPresenter = {
       present(tools: readonly Tool[], ctx: PresentContext): readonly Tool[] {
         try {
@@ -334,8 +333,6 @@ searching over declining or improvising.`,
           const candidates = tools.filter(t => t.name !== SEARCH && !isHidden(t.name));
 
           let window: Tool[];
-          let culled = false;
-          let preCull = 0;
           if (candidates.length + (searchTool ? 1 : 0) <= TARGET_WINDOW) {
             window = searchTool ? [searchTool, ...candidates] : [...candidates];   // whole library fits → present all
           } else {
@@ -344,8 +341,7 @@ searching over declining or improvising.`,
             const wsNames = new Set<string>([...usedTools(msgs), ...latestCandidates(msgs)]);
             // Threshold cull: over CULL_TRIGGER, cut HARD to CULL_TARGET by turn-distance recency. A threshold
             // (not per-call trimming) triggers it, so the set is stable — hence cache-friendly — between culls.
-            culled = wsNames.size > CULL_TRIGGER;
-            const keep = culled ? keepByRecency(msgs, wsNames, CULL_TARGET) : wsNames;
+            const keep = wsNames.size > CULL_TRIGGER ? keepByRecency(msgs, wsNames, CULL_TARGET) : wsNames;
             let ws = candidates.filter(t => keep.has(t.name));       // registry order → stable prefix
             if (EAGER_FILL) {
               // A/B: also pre-rank THIS message and fold in the BM25-top NEW tools, so an obvious tool needs
@@ -357,13 +353,6 @@ searching over declining or improvising.`,
               ws = [...ws, ...fill];
             }
             window = [...(searchTool ? [searchTool] : []), ...ws];
-            preCull = wsNames.size + (searchTool ? 1 : 0);
-          }
-          const sig = window.map(t => t.name).join(',');
-          if (sig !== lastWindowSig) {
-            lastWindowSig = sig;
-            const from = culled ? ` (culled from ${preCull})` : '';
-            console.warn(`${TAG} working set (${window.length})${from}: ${window.map(t => t.name).join(', ') || '(none)'}`);
           }
           return window;
         } catch { return tools; }                                                  // never break a turn
