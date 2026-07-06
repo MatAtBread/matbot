@@ -414,6 +414,16 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Optional
 
+- **function-tools — `lambda` is now type-checked, and both actions accept `noTypeCheck` to opt out.**
+  `define` already type-checked a function body against the live tool types (via `ToolTypeIndex`) before
+  registering it; `lambda` now does the same before running (syntax is still gated first by the
+  type-stripper, so an unparseable head simply skips the check). A `lambda` may omit its return annotation —
+  TypeScript infers it, still checking the body and its `tool` calls. Both `define` and `lambda` take an
+  optional `noTypeCheck: boolean` (default false) to bypass the check for the rare spurious error (e.g.
+  composing a tool whose result type is `unknown`); the `define` result notes when the check was skipped.
+  No behavioural change where no type-checker is available (the browser: `check()` is a no-op, so
+  composition still compiles and runs — `noTypeCheck` just makes that graceful degradation explicit).
+
 - **tool-router — windowed presentation of a large tool library (cross-platform).** A new plugin that keeps
   selection sharp as the tool set grows past the ~30–50 where models start mis-picking. It registers a
   `ToolPresenter` that advertises only `tool_search` plus a bounded *working set* — the tools called this
