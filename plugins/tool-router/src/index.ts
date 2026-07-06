@@ -68,17 +68,28 @@ function usedTools(messages: readonly Message[]): Set<string> {
   return used;
 }
 function latestCandidates(messages: readonly Message[]): Set<string> {
-  const searchIds = new Set<string>();
-  let latest = new Set<string>();
+  // The most-recent search BATCH: every tool_search call in the LATEST assistant message that issued any.
+  // A model may fan out several searches in one turn (parallel tool use — Sonnet does this), and that is ONE
+  // round of searching. "Last result wins" would keep only one and silently drop the others' candidates —
+  // invisible on a leaky provider (still callable by name) but fatal on a strict one (Anthropic binds calls
+  // to the tools param, so an un-promoted candidate is uncallable and the model re-searches / gives up).
+  let batchIds = new Set<string>();
+  for (const m of messages) {
+    const ids: string[] = [];
+    for (const c of m.content) if (c.type === 'tool-call' && c.name === SEARCH) ids.push(c.id);
+    if (ids.length) batchIds = new Set(ids);                           // a newer search-issuing turn REPLACES the floor
+  }
+  const names = new Set<string>();
   for (const m of messages) for (const c of m.content) {
-    if (c.type === 'tool-call' && c.name === SEARCH) searchIds.add(c.id);
-    else if (c.type === 'tool-result' && searchIds.has(c.id)) {        // a tool_search result → the tools it revealed
+    if (c.type === 'tool-result' && batchIds.has(c.id)) {              // union the found names across the batch
       const found = (c.result as { found?: unknown } | null)?.found;
-      if (Array.isArray(found))
-        latest = new Set(found.map(f => (f as { name?: unknown } | null)?.name).filter((n): n is string => typeof n === 'string'));
+      if (Array.isArray(found)) for (const f of found) {
+        const n = (f as { name?: unknown } | null)?.name;
+        if (typeof n === 'string') names.add(n);
+      }
     }
   }
-  return latest;
+  return names;
 }
 // Cull `wsNames` to its k most-recent members by turn-distance. Walk the transcript building a
 // most-recently-referenced-first ordering — a tool CALL and the search that REVEALED it both count as
