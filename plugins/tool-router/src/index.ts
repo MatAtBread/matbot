@@ -1,30 +1,42 @@
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import type { MatbotPluginSpec, Message, MessageContent, Tool, ToolPresenter, PresentContext } from '@matatbread/matbot-plugin-api';
-import { wireDescription } from '@matatbread/matbot-core';
 
-// tool-router — presents a bounded WINDOW of tools per turn instead of the whole library, and lets the
-// model reach the tail via `tool_search`. Two modes (EAGER_FILL):
-//   lean (default) — present only `tool_search` + the wide "pins"; the model pages in specialists on
-//     demand. A tool_search result lands FULL specs in the transcript and stays callable by name, so the
-//     wire stays minimal AND a full window of general tools can't bias the model into satisficing (bash,
-//     always bash) instead of describing the gap so search can surface the right specialist.
-//   eager — additionally pre-rank the current message into the window (BM25-top, latency-first), so an
-//     obvious tool needs no search round-trip; the tail is still reachable via tool_search.
-// "Pins" are the wide/low-Q fallbacks that answer requests never naming them (so a ranker can't surface
-// them); they are DERIVED per tool from description + inputSchema, never name-listed. Hidden tools
-// (trigger-driven, not model-facing) are never presented.
+// tool-router — the model never sees the whole tool library. Each provider call it sees `tool_search` plus a
+// bounded WORKING SET of full tool specs, delivered through the ephemeral `tools` param (recomputed per
+// loop-iteration, never persisted). `tool_search` is the tail backstop: it ranks the whole library against a
+// NL query and returns a LEAN discovery record (names only) — the presenter reads those names back from the
+// transcript and promotes the tools to FULL specs (desc + folded TS) in the next iteration's working set, so
+// the model always selects and calls from full definitions, never from a bare summary (name+summary calling
+// failed hard — models hallucinate params). Eviction is FREE: the presenter simply stops including a tool; no
+// transcript rewrite. Working set = {tools called this session} ∪ {the LATEST search's candidates}; a new
+// search REPLACES the candidate floor (previous un-called drop), called tools PERSIST → the set is
+// byte-stable between search/call events so the tools prefix caches. EAGER_FILL additionally pre-ranks the
+// current message into the working set (A/B). "Pins" are wide/low-Q fallbacks a ranker can't surface; they
+// ride along in every tool_search result as a floor, DERIVED per tool from description + inputSchema, never
+// name-listed. Hidden tools (trigger-driven, not model-facing) are never presented.
 
 const TAG = '[tool-router]';
 const SEARCH = 'tool_search';
 
 // ── Windowing config (tweak with experience) ────────────────────────────────────────
-// Tools presented per turn, INCLUDING tool_search and the pins. We can still serve all ~40 today; culling
-// toward this keeps selection sharp as the library grows. Raise/lower freely.
+// If the WHOLE library (minus hidden) plus tool_search fits in this many, present all of it — no windowing.
+// Above it we window: tool_search + the working set. Raise/lower freely as the library grows.
 const TARGET_WINDOW = 20;
-// EAGER_FILL — false (default, "lean"): the miss-branch window is just `tool_search` + pins; the model
-// pages in specialists on demand. true ("eager"): also pre-rank the current user message into the window
-// (BM25-top), trading a fuller wire for no search round-trip on an obvious request. Annotated `boolean`
-// (not the literal) so the checker keeps both branches live. Flip to A/B the two.
+// Threshold cull (priority 2 — bound the AVAILABLE set, not total context). The working set accumulates
+// {called} ∪ {latest search's candidates}; left unchecked it drifts into the >30-50 zone where selection
+// degrades. So when it exceeds CULL_TRIGGER, cut it HARD to CULL_TARGET (≈ half — "pay once, then continue")
+// by turn-distance recency. A THRESHOLD (not continuous trimming) is the trigger, so between culls the set
+// is stable and the tools prefix keeps caching; a cull is a rare, amortized prefix invalidation. Recency
+// keeps the freshest reference of each tool (a call, or the latest search that revealed it), with the latest
+// search's own rank order as the fine-grained tiebreak, so a broad search keeps its BEST matches and sheds
+// the tail (low-rank matches + trailing fallbacks — all re-reachable by another search).
+const CULL_TRIGGER = 20;
+const CULL_TARGET  = 12;
+// EAGER_FILL — false (default, Option A): the working set is purely search/call-driven; the model must
+// search to surface a specialist. true: ALSO pre-rank the current user message and fold the BM25-top NEW
+// tools into the working set, so an obvious tool needs no search round-trip (full specs still come from the
+// registry, so it composes with lean search). Annotated `boolean` (not the literal) so the checker keeps
+// both branches live. Flip to A/B the two.
 const EAGER_FILL: boolean = false;
 // There is deliberately NO hard-coded list of "wide"/pinned or "hidden" tool NAMES. A name like `http` or
 // `find_fact` is not a stable identifier of function — the implementing plugin may be absent, or another
@@ -42,29 +54,56 @@ function lastUserText(messages: readonly Message[]): string {
   for (let i = messages.length - 1; i >= 0; i--) if (messages[i]?.role === 'user') return textOf(messages[i]!.content);
   return '';
 }
-// Tools already reachable from the transcript — those the model has USED (tool-call blocks) or that a
-// `tool_search` REVEALED (the names in its result's `found` list). Derived by scanning the session, so it
-// stays coherent under session edits (cut/fork/split/compact) with zero bookkeeping, and "recent" is
-// turn-distance, not wall-clock. These need not be re-presented on a lenient provider (they resolve by name
-// from context, as observed); a strict provider would need them re-presented or the native tool_reference path.
-function residentTools(messages: readonly Message[]): Set<string> {
-  const resident = new Set<string>();
+// The working set is reconstructed read-only from the transcript each iteration (so it survives session
+// edits — cut/fork/split/compact — with zero bookkeeping, and "recent" is turn-distance, not wall-clock):
+//   usedTools        — every tool the model has CALLED (tool-call blocks, minus tool_search). These PERSIST.
+//   latestCandidates — the names a tool_search REVEALED, but ONLY from the most recent search: a new search
+//                      REPLACES this floor, so previous un-called candidates fall out of the window for free
+//                      (the eviction lever). tool_search returns lean {name} records; the presenter pulls
+//                      full specs from the live registry, so nothing evictable is baked into the transcript.
+function usedTools(messages: readonly Message[]): Set<string> {
+  const used = new Set<string>();
+  for (const m of messages) for (const c of m.content)
+    if (c.type === 'tool-call' && c.name !== SEARCH) used.add(c.name);
+  return used;
+}
+function latestCandidates(messages: readonly Message[]): Set<string> {
   const searchIds = new Set<string>();
-  for (const m of messages) {
-    for (const c of m.content) {
-      if (c.type === 'tool-call') {
-        if (c.name === SEARCH) searchIds.add(c.id);
-        else resident.add(c.name);                                     // a tool it used
-      } else if (c.type === 'tool-result' && searchIds.has(c.id)) {    // a tool_search result → the tools it revealed
-        const found = (c.result as { found?: unknown } | null)?.found;
-        if (Array.isArray(found)) for (const f of found) {
-          const n = (f as { name?: unknown } | null)?.name;
-          if (typeof n === 'string') resident.add(n);
-        }
+  let latest = new Set<string>();
+  for (const m of messages) for (const c of m.content) {
+    if (c.type === 'tool-call' && c.name === SEARCH) searchIds.add(c.id);
+    else if (c.type === 'tool-result' && searchIds.has(c.id)) {        // a tool_search result → the tools it revealed
+      const found = (c.result as { found?: unknown } | null)?.found;
+      if (Array.isArray(found))
+        latest = new Set(found.map(f => (f as { name?: unknown } | null)?.name).filter((n): n is string => typeof n === 'string'));
+    }
+  }
+  return latest;
+}
+// Cull `wsNames` to its k most-recent members by turn-distance. Walk the transcript building a
+// most-recently-referenced-first ordering — a tool CALL and the search that REVEALED it both count as
+// references — then keep the front k. A search result's `found` is rank-ordered, so pushing it front-to-back
+// leaves its top match frontmost: a broad search keeps its BEST matches and sheds the tail. Restricted to
+// wsNames (an older search's un-adopted candidates were already excluded from the working set upstream).
+function keepByRecency(messages: readonly Message[], wsNames: ReadonlySet<string>, k: number): Set<string> {
+  const order: string[] = [];                                          // most-recent first
+  const touch = (n: string): void => {
+    if (!wsNames.has(n)) return;
+    const i = order.indexOf(n); if (i >= 0) order.splice(i, 1);
+    order.unshift(n);
+  };
+  const searchIds = new Set<string>();
+  for (const m of messages) for (const c of m.content) {
+    if (c.type === 'tool-call') { if (c.name === SEARCH) searchIds.add(c.id); else touch(c.name); }
+    else if (c.type === 'tool-result' && searchIds.has(c.id)) {
+      const found = (c.result as { found?: unknown } | null)?.found;
+      if (Array.isArray(found)) for (let i = found.length - 1; i >= 0; i--) {   // reverse → found[0] lands frontmost
+        const n = (found[i] as { name?: unknown } | null)?.name;
+        if (typeof n === 'string') touch(n);
       }
     }
   }
-  return resident;
+  return new Set(order.slice(0, k));
 }
 function queryOf(input: unknown): string {
   return input && typeof input === 'object' && typeof (input as { query?: unknown }).query === 'string'
@@ -244,7 +283,6 @@ searching over declining or improvising.`,
         async *execute(input) {
           const query   = queryOf(input);
           const all     = services.tools.list().filter(t => t.name !== SEARCH && !isHidden(t.name));
-          const byName  = new Map(all.map(t => [t.name, t]));
           // Rank the whole library; keep the specialists that actually matched (score > 0 — drop the duds),
           // then ALWAYS append the derived-wide pins as a fallback floor. A pin has near-zero lexical overlap
           // with a specific query (bash won't match "convert video to gif"), so ranking alone can't surface
@@ -255,25 +293,26 @@ searching over declining or improvising.`,
             : all.map(t => t.name).slice(0, TARGET_WINDOW);
           const pins    = all.filter(t => isPin(t.name)).map(t => t.name);
           const names   = [...new Set([...matched, ...pins])];
-          // Reveal = this result landing in the transcript (full specs). No side-state: `residentTools`
-          // reads it back from the session on subsequent turns.
-          const wire = await services.ToolTypeIndex?.wireContracts();
-          const found = names.map(n => {
-            const t = byName.get(n)!;                                       // n came from `all`
-            return { name: n, description: wireDescription(t.description, wire?.[n]), inputSchema: t.inputSchema };
-          });
+          // LEAN discovery record — names ONLY, never full specs. The presenter reads these back from the
+          // transcript (latestCandidates) and promotes them to FULL specs (desc + folded TS) in the next
+          // iteration's working set, where they become natively callable. Nothing evictable is baked into the
+          // transcript, so eviction is just the presenter dropping them. The model must NOT construct a call
+          // from this list — it selects from the full tool definitions that now appear in its tool set.
+          const found = names.map(n => ({ name: n }));
           const note = matched.length
-            ? `${matched.length} matching tool(s), most relevant first, then general-purpose fallbacks. Each entry is the full spec and is now callable — prefer a specific match; use a fallback only if none fit.`
-            : `No specific tool matched; the entries below are general-purpose fallbacks (full specs, now callable). Use one, or refine your search.`;
+            ? `${matched.length} matching tool(s) loaded (plus general-purpose fallbacks); they now appear in your available tools with full specifications. Call the best fit from there — prefer a specific match, use a fallback only if none fit — and do not guess arguments from this list.`
+            : `No specific tool matched; general-purpose fallbacks are now loaded and appear in your available tools with full specifications. Call one from there, or refine your search.`;
           yield { type: 'result', value: { found, note } };
         },
       },
     };
     services.tools.register(toolSearch);
 
-    // Presenter — build the per-turn window. tool_search + pins are always in; the rest of the budget goes
-    // to the session working set (selected/revealed, LRU) then BM25-ranked fill for THIS message. Hidden
-    // tools never appear. When the whole library fits the budget, present all of it (minus hidden).
+    // Presenter — build the per-iteration window: `tool_search` + the WORKING SET (full specs, TS already
+    // folded by session-runner). The working set = {tools called this session} ∪ {the latest search's
+    // candidates}, both read back from the transcript. Hidden tools never appear. When the whole library
+    // fits the budget, present all of it (minus hidden). Logged (on change) so the tools array is eyeballable.
+    let lastWindowSig = '';
     const presenter: ToolPresenter = {
       present(tools: readonly Tool[], ctx: PresentContext): readonly Tool[] {
         try {
@@ -284,30 +323,36 @@ searching over declining or improvising.`,
           const candidates = tools.filter(t => t.name !== SEARCH && !isHidden(t.name));
 
           let window: Tool[];
+          let culled = false;
+          let preCull = 0;
           if (candidates.length + (searchTool ? 1 : 0) <= TARGET_WINDOW) {
             window = searchTool ? [searchTool, ...candidates] : [...candidates];   // whole library fits → present all
           } else {
-            const pins = candidates.filter(t => isPin(t.name));
-            if (!EAGER_FILL) {
-              // Lean (default): present ONLY tool_search. Even the wide pins are withheld — a present general
-              // tool (find_fact, a web-search MCP) is a SELECTABLE tool, and the model will grab it alongside
-              // searching instead of letting search route to the specialist (which is invisible in the tail,
-              // so there's no contest). So pins move OFF the wire and into every tool_search RESULT as a
-              // fallback floor (see the executor): the model must search, and there the matching specialist
-              // outranks the general fallback — the head-to-head that couldn't happen with pins on the wire.
-              window = searchTool ? [searchTool] : [];
-            } else {
-              // Eager: also pre-rank THIS message into the window. Don't re-present what's already reachable
-              // from the transcript (used/revealed); fill the rest of the budget with the BM25-top NEW tools.
-              // Keeps the prefix stable/monotonic (cache-friendly); a buried tool is re-surfaced by tool_search.
-              const resident = residentTools(msgs);
-              const skip     = new Set<string>([...pins.map(t => t.name), ...resident]);
-              const budget   = Math.max(0, TARGET_WINDOW - pins.length - (searchTool ? 1 : 0));
-              const fill     = rankNames(lastUserText(msgs), candidates.filter(t => !skip.has(t.name)))
+            // Working set from the transcript: called tools persist, the latest search's candidates form the
+            // (replaceable) floor. Full specs come from the live `tools` param (byName), never the transcript.
+            const wsNames = new Set<string>([...usedTools(msgs), ...latestCandidates(msgs)]);
+            // Threshold cull: over CULL_TRIGGER, cut HARD to CULL_TARGET by turn-distance recency. A threshold
+            // (not per-call trimming) triggers it, so the set is stable — hence cache-friendly — between culls.
+            culled = wsNames.size > CULL_TRIGGER;
+            const keep = culled ? keepByRecency(msgs, wsNames, CULL_TARGET) : wsNames;
+            let ws = candidates.filter(t => keep.has(t.name));       // registry order → stable prefix
+            if (EAGER_FILL) {
+              // A/B: also pre-rank THIS message and fold in the BM25-top NEW tools, so an obvious tool needs
+              // no search round-trip. Full specs come from the registry, so it composes with lean search.
+              const budget = Math.max(0, TARGET_WINDOW - ws.length - (searchTool ? 1 : 0));
+              const fill   = rankNames(lastUserText(msgs), candidates.filter(t => !keep.has(t.name)))
                 .slice(0, budget)
                 .map(n => byName.get(n)).filter((t): t is Tool => !!t);
-              window = [...(searchTool ? [searchTool] : []), ...pins, ...fill];
+              ws = [...ws, ...fill];
             }
+            window = [...(searchTool ? [searchTool] : []), ...ws];
+            preCull = wsNames.size + (searchTool ? 1 : 0);
+          }
+          const sig = window.map(t => t.name).join(',');
+          if (sig !== lastWindowSig) {
+            lastWindowSig = sig;
+            const from = culled ? ` (culled from ${preCull})` : '';
+            console.warn(`${TAG} working set (${window.length})${from}: ${window.map(t => t.name).join(', ') || '(none)'}`);
           }
           return window;
         } catch { return tools; }                                                  // never break a turn
