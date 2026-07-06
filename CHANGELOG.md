@@ -80,6 +80,14 @@ churn and less likely to affect a consumer who doesn't use them.
   `toolWireDescription` helper — it is derived from the one contract and folded into the tool description at
   the dispatch edge (see below).
 
+- **`MatbotServices.ToolPresenter` (optional) — per-call tool advertisement.** A plugin may register a
+  `ToolPresenter` whose `present(tools, { session, provider })` chooses which tools are advertised to the model
+  on each provider call. The runner consults it before *every* call, so a presenter may advertise a subset
+  (deferring a large library behind a search tool) and grow it mid-turn as the model discovers tools. Absent ⇒
+  the whole turn snapshot is advertised, byte-identical to before. Presentation is orthogonal to the
+  `ToolRegistry`: a withheld tool still resolves by name at execution, so this only changes what the model is
+  *told about*, never what it can call.
+
 - **`MatbotServices.ToolTypeIndex` (optional, node-only).** A new registerable service for typing what
   tool calls resolve to: `dts()` returns a self-contained `.d.ts` of the loaded tools' result/service types —
   the source-derived augmentations (from compiling each plugin's `declare module` block) merged with the
@@ -405,6 +413,17 @@ churn and less likely to affect a consumer who doesn't use them.
   (a missing secret) are still left in config to retry.
 
 ### Optional
+
+- **tool-router — windowed presentation of a large tool library (cross-platform).** A new plugin that keeps
+  selection sharp as the tool set grows past the ~30–50 where models start mis-picking. It registers a
+  `ToolPresenter` that advertises only `tool_search` plus a bounded *working set* — the tools called this
+  session ∪ the latest search's candidates — pulling full specs (description + folded TS contract) from the
+  live registry so the model always selects and calls from complete definitions, never a bare summary.
+  `tool_search` ranks the whole library (BM25 over name/description/params, plus a per-tool noun + "width"
+  derivation) and returns a lean discovery record; the presenter promotes the matches into the working set on
+  the next loop iteration, where they become natively callable. A turn-distance *cull* bounds the working set,
+  and parallel `tool_search` calls in one turn are unioned so a strict (first-party) provider can call every
+  surfaced tool.
 
 - **browser / web-bundle — browser tools now carry their real TypeScript wire contracts (params AND result),
   not just a call shape.** The browser `ToolTypeIndex` previously emitted a wire contract only for tools with a
