@@ -2,7 +2,7 @@ import type { Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext } from
 
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
-    about_matbot: ToolContract<{ version: string; about: string }, Record<string, never>>;
+    about_matbot: ToolContract<{ version: string; about: string, currentProvider: string | undefined }, Record<string, never>>;
   }
 }
 
@@ -17,8 +17,8 @@ const ABOUT = 'Matbot composable LLM harness';
  */
 export function createAboutMatbotTool(version: string): Tool<ToolResultOf<'about_matbot'>> {
   const executor: ToolExecutor<ToolResultOf<'about_matbot'>> = {
-    async *execute(_input: unknown, _ctx: ToolContext) {
-      yield { type: 'result', value: { version, about: ABOUT } };
+    async *execute(_input: unknown, ctx: ToolContext) {
+      yield { type: 'result', value: { version, about: ABOUT, currentProvider: ctx.provider } };
     },
   };
 
