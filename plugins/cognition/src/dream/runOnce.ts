@@ -286,22 +286,33 @@ async function buildEnrichedFact(
 // ── The pipeline ──────────────────────────────────────────────────────────────
 
 /**
- * One consolidation pass. Returns the {@link DreamRun} record without persisting it — the caller
- * (the tool executor) is responsible for `dreamRuns.set(run.id, run)`, so a failure to persist the
- * record does not double-charge a successful merge. The record is fully assembled in memory before
- * any store write happens.
+ * One consolidation pass. An async generator: it YIELDS coarse {@link DreamProgress} events as the
+ * pass advances (a backlog drains as many sequential LLM calls — one rank, then a merge per fact —
+ * so a pass is a long, otherwise-silent wait) and RETURNS the {@link DreamRun} record without
+ * persisting it. The caller (the tool executor) drains the progress, then owns `dreamRuns.set(run.id,
+ * run)`, so a failure to persist the record does not double-charge a successful merge. The record is
+ * fully assembled in memory before any store write happens.
  *
  * The function does not throw on judgement-call failures or per-fact CAS misses: those are caught
  * locally, recorded as an `error` outcome on the run, and the run record is still returned. It
  * does throw on setup-shaped problems (missing services, invalid settings, missing metadata) —
  * those are bugs the caller should surface, not data points to record.
  */
-export async function runOnce(
+export interface DreamProgress { pct: number; message: string }
+
+// Progress is one linear bar over the per-fact LLM calls (enrichment re-ranks + merges — the slow
+// body, "the run of N"): each is worth (100 − FRONT − TAIL)/N. FRONT and TAIL reserve the two batched
+// costs that bracket that body and can't animate per-fact — the single up-front rank call (one LLM
+// call over ALL facts) and the final save/persist.
+const PROGRESS_RANK_FRONT = 10;
+const PROGRESS_TAIL       = 5;
+
+export async function* runOnce(
   services: MatbotMachine,
   ranker:   Ranker,
   merger:   Merger,
   signal:   AbortSignal,
-): Promise<DreamRun> {
+): AsyncGenerator<DreamProgress, DreamRun, void> {
   const startedAt = new Date().toISOString();
   const runId     = cryptoRandomId();
   const calls: JudgementCallStat[] = [];
@@ -355,6 +366,8 @@ export async function runOnce(
     const oldest = unassigned[0];
     if (oldest === undefined) return finish('no-facts', 0);   // unreachable: length>0 above
 
+    yield { pct: 0, message: `Ranking ${unassigned.length} fact(s) against ${candidates.length} skill(s)…` };
+
     // ── ONE rank call over the WHOLE backlog (fact × skill). Its scores drive every fact's
     //    disposition below — the expensive call is paid once and spent on all of them, not just the
     //    oldest. The ranker is free to batch internally. ──
@@ -376,6 +389,18 @@ export async function runOnce(
       else if (d.decision === 'weak')   weak.push(f);
       else                              none.push(f);
     }
+    // One linear bar over the per-fact LLM calls that follow — the enrichment re-ranks plus the
+    // merges. `perFactTotal` is the upper bound (every enrichable `none` could route strong and then
+    // merge, capped by the merge budget), so the bar never overshoots and the tool's terminal 100%
+    // covers any shortfall. FRONT is already spent on the rank above; TAIL is reserved for persist.
+    const enrichDenom  = Math.min(none.length, settings.maxEnrichmentsPerPass);
+    const perFactTotal = enrichDenom + Math.min(strong.length + enrichDenom, settings.maxMergesPerPass);
+    let   perFactDone  = 0;
+    const bar = (): number => Math.min(
+      100 - PROGRESS_TAIL,
+      PROGRESS_RANK_FRONT + Math.round((100 - PROGRESS_RANK_FRONT - PROGRESS_TAIL) * perFactDone / Math.max(1, perFactTotal)),
+    );
+    yield { pct: PROGRESS_RANK_FRONT, message: `${strong.length} to merge · ${weak.length} deferred · ${none.length} to review` };
 
     // ── Enrichment phase: rescue `none` facts with provenance context, oldest-first, bounded by
     //    maxEnrichmentsPerPass. A bare atomic fact can under-score in isolation but route cleanly
@@ -395,6 +420,8 @@ export async function runOnce(
       if (enrichedText === undefined) { stillNone.push(f); continue; }
       enrichBudget--;
       enrichedIds.add(f.id);
+      perFactDone++;
+      yield { pct: bar(), message: 'Re-checking an unmatched fact…' };
       const rerankStart    = Date.now();
       const enrichedScores = await ranker.rank([{ ...f, fact: enrichedText }], candidates, signal);
       calls.push({ role: 'rank', inputSize: candidates.length, ms: Date.now() - rerankStart });
@@ -445,6 +472,8 @@ export async function runOnce(
       let content = doc.content;
       const skillMergedIds: string[] = [];
       for (const f of cluster) {
+        perFactDone++;
+        yield { pct: bar(), message: `Merging into "${skill}"…` };
         const mergeStart = Date.now();
         try {
           const result: MergeResult = await merger.merge(skill, content, f, signal);

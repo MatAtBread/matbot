@@ -2,10 +2,11 @@
  * The `dream_time` tool: one pass of background memory consolidation, exposed to the model.
  *
  * Zero-input tool. Everything it needs is already in `MatbotMachine` (the skill manager, the
- * stores, the provider list) and `ToolContext` (the active provider, the abort signal). Returns a
- * single result event carrying the fully-assembled {@link DreamRun} record; the same record is
- * also persisted to the `dream_runs` store, so observability survives the conversation that
- * triggered it.
+ * stores, the provider list) and `ToolContext` (the active provider, the abort signal). Streams
+ * `progress` events as the pass advances — a backlog drains as many sequential LLM calls, so a run
+ * is a long, otherwise-silent wait — then a single result event carrying the fully-assembled
+ * {@link DreamRun} record; the same record is also persisted to the `dream_runs` store, so
+ * observability survives the conversation that triggered it.
  *
  * The deterministic spine lives in `./runOnce.ts`. This file is the thin tool-shaped wrapper:
  *
@@ -40,14 +41,17 @@ declare module '@matatbread/matbot-plugin-api' {
   }
 }
 
-// Process-local mutex. A Promise the next caller awaits; the chain extends with every call and
-// settles in order. Simple, correct, no third-party dependency.
-let runChain: Promise<unknown> = Promise.resolve();
-
-function serialise<T>(fn: () => Promise<T>): Promise<T> {
-  const next = runChain.then(fn, fn);   // run regardless of prior settle state
-  runChain = next.catch(() => undefined); // don't let one failure poison the chain
-  return next;
+// Process-local mutex serialising passes (they'd race on SkillManager.save and per-fact CAS writes;
+// one consolidation pass at a time is the design). lock() resolves when it's this caller's turn and
+// hands back a release() — always invoked in a finally, so the chain never deadlocks. Unlike a
+// promise-wrapping serialise(), the lock is held across the whole generator DRAIN below, so progress
+// events can stream out of the executor while the pass still holds the mutex.
+let runTail: Promise<void> = Promise.resolve();
+function lock(): Promise<() => void> {
+  const prior = runTail;
+  let release!: () => void;
+  runTail = new Promise<void>(r => { release = r; });
+  return prior.then(() => release);
 }
 
 export function createDreamTimeTool(services: MatbotMachine): Tool<ToolResultOf<'dream_time'>> {
@@ -86,15 +90,26 @@ export function createDreamTimeTool(services: MatbotMachine): Tool<ToolResultOf<
       const merger = createLlmMerger(services, mergerProvider);
 
       let run: DreamRun;
+      const release = await lock();
       try {
-        run = await serialise(() => runOnce(services, ranker, merger, ctx.signal));
+        // Drain the pipeline generator, streaming its progress out as tool progress events so a long
+        // pass (a backlog of merges is many sequential LLM calls) isn't a silent wait. The generator's
+        // RETURN value (step.value once done) is the fully-assembled DreamRun.
+        const gen = runOnce(services, ranker, merger, ctx.signal);
+        let step = await gen.next();
+        while (!step.done) {
+          yield { type: 'progress', pct: step.value.pct, message: step.value.message };
+          step = await gen.next();
+        }
+        run = step.value;
       } catch (e) {
         // runOnce catches its own pipeline errors into the run record. A throw here is something
         // unexpected — a setup-shaped failure (missing SkillManager, malformed settings,
-        // metadata-gap assertion) or the mutex chain itself misbehaving. Surface it as a tool
-        // error so the caller sees it; nothing was written to the dream_runs store.
+        // metadata-gap assertion). Surface it as a tool error; nothing was written to the store.
         yield { type: 'error', message: `dream_time failed before producing a run record: ${(e as Error).message ?? String(e)}` };
         return;
+      } finally {
+        release();
       }
 
       // Persist the run record. Failures here are logged but do NOT block returning the result —
@@ -107,6 +122,7 @@ export function createDreamTimeTool(services: MatbotMachine): Tool<ToolResultOf<
         console.warn('[dream/tool] failed to persist DreamRun:', (e as Error).message ?? e);
       }
 
+      yield { type: 'progress', pct: 100, message: 'Yawn & stretch' };
       yield { type: 'result', value: run };
     },
   };
