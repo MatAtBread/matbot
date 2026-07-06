@@ -25,9 +25,11 @@ export function createAboutMatbotTool(version: string): Tool<ToolResultOf<'about
   return {
     name: 'about_matbot',
     description:
-      'Report what you are running: the matbot harness version and a one-line description. Use it when ' +
-      'asked what version of matbot this is, or for an "about" of the harness itself (distinct from the ' +
-      'plugin tool, which lists loaded plugins).',
+      'Report what you are running right now: the current model / LLM and provider profile powering THIS ' +
+      'conversation, plus the matbot harness version and a one-line description. Use it whenever asked ' +
+      '"what model / LLM are you using?", "which provider is this?", what version of matbot this is, or for ' +
+      'an "about" of the harness itself — distinct from the `provider` tool (which lists all configured ' +
+      'provider profiles) and the `plugin` tool (which lists loaded plugins).',
     inputSchema: { type: 'object', properties: {} },
     executor,
   };
