@@ -266,6 +266,21 @@ async function main() {
   // The web-bundle's own package version → reported by about_matbot as the harness version.
   const harnessVersion = JSON.parse(await readFile(path.join(here, 'package.json'), 'utf8')).version;
 
+  // Per-tool wire contracts ({ params, result }) extracted from the RAW (pre-strip) source of the baked
+  // plugin graph — compiler-free, the SAME scanner the browser runs over http-fetched plugins at runtime
+  // (see extractToolContracts). A ToolContracts augmentation is type-only, so it vanishes once stripped —
+  // hence bake it here so the browser ToolTypeIndex can fold the real params+result TS into built-in tools'
+  // wire descriptions, exactly as node does. Scanning rawSources (not a whole-tree glob) means each tool's
+  // BROWSER-variant augmentation wins — matching what actually loads in the bundle.
+  let toolContracts = {};
+  try {
+    const { extractToolContracts } = await import('../../plugins/browser/src/tool-types.ts');
+    for (const src of Object.values(rawSources)) Object.assign(toolContracts, extractToolContracts(src));
+    console.log(`[assemble] baked ${Object.keys(toolContracts).length} tool contracts`);
+  } catch (e) {
+    console.warn(`[assemble] could not extract tool contracts (${e?.message ?? e}) — browser TS contracts limited to toolContract-string tools.`);
+  }
+
   const payload = {
     sources,
     packageEntries,
@@ -274,6 +289,7 @@ async function main() {
     specRuntimes,
     specVersions,
     ...(harnessVersion !== undefined ? { harnessVersion } : {}),
+    toolContracts,
     assets,
     config: {
       plugins:   pluginSpecs,

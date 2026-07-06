@@ -8,4 +8,5 @@ export { createBrowserPluginTool } from './plugin-tool.js';
 export type { ExtraPlugins }       from './plugin-tool.js';
 export { createBrowserProviderTool } from './provider-tool.js';
 export type { ProviderAdmin, ProviderRow, AvailableProvider, ProviderDraft } from './provider-tool.js';
-export { createBrowserToolTypeIndex } from './tool-types.js';
+export { createBrowserToolTypeIndex, extractToolContracts } from './tool-types.js';
+export type { BrowserToolTypeIndexHandle } from './tool-types.js';

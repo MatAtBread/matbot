@@ -406,6 +406,19 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Optional
 
+- **browser / web-bundle — browser tools now carry their real TypeScript wire contracts (params AND result),
+  not just a call shape.** The browser `ToolTypeIndex` previously emitted a wire contract only for tools with a
+  runtime `toolContract` string, so every source-augmented native tool reached the model with its base
+  description and `inputSchema` alone — no TS — because a `ToolContracts` augmentation is type-only and is
+  stripped from the baked bundle (the model was left guessing parameter shapes). Contracts are now recovered by
+  a compiler-free source scan (`extractToolContracts`): node's extraction is purely textual (read the
+  `ToolContract<Result, Params>` type-argument text; the compiler is only needed to *merge* declarations), so
+  the browser does the same. The assembler bakes contracts for the built-in graph into the artifact
+  (`payload.toolContracts`, from the raw pre-strip sources), and http-loaded plugins are scanned at load time
+  (`loadRemote` returns each module's raw source; `loadPlugin` merges via `ToolTypeIndex.addContracts`) — so a
+  remotely-loaded plugin's tools get real TS too. `wireContracts()`/`dts()` now prefer a baked/loaded contract,
+  then a `toolContract` string, then schema-derived params. The node runtime is unchanged.
+
 - **frontend-web — every tool row in the sidebar now has a trigger (⚡) icon that manages that tool's
   triggers.** The icon is blue when the tool has one or more triggers and grey/translucent when it has none
   (always clickable — that's how you add the first one); per-tool counts come from a single

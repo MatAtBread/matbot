@@ -175,7 +175,11 @@
   // the blob URLs of their (recursively loaded) dependencies — so no second import map is needed.
   // Bare imports still flow through the baseline import map, preserving the singleton boundary.
   const remoteCache = new Map();
-  const loadRemoteModule = async (absUrl, stack) => {
+  // rawSink (optional) collects each fetched .ts's RAW (pre-strip) source, so the caller can scan it for
+  // `ToolContracts` augmentations (type-only — gone after stripping) and give a remote plugin's tools real
+  // TS contracts, the same as the baked built-ins. Only newly-fetched modules are collected (a cache hit
+  // means the module was already scanned on its first load).
+  const loadRemoteModule = async (absUrl, stack, rawSink) => {
     if (remoteCache.has(absUrl)) return remoteCache.get(absUrl);
     if (stack.includes(absUrl)) throw new Error(`matbot: import cycle in remote plugin at ${absUrl}`);
 
@@ -185,6 +189,7 @@
     if (!res.ok) throw new Error(`matbot: failed to fetch "${absUrl}" (${res.status})`);
 
     const raw      = await res.text();
+    if (url.endsWith('.ts') && rawSink) rawSink.push(raw);
     // Strip types ONLY (disableESTransforms + keepUnusedImports): keep `??`/`?.` native and imports verbatim.
     const stripped = url.endsWith('.ts') ? (await getTransform())(raw, { transforms: ['typescript'], disableESTransforms: true, keepUnusedImports: true, filePath: url, preserveDynamicImport: true }).code : raw;
     const rewritten = await rewrite(stripped, async (spec) => {
@@ -193,7 +198,7 @@
       }
       if (!isRelative(spec)) return null;   // bare → baseline import map (host singletons)
       const childAbs = new URL(spec, url).href;
-      return await loadRemoteModule(childAbs, [...stack, url]);
+      return await loadRemoteModule(childAbs, [...stack, url], rawSink);
     });
     const blob = URL.createObjectURL(new Blob([rewritten], { type: 'text/javascript' }));
     remoteCache.set(absUrl, blob);
@@ -253,15 +258,16 @@
         ({ name, runtimes } = await readSiblingManifest(absUrl));
       }
 
-      const spec = await loadRemoteModule(absUrl, []);
-      return { spec, name, ...(runtimes !== undefined ? { runtimes } : {}) };
+      const sources = [];
+      const spec = await loadRemoteModule(absUrl, [], sources);
+      return { spec, name, sources, ...(runtimes !== undefined ? { runtimes } : {}) };
     },
   };
 
   // ── Boot ──────────────────────────────────────────────────────────────────────────────────────
   try {
     const mod = await import(SYN(ENTRY));
-    await mod.boot({ config: MB.config, specNames: MB.specNames, specRuntimes: MB.specRuntimes, specVersions: MB.specVersions, harnessVersion: MB.harnessVersion, loader });
+    await mod.boot({ config: MB.config, specNames: MB.specNames, specRuntimes: MB.specRuntimes, specVersions: MB.specVersions, harnessVersion: MB.harnessVersion, toolContracts: MB.toolContracts, loader });
   } catch (err) {
     console.error('[matbot] boot failed:', err);
     const pre = document.createElement('pre');
