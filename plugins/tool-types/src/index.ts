@@ -100,7 +100,7 @@ function schemaToTs(schema: unknown, depth = 0): string {
  * tool (a `function-tools` function; the `tool-store` per-namespace tool) carries its contract on the
  * registered `Tool` as a `toolContract` string, appended in a second augmentation block; a name the scan
  * already declares is skipped, so nothing is declared twice. `declare const tool: ToolProxy` (mapped over
- * the merged `ToolContracts`) is what generators call.
+ * the merged `ToolContracts`) plus its override factory `toolInContext` is what generators call.
  */
 class ToolTypeIndexImpl implements ToolTypeIndex {
   private readonly machine: MatbotMachine;
@@ -142,11 +142,13 @@ class ToolTypeIndexImpl implements ToolTypeIndex {
 
   async dts(): Promise<string> {
     await this.ensureBuilt();
-    // `tool` — the injected proxy `function-tools`/compiled skills call — is `ToolProxy`, a mapped type over
-    // the (augmented) `ToolContracts`: each multi-arm entry becomes an overload set, so `await tool.x(params)`
-    // narrows its result by the params. Derived, never hand-authored; `check()` uses this same string, so what
-    // a generator is shown is exactly what it is graded against.
-    return `${this.registryBlock(this.cache!)}\ndeclare const tool: import('@matatbread/matbot-plugin-api').ToolProxy;\n`;
+    // `tool` — the injected proxy `function-tools`/compiled skills call — is a `ToolProxy`, a mapped type
+    // over the (augmented) `ToolContracts`: each multi-arm entry becomes an overload set, so `await
+    // tool.x(params)` narrows its result by the params, and a non-existent tool name is a compile error.
+    // `toolInContext(override)` is the sibling factory for a context override. Both derived, never
+    // hand-authored; `check()` uses this same string, so what a generator is shown is exactly what it is
+    // graded against.
+    return `${this.registryBlock(this.cache!)}\ndeclare const tool: import('@matatbread/matbot-plugin-api').ToolProxy;\ndeclare const toolInContext: import('@matatbread/matbot-plugin-api').ToolBox;\n`;
   }
 
   async wireContracts(): Promise<Record<string, { params: string; result: string }>> {
