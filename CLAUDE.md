@@ -82,7 +82,7 @@ Named LLM configurations in `matbot.yaml`, fully self-contained:
 ```yaml
 providers:
   claude-sonnet-4-6:
-    module: ./plugins/providers/anthropic
+    module: @matatbread/matbot-provider-anthropic
     endpoint: https://api.anthropic.com
     model: claude-sonnet-4-6
     credentials:
@@ -91,6 +91,7 @@ providers:
       maxTokens: 4096
 ```
 
+- `module` is the adapter's **package name** — the location-independent form, resolvable whether matbot is installed (`node_modules`) or run from a source checkout (the CLI's own install; see `resolvePluginSpecifiers`). A relative path (`./plugins/providers/anthropic`) also loads but isn't portable, so the setup wizard and the `provider` tool always write the package name when it resolves. This is the form to prefer.
 - Prefer duplication over references **for provider config blocks specifically** — five similar `matbot.yaml` blocks is fine. This is a config-authoring exception, not a general code-style rule — see Code style for shared *code*.
 - `${NAME}` resolved by `Vault` at runtime (flat namespace; `.env` is default node backend)
 - Credentials never in source code

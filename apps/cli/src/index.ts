@@ -112,6 +112,18 @@ function resolveExportsEntry(value: unknown): string | undefined {
  *
  * This is the single funnel for both startup and runtime (`plugin add` / hot-load) resolution.
  */
+// Resolve npm specifiers against the CLI's own install as well as the config dir. The bundled
+// provider adapters are dependencies of the CLI, not of an arbitrary config dir, so a source
+// checkout never symlinks them into `<configDir>/node_modules` — only the CLI's own require reaches
+// them (the same anchor discoverProviders uses). The first-run wizard stores the bare package name
+// (portable once matbot is installed), so without this anchor no turn could load it in a checkout.
+const appRequire = createRequire(import.meta.url);
+
+/** Resolve `spec` through `req`, returning the resolved path or undefined when it isn't installed. */
+function tryResolve(req: ReturnType<typeof createRequire>, spec: string): string | undefined {
+  try { return req.resolve(spec); } catch { return undefined; }
+}
+
 async function resolvePluginSpecifiers(specifiers: readonly string[], configDir: string, forceRefresh = false): Promise<PluginLoadRequest[]> {
   const req = createRequire(path.join(configDir, '_'));
   const dotPlugins = path.join(configDir, '.plugins');
@@ -139,12 +151,14 @@ async function resolvePluginSpecifiers(specifiers: readonly string[], configDir:
       } catch { /* no package.json or unparseable — import the directory */ }
     } else {
       // npm / pnpm-url: installed in node_modules under the package name (the stored specifier).
-      try {
-        importSpec = pathToFileURL(req.resolve(spec)).href;
-      } catch {
+      // Prefer the config dir (a package the user installed in their own project); fall back to the
+      // CLI's own install so bundled adapters referenced by bare name still resolve in a source checkout.
+      const entry = tryResolve(req, spec) ?? tryResolve(appRequire, spec);
+      if (entry === undefined) {
         results.push({ spec, importSpec: spec });  // not on disk — let loadPlugins emit the warning
         continue;
       }
+      importSpec = pathToFileURL(entry).href;
     }
 
     const meta = await readPluginMeta(importSpec, configDir);
@@ -646,8 +660,10 @@ async function runSetupWizard(configPath: string): Promise<import('./config.js')
     await writeFile(envPath, envLines.join('\n') + '\n', 'utf8');
     process.env[envVarName] = apiKey;
 
-    // Reference the provider by package name: resolves via node_modules when installed and via the
-    // workspace symlink in the monorepo, so the config is portable either way.
+    // Reference the provider by package name — the location-independent form. It resolves via
+    // node_modules when matbot is installed, and in a source checkout via resolvePluginSpecifiers'
+    // CLI-anchored fallback (the bundled adapters are the CLI's own dependencies, not the config
+    // dir's), so the written config is portable either way.
     const moduleSpec = chosen.name;
 
     const yaml = [
@@ -1115,10 +1131,9 @@ async function main(): Promise<void> {
   // reports the source truth (a yaml path stays a yaml path) instead of drifting to the package name once
   // a profile is touched.
 
-  // Map plugin name → the original module specifier written in matbot.yaml.
-  // Used by the provider tool so its description and list output show YAML-valid
-  // specifiers, and so `provider add` writes a path the loader can resolve — never
-  // the bare package name of a local plugin, which crashes startup.
+  // Map plugin name → the original module specifier written in matbot.yaml. Used by the provider
+  // tool as the write-back fallback for a local adapter that has no resolvable package name, and to
+  // match an LLM-supplied path against a loaded adapter.
   const pluginNameToOrigPath = new Map<string, string>();
   const recordOrigPaths = (origs: readonly string[]): void => {
     // plugin.specifier === the original config entry, so look up the name by that entry directly.
@@ -1145,10 +1160,20 @@ async function main(): Promise<void> {
   // for every loaded adapter, not just ones already referenced by a provider profile.
   recordOrigPaths(matbotConfig.plugins);
 
+  // Whether an adapter's canonical package name is resolvable at load time — the same two-anchor
+  // resolution the loader uses (config dir, then the CLI's own install for a bundled adapter). Only
+  // the host can answer this, so the provider tool takes it as a predicate: it prefers the package
+  // name (location-independent) whenever it resolves, falling back to a path for a local-only adapter
+  // that has no resolvable name. Pure string resolution — independent of whether the adapter, which
+  // may load lazily on first use, is registered yet.
+  const configRequire = createRequire(path.join(path.dirname(configPath), '_'));
+  const providerNameResolves = (name: string): boolean =>
+    tryResolve(configRequire, name) !== undefined || tryResolve(appRequire, name) !== undefined;
+
   // Register the provider management tool now that all adapter plugins are loaded and
   // their YAML specifiers are recorded — createProviderTool reads getRegisteredPlugins()
   // and pluginNameToOrigPath to build its description.
-  toolReg.register(createProviderTool(providers, pluginNameToOrigPath));
+  toolReg.register(createProviderTool(providers, pluginNameToOrigPath, providerNameResolves));
 
   // single_turn: the model-facing surface of the core singleTurn service. Registered here beside the
   // other core service-management tools (it needs the live `services` for `singleTurn`/`providers`).

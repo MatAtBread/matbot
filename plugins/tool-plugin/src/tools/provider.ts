@@ -54,8 +54,9 @@ function escapeRegex(s: string): string {
 // validation therefore happens here, before anything is written: we resolve whatever
 // form arrives to (a) the canonical plugin name for the live map, and (b) a
 // specifier the loader (via instantiateProvider) can resolve at use time.
-// We never echo the raw input into matbot.yaml — a bare package name for a local
-// plugin is not resolvable at load time and crashes startup.
+// We write the canonical package name when it resolves (location-independent), and fall
+// back to a path only for a local, unpublished adapter whose name resolves nowhere — a
+// bare package name for such a plugin is not loadable and would crash startup.
 
 const pathLike = (s: string): boolean => s.startsWith('.') || s.startsWith('/') || path.isAbsolute(s);
 
@@ -92,14 +93,19 @@ function findLoadedAdapter(
   return undefined;
 }
 
-// The YAML-valid specifier to write for an already-loaded adapter: prefer the exact
-// string from matbot.yaml (portable, human-authored), otherwise derive a relative path
-// from the resolved entry file. Never the bare package name of a local plugin.
+// The YAML-valid specifier to write for an already-loaded adapter. Prefer the canonical package
+// name — the location-independent form, resolvable whether matbot is installed or run from a
+// checkout (the host's `nameResolves` predicate confirms this, since only the host knows the CLI's
+// own install can resolve a bundled adapter's name). Otherwise fall back to the human-authored yaml
+// string, then a relative path derived from the resolved entry — the only forms that work for a
+// local, unpublished adapter whose name resolves nowhere.
 function yamlSpecifierFor(
   name:                 string,
   projectDir:           string,
   pluginNameToOrigPath?: ReadonlyMap<string, string>,
+  nameResolves?:         (pluginName: string) => boolean,
 ): string | undefined {
+  if (nameResolves?.(name)) return name;
   const orig = pluginNameToOrigPath?.get(name);
   if (orig !== undefined) return orig;
   const entry = resolvedEntryPath(name);
@@ -213,7 +219,11 @@ function currentProviderName(ctx: ToolContext): string | undefined {
 
 // ── Executor ──────────────────────────────────────────────────────────────────
 
-function makeExecutor(providers: ProviderRegistry, pluginNameToOrigPath?: ReadonlyMap<string, string>): ToolExecutor<ToolResultOf<'provider'>> {
+function makeExecutor(
+  providers:            ProviderRegistry,
+  pluginNameToOrigPath?: ReadonlyMap<string, string>,
+  nameResolves?:         (pluginName: string) => boolean,
+): ToolExecutor<ToolResultOf<'provider'>> {
   return {
     async *execute(input: unknown, ctx: ToolContext) {
       const { action } = input as ProviderInput;
@@ -262,7 +272,7 @@ function makeExecutor(providers: ProviderRegistry, pluginNameToOrigPath?: Readon
 
         const loaded = findLoadedAdapter(mod, projectDir, pluginNameToOrigPath);
         if (loaded !== undefined) {
-          const spec = yamlSpecifierFor(loaded.name, projectDir, pluginNameToOrigPath);
+          const spec = yamlSpecifierFor(loaded.name, projectDir, pluginNameToOrigPath, nameResolves);
           if (spec === undefined) {
             yield { type: 'error', message: `Adapter "${loaded.name}" is loaded but its module path could not be determined.` };
             return;
@@ -276,14 +286,16 @@ function makeExecutor(providers: ProviderRegistry, pluginNameToOrigPath?: Readon
               yield { type: 'error', message: `Module "${mod}" loaded but is not a provider adapter.` };
               return;
             }
-            yamlModule = mod; // mod resolved and loaded, so it is YAML-valid as written
+            // Prefer the canonical package name (location-independent) when it resolves; otherwise the
+            // just-supplied `mod` resolved and loaded, so it is YAML-valid as written.
+            yamlModule = nameResolves?.(justLoaded.name) ? justLoaded.name : mod;
             if (pluginNameToOrigPath !== undefined) {
               (pluginNameToOrigPath as Map<string, string>).set(justLoaded.name, mod);
             }
           } catch {
             const available = getRegisteredPlugins()
               .filter(p => p.provider !== undefined)
-              .map(p => yamlSpecifierFor(p.name, projectDir, pluginNameToOrigPath) ?? p.name);
+              .map(p => yamlSpecifierFor(p.name, projectDir, pluginNameToOrigPath, nameResolves) ?? p.name);
             yield {
               type:    'error',
               message: `Could not resolve provider module "${mod}". Use one of the available adapter modules: ${available.join(', ')}.`,
@@ -413,14 +425,16 @@ function makeExecutor(providers: ProviderRegistry, pluginNameToOrigPath?: Readon
 export function createProviderTool(
   providers:          ProviderRegistry,
   pluginNameToOrigPath?: ReadonlyMap<string, string>,
+  nameResolves?:         (pluginName: string) => boolean,
 ): Tool<ToolResultOf<'provider'>> {
-  // Derive adapter list from provider plugins registered at call time.
-  // Show the original YAML-valid module path (e.g. ./plugins/providers/anthropic)
-  // rather than the internal plugin name that canonicalisation produces.
+  // Derive the adapter list from provider plugins registered at call time. Advertise each by the
+  // exact specifier the tool would write for it (yamlSpecifierFor) — the canonical package name when
+  // it resolves, else the yaml path — so the module the LLM copies from this list is the one the
+  // loader can resolve.
   const adapterPlugins = getRegisteredPlugins().filter(p => p.provider !== undefined);
   const adapterSection = adapterPlugins.length > 0
     ? adapterPlugins.map(p => {
-        const modulePath = pluginNameToOrigPath?.get(p.name) ?? p.name;
+        const modulePath = (nameResolves?.(p.name) ? p.name : pluginNameToOrigPath?.get(p.name)) ?? p.name;
         const desc = p.manifest?.description ? ` — ${p.manifest.description}` : '';
         return `  ${modulePath}${desc}`;
       }).join('\n')
@@ -508,6 +522,6 @@ When a user asks to add a new LLM or provider, ask for:
       },
     },
 
-    executor: makeExecutor(providers, pluginNameToOrigPath),
+    executor: makeExecutor(providers, pluginNameToOrigPath, nameResolves),
   };
 }

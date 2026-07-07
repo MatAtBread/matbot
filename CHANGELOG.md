@@ -414,6 +414,24 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Optional
 
+- **cli — a provider referenced by bare package name now resolves in a source checkout (first-run
+  regression fix).** `resolvePluginSpecifiers` resolved npm/scoped specifiers only against the config
+  directory, but the bundled provider adapters are dependencies of the CLI, not of an arbitrary config
+  dir, so a checkout never symlinks them into `<configDir>/node_modules`. The first-run setup wizard
+  writes the bare package name (`@matatbread/matbot-provider-anthropic`) as the portable form, so the
+  first turn failed with `ERR_MODULE_NOT_FOUND` → "Unknown provider" (surfaced lazily, on first use,
+  once the boot provider pre-scan was disabled). Resolution now falls back to the CLI's own install —
+  the same anchor `discoverProviders` already uses — so a bare package name resolves whether matbot is
+  installed or run from a checkout. A package the user installed in their own project still wins (config
+  dir is tried first); a local, unpublished adapter is unaffected (still referenced by path).
+
+- **tool-plugin — the `provider` tool now writes and advertises the canonical package name when it
+  resolves, not a path.** Reconciles the tool with the setup wizard on the location-independent form:
+  `provider add` writes `@matatbread/matbot-provider-…` (and `list`/the tool description advertise it)
+  whenever that name resolves, falling back to the yaml path only for a local, unpublished adapter whose
+  name resolves nowhere. Whether a name resolves is a host decision (only the CLI knows its own install
+  can reach a bundled adapter), so the host passes a `nameResolves` predicate to `createProviderTool`.
+
 - **function-tools — `lambda` is now type-checked, and both actions accept `noTypeCheck` to opt out.**
   `define` already type-checked a function body against the live tool types (via `ToolTypeIndex`) before
   registering it; `lambda` now does the same before running (syntax is still gated first by the
