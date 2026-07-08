@@ -145,8 +145,11 @@ const DESCRIPTION = `Compose multiple tool calls — filter, count, reshape thei
 back through the model. Compositions is expressed as TypeScript functions that orchestrate other tools in a single pass.
 
 Inside a function, call any registered tool through the injected \`tool\` proxy:
-\`const r = await tool.<tool_name>(params)\` runs that tool and resolves to its structured result (the
-same value a direct call yields). Every tool call MUST be awaited — the whole body runs as an async
+\`const r = await tool.<tool_name>(params)\` runs that tool and resolves to its structured result (the same
+value a direct call yields), inheriting this call's context. To run one call under a different context
+(e.g. another model), use the \`toolInContext\` factory: \`await toolInContext({ provider: 'fast-model' }).<tool_name>(params)\`
+— omitted fields are inherited. A tool name that doesn't exist is a compile error, so you can only call
+tools that are actually registered. Every tool call MUST be awaited — the whole body runs as an async
 function (so a recursive self-call must be awaited too). Return a JSON-serialisable value; that becomes
 the result the model sees. Each tool call is echoed to stdout, so the run is observable.
 
@@ -223,17 +226,21 @@ function functionTool(machine: MatbotMachine, store: FunctionStore): Tool<ToolRe
             let fn: CompiledFn;
             try { fn = await buildAsyncFn(machine.TypeScriptStripper, act.definition, ['args']); }
             catch (e) { yield errorEvent(e instanceof Error ? e.message : String(e)); return; }
+            // The lambda calling convention is ONE argument (the params object). Gate it structurally:
+            // the typecheck grades the function against its OWN signature, not the convention, so a
+            // multi-param head would typecheck and then silently run as (paramsObject, undefined, …).
+            let sig: ParsedSignature | undefined;
+            try { sig = parseSignature(act.definition); } catch { /* head unparseable — gates skipped */ }
+            if (sig !== undefined && sig.params.length > 1) {
+              yield errorEvent('lambda takes exactly ONE argument — the `params` object. Declare a single object parameter and read fields from it, e.g. (args: { a: number; b: number }): number { return args.a + args.b; }');
+              return;
+            }
             // Type-check the body against the live tool types before running (node only; opt out with
-            // noTypeCheck). Syntax was already gated by buildAsyncFn above; an unparseable head just skips
-            // the type-check (it already stripped and compiled).
+            // noTypeCheck). Syntax was already gated by buildAsyncFn above.
             const index = machine.ToolTypeIndex;
-            if (index !== undefined && act.noTypeCheck !== true) {
-              let sig: ParsedSignature | undefined;
-              try { sig = parseSignature(act.definition); } catch { /* head unparseable — skip */ }
-              if (sig !== undefined) {
-                const diags = await index.check(checkSnippet(sig));
-                if (diags.length > 0) { yield errorEvent(`type error(s) — fix and re-run, or pass noTypeCheck to bypass:\n${diags.join('\n')}`); return; }
-              }
+            if (index !== undefined && act.noTypeCheck !== true && sig !== undefined) {
+              const diags = await index.check(checkSnippet(sig));
+              if (diags.length > 0) { yield errorEvent(`type error(s) — fix and re-run, or pass noTypeCheck to bypass:\n${diags.join('\n')}`); return; }
             }
             yield* runFunction(machine, ctx, fn, [act.params ?? {}]);
             return;

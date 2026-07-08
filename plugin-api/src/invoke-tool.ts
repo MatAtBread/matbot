@@ -1,5 +1,5 @@
 import type { MatbotMachine } from './plugin.js';
-import type { ToolContext, ToolEvent, ToolResultFor, PromptFn, FormField } from './types.js';
+import type { ToolContext, ToolEvent, ToolResultFor, ToolProxy, PromptFn, FormField } from './types.js';
 
 /**
  * Inputs to {@link invokeTool} that a one-shot caller can't derive from the machine. A tool
@@ -98,3 +98,55 @@ const rejectingPrompt: PromptFn = (((p: string | FormField): Promise<string> => 
   const label = typeof p === 'string' ? p : p.label;
   return Promise.reject(new Error(`Non-interactive context: cannot prompt for "${label}"`));
 }) as PromptFn);
+
+/** Compact a value to one trace line. */
+function compactTrace(v: unknown): string {
+  let s: string;
+  if (typeof v === 'string') s = v;
+  else { try { s = JSON.stringify(v) ?? String(v); } catch { s = String(v); } }
+  return s.length > 240 ? `${s.slice(0, 240)}…` : s;
+}
+
+/**
+ * A factory for a context-overridden {@link ToolProxy}: `toolInContext({ provider }).some_tool(params)`
+ * runs `some_tool` with the given fields merged over the box's bound context (omitted fields inherited).
+ * Keyed on `ToolContracts`, so a hallucinated tool name is a **compile error**. This is the explicit
+ * escape hatch beside the default `tool` proxy — reach for it only when a call needs a different provider,
+ * signal, prompt or session.
+ */
+export type ToolBox = (call?: Partial<InvokeToolOptions>) => ToolProxy;
+
+/**
+ * Build the typed calling surface both `function-tools` compositions and compiled skills use:
+ *
+ *   const { tool, toolInContext } = makeToolBox(machine, callContext, { onEvent });
+ *   await tool.some_tool(params);                     // bound context; a bad name is a compile error
+ *   await toolInContext({ provider }).some_tool(...); // override one field for this call
+ *
+ * `tool` is a {@link ToolProxy} bound to `callContext`; `toolInContext(override)` returns a fresh proxy
+ * with `override` merged over it (never mutating `tool`). `onEvent`, when supplied, receives a `stdout`
+ * trace per call (→ name / ← result) so a run is observable; omit it for a silent surface. Built on
+ * {@link invokeTool}/{@link toolResult}, which remain the low-level, dynamic-name seam.
+ */
+export function makeToolBox(
+  machine:     MatbotMachine,
+  defaultCall: InvokeToolOptions,
+  opts?:       { onEvent?: (event: ToolEvent) => void },
+): { tool: ToolProxy; toolInContext: ToolBox } {
+  const build = (call: InvokeToolOptions): ToolProxy =>
+    new Proxy({}, {
+      get(_target, prop) {
+        // A symbol key, or `then`, must not read as a callable tool — otherwise the proxy looks like a
+        // thenable and awaiting/returning it would try to invoke a tool named `then`.
+        if (typeof prop !== 'string' || prop === 'then') return undefined;
+        return async (params?: unknown): Promise<unknown> => {
+          opts?.onEvent?.({ type: 'stdout', chunk: `→ ${prop}(${compactTrace(params)})\n` });
+          const value = await toolResult(invokeTool(machine, prop, params ?? {}, call));
+          opts?.onEvent?.({ type: 'stdout', chunk: `← ${prop}: ${compactTrace(value)}\n` });
+          return value;
+        };
+      },
+    }) as ToolProxy;
+  const toolInContext: ToolBox = (override) => build(override === undefined ? defaultCall : { ...defaultCall, ...override });
+  return { tool: build(defaultCall), toolInContext };
+}
