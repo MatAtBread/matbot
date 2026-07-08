@@ -1,4 +1,3 @@
-import type TS from 'typescript';
 import { dirname, join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -6,8 +5,10 @@ import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import type { MatbotMachine, MatbotPluginSpec, ToolTypeIndex } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins } from '@matatbread/matbot-core';
 import { buildMatbotToolsDts } from './build-dts.js';
+import { checkSnippetAgainst } from './checker.js';
 
 export { buildMatbotToolsDts, type MatbotToolsDts } from './build-dts.js';
+export { checkProjectDir, checkSnippetAgainst, type CheckResult } from './checker.js';
 
 // Split a string on `sep` at bracket-depth 0 only (respecting `<> {} () []`), so a top-level `|` or `,`
 // inside a nested type isn't mistaken for a separator.
@@ -163,11 +164,9 @@ class ToolTypeIndexImpl implements ToolTypeIndex {
   }
 
   async check(snippet: string): Promise<string[]> {
-    const ts   = (await import('typescript')).default;
     const root = this.machine.configPath !== undefined ? dirname(this.machine.configPath) : '.';
     const prefix = `${await this.dts()}\n`;
     const source = `${prefix}${snippet}\nexport {};\n`;           // trailing export ⇒ this file is a module
-    const virtual = `${root}/__mb_toolcheck_${crypto.randomUUID()}.ts`;
 
     // Anchor `@matatbread/matbot-plugin-api` — it isn't a bare-resolvable dep of the project root, so map it
     // to the monorepo source (or the installed package). Without this the imports fail and every type
@@ -178,31 +177,14 @@ class ToolTypeIndexImpl implements ToolTypeIndex {
       try { apiIndex = createRequire(join(root, '_')).resolve('@matatbread/matbot-plugin-api'); } catch { /* unresolved */ }
     }
 
-    const options: TS.CompilerOptions = {
-      target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.NodeNext, moduleResolution: ts.ModuleResolutionKind.NodeNext,
-      strict: true, exactOptionalPropertyTypes: true, noEmit: true, skipLibCheck: true, baseUrl: root,
-      ...(apiIndex !== undefined ? { paths: { '@matatbread/matbot-plugin-api': [apiIndex] } } : {}),
-    };
-    const host = ts.createCompilerHost(options);
-    const getSF = host.getSourceFile.bind(host);
-    host.getSourceFile = (f, lang, onErr, create) =>
-      f === virtual ? ts.createSourceFile(f, source, lang, true) : getSF(f, lang, onErr, create);
-    const fileExists = host.fileExists.bind(host); host.fileExists = f => f === virtual || fileExists(f);
-    const readFile   = host.readFile.bind(host);   host.readFile   = f => (f === virtual ? source : readFile(f));
-
-    const program = ts.createProgram([virtual], options, host);
-    const sf = program.getSourceFile(virtual);
-    if (sf === undefined) return [];
-
-    const prefixLen   = prefix.length;
-    const prefixLines = prefix.split('\n').length - 1;
-    const out: string[] = [];
-    for (const d of [...program.getSyntacticDiagnostics(sf), ...program.getSemanticDiagnostics(sf)]) {
-      if (typeof d.start !== 'number' || d.start < prefixLen) continue;   // only the caller's snippet
-      const { line } = sf.getLineAndCharacterOfPosition(d.start);
-      out.push(`line ${line - prefixLines + 1}: ${ts.flattenDiagnosticMessageText(d.messageText, '\n')}`);
-    }
-    return out;
+    // Worker-hosted check (see checker.ts) — off the main loop, and each diagnostic comes back as an
+    // annotated block (caret-anchored frame, related locations, HINT) with snippet-relative positions.
+    return checkSnippetAgainst({
+      root, source,
+      prefixLen: prefix.length,
+      prefixLines: prefix.split('\n').length - 1,
+      ...(apiIndex !== undefined ? { apiIndexPath: apiIndex } : {}),
+    });
   }
 
   // Every live tool the source scan didn't already declare: a source-less tool that carries its contract as
