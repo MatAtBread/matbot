@@ -590,6 +590,9 @@ type ArmCallSig<E> =
     ? (unknown extends P ? (params?: unknown) => Promise<R> : (params: P) => Promise<R>)
     : never;
 
+// The union of a tool's arm params — the parameter type of the trailing catch-all signature below.
+type ArmArgsUnion<E> = E extends ToolContract<unknown, infer A> ? A : never;
+
 /**
  * The type of the injected `tool` proxy that `function-tools` and compiled skills call
  * (`await tool.name(params)`). Each key is derived from its {@link ToolContracts} entry: a multi-arm
@@ -599,8 +602,17 @@ type ArmCallSig<E> =
  * generated `dts()` declares `tool` as; it is *derived* — never hand-authored — from the same `ToolContracts`
  * augmentation that types authors' `invokeTool`/`toolResult` calls, so the human editor and the LLM see one
  * source of truth.
+ *
+ * The trailing catch-all signature (params union → result union) exists for soundness at the *meta-type*
+ * level, not for call sites: overload resolution is first-match, so a well-formed call still hits its
+ * specific arm and narrows precisely, and a malformed call matches nothing and still errors. What it
+ * changes: `ReturnType<typeof tool.x>` — which on a bare overload set resolves to an arbitrary (last) arm,
+ * a real-world codegen trap — now degrades to the sound full union; and a params value typed as a union of
+ * arms (dynamic multi-action dispatch) becomes callable, returning the result union.
  */
-export type ToolProxy = { [K in keyof ToolContracts]: UnionToIntersection<ArmCallSig<ToolContracts[K]>> };
+export type ToolProxy = { [K in keyof ToolContracts]:
+    UnionToIntersection<ArmCallSig<ToolContracts[K]>>
+  & ((params: ArmArgsUnion<ToolContracts[K]>) => Promise<ToolResultUnion<ToolContracts[K]>>) };
 
 /**
  * Ask the user a question and resolve with their answer. The host supplies the
