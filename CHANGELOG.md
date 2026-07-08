@@ -58,6 +58,17 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### API gaps filled
 
+- **`ToolProxy` gains a trailing catch-all overload per tool (params union → result union).** A bare
+  overload set is precise at call sites but unsound at the meta-type level: `ReturnType<typeof tool.x>`
+  resolved to whichever arm happened to be declared last — a real-world codegen trap (a model
+  pre-declaring a result variable that way produced a baffling TS2739 it could not repair in three
+  passes). Call sites are unchanged (overload resolution is first-match, so well-formed calls still
+  narrow to their arm and malformed calls still error — with *better* messages, since the "last
+  overload" tsc reports against is now the full params union, which enumerates the valid actions and
+  triggers "Did you mean…" suggestions). Two things become expressible: `ReturnType` degrades to the
+  sound result union instead of an arbitrary arm, and a params value typed as a union of arms (dynamic
+  multi-action dispatch) is now callable, returning the result union.
+
 - **Plugin load failures are recorded, not swallowed (`getFailedPlugins`).** A plugin the loader skips —
   an incompatible `matbotRuntime`, an import that rejects, a module that isn't plugin-shaped, or a `setup()`
   that throws — still fails *gracefully* (the boot batch skips it and continues; only an explicit single load
@@ -413,6 +424,72 @@ churn and less likely to affect a consumer who doesn't use them.
   (a missing secret) are still left in config to retry.
 
 ### Optional
+
+- **skills_compiler — codegen now sees the tool contracts it typechecks against, and demonstrations
+  can prompt the user.** The derived `matbot-tools.d.ts` (live-registry tool/service contracts) was
+  written to disk for `tsc` only; the generation prompts merely asserted it existed, so a model wrote
+  tool calls from the skill prose and converged on the real signatures only via the typecheck-repair
+  loop. The dts is now derived before codegen and embedded verbatim in all three prompts (initial,
+  iterate, repair), so hallucinating a tool or signature contradicts text that is in context. The
+  demonstration session now inherits the calling turn's interactive prompt channel (`ctx.prompt` →
+  `run.open`), so a skill whose procedure asks the user works end-to-end when compiled interactively
+  — previously every `ask_user` without a declared default failed as "Non-interactive context" and the
+  demonstration stalled before the real procedure. The environment spec handed to codegen also gains
+  rules that each removed an observed run-to-run divergence: progress `pct` is 0–100 (a model emitted
+  0–1 fractions), an LLM step with no explicit provider is `tool.single_turn` with `provider` omitted
+  (models fabricated `''`/`'default'` for `services.singleTurn`), a cancelled `ask_user` throws (a
+  model let the throw abort a loop the skill said continues), and never pre-declare a variable as
+  `ReturnType<typeof tool.x>` (on an overload set it resolves to the last overload alone — one model
+  burned all three repair passes on the resulting misleading TS2739). Three further fixes from a
+  14-round/7-provider test campaign: a distilled method returned as a JSON *array* of steps was
+  silently discarded in favour of the raw demonstration transcript (arrays now accepted; all terminal
+  results carry a `distilled` flag, and a genuine fallback is labelled as a RAW trace in the prompt
+  instead of claiming to be distilled); a declined install confirmation (a "Cancelled." *result*, not
+  a throw) was reported as `installed` and hid the source skill (the compiler now verifies the tool
+  actually resolved before claiming success, and hides only on verified install); and the distiller
+  now prefers spec-named neutral mechanisms over persona tools the demonstration happened to use
+  (`ask_inner_voice` was leaking into compiled tools) and types enumerable result fields as literal
+  unions rather than `string`. The typecheck step now runs the TypeScript compiler API in a worker
+  thread (the shared checker in `@matatbread/matbot-tool-types`), replacing the shelled `tsc`
+  subprocess outright — the inputs are fully determined (the compiler's own scaffold and tsconfig,
+  the same resolved typescript module), so a checker failure is a plumbing bug that must surface as
+  the compile's error, not be absorbed by a quieter fallback path. Structured diagnostics become
+  repair feedback with the
+  offending source frame caret-anchored under each error, full elaboration chains and
+  related-information locations (e.g. which contract arm an expected type came from), directed HINT
+  lines for the recurring strict-mode idioms (`noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`,
+  `import type`, tool-contract arm mismatches), and cascade capping ("fix the first error first") —
+  models repair from anchored snippets in one pass where bare `file(line,col)` references had them
+  guessing.
+
+- **tool-types — the checker gains a structural cast gate.** `tsc` accepts type assertions
+  unconditionally, so generated code could re-assert a shape onto a value the tool proxy had already
+  typed precisely — one `as any` and a hallucinated field compiles, then fails silently at runtime.
+  The worker now walks the checked source and reports three patterns as `CAST-GATE` diagnostics
+  through the same annotated/repair pipeline as type errors: `as any` (always), `as unknown as T`
+  double assertions, and — verified against the live `TypeChecker` — widening an already-typed value
+  to a loosening target (`Record<…>`, `object`, `unknown`, index-signature-only literals). Assertions
+  on genuinely-unknown sources (the executor's `input`, `await resp.json()`, catch variables),
+  narrowing assertions, and `as const` all pass. A dry run over the 24 previously compiled test
+  sources failed 12 of them (1–3 findings each) — the prose-only rule this replaces had roughly
+  coin-flip compliance.
+
+- **tool-types — `ToolTypeIndex.check` moves off the main thread and returns annotated diagnostics.**
+  The lambda type-check previously built a `ts.createProgram` synchronously on the main thread, so
+  every `tool_function` define/lambda froze the event loop — and every frontend — for the duration.
+  The check now runs in the same worker-hosted checker the skills compiler uses (one checker, two
+  entry modes, both exported: `checkProjectDir` for a compiled plugin's build dir,
+  `checkSnippetAgainst` for a virtual ambient-dts-plus-snippet module), and each diagnostic comes
+  back as an annotated block — caret-anchored source frame with snippet-relative positions,
+  related-information locations (which contract arm an expected type came from), and directed HINT
+  lines — instead of a bare `line N: message` string.
+
+- **function-tools — lambda's one-argument convention is enforced, not just documented.** A lambda
+  declaring more than one parameter typechecked (the check grades the function against its own
+  signature, not the calling convention) and then silently ran as `(paramsObject, undefined, …)` —
+  `(a: number, b: number)` invoked with `{a:2,b:3}` returned `"[object Object]undefined"`. The head
+  is now parsed unconditionally and a multi-param lambda is rejected up front with a corrective
+  example, before anything runs.
 
 - **cli — a provider referenced by bare package name now resolves in a source checkout (first-run
   regression fix).** `resolvePluginSpecifiers` resolved npm/scoped specifiers only against the config
