@@ -1,5 +1,14 @@
 # @matatbread/matbot-storage-google-drive
 
+## 0.3.2
+
+### Patch Changes
+
+- Updated dependencies
+  - @matatbread/matbot-plugin-api@0.3.2
+  - @matatbread/matbot-core@0.3.2
+  - @matatbread/matbot-browser@0.3.2
+
 ## 0.2.9
 
 ### Patch Changes
