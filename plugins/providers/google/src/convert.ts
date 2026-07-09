@@ -64,6 +64,7 @@ function sanitizeSchema(schema: unknown): unknown {
 
   for (const [k, v] of Object.entries(src)) {
     if (!SCHEMA_KEYS.has(k)) continue;
+    if (k === 'type') continue;   // owned by the block above (array → scalar/nullable/anyOf) — never re-copy the raw value
     if (k === 'properties' && v !== null && typeof v === 'object') {
       const props: Record<string, unknown> = {};
       for (const [pk, pv] of Object.entries(v as Record<string, unknown>)) props[pk] = sanitizeSchema(pv);
