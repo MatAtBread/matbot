@@ -1,4 +1,4 @@
-# @matatbread/matbot-tool-router
+# @matatbread/matbot-provider-google
 
 ## 0.3.3
 
@@ -13,10 +13,5 @@
 
 - Updated dependencies
   - @matatbread/matbot-plugin-api@0.3.3
-
-## 0.3.2
-
-### Patch Changes
-
-- Updated dependencies
-  - @matatbread/matbot-plugin-api@0.3.2
+  - @matatbread/matbot-core@0.3.3
+  - @matatbread/matbot-provider-openai-compat@0.3.3
