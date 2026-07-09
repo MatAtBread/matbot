@@ -58,6 +58,20 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### API gaps filled
 
+- **Augmentable per-tool-call round-trip metadata (`ProviderMeta` + `tool-call` `meta?`).** The
+  `tool-call` variant of both `CompletionEvent` and `MessageContent` gains an optional `meta?:
+  ProviderMeta` — opaque, provider-specific round-trip state captured from a completion and re-sent
+  verbatim when the call is replayed in history. `ProviderMeta` is an empty, augmentable interface (same
+  idiom as `MatbotServices`/`MarkerData`/`ToolContracts`): a provider package declares its OWN slice
+  from its own module (namespaced by provider family, e.g. `interface ProviderMeta { google?: {
+  thoughtSignature?: string } }`), so adding a provider that needs round-trip state touches **no** core
+  code. It's an open, additive union (interface augmentation), not a generic parameter, because a single
+  session interleaves tool-calls from many providers. The runner persists `meta` on the stored
+  `tool-call` and threads it back through `pendingCalls`, never interpreting it — so a provider that
+  requires such a token (Gemini 3 "thought signatures", mandatory on every historical `functionCall`)
+  round-trips its own history losslessly, while any adapter is free to elide a call whose `meta` it
+  doesn't trust when rendering cross-provider history.
+
 - **`ToolProxy` gains a trailing catch-all overload per tool (params union → result union).** A bare
   overload set is precise at call sites but unsound at the meta-type level: `ReturnType<typeof tool.x>`
   resolved to whichever arm happened to be declared last — a real-world codegen trap (a model
@@ -424,6 +438,39 @@ churn and less likely to affect a consumer who doesn't use them.
   (a missing secret) are still left in config to retry.
 
 ### Optional
+
+- **providers/google — native Gemini adapter (new `@matatbread/matbot-provider-google`).** One
+  `module:`, two wire formats, chosen by the endpoint **path** (not host — a proxy/gateway may rewrite
+  the host but keeps the path): a bare base or `…/models/{model}:generateContent` selects the native
+  `generateContent` adapter; a `…/chat/completions` / `…/openai/…` path falls back to the shared
+  OpenAI-compat adapter in `gemini` mode. The native adapter round-trips Gemini 3 thought signatures as
+  the sibling `thoughtSignature` on each part (carried in the tool-call's `meta.google.thoughtSignature`
+  — see `ProviderMeta` above), maps tool results into `user`-role `functionResponse` parts, lifts the
+  system prompt to `systemInstruction`, and sanitizes tool schemas to Gemini's strict OpenAPI-subset
+  (dropping `additionalProperties`/`$schema`/`$ref`…, normalising `type:[…,"null"]`→`nullable`,
+  `const`→`enum`, `oneOf`/`allOf`→`anyOf`, and injecting `items` on loose arrays). The model and API key
+  come from the profile's own `model:`/`credentials.apiKey` — the model is interpolated into the URL
+  path, the key sent as `x-goog-api-key` (never the query string). Cross-provider replay is handled by a
+  **provider-origin trust rule**: a signature is replayed only when the message that produced it came
+  from the current provider — so a foreign tool-call (no Gemini signature) is elided with its paired
+  `functionResponse`, and a foreign *thinking* signature (e.g. Anthropic's, which is NOT a valid Gemini
+  thought signature) is dropped rather than replayed into `thoughtSignature`, which Gemini would reject
+  as "Corrupted thought signature".
+
+- **providers/openai-compat — `gemini` mode.** An opt-in mode (set by the google variant, or
+  `parameters.gemini: true`) that round-trips Gemini 3 thought signatures over the OpenAI-compat wire
+  (`extra_content.google.thought_signature`, stored in the tool-call's `meta.google.thoughtSignature`)
+  and elides signature-less tool-call/result pairs from foreign history, so Gemini's OpenAI-compatible
+  endpoint works with tools and tolerates mixed-provider sessions. Homes the `ProviderMeta.google`
+  augmentation (the native `google` adapter depends on this package and sees it transitively). Off by
+  default — a plain OpenAI/DeepSeek/ollama endpoint is unaffected.
+
+- **tool-router — working set now grows append-only (better prompt-cache hits).** The windowed working
+  set was ordered by registry (boot-load) order, so discovering a tool that loaded early inserted it
+  mid-block and shifted the tail, invalidating the cached tools prefix every turn. It's now ordered by
+  **adoption** (first reference in the transcript — a call, or the search that revealed it), so a newly
+  discovered tool appends and the already-presented prefix stays byte-stable and keeps caching. No
+  change to *which* tools are presented, only their stable wire order.
 
 - **skills_compiler — codegen now sees the tool contracts it typechecks against, and demonstrations
   can prompt the user.** The derived `matbot-tools.d.ts` (live-registry tool/service contracts) was

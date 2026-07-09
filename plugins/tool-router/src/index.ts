@@ -116,6 +116,29 @@ function keepByRecency(messages: readonly Message[], wsNames: ReadonlySet<string
   }
   return new Set(order.slice(0, k));
 }
+// First-reference order of each tool across the transcript (a tool CALL, or a search that REVEALED it),
+// as a monotonic rank. Ordering the working set by this makes it grow APPEND-ONLY: an earlier-adopted tool
+// keeps its slot forever and a newly-adopted one lands at the end, so the tools prefix stays byte-stable
+// across turns and keeps caching. Registry order does NOT achieve this — a late-adopted but early-loaded
+// tool inserts mid-block and shifts the tail, busting the prefix. The transcript is append-only, so a past
+// tool's rank never changes.
+function firstSeenOrder(messages: readonly Message[]): Map<string, number> {
+  const seen = new Map<string, number>();
+  let rank = 0;
+  const mark = (n: string): void => { if (!seen.has(n)) seen.set(n, rank++); };
+  const searchIds = new Set<string>();
+  for (const m of messages) for (const c of m.content) {
+    if (c.type === 'tool-call') { if (c.name === SEARCH) searchIds.add(c.id); else mark(c.name); }
+    else if (c.type === 'tool-result' && searchIds.has(c.id)) {
+      const found = (c.result as { found?: unknown } | null)?.found;
+      if (Array.isArray(found)) for (const f of found) {
+        const n = (f as { name?: unknown } | null)?.name;
+        if (typeof n === 'string') mark(n);
+      }
+    }
+  }
+  return seen;
+}
 function queryOf(input: unknown): string {
   return input && typeof input === 'object' && typeof (input as { query?: unknown }).query === 'string'
     ? (input as { query: string }).query : '';
@@ -342,7 +365,12 @@ searching over declining or improvising.`,
             // Threshold cull: over CULL_TRIGGER, cut HARD to CULL_TARGET by turn-distance recency. A threshold
             // (not per-call trimming) triggers it, so the set is stable — hence cache-friendly — between culls.
             const keep = wsNames.size > CULL_TRIGGER ? keepByRecency(msgs, wsNames, CULL_TARGET) : wsNames;
-            let ws = candidates.filter(t => keep.has(t.name));       // registry order → stable prefix
+            // Order by adoption (first-seen), NOT registry order: growth then appends, so discovering a new
+            // tool leaves the already-presented prefix byte-identical and it keeps caching. Registry order
+            // would insert an early-loaded tool mid-block and shift the tail, busting the prefix every turn.
+            const seen = firstSeenOrder(msgs);
+            let ws = candidates.filter(t => keep.has(t.name))
+              .sort((a, b) => (seen.get(a.name) ?? Number.MAX_SAFE_INTEGER) - (seen.get(b.name) ?? Number.MAX_SAFE_INTEGER));
             if (EAGER_FILL) {
               // A/B: also pre-rank THIS message and fold in the BM25-top NEW tools, so an obvious tool needs
               // no search round-trip. Full specs come from the registry, so it composes with lean search.

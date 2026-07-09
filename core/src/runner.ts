@@ -1,5 +1,5 @@
 import type {
-  Session, MessageContent, Usage,
+  Session, MessageContent, Usage, ProviderMeta,
   PipelineEvent, RunConfig, ProviderAdapter, ProviderConfig,
   Tool, ToolRegistry, ToolContext, Store, FileStore, SystemContextRegistry, Vault, PromptFn, FormField,
 } from './types.js';
@@ -138,7 +138,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
       return;
     }
 
-    const pendingCalls: Array<{ id: string; name: string; input: unknown }> = [];
+    const pendingCalls: Array<{ id: string; name: string; input: unknown; meta?: ProviderMeta }> = [];
     const assistantParts: MessageContent[] = [];
     let textAcc = '';
     let turnUsage: Usage | undefined;
@@ -187,7 +187,8 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
             assistantParts.push({ type: 'reasoning', reasoning: ev.reasoning });
             break;
           case 'tool-call':
-            pendingCalls.push({ id: ev.id, name: ev.name, input: ev.input });
+            pendingCalls.push({ id: ev.id, name: ev.name, input: ev.input,
+              ...(ev.meta !== undefined ? { meta: ev.meta } : {}) });
             break;
           case 'usage':
             turnUsage = addUsage(turnUsage, ev);
@@ -221,7 +222,8 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
     // Build and store assistant message
     if (textAcc)           assistantParts.push({ type: 'text', text: textAcc });
     for (const tc of pendingCalls) {
-      assistantParts.push({ type: 'tool-call', id: tc.id, name: tc.name, input: tc.input });
+      assistantParts.push({ type: 'tool-call', id: tc.id, name: tc.name, input: tc.input,
+        ...(tc.meta !== undefined ? { meta: tc.meta } : {}) });
     }
 
     if (assistantParts.length > 0) {

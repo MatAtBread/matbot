@@ -1,5 +1,13 @@
 import type { Message, Tool, JSONSchema } from '@matatbread/matbot-plugin-api';
 
+// Gemini 3 thought signatures ride on a tool-call's `ProviderMeta`, namespaced under `google`. Homed in
+// THIS package (not the native @matatbread/matbot-provider-google adapter) because both surfaces round-
+// trip them — this OpenAI-compat gemini mode and the native adapter, which depends on this package and so
+// sees the augmentation transitively. Core carries `meta` opaquely; only these two adapters read `google`.
+declare module '@matatbread/matbot-plugin-api' {
+  interface ProviderMeta { google?: { thoughtSignature?: string } }
+}
+
 // ── Internal OpenAI API types ─────────────────────────────────────────────────
 
 type OAIRole    = 'system' | 'user' | 'assistant' | 'tool';
@@ -22,12 +30,30 @@ interface OAIToolCall {
   id:       string;
   type:     'function';
   function: { name: string; arguments: string };
+  // Gemini-only WIRE shape (snake_case, per Google's OpenAI-compat spec): the round-tripped thought
+  // signature. Written by `toOAIMessages` in gemini mode, translated from the tool-call's neutral
+  // `meta.google.thoughtSignature`; never sent to other OpenAI-compatible providers.
+  extra_content?: { google: { thought_signature: string } };
 }
 
 export interface OAIToolDef {
   type:     'function';
   function: { name: string; description: string; parameters: JSONSchema };
   cache_control?: CacheControl;
+}
+
+// A foreign (non-Gemini) tool call can't be replayed to Gemini as a native functionCall — it lacks the
+// mandatory thought signature. Rather than eliding it (which drops the facts the tool returned and invites
+// confabulation), the gemini renderers degrade the call+result to this plain-text context note, emitted at
+// the result's position. Lossy — prose, not a real tool exchange the model can chain from — but the
+// substance survives. Args/result are clipped so a chatty tool doesn't balloon every subsequent turn (the
+// note rides in context on every future turn). Shared so the native and OpenAI-compat renderers agree.
+export function foreignToolNote(name: string, args: unknown, result: unknown): string {
+  const clip = (v: unknown, max: number): string => {
+    const s = JSON.stringify(v ?? null) ?? 'null';
+    return s.length > max ? `${s.slice(0, max)}…(+${s.length - max} chars)` : s;
+  };
+  return `[Earlier tool call — ${name}(${clip(args, 400)}) → ${clip(result, 2000)}]`;
 }
 
 // ── Message conversion ────────────────────────────────────────────────────────
@@ -59,8 +85,24 @@ function applyCacheBreakpoints(result: OAIMessage[]): void {
   if (userTurns.length >= 2) markCacheable(result[userTurns[userTurns.length - 2]!]!);
 }
 
-export function toOAIMessages(messages: Message[], cache = false): OAIMessage[] {
+export function toOAIMessages(messages: Message[], cache = false, geminiMode = false): OAIMessage[] {
   const result: OAIMessage[] = [];
+
+  // Gemini rejects any historical functionCall lacking a thought_signature. A call produced by another
+  // provider — or before gemini mode was on — has none, so in gemini mode we can't replay it as a native
+  // call: the call itself is elided, and its paired tool-result is degraded to a text context note (see
+  // `foreignToolNote`) at the result's position rather than dropped, so the facts survive. (A call kept
+  // here always has a signature, so emission below is unconditional for the survivors.)
+  const dropIds = new Set<string>();
+  const foreignCall = new Map<string, { name: string; args: unknown }>();
+  if (geminiMode) {
+    for (const m of messages)
+      for (const c of m.content)
+        if (c.type === 'tool-call' && c.meta?.google?.thoughtSignature === undefined) {
+          dropIds.add(c.id);
+          foreignCall.set(c.id, { name: c.name, args: c.input });
+        }
+  }
 
   for (const msg of messages) {
     if (msg.role === 'system') {
@@ -75,6 +117,12 @@ export function toOAIMessages(messages: Message[], cache = false): OAIMessage[] 
     if (msg.role === 'tool') {
       for (const c of msg.content) {
         if (c.type === 'tool-result') {
+          if (dropIds.has(c.id)) {
+            // its tool-call was elided — degrade the pair to a text context note instead of dropping it
+            const fc = foreignCall.get(c.id);
+            if (fc) result.push({ role: 'user', content: foreignToolNote(fc.name, fc.args, c.result) });
+            continue;
+          }
           result.push({
             role:         'tool',
             tool_call_id: c.id,
@@ -90,7 +138,7 @@ export function toOAIMessages(messages: Message[], cache = false): OAIMessage[] 
 
     if (msg.role !== 'user' && msg.role !== 'assistant') continue;
 
-    const toolCalls = msg.content.filter(c => c.type === 'tool-call');
+    const toolCalls = msg.content.filter(c => c.type === 'tool-call' && !dropIds.has(c.id));
     const parts     = msg.content.filter(c => c.type !== 'tool-call');
 
     const contentParts: OAIContentPart[] = parts.flatMap((c): OAIContentPart[] => {
@@ -132,11 +180,18 @@ export function toOAIMessages(messages: Message[], cache = false): OAIMessage[] 
     if (toolCalls.length > 0) {
       oaiMsg.tool_calls = toolCalls.map(c => {
         if (c.type !== 'tool-call') return null!;
-        return {
+        const call: OAIToolCall = {
           id:       c.id,
           type:     'function' as const,
           function: { name: c.name, arguments: JSON.stringify(c.input) },
         };
+        // Survivors in gemini mode always carry a signature (the rest were elided into dropIds); echo
+        // it back so Gemini accepts the replayed call. Never emitted for other providers.
+        const sig = c.meta?.google?.thoughtSignature;
+        if (geminiMode && sig !== undefined) {
+          call.extra_content = { google: { thought_signature: sig } };
+        }
+        return call;
       }).filter(Boolean);
     }
 

@@ -28,6 +28,9 @@ interface OAIDelta {
     index:    number;
     id?:      string;
     function?: { name?: string; arguments?: string };
+    // Gemini 3's OpenAI-compat surface hangs a "thought signature" here that must be echoed back on
+    // replay or the next request 400s. Absent on every other OpenAI-compatible provider.
+    extra_content?: { google?: { thought_signature?: string } };
   }>;
 }
 
@@ -38,9 +41,15 @@ interface OAIChunk {
 
 export class OpenAICompatAdapter implements ProviderAdapter {
   readonly name: string;
+  private readonly gemini: boolean;
 
-  constructor(name = 'openai-compat') {
-    this.name = name;
+  // `gemini` opts into Google's OpenAI-compat quirks (see convert.ts): round-tripping Gemini 3 thought
+  // signatures and eliding signature-less tool calls from foreign history. Off by default so the
+  // adapter stays a clean generic OpenAI/DeepSeek/ollama client. The @matatbread/matbot-provider-google
+  // variant constructs it with `gemini: true`.
+  constructor(name = 'openai-compat', opts: { gemini?: boolean } = {}) {
+    this.name   = name;
+    this.gemini = opts.gemini ?? false;
   }
 
   complete(
@@ -63,11 +72,16 @@ export class OpenAICompatAdapter implements ProviderAdapter {
     // Opt-in prompt caching (Anthropic-style breakpoints, e.g. via OpenRouter). Off by default so a
     // plain OpenAI / ollama endpoint never receives `cache_control` it can't parse.
     const cache    = config.parameters?.['promptCache'] === true;
+    // Gemini mode (from the provider variant, or an explicit per-config override) turns on Google's
+    // OpenAI-compat tool quirks in convert.ts. Capturing signatures is always safe (no other provider
+    // emits them); this gate only governs what we send back on replay, so a mid-session switch to a
+    // non-Gemini provider renders clean OpenAI wire.
+    const geminiMode = this.gemini || config.parameters?.['gemini'] === true;
 
     const body: Record<string, unknown> = {
       model:    config.model,
       [tokenLimitParam(config)]: config.parameters?.maxTokens ?? DEFAULT_MAX_TOKENS,
-      messages:       toOAIMessages(messages, cache),
+      messages:       toOAIMessages(messages, cache, geminiMode),
       stream:         true,
       stream_options: { include_usage: true },
     };
@@ -98,7 +112,7 @@ export class OpenAICompatAdapter implements ProviderAdapter {
     }
 
     // Accumulate streaming tool call arguments and reasoning per index
-    const toolAccum    = new Map<number, { id: string; name: string; args: string }>();
+    const toolAccum    = new Map<number, { id: string; name: string; args: string; sig?: string }>();
     let reasoningAcc = '';
     // Diagnostic state: did the model emit anything, and how did it finish? Used to surface a
     // genuinely empty completion (e.g. an Azure content filter, or a provider returning a bare stop)
@@ -144,17 +158,20 @@ export class OpenAICompatAdapter implements ProviderAdapter {
       if ((delta.tool_calls?.length ?? 0) > 0) sawAny = true;
 
       for (const tc of delta.tool_calls ?? []) {
+        const sig = tc.extra_content?.google?.thought_signature;
         const acc = toolAccum.get(tc.index);
         if (!acc) {
           toolAccum.set(tc.index, {
             id:   tc.id   ?? '',
             name: tc.function?.name ?? '',
             args: tc.function?.arguments ?? '',
+            ...(sig ? { sig } : {}),
           });
         } else {
           if (tc.id)                       acc.id   = tc.id;
           if (tc.function?.name)           acc.name = tc.function.name;
           if (tc.function?.arguments)      acc.args += tc.function.arguments;
+          if (sig)                         acc.sig  = sig;
         }
       }
 
@@ -169,7 +186,8 @@ export class OpenAICompatAdapter implements ProviderAdapter {
         let truncatedTool: { name: string; bytes: number } | undefined;
         for (const [, call] of toolAccum) {
           try {
-            yield { type: 'tool-call', id: call.id, name: call.name, input: JSON.parse(call.args || '{}') };
+            yield { type: 'tool-call', id: call.id, name: call.name, input: JSON.parse(call.args || '{}'),
+            ...(call.sig ? { meta: { google: { thoughtSignature: call.sig } } } : {}) };
           } catch {
             truncatedTool ??= { name: call.name, bytes: call.args.length };
           }
@@ -194,7 +212,8 @@ export class OpenAICompatAdapter implements ProviderAdapter {
       let truncatedTool: { name: string; bytes: number } | undefined;
       for (const [, call] of toolAccum) {
         try {
-          yield { type: 'tool-call', id: call.id, name: call.name, input: JSON.parse(call.args || '{}') };
+          yield { type: 'tool-call', id: call.id, name: call.name, input: JSON.parse(call.args || '{}'),
+            ...(call.sig ? { meta: { google: { thoughtSignature: call.sig } } } : {}) };
         } catch {
           truncatedTool ??= { name: call.name, bytes: call.args.length };
         }

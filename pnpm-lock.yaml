@@ -38,6 +38,9 @@ importers:
       '@matatbread/matbot-provider-customer-services':
         specifier: workspace:^
         version: link:../../plugins/providers/customer-services
+      '@matatbread/matbot-provider-google':
+        specifier: workspace:^
+        version: link:../../plugins/providers/google
       '@matatbread/matbot-provider-openai-compat':
         specifier: workspace:^
         version: link:../../plugins/providers/openai-compat
@@ -331,6 +334,22 @@ importers:
 
   plugins/providers/customer-services:
     devDependencies:
+      '@matatbread/matbot-plugin-api':
+        specifier: workspace:^
+        version: link:../../../plugin-api
+      typescript:
+        specifier: 'catalog:'
+        version: 6.0.3
+
+  plugins/providers/google:
+    dependencies:
+      '@matatbread/matbot-provider-openai-compat':
+        specifier: workspace:^
+        version: link:../openai-compat
+    devDependencies:
+      '@matatbread/matbot-core':
+        specifier: workspace:^
+        version: link:../../../core
       '@matatbread/matbot-plugin-api':
         specifier: workspace:^
         version: link:../../../plugin-api

@@ -557,6 +557,7 @@ interface ProviderPackage { type: string; name: string; dir: string; }
 const BUNDLED_PROVIDERS = [
   '@matatbread/matbot-provider-anthropic',
   '@matatbread/matbot-provider-openai-compat',
+  '@matatbread/matbot-provider-google',
   '@matatbread/matbot-provider-customer-services',
 ];
 

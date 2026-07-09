@@ -62,9 +62,30 @@ export interface UsageRecord {
   usage:    Usage;
 }
 
+/**
+ * Opaque, provider-specific round-trip metadata attached to a tool-call — captured from a completion,
+ * persisted, and re-sent verbatim when the call is replayed in history (e.g. a Gemini 3 "thought
+ * signature", which every historical `functionCall` must carry or the request 400s). The harness never
+ * interprets it: it stores, renders, or elides it. Empty by default — a provider package augments its
+ * OWN slice from its own module (namespaced by provider family, so slices from different providers in a
+ * mixed-provider session never collide), so adding a provider that needs round-trip state touches NO
+ * core code:
+ *
+ *   declare module '@matatbread/matbot-plugin-api' {
+ *     interface ProviderMeta { google?: { thoughtSignature?: string } }
+ *   }
+ *
+ * A single session interleaves tool-calls from many providers, so this must be an open, additive union
+ * (interface augmentation) — a generic type parameter can bind only one provider per instantiation and
+ * so could not type a heterogeneous transcript.
+ */
+export interface ProviderMeta {}
+
 export type CompletionEvent =
   | { type: 'text-delta';          delta: string }
-  | { type: 'tool-call';           id: string; name: string; input: unknown }
+  | { type: 'tool-call';           id: string; name: string; input: unknown;
+      /** Provider-specific round-trip metadata for this call, opaque to the harness — see `ProviderMeta`. */
+      meta?: ProviderMeta }
   | { type: 'tool-result';         id: string; result: unknown }
   | { type: 'thinking';            delta: string }
   | { type: 'thinking-block';      thinking: string; signature: string }
@@ -99,7 +120,10 @@ export type MessageContent = (
   | { type: 'image-url';         url: string; detail?: 'low' | 'high' | 'auto' }
   | { type: 'document';          data: string; mimeType: MimeType; name?: string }
   | { type: 'audio';             data: string; mimeType: MimeType }
-  | { type: 'tool-call';         id: string; name: string; input: unknown }
+  | { type: 'tool-call';         id: string; name: string; input: unknown;
+      /** Provider-specific round-trip metadata, persisted and re-sent verbatim on replay — see
+       *  `ProviderMeta` and the `tool-call` `CompletionEvent`. */
+      meta?: ProviderMeta }
   | { type: 'tool-result';       id: string; result: unknown; isError?: boolean;
       /**
        * Accounting addendum: completions the tool itself ran (e.g. `single_turn`, `dream_time`'s ranker/

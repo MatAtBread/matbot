@@ -50,6 +50,12 @@
       "modelHint": "deepseek-chat"
     },
     {
+      "label": "Google Gemini (native generateContent)",
+      "module": "plugins/providers/google",
+      "endpointHint": "https://generativelanguage.googleapis.com/v1beta",
+      "modelHint": "gemini-3.1-flash-lite"
+    },
+    {
       "label": "Customer Services (free demo LLM — no endpoint or API key needed)",
       "module": "plugins/providers/customer-services",
       "modelHint": "customer-services",

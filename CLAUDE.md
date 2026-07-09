@@ -54,7 +54,8 @@ plugins/
       telegram/    — Telegram bot frontend
     providers/
       anthropic/   — Anthropic Messages API adapter
-      openai-compat/— OpenAI-compatible adapter
+      openai-compat/— OpenAI-compatible adapter (+ opt-in `gemini` mode)
+      google/      — Google Gemini adapter (native generateContent; OpenAI-compat fallback by endpoint path)
     tools/
       bash/, docker-bash/, http/, schedule/, workspace/
     storage/
@@ -96,6 +97,8 @@ providers:
 - `${NAME}` resolved by `Vault` at runtime (flat namespace; `.env` is default node backend)
 - Credentials never in source code
 - Built-in `provider` tool adds/removes profiles live
+
+**Provider round-trip metadata (`ProviderMeta`).** Some providers require an opaque token to be echoed back verbatim when a tool-call is replayed in history — e.g. Gemini 3 "thought signatures", mandatory on every historical `functionCall` or the request 400s. This rides on a tool-call's `meta?: ProviderMeta` (on both `CompletionEvent` and `MessageContent`). `ProviderMeta` is an empty, **augmentable** interface (same idiom as `MatbotServices`/`MarkerData`): a provider package declares its own namespaced slice from its own module (`interface ProviderMeta { google?: { thoughtSignature?: string } }`), so core carries `meta` opaquely — stores, renders, or elides it — and **never changes when a provider adds round-trip state**. It's interface augmentation, not a generic parameter, because one session interleaves tool-calls from many providers. An adapter replays a token only when the message that produced it came from the *current* provider (a foreign token is elided/degraded, never posted into a slot it doesn't belong in).
 
 ---
 
