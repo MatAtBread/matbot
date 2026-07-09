@@ -47,6 +47,7 @@
     "@matatbread/matbot-storage-filesystem": "workspace:^",
     "@matatbread/matbot-tool-plugin": "workspace:^",
     "@matatbread/matbot-provider-anthropic": "workspace:^",
+    "@matatbread/matbot-provider-claude-code": "workspace:^",
     "@matatbread/matbot-provider-openai-compat": "workspace:^",
     "@matatbread/matbot-provider-customer-services": "workspace:^"
   },

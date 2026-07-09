@@ -35,6 +35,9 @@ importers:
       '@matatbread/matbot-provider-anthropic':
         specifier: workspace:^
         version: link:../../plugins/providers/anthropic
+      '@matatbread/matbot-provider-claude-code':
+        specifier: workspace:^
+        version: link:../../plugins/providers/claude-code
       '@matatbread/matbot-provider-customer-services':
         specifier: workspace:^
         version: link:../../plugins/providers/customer-services

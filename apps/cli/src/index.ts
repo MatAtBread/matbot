@@ -556,6 +556,7 @@ interface ProviderPackage { type: string; name: string; dir: string; }
 // the monorepo (workspace symlinks). A user can `plugin add` other providers after setup.
 const BUNDLED_PROVIDERS = [
   '@matatbread/matbot-provider-anthropic',
+  '@matatbread/matbot-provider-claude-code',
   '@matatbread/matbot-provider-openai-compat',
   '@matatbread/matbot-provider-customer-services',
 ];
