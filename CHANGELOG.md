@@ -425,6 +425,20 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Optional
 
+- **New provider `@matatbread/matbot-provider-claude-code` — run inference on a Claude subscription via
+  the local Claude Code CLI.** A node-only `ProviderAdapter` that drives `claude -p` as a single-turn
+  structured completion, so tokens are billed to whatever the CLI is logged in as — a Claude Pro/Max
+  subscription (`claude setup-token`, OAuth, no API key) or an API key. matbot keeps the agentic loop and
+  executes every tool through its own registry + hooks; the CLI executes nothing. This is possible because
+  the subscription is only reachable through the agent (which always runs any tool it calls natively), so
+  the adapter constrains each turn with `--json-schema` to emit *either* a tool-call intent *or* a final
+  answer as data — never a native `tool_use` — which matbot's runner then acts on. Trade-off vs. the native
+  Anthropic provider: structured/prompt tool-calling rather than native `tool_use` (slightly lower fidelity
+  on tool selection and no token-by-token streaming of the final answer). Configure with a `matbot.yaml`
+  provider block (`module: '@matatbread/matbot-provider-claude-code'`, `model: opus|sonnet|haiku|<full-id>`,
+  optional `parameters.effort`); no credentials needed when the CLI is already logged in. See the plugin
+  README.
+
 - **skills_compiler — codegen now sees the tool contracts it typechecks against, and demonstrations
   can prompt the user.** The derived `matbot-tools.d.ts` (live-registry tool/service contracts) was
   written to disk for `tsc` only; the generation prompts merely asserted it existed, so a model wrote

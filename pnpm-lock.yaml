@@ -329,6 +329,18 @@ importers:
         specifier: 'catalog:'
         version: 6.0.3
 
+  plugins/providers/claude-code:
+    devDependencies:
+      '@matatbread/matbot-plugin-api':
+        specifier: workspace:^
+        version: link:../../../plugin-api
+      '@types/node':
+        specifier: 'catalog:'
+        version: 22.19.19
+      typescript:
+        specifier: 'catalog:'
+        version: 6.0.3
+
   plugins/providers/customer-services:
     devDependencies:
       '@matatbread/matbot-plugin-api':
