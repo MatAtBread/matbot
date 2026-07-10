@@ -36,7 +36,7 @@ export function createRumsfeldPlugin(): MatbotPluginSpec {
 
       services.tools.register({
         name:        'contextual_search',
-        description: `Load context for an unknown concept, system, term, or entity — returns a whole knowledge document to read.
+        description: `Load context for an unknown concept, system, term, or entity - returns a whole knowledge document to read.
 
       For a single specific fact (a city, a URL, a date) rather than a document, use find_fact instead.
 
@@ -47,7 +47,7 @@ export function createRumsfeldPlugin(): MatbotPluginSpec {
         - <unknown> said to <unknown> that <unknown> is broken.
         - The <unknown> is arriving for <unknown>'s birthday.
 
-      Use when you encounter an "unknown" concept, system, term, entity, person or domain you lack specific context about — a named system you haven't
+      Use when you encounter an "unknown" concept, system, term, entity, person or domain you lack specific context about - a named system you haven't
       been trained on, user-specific preferences, personal information, a specialised topic or other subject the user assumes you know about.
 
       Use this tool early and as a higher priority than external searches as it is more likely to yield domain specific results than a general search.
@@ -60,8 +60,8 @@ export function createRumsfeldPlugin(): MatbotPluginSpec {
       - when the user directly uses the term 'skill' in their query, for example "Use your skill about <unknown> to do <unknown>".
       - Deictic words such as "here", "there", "the other one", "home" which imply contextual knowledge, but none was present.
 
-      Each term must be SPECIFIC enough to identify a particular thing — a proper noun, a named system, or a personal identifier. Strip qualifiers from a named entity ("my Volvo" → "Volvo"; "Fred's car" → "Fred" and "car" as separate terms), but do NOT collapse a query down to a bare generic noun: searching a common word like "location", "weather" or "car" on its own matches any document that merely discusses that topic — including procedures about it — rather than the specific fact you need.
-      When the unknown is deictic or self-referential — "here", "home", "where am I?", "my location" — the thing you actually lack context about is the USER, not the common noun. Search for the user's own identifier (their name if you know it, otherwise terms like "user", "profile", "home") so you retrieve their stored personal facts, not material that merely mentions the concept.
+      Each term must be SPECIFIC enough to identify a particular thing - a proper noun, a named system, or a personal identifier. Strip qualifiers from a named entity ("my Volvo" → "Volvo"; "Fred's car" → "Fred" and "car" as separate terms), but do NOT collapse a query down to a bare generic noun: searching a common word like "location", "weather" or "car" on its own matches any document that merely discusses that topic - including procedures about it - rather than the specific fact you need.
+      When the unknown is deictic or self-referential - "here", "home", "where am I?", "my location" - the thing you actually lack context about is the USER, not the common noun. Search for the user's own identifier (their name if you know it, otherwise terms like "user", "profile", "home") so you retrieve their stored personal facts, not material that merely mentions the concept.
       Always include the contextual phrase or sentence each term was mentioned in.`,
         inputSchema: {
           type:     'object',
@@ -124,19 +124,19 @@ export function createRumsfeldPlugin(): MatbotPluginSpec {
           const res = await services.singleTurn({
             provider,
             system: `Answer the specific question below using ONLY the supplied knowledge entries.
-Extract the precise fact or facts that answers the question. Don't include narrative or contextual infomation or repeat the question form, just the bare answer.
-Multiple answers are permitted. If the supplied entries do not contain it, return \`null\` for the result.
-Never guess, infer, or fall back on outside knowledge to answer the question - the source of the answer must be in the supplied entries.
-Reply with JSON only, no prose: {"result": Array<{"fact": string, "source": string}> | null}
-"fact" contains only the concise answer, not any surrounding text or context - only the fact that answers the question.
-"source" is the heading of the entry it came from.`,
+Extract the precise fact(s) that answer the question. Return ONLY the bare answer - no narrative, no context, no prose,
+never copy the original entry text if it contains more than the answer.
+Multiple answers are permitted and each MUST be a separate array element.
+If the supplied entries do not contain a factual answer to the question, return \`null\` for the result.
+Never guess, infer, or fall back on outside knowledge - the source must be in the supplied entries.
+Reply with JSON only, no prose: {"result": {"fact": string, "source": string}[] | null}`,
             prompt: `Question: ${question}\n\n--- KNOWLEDGE ENTRIES ---\n${knowledgeEntries}\n--- END KNOWLEDGE ENTRIES ---`,
             signal: ctx.signal,
           });
 
           try {
             const m = res.text.match(/\{[\s\S]*\}/);
-            const parsed = m ? JSON.parse(m[0]) as {"result": Array<{"fact": string, "source": string}> | null} : null;
+            const parsed = m ? JSON.parse(m[0]) as {"result": {"fact": string, "source": string}[] | null} : null;
             if (parsed?.result?.length) {
               yield {
                 type: 'result',
@@ -144,7 +144,7 @@ Reply with JSON only, no prose: {"result": Array<{"fact": string, "source": stri
               };
               return;
             }
-          } catch { /* unparseable — treat as not found */ }
+          } catch { /* unparseable - treat as not found */ }
 
           yield { type: 'result', value: null };
           return ;
@@ -153,11 +153,11 @@ Reply with JSON only, no prose: {"result": Array<{"fact": string, "source": stri
 
       services.tools.register({
         name: 'find_fact',
-        description: `Retrieve a fact from stored knowledge — whatever the knowledge index happens to hold. Its contents are open-ended: personal details, a system's URL, a configured threshold, someone's birthday, domain-specific knowledge — or anything else that has been stored. Whenever a request turns on some fact that might be recorded, this can likely answer it.
+        description: `Retrieve a fact from stored knowledge - whatever the knowledge index happens to hold. Its contents are open-ended: personal details, a system's URL, a configured threshold, someone's birthday, domain-specific knowledge - or anything else that has been stored. Whenever a request turns on some fact that might be recorded, this can likely answer it.
 
-Use this, not contextual_search, when you want the precise answer rather than a whole document to read. It searches the index, reads across the best matches (the fact may not be in the top-ranked entry), and returns just the answers as an array of strings — or null if the knowledge doesn't contain it. It never invents an answer.
+Use this, not contextual_search, when you want the precise answer rather than a whole document to read. It searches the index, reads across the best matches (the fact may not be in the top-ranked entry), and returns just the answers as an array of strings - or null if the knowledge doesn't contain it. It never invents an answer.
 
-Provide "question" (the fact sought, e.g. "the user's home city") and "terms" (specific search keys that locate it — proper nouns, named systems, or personal identifiers; for a personal or deictic fact, search the user's name or "user"/"profile", not a bare generic noun). Returns string[] or null`,
+Provide "question" (the fact sought, e.g. "the user's home city") and "terms" (specific search keys that locate it - proper nouns, named systems, or personal identifiers; for a personal or deictic fact, search the user's name or "user"/"profile", not a bare generic noun). Returns string[] or null`,
         inputSchema: {
           type: 'object',
           required: ['question', 'terms'],
