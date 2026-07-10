@@ -124,7 +124,8 @@ export function createRumsfeldPlugin(): MatbotPluginSpec {
           const res = await services.singleTurn({
             provider,
             system: `Answer the specific question below using ONLY the supplied knowledge entries.
-Extract the precise fact or facts that answers the question. Multiple answers are permitted. If the supplied entries do not contain it, return \`null\` for the result.
+Extract the precise fact or facts that answers the question. Don't include narrative or contextual infomation or repeat the question form, just the bare answer.
+Multiple answers are permitted. If the supplied entries do not contain it, return \`null\` for the result.
 Never guess, infer, or fall back on outside knowledge to answer the question - the source of the answer must be in the supplied entries.
 Reply with JSON only, no prose: {"result": Array<{"fact": string, "source": string}> | null}
 "fact" contains only the concise answer, not any surrounding text or context - only the fact that answers the question.
