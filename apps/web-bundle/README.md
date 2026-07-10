@@ -26,7 +26,7 @@ pnpm web-server    # → http://localhost:9778/
 ```
 
 On first launch a setup form asks for the **full provider config** — a name, the adapter type
-(Anthropic- or OpenAI-compatible), the endpoint URL, the model, and the API key — and persists it
+(Anthropic-compatible, OpenAI-compatible, or Google Gemini), the endpoint URL, the model, and the API key — and persists it
 (config in `localStorage`, key in the vault). No OpenAI/Anthropic account needed: point it at
 DeepSeek, Azure, a local server, or anything compatible. The header's provider dropdown has a
 **＋ Add provider…** entry to configure more later.
@@ -71,13 +71,14 @@ The web defaults are plugins, never core packages. The **auto-load core** (`matb
   bundle swaps this for **`@matatbread/matbot-frontend-dom`**, a minimal ~450-line demonstrator.)
 
 Everything else browser-safe — `http`, `ask-user`, `sessions`, `edit-session`, `workspace`,
-`rumsfeld`, `skills`, `mcp-http`, `whoami`, `hook-logger`, `persist-ki-bge`, `json-validation`,
-`tool-store`, and `cognition` — is **baked-but-idle** (`bundledPlugins`): in the artifact and the
+`rumsfeld`, `triggers`, `skills`, `mcp-http`, `whoami`, `hook-logger`, `persist-ki-bge`,
+`json-validation`, `tool-store`, `function-tools`, `tool-router`, `cognition`, and the
+`storage/google-drive` backend — is **baked-but-idle** (`bundledPlugins`): in the artifact and the
 import map but not auto-loaded, offered via the `plugin` tool's `discover_local` and loaded on demand
-by package name (which persists across reloads). The provider adapters (anthropic / openai-compat —
-pure `fetch`) are inlined as wizard-selectable *types* rather than pre-configured providers —
-including **customer-services**, a free self-contained demo LLM the wizard offers with no endpoint or
-API key required (zero-config first run). Node-only plugins (`bash`, `docker-bash`, the stdio `mcp`
+by package name (which persists across reloads). The provider adapters (anthropic / openai-compat /
+google Gemini — pure `fetch`) are inlined as wizard-selectable *types* rather than pre-configured
+providers — including **customer-services**, a free self-contained demo LLM the wizard offers with no
+endpoint or API key required (zero-config first run). Node-only plugins (`bash`, `docker-bash`, the stdio `mcp`
 plugin, `skills-node`, the node web frontend's server entry) are omitted — they need Node primitives.
 Note the MCP split: the stdio `@matatbread/matbot-tool-mcp` is Node-only, but the cross-runtime
 `@matatbread/matbot-mcp-http` (HTTP/SSE servers) *is* bundled. Likewise the base `skills` plugin is

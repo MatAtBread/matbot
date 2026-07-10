@@ -71,10 +71,11 @@ No providers configured. Let's set one up.
 
 Available provider types:
   1. anthropic  (@matatbread/matbot-provider-anthropic)
-  2. customer-services  (@matatbread/matbot-provider-customer-services)
-  3. openai-compat  (@matatbread/matbot-provider-openai-compat)
+  2. openai-compat  (@matatbread/matbot-provider-openai-compat)
+  3. google  (@matatbread/matbot-provider-google)
+  4. customer-services  (@matatbread/matbot-provider-customer-services)
 
-Choose a type [1-3]: 1
+Choose a type [1-4]: 1
 Provider name: deepseek
 Model name: deepseek-v4-flash
 Endpoint URL: https://api.deepseek.com/anthropic
@@ -83,7 +84,7 @@ API key: ************************************
 Configuration written to ~/matbot/matbot.yaml
 ```
 
-> **No API key?** Try option 2 — `customer-services` is a free built-in provider that
+> **No API key?** Try option 4 — `customer-services` is a free built-in provider that
 > needs no endpoint or API key. It's not a real LLM, but it's useful for testing your
 > setup.
 
@@ -220,6 +221,7 @@ explicit `plugins:` entry.
 | `--prompt-file <path>` | Read the prompt from a file; runs a single turn and exits |
 | `--principal <id\|json>` | Boot identity: a bare id (type `user`) or JSON `{"id","type"}`. Overrides `MATBOT_PRINCIPAL` and the config `principal:` |
 | `--help` | Show help and exit |
+| `--version`, `-v` | Print the version banner and exit |
 
 ---
 
@@ -232,11 +234,16 @@ With the default filesystem storage backend, all runtime state lives in `.data/`
 .data/
   sessions/    — session store (only created when persistence is active)
   settings/    — per-plugin key-value settings
+  skills/      — skill documents (skills plugin)
+  triggers/    — trigger documents (triggers plugin)
   schedules/   — recurring background job definitions (background plugin)
   knowledge/   — KnowledgeIndex entries (persist-ki-bge plugin)
   bash-cwd/    — default working directory for bash tool execution
   files/       — file store blobs; workspace_action writes go here
 ```
+
+Each store namespace becomes its own subdirectory, so plugins add more as needed (e.g. cognition's
+`remembered_facts/` and `dream_runs/`).
 
 The SQLite storage plugin (`@matatbread/matbot-storage-sqlite`) is a drop-in replacement
 that collapses the per-directory filesystem stores into a single `.data/matbot.db` file.
@@ -332,7 +339,8 @@ matbot --session create
 
 The `triggers` plugin fires skills/tools on behavioural conditions (judged by an LLM classifier);
 the `cognition` plugin adds inner-voice critique (the `ask_inner_voice` tool), persistent fact memory
-(`remember_fact`), and background consolidation (`Dream time` skill).
+(`remember_fact`, with a generated `remembered_facts_action` CRUD tool), and background consolidation
+(the `dream_time` tool). It also seeds one skill — Inner Voice.
 
 **No dedicated provider profiles are needed for these.** Each subsystem that consults a model for an
 internal job — the triggers classifier, skills' content analysis, cognition's inner voice — uses the

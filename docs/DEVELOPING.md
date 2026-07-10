@@ -189,33 +189,50 @@ read-write `.data/` tree), so a restart loads from disk rather than re-fetching.
 
 ## Services available in `setup()`
 
-`MatbotServices` is the runtime environment handed to every plugin:
+`setup(services)` receives a `MatbotMachine` — the intersection of two interfaces. **`MatbotRuntime`**
+is the fixed plumbing that is always present and never registerable (`complete`, `createStore`, the
+`hooks`/`tools`/`systemContext`/`providers` registries, plugin lifecycle, the registry API itself).
+**`MatbotServices`** is the swappable, registerable bucket keyed by interface name — the `keyof` domain
+of `register`/`get` and the surface third-party plugins augment (`StorageBackend?`, `KnowledgeIndex`,
+`Vault`, plus what plugins add). Both are read through one member surface:
 
 ```ts
-interface MatbotServices {
+type MatbotMachine = MatbotServices & MatbotRuntime;
+
+// MatbotRuntime — the fixed runtime plumbing (never registerable):
+interface MatbotRuntime {
   complete(req: CompletionRequest): Promise<CompletionResponse>;
+  singleTurn(req: SingleTurnRequest): Promise<CompletionResponse>;   // one-shot prompt convenience over complete()
   settings(): PluginSettings;                       // the calling plugin's own scoped settings
   createStore<T extends { id: string; version: string }>(namespace: string): Store<T>;
-  loadPlugin(specifier: string, prompt?: PromptFn): Promise<MatbotPlugin>;
+  loadPlugin(specifier: string, prompt?: PromptFn, refresh?: boolean): Promise<MatbotPlugin>;
   unloadPlugin(specifier: string): Promise<boolean>;
   register<K extends keyof MatbotServices>(key: K, value: NonNullable<MatbotServices[K]>): Promise<void>;
   get<K extends keyof MatbotServices>(key: K): MatbotServices[K] | undefined;
   registerFrontend(info: FrontendInfo): void;
   isSubAgent(): boolean;
 
-  readonly providers:       ReadonlyMap<string, ProviderConfig>;
+  readonly TypeScriptStripper: TypeScriptStripper;   // host-provided, per-platform TS type-stripper
+  readonly mounted:         Mounted;                 // react to a registry service (re)mounting / unloading
+  readonly providers:       ProviderRegistry;        // named provider profiles (a writable ReadonlyMap)
   readonly sessions?:       Store<Session>;
   readonly run?:            SessionRunner;            // per-session turn serialiser
   readonly self?:           PluginSelf;               // the calling plugin's loader-stamped identity
-  readonly StorageBackend?: StorageBackend | undefined;
-  readonly KnowledgeIndex:  KnowledgeIndex;
   readonly files?:          FileStore;
-  readonly vault:           Vault;
   readonly hooks:           HookRegistry;
   readonly tools:           ToolRegistry;
   readonly systemContext:   SystemContextRegistry;
   readonly workdir?:        string;
   readonly configPath?:     string;
+}
+
+// MatbotServices — the registry bucket (registerable / swappable keys):
+interface MatbotServices {
+  readonly StorageBackend?: StorageBackend | undefined;
+  readonly KnowledgeIndex:  KnowledgeIndex;
+  readonly Vault:           Vault;
+  readonly ToolTypeIndex?:  ToolTypeIndex | undefined;   // node-only; provided by the tool-types plugin
+  readonly ToolPresenter?:  ToolPresenter | undefined;   // per-turn tool-visibility policy (tool-router)
 }
 ```
 
@@ -236,6 +253,11 @@ A few members worth calling out:
   identity — e.g. a frontend's long-poll loop, which would otherwise contend with the foreground
   process on the same upstream connection. The signal is platform-sourced (the Node entry reads it
   from the environment; the browser realm has no sub-agent notion and returns `false`).
+- **`mounted`** (`Mounted`) — subscribe to a registry service (re)mounting or being unloaded. Only
+  needed if your `setup()` reads another service's *current state* to build cached/derived state (e.g.
+  skills/triggers caching the `StorageBackend`'s documents, cognition seeding from the `SkillManager`);
+  a pure map that resolves its dependency per-invocation through the member/proxy subscribes to
+  nothing. See CLAUDE.md's *mount table* for the full contract.
 
 ### Plugin-to-plugin services
 
@@ -371,6 +393,7 @@ const mcpAction: Tool = {
 | `progress` | `pct: number`, `message?: string` | Progress (0–100) |
 | `result` | `value: unknown` | Final result (JSON-serialisable) |
 | `file` | `handle: FileHandle` | Output file reference |
+| `marker` | `creator: string`, `data: unknown` | Emit a durable marker (see [Markers](#markers)) |
 | `error` | `message: string`, `code?: number`, `stdout?: string`, `stderr?: string` | Expected tool error |
 
 Throw only for unexpected failures; yield `{ type: 'error' }` for expected ones.
@@ -691,23 +714,34 @@ Store-backed index with optional Cloudflare BGE reranker.
 | `@matatbread/matbot-tool-mcp` | `mcp_action` | Connect to MCP servers — stdio (local) and remote (delegates to mcp-http); Node only |
 | `@matatbread/matbot-mcp-http` | `mcp_action` | Connect to HTTP/SSE MCP servers (Node + browser) |
 | `@matatbread/matbot-sessions` | `session_action` | Session lifecycle: list, get, rename, hide |
-| `@matatbread/matbot-edit-session` | `session_edit` | Trim, branch, split, and compact sessions |
+| `@matatbread/matbot-edit-session` | `session_edit`, `compact_sessions` | Trim, branch, split, and compact sessions |
+| `@matatbread/matbot-triggers` | `trigger_action`, `triggers_config` (`screen`/`followup` hooks) | Data-driven hooks: stored conditions that invoke a tool when an LLM classifier judges them matched |
 | `@matatbread/matbot-tool-json-validation` | `toolcall` hook | Validate tool inputs against their schema; the model self-corrects on mismatch |
-| `@matatbread/matbot-skills` | `skill_action`, `skill_triggers` | Cross-runtime skill CRUD |
+| `@matatbread/matbot-skills` | `skill_action`, `skills_config` | Cross-runtime skill CRUD (named markdown playbooks) |
 | `@matatbread/matbot-skills-node` | `skill_action` + file watch | Node specialization of `skills`: adds local `.md` import/watch |
-| `@matatbread/matbot-rumsfeld` | `contextual_search` | Resolves unknown terms via the knowledge index |
+| `@matatbread/matbot-tool-skill-compiler` | `skill_compiler` | Compile procedural markdown skills into executable TypeScript tool plugins |
+| `@matatbread/matbot-function-tools` | `tool_function` | Author/run TypeScript functions that compose registered tools in one pass (define persists a named tool; lambda runs once) |
+| `@matatbread/matbot-tool-router` | `ToolPresenter` (`tool_search`) | Serves a bounded per-turn tool window from a large library — pins + BM25-ranked tools + a `tool_search` entry point |
+| `@matatbread/matbot-tool-store` | `store_action` (+ `defineStore`) | Define and expose named persistent stores with generated CRUD tools |
+| `@matatbread/matbot-rumsfeld` | `contextual_search`, `find_fact` | Resolve unknown terms via the knowledge index (`contextual_search` returns a document; `find_fact` returns a precise answer) |
 | `@matatbread/matbot-persist-ki-bge` | knowledge backend | Persistent KnowledgeIndex with optional BGE reranker |
-| `@matatbread/matbot-cognition` | skills + `remembered_facts_action` | Seeds Inner Voice / Remember This / Dream Time skills and a remembered-facts store |
+| `@matatbread/matbot-cognition` | `ask_inner_voice`, `remember_fact`, `dream_time`, `cognition_config` + `remembered_facts_action` | Seeds the Inner Voice skill and a remembered-facts store; inner-voice critique, fact memory, background Dream Time consolidation |
+| `@matatbread/matbot-tool-whoami` | `whoami` | Reports the current Principal |
+| `@matatbread/matbot-tool-types` | `ToolTypeIndex` service · Node only | Derives a `.d.ts` of the loaded tools' result/service types so code generators can type what `tool` calls resolve to |
 | `@matatbread/matbot-hook-logger` | diagnostic hooks | Logs each hook channel firing |
 | `@matatbread/matbot-frontend-web` | frontend | Web UI with session management (HTTP+SSE on Node, in-process in the browser) |
 | `@matatbread/matbot-frontend-dom` | frontend | Minimal in-process browser chat (the `matbot-demo.html` demonstrator) |
-| `@matatbread/matbot-frontend-telegram` | frontend + tools | Telegram bot |
-| `@matatbread/matbot-provider-anthropic` | provider | Anthropic Messages API (+ DeepSeek compat) |
+| `@matatbread/matbot-frontend-telegram` | frontend + tools | Telegram bot (`telegram_send`, `telegram_provider`, `telegram_open_door`) |
+| `@matatbread/matbot-web-principal-user` | `WebPrincipalResolver` | Override the web frontend's request principal with the host OS user (`$USER`) |
+| `@matatbread/matbot-provider-anthropic` | provider | Anthropic Messages API (+ DeepSeek `/anthropic` compat) |
 | `@matatbread/matbot-provider-openai-compat` | provider | OpenAI-compatible chat completions |
+| `@matatbread/matbot-provider-google` | provider | Google Gemini (native `generateContent`; OpenAI-compat fallback by endpoint path) |
 | `@matatbread/matbot-provider-customer-services` | provider | Free built-in demo LLM — no API key needed |
-| `@matatbread/matbot-storage-sqlite` | storage backend | SQLite-backed Store + FileStore |
-| `@matatbread/matbot-tool-store` | `store_action` (+ `defineStore`) | Define and expose named persistent stores |
-| `@matatbread/matbot-tool-whoami` | `whoami` | Reports the current Principal |
+| `@matatbread/matbot-storage-filesystem` | storage backend | Filesystem-backed Store + FileStore (Node; content-addressed, CAS-safe; the CLI's default) |
+| `@matatbread/matbot-storage-sqlite` | storage backend | SQLite-backed Store + FileStore (Node) |
+| `@matatbread/matbot-storage-google-drive` | storage backend | Google Drive-backed Store + FileStore (browser; Google Identity Services auth) |
+| `@matatbread/matbot-browser` | storage + `plugin`/`provider` tools | Browser-native backends: IndexedDB Store, OPFS FileStore, WebCrypto vault, and browser plugin/provider management tools |
+| `@matatbread/matbot-files-node` | `FileStore` | Node filesystem-backed FileStore for MIME-typed blobs, served by the frontend |
 
 ---
 

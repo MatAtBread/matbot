@@ -57,7 +57,7 @@ plugins/
       openai-compat/— OpenAI-compatible adapter (+ opt-in `gemini` mode)
       google/      — Google Gemini adapter (native generateContent; OpenAI-compat fallback by endpoint path)
     tools/
-      bash/, docker-bash/, http/, schedule/, workspace/
+      bash/, docker-bash/, http/, background/, workspace/, ask-user/, whoami/
     storage/
       filesystem/    — FilesystemStore (Node, CAS-safe); CLI boot default
       sqlite/        — SQLite StorageBackend (WAL)
