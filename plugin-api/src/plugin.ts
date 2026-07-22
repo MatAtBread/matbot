@@ -166,10 +166,10 @@ export interface MatbotRuntime {
    * per-invocation through its proxy/member instead.
    *
    *   // cache the backend's documents; rebuild on every swap (own initial load was in setup())
-   *   services.mounted.consume({ key: 'StorageBackend', signal }, () => this.load());
+   *   services.mounted.observe({ key: 'StorageBackend', signal }, () => this.load());
    *
    *   // depend on a peer service that may not be present yet; seed now if it is, and on each (re)mount
-   *   services.mounted.consume({ key: 'SkillManager', replay: true, signal }, m => seed(m));
+   *   services.mounted.observe({ key: 'SkillManager', replay: true, signal }, m => seed(m));
    *
    * Contract guarantees only *eventual, ordered* delivery of each key's net presence transition — it
    * says nothing about timing: a mount may fire synchronously-ish or batch to a later quiescent edge, so
@@ -334,9 +334,11 @@ export interface MountConsumeOptions<K extends keyof MatbotServices> {
   readonly onUnmount?: (machine: MatbotMachine) => void | Promise<void>;
 }
 
-/** The mount-table consumer facet exposed on {@link MatbotRuntime.mounted}. */
+/** The mount-table consumer facet exposed on {@link MatbotRuntime.mounted}. `observe` (not `consume`)
+ *  so the verb `consume` means exactly one thing repo-wide — the detached stream drain on
+ *  {@link Subscribable}; this keyed, replay/onUnmount, edge-batched delivery is its own paradigm. */
 export interface Mounted {
-  consume<K extends keyof MatbotServices>(
+  observe<K extends keyof MatbotServices>(
     options: MountConsumeOptions<K>,
     handler: (machine: MountedMachine<K>) => void | Promise<void>,
   ): void;
@@ -385,7 +387,7 @@ export function createMountTable(getMachine: () => MatbotMachine): MountTable {
   };
 
   const mounted: Mounted = {
-    consume(options, handler) {
+    observe(options, handler) {
       const { key, replay, signal, onUnmount } = options;
       if (signal?.aborted === true) return;
       const interest: MountInterest = {

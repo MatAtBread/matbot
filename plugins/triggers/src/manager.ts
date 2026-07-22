@@ -38,7 +38,7 @@ export class TriggerManager implements Triggers {
     this.services = services;
   }
 
-  /** Ends with the manager (teardown). Hand to `services.mounted.consume` so a StorageBackend swap
+  /** Ends with the manager (teardown). Hand to `services.mounted.observe` so a StorageBackend swap
    *  re-reads the new backend's triggers, and the loop stops when the plugin unloads. */
   get signal(): AbortSignal { return this.lifecycle.signal; }
 

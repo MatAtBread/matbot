@@ -164,10 +164,10 @@ A plugin reacts to a registry service (re)mounting or being unloaded through **`
 ```ts
 // cache the backend's documents; rebuild on every swap (initial load was in setup(), so no replay)
 await manager.load();
-services.mounted.consume({ key: 'StorageBackend', signal: manager.signal }, () => void manager.load());
+services.mounted.observe({ key: 'StorageBackend', signal: manager.signal }, () => void manager.load());
 
 // depend on a peer service that may arrive later; seed now if present (replay) and on each remount
-services.mounted.consume({ key: 'SkillManager', replay: true, signal }, m => seed(m));   // m.SkillManager narrowed present
+services.mounted.observe({ key: 'SkillManager', replay: true, signal }, m => seed(m));   // m.SkillManager narrowed present
 ```
 
 `replay` fires the handler on the next microtask against the current machine if the key is present (the deferred-dependency latch); handlers must be idempotent (a remount re-fires). A cacher that reads straight through a store proxy on each call (e.g. `persist-ki-bge`) needs no subscription — the proxy already follows the swap.

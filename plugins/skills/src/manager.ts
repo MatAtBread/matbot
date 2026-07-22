@@ -149,7 +149,7 @@ export interface SkillSummary {
  * catalogue advertisement only — firing a skill on a condition is the triggers subsystem's concern.
  */
 export interface SkillManager {
-  /** Ends with the manager (teardown). Hand to `services.mounted.consume` so a StorageBackend swap
+  /** Ends with the manager (teardown). Hand to `services.mounted.observe` so a StorageBackend swap
    *  re-reads the new backend's skills, and the loop stops when the plugin unloads. */
   readonly signal: AbortSignal;
   /** The provider used to derive a skill's catalogue summary / knowledge analysis: the `analysisProvider`
@@ -210,7 +210,7 @@ export class SkillManagerImpl implements SkillManager {
     this.services = services;
   }
 
-  /** Ends with the manager (teardown). Hand to `services.mounted.consume` so a StorageBackend swap
+  /** Ends with the manager (teardown). Hand to `services.mounted.observe` so a StorageBackend swap
    *  re-reads the new backend's skills, and the loop stops when the plugin unloads. */
   get signal(): AbortSignal { return this.lifecycle.signal; }
 
@@ -256,8 +256,10 @@ export class SkillManagerImpl implements SkillManager {
 
   /** Observe skill content CRUD (save/delete), including saves made by the LLM mid-turn via
    *  `skill_action` — the source a UI needs to refresh a skills list live. */
-  watch(signal?: AbortSignal): AsyncIterable<SkillEvent> {
-    return this.events.subscribe(signal);
+  async *watch(signal?: AbortSignal): AsyncIterable<SkillEvent> {
+    // Bare events for now (unwrap the envelope). Origin/partition attribution for skills lands with the
+    // cross-partition watch fan-out; until then skill CRUD broadcasts as before.
+    for await (const { value } of this.events.subscribe(signal)) yield value;
   }
 
   /** Create a new skill or update an existing one's content by name. */

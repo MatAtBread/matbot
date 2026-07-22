@@ -207,7 +207,7 @@ it is purely a data maintenance function.
       // else on the first mount when one is. Re-seed on each remount is a no-op (importIfAbsent). The
       // Triggers service is seeded opportunistically in the same pass when present. Order-independent
       // and self-healing, with no resident hook.
-      services.mounted.consume(
+      services.mounted.observe(
         { key: 'SkillManager', replay: true, signal: lifecycle.signal },
         m => seedCognition(m),
       );

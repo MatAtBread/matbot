@@ -32,7 +32,8 @@ export class ToolRegistryImpl implements ToolRegistry {
     return [...this.tools.values()];
   }
 
-  watch(signal?: AbortSignal): AsyncIterable<ToolRegistryEvent> {
-    return this.events.subscribe(signal);
+  async *watch(signal?: AbortSignal): AsyncIterable<ToolRegistryEvent> {
+    // Tool CRUD is global — no origin — so unwrap the envelope to the bare event.
+    for await (const { value } of this.events.subscribe(signal)) yield value;
   }
 }

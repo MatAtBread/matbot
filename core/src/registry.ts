@@ -39,8 +39,9 @@ const state = {
 // not in `state` — it owns subscribers across the registry's lifetime, not per-plugin data.
 const pluginEvents = createBroadcaster<PluginRegistryEvent>();
 
-export function watchPlugins(signal?: AbortSignal): AsyncIterable<PluginRegistryEvent> {
-  return pluginEvents.subscribe(signal);
+export async function* watchPlugins(signal?: AbortSignal): AsyncIterable<PluginRegistryEvent> {
+  // Plugin CRUD is global — no origin — so unwrap the envelope to the bare event the panel expects.
+  for await (const { value } of pluginEvents.subscribe(signal)) yield value;
 }
 
 // Settings namespace + key under which the user's "overwrite all colliding tools" choice
@@ -306,13 +307,13 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotMachine,
   // fires. Forward-referenced via `scoped`, assigned below; consume() only runs after setup.
   let scoped: MatbotMachine;
   const scopedMounted: Mounted = {
-    consume(options, handler) {
+    observe(options, handler) {
       // Forward to the host mount table but deliver *this plugin's* scoped machine — it reads through
       // the same proxies/registry, so scoped[key] is the host's live service. onUnmount is scoped too.
       const forwarded = options.onUnmount !== undefined
         ? { ...options, onUnmount: () => options.onUnmount!(scoped) }
         : options;
-      services.mounted.consume(forwarded, () => handler(scoped as never));
+      services.mounted.observe(forwarded, () => handler(scoped as never));
     },
   };
 
