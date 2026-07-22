@@ -1898,11 +1898,19 @@
     .profile-menu .pm-ns-choose { margin-top: 4px; }
     .profile-menu .pm-ns-toggle { border: none; background: none; cursor: pointer; font-size: 0.85em; color: #374151; padding: 2px 4px; }
     .profile-menu .pm-ns-choose .pm-ns { margin-top: 4px; padding-left: 6px; }
+    #chat-header .hdr-btn { margin-left: auto; border: 1px solid #d1d5db; background: #fff; border-radius: 6px; cursor: pointer; padding: 4px 6px; color: #374151; display: inline-flex; align-items: center; line-height: 0; }
+    #chat-header .hdr-btn[hidden] { display: none; }
+    #chat-header .hdr-btn:hover { background: #f3f4f6; }
+    #chat-header .hdr-btn svg { width: 16px; height: 16px; }
+    #chat-header .readonly-badge { margin-left: auto; font-size: 0.78em; font-weight: 500; color: #92400e; background: #fef3c7; border: 1px solid #fde68a; border-radius: 10px; padding: 1px 8px; white-space: nowrap; }
+    #share-menu .sm-title { font-size: 0.85em; color: #6b7280; padding: 2px 8px 6px; }
+    #share-menu .sm-status { font-size: 0.9em; min-width: 1.2em; text-align: right; color: #059669; }
 </style>
 </head>
 <body>
   <div id="sidebar-overlay"></div>
   <div id="profile-menu" class="profile-menu" hidden></div>
+  <div id="share-menu" class="profile-menu" hidden></div>
   <nav id="sidebar">
     <h1>matbot <span id="matbot-version"></span><button id="profile-btn" class="profile-btn" title="Switch storage profile" hidden><span id="profile-btn-label">Global</span> &#9662;</button><span class="fs-controls"><button class="fs-btn" id="fs-down" title="Smaller">A</button><button class="fs-btn" id="fs-up" title="Larger">A</button></span></h1>
     <a id="new-btn" href="#new">+ New conversation</a>
@@ -1982,7 +1990,7 @@
   </div>
 
   <main id="main">
-    <div id="chat-header"><button id="burger" aria-label="Open menu">&#9776;</button><span id="chat-title"></span></div>
+    <div id="chat-header"><button id="burger" aria-label="Open menu">&#9776;</button><span id="chat-title"></span><span id="readonly-badge" class="readonly-badge" hidden></span><button id="share-btn" class="hdr-btn" title="Share this conversation with another profile" hidden aria-label="Share conversation"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4"/></svg></button></div>
     <div id="messages"></div>
     <div id="sessions-banner" class="plugin-prompt-banner">
       <span>Sessions plugin not loaded — conversations won't be saved after reload.</span>

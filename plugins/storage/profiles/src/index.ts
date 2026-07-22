@@ -1,7 +1,7 @@
 import type { MatbotPluginSpec, MatbotMachine, ToolRegistry } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import { ProfilesStorageBackend, asProfileDirectory } from './backend.js';
-import { createProfileTool } from './tool.js';
+import { createProfileTool, createShareTool } from './tool.js';
 
 export { ProfilesStorageBackend, asProfileDirectory } from './backend.js';
 export type { Profile, ProfileDirectory } from './backend.js';
@@ -35,12 +35,15 @@ export const plugin: MatbotPluginSpec = {
 
     // The tool resolves its directory live (duck-typed, swap-safe) on each call, so it follows any later
     // StorageBackend swap and never pins a stale or hot-reloaded instance.
-    services.tools.register(createProfileTool(() => asProfileDirectory(services.StorageBackend)));
+    const dir = () => asProfileDirectory(services.StorageBackend);
+    services.tools.register(createProfileTool(dir));
+    services.tools.register(createShareTool(dir));
     toolRegistry = services.tools;
   },
 
   async teardown() {
     toolRegistry?.remove('profile');
+    toolRegistry?.remove('share');
     toolRegistry = undefined;
   },
 };

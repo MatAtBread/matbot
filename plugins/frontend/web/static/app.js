@@ -12,6 +12,7 @@ const LS_SIDEBAR        = 'sidebarSections';
 const LS_SIDEBAR_WIDTH  = 'sidebarWidth';
 
 let currentSessionId = null;
+let profilesActive = false;   // set once initProfiles confirms a profile-aware storage backend (gates sharing UI)
 let sending = false;          // current session busy? mirrors the server's 'session-busy' status
 const busySessions   = new Set();
 const unreadSessions = new Set();
@@ -133,6 +134,7 @@ const sessionsBanner = document.getElementById('sessions-banner');
 const sessionListEl  = document.getElementById('session-list');
 const chatHeaderEl   = document.getElementById('chat-header');
 const chatTitleEl    = document.getElementById('chat-title');
+const shareBtn       = document.getElementById('share-btn');
 const inputEl        = document.getElementById('input');
 const sendBtn        = document.getElementById('send-btn');
 const stopBtn        = document.getElementById('stop-btn');
@@ -335,6 +337,7 @@ async function hideSession(id) {
     if (id === currentSessionId) {
       currentSessionId = sessions[0]?.id ?? null;
       if (currentSessionId) { await openSession(currentSessionId); return; }
+      updateShareBtn();
       showEmpty();
       setBusyState(false);
       if (chatHeaderEl) chatTitleEl.textContent = '';
@@ -2009,6 +2012,7 @@ function renderSession(session, startIdx, scrollTarget) {
 async function openSession(id, scrollTarget) {
   closeSidebar();
   currentSessionId = id;
+  void refreshShareState(id);
   unreadSessions.delete(id);
   sessionListEl.querySelector('[data-sid="' + id + '"]')?.classList.remove('unread');
   location.hash = id;
@@ -2032,6 +2036,7 @@ async function handleNewSession() {
   try {
     const { id } = await apiNewSession();
     currentSessionId = id;
+    void refreshShareState(id);
     location.hash = id;
     showEmpty();
     setBusyState(false); // a brand-new session is idle; clear any Stop carried over from the last view
@@ -2226,7 +2231,7 @@ function showSubmitError(content, msg) {
   if (text) appendUserBubble(text);
   const div = document.createElement('div');
   div.className = 'msg-error';
-  div.textContent = '[send failed: ' + msg + ']';
+  div.textContent = 'send failed: ' + msg;
   messagesEl.appendChild(div);
 }
 
@@ -2637,7 +2642,7 @@ async function renderTurn(sid, traceId) {
           removeLoading();
           const errDiv = document.createElement('div');
           errDiv.className = 'msg-error';
-          errDiv.textContent = '[error: ' + (ev.error ?? ev.message ?? 'unknown') + ']';
+          errDiv.textContent = (ev.error ?? ev.message ?? 'unknown');
           turnWrap.appendChild(errDiv);
           break;
         }
@@ -2649,7 +2654,7 @@ async function renderTurn(sid, traceId) {
     removeLoading();
     const errDiv = document.createElement('div');
     errDiv.className = 'msg-error';
-    errDiv.textContent = '[error: ' + e.message + ']';
+    errDiv.textContent = e.message;
     turnWrap.appendChild(errDiv);
   } finally {
     // Don't markStarted() here — a turn that was only queued then cancelled must not spawn an empty
@@ -3011,6 +3016,9 @@ async function initProfiles() {
   try { profiles = (await callTool('profile', { action: 'list' })).profiles; }
   catch { return; }                                   // tool absent ⇒ no profile-aware storage ⇒ feature off
 
+  profilesActive = true;                               // storage is profile-aware ⇒ the sharing UI can appear
+  updateShareBtn();
+
   const btn   = document.getElementById('profile-btn');
   const menu  = document.getElementById('profile-menu');
   const label = document.getElementById('profile-btn-label');
@@ -3164,5 +3172,94 @@ async function initProfiles() {
 
   refresh();                                          // initial render, also pulling the isolatable-namespace set
 }
+
+// ── Sharing (chat-header) ─────────────────────────────────────────────────────────
+// The share button is capability-gated on the same `profile` tool as the profile selector, and only
+// appears once a session is open (there's nothing to share otherwise). Clicking pops a small menu of
+// target profiles (those that isolate `sessions`, minus the active one) and POSTs `share` per pick.
+function updateShareBtn() {
+  if (!shareBtn) return;
+  shareBtn.hidden = !(profilesActive && currentSessionId);
+}
+
+// Resolve ownership of the open session and reflect it: a session shared IN from another profile can't be
+// re-shared (hide the button) and is read-only (show a badge — writes to it are rejected by the backend
+// and surface as a turn error). Owned/new sessions clear the badge and show the button. Guarded against a
+// late resolve after the user navigated away.
+async function refreshShareState(sessionId) {
+  const badge = document.getElementById('readonly-badge');
+  if (badge) badge.hidden = true;
+  updateShareBtn();
+  if (!profilesActive || !sessionId) return;
+  let owner = null;
+  try { owner = (await callTool('share', { action: 'owner', namespace: 'sessions', id: sessionId })).owner; }
+  catch { return; }
+  if (sessionId !== currentSessionId) return;
+  if (owner != null) {                                 // '' = owned by global/base; null = owned by me
+    if (shareBtn) shareBtn.hidden = true;
+    if (badge) { badge.textContent = 'read-only · ' + (owner || 'global'); badge.hidden = false; }
+  }
+}
+
+function setupShare() {
+  const menu = document.getElementById('share-menu');
+  if (!shareBtn || !menu) return;
+
+  const open = async () => {
+    if (!currentSessionId) return;
+    menu.innerHTML = '';
+    const loading = document.createElement('div');
+    loading.className = 'sm-title'; loading.textContent = 'Loading profiles…';
+    menu.appendChild(loading);
+    const r = shareBtn.getBoundingClientRect();
+    menu.style.left = 'auto';
+    menu.style.right = (window.innerWidth - r.right) + 'px';
+    menu.style.top   = (r.bottom + 6) + 'px';
+    menu.hidden = false;
+
+    let profiles;
+    try { profiles = (await callTool('profile', { action: 'list' })).profiles; }
+    catch { menu.hidden = true; return; }
+    const active  = currentProfileName();
+    const targets = profiles.filter(p => p.name !== active && (p.isolated || []).includes('sessions'));
+
+    menu.innerHTML = '';
+    const title = document.createElement('div');
+    title.className = 'sm-title';
+    title.textContent = targets.length
+      ? 'Share this conversation with:'
+      : 'No other profile isolates "sessions" to share into.';
+    menu.appendChild(title);
+
+    for (const p of targets) {
+      const item   = document.createElement('div');
+      item.className = 'pm-item';
+      const nm     = document.createElement('span'); nm.className = 'pm-name'; nm.textContent = p.name;
+      const status = document.createElement('span'); status.className = 'sm-status';
+      item.appendChild(nm); item.appendChild(status);
+      item.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        status.textContent = '…'; item.title = '';
+        try {
+          await callTool('share', { namespace: 'sessions', id: currentSessionId, target: p.name });
+          status.textContent = '✓';
+        } catch (err) {
+          status.textContent = '✗'; item.title = String(err && err.message || err);
+        }
+      });
+      menu.appendChild(item);
+    }
+  };
+
+  shareBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (menu.hidden) open(); else menu.hidden = true;
+  });
+  document.addEventListener('click', (e) => {
+    if (!menu.hidden && !menu.contains(e.target) && e.target !== shareBtn && !shareBtn.contains(e.target)) menu.hidden = true;
+  });
+}
+
+setupShare();
 
 init().catch(console.error);

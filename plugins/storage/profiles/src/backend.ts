@@ -1,5 +1,7 @@
-import { join } from 'node:path';
-import type { Store, FileStore, StorageBackend } from '@matatbread/matbot-plugin-api';
+import { promises as fs } from 'node:fs';
+import { dirname, join, sep } from 'node:path';
+import type { Store, FileStore, StorageBackend, Principal } from '@matatbread/matbot-plugin-api';
+import { readOnlyError } from '@matatbread/matbot-plugin-api';
 import { tryCurrentPrincipal } from '@matatbread/matbot-core';
 import { FilesystemStorageBackend } from '@matatbread/matbot-storage-filesystem';
 
@@ -34,6 +36,13 @@ export interface ProfileDirectory {
   // The namespaces observed so far (a lower bound — a namespace appears only once its owning plugin has
   // called createStore this session), minus those that can never be isolated. Drives the UI's picker.
   availableNamespaces(): string[];
+  // Item-grain sharing. `share` exposes one item the current principal owns in `target`'s partition
+  // (this backend links it — a live single source, never a copy); `unshare` reverses that. `ownerOf`
+  // reports who owns the item the current principal would read for (namespace, id) — undefined when it is
+  // owned here (a real file, absent, or not shared in). The effecting mechanism is backend-private.
+  share(namespace: string, id: string, target: string): Promise<void>;
+  unshare(namespace: string, id: string, target: string): Promise<void>;
+  ownerOf(namespace: string, id: string): Promise<Principal | undefined>;
 }
 
 /** Narrow any active StorageBackend to its {@link ProfileDirectory} facet by method presence, or undefined. */
@@ -45,6 +54,9 @@ export function asProfileDirectory(backend: unknown): ProfileDirectory | undefin
     && typeof b.deleteProfile       === 'function'
     && typeof b.setIsolated         === 'function'
     && typeof b.availableNamespaces === 'function'
+    && typeof b.share               === 'function'
+    && typeof b.unshare             === 'function'
+    && typeof b.ownerOf             === 'function'
     ? (b as ProfileDirectory)
     : undefined;
 }
@@ -121,11 +133,26 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
     const pick = (): Store<T> => this.subStore<T>(this.route(namespace), namespace);
     return {
       get:    (id)                  => pick().get(id),
-      set:    (id, value)           => pick().set(id, value),
-      cas:    (id, expected, next)  => pick().cas(id, expected, next),
-      delete: (id, expectedVersion) => pick().delete(id, expectedVersion),
       query:  (q)                   => pick().query(q),
+      // delete is exempt from the read-only guard: unlinking a symlink IS un-sharing, and never reaches
+      // the owner's file — so a sharee deleting a shared-in item just drops their own link.
+      delete: (id, expectedVersion) => pick().delete(id, expectedVersion),
+      set:    async (id, value)          => { await this.guardWrite(namespace, id); return pick().set(id, value); },
+      cas:    async (id, expected, next) => { await this.guardWrite(namespace, id); return pick().cas(id, expected, next); },
     };
+  }
+
+  // Read-only sharing (v1): a set/cas onto an item shared IN from another partition would clobber the
+  // symlink with a real file in this partition (writeAtomic's rename), silently forking the owner's data.
+  // Refuse it. Only profile partitions ever hold shared-in links (share() rejects a base target), so a
+  // base-routed write skips the stat entirely.
+  private async guardWrite(namespace: string, id: string): Promise<void> {
+    const part = this.route(namespace);
+    if (part === BASE) return;
+    const owner = await this.sharedOwner(part, namespace, id);
+    // Branded (not `new Error`): the turn pump distinguishes it via isReadOnlyError() and surfaces it as a
+    // per-turn error instead of crashing on the mandatory persist-at-turn-start write.
+    if (owner !== undefined) throw readOnlyError(namespace, id, owner.id);
   }
 
   async close(): Promise<void> {
@@ -196,14 +223,88 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
     return true;
   }
 
+  // ── Sharing (item-grain; filesystem mechanism = symlink) ──────────────────────────
+
+  // Expose one item the current principal owns in `target`'s partition as a symlink to the owner's real
+  // file — get()/query() read straight through it, so the sharee sees the live single source. Idempotent.
+  async share(namespace: string, id: string, target: string): Promise<void> {
+    const sid = this.safeId(id);
+    if (ALWAYS_BASE.has(namespace)) throw new Error(`Namespace "${namespace}" is shared globally; individual items can't be shared.`);
+    if (this.profiles.get(target) === undefined) throw new Error(`Unknown target profile "${target}".`);
+    const sourcePart = this.route(namespace);               // owner = current principal
+    const targetPart = this.routeFor(target, namespace);
+    if (targetPart === BASE)        throw new Error(`Profile "${target}" does not isolate "${namespace}", so it already reads the shared base data — nothing to share into.`);
+    if (targetPart === sourcePart)  throw new Error(`"${id}" already lives in "${target}"'s partition.`);
+    const src = join(this.nsDir(sourcePart, namespace), `${sid}.json`);
+    const dst = join(this.nsDir(targetPart, namespace), `${sid}.json`);
+    const st  = await fs.lstat(src).catch(() => undefined);
+    if (st === undefined)     throw new Error(`No "${id}" in "${namespace}" to share.`);
+    if (st.isSymbolicLink())  throw new Error(`"${id}" is itself shared in — share it from its owner.`);
+    await fs.mkdir(dirname(dst), { recursive: true });
+    try { await fs.symlink(src, dst); }
+    catch (e) { if ((e as { code?: string }).code !== 'EEXIST') throw e; } // already shared ⇒ idempotent
+  }
+
+  // Remove a share by unlinking the target-side symlink. Only ever unlinks a symlink — never the owner's
+  // real file — so it is safe even if `target` happens to own a same-id item of its own.
+  async unshare(namespace: string, id: string, target: string): Promise<void> {
+    const targetPart = this.routeFor(target, namespace);
+    if (targetPart === BASE) return;
+    const dst = join(this.nsDir(targetPart, namespace), `${this.safeId(id)}.json`);
+    const st  = await fs.lstat(dst).catch(() => undefined);
+    if (st?.isSymbolicLink()) await fs.unlink(dst);
+  }
+
+  // Who owns the item the current principal would read for (namespace, id): undefined when owned here
+  // (real file / absent / not shared in), otherwise the source partition's principal (id only — routing
+  // keys on principal.id and never reads .type).
+  async ownerOf(namespace: string, id: string): Promise<Principal | undefined> {
+    return this.sharedOwner(this.route(namespace), namespace, id);
+  }
+
+  private async sharedOwner(partId: string, namespace: string, id: string): Promise<Principal | undefined> {
+    const path = join(this.nsDir(partId, namespace), `${this.safeId(id)}.json`);
+    let link: string;
+    try {
+      const st = await fs.lstat(path);
+      if (!st.isSymbolicLink()) return undefined;
+      link = await fs.readlink(path);
+    } catch { return undefined; }
+    return { id: this.partitionOfPath(link), type: 'user' };
+  }
+
+  private safeId(id: string): string {
+    if (!/^[\w-]+$/.test(id)) throw new Error(`Invalid store id: "${id}"`);
+    return id;
+  }
+
+  // On-disk directory of a namespace's per-id JSON files for a partition ('' = base). Mirrors the
+  // FilesystemStorageBackend layout: base at <dotData>/<ns>, a profile at <dotData>/profiles/<id>/<ns>.
+  private nsDir(partId: string, namespace: string): string {
+    return partId === BASE ? join(this.dotData, namespace) : join(this.dotData, 'profiles', partId, namespace);
+  }
+
+  // The partition id a real on-disk path belongs to: the `<id>` in `.../profiles/<id>/...`, else base.
+  private partitionOfPath(p: string): string {
+    const marker = `${sep}profiles${sep}`;
+    const i = p.indexOf(marker);
+    if (i < 0) return BASE;
+    return p.slice(i + marker.length).split(sep)[0] ?? BASE;
+  }
+
   // ── Routing ──────────────────────────────────────────────────────────────────────
 
   // The partition id ('' == base) that should serve (currentPrincipal, namespace).
   private route(namespace: string): string {
+    return this.routeFor(tryCurrentPrincipal()?.id, namespace);
+  }
+
+  // As route(), for an explicit principal id — lets share() resolve a *target*'s partition without
+  // entering its principal scope.
+  private routeFor(principalId: string | undefined, namespace: string): string {
     if (ALWAYS_BASE.has(namespace)) return BASE;
-    const principal = tryCurrentPrincipal();
-    if (principal === undefined) return BASE;
-    const profile = this.profiles.get(principal.id);
+    if (principalId === undefined) return BASE;
+    const profile = this.profiles.get(principalId);
     if (profile === undefined) return BASE;                 // default/boot/unknown identity → base layout
     const alias = profile.sharedFrom?.[namespace];
     if (alias !== undefined) return alias !== BASE && this.profiles.has(alias) ? alias : BASE;

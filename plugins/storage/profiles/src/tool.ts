@@ -19,6 +19,12 @@ declare module '@matatbread/matbot-plugin-api' {
       | ToolContract<{ name: string; deleted: boolean },                                 { action: 'delete'; name: string }>
       | ToolContract<{ done: true },                                                     { action: 'set_isolated'; name: string; isolated: IsolatableNamespace[] }>
       | ToolContract<IsolatableNamespace[],                                              { action: 'available_namespaces' }>;
+    // Item-grain sharing across profiles. `action` defaults to `share`. `owner` reports the profile that
+    // owns the item this principal would read (null when owned here) — the read-only signal for the UI.
+    share:
+      | ToolContract<{ shared: true },         { action?: 'share'; namespace: IsolatableNamespace; id: string; target: string }>
+      | ToolContract<{ unshared: true },       { action: 'unshare'; namespace: IsolatableNamespace; id: string; target: string }>
+      | ToolContract<{ owner: string | null }, { action: 'owner'; namespace: IsolatableNamespace; id: string }>;
   }
 }
 
@@ -98,6 +104,69 @@ export function createProfileTool(getDir: () => ProfileDirectory | undefined): T
         action:   { type: 'string', enum: ['list', 'available_namespaces', 'create', 'set_isolated', 'delete'], description: 'The operation to perform.' },
         name:     { type: 'string', description: 'Profile name (letters, digits, underscore, hyphen). Required for create/set_isolated/delete.' },
         isolated: { type: 'array', items: { type: 'string' }, description: 'Namespace names (as returned by the `available_namespaces` action) to isolate into this profile. Optional for create (defaults to ["sessions"]); required for set_isolated (replaces the set).' },
+      },
+    },
+    executor,
+  };
+}
+
+// Companion to the `profile` tool: shares an individual stored item (a session, a fact, …) between
+// profiles. Kept a separate tool — sharing is about an item + a target, not the profile registry the
+// `profile` tool manages. Resolves the directory live per call, like `profile`.
+export function createShareTool(getDir: () => ProfileDirectory | undefined): Tool<ToolResultOf<'share'>> {
+  const executor: ToolExecutor<ToolResultOf<'share'>> = {
+    async *execute(input: unknown, _ctx: ToolContext) {
+      const args = input as { action?: string; namespace?: string; id?: string; target?: string };
+      const dir  = getDir();
+      if (dir === undefined) { yield { type: 'error', message: 'Profile storage is not active.' }; return; }
+      const ns = args.namespace, id = args.id;
+      if (!ns || !id) { yield { type: 'error', message: 'share requires "namespace" and "id".' }; return; }
+      try {
+        switch (args.action ?? 'share') {
+          case 'owner': {
+            const owner = await dir.ownerOf(ns, id);
+            yield { type: 'result', value: { owner: owner === undefined ? null : owner.id } };
+            return;
+          }
+          case 'unshare': {
+            if (!args.target) { yield { type: 'error', message: 'action "unshare" requires "target".' }; return; }
+            await dir.unshare(ns, id, args.target.trim());
+            yield { type: 'result', value: { unshared: true } };
+            return;
+          }
+          case 'share': {
+            if (!args.target) { yield { type: 'error', message: 'share requires "target".' }; return; }
+            await dir.share(ns, id, args.target.trim());
+            yield { type: 'result', value: { shared: true } };
+            return;
+          }
+          default:
+            yield { type: 'error', message: `Unknown action "${String(args.action)}". Expected share, unshare, or owner.` };
+        }
+      } catch (e) {
+        yield { type: 'error', message: e instanceof Error ? e.message : String(e) };
+      }
+    },
+  };
+
+  return {
+    name: 'share',
+    description:
+      'Share a single stored item you own with another storage profile, or reverse it. `share` (the ' +
+      'default action) exposes the item — e.g. a `sessions` conversation — read-only in the target ' +
+      'profile\'s partition: the target reads your live item, not a copy, and only you can edit it. ' +
+      '`unshare` removes that exposure. `owner` reports which profile owns the item the current profile ' +
+      'would read (null when you own it) — the read-only signal. Sharing exists only because profiles do; ' +
+      'only a namespace the target profile isolates can be shared into (a base/global namespace is already ' +
+      'shared by everyone). Names an item by (`namespace`, `id`) and, for share/unshare, a `target` profile.',
+    inputSchema: {
+      type:       'object',
+      required:   ['namespace', 'id'],
+      properties: {
+        action:    { type: 'string', enum: ['share', 'unshare', 'owner'], description: 'Operation to perform; defaults to "share".' },
+        namespace: { type: 'string', description: 'Storage namespace of the item, e.g. "sessions".' },
+        id:        { type: 'string', description: 'Id of the item to share.' },
+        target:    { type: 'string', description: 'Target profile name. Required for share and unshare.' },
       },
     },
     executor,

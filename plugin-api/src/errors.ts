@@ -16,7 +16,7 @@
 
 const BRAND = 'matbot';
 
-export type MatbotErrorKind = 'MissingSecret' | 'IncompatibleRuntime' | 'NotAPlugin' | 'PromptCancelled';
+export type MatbotErrorKind = 'MissingSecret' | 'IncompatibleRuntime' | 'NotAPlugin' | 'PromptCancelled' | 'ReadOnly';
 
 function isKind(e: unknown, kind: MatbotErrorKind): boolean {
   return typeof e === 'object' && e !== null && (e as Record<string, unknown>)[BRAND] === kind;
@@ -101,4 +101,27 @@ export function promptCancelledError(message = 'User cancelled — cannot procee
 }
 export function isPromptCancelledError(e: unknown): e is PromptCancelledError {
   return isKind(e, 'PromptCancelled');
+}
+
+/**
+ * Thrown by a `Store` write when the target item is not owned by the current principal — e.g. a session
+ * shared read-only into another profile's partition (see `@matatbread/matbot-storage-profiles`). This is
+ * a per-operation condition, **not** a process fault: the turn pump catches it (via {@link isReadOnlyError},
+ * never `instanceof`) and surfaces it as a turn error rather than letting it escape the detached pump and
+ * crash the host. `namespace`/`id` name the item; `owner` is the owning principal id (`''` for the shared
+ * base/global partition).
+ */
+export interface ReadOnlyError extends Error {
+  matbot: 'ReadOnly';
+  readonly namespace: string;
+  readonly id:        string;
+  readonly owner:     string;
+}
+export function readOnlyError(namespace: string, id: string, owner: string): ReadOnlyError {
+  const e = new Error(`${namespace} "${id}" was shared by "${owner || 'global'}" and is read-only.`);
+  e.name = 'ReadOnlyError';
+  return Object.assign(e, { matbot: 'ReadOnly' as const, namespace, id, owner });
+}
+export function isReadOnlyError(e: unknown): e is ReadOnlyError {
+  return isKind(e, 'ReadOnly');
 }
