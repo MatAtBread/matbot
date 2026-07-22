@@ -4,6 +4,7 @@ import type { Store, FileStore, StorageBackend, Principal } from '@matatbread/ma
 import { readOnlyError } from '@matatbread/matbot-plugin-api';
 import { tryCurrentPrincipal } from '@matatbread/matbot-core';
 import { FilesystemStorageBackend } from '@matatbread/matbot-storage-filesystem';
+import { ProfilesFileStore } from './file-store.js';
 
 /**
  * A stored partition of storage keyed by principal id. `id` doubles as the principal id and the
@@ -77,6 +78,11 @@ const BASE = '';
 // Namespaces a freshly-created profile isolates by default when the caller doesn't specify. Sessions only.
 const DEFAULT_ISOLATED = ['sessions'];
 
+// The single isolation key for the file store (see ProfilesFileStore): files are one axis, not
+// per-file-namespace. A profile whose isolated set includes it keeps its whole file area partitioned.
+// No document store uses this namespace, so it never collides with a routed createStore.
+const FILES_NS = 'files';
+
 /**
  * A StorageBackend that partitions selected namespaces per web principal. It does not wrap the active
  * backend service — it composes the filesystem *primitive* directly (one {@link FilesystemStorageBackend}
@@ -110,7 +116,13 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
   private constructor(dotData: string, base: StorageBackend) {
     this.dotData   = dotData;
     this.base      = base;
-    this.fileStore = base.fileStore;                         // files are unprofiled for now (a separate axis)
+    // Files route per-principal on the single `files` axis: the current principal's file area, base
+    // (byte-identical to the plain backend) unless the profile isolates files. subStores/partitions are
+    // shared with the document side, so a profile's files land under the same profiles/<id>/ root.
+    this.fileStore = new ProfilesFileStore(() => {
+      const part = this.route(FILES_NS);
+      return part === BASE ? this.base.fileStore : this.partitionFor(part).fileStore;
+    });
     this.registry  = base.createStore<Profile>(PROFILE_REGISTRY_NS);
   }
 
@@ -123,6 +135,7 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
       for (const ns of p.isolated) backend.observed.add(ns);
     }
     for (const ns of DEFAULT_ISOLATED) backend.observed.add(ns);
+    backend.observed.add(FILES_NS);                          // offer files as a toggle even before any file op
     return backend;
   }
 

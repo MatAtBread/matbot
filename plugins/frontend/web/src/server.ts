@@ -717,16 +717,26 @@ export function createWebServer(deps: WebServerDeps) {
       return;
     }
 
-    // --- GET /files/<namespace>/<name> --- (read-only static access; only files marked `allowed`)
-    const fileMatch = /^\/files\/([^/]+)\/(.+)$/.exec(url);
+    // --- GET /files/[~<principal>/]<namespace>/<name> --- (read-only static access; only files marked `allowed`)
+    // A browser GET (img/anchor/download) can't send the x-matbot-principal header, so a profiled file's
+    // owning partition rides in the path as an optional leading `~<principal>` segment (minted by
+    // url_for_resource). `~` is excluded from principal ids and namespaces, so the segment is unambiguous.
+    // Bare paths are served from the request principal (base in a default deployment) — unchanged.
+    const fileMatch = /^\/files\/(?:~([^/]+)\/)?([^/]+)\/(.+)$/.exec(url);
     if (method === 'GET' && fileMatch && deps.files) {
-      let namespace: string, name: string;
-      try { namespace = decodeURIComponent(fileMatch[1]!); name = decodeURIComponent(fileMatch[2]!); }
+      let filePrincipal: string | undefined, namespace: string, name: string;
+      try {
+        filePrincipal = fileMatch[1] !== undefined ? decodeURIComponent(fileMatch[1]) : undefined;
+        namespace = decodeURIComponent(fileMatch[2]!); name = decodeURIComponent(fileMatch[3]!);
+      }
       catch { json(res, 400, { error: 'Invalid path encoding' }); return; }
 
       // One read serves and gates: the handle we need to stream also carries `allowed`. A file that
       // isn't servable is reported as missing, not forbidden — don't reveal that the path exists.
-      const handle = await deps.files.getByName(name, namespace);
+      const read = () => deps.files!.getByName(name, namespace);
+      const handle = filePrincipal !== undefined
+        ? await runAs({ id: filePrincipal, type: 'user' }, read)
+        : await read();
       if (!handle) { json(res, 404, { error: 'Not found' }); return; }
       if (!handle.allowed) { json(res, 403, { error: 'Not allowed' }); return; }
 

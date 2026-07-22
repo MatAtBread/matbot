@@ -198,7 +198,8 @@
   function skillEvents(signal)  { return globalEventStream('skill-changed',  signal); }
 
   function openFile(namespace, path) {
-    window.open('/files/' + namespace + '/' + path, '_blank');
+    const profileName = currentProfile();
+    window.open('/files/' + (profileName ? '~' + profileName + '/' : '') + namespace + '/' + path, '_blank');
   }
 
   window.matbotTransport = {

@@ -13,6 +13,7 @@ const LS_SIDEBAR_WIDTH  = 'sidebarWidth';
 
 let currentSessionId = null;
 let profilesActive = false;   // set once initProfiles confirms a profile-aware storage backend (gates sharing UI)
+let profileNames = new Set(); // valid profile names, populated by initProfiles — lets hashchange split a deep-link profile like load does
 let sending = false;          // current session busy? mirrors the server's 'session-busy' status
 const busySessions   = new Set();
 const unreadSessions = new Set();
@@ -2924,7 +2925,14 @@ document.getElementById('upload-input')?.addEventListener('change', function() {
 });
 
 window.addEventListener('hashchange', async () => {
-  const raw      = location.hash.slice(1);
+  // Mirror the load-time parse in initProfiles: a deep-link may carry a leading `#<profile>:` prefix.
+  // A profile that differs from the active one is a switch — adopt it and reload (like selectProfile),
+  // and the post-reload initProfiles strips it before the session parse. A matching profile is stripped
+  // in place; only the `<session>~<params>` remainder drives the session logic below.
+  const { profile: hashProfile, rest } = splitHashProfile(location.hash.slice(1), profileNames);
+  if (hashProfile !== null && hashProfile !== currentProfileName()) { selectProfile(hashProfile); return; }
+  if (hashProfile !== null) history.replaceState(null, '', location.pathname + (rest ? '#' + rest : ''));
+  const raw      = rest;
   const ti       = raw.indexOf('~');
   const id       = ti >= 0 ? raw.slice(0, ti) : raw;
   const nav      = ti >= 0 ? (() => { try { return JSON.parse(raw.slice(ti + 1)); } catch { return null; } })() : null;
@@ -3029,6 +3037,7 @@ async function initProfiles() {
   // downstream session-fragment parser in init() sees only `<session>~<params>`. Done here at load — no
   // reload, since nothing has opened under the old identity yet (unlike selectProfile's live switch).
   const validNames = new Set(profiles.map(p => p.name));
+  profileNames = validNames;                            // share with the hashchange handler
   const { profile: hashProfile, rest } = splitHashProfile(location.hash.slice(1), validNames);
   if (hashProfile !== null) {
     try { localStorage.setItem(PROFILE_LS, hashProfile); } catch { /* ignore */ }
