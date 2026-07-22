@@ -37,8 +37,25 @@
     return { events, remaining };
   }
 
+  // The active profile is a per-browser choice (the profile selector stores it here); when set it rides
+  // every API request as `x-matbot-principal`, so the server routes the request — and its session/tool
+  // storage — to that profile. Absent ⇒ no header ⇒ the server's default (boot) principal, i.e. base
+  // storage, so a vanilla UI with no profile chosen behaves exactly as before. The global /events
+  // EventSource carries only non-principal data, so it is intentionally left un-headered.
+  const PROFILE_KEY = 'matbot.profile';
+  function currentProfile() { try { return localStorage.getItem(PROFILE_KEY) || null; } catch { return null; } }
+  function withProfile(headers) {
+    const p = currentProfile();
+    return p ? { ...(headers || {}), 'x-matbot-principal': p } : (headers || undefined);
+  }
+  function apiFetch(url, opts) {
+    const o = opts || {};
+    const headers = withProfile(o.headers);
+    return fetch(url, headers ? { ...o, headers } : o);
+  }
+
   async function callTool(toolName, input) {
-    const res = await fetch('/tools/' + toolName, {
+    const res = await apiFetch('/tools/' + toolName, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(input),
@@ -49,13 +66,13 @@
   }
 
   async function createSession() {
-    const r = await fetch('/sessions', { method: 'POST' });
+    const r = await apiFetch('/sessions', { method: 'POST' });
     return r.json();
   }
 
   async function sessionBusy(id) {
     try {
-      const r = await fetch('/sessions/' + id);
+      const r = await apiFetch('/sessions/' + id);
       return r.ok ? (await r.json()).busy : false;
     } catch { return false; }
   }
@@ -63,7 +80,7 @@
   // Fire-and-forget enqueue: the turn's output arrives over sessionEvents(), not here. Throws on a
   // non-2xx or a transport failure (incl. the 20s timeout) so the caller can surface it inline.
   async function submit(sid, body) {
-    const res = await fetch('/sessions/' + sid + '/submit', {
+    const res = await apiFetch('/sessions/' + sid + '/submit', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
@@ -81,7 +98,7 @@
   async function* sessionEvents(sid, signal) {
     while (!signal.aborted) {
       try {
-        const res = await fetch('/events/sessions/' + sid, { signal });
+        const res = await apiFetch('/events/sessions/' + sid, { signal });
         if (!res.ok || !res.body) break;
         const reader = res.body.getReader();
         const dec = new TextDecoder();
@@ -104,7 +121,7 @@
   }
 
   async function answerPrompt(sid, body) {
-    await fetch('/sessions/' + sid + '/prompt', {
+    await apiFetch('/sessions/' + sid + '/prompt', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
@@ -112,7 +129,7 @@
   }
 
   async function answerEnv(sid, body) {
-    await fetch('/sessions/' + sid + '/env-result', {
+    await apiFetch('/sessions/' + sid + '/env-result', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
@@ -120,7 +137,7 @@
   }
 
   async function abort(sid) {
-    await fetch('/sessions/' + sid + '/abort', { method: 'POST' });
+    await apiFetch('/sessions/' + sid + '/abort', { method: 'POST' });
   }
 
   // All global (non-session) event types share ONE EventSource to /events, demuxed by event name and

@@ -69,7 +69,7 @@
     }
     #matbot-version {
       color: #9ca3af;
-      margin-left: 0.5em;
+      margin: 0 0.5em;
       font-size: 75%;
       font-weight: 300;
     }
@@ -1867,12 +1867,44 @@
       word-break: break-word !important;
     }
   }
+    /* Profile selector — shown only when a profile-aware storage backend is active (the `profile`
+       tool exists). Left of the "matbot" title; the menu is position:fixed so it escapes sidebar clipping. */
+    .profile-btn { font: inherit; font-size: 0.62em; padding: 2px 7px; margin-right: 8px; border: 1px solid #d1d5db;
+      border-radius: 6px; background: #f9fafb; color: #374151; cursor: pointer; vertical-align: middle; }
+    .profile-btn:hover { background: #f3f4f6; }
+    .profile-menu { position: fixed; z-index: 60; background: #fff; border: 1px solid #d1d5db; border-radius: 8px;
+      box-shadow: 0 4px 16px rgba(0,0,0,.14); min-width: 210px; max-width: 280px; padding: 6px; }
+    .profile-menu .pm-item { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-radius: 6px; cursor: pointer; }
+    .profile-menu .pm-item:hover { background: #f3f4f6; }
+    .profile-menu .pm-item.active { font-weight: 600; }
+    .profile-menu .pm-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .profile-menu .pm-link { border: none; background: none; cursor: pointer; font-size: 0.9em; line-height: 1; padding: 2px 4px; opacity: 0.65; }
+    .profile-menu .pm-link:hover { opacity: 1; }
+    .profile-menu .pm-del { border: none; background: none; color: #ef4444; cursor: pointer; font-size: 0.9em; line-height: 1; padding: 2px 4px; }
+    .profile-menu .pm-new { display: flex; gap: 4px; margin-top: 6px; border-top: 1px solid #eee; padding-top: 8px; }
+    .profile-menu .pm-new input { flex: 1; min-width: 0; padding: 4px 6px; border: 1px solid #d1d5db; border-radius: 6px; font: inherit; }
+    .profile-menu .pm-new button { padding: 4px 8px; border: 1px solid #d1d5db; border-radius: 6px; background: #f9fafb; cursor: pointer; }
+    .profile-menu .pm-ns-btn { border: none; background: none; cursor: pointer; font-size: 0.9em; line-height: 1; padding: 2px 4px; opacity: 0.65; }
+    .profile-menu .pm-ns-btn:hover { opacity: 1; }
+    .profile-menu .pm-ns-panel { padding: 2px 8px 8px 20px; }
+    .profile-menu .pm-ns { display: flex; flex-direction: column; gap: 2px; max-height: 150px; overflow-y: auto; }
+    .profile-menu .pm-ns[hidden] { display: none; }
+    .profile-menu .pm-ns-item { display: flex; align-items: center; gap: 6px; font-size: 0.9em; cursor: pointer; padding: 1px 0; white-space: nowrap; }
+    .profile-menu .pm-ns-item input { margin: 0; flex: none; }
+    .profile-menu .pm-ns-empty { font-size: 0.85em; color: #6b7280; font-style: italic; }
+    .profile-menu .pm-ns-actions { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+    .profile-menu .pm-ns-actions button { padding: 3px 8px; border: 1px solid #d1d5db; border-radius: 6px; background: #f9fafb; cursor: pointer; font: inherit; font-size: 0.9em; }
+    .profile-menu .pm-ns-status { font-size: 0.85em; color: #059669; }
+    .profile-menu .pm-ns-choose { margin-top: 4px; }
+    .profile-menu .pm-ns-toggle { border: none; background: none; cursor: pointer; font-size: 0.85em; color: #374151; padding: 2px 4px; }
+    .profile-menu .pm-ns-choose .pm-ns { margin-top: 4px; padding-left: 6px; }
 </style>
 </head>
 <body>
   <div id="sidebar-overlay"></div>
+  <div id="profile-menu" class="profile-menu" hidden></div>
   <nav id="sidebar">
-    <h1>matbot <span id="matbot-version"></span><span class="fs-controls"><button class="fs-btn" id="fs-down" title="Smaller">A</button><button class="fs-btn" id="fs-up" title="Larger">A</button></span></h1>
+    <h1>matbot <span id="matbot-version"></span><button id="profile-btn" class="profile-btn" title="Switch storage profile" hidden><span id="profile-btn-label">Global</span> &#9662;</button><span class="fs-controls"><button class="fs-btn" id="fs-down" title="Smaller">A</button><button class="fs-btn" id="fs-up" title="Larger">A</button></span></h1>
     <a id="new-btn" href="#new">+ New conversation</a>
     <div class="sidebar-section" data-section="conversations">
       <div class="sidebar-heading">Conversations</div>

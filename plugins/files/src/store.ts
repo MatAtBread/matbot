@@ -198,6 +198,10 @@ export class FilesystemFileStore implements FileStore {
   }
 
   async *watch(signal?: AbortSignal): AsyncIterable<FileEvent> {
+    // fs.watch throws ENOENT on a missing directory, so ensure it exists first — mirroring put()/list().
+    // This bites when a registered StorageBackend is the boot backend: the host skips its own files-dir
+    // mkdir, so nothing else has created the directory before the frontend starts watching it.
+    await this.ensureDir();
     const queue:     FileEvent[]                             = [];
     const prevMeta   = new Map<string, FileMetaData>();
     const debounces  = new Map<string, ReturnType<typeof setTimeout>>();

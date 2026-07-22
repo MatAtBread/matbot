@@ -62,13 +62,23 @@ const ANONYMOUS_WEB_USER: Principal = {
   type: 'user',
 };
 
-// All matbot frontends are single-principal today, so the default request identity is the process
-// boot principal (the pod/sandbox/system identity established at the entry) — keeping web sessions
-// attributed to the same identity as the rest of the app. A multi-user deployment registers a
-// `WebPrincipalResolver` (e.g. deriving identity from headers) which overrides this entirely; that
-// override is deliberately NOT chained to the boot principal, so it never leaks the operator
-// identity to anonymous visitors.
-export const defaultWebPrincipal: WebPrincipalResolver = () => tryCurrentPrincipal() ?? ANONYMOUS_WEB_USER;
+// A generic per-request identity hint: an `x-matbot-principal` header names the identity this browser is
+// acting as (type 'user'), or undefined when absent. The frontend learns only "identity header," never
+// any particular feature's notion of it — whatever backend/service interprets the principal does the
+// rest (e.g. the profile selector stores its choice locally and sends it here). It takes precedence over
+// a registered WebPrincipalResolver (see the composition in plugin.ts), so an explicitly-asserted
+// identity is an override, not something a resolver can shadow. There is no auth here by design.
+export function headerPrincipal(req: IncomingMessage): Principal | undefined {
+  const hinted = req.headers['x-matbot-principal'];
+  const id     = (Array.isArray(hinted) ? hinted[0] : hinted)?.trim();
+  return id ? { id, type: 'user' } : undefined;
+}
+
+// The default request identity when no header and no override resolver apply: the process boot principal
+// (the pod/sandbox/system identity established at the entry), keeping web sessions attributed to the same
+// identity as the rest of the app. The header still wins here too, for when this default is used directly.
+export const defaultWebPrincipal: WebPrincipalResolver = (req) =>
+  headerPrincipal(req) ?? tryCurrentPrincipal() ?? ANONYMOUS_WEB_USER;
 
 async function readBody(req: IncomingMessage, maxBytes = 1_048_576): Promise<string> {
   return new Promise((resolve, reject) => {

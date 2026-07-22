@@ -2727,6 +2727,8 @@ async function init() {
     marked.use({ breaks: true, gfm: true });
   }
 
+  await initProfiles();
+
   {
     const MIN = 10, MAX = 22;
     function adjust(delta) {
@@ -2930,5 +2932,237 @@ window.addEventListener('hashchange', async () => {
     scrollToMsgIdx(nav.msg);
   }
 });
+
+// ── Profile selector ────────────────────────────────────────────────────────────
+// Capability-gated on the `profile` storage tool: if it isn't registered (no profile-aware storage
+// backend), the whole feature stays hidden and the UI is unchanged. The active profile lives per-browser
+// in localStorage; the transport sends it as the x-matbot-principal header so the server routes this
+// browser's sessions to that profile's partition. Switching reloads the page — the least-code way to
+// re-open every stream/list under the new identity. "Global" (no profile) is the shared base storage.
+const PROFILE_LS = 'matbot.profile';
+
+function currentProfileName() { try { return localStorage.getItem(PROFILE_LS) || null; } catch { return null; } }
+
+function selectProfile(name) {
+  try { if (name) localStorage.setItem(PROFILE_LS, name); else localStorage.removeItem(PROFILE_LS); } catch { /* ignore */ }
+  location.reload();
+}
+
+// A deep-link may name a profile ahead of the session: `#<profile>:<session>~<params>`, with every part
+// optional so pre-profile links (`#<session>`, `#<session>~<params>`) are untouched. Split off a leading
+// profile token, keeping the rest for the existing session-fragment parser. The profile is judged
+// heuristically — a colon-prefixed token, or a lone token that names an existing profile (session ids,
+// being UUIDs, never do). `validNames` is the current profile set; `raw` is the un-decoded fragment
+// (profile names are [\w-]+, so encoding is irrelevant to the split).
+function splitHashProfile(raw, validNames) {
+  const colon = raw.indexOf(':');
+  if (colon >= 0) {
+    const cand = raw.slice(0, colon);
+    return validNames.has(cand) ? { profile: cand, rest: raw.slice(colon + 1) } : { profile: null, rest: raw };
+  }
+  if (raw && raw.indexOf('~') < 0 && validNames.has(raw)) return { profile: raw, rest: '' };
+  return { profile: null, rest: raw };
+}
+
+// Copy `text` to the clipboard, falling back to a hidden textarea + execCommand on plain-HTTP contexts
+// where the async clipboard API is unavailable (mirrors the message copy-link path).
+async function copyToClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    try { await navigator.clipboard.writeText(text); return true; } catch { /* denied — fall through */ }
+  }
+  const ta = document.createElement('textarea');
+  ta.value = text; ta.style.cssText = 'position:fixed;opacity:0';
+  document.body.appendChild(ta); ta.select();
+  let ok = false; try { ok = document.execCommand('copy'); } catch { /* */ }
+  ta.remove();
+  return ok;
+}
+
+// A checklist of isolatable namespaces for the profile menu. `available` is the backend's observed set (a
+// lower bound); `selected` is the profile's current isolated set. Their union is shown, so a namespace the
+// profile already isolates appears even if nothing has touched it yet this session. Returns the element and
+// a `current()` reading the checked namespaces.
+function namespaceChecklist(available, selected) {
+  const box  = document.createElement('div');
+  box.className = 'pm-ns';
+  const all  = [...new Set([...available, ...selected])].sort();
+  const cbs  = new Map();
+  if (!all.length) {
+    const empty = document.createElement('div');
+    empty.className = 'pm-ns-empty';
+    empty.textContent = 'No namespaces observed yet.';
+    box.appendChild(empty);
+  }
+  for (const ns of all) {
+    const lab = document.createElement('label');
+    lab.className = 'pm-ns-item';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.checked = selected.includes(ns);
+    cbs.set(ns, cb);
+    lab.appendChild(cb);
+    lab.appendChild(document.createTextNode(ns));
+    box.appendChild(lab);
+  }
+  return { box, current: () => [...cbs].filter(([, cb]) => cb.checked).map(([ns]) => ns) };
+}
+
+async function initProfiles() {
+  let profiles;
+  try { profiles = (await callTool('profile', { action: 'list' })).profiles; }
+  catch { return; }                                   // tool absent ⇒ no profile-aware storage ⇒ feature off
+
+  const btn   = document.getElementById('profile-btn');
+  const menu  = document.getElementById('profile-menu');
+  const label = document.getElementById('profile-btn-label');
+  if (!btn || !menu || !label) return;
+
+  // Honour a `#<profile>:…` deep-link BEFORE any session/tool call reads the active profile (the transport
+  // sends it from localStorage per request). Adopt the named profile, then strip it from the hash so the
+  // downstream session-fragment parser in init() sees only `<session>~<params>`. Done here at load — no
+  // reload, since nothing has opened under the old identity yet (unlike selectProfile's live switch).
+  const validNames = new Set(profiles.map(p => p.name));
+  const { profile: hashProfile, rest } = splitHashProfile(location.hash.slice(1), validNames);
+  if (hashProfile !== null) {
+    try { localStorage.setItem(PROFILE_LS, hashProfile); } catch { /* ignore */ }
+    history.replaceState(null, '', location.pathname + (rest ? '#' + rest : ''));
+  }
+
+  const active = currentProfileName();
+  label.textContent = active || 'Global';
+  btn.hidden = false;
+
+  const render = (list, namespaces) => {
+    menu.innerHTML = '';
+    // `p` is a profile { name, isolated } or null for the base/"global" identity (no isolation, not editable).
+    const row = (p) => {
+      const name = p && p.name;
+      const item = document.createElement('div');
+      item.className = 'pm-item' + ((name || null) === active ? ' active' : '');
+      const nm = document.createElement('span');
+      nm.className = 'pm-name';
+      nm.textContent = name || 'Global (shared)';
+      item.appendChild(nm);
+      item.addEventListener('click', () => selectProfile(name));
+      if (!name) { menu.appendChild(item); return; }
+
+      // Isolated-namespaces editor: the gear toggles a checklist panel (a menu sibling of the row, so its
+      // clicks never bubble into the row's select-and-reload handler). Apply writes the whole set at once.
+      const panel = document.createElement('div');
+      panel.className = 'pm-ns-panel'; panel.hidden = true;
+      const gear = document.createElement('button');
+      gear.className = 'pm-ns-btn'; gear.title = 'Edit isolated namespaces'; gear.textContent = '⚙';
+      gear.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (!panel.hidden) { panel.hidden = true; return; }
+        panel.innerHTML = '';
+        const { box, current } = namespaceChecklist(namespaces, p.isolated || []);
+        const actions = document.createElement('div');
+        actions.className = 'pm-ns-actions';
+        const apply  = document.createElement('button'); apply.textContent = 'Apply';
+        const status = document.createElement('span');   status.className = 'pm-ns-status';
+        apply.addEventListener('click', async (ev) => {
+          ev.stopPropagation();
+          const next = current();
+          try { await callTool('profile', { action: 'set_isolated', name, isolated: next }); }
+          catch (err) { status.textContent = String(err); return; }
+          p.isolated = next;                            // reflect the persisted set without collapsing the panel
+          status.textContent = 'Saved';
+        });
+        actions.appendChild(apply); actions.appendChild(status);
+        panel.appendChild(box); panel.appendChild(actions);
+        panel.hidden = false;
+      });
+
+      const link = document.createElement('button');
+      link.className = 'pm-link'; link.title = 'Copy shareable link'; link.textContent = '\u{1F517}';
+      link.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const url = location.origin + location.pathname + '#' + encodeURIComponent(name);
+        const ok  = await copyToClipboard(url);
+        const was = link.textContent;
+        link.textContent = ok ? '✓' : '✗';
+        setTimeout(() => { link.textContent = was; }, 1200);
+      });
+
+      const del = document.createElement('button');
+      del.className = 'pm-del'; del.title = 'Delete profile'; del.textContent = '✕';
+      del.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (!confirm('Delete profile "' + name + '"? Its stored data is left on disk.')) return;
+        try { await callTool('profile', { action: 'delete', name }); } catch (err) { alert(String(err)); return; }
+        if (currentProfileName() === name) { selectProfile(null); return; }
+        refresh();
+      });
+
+      item.appendChild(gear); item.appendChild(link); item.appendChild(del);
+      menu.appendChild(item);
+      menu.appendChild(panel);
+    };
+    row(null);                                        // the base / "global" identity
+    for (const p of list) row(p);
+
+    const newRow = document.createElement('div');
+    newRow.className = 'pm-new';
+    const input = document.createElement('input');
+    input.type = 'text'; input.placeholder = 'New profile name';
+    const add = document.createElement('button');
+    add.textContent = 'Create';
+    newRow.appendChild(input); newRow.appendChild(add);
+
+    // Namespace chooser for the new profile — collapsed, defaulting to `sessions` (the backend's default),
+    // so `create` sends the same set unless the user opens it and changes the selection.
+    const choose = document.createElement('div');
+    choose.className = 'pm-ns-choose';
+    const toggle = document.createElement('button');
+    toggle.type = 'button'; toggle.className = 'pm-ns-toggle'; toggle.textContent = 'Isolated namespaces ▾';
+    const { box: createBox, current: createCurrent } =
+      namespaceChecklist(namespaces, namespaces.includes('sessions') ? ['sessions'] : []);
+    createBox.hidden = true;
+    toggle.addEventListener('click', (e) => { e.stopPropagation(); createBox.hidden = !createBox.hidden; });
+    choose.appendChild(toggle); choose.appendChild(createBox);
+
+    const create = async () => {
+      const name = input.value.trim();
+      if (!name) return;
+      try { await callTool('profile', { action: 'create', name, isolated: createCurrent() }); }
+      catch (err) { alert(String(err)); return; }
+      selectProfile(name);                            // switch to the freshly-created profile
+    };
+    add.addEventListener('click', create);
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') create(); });
+    menu.appendChild(newRow);
+    menu.appendChild(choose);
+  };
+
+  const refresh = async () => {
+    let list = [], namespaces = [];
+    try {
+      const [listed, ns] = await Promise.all([
+        callTool('profile', { action: 'list' }),
+        callTool('profile', { action: 'available_namespaces' }),
+      ]);
+      list = listed.profiles; namespaces = ns;
+    } catch { /* keep last */ }
+    render(list, namespaces);
+  };
+
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (menu.hidden) {
+      const r = btn.getBoundingClientRect();
+      menu.style.left = r.left + 'px';
+      menu.style.top  = (r.bottom + 4) + 'px';
+      refresh();
+      menu.hidden = false;
+    } else {
+      menu.hidden = true;
+    }
+  });
+  document.addEventListener('click', (e) => {
+    if (!menu.hidden && !menu.contains(e.target) && e.target !== btn && !btn.contains(e.target)) menu.hidden = true;
+  });
+
+  refresh();                                          // initial render, also pulling the isolatable-namespace set
+}
 
 init().catch(console.error);

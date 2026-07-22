@@ -9,7 +9,7 @@ declare module '@matatbread/matbot-plugin-api' {
 import { watchPlugins }                      from '@matatbread/matbot-core';
 // Type import also brings the `SkillManager` augmentation of MatbotMachine into scope.
 import type { SkillManager }                 from '@matatbread/matbot-skills';
-import { createWebServer, defaultWebPrincipal } from './server.js';
+import { createWebServer, defaultWebPrincipal, headerPrincipal } from './server.js';
 import process                               from 'node:process';
 
 let webServer: Awaited<ReturnType<typeof createWebServer>> | undefined;
@@ -77,8 +77,11 @@ export const plugin: MatbotPluginSpec = {
       // Resolve the SkillManager per call, not once here: frontend-web loads before the skills plugin,
       // so a snapshot would capture undefined forever (services.SkillManager is a live registry getter).
       skills:        () => services.SkillManager,
-      // Look up the resolver per request so an override registered in any load order takes effect.
-      resolvePrincipal: (req) => (services.WebPrincipalResolver ?? defaultWebPrincipal)(req),
+      // An explicit `x-matbot-principal` header wins over any registered resolver (so a browser acting as
+      // a chosen profile is honoured even when web-principal-user/auth pins a default identity); absent it,
+      // a registered WebPrincipalResolver takes effect, else the header-aware default. Resolver looked up
+      // per request so a registration in any load order applies.
+      resolvePrincipal: (req) => headerPrincipal(req) ?? (services.WebPrincipalResolver ?? defaultWebPrincipal)(req),
       ...(services.workdir    !== undefined ? { workdir:    services.workdir    } : {}),
       ...(services.files      !== undefined ? { files:      services.files      } : {}),
       ...(services.configPath !== undefined ? { configPath: services.configPath } : {}),
