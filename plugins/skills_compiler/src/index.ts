@@ -358,7 +358,6 @@ ${toolContractsDts}
             const scratch: Session = {
               id: scratchId,
               version: crypto.randomUUID(),
-              ownerPrincipalId: principal.id,
               status: 'active',
               contexts: [],
               messages: [],

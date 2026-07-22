@@ -1257,7 +1257,7 @@ async function main(): Promise<void> {
     }
     session = existing;
   } else {
-    session = createSession({ ownerPrincipal: principal });
+    session = createSession();
     if (opts.system) {
       session = appendMessage(session, createMessage({
         role:    'system',

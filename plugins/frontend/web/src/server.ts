@@ -289,11 +289,10 @@ export function createWebServer(deps: WebServerDeps) {
     }
   });
 
-  function makeToolCtx(ac: AbortController, principal: Principal) {
+  function makeToolCtx(ac: AbortController) {
     const now = new Date().toISOString();
     const stubSession: Session = {
       id: crypto.randomUUID(), version: crypto.randomUUID(),
-      ownerPrincipalId: principal.id,
       status: 'active', contexts: [], messages: [],
       createdAt: now, updatedAt: now,
     };
@@ -414,7 +413,7 @@ export function createWebServer(deps: WebServerDeps) {
 
     // --- POST /sessions ---
     if (method === 'POST' && url === '/sessions') {
-      const session = createSession({ ownerPrincipal: principal });
+      const session = createSession();
       await deps.store.set(session.id, session);
       json(res, 201, { id: session.id });
       return;
@@ -597,7 +596,7 @@ export function createWebServer(deps: WebServerDeps) {
       const tool = await resolveToolReady(toolName, ac.signal);
       if (!tool) { json(res, 404, { error: `Tool "${toolName}" not found` }); return; }
 
-      const toolCtx = makeToolCtx(ac, principal);
+      const toolCtx = makeToolCtx(ac);
       let stdout = '';
       let stderr = '';
       try {
@@ -649,7 +648,7 @@ export function createWebServer(deps: WebServerDeps) {
       res.write(sseComment('tool stream open'));
 
       try {
-        for await (const ev of tool.executor.execute(input, makeToolCtx(ac, principal))) {
+        for await (const ev of tool.executor.execute(input, makeToolCtx(ac))) {
           if (!res.writable) break;
           res.write(sseEvent(ev.type, ev));
         }

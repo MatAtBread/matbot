@@ -202,7 +202,7 @@ export const plugin: MatbotPluginSpec = {
         // so a new session is created with the current naming convention
         if (session?.status !== 'active') session = null;
         if (!session) {
-          session = createSession({ ownerPrincipal: principal });
+          session = createSession();
           // Name the session after the sender so it's identifiable in the web UI
           const name = senderName || 'Telegram';
           session.title = `${name} on Telegram`;

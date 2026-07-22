@@ -219,7 +219,7 @@ export class ChatUI {
   private async newSession(): Promise<void> {
     const store = this.services.sessions;
     if (store === undefined) throw new Error('No sessions store available.');
-    const session = createSession({ ownerPrincipal: this.principal() });
+    const session = createSession();
     await store.set(session.id, session);
     await this.refreshSessionList();
     await this.selectSession(session.id);
