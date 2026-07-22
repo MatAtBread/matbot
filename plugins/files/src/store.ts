@@ -198,6 +198,9 @@ export class FilesystemFileStore implements FileStore {
   }
 
   async *watch(signal?: AbortSignal): AsyncIterable<FileEvent> {
+    // A per-subscriber bridge over the external `fs.watch` source — deliberately NOT the shared
+    // `createBroadcaster` fan-out (that's for internally-emitted events like the sqlite store's). Each
+    // subscriber owns its own fs.watch; the profiles backend merges one such stream per partition.
     // fs.watch throws ENOENT on a missing directory, so ensure it exists first — mirroring put()/list().
     // This bites when a registered StorageBackend is the boot backend: the host skips its own files-dir
     // mkdir, so nothing else has created the directory before the frontend starts watching it.

@@ -1,11 +1,12 @@
 import { DatabaseSync } from 'node:sqlite';
 import type { FileStore, FileHandle, FileMetaData, FileEvent, FileFilter, MimeType } from '@matatbread/matbot-plugin-api';
+import { createBroadcaster } from '@matatbread/matbot-plugin-api';
 
 const file_table_name = 'file_meta';
 
 export class SQLiteFileStore implements FileStore {
-  private readonly db:       DatabaseSync;
-  private readonly watchers = new Set<(event: FileEvent) => void>();
+  private readonly db:     DatabaseSync;
+  private readonly events = createBroadcaster<FileEvent>();
 
   constructor(db: DatabaseSync) {
     this.db = db;
@@ -105,31 +106,12 @@ export class SQLiteFileStore implements FileStore {
   }
 
   async *watch(signal?: AbortSignal): AsyncIterable<FileEvent> {
-    const queue: FileEvent[] = [];
-    let notify: (() => void) | undefined;
-    let done = false;
-
-    const wake     = (): void => { const fn = notify; notify = undefined; fn?.(); };
-    const listener = (event: FileEvent): void => { queue.push(event); wake(); };
-    const onAbort  = (): void => { done = true; this.watchers.delete(listener); wake(); };
-
-    this.watchers.add(listener);
-    signal?.addEventListener('abort', onAbort, { once: true });
-
-    try {
-      while (!done) {
-        while (queue.length > 0) yield queue.shift()!;
-        if (done) break;
-        await new Promise<void>(r => { notify = r; });
-      }
-    } finally {
-      this.watchers.delete(listener);
-      signal?.removeEventListener('abort', onAbort);
-    }
+    // Bare events (unwrap the envelope) — a single-partition store has no origin to attribute.
+    for await (const { value } of this.events.subscribe(signal)) yield value;
   }
 
   private emit(event: FileEvent): void {
-    for (const fn of this.watchers) fn(event);
+    this.events.emit(event);
   }
 
   private buildHandle(row: MetaRow): FileHandle {
