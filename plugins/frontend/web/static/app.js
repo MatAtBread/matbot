@@ -14,6 +14,7 @@ const LS_SIDEBAR_WIDTH  = 'sidebarWidth';
 let currentSessionId = null;
 let profilesActive = false;   // set once initProfiles confirms a profile-aware storage backend (gates sharing UI)
 let profileNames = new Set(); // valid profile names, populated by initProfiles — lets hashchange split a deep-link profile like load does
+let composerReadOnly = false; // true while viewing a session shared IN from another profile (writes rejected by backend)
 let sending = false;          // current session busy? mirrors the server's 'session-busy' status
 const busySessions   = new Set();
 const unreadSessions = new Set();
@@ -2186,6 +2187,7 @@ async function connectSessionStream(sid) {
 // add more context. concat = false (Ctrl+Enter): a distinct queued turn, run in order — use when the
 // next ask depends on this one's tools/state (e.g. install a plugin, then use it).
 async function sendMessage(concat = true) {
+  if (composerReadOnly) return;                          // shared-in session: writes are rejected by the backend
   const content = inputEl.value.trim();
   if (!content) return;
   inputEl.value = '';
@@ -3198,6 +3200,7 @@ function updateShareBtn() {
 async function refreshShareState(sessionId) {
   const badge = document.getElementById('readonly-badge');
   if (badge) badge.hidden = true;
+  setComposerReadOnly(false);                          // optimistic: owned/new until the owner call says otherwise
   updateShareBtn();
   if (!profilesActive || !sessionId) return;
   let owner = null;
@@ -3207,7 +3210,22 @@ async function refreshShareState(sessionId) {
   if (owner != null) {                                 // '' = owned by global/base; null = owned by me
     if (shareBtn) shareBtn.hidden = true;
     if (badge) { badge.textContent = 'read-only · ' + (owner || 'global'); badge.hidden = false; }
+    setComposerReadOnly(true, owner);
   }
+}
+
+// Disable the composer for a shared-in (read-only) session: the textarea is disabled and the send button
+// is gated via CSS (a class, not `disabled`, so setStop's busy handling doesn't fight it). The backend
+// rejects the write regardless — this just spares the user a doomed submit. `owner` (the partition that
+// can modify it; '' = global/base) is named in the placeholder so the user knows who to ask.
+function setComposerReadOnly(ro, owner) {
+  composerReadOnly = ro;
+  const row = document.getElementById('input-row');
+  if (row) row.classList.toggle('read-only', ro);
+  inputEl.disabled = ro;
+  inputEl.placeholder = ro
+    ? `This conversation was shared by "${owner || 'global'}" and is read-only.`
+    : 'Shift+⬅️ to send, ⬅️ for newline';
 }
 
 function setupShare() {
