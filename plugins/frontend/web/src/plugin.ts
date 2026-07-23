@@ -9,7 +9,7 @@ declare module '@matatbread/matbot-plugin-api' {
 import { watchPlugins, tryCurrentPrincipal }  from '@matatbread/matbot-core';
 // Type import also brings the `SkillManager` augmentation of MatbotMachine into scope.
 import type { SkillManager }                 from '@matatbread/matbot-skills';
-import { createWebServer, defaultWebPrincipal, headerPrincipal } from './server.js';
+import { createWebServer, defaultWebPrincipal, headerPrincipal, urlPrincipal } from './server.js';
 import process                               from 'node:process';
 
 let webServer: Awaited<ReturnType<typeof createWebServer>> | undefined;
@@ -90,7 +90,7 @@ export const plugin: MatbotPluginSpec = {
       // a chosen profile is honoured even when web-principal-user/auth pins a default identity); absent it,
       // a registered WebPrincipalResolver takes effect, else the header-aware default. Resolver looked up
       // per request so a registration in any load order applies.
-      resolvePrincipal: (req) => headerPrincipal(req) ?? (services.WebPrincipalResolver ?? defaultWebPrincipal)(req),
+      resolvePrincipal: (req) => headerPrincipal(req) ?? urlPrincipal(req) ?? (services.WebPrincipalResolver ?? defaultWebPrincipal)(req),
       ...(services.workdir    !== undefined ? { workdir:    services.workdir    } : {}),
       ...(services.files      !== undefined ? { files:      services.files      } : {}),
       // Partition-aware file watch, if a partitioning backend registered one (profiles loads first, so it's

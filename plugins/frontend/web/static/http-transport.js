@@ -41,7 +41,8 @@
   // every API request as `x-matbot-principal`, so the server routes the request — and its session/tool
   // storage — to that profile. Absent ⇒ no header ⇒ the server's default (boot) principal, i.e. base
   // storage, so a vanilla UI with no profile chosen behaves exactly as before. The global /events
-  // EventSource carries only non-principal data, so it is intentionally left un-headered.
+  // EventSource can't set a header (the browser API has none), so it carries the same choice as a
+  // `?principal=` query param — the server filters that connection's partitioned file events by it.
   const PROFILE_KEY = 'matbot.profile';
   function currentProfile() { try { return localStorage.getItem(PROFILE_KEY) || null; } catch { return null; } }
   function withProfile(headers) {
@@ -160,7 +161,8 @@
 
   function ensureGlobalStream() {
     if (globalES) return;
-    const es = new EventSource('/events');
+    const p = currentProfile();
+    const es = new EventSource('/events' + (p ? '?principal=' + encodeURIComponent(p) : ''));
     globalES = es;
     for (const name of globalSubs.keys()) bindGlobalEvent(es, name);
     es.onerror = () => { es.close(); if (globalES === es) globalES = null; setTimeout(ensureGlobalStream, 3000); };

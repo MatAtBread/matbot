@@ -78,11 +78,22 @@ export function headerPrincipal(req: IncomingMessage): Principal | undefined {
   return id ? { id, type: 'user' } : undefined;
 }
 
+// The same identity hint carried in the URL as `?principal=<id>`, for a request that cannot set a header —
+// notably an `EventSource` (SSE), whose browser API has no header option. The global `/events` firehose now
+// carries per-connection-filtered file events, so its EventSource passes the chosen profile this way. Ranked
+// below the header (an explicit XHR header still wins) and, like it, is routing not auth — client-asserted.
+export function urlPrincipal(req: IncomingMessage): Principal | undefined {
+  const q = req.url?.indexOf('?') ?? -1;
+  if (q < 0) return undefined;
+  const id = new URLSearchParams(req.url!.slice(q + 1)).get('principal')?.trim();
+  return id ? { id, type: 'user' } : undefined;
+}
+
 // The default request identity when no header and no override resolver apply: the process boot principal
 // (the pod/sandbox/system identity established at the entry), keeping web sessions attributed to the same
 // identity as the rest of the app. The header still wins here too, for when this default is used directly.
 export const defaultWebPrincipal: WebPrincipalResolver = (req) =>
-  headerPrincipal(req) ?? tryCurrentPrincipal() ?? ANONYMOUS_WEB_USER;
+  headerPrincipal(req) ?? urlPrincipal(req) ?? tryCurrentPrincipal() ?? ANONYMOUS_WEB_USER;
 
 async function readBody(req: IncomingMessage, maxBytes = 1_048_576): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -286,7 +297,10 @@ export function createWebServer(deps: WebServerDeps) {
 
   const server = createServer(async (req, res) => {
     const method = req.method ?? 'GET';
-    const url    = req.url ?? '/';
+    // Path only for routing; the query string (e.g. ?principal= on the SSE EventSource) is read off the
+    // raw req.url by the principal resolvers, never by a route match.
+    const rawUrl = req.url ?? '/';
+    const url    = rawUrl.includes('?') ? rawUrl.slice(0, rawUrl.indexOf('?')) : rawUrl;
 
     // A dead socket — client gone, or the server torn down mid-stream while this plugin unloads —
     // makes a pending `res.write` (e.g. the SSE loop below) emit an async 'error' on a later tick.
