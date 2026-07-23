@@ -1,5 +1,14 @@
 # @matatbread/matbot-provider-google
 
+## 0.3.4
+
+### Patch Changes
+
+- Updated dependencies [c3a1b00]
+  - @matatbread/matbot-plugin-api@0.3.4
+  - @matatbread/matbot-core@0.3.4
+  - @matatbread/matbot-provider-openai-compat@0.3.4
+
 ## 0.3.3
 
 ### Patch Changes

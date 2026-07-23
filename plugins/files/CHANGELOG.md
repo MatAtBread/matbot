@@ -1,5 +1,16 @@
 # @matatbread/matbot-files-node
 
+## 0.3.4
+
+### Patch Changes
+
+- 36fee95: Fix `FilesystemFileStore.watch()` throwing `ENOENT` when its directory does not yet exist. It now
+  ensures the directory first (mirroring `put()`/`list()`), so a registered `StorageBackend` acting as the
+  boot backend — where the host skips its own `.data/files` mkdir — no longer crashes the web frontend at
+  startup on a fresh data directory.
+- Updated dependencies [c3a1b00]
+  - @matatbread/matbot-core@0.3.4
+
 ## 0.3.3
 
 ### Patch Changes
