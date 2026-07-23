@@ -1,3 +1,4 @@
+import { dirname, join } from 'node:path';
 import type { MatbotPluginSpec, MatbotMachine, ToolRegistry } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import { ProfilesStorageBackend, asProfileDirectory } from './backend.js';
@@ -24,19 +25,25 @@ export const plugin: MatbotPluginSpec = {
   },
 
   async setup(services: MatbotMachine) {
-    // Register the `profile` tool only when profiles are genuinely the active backend — i.e. we were the
-    // boot pre-scan (our open() ran), or the live StorageBackend already exposes the profile facet. The
-    // check is duck-typed, never `instanceof`: a hot reload gives this module a fresh class identity, so
-    // an identity check would miss a still-active earlier instance. A boot storage backend cannot be
-    // reliably (re)installed at runtime — the host reverts it on unload and the swap is deferred to a
-    // pump turn — so changing the storage backend is a restart-time operation; see README.
+    // Make the profiles backend the active one if it isn't already. The boot pre-scan (openedByPreScan)
+    // installs it before any setup; a reload where a profile backend is still active is likewise a no-op.
+    // Otherwise we were HOT-LOADED at runtime: open and register it now — mirroring the sqlite plugin. The
+    // swap is deferred to the next quiescent edge (applied immediately when idle, at the turn's end when
+    // loaded mid-turn), and unloadPlugin reverts it via the recorded service key. No restart needed. The
+    // active-backend check is duck-typed, never `instanceof`: a hot reload gives this module a fresh class
+    // identity, so an identity check would miss a still-active earlier instance.
     if (!openedByPreScan && asProfileDirectory(services.StorageBackend) === undefined) {
-      console.warn('[storage-profiles] not the active storage backend — `profile` tool not registered. A storage backend must be present at boot (restart after adding it); it cannot be hot-installed.');
-      return;
+      if (!services.configPath) {
+        console.warn('[storage-profiles] no configPath — cannot hot-activate the profiles backend; add it to matbot.yaml.');
+        return;
+      }
+      const dotData = join(dirname(services.configPath), '.data');
+      await services.register('StorageBackend', await ProfilesStorageBackend.open(dotData));
     }
 
-    // The tool resolves its directory live (duck-typed, swap-safe) on each call, so it follows any later
-    // StorageBackend swap and never pins a stale or hot-reloaded instance.
+    // The tools + WatchVisibility resolve their directory live (duck-typed, swap-safe) on each call, so
+    // they follow any later StorageBackend swap and work the moment a deferred hot-load swap lands — even
+    // if that is after this setup() returns — and never pin a stale or hot-reloaded instance.
     const dir = () => asProfileDirectory(services.StorageBackend);
     services.tools.register(createProfileTool(dir));
     services.tools.register(createShareTool(dir));
