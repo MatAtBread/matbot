@@ -7,6 +7,7 @@ import { DriveVault } from './drive-vault.js';
 import { DrivePluginSet, createSyncedPluginTool } from './drive-plugins.js';
 import { DriveProviderSet, driveProviderAdmin } from './drive-providers.js';
 import { createBrowserProviderTool } from '@matatbread/matbot-browser';
+import { CachingStorageBackend } from '@matatbread/matbot-core/storage-base';
 
 // Config needed to *reach* Drive (client ID + root folder) lives in localStorage, not in matbot's
 // swappable settings store — settings would be backed by Drive once this plugin activates, so
@@ -76,14 +77,19 @@ export const plugin: MatbotPluginSpec = {
   manifest:   { description: 'Persist matbot sessions, settings, files and secrets to a folder in your Google Drive (browser).' },
 
   async setup(services: MatbotMachine): Promise<void> {
-    if (services.StorageBackend instanceof GoogleDriveStorageBackend) return;
-    const backend = await authoriseAndBuild();
+    // Idempotency guard — duck-type through the cache wrapper rather than an `instanceof` on the
+    // registered backend, which is now a CachingStorageBackend hiding the real Drive backend in `.inner`.
+    const active = services.StorageBackend;
+    const activeRaw = active instanceof CachingStorageBackend ? active.inner : active;
+    if (activeRaw instanceof GoogleDriveStorageBackend) return;
+
+    const drive = await authoriseAndBuild();
 
     // Probe Drive with a real call BEFORE swapping it in. If Drive is misconfigured (most commonly
     // the Drive API isn't enabled for the project), fail here — nothing is registered, so the session
     // stays on its existing local backend rather than erroring on every store operation.
     try {
-      await backend.ready();
+      await drive.ready();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       throw new Error(
@@ -95,6 +101,18 @@ export const plugin: MatbotPluginSpec = {
       );
     }
 
+    // Wrap Drive in a read-through cache before registering: Drive reads are slow, and the harness
+    // re-reads whole namespaces (triggers, skills, providers) every turn. Write-through keeps CAS on
+    // the real backend; the cache only serves reads. The browser bundle is single-user per session, so
+    // its own writes stay coherent and no foreign-write invalidation (TTL, or a Drive Changes-API
+    // watch) is needed — the sole divergence case is the same user in two browsers at once, and the
+    // Drive token expires within the hour anyway. A `drive.changes.watch()` feed remains a possible
+    // future sharpening if that ever matters.
+    const backend = new CachingStorageBackend(drive);
+    // Diagnostic handle: `__mbCache()` in the devtools console dumps per-namespace cache counters
+    // (docs / reads / hits / loads / lastLoadMs) so you can see the cache serving reads instead of
+    // re-reading Drive (hits climbing while loads stays ~1).
+    (globalThis as unknown as Record<string, unknown>).__mbCache = () => backend.stats();
     await services.register('StorageBackend', backend);
 
     // Re-point the vault at Drive so secrets sync too. createStore('vault') now resolves to the

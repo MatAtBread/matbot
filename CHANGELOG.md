@@ -58,6 +58,19 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### API gaps filled
 
+- **`CachingStorageBackend` — read-through cache decorator (`@matatbread/matbot-core/storage-base`).**
+  Wraps any `StorageBackend` in a per-namespace, cache-aside, **write-through** cache: reads serve from
+  a full in-memory image of the namespace (warmed lazily by one `backing.query({})`), while every
+  `set`/`cas`/`delete` goes to the backing store first (system of record — CAS and durability unchanged)
+  and then updates the image. Coherence is honest: always coherent with the wrapper's own writes; foreign
+  writes only as sharp as the optional `ttlMs` tier (a bounded-staleness ceiling — unset ⇒ warm once,
+  never expire). Cross-platform (pure logic + `Map` + `executeQuery`, no Node primitives). Compose it
+  *below* any principal-partitioning router so each partition gets its own cache. Purpose: stop slow
+  backends re-reading whole namespaces every turn; the correctness half (consumer-side caches → read-
+  through) shipped earlier this release. A `stats()` method exposes per-namespace counters
+  (`CacheNamespaceStats`: docs / reads / hits / loads / lastLoadMs) for confirming the cache is serving
+  reads rather than re-reading the backend.
+
 - **Augmentable per-tool-call round-trip metadata (`ProviderMeta` + `tool-call` `meta?`).** The
   `tool-call` variant of both `CompletionEvent` and `MessageContent` gains an optional `meta?:
   ProviderMeta` — opaque, provider-specific round-trip state captured from a completion and re-sent
@@ -438,6 +451,16 @@ churn and less likely to affect a consumer who doesn't use them.
   (a missing secret) are still left in config to retry.
 
 ### Optional
+
+- **storage/google-drive — wraps its backend in `CachingStorageBackend` before registering.** Drive
+  reads are slow and the harness re-reads whole namespaces (triggers, skills, providers) every turn;
+  the cache serves reads locally while writes stay write-through to Drive. The browser bundle is single-
+  user per session, so its own writes stay coherent with no foreign-write invalidation configured (the
+  only divergence case is the same user in two browsers at once, and the Drive token expires within the
+  hour); a `drive.changes.watch()` feed is noted in-code as a possible future sharpening. The `setup()`
+  idempotency guard now duck-types through the wrapper (`.inner`) instead of an `instanceof` on the
+  registered backend. Exposes `globalThis.__mbCache()` in the browser as a console handle onto the
+  wrapper's `stats()`.
 
 - **providers/google — native Gemini adapter (new `@matatbread/matbot-provider-google`).** One
   `module:`, two wire formats, chosen by the endpoint **path** (not host — a proxy/gateway may rewrite
