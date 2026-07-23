@@ -47,14 +47,14 @@ export const plugin: MatbotPluginSpec = {
     // file events (origin-stamped) and filters each SSE connection by its principal. Delegates live to
     // the active backend (swap-safe), fail-open on visibility if the facet has gone.
     await services.register('WatchVisibility', {
-      watch:     (signal) => dir()?.watchFiles(signal) ?? (async function* (): AsyncIterable<never> {})(),
-      visibleTo: (viewer, event) => dir()?.visibleToFiles(viewer, event) ?? true,
+      watchFiles: (signal) => dir()?.watchFiles(signal) ?? (async function* (): AsyncIterable<never> {})(),
+      visible:    (viewer, ns, origin) => dir()?.visible(viewer, ns, origin) ?? true,
     });
     watchRegistered = true;
   },
 
   async teardown() {
-    toolRegistry?.remove('profile');
+    toolRegistry?.remove('profile_action');
     toolRegistry?.remove('share');
     toolRegistry = undefined;
     if (watchRegistered && machine) { machine.unregister('WatchVisibility'); watchRegistered = false; }

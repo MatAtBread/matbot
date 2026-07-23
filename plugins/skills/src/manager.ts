@@ -1,5 +1,5 @@
-import type { Store, KnowledgeIndex, KnowledgeEntry, MatbotMachine } from '@matatbread/matbot-plugin-api';
-import { createBroadcaster } from '@matatbread/matbot-plugin-api';
+import type { Store, KnowledgeIndex, KnowledgeEntry, MatbotMachine, Routed } from '@matatbread/matbot-plugin-api';
+import { createBroadcaster, tryCurrentPrincipal } from '@matatbread/matbot-plugin-api';
 import type { SkillDoc, SkillEvent } from './types.js';
 
 type SkillAnalysis  = { entities: string[]; tags: string[]; summary: string; classification: { procedural: number; informational: number } };
@@ -162,8 +162,10 @@ export interface SkillManager {
   list(): SkillSummary[];
   get(name: string): SkillDoc | undefined;
   /** Observe skill content CRUD (save/delete), including LLM mid-turn saves — the source a UI needs to
-   *  refresh a skills list live. */
-  watch(signal?: AbortSignal): AsyncIterable<SkillEvent>;
+   *  refresh a skills list live. Each event is stamped with the acting principal (its `origin`), so a
+   *  partitioned frontend can filter it per connection; a boot/import with no principal has `origin`
+   *  undefined (base/global). */
+  watch(signal?: AbortSignal): AsyncIterable<Routed<SkillEvent>>;
   /** Create a new skill or update an existing one's content by name. `catalogue` omitted ⇒ unchanged. */
   save(name: string, content: string, catalogue?: boolean): Promise<SkillDoc>;
   /** Delete a skill by name. Returns the removed doc, or `undefined`. */
@@ -256,10 +258,8 @@ export class SkillManagerImpl implements SkillManager {
 
   /** Observe skill content CRUD (save/delete), including saves made by the LLM mid-turn via
    *  `skill_action` — the source a UI needs to refresh a skills list live. */
-  async *watch(signal?: AbortSignal): AsyncIterable<SkillEvent> {
-    // Bare events for now (unwrap the envelope). Origin/partition attribution for skills lands with the
-    // cross-partition watch fan-out; until then skill CRUD broadcasts as before.
-    for await (const { value } of this.events.subscribe(signal)) yield value;
+  watch(signal?: AbortSignal): AsyncIterable<Routed<SkillEvent>> {
+    return this.events.subscribe(signal);
   }
 
   /** Create a new skill or update an existing one's content by name. */
@@ -283,12 +283,12 @@ export class SkillManagerImpl implements SkillManager {
       };
       await this.store.set(newDoc.id, newDoc);
       this.commit(newDoc, true);
-      this.events.emit({ type: 'saved', name: newDoc.name });
+      this.events.emit({ type: 'saved', name: newDoc.name }, tryCurrentPrincipal());
       return newDoc;
     }
 
     const saved = await this.casMutate(doc, cur => this.bump({ ...cur, content, ...(catalogue !== undefined ? { catalogue } : {}) }), true);
-    this.events.emit({ type: 'saved', name: saved.name });
+    this.events.emit({ type: 'saved', name: saved.name }, tryCurrentPrincipal());
     return saved;
   }
 
@@ -302,7 +302,7 @@ export class SkillManagerImpl implements SkillManager {
     await this.store.delete(doc.id, doc.version);
     await this.knowledge.remove(doc.id);  // retract its index entry — the store no longer owns it
     this.skills.delete(key);
-    this.events.emit({ type: 'deleted', name: doc.name });
+    this.events.emit({ type: 'deleted', name: doc.name }, tryCurrentPrincipal());
     return doc;
   }
 
@@ -323,7 +323,7 @@ export class SkillManagerImpl implements SkillManager {
     } else {
       void this.reindex(saved);
     }
-    this.events.emit({ type: 'saved', name: saved.name });
+    this.events.emit({ type: 'saved', name: saved.name }, tryCurrentPrincipal());
     return saved;
   }
 
@@ -352,7 +352,7 @@ export class SkillManagerImpl implements SkillManager {
     };
     await this.store.set(doc.id, doc);
     this.commit(doc, true);
-    this.events.emit({ type: 'saved', name: doc.name });
+    this.events.emit({ type: 'saved', name: doc.name }, tryCurrentPrincipal());
     return true;
   }
 

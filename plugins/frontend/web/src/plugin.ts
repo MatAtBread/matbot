@@ -20,7 +20,7 @@ const port = Number(process.env['MATBOT_WEB_PORT'] ?? 19778); // 19778 is "MB" i
 // `allowed` (default-deny). The path mirrors the GET /files/[~<principal>/]<namespace>/<name> route in
 // server.ts. Registered only when the server is up (below), so the tool is absent when nothing is serving.
 //
-// Built with `services` so it can detect profile-aware storage (the `profile` tool is registered iff
+// Built with `services` so it can detect profile-aware storage (the `profile_action` tool is registered iff
 // profiles are active — the same capability signal the UI gates on) and bake the current principal into
 // the path as `~<id>`: a plain browser GET can't send the x-matbot-principal header, so a profiled file's
 // partition has to travel in the URL itself. Without profiles the path stays byte-identical to before.
@@ -48,7 +48,7 @@ function makeUrlForResourceTool(services: MatbotMachine): Tool<ToolResultOf<'url
         if (!ctx.files) { yield { type: 'result', value: { url: null } }; return; }
         const handle = await ctx.files.getByName(name, namespace);
         if (!handle || !handle.allowed) { yield { type: 'result', value: { url: null } }; return; }
-        const principalId = services.tools?.resolve('profile') ? tryCurrentPrincipal()?.id : undefined;
+        const principalId = services.tools?.resolve('profile_action') ? tryCurrentPrincipal()?.id : undefined;
         const prefix = principalId ? `~${encodeURIComponent(principalId)}/` : '';
         const path = `${encodeURIComponent(namespace)}/${name.split('/').map(encodeURIComponent).join('/')}`;
         yield { type: 'result', value: { url: `/files/${prefix}${path}` } };

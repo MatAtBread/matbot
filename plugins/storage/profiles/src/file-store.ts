@@ -1,37 +1,4 @@
-import type { FileEvent, FileFilter, FileHandle, FileStore, MimeType, Principal, Routed } from '@matatbread/matbot-plugin-api';
-
-/** A partition's file store paired with the principal that owns it (`undefined` = base/global). */
-export interface FileSource {
-  origin: Principal | undefined;
-  store:  FileStore;
-}
-
-/**
- * Merge every partition's `fileStore.watch()` into one stream, stamping each event with its origin
- * partition — the cross-partition firehose feed a frontend filters per connection. A fair round-robin
- * race: each source keeps one in-flight `next()`; the winner is yielded and re-armed, a finished source
- * drops out, and `signal` abort ends every underlying watch (their own `finally` closes the fs.watch).
- * Partitions are captured at subscribe time, so a profile created *after* this starts isn't watched until
- * the stream is re-subscribed (a frontend reload) — acceptable for a rare event on a long-lived stream.
- */
-export async function* mergeRoutedFiles(sources: FileSource[], signal?: AbortSignal): AsyncIterable<Routed<FileEvent>> {
-  interface Entry { origin: Principal | undefined; it: AsyncIterator<FileEvent>; }
-  const entries: Entry[] = sources.map(s => ({ origin: s.origin, it: s.store.watch(signal)[Symbol.asyncIterator]() }));
-  const pending = new Map<Entry, Promise<{ e: Entry; r: IteratorResult<FileEvent> }>>();
-  const arm = (e: Entry): void => { pending.set(e, e.it.next().then(r => ({ e, r }))); };
-  for (const e of entries) arm(e);
-  try {
-    while (pending.size > 0) {
-      if (signal?.aborted) break;
-      const { e, r } = await Promise.race(pending.values());
-      if (r.done) { pending.delete(e); continue; }
-      yield e.origin !== undefined ? { value: r.value, origin: e.origin } : { value: r.value };
-      arm(e);
-    }
-  } finally {
-    for (const e of entries) void e.it.return?.();
-  }
-}
+import type { FileEvent, FileFilter, FileHandle, FileStore, MimeType } from '@matatbread/matbot-plugin-api';
 
 /**
  * A {@link FileStore} that routes every op to a per-principal partition's file store, mirroring how

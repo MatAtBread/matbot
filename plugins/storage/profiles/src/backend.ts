@@ -1,10 +1,10 @@
 import { promises as fs } from 'node:fs';
 import { dirname, join, sep } from 'node:path';
 import type { Store, FileStore, FileEvent, StorageBackend, Principal, Routed } from '@matatbread/matbot-plugin-api';
-import { readOnlyError } from '@matatbread/matbot-plugin-api';
+import { readOnlyError, createBroadcaster } from '@matatbread/matbot-plugin-api';
 import { tryCurrentPrincipal } from '@matatbread/matbot-core';
 import { FilesystemStorageBackend } from '@matatbread/matbot-storage-filesystem';
-import { ProfilesFileStore, mergeRoutedFiles, type FileSource } from './file-store.js';
+import { ProfilesFileStore } from './file-store.js';
 
 /**
  * A stored partition of storage keyed by principal id. `id` doubles as the principal id and the
@@ -44,11 +44,11 @@ export interface ProfileDirectory {
   share(namespace: string, id: string, target: string): Promise<void>;
   unshare(namespace: string, id: string, target: string): Promise<void>;
   ownerOf(namespace: string, id: string): Promise<Principal | undefined>;
-  // Cross-partition file watch + its per-connection visibility predicate — the `WatchVisibility` service
-  // surface, exposed here so the plugin can register it. `watchFiles` merges every partition's file
-  // events (origin-stamped); `visibleToFiles` answers whether `viewer` routes to an event's origin.
+  // The `WatchVisibility` service surface, exposed here so the plugin can register it. `watchFiles`
+  // subscribes to the live origin-stamped file stream (all partitions, dynamic); `visible` is the generic
+  // per-connection predicate for any partitioned kind (files, skills, …), keyed on the event's namespace.
   watchFiles(signal?: AbortSignal): AsyncIterable<Routed<FileEvent>>;
-  visibleToFiles(viewer: Principal, event: Routed<FileEvent>): boolean;
+  visible(viewer: Principal, namespace: string, origin: Principal | undefined): boolean;
 }
 
 /** Narrow any active StorageBackend to its {@link ProfileDirectory} facet by method presence, or undefined. */
@@ -64,7 +64,7 @@ export function asProfileDirectory(backend: unknown): ProfileDirectory | undefin
     && typeof b.unshare             === 'function'
     && typeof b.ownerOf             === 'function'
     && typeof b.watchFiles          === 'function'
-    && typeof b.visibleToFiles      === 'function'
+    && typeof b.visible             === 'function'
     ? (b as ProfileDirectory)
     : undefined;
 }
@@ -119,6 +119,11 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
   // A lower bound (lazily-created namespaces appear only once touched) — good for UI suggestions, not for
   // hard validation. ALWAYS_BASE members are filtered out at read time in availableNamespaces().
   private readonly observed                    = new Set<string>();
+  // One long-lived, origin-stamped file-event stream fed by a pump per partition (base + each profile,
+  // and each profile the moment it's created). watchFiles() just subscribes — so a profile made
+  // mid-session is watched live, without the restart a subscribe-time partition snapshot would need.
+  private readonly fileEvents                  = createBroadcaster<FileEvent>();
+  private readonly lifecycle                   = new AbortController();
 
   private constructor(dotData: string, base: StorageBackend) {
     this.dotData   = dotData;
@@ -131,6 +136,7 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
       return part === BASE ? this.base.fileStore : this.partitionFor(part).fileStore;
     });
     this.registry  = base.createStore<Profile>(PROFILE_REGISTRY_NS);
+    this.watchPartition(undefined, this.base.fileStore);     // base file area (always present)
   }
 
   static async open(dotData: string): Promise<ProfilesStorageBackend> {
@@ -140,10 +146,20 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
     for (const p of items) {
       backend.profiles.set(p.id, p);
       for (const ns of p.isolated) backend.observed.add(ns);
+      backend.watchPartition({ id: p.id, type: 'user' }, backend.partitionFor(p.id).fileStore);
     }
     for (const ns of DEFAULT_ISOLATED) backend.observed.add(ns);
     backend.observed.add(FILES_NS);                          // offer files as a toggle even before any file op
     return backend;
+  }
+
+  // Pump one partition's file events into the shared broadcaster, tagged with its origin, for the backend's
+  // lifetime. `origin` undefined = base. The underlying fileStore.watch ends on lifecycle abort (close()).
+  private watchPartition(origin: Principal | undefined, store: FileStore): void {
+    void (async () => {
+      try { for await (const ev of store.watch(this.lifecycle.signal)) this.fileEvents.emit(ev, origin); }
+      catch (e) { console.error(`[storage-profiles] file watch for "${origin?.id ?? 'base'}" ended:`, e instanceof Error ? e.message : e); }
+    })();
   }
 
   // ── StorageBackend ─────────────────────────────────────────────────────────────
@@ -176,6 +192,7 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
   }
 
   async close(): Promise<void> {
+    this.lifecycle.abort();                                  // stop every partition's file-watch pump
     await this.base.close?.();
     for (const p of this.partitions.values()) await p.close?.();
   }
@@ -200,6 +217,7 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
     };
     await this.registry.set(id, profile);
     this.profiles.set(id, profile);
+    this.watchPartition({ id, type: 'user' }, this.partitionFor(id).fileStore);   // watch it live — no restart
     return profile;
   }
 
@@ -282,24 +300,21 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
     return this.sharedOwner(this.route(namespace), namespace, id);
   }
 
-  // ── Cross-partition file watch (the WatchVisibility service surface) ───────────────
+  // ── Partitioned watch (the WatchVisibility service surface) ────────────────────────
 
-  // Merge every partition's file events into one origin-stamped stream. Base + one per profile; a
-  // profile that doesn't isolate files has an empty file dir (it writes to base), so it contributes
-  // nothing — harmless. Partitions are captured at subscribe time (see mergeRoutedFiles).
+  // Subscribe to the live, origin-stamped file-event stream (base + every partition, including profiles
+  // created after this call — the pumps feed one broadcaster). Never snapshots a partition set.
   watchFiles(signal?: AbortSignal): AsyncIterable<Routed<FileEvent>> {
-    const sources: FileSource[] = [{ origin: undefined, store: this.base.fileStore }];
-    for (const p of this.profiles.values()) {
-      sources.push({ origin: { id: p.id, type: 'user' }, store: this.partitionFor(p.id).fileStore });
-    }
-    return mergeRoutedFiles(sources, signal);
+    return this.fileEvents.subscribe(signal);
   }
 
-  // Does `viewer` route files to the partition this event came from? Files are the single `files` axis
-  // (not per-file-namespace), so the test is route(viewer, FILES_NS) === the event's origin partition
-  // ('' = base). An undefined origin is a base event, visible to everyone who routes files to base.
-  visibleToFiles(viewer: Principal, event: Routed<FileEvent>): boolean {
-    return this.routeFor(viewer.id, FILES_NS) === (event.origin?.id ?? BASE);
+  // Would `viewer` see an event in `namespace` from `origin`? They see it iff they route that namespace to
+  // the same partition: route(viewer, ns) === route(origin, ns). Routing BOTH sides (rather than comparing
+  // origin.id to a partition) makes it correct whether `origin` is a partition principal (files, tagged by
+  // the pump) or the acting principal (skills, stamped at write), and yields "global events for namespaces
+  // the viewer hasn't isolated, own-partition only for those it has". `undefined` origin ⇒ base.
+  visible(viewer: Principal, namespace: string, origin: Principal | undefined): boolean {
+    return this.routeFor(viewer.id, namespace) === this.routeFor(origin?.id, namespace);
   }
 
   private async sharedOwner(partId: string, namespace: string, id: string): Promise<Principal | undefined> {

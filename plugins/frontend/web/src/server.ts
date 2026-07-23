@@ -10,6 +10,13 @@ import { makeWebEnvTool } from './web-env.js';
 import { promises } from "node:fs";
 const { readFile } = promises;
 
+// The routing namespace each partitioned event stream is filtered on (WatchVisibility.visible): a viewer
+// sees an event iff it routes that namespace to the same partition the event came from. Files use the
+// single file-isolation axis ('files'); skills use their store namespace ('skills'). Global streams
+// (tool/plugin CRUD) are never partitioned and are broadcast unfiltered.
+const FILE_WATCH_NS  = 'files';
+const SKILL_WATCH_NS = 'skills';
+
 export interface WebServerDeps {
   store:          Store<Session>;
   /** Per-session turn serialiser — submits queue instead of running concurrently. */
@@ -207,12 +214,12 @@ export function createWebServer(deps: WebServerDeps) {
     const wv = deps.watchVisibility?.();
     if (wv) {
       void (async () => {
-        for await (const event of wv.watch(watchAc.signal)) {
+        for await (const event of wv.watchFiles(watchAc.signal)) {
           const msg = sseEvent('file-changed', event.value);
-          broadcast(msg, principal => wv.visibleTo(principal, event));
+          broadcast(msg, principal => wv.visible(principal, FILE_WATCH_NS, event.origin));
           const subs = fileEventListeners.get(`${event.value.namespace ?? ''}/${event.value.name}`);
           if (subs) for (const [res, principal] of subs) {
-            if (!wv.visibleTo(principal, event)) continue;
+            if (!wv.visible(principal, FILE_WATCH_NS, event.origin)) continue;
             if (res.writable) res.write(msg); else subs.delete(res);
           }
         }
@@ -243,8 +250,15 @@ export function createWebServer(deps: WebServerDeps) {
   function startSkillWatch(skills: SkillManager): void {
     if (skillWatchStarted) return;
     skillWatchStarted = true;
+    // Skills are partitioned (a profile can isolate the `skills` namespace), and every partition's CRUD
+    // flows through the one SkillManager broadcaster, each event stamped with its acting principal. So the
+    // stream is dynamic for free; we just filter per connection by the same visibility predicate as files.
+    const wv = deps.watchVisibility?.();
     void (async () => {
-      for await (const event of skills.watch(watchAc.signal)) broadcast(sseEvent('skill-changed', event));
+      for await (const event of skills.watch(watchAc.signal)) {
+        const msg = sseEvent('skill-changed', event.value);
+        broadcast(msg, wv ? (principal => wv.visible(principal, SKILL_WATCH_NS, event.origin)) : undefined);
+      }
     })();
   }
 

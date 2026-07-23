@@ -13,7 +13,7 @@ declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
     // One arm per action. `select` is deliberately absent — selecting the active profile is a
     // per-client concern (the web UI stores it locally and sends it as a request header), not server state.
-    profile:
+    profile_action:
       | ToolContract<{ profiles: { name: string; isolated: IsolatableNamespace[] }[] }, { action: 'list' }>
       | ToolContract<{ name: string; isolated: IsolatableNamespace[] },                  { action: 'create'; name: string; isolated?: IsolatableNamespace[] }>
       | ToolContract<{ name: string; deleted: boolean },                                 { action: 'delete'; name: string }>
@@ -30,8 +30,8 @@ declare module '@matatbread/matbot-plugin-api' {
 
 // The directory is resolved live per call (not captured) so the tool follows any later StorageBackend
 // swap and never pins a stale/hot-reloaded instance. Absent ⇒ profile storage isn't active right now.
-export function createProfileTool(getDir: () => ProfileDirectory | undefined): Tool<ToolResultOf<'profile'>> {
-  const executor: ToolExecutor<ToolResultOf<'profile'>> = {
+export function createProfileTool(getDir: () => ProfileDirectory | undefined): Tool<ToolResultOf<'profile_action'>> {
+  const executor: ToolExecutor<ToolResultOf<'profile_action'>> = {
     async *execute(input: unknown, _ctx: ToolContext) {
       const args = input as { action?: string; name?: string; isolated?: string[] };
       const dir  = getDir();
@@ -81,7 +81,7 @@ export function createProfileTool(getDir: () => ProfileDirectory | undefined): T
   };
 
   return {
-    name: 'profile',
+    name: 'profile_action',
     description:
       'Manage storage profiles — named partitions of the datastore, selected per browser in the web UI. ' +
       'A profile isolates a chosen set of namespaces (its `isolated` list; `sessions` by default) into its ' +

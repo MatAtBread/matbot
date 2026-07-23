@@ -495,9 +495,17 @@ export interface StorageBackend {
  */
 export interface WatchVisibility {
   /** Every partition's file events, merged into one stream, each tagged with its origin partition. */
-  watch(signal?: AbortSignal): AsyncIterable<Routed<FileEvent>>;
-  /** Would a connection owned by `viewer` see this event — i.e. does `viewer` route to the origin's partition? */
-  visibleTo(viewer: Principal, event: Routed<FileEvent>): boolean;
+  watchFiles(signal?: AbortSignal): AsyncIterable<Routed<FileEvent>>;
+  /**
+   * The per-connection visibility predicate for ANY partitioned event stream (files, skills, …): would a
+   * connection owned by `viewer` see an event in `namespace` produced by `origin`? Defined as
+   * `route(viewer, namespace) === route(origin, namespace)` — the two see it iff they route that namespace
+   * to the same partition. This yields the intended behavior uniformly: a viewer sees global/base events
+   * for namespaces it does NOT isolate, and only its own partition's events for namespaces it does.
+   * `origin` may be a partition principal (files, tagged by the merge) or the acting principal (skills,
+   * stamped at write) — routing both sides makes either correct. `undefined` origin ⇒ base.
+   */
+  visible(viewer: Principal, namespace: string, origin: Principal | undefined): boolean;
 }
 
 // ── Plugin interface ──────────────────────────────────────────────────────────

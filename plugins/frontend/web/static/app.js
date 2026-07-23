@@ -3023,7 +3023,7 @@ function namespaceChecklist(available, selected) {
 
 async function initProfiles() {
   let profiles;
-  try { profiles = (await callTool('profile', { action: 'list' })).profiles; }
+  try { profiles = (await callTool('profile_action', { action: 'list' })).profiles; }
   catch { return; }                                   // tool absent ⇒ no profile-aware storage ⇒ feature off
 
   profilesActive = true;                               // storage is profile-aware ⇒ the sharing UI can appear
@@ -3082,7 +3082,7 @@ async function initProfiles() {
         apply.addEventListener('click', async (ev) => {
           ev.stopPropagation();
           const next = current();
-          try { await callTool('profile', { action: 'set_isolated', name, isolated: next }); }
+          try { await callTool('profile_action', { action: 'set_isolated', name, isolated: next }); }
           catch (err) { status.textContent = String(err); return; }
           p.isolated = next;                            // reflect the persisted set without collapsing the panel
           status.textContent = 'Saved';
@@ -3108,7 +3108,7 @@ async function initProfiles() {
       del.addEventListener('click', async (e) => {
         e.stopPropagation();
         if (!confirm('Delete profile "' + name + '"? Its stored data is left on disk.')) return;
-        try { await callTool('profile', { action: 'delete', name }); } catch (err) { alert(String(err)); return; }
+        try { await callTool('profile_action', { action: 'delete', name }); } catch (err) { alert(String(err)); return; }
         if (currentProfileName() === name) { selectProfile(null); return; }
         refresh();
       });
@@ -3143,7 +3143,7 @@ async function initProfiles() {
     const create = async () => {
       const name = input.value.trim();
       if (!name) return;
-      try { await callTool('profile', { action: 'create', name, isolated: createCurrent() }); }
+      try { await callTool('profile_action', { action: 'create', name, isolated: createCurrent() }); }
       catch (err) { alert(String(err)); return; }
       selectProfile(name);                            // switch to the freshly-created profile
     };
@@ -3157,8 +3157,8 @@ async function initProfiles() {
     let list = [], namespaces = [];
     try {
       const [listed, ns] = await Promise.all([
-        callTool('profile', { action: 'list' }),
-        callTool('profile', { action: 'available_namespaces' }),
+        callTool('profile_action', { action: 'list' }),
+        callTool('profile_action', { action: 'available_namespaces' }),
       ]);
       list = listed.profiles; namespaces = ns;
     } catch { /* keep last */ }
@@ -3245,7 +3245,7 @@ function setupShare() {
     menu.hidden = false;
 
     let profiles;
-    try { profiles = (await callTool('profile', { action: 'list' })).profiles; }
+    try { profiles = (await callTool('profile_action', { action: 'list' })).profiles; }
     catch { menu.hidden = true; return; }
     const active  = currentProfileName();
     const targets = profiles.filter(p => p.name !== active && (p.isolated || []).includes('sessions'));
