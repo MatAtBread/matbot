@@ -151,7 +151,6 @@ export function toOAIMessages(messages: Message[], cache = false, geminiMode = f
         case 'audio':     return [{ type: 'text', text: `[Audio: ${c.mimeType}]` }];
         case 'thinking':
         case 'redacted-thinking':
-        case 'reasoning':
         case 'tool-result':    // only in role === 'tool' messages, handled above
         case 'refusal':
         case 'form':
@@ -159,6 +158,15 @@ export function toOAIMessages(messages: Message[], cache = false, geminiMode = f
         case 'marker':         // opaque UI annotation; transparent to the model
         case 'unknown-content':
           return [];
+        case 'reasoning': {
+          // OpenAI/DeepSeek reasoning — strip for plain-chat turns (DeepSeek ignores prior reasoning
+          // when there are no tool calls). On tool-call turns DeepSeek requires it to be passed back
+          // or the request 400s, so degrade to a text marker.
+          const hasToolCalls = msg.content.some(mc => mc.type === 'tool-call');
+          return hasToolCalls
+            ? [{ type: 'text', text: `[Prior reasoning: ${c.reasoning}]` }]
+            : [];
+        }
       }
     });
 

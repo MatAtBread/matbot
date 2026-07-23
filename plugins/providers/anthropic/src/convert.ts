@@ -48,8 +48,15 @@ export function toAnthropicMessages(messages: Message[]): AnthropicMessage[] {
           // format does not carry enough information to prove that, so elide
           // them deterministically rather than sending possibly-invalid input.
           return [];
-        case 'reasoning':
-          return [];  // OpenAI/DeepSeek reasoning — strip; Anthropic has no equivalent
+        case 'reasoning': {
+          // OpenAI/DeepSeek reasoning — Anthropic has no native equivalent. Strip for plain-chat turns
+          // (DeepSeek ignores prior reasoning when there are no tool calls). On tool-call turns DeepSeek
+          // requires it to be passed back or the request 400s, so degrade to a text marker.
+          const hasToolCalls = msg.content.some(mc => mc.type === 'tool-call');
+          return hasToolCalls
+            ? [{ type: 'text', text: `[Prior reasoning: ${c.reasoning}]` }]
+            : [];
+        }
         case 'image':
           return [{ type: 'image', source: { type: 'base64', media_type: c.mimeType, data: c.data } }];
         case 'image-url':
