@@ -452,6 +452,20 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Optional
 
+- **web-bundle — provider profiles now persist and resolve by package name, not a build-specific
+  `mbmod:` id.** Since the provider-registry refactor moved adapter loading from a boot pre-scan to
+  on-demand (and stopped canonicalising modules at boot), a profile's persisted `module` must be
+  *directly importable at use time*. Two gaps combined to break that: (1) the assembler baked each wizard
+  adapter's `availableProviders[].module` as the synthetic `mbmod:<id>` graph-root specifier, which the
+  wizard wrote verbatim into `localStorage`/Drive — build-specific, so a profile saved by one bundle went
+  dead on the next rebuild (a stale one imports as an unknown-scheme URL → `mbmod:` CORS/`ERR_FAILED`);
+  and (2) provider adapters were pulled into the graph only as roots, never by bare-name import, so their
+  package names were absent from `packageEntries` (the import map) — the durable, rebuild-stable form
+  didn't resolve either. Fixed both, mirroring how bundled plugins already work: adapter package names
+  are added to the import map, and the wizard offers/persists the package name. Boot also self-heals
+  older saved configs — a still-known synthetic id is repaired to its package name, a stale-across-builds
+  one is skipped with a notice instead of throwing.
+
 - **storage/google-drive — wraps its backend in `CachingStorageBackend` before registering.** Drive
   reads are slow and the harness re-reads whole namespaces (triggers, skills, providers) every turn;
   the cache serves reads locally while writes stay write-through to Drive. The browser bundle is single-

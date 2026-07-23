@@ -217,16 +217,24 @@ async function main() {
   // Adapter types the startup wizard offers. Inlined as graph roots so a wizard-configured provider's
   // module is present even though no baked provider references it.
   const availableProviders = [];
+  const availableProviderSpecs = [];
   for (const pm of config.providerModules ?? []) {
     const { id, name, runtimes, version } = await entryForPath(pm.module);
     rootIds.push(id);
     const spec = SYN(id);
+    availableProviderSpecs.push(spec);
     specNames[spec] = name;
-    if (runtimes !== undefined) specRuntimes[spec] = runtimes;
-    if (version  !== undefined) specVersions[spec] = version;
+    if (runtimes !== undefined) { specRuntimes[spec] = runtimes; specRuntimes[name] = runtimes; }
+    if (version  !== undefined) { specVersions[spec] = version;  specVersions[name] = version;  }
     availableProviders.push({
       label: pm.label ?? name,
-      module: spec,
+      // Offer (and therefore persist) the PACKAGE NAME, not the synthetic mbmod id — exactly as
+      // availablePlugins[].specifier does. The wizard writes this straight into localStorage /
+      // Drive, so it must survive a rebuild: a package name resolves through the import map on every
+      // build, whereas a synthetic `mbmod:/…` id is build-specific and goes dead across rebuilds
+      // (a stale one imported verbatim is the `mbmod:` CORS/ERR_FAILED boot failure). The module is
+      // still baked as a graph root above; only what we hand the wizard changes.
+      module: name,
       ...(pm.endpointHint  !== undefined ? { endpointHint:  pm.endpointHint  } : {}),
       ...(pm.modelHint     !== undefined ? { modelHint:     pm.modelHint     } : {}),
       ...(pm.selfContained !== undefined ? { selfContained: pm.selfContained } : {}),
@@ -241,9 +249,13 @@ async function main() {
   for (const [id, src] of Object.entries(rawSources)) sources[id] = stripTypes(src, id);
 
   // packageEntries: every workspace package whose entry was pulled into the graph (so the import map
-  // can map its bare name → blob), plus the ones referenced by config even if only dynamically.
+  // can map its bare name → blob), plus the ones referenced by config even if only dynamically. Provider
+  // adapters (availableProviderSpecs) are pulled in as graph ROOTS, not by a bare-name import, so they
+  // never land in usedNames — they must be added here by name, or a provider persisted/loaded BY PACKAGE
+  // NAME (the durable form the wizard now writes) fails to resolve at import time. Same rationale as the
+  // bundled plugins beside them.
   const packageEntries = { ...usedNames };
-  for (const spec of [...pluginSpecs, ...bundledSpecs, ...Object.values(providers).map(p => p.module)]) {
+  for (const spec of [...pluginSpecs, ...bundledSpecs, ...availableProviderSpecs, ...Object.values(providers).map(p => p.module)]) {
     const id = spec.slice('mbmod:'.length);
     const name = specNames[spec];
     if (name) packageEntries[name] = id;
