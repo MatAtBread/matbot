@@ -7,10 +7,10 @@ import { buildMatbotToolsDts, checkProjectDir } from '@matatbread/matbot-tool-ty
 declare module '@matatbread/matbot-plugin-api' {
   interface MatbotServices {
     SkillManager?: {
-      get(name: string): {
+      get(name: string): Promise<{
         content: string;
         knowledge?: { classification: { procedural: number; informational: number } };
-      } | undefined;
+      } | undefined>;
       setHidden(name: string, hidden: boolean): Promise<unknown>;
     };
   }
@@ -267,7 +267,7 @@ export function createSkillCompilerPlugin(): MatbotPluginSpec {
           const iterate = feedback !== undefined && priorSource !== undefined;
 
           yield { type: 'progress', pct: 5, message: iterate ? `Iterating on "${toolName}"...` : `Loading "${skill}"...` };
-          const doc = services.SkillManager?.get(skill);
+          const doc = await services.SkillManager?.get(skill);
           if (!iterate) {
             if (!doc) {
               yield { type: 'result', value: { status: 'not_found', message: `Skill "${skill}" not found.` } };

@@ -27,7 +27,6 @@ function invokeKey(t: { invoke: Trigger['invoke'] }): string {
  * Constructed only with web-platform primitives, so it runs in the browser too.
  */
 export class TriggerManager implements Triggers {
-  private readonly triggers = new Map<string, Trigger>();
   private readonly store:    Store<Trigger>;
   private readonly services: MatbotMachine;
   // Aborts on teardown (clear()), ending the mounted-swap subscription set up in setupTriggers.
@@ -38,8 +37,7 @@ export class TriggerManager implements Triggers {
     this.services = services;
   }
 
-  /** Ends with the manager (teardown). Hand to `services.mounted.observe` so a StorageBackend swap
-   *  re-reads the new backend's triggers, and the loop stops when the plugin unloads. */
+  /** Aborts on teardown (clear()) — ends any in-flight classifier call the manager owns. */
   get signal(): AbortSignal { return this.lifecycle.signal; }
 
   // The classifier provider, resolved live per evaluation (so a triggers_config change takes effect on
@@ -53,26 +51,25 @@ export class TriggerManager implements Triggers {
     return turnProvider;
   }
 
-  /** (Re)load persisted triggers into memory. Re-runnable: the initial boot load and every later
-   *  StorageBackend swap funnel through here. Reading `this.store` (a swap-following proxy) always hits
-   *  the live backend, so a swap re-reads the new backend's triggers. Clears first — the old in-memory
-   *  set belongs to the displaced backend. */
-  async load(): Promise<void> {
-    this.triggers.clear();
+  /** Read straight through the backing store on every call — no in-memory snapshot. The store is a
+   *  swap-following proxy, so this always reflects the live backend AND the current principal's
+   *  partition, and a shared backend's out-of-band writes are seen too. A snapshot here would be
+   *  principal-blind and go stale under any second writer; caching, if a slow backend needs it,
+   *  belongs in the StorageBackend, not in this consumer. */
+  async all(): Promise<Trigger[]> {
     const { items } = await this.store.query({});
-    for (const t of items) {
-      this.triggers.set(t.id, t);
-    }
+    return items;
   }
 
-  all(): Trigger[] { return [...this.triggers.values()]; }
-  get(id: string): Trigger | undefined { return this.triggers.get(id); }
+  async get(id: string): Promise<Trigger | undefined> {
+    return (await this.store.get(id)) ?? undefined;
+  }
 
   /** Triggers whose invocation matches the filter: `tool` (if given) must equal `invoke.tool`, and
    *  `params` (if given) must deep-equal `invoke.params`. The natural "which trigger(s) fire tool X
    *  (with these args)" lookup — e.g. the one that loads a given skill. */
-  query(filter: { tool?: string; params?: unknown }): Trigger[] {
-    return this.all().filter(t => {
+  async query(filter: { tool?: string; params?: unknown }): Promise<Trigger[]> {
+    return (await this.all()).filter(t => {
       if (filter.tool !== undefined && t.invoke.tool !== filter.tool) return false;
       if (filter.params !== undefined &&
           JSON.stringify(t.invoke.params ?? null) !== JSON.stringify(filter.params)) return false;
@@ -92,13 +89,12 @@ export class TriggerManager implements Triggers {
       updatedAt:  now,
     };
     await this.store.set(doc.id, doc);
-    this.triggers.set(doc.id, doc);
     return doc;
   }
 
   async update(id: string, patch: Partial<TriggerSpec>): Promise<Trigger | undefined> {
-    const cur = this.triggers.get(id);
-    if (cur === undefined) return undefined;
+    const cur = await this.store.get(id);
+    if (cur === null) return undefined;
     return this.casMutate(cur, prev => ({
       ...prev,
       ...(patch.conditions !== undefined ? { conditions: patch.conditions } : {}),
@@ -110,21 +106,20 @@ export class TriggerManager implements Triggers {
   }
 
   async remove(id: string): Promise<boolean> {
-    const cur = this.triggers.get(id);
-    if (cur === undefined) return false;
+    const cur = await this.store.get(id);
+    if (cur === null) return false;
     await this.store.delete(id, cur.version);
-    this.triggers.delete(id);
     return true;
   }
 
   async importIfAbsent(spec: TriggerSpec): Promise<Trigger> {
     const key      = invokeKey(spec);
-    const existing = this.all().find(t => invokeKey(t) === key);
+    const existing = (await this.all()).find(t => invokeKey(t) === key);
     if (existing !== undefined) return existing;
     return this.add(spec);
   }
 
-  clear(): void { this.lifecycle.abort(); this.triggers.clear(); }
+  clear(): void { this.lifecycle.abort(); }
 
   /**
    * LLM-judge every enabled condition on `surface` against the current turn and return the distinct
@@ -148,7 +143,8 @@ export class TriggerManager implements Triggers {
     // Candidate key is `${triggerId}#${conditionIndex}` — addressing conditions by index is fine
     // because evaluation is per-turn and the trigger set is stable for its duration. The surface a
     // condition belongs to is derived from its `kind` (ephemeral/contextual→user, retract/followup→agent).
-    const candidates = this.all()
+    const triggers   = await this.all();
+    const candidates = triggers
       .filter(t => t.enabled !== false)
       .flatMap(t => t.conditions
         .map((c, i) => ({ triggerId: t.id, key: `${t.id}#${i}`, index: i, kind: c.kind, rule: c.rule }))
@@ -195,8 +191,9 @@ export class TriggerManager implements Triggers {
       list.push({ index: c.index, kind: c.kind, rule: c.rule, ...(why !== undefined ? { why } : {}) });
       firedByTrigger.set(c.triggerId, list);
     }
+    const byId = new Map(triggers.map(t => [t.id, t]));
     return [...firedByTrigger].flatMap(([id, matched]) => {
-      const trigger = this.triggers.get(id);
+      const trigger = byId.get(id);
       return trigger ? [{ trigger, kinds: [...new Set(matched.map(m => m.kind))], matched }] : [];
     });
   }
@@ -206,11 +203,10 @@ export class TriggerManager implements Triggers {
     for (;;) {
       const next = mutate(cur);
       const r = await this.store.cas(cur.id, cur.version, next);
-      if (r.ok) { this.triggers.set(next.id, next); return next; }
+      if (r.ok) return next;
       const fresh = await this.store.get(cur.id);
       if (fresh === null) {
         await this.store.set(next.id, next);
-        this.triggers.set(next.id, next);
         return next;
       }
       cur = fresh;

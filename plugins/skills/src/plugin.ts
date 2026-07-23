@@ -58,8 +58,8 @@ export async function setupSkills(services: MatbotMachine): Promise<SkillManager
   // live add/remove. No LLM, no condition — pure advertisement. The advertised text is the skill's
   // `catalogSummary` (a hand-written override, when set) else its generated `knowledge.summary`; a
   // flagged skill with neither yet (analysis still pending) is simply skipped until it has one.
-  services.systemContext.register(() => {
-    const lines = manager.all()
+  services.systemContext.register(async () => {
+    const lines = (await manager.all())
       .filter(s => s.catalogue === true && !s.hidden)
       .map(s => ({ name: s.name, summary: (s.catalogSummary?.trim() || s.knowledge?.summary?.trim() || '') }))
       .filter(s => s.summary !== '')

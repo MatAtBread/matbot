@@ -92,11 +92,11 @@ export interface TriggerSpec {
  * triggers plugin, which owns the hooks that drive them.
  */
 export interface Triggers {
-  all(): Trigger[];
-  get(id: string): Trigger | undefined;
+  all(): Promise<Trigger[]>;
+  get(id: string): Promise<Trigger | undefined>;
   /** Triggers whose invocation matches the filter — `tool` (if given) equals `invoke.tool`, `params`
    *  (if given) deep-equals `invoke.params`. The "which trigger(s) fire tool X" lookup. */
-  query(filter: { tool?: string; params?: unknown }): Trigger[];
+  query(filter: { tool?: string; params?: unknown }): Promise<Trigger[]>;
   add(spec: TriggerSpec): Promise<Trigger>;
   update(id: string, patch: Partial<TriggerSpec>): Promise<Trigger | undefined>;
   remove(id: string): Promise<boolean>;

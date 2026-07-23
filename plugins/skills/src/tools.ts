@@ -42,14 +42,14 @@ export function createSkillTool(manager: SkillManager): Tool<ToolResultOf<'skill
 
       switch (args.action) {
         case 'list': {
-          yield { type: 'result', value: { skills: manager.list() } };
+          yield { type: 'result', value: { skills: await manager.list() } };
           return;
         }
 
         case 'load': {
           const { name } = args as Extract<SkillInput, { action: 'load' }>;
           if (!name) { yield { type: 'error', message: 'action "load" requires "name".' }; return; }
-          const doc = manager.get(name);
+          const doc = await manager.get(name);
           if (!doc) { yield { type: 'error', message: `Skill not found: "${name}"` }; return; }
           yield { type: 'result', value: { id: doc.id, name: doc.name, content: doc.content } };
           return;
@@ -62,7 +62,7 @@ export function createSkillTool(manager: SkillManager): Tool<ToolResultOf<'skill
           // "Use the skill X" resubmit had, with the content inlined so there's no second round-trip.
           const { name } = args as Extract<SkillInput, { action: 'use' }>;
           if (!name) { yield { type: 'error', message: 'action "use" requires "name".' }; return; }
-          const doc = manager.get(name);
+          const doc = await manager.get(name);
           if (!doc) { yield { type: 'error', message: `Skill not found: "${name}"` }; return; }
           yield { type: 'result', value: {
             id:      doc.id,
@@ -76,7 +76,7 @@ export function createSkillTool(manager: SkillManager): Tool<ToolResultOf<'skill
         case 'metadata': {
           const { name } = args as Extract<SkillInput, { action: 'metadata' }>;
           if (!name) { yield { type: 'error', message: 'action "metadata" requires "name".' }; return; }
-          const doc = manager.get(name);
+          const doc = await manager.get(name);
           if (!doc) { yield { type: 'error', message: `Skill not found: "${name}"` }; return; }
           // Derived LLM analysis (absent until the background analysis has run and cached it), plus
           // `catalogue` — whether the skill is advertised in the system prompt.
