@@ -26,10 +26,12 @@ export interface WebServerDeps {
   cors?:          string;  // Access-Control-Allow-Origin value, default '*'
   workdir?:       string;
   files?:         FileStore;
-  /** Optional partition-aware file-watch layer. When present, the firehose observes file events across
-   *  every partition (origin-stamped) and filters each SSE connection by its principal; absent ⇒ the
-   *  plain single-stream `files.watch()` with no filter (the non-partitioned default). */
-  watchVisibility?: WatchVisibility;
+  /** Optional partition-aware file-watch layer. Resolved lazily (a thunk, like {@link skills}) because a
+   *  partitioning storage backend may register it *after* frontend-web sets up — capturing a value here
+   *  would snapshot `undefined` and silently fall back to base-only watching. When present, the firehose
+   *  observes file events across every partition (origin-stamped) and filters each SSE connection by its
+   *  principal; absent ⇒ the plain single-stream `files.watch()` with no filter (the non-partitioned default). */
+  watchVisibility?: () => WatchVisibility | undefined;
   configPath?:    string;
   /** Derives the security principal for each request. Defaults to {@link defaultWebPrincipal}. */
   resolvePrincipal?: WebPrincipalResolver;
@@ -193,31 +195,38 @@ export function createWebServer(deps: WebServerDeps) {
   const fileEventListeners = new Map<string, Map<ServerResponse, Principal>>();
   const watchAc            = new AbortController();
 
-  // File-change firehose. With a partition-aware backend (WatchVisibility), observe every partition's
-  // events — each carrying its origin — and gate each connection by whether its principal routes to that
-  // origin. Without one, fall back to the plain single stream with no filter — byte-identical to before.
-  const wv = deps.watchVisibility;
-  if (wv) {
-    void (async () => {
-      for await (const event of wv.watch(watchAc.signal)) {
-        const msg = sseEvent('file-changed', event.value);
-        broadcast(msg, principal => wv.visibleTo(principal, event));
-        const subs = fileEventListeners.get(`${event.value.namespace ?? ''}/${event.value.name}`);
-        if (subs) for (const [res, principal] of subs) {
-          if (!wv.visibleTo(principal, event)) continue;
-          if (res.writable) res.write(msg); else subs.delete(res);
+  // File-change firehose — started once, on the first /events connect (like the skill watch), so the
+  // WatchVisibility layer, which a partitioning backend may register *after* frontend-web sets up, is
+  // resolved when it's certainly present rather than snapshotted as undefined at construction. With it,
+  // observe every partition's events — each carrying its origin — and gate each connection by whether its
+  // principal routes to that origin. Without it, fall back to the plain single stream with no filter.
+  let fileWatchStarted = false;
+  function startFileWatch(): void {
+    if (fileWatchStarted) return;
+    fileWatchStarted = true;
+    const wv = deps.watchVisibility?.();
+    if (wv) {
+      void (async () => {
+        for await (const event of wv.watch(watchAc.signal)) {
+          const msg = sseEvent('file-changed', event.value);
+          broadcast(msg, principal => wv.visibleTo(principal, event));
+          const subs = fileEventListeners.get(`${event.value.namespace ?? ''}/${event.value.name}`);
+          if (subs) for (const [res, principal] of subs) {
+            if (!wv.visibleTo(principal, event)) continue;
+            if (res.writable) res.write(msg); else subs.delete(res);
+          }
         }
-      }
-    })();
-  } else if (deps.files?.watch) {
-    void (async () => {
-      for await (const event of deps.files!.watch!(watchAc.signal)) {
-        const msg = sseEvent('file-changed', event);
-        broadcast(msg);
-        const subs = fileEventListeners.get(`${event.namespace ?? ''}/${event.name}`);
-        if (subs) for (const [res] of subs) { if (res.writable) res.write(msg); else subs.delete(res); }
-      }
-    })();
+      })();
+    } else if (deps.files?.watch) {
+      void (async () => {
+        for await (const event of deps.files!.watch!(watchAc.signal)) {
+          const msg = sseEvent('file-changed', event);
+          broadcast(msg);
+          const subs = fileEventListeners.get(`${event.namespace ?? ''}/${event.name}`);
+          if (subs) for (const [res] of subs) { if (res.writable) res.write(msg); else subs.delete(res); }
+        }
+      })();
+    }
   }
 
   if (deps.tools) {
@@ -440,6 +449,7 @@ export function createWebServer(deps: WebServerDeps) {
       // place it after frontend-web), so deps.skills() now resolves.
       const skills = deps.skills?.();
       if (skills) startSkillWatch(skills);
+      startFileWatch();
       globalListeners.set(res, principal);
       req.on('close', () => { globalListeners.delete(res); });
       return; // keep connection open

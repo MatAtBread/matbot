@@ -93,9 +93,9 @@ export const plugin: MatbotPluginSpec = {
       resolvePrincipal: (req) => headerPrincipal(req) ?? urlPrincipal(req) ?? (services.WebPrincipalResolver ?? defaultWebPrincipal)(req),
       ...(services.workdir    !== undefined ? { workdir:    services.workdir    } : {}),
       ...(services.files      !== undefined ? { files:      services.files      } : {}),
-      // Partition-aware file watch, if a partitioning backend registered one (profiles loads first, so it's
-      // present by now). Absent ⇒ the firehose uses the plain files.watch() with no per-connection filter.
-      ...(services.WatchVisibility !== undefined ? { watchVisibility: services.WatchVisibility } : {}),
+      // Partition-aware file watch, resolved per call (a thunk, like `skills`): a partitioning backend may
+      // register it after frontend-web sets up, and the firehose only reads it on the first /events connect.
+      watchVisibility: () => services.WatchVisibility,
       ...(services.configPath !== undefined ? { configPath: services.configPath } : {}),
     });
 
