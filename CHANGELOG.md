@@ -9,7 +9,95 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
-## Unreleased
+## 0.3.4
+
+_User profiles, profile-specific backend correctness, and cross-profile resource sharing._
+
+### Breaking changes
+
+- **`Subscribable`/`Broadcaster` now wraps every event in a `Routed<T>` envelope** carrying an optional
+  `origin` principal — the partition or actor that produced it. `subscribe()` yields `Routed<T>` instead
+  of bare `T`; `emit()` takes an optional `origin`; `consume()` handlers receive `Routed<T>`. Both
+  `subscribe()` and `consume()` accept an optional `RoutedFilter` for per-subscriber origin filtering.
+  Core's internal watchers (`watchPlugins`, `ToolRegistryImpl.watch()`) unwrap the envelope; any
+  third-party subscriber must do the same (`for await (const { value } of …)`).
+
+- **`Mounted.consume()` renamed to `Mounted.observe()`.** The method name changed so `consume` means
+  exactly one thing repo-wide (the detached `Subscribable` stream drain); signature and semantics are
+  identical. Every plugin that subscribes to a service (re)mount needs a one-word update.
+
+- **`Session` ownership fields removed.** `Session.ownerPrincipalId`, `actorPrincipalId`, and `persona`
+  are removed from the interface. `RunConfig.persona` is removed. `CreateSessionOpts` no longer takes
+  `ownerPrincipal`/`actorPrincipal`/`persona` — `createSession()` now takes no required arguments.
+  These fields were never read: ownership-at-rest is structural (the storage partition), not a stored
+  field. Old persisted data keeps them harmlessly as excess properties.
+
+### API gaps filled
+
+- **Branded `ReadOnlyError` for store writes rejected by principal ownership.** `readOnlyError()` factory
+  and `isReadOnlyError()` guard (brand-based, never `instanceof`) let a `Store` reject a write when the
+  current principal does not own the item — e.g. a session shared read-only from another profile's
+  partition. The turn pump catches it around the persist-at-turn-start write in `SessionRunner`: a
+  read-only rejection is surfaced as a per-turn `error` event and the submission is dropped, instead of
+  escaping the detached pump and crashing the host.
+
+- **`CachingStorageBackend` — read-through, write-through cache decorator**
+  (`@matatbread/matbot-core/storage-base`). Wraps any `StorageBackend` in a per-namespace,
+  cache-aside, write-through cache: reads serve from a full in-memory image warmed lazily, while
+  `set`/`cas`/`delete` go to the backing store first and then update the image. Cross-platform (pure
+  logic, no Node primitives). Compose it below any principal-partitioning router so each partition gets
+  its own cache.
+
+- **Storage consumers now read through the store proxy instead of keeping an in-memory snapshot.**
+  `TriggerManager` and `SkillManager` each held a `Map` loaded once at boot — making reads
+  principal-blind (a profile isolating `triggers`/`skills` still saw the base partition's data) and
+  stale under any second writer. Both now read straight through the store proxy, which follows both the
+  live backend and the current principal's partition.
+
+- **`WatchVisibility` — partition-aware file-watch layer (new optional service).** Registered by a
+  partitioning storage backend, consumed by frontend firehoses. The generic
+  `visible(viewer, namespace, origin)` predicate — `route(viewer, ns) === route(origin, ns)` — is
+  correct for files, skills, and any future namespace uniformly: a viewer sees global/base events for
+  namespaces it does NOT isolate, and only its own partition's events for namespaces it does.
+
+### Bug fixes
+
+- **`FilesystemFileStore.watch()` no longer throws `ENOENT` on a missing directory.** It now ensures
+  the directory first (mirroring `put()`/`list()`), so a registered `StorageBackend` acting as the
+  boot backend no longer crashes the web frontend at startup on a fresh data directory.
+
+- **Forward `thinking`/`reasoning` parameters to the provider API and preserve reasoning blocks on
+  tool-call replay.** Previously these parameters were dropped, so a provider configured with thinking
+  enabled silently fell back to the default.
+
+### Optional
+
+- **Storage profiles — per-principal storage partitions, profile-aware file routing, hot-add, and
+  item-grain sharing.** A new `storage-profiles` plugin partitions every store + file area by
+  principal. Profiles can be created and switched to at runtime — no restart. File storage is
+  profile-aware (`put`/`get`/`list`/`delete`/`watch` all route to the current principal's partition),
+  and served file URLs bake the principal into the path. Items (e.g. a session) can be shared
+  between profiles via symlink (live single source, not a copy), with `share`/`unshare`/`owner`
+  actions. A shared-in session is surfaced as read-only, enforced by `ReadOnlyError` at the store
+  level. The `profile` tool is renamed `profile_action` for consistency. **This plugin demonstrates how a user-specific frontend could be implemented**, although it has no auth/login of its own (the frontend/web UI simply allows you to create new, named profiles).
+
+- **Skills watch fan-out with dynamic partitions.** `SkillManager.watch()` now yields origin-stamped
+  events (`Routed<SkillEvent>`), and the web firehose filters `skill-changed` per connection. A
+  profile that isolates `skills` sees only its own skill CRUD; a profile created mid-session is
+  watched without a restart.
+
+- **Web frontend — profile-aware identity, file URLs, and session sharing.** An `x-matbot-principal`
+  request header overrides per-request identity. A profile selector appears in the header (hidden
+  when no `profile` tool is registered). Served file URLs bake the principal into the path so a plain
+  browser GET works. A share button on the chat header lets the user share the open session into
+  another profile that isolates `sessions`; shared-in sessions show a "read-only · &lt;owner&gt;" badge
+  and hide the share button. The composer is disabled for read-only sessions.
+
+- **Web-bundle — provider profiles resolve by package name, not a build-specific `mbmod:` id.**
+  Adapter package names are added to the import map, and the wizard offers/persists the package name.
+  Boot self-heals older saved configs — a still-known synthetic id is repaired to its package name.
+
+## 0.3.3
 
 ### Breaking changes
 
@@ -57,6 +145,19 @@ churn and less likely to affect a consumer who doesn't use them.
   tool-context field `ctx.vault` is a separate surface and is unchanged.
 
 ### API gaps filled
+
+- **`CachingStorageBackend` — read-through cache decorator (`@matatbread/matbot-core/storage-base`).**
+  Wraps any `StorageBackend` in a per-namespace, cache-aside, **write-through** cache: reads serve from
+  a full in-memory image of the namespace (warmed lazily by one `backing.query({})`), while every
+  `set`/`cas`/`delete` goes to the backing store first (system of record — CAS and durability unchanged)
+  and then updates the image. Coherence is honest: always coherent with the wrapper's own writes; foreign
+  writes only as sharp as the optional `ttlMs` tier (a bounded-staleness ceiling — unset ⇒ warm once,
+  never expire). Cross-platform (pure logic + `Map` + `executeQuery`, no Node primitives). Compose it
+  *below* any principal-partitioning router so each partition gets its own cache. Purpose: stop slow
+  backends re-reading whole namespaces every turn; the correctness half (consumer-side caches → read-
+  through) shipped earlier this release. A `stats()` method exposes per-namespace counters
+  (`CacheNamespaceStats`: docs / reads / hits / loads / lastLoadMs) for confirming the cache is serving
+  reads rather than re-reading the backend.
 
 - **Augmentable per-tool-call round-trip metadata (`ProviderMeta` + `tool-call` `meta?`).** The
   `tool-call` variant of both `CompletionEvent` and `MessageContent` gains an optional `meta?:
@@ -438,6 +539,30 @@ churn and less likely to affect a consumer who doesn't use them.
   (a missing secret) are still left in config to retry.
 
 ### Optional
+
+- **web-bundle — provider profiles now persist and resolve by package name, not a build-specific
+  `mbmod:` id.** Since the provider-registry refactor moved adapter loading from a boot pre-scan to
+  on-demand (and stopped canonicalising modules at boot), a profile's persisted `module` must be
+  *directly importable at use time*. Two gaps combined to break that: (1) the assembler baked each wizard
+  adapter's `availableProviders[].module` as the synthetic `mbmod:<id>` graph-root specifier, which the
+  wizard wrote verbatim into `localStorage`/Drive — build-specific, so a profile saved by one bundle went
+  dead on the next rebuild (a stale one imports as an unknown-scheme URL → `mbmod:` CORS/`ERR_FAILED`);
+  and (2) provider adapters were pulled into the graph only as roots, never by bare-name import, so their
+  package names were absent from `packageEntries` (the import map) — the durable, rebuild-stable form
+  didn't resolve either. Fixed both, mirroring how bundled plugins already work: adapter package names
+  are added to the import map, and the wizard offers/persists the package name. Boot also self-heals
+  older saved configs — a still-known synthetic id is repaired to its package name, a stale-across-builds
+  one is skipped with a notice instead of throwing.
+
+- **storage/google-drive — wraps its backend in `CachingStorageBackend` before registering.** Drive
+  reads are slow and the harness re-reads whole namespaces (triggers, skills, providers) every turn;
+  the cache serves reads locally while writes stay write-through to Drive. The browser bundle is single-
+  user per session, so its own writes stay coherent with no foreign-write invalidation configured (the
+  only divergence case is the same user in two browsers at once, and the Drive token expires within the
+  hour); a `drive.changes.watch()` feed is noted in-code as a possible future sharpening. The `setup()`
+  idempotency guard now duck-types through the wrapper (`.inner`) instead of an `instanceof` on the
+  registered backend. Exposes `globalThis.__mbCache()` in the browser as a console handle onto the
+  wrapper's `stats()`.
 
 - **providers/google — native Gemini adapter (new `@matatbread/matbot-provider-google`).** One
   `module:`, two wire formats, chosen by the endpoint **path** (not host — a proxy/gateway may rewrite
@@ -1134,108 +1259,3 @@ churn and less likely to affect a consumer who doesn't use them.
   `"null"` rather than `undefined` (a `tool_result` block must carry content). The assistant
   null-content case does not arise here (tool calls are `tool_use` content blocks, and an
   empty-content message is dropped).
-
-## Previously
-
-### Breaking changes
-
-- **`StoreQuery` redesigned as a minimal, backend-translatable grammar.** The
-  previous query type was an unfinished superset (filter/fullText/vector/sort-with-magic-fields/
-  offset/projection/explain) that every backend "implemented" by loading all rows
-  and filtering in JS. It is replaced by a small closed grammar where every
-  construct maps natively to SQL/Elasticsearch/Mongo/IndexedDB. Consumer-visible
-  consequences:
-  - `Filter` is now a closed union discriminated by `op`
-    (`eq`/`neq`, `lt`/`lte`/`gt`/`gte`, `in`/`nin`, `exists`, `stringContains`,
-    `arrayContains`, `and`/`or`/`not`).
-  - `FieldPath = string | string[]` — a bare string is **one** key (no longer split
-    on `.`); use an array for nested paths.
-  - `StoreQuery` is no longer generic; `QueryResult<T>` now has flat `items: T[]`
-    plus optional `cursor`/`total`. All callers (background, sessions, skills,
-    frontend/dom, persist-ki-bge, tool-store) migrated to the flat shape.
-  - Comparisons are type-strict (`5 ≠ "5"`); `null` and absent collapse to a single
-    "missing" state observable only via `exists`.
-  - Invalid queries throw a located `StoreQueryError` (JSON pointer + code) at the
-    boundary instead of silently mis-matching.
-  - Full-text/vector search, field-vs-field comparison, and regex are intentionally
-    removed from `Store` (they live on `KnowledgeIndex`/future interfaces).
-
-### API gaps filled
-
-- **The `Vault` backend is now swappable at runtime via `services.register('Vault', impl)`.**
-  Storage and knowledge were already replaceable behind a capture-safe forwarding
-  proxy, but the vault was the one core backend a plugin could not replace. Filled
-  by wrapping the active vault in the same `forwardingProxy` over a mutable
-  `activeVault`, adding a `register('Vault', …)` branch that re-points it, and
-  exposing a `Vault?` swap-handle key on `MatbotServices` (the read path stays
-  `services.vault`). References captured before a swap keep resolving to the live
-  impl. This enables, e.g., an encrypted per-user DB-backed secret store in place of
-  `.env`.
-- **`MemoryStore` (apps/cli) now honours queries.** It previously ignored them; it
-  now delegates to the shared `executeQuery` reference engine like the other
-  in-memory backends.
-- **`singleTurn` promoted to a first-class `MatbotServices` method** (alongside
-  `complete()`), implemented in both hosts (cli, web-bundle) as a thin delegation to
-  their own `complete()`. The pure, platform-independent helpers (`forwardingProxy`,
-  `makeSwappable`, `SwapFn`, `singleTurnRequest`) moved into plugin-api; the skills
-  plugin now calls `services.singleTurn(...)`.
-- **`services.isSubAgent`** added to the plugin-api.
-- **Initiating provider passed through to tools** (e.g. `background`) via a new field
-  on the tool-execution context.
-- **Tool listing now returns tool names & descriptions** (core `tool-plugin`, plus
-  the browser plugin-tool).
-- **Hook self-removal: every hook `ctx` now carries `removeHook()`**, which
-  unregisters the currently-running hook — the clean one-shot primitive (no plugin
-  name, no `removeByPlugin`).
-- **Hook-failure visibility:** a throwing hook is recorded (deduped by identity) and
-  drained into a `matbot-hooks` marker by the next `runScreen`; a new `marker`
-  `PipelineEvent` carries it live. The `SkillManager` service key was added to the
-  `MatbotServices` augmentation.
-
-### Bug fixes
-
-- **`plugin reload` now actually re-evaluates plugin code from disk.** Two stacked
-  regressions: (1) the cache-bust stamp (`?mbfresh`) was silently bypassed because
-  the node host always pre-populated `importSpec` with an absolute `file://` URL, so
-  Node re-served the cached module — fixed with `freshImportSpec()`, which stamps a
-  pre-resolved `file:` URL while leaving `blob:`/other schemes untouched; (2) tool
-  executors were resolved from a turn-start registry snapshot, so a reload performed
-  mid-turn didn't affect later tool calls in that same turn — fixed by resolving the
-  executor against a live `toolRegistry` at call time (the snapshot remains the
-  stable tool list advertised to the model, preserving prompt caching). A tool
-  removed mid-turn now correctly resolves to "Unknown tool".
-- **`StoreQuery` paging no longer overlaps.** Cursors are now opaque, stateless and
-  self-contained (carrying `{where, sort, limit, offset}`), and sort always appends
-  `id` as a final tiebreaker. Previously the cursor held only an offset, so page 2
-  sent without a sort fell back to id-order and overlapped page 1.
-- **Throwing hooks are isolated, not fatal.** The dispatcher now catches a handler
-  that throws, logs it, and treats it as a no-op on every channel — fixing a hard
-  failure where a `screen` hook calling a misconfigured provider (unresolved secret)
-  threw at the top of every turn, killing the loop with no in-chat recovery.
-  Intentional stops remain return values (`abort`/`rejectTool`), never throws.
-
-### Optional
-
-- **frontend/web** — queued-message UI no longer folds a quickly-queued message into
-  the wrong bubble: only a head still waiting behind a running turn (`queued > 0`)
-  opens a foldable batch; a head that runs immediately (`queued === 0`) is sealed
-  synchronously by `pump`, fixing the live/reload rendering mismatch.
-- **cognition** (new plugin) — `@matatbread/matbot-cognition`, a consumer of the
-  skills service that seeds built-in skills (Inner voice, Remember this, Dream-time)
-  create-if-absent, discovering the live `SkillManager` off the registry and
-  degrading gracefully (deferred one-shot screen hook) when none is present yet.
-- **tool-store** (new plugin) added.
-- **skills** — now registers the `SkillManager` service (idempotent / double-setup
-  safe); trigger classifier reworked so the opposing prior turn is a first-class
-  input (relational triggers can use it); agent-phase robo resubmit names matched
-  skills instead of inlining full content, so history no longer accumulates whole
-  playbooks on every fire.
-- **frontend/web** & **CLI** — render the new `matbot-hooks` marker live and on
-  reload (amber warning pill / amber ⚠ line).
-- **telegram** — a sub-agent now runs send-only (skips `getUpdates` polling, so its long-poll can't
-  409-conflict with the foreground owner's), while still having a live `setup()` so it can send. The
-  foreground bot polls as before.
-- Plugin bug fixes: **background** correctly sets `allowed` on writes with a clearer
-  HTTP error on disallowed; **frontend/web** send/stop button state on session switch
-  + initial-message echo; mangled robo message; tool-store type-extraction regex;
-  absolute path leak in workspace list.

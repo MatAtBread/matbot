@@ -1,9 +1,10 @@
 import type {
-  FileStore, Vault, Message, ModelParameters,
+  FileStore, FileEvent, Principal, Vault, Message, ModelParameters,
   ProviderAdapter, ProviderConfig, ProviderRegistry, Tool, ToolRegistry, FrontendInfo,
   Store, Session, SystemContextRegistry, KnowledgeIndex, PromptFn, SessionRunner, Usage,
   TypeScriptStripper, ToolTypeIndex, ToolPresenter,
 } from './types.js';
+import type { Routed } from './broadcast.js';
 import type { HookRegistry } from './hooks.js';
 
 export const PLUGIN_API_VERSION = '0.1';
@@ -106,6 +107,10 @@ export interface MatbotServices {
    *  whole turn snapshot. A plain registered service (not a swap-member); consumed as a member. See
    *  {@link ToolPresenter}. */
   readonly ToolPresenter?: ToolPresenter | undefined;
+  /** Optional partition-aware file-watch layer (cross-partition observation + per-connection visibility),
+   *  registered by a partitioning storage backend. Absent ⇒ frontends use the plain `fileStore.watch()`.
+   *  See {@link WatchVisibility}. */
+  readonly WatchVisibility?: WatchVisibility | undefined;
 }
 
 /** The assembled machine: registry services wired to the fixed runtime — what `setup()` receives. */
@@ -166,10 +171,10 @@ export interface MatbotRuntime {
    * per-invocation through its proxy/member instead.
    *
    *   // cache the backend's documents; rebuild on every swap (own initial load was in setup())
-   *   services.mounted.consume({ key: 'StorageBackend', signal }, () => this.load());
+   *   services.mounted.observe({ key: 'StorageBackend', signal }, () => this.load());
    *
    *   // depend on a peer service that may not be present yet; seed now if it is, and on each (re)mount
-   *   services.mounted.consume({ key: 'SkillManager', replay: true, signal }, m => seed(m));
+   *   services.mounted.observe({ key: 'SkillManager', replay: true, signal }, m => seed(m));
    *
    * Contract guarantees only *eventual, ordered* delivery of each key's net presence transition — it
    * says nothing about timing: a mount may fire synchronously-ish or batch to a later quiescent edge, so
@@ -334,9 +339,11 @@ export interface MountConsumeOptions<K extends keyof MatbotServices> {
   readonly onUnmount?: (machine: MatbotMachine) => void | Promise<void>;
 }
 
-/** The mount-table consumer facet exposed on {@link MatbotRuntime.mounted}. */
+/** The mount-table consumer facet exposed on {@link MatbotRuntime.mounted}. `observe` (not `consume`)
+ *  so the verb `consume` means exactly one thing repo-wide — the detached stream drain on
+ *  {@link Subscribable}; this keyed, replay/onUnmount, edge-batched delivery is its own paradigm. */
 export interface Mounted {
-  consume<K extends keyof MatbotServices>(
+  observe<K extends keyof MatbotServices>(
     options: MountConsumeOptions<K>,
     handler: (machine: MountedMachine<K>) => void | Promise<void>,
   ): void;
@@ -385,7 +392,7 @@ export function createMountTable(getMachine: () => MatbotMachine): MountTable {
   };
 
   const mounted: Mounted = {
-    consume(options, handler) {
+    observe(options, handler) {
       const { key, replay, signal, onUnmount } = options;
       if (signal?.aborted === true) return;
       const interest: MountInterest = {
@@ -476,6 +483,29 @@ export interface StorageBackend {
   createStore<T extends { id: string; version: string }>(namespace: string): Store<T>;
   readonly fileStore: FileStore;
   close?(): Promise<void>;
+}
+
+/**
+ * The partition-aware file-watch layer, registered by a storage backend that partitions files per
+ * principal (the profiles backend). Consumed by a frontend firehose so it can (a) observe file events
+ * across *every* partition, each stamped with the {@link Routed} origin that produced it, and (b) decide,
+ * per SSE connection, whether a given event is visible to that connection's principal. Absent ⇒ no
+ * partitioning: the frontend falls back to the plain single-stream `fileStore.watch()` with no filter.
+ * The origin/visibility split is generic (files today; the same shape serves skills/stores later).
+ */
+export interface WatchVisibility {
+  /** Every partition's file events, merged into one stream, each tagged with its origin partition. */
+  watchFiles(signal?: AbortSignal): AsyncIterable<Routed<FileEvent>>;
+  /**
+   * The per-connection visibility predicate for ANY partitioned event stream (files, skills, …): would a
+   * connection owned by `viewer` see an event in `namespace` produced by `origin`? Defined as
+   * `route(viewer, namespace) === route(origin, namespace)` — the two see it iff they route that namespace
+   * to the same partition. This yields the intended behavior uniformly: a viewer sees global/base events
+   * for namespaces it does NOT isolate, and only its own partition's events for namespaces it does.
+   * `origin` may be a partition principal (files, tagged by the merge) or the acting principal (skills,
+   * stamped at write) — routing both sides makes either correct. `undefined` origin ⇒ base.
+   */
+  visible(viewer: Principal, namespace: string, origin: Principal | undefined): boolean;
 }
 
 // ── Plugin interface ──────────────────────────────────────────────────────────

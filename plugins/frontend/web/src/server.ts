@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type {
   MatbotPlugin, Principal, Session, Store, Tool, ToolRegistry, FileStore, Vault,
-  FormField, PromptFn, SessionRunner, PluginRegistryEvent,
+  FormField, PromptFn, SessionRunner, PluginRegistryEvent, WatchVisibility,
 } from '@matatbread/matbot-core';
 import { createSession, promptCancelledError, runAs, tryCurrentPrincipal } from '@matatbread/matbot-core';
 import type { SkillManager } from '@matatbread/matbot-skills';
@@ -9,6 +9,13 @@ import { sseComment, sseEvent } from './sse-writer.js';
 import { makeWebEnvTool } from './web-env.js';
 import { promises } from "node:fs";
 const { readFile } = promises;
+
+// The routing namespace each partitioned event stream is filtered on (WatchVisibility.visible): a viewer
+// sees an event iff it routes that namespace to the same partition the event came from. Files use the
+// single file-isolation axis ('files'); skills use their store namespace ('skills'). Global streams
+// (tool/plugin CRUD) are never partitioned and are broadcast unfiltered.
+const FILE_WATCH_NS  = 'files';
+const SKILL_WATCH_NS = 'skills';
 
 export interface WebServerDeps {
   store:          Store<Session>;
@@ -26,6 +33,12 @@ export interface WebServerDeps {
   cors?:          string;  // Access-Control-Allow-Origin value, default '*'
   workdir?:       string;
   files?:         FileStore;
+  /** Optional partition-aware file-watch layer. Resolved lazily (a thunk, like {@link skills}) because a
+   *  partitioning storage backend may register it *after* frontend-web sets up — capturing a value here
+   *  would snapshot `undefined` and silently fall back to base-only watching. When present, the firehose
+   *  observes file events across every partition (origin-stamped) and filters each SSE connection by its
+   *  principal; absent ⇒ the plain single-stream `files.watch()` with no filter (the non-partitioned default). */
+  watchVisibility?: () => WatchVisibility | undefined;
   configPath?:    string;
   /** Derives the security principal for each request. Defaults to {@link defaultWebPrincipal}. */
   resolvePrincipal?: WebPrincipalResolver;
@@ -62,13 +75,34 @@ const ANONYMOUS_WEB_USER: Principal = {
   type: 'user',
 };
 
-// All matbot frontends are single-principal today, so the default request identity is the process
-// boot principal (the pod/sandbox/system identity established at the entry) — keeping web sessions
-// attributed to the same identity as the rest of the app. A multi-user deployment registers a
-// `WebPrincipalResolver` (e.g. deriving identity from headers) which overrides this entirely; that
-// override is deliberately NOT chained to the boot principal, so it never leaks the operator
-// identity to anonymous visitors.
-export const defaultWebPrincipal: WebPrincipalResolver = () => tryCurrentPrincipal() ?? ANONYMOUS_WEB_USER;
+// A generic per-request identity hint: an `x-matbot-principal` header names the identity this browser is
+// acting as (type 'user'), or undefined when absent. The frontend learns only "identity header," never
+// any particular feature's notion of it — whatever backend/service interprets the principal does the
+// rest (e.g. the profile selector stores its choice locally and sends it here). It takes precedence over
+// a registered WebPrincipalResolver (see the composition in plugin.ts), so an explicitly-asserted
+// identity is an override, not something a resolver can shadow. There is no auth here by design.
+export function headerPrincipal(req: IncomingMessage): Principal | undefined {
+  const hinted = req.headers['x-matbot-principal'];
+  const id     = (Array.isArray(hinted) ? hinted[0] : hinted)?.trim();
+  return id ? { id, type: 'user' } : undefined;
+}
+
+// The same identity hint carried in the URL as `?principal=<id>`, for a request that cannot set a header —
+// notably an `EventSource` (SSE), whose browser API has no header option. The global `/events` firehose now
+// carries per-connection-filtered file events, so its EventSource passes the chosen profile this way. Ranked
+// below the header (an explicit XHR header still wins) and, like it, is routing not auth — client-asserted.
+export function urlPrincipal(req: IncomingMessage): Principal | undefined {
+  const q = req.url?.indexOf('?') ?? -1;
+  if (q < 0) return undefined;
+  const id = new URLSearchParams(req.url!.slice(q + 1)).get('principal')?.trim();
+  return id ? { id, type: 'user' } : undefined;
+}
+
+// The default request identity when no header and no override resolver apply: the process boot principal
+// (the pod/sandbox/system identity established at the entry), keeping web sessions attributed to the same
+// identity as the rest of the app. The header still wins here too, for when this default is used directly.
+export const defaultWebPrincipal: WebPrincipalResolver = (req) =>
+  headerPrincipal(req) ?? urlPrincipal(req) ?? tryCurrentPrincipal() ?? ANONYMOUS_WEB_USER;
 
 async function readBody(req: IncomingMessage, maxBytes = 1_048_576): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -151,26 +185,55 @@ export function createWebServer(deps: WebServerDeps) {
   // busy/idle, file changes, and tool/skill/plugin CRUD — each tagged by name and demuxed client-side.
   // Browsers cap HTTP/1.1 at ~6 sockets per host; a separate SSE connection per panel would exhaust
   // that and starve ordinary fetches (the sidebar load, tool calls), so the whole UI shares one socket.
-  const globalListeners = new Set<ServerResponse>();
+  // Each listener carries its connection's principal, so file events can be filtered per connection when
+  // storage partitions them (see the WatchVisibility path below). Non-partitioned deployments ignore it.
+  const globalListeners = new Map<ServerResponse, Principal>();
 
-  const broadcast = (msg: string): void => {
-    for (const res of globalListeners) { if (res.writable) res.write(msg); else globalListeners.delete(res); }
+  const broadcast = (msg: string, visible?: (principal: Principal) => boolean): void => {
+    for (const [res, principal] of globalListeners) {
+      if (visible !== undefined && !visible(principal)) continue;
+      if (res.writable) res.write(msg); else globalListeners.delete(res);
+    }
   };
 
   // Per-file watchers (GET /events/files/:ns/:name), keyed `<namespace>/<name>` so single-file streams
   // don't collide across namespaces. Separate from the global stream: a targeted watch, not the firehose.
-  const fileEventListeners = new Map<string, Set<ServerResponse>>();
+  // Each entry maps a connection to its principal, for the same per-connection visibility filter.
+  const fileEventListeners = new Map<string, Map<ServerResponse, Principal>>();
   const watchAc            = new AbortController();
 
-  if (deps.files?.watch) {
-    void (async () => {
-      for await (const event of deps.files!.watch!(watchAc.signal)) {
-        const msg = sseEvent('file-changed', event);
-        broadcast(msg);
-        const subs = fileEventListeners.get(`${event.namespace ?? ''}/${event.name}`);
-        if (subs) for (const res of subs) { if (res.writable) res.write(msg); else subs.delete(res); }
-      }
-    })();
+  // File-change firehose — started once, on the first /events connect (like the skill watch), so the
+  // WatchVisibility layer, which a partitioning backend may register *after* frontend-web sets up, is
+  // resolved when it's certainly present rather than snapshotted as undefined at construction. With it,
+  // observe every partition's events — each carrying its origin — and gate each connection by whether its
+  // principal routes to that origin. Without it, fall back to the plain single stream with no filter.
+  let fileWatchStarted = false;
+  function startFileWatch(): void {
+    if (fileWatchStarted) return;
+    fileWatchStarted = true;
+    const wv = deps.watchVisibility?.();
+    if (wv) {
+      void (async () => {
+        for await (const event of wv.watchFiles(watchAc.signal)) {
+          const msg = sseEvent('file-changed', event.value);
+          broadcast(msg, principal => wv.visible(principal, FILE_WATCH_NS, event.origin));
+          const subs = fileEventListeners.get(`${event.value.namespace ?? ''}/${event.value.name}`);
+          if (subs) for (const [res, principal] of subs) {
+            if (!wv.visible(principal, FILE_WATCH_NS, event.origin)) continue;
+            if (res.writable) res.write(msg); else subs.delete(res);
+          }
+        }
+      })();
+    } else if (deps.files?.watch) {
+      void (async () => {
+        for await (const event of deps.files!.watch!(watchAc.signal)) {
+          const msg = sseEvent('file-changed', event);
+          broadcast(msg);
+          const subs = fileEventListeners.get(`${event.namespace ?? ''}/${event.name}`);
+          if (subs) for (const [res] of subs) { if (res.writable) res.write(msg); else subs.delete(res); }
+        }
+      })();
+    }
   }
 
   if (deps.tools) {
@@ -187,8 +250,15 @@ export function createWebServer(deps: WebServerDeps) {
   function startSkillWatch(skills: SkillManager): void {
     if (skillWatchStarted) return;
     skillWatchStarted = true;
+    // Skills are partitioned (a profile can isolate the `skills` namespace), and every partition's CRUD
+    // flows through the one SkillManager broadcaster, each event stamped with its acting principal. So the
+    // stream is dynamic for free; we just filter per connection by the same visibility predicate as files.
+    const wv = deps.watchVisibility?.();
     void (async () => {
-      for await (const event of skills.watch(watchAc.signal)) broadcast(sseEvent('skill-changed', event));
+      for await (const event of skills.watch(watchAc.signal)) {
+        const msg = sseEvent('skill-changed', event.value);
+        broadcast(msg, wv ? (principal => wv.visible(principal, SKILL_WATCH_NS, event.origin)) : undefined);
+      }
     })();
   }
 
@@ -250,7 +320,10 @@ export function createWebServer(deps: WebServerDeps) {
 
   const server = createServer(async (req, res) => {
     const method = req.method ?? 'GET';
-    const url    = req.url ?? '/';
+    // Path only for routing; the query string (e.g. ?principal= on the SSE EventSource) is read off the
+    // raw req.url by the principal resolvers, never by a route match.
+    const rawUrl = req.url ?? '/';
+    const url    = rawUrl.includes('?') ? rawUrl.slice(0, rawUrl.indexOf('?')) : rawUrl;
 
     // A dead socket — client gone, or the server torn down mid-stream while this plugin unloads —
     // makes a pending `res.write` (e.g. the SSE loop below) emit an async 'error' on a later tick.
@@ -279,11 +352,10 @@ export function createWebServer(deps: WebServerDeps) {
     }
   });
 
-  function makeToolCtx(ac: AbortController, principal: Principal) {
+  function makeToolCtx(ac: AbortController) {
     const now = new Date().toISOString();
     const stubSession: Session = {
       id: crypto.randomUUID(), version: crypto.randomUUID(),
-      ownerPrincipalId: principal.id,
       status: 'active', contexts: [], messages: [],
       createdAt: now, updatedAt: now,
     };
@@ -391,7 +463,8 @@ export function createWebServer(deps: WebServerDeps) {
       // place it after frontend-web), so deps.skills() now resolves.
       const skills = deps.skills?.();
       if (skills) startSkillWatch(skills);
-      globalListeners.add(res);
+      startFileWatch();
+      globalListeners.set(res, principal);
       req.on('close', () => { globalListeners.delete(res); });
       return; // keep connection open
     }
@@ -404,7 +477,7 @@ export function createWebServer(deps: WebServerDeps) {
 
     // --- POST /sessions ---
     if (method === 'POST' && url === '/sessions') {
-      const session = createSession({ ownerPrincipal: principal });
+      const session = createSession();
       await deps.store.set(session.id, session);
       json(res, 201, { id: session.id });
       return;
@@ -587,7 +660,7 @@ export function createWebServer(deps: WebServerDeps) {
       const tool = await resolveToolReady(toolName, ac.signal);
       if (!tool) { json(res, 404, { error: `Tool "${toolName}" not found` }); return; }
 
-      const toolCtx = makeToolCtx(ac, principal);
+      const toolCtx = makeToolCtx(ac);
       let stdout = '';
       let stderr = '';
       try {
@@ -639,7 +712,7 @@ export function createWebServer(deps: WebServerDeps) {
       res.write(sseComment('tool stream open'));
 
       try {
-        for await (const ev of tool.executor.execute(input, makeToolCtx(ac, principal))) {
+        for await (const ev of tool.executor.execute(input, makeToolCtx(ac))) {
           if (!res.writable) break;
           res.write(sseEvent(ev.type, ev));
         }
@@ -699,8 +772,8 @@ export function createWebServer(deps: WebServerDeps) {
       res.write(sseComment(`watching ${key}`));
 
       let subs = fileEventListeners.get(key);
-      if (subs === undefined) { subs = new Set(); fileEventListeners.set(key, subs); }
-      subs.add(res);
+      if (subs === undefined) { subs = new Map(); fileEventListeners.set(key, subs); }
+      subs.set(res, principal);
       req.on('close', () => {
         const s = fileEventListeners.get(key);
         if (s) { s.delete(res); if (s.size === 0) fileEventListeners.delete(key); }
@@ -708,16 +781,26 @@ export function createWebServer(deps: WebServerDeps) {
       return;
     }
 
-    // --- GET /files/<namespace>/<name> --- (read-only static access; only files marked `allowed`)
-    const fileMatch = /^\/files\/([^/]+)\/(.+)$/.exec(url);
+    // --- GET /files/[~<principal>/]<namespace>/<name> --- (read-only static access; only files marked `allowed`)
+    // A browser GET (img/anchor/download) can't send the x-matbot-principal header, so a profiled file's
+    // owning partition rides in the path as an optional leading `~<principal>` segment (minted by
+    // url_for_resource). `~` is excluded from principal ids and namespaces, so the segment is unambiguous.
+    // Bare paths are served from the request principal (base in a default deployment) — unchanged.
+    const fileMatch = /^\/files\/(?:~([^/]+)\/)?([^/]+)\/(.+)$/.exec(url);
     if (method === 'GET' && fileMatch && deps.files) {
-      let namespace: string, name: string;
-      try { namespace = decodeURIComponent(fileMatch[1]!); name = decodeURIComponent(fileMatch[2]!); }
+      let filePrincipal: string | undefined, namespace: string, name: string;
+      try {
+        filePrincipal = fileMatch[1] !== undefined ? decodeURIComponent(fileMatch[1]) : undefined;
+        namespace = decodeURIComponent(fileMatch[2]!); name = decodeURIComponent(fileMatch[3]!);
+      }
       catch { json(res, 400, { error: 'Invalid path encoding' }); return; }
 
       // One read serves and gates: the handle we need to stream also carries `allowed`. A file that
       // isn't servable is reported as missing, not forbidden — don't reveal that the path exists.
-      const handle = await deps.files.getByName(name, namespace);
+      const read = () => deps.files!.getByName(name, namespace);
+      const handle = filePrincipal !== undefined
+        ? await runAs({ id: filePrincipal, type: 'user' }, read)
+        : await read();
       if (!handle) { json(res, 404, { error: 'Not found' }); return; }
       if (!handle.allowed) { json(res, 403, { error: 'Not allowed' }); return; }
 
@@ -743,12 +826,12 @@ export function createWebServer(deps: WebServerDeps) {
     busyState.clear();
 
     // Close the multiplexed global event stream(s).
-    for (const res of globalListeners) res.end();
+    for (const res of globalListeners.keys()) res.end();
     globalListeners.clear();
 
     // Stop the watch loops and close the per-file watch SSE connections.
     watchAc.abort();
-    for (const subs of fileEventListeners.values()) for (const res of subs) res.end();
+    for (const subs of fileEventListeners.values()) for (const res of subs.keys()) res.end();
     fileEventListeners.clear();
 
     // Resolve all pending prompts so callers don't hang.

@@ -1,25 +1,17 @@
-import type { Session, Message, MessageContent, MessageRole, Principal, Usage } from './types.js';
+import type { Session, Message, MessageContent, MessageRole, Usage } from './types.js';
 
 export interface CreateSessionOpts {
-  ownerPrincipal:        Principal;
-  actorPrincipal?:       Principal;
-  persona?:              string;
   title?:                string;
   contexts?:             string[];
   parentSessionId?:      string;
   branchPointMessageId?: string;
 }
 
-export function createSession(opts: CreateSessionOpts): Session {
+export function createSession(opts: CreateSessionOpts = {}): Session {
   const now = new Date().toISOString();
   return {
     id:               crypto.randomUUID(),
     version:          crypto.randomUUID(),
-    ownerPrincipalId: opts.ownerPrincipal.id,
-    ...(opts.actorPrincipal && opts.actorPrincipal.id !== opts.ownerPrincipal.id
-      ? { actorPrincipalId: opts.actorPrincipal.id }
-      : {}),
-    ...(opts.persona              !== undefined ? { persona:              opts.persona              } : {}),
     ...(opts.title                !== undefined ? { title:                opts.title                } : {}),
     ...(opts.parentSessionId      !== undefined ? { parentSessionId:      opts.parentSessionId      } : {}),
     ...(opts.branchPointMessageId !== undefined ? { branchPointMessageId: opts.branchPointMessageId } : {}),

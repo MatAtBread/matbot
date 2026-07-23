@@ -90,20 +90,20 @@ export function createTriggerActionTool(manager: TriggerManager): Tool<ToolResul
 
       switch (args.action) {
         case 'list': {
-          yield { type: 'result', value: { triggers: manager.all() } };
+          yield { type: 'result', value: { triggers: await manager.all() } };
           return;
         }
 
         case 'query': {
           const a = args as Extract<TriggerActionInput, { action: 'query' }>;
-          yield { type: 'result', value: { triggers: manager.query(queryFilter(a)) } };
+          yield { type: 'result', value: { triggers: await manager.query(queryFilter(a)) } };
           return;
         }
 
         case 'get': {
           const { id } = args as Extract<TriggerActionInput, { action: 'get' }>;
           if (!id) { yield { type: 'error', message: 'action "get" requires "id".' }; return; }
-          const t = manager.get(id);
+          const t = await manager.get(id);
           if (!t) { yield { type: 'error', message: `Trigger not found: "${id}"` }; return; }
           yield { type: 'result', value: t };
           return;
@@ -128,10 +128,13 @@ export function createTriggerActionTool(manager: TriggerManager): Tool<ToolResul
           if (!a.id) { yield { type: 'error', message: 'action "update" requires "id".' }; return; }
           if (a.conditions !== undefined && !validConditions(a.conditions)) { yield { type: 'error', message: '"conditions" must be [{ kind, rule }].' }; return; }
           if (a.tool !== undefined && typeof a.tool !== 'string')           { yield { type: 'error', message: '"tool" must be a string.' }; return; }
+          const priorTool = (a.tool !== undefined || a.params !== undefined)
+            ? (await manager.get(a.id))?.invoke.tool ?? ''
+            : '';
           const t = await manager.update(a.id, {
             ...(a.conditions !== undefined ? { conditions: a.conditions } : {}),
             ...(a.tool !== undefined || a.params !== undefined
-              ? { invoke: { tool: a.tool ?? manager.get(a.id)?.invoke.tool ?? '', ...(a.params !== undefined ? { params: a.params } : {}) } }
+              ? { invoke: { tool: a.tool ?? priorTool, ...(a.params !== undefined ? { params: a.params } : {}) } }
               : {}),
             ...(a.enabled !== undefined ? { enabled: a.enabled } : {}),
           });
@@ -168,7 +171,7 @@ export function createTriggerActionTool(manager: TriggerManager): Tool<ToolResul
           if (a.tool === undefined && a.params === undefined) { yield { type: 'error', message: 'action "move" requires a filter ("tool" and/or "params") selecting which triggers to re-target — refusing to move every trigger.' }; return; }
           const invoke = { tool: a.toTool, ...(a.toParams !== undefined ? { params: a.toParams } : {}) };
           const triggers: Trigger[] = [];
-          for (const t of manager.query(queryFilter(a))) {
+          for (const t of await manager.query(queryFilter(a))) {
             const updated = await manager.update(t.id, { invoke });
             if (updated !== undefined) triggers.push(updated);
           }
@@ -182,7 +185,7 @@ export function createTriggerActionTool(manager: TriggerManager): Tool<ToolResul
           if (a.tool === undefined && a.params === undefined) { yield { type: 'error', message: 'action "copy" requires a filter ("tool" and/or "params") selecting which triggers to duplicate — refusing to duplicate every trigger.' }; return; }
           const invoke = { tool: a.toTool, ...(a.toParams !== undefined ? { params: a.toParams } : {}) };
           const triggers: Trigger[] = [];
-          for (const t of manager.query(queryFilter(a))) {
+          for (const t of await manager.query(queryFilter(a))) {
             triggers.push(await manager.add({
               conditions: t.conditions,
               invoke,

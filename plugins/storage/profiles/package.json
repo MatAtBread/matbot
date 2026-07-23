@@ -1,0 +1,51 @@
+{
+  "name": "@matatbread/matbot-storage-profiles",
+  "matbotRuntime": [
+    "node"
+  ],
+  "version": "0.3.4",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "files": [
+    "src"
+  ],
+  "description": "Profile-aware StorageBackend for Node — partitions selected namespaces (sessions by default) per web principal over the filesystem layout, with a `profile` CRUD tool. Default principal keeps the existing base layout.",
+  "keywords": [
+    "matbot",
+    "matbot-plugin",
+    "matbot-storage",
+    "llm",
+    "ai",
+    "agent"
+  ],
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MatAtBread/matbot.git",
+    "directory": "plugins/storage/profiles"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@matatbread/matbot-storage-filesystem": "workspace:^"
+  },
+  "peerDependencies": {
+    "@matatbread/matbot-plugin-api": "workspace:^",
+    "@matatbread/matbot-core": "workspace:^"
+  },
+  "devDependencies": {
+    "typescript": "catalog:",
+    "@types/node": "catalog:",
+    "@matatbread/matbot-plugin-api": "workspace:^",
+    "@matatbread/matbot-core": "workspace:^"
+  }
+}

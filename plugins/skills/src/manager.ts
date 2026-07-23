@@ -1,5 +1,5 @@
-import type { Store, KnowledgeIndex, KnowledgeEntry, MatbotMachine } from '@matatbread/matbot-plugin-api';
-import { createBroadcaster } from '@matatbread/matbot-plugin-api';
+import type { Store, KnowledgeIndex, KnowledgeEntry, MatbotMachine, Routed } from '@matatbread/matbot-plugin-api';
+import { createBroadcaster, tryCurrentPrincipal } from '@matatbread/matbot-plugin-api';
 import type { SkillDoc, SkillEvent } from './types.js';
 
 type SkillAnalysis  = { entities: string[]; tags: string[]; summary: string; classification: { procedural: number; informational: number } };
@@ -149,21 +149,24 @@ export interface SkillSummary {
  * catalogue advertisement only — firing a skill on a condition is the triggers subsystem's concern.
  */
 export interface SkillManager {
-  /** Ends with the manager (teardown). Hand to `services.mounted.consume` so a StorageBackend swap
+  /** Ends with the manager (teardown). Hand to `services.mounted.observe` so a StorageBackend swap
    *  re-reads the new backend's skills, and the loop stops when the plugin unloads. */
   readonly signal: AbortSignal;
   /** The provider used to derive a skill's catalogue summary / knowledge analysis: the `analysisProvider`
    *  setting if pinned and configured, else the first configured provider (works with zero config). */
   resolveAnalysisProvider(): Promise<string>;
-  /** (Re)load persisted skills into memory and index each one. Re-runnable: boot load + each later
-   *  StorageBackend swap funnel through here. */
+  /** (Re)index every persisted skill into the active KnowledgeIndex. Re-runnable: boot + each later
+   *  StorageBackend swap funnel through here. This is a projection into search only — it holds no
+   *  in-memory copy of the skills; catalogue reads (all/list/get) go straight to the store. */
   load(): Promise<void>;
-  all(): SkillDoc[];
-  list(): SkillSummary[];
-  get(name: string): SkillDoc | undefined;
+  all(): Promise<SkillDoc[]>;
+  list(): Promise<SkillSummary[]>;
+  get(name: string): Promise<SkillDoc | undefined>;
   /** Observe skill content CRUD (save/delete), including LLM mid-turn saves — the source a UI needs to
-   *  refresh a skills list live. */
-  watch(signal?: AbortSignal): AsyncIterable<SkillEvent>;
+   *  refresh a skills list live. Each event is stamped with the acting principal (its `origin`), so a
+   *  partitioned frontend can filter it per connection; a boot/import with no principal has `origin`
+   *  undefined (base/global). */
+  watch(signal?: AbortSignal): AsyncIterable<Routed<SkillEvent>>;
   /** Create a new skill or update an existing one's content by name. `catalogue` omitted ⇒ unchanged. */
   save(name: string, content: string, catalogue?: boolean): Promise<SkillDoc>;
   /** Delete a skill by name. Returns the removed doc, or `undefined`. */
@@ -191,7 +194,6 @@ export interface SkillManager {
  * like any other tool, so skills carry no trigger data of their own.
  */
 export class SkillManagerImpl implements SkillManager {
-  private readonly skills = new Map<string, SkillDoc>();
   // In-flight analysis per skill id, so a detached reindex can be cancelled: superseded by a newer
   // write, the skill being deleted, or teardown. Keeps it from outliving the skill or the process.
   private readonly inflight = new Map<string, AbortController>();
@@ -210,7 +212,7 @@ export class SkillManagerImpl implements SkillManager {
     this.services = services;
   }
 
-  /** Ends with the manager (teardown). Hand to `services.mounted.consume` so a StorageBackend swap
+  /** Ends with the manager (teardown). Hand to `services.mounted.observe` so a StorageBackend swap
    *  re-reads the new backend's skills, and the loop stops when the plugin unloads. */
   get signal(): AbortSignal { return this.lifecycle.signal; }
 
@@ -225,24 +227,28 @@ export class SkillManagerImpl implements SkillManager {
     return [...this.services.providers.keys()][0] ?? '';
   }
 
-  /** (Re)load persisted skills into memory and index each one. Re-runnable: the initial boot load and
-   *  every later StorageBackend swap funnel through here. Reading `this.store` (a swap-following proxy)
-   *  always hits the live backend, so a swap re-reads the new backend's skills. Clears first — old
-   *  in-memory skills and their in-flight analyses belong to the displaced backend. */
+  /** (Re)index every persisted skill into the active KnowledgeIndex — a projection into search only,
+   *  holding no in-memory copy. Re-runnable: the initial boot pass and every later StorageBackend swap
+   *  funnel through here. Reading `this.store` (a swap-following proxy) always hits the live backend, so
+   *  a swap re-indexes the new backend's skills; the old backend's in-flight analyses are cancelled. */
   async load(): Promise<void> {
     for (const ac of this.inflight.values()) ac.abort();
     this.inflight.clear();
-    this.skills.clear();
     const { items } = await this.store.query({});
     for (const doc of items) this.commit(doc, true);
   }
 
-  all(): SkillDoc[] {
-    return [...this.skills.values()];
+  // Read straight through the store — no in-memory snapshot. The proxy follows both the StorageBackend
+  // swap and the current principal's partition, and a shared backend's out-of-band writes are seen too.
+  // Skills are few and this runs at most once per turn (the catalogue contributor), so a full scan is
+  // cheap on a local backend; a slow backend (Drive) is accelerated by a CachingStorageBackend, not here.
+  async all(): Promise<SkillDoc[]> {
+    const { items } = await this.store.query({});
+    return items;
   }
 
-  list(): SkillSummary[] {
-    return this.all().map(s => ({
+  async list(): Promise<SkillSummary[]> {
+    return (await this.all()).map(s => ({
       id:     s.id,
       name:   s.name,
       ...(s.toolBinding !== undefined ? { toolBinding: s.toolBinding } : {}),
@@ -250,13 +256,16 @@ export class SkillManagerImpl implements SkillManager {
     }));
   }
 
-  get(name: string): SkillDoc | undefined {
-    return this.skills.get(name.toLowerCase());
+  // Skills are keyed by id in the store but addressed by name here, so this scans. Case-insensitive.
+  async get(name: string): Promise<SkillDoc | undefined> {
+    const key = name.toLowerCase();
+    const { items } = await this.store.query({});
+    return items.find(s => s.name.toLowerCase() === key);
   }
 
   /** Observe skill content CRUD (save/delete), including saves made by the LLM mid-turn via
    *  `skill_action` — the source a UI needs to refresh a skills list live. */
-  watch(signal?: AbortSignal): AsyncIterable<SkillEvent> {
+  watch(signal?: AbortSignal): AsyncIterable<Routed<SkillEvent>> {
     return this.events.subscribe(signal);
   }
 
@@ -266,8 +275,7 @@ export class SkillManagerImpl implements SkillManager {
   // triggers, and the flag in one action.
   async save(name: string, content: string, catalogue?: boolean): Promise<SkillDoc> {
     const now = new Date().toISOString();
-    const key = name.toLowerCase();
-    const doc = this.skills.get(key);
+    const doc = await this.get(name);
 
     if (doc === undefined) {
       const newDoc: SkillDoc = {
@@ -281,26 +289,24 @@ export class SkillManagerImpl implements SkillManager {
       };
       await this.store.set(newDoc.id, newDoc);
       this.commit(newDoc, true);
-      this.events.emit({ type: 'saved', name: newDoc.name });
+      this.events.emit({ type: 'saved', name: newDoc.name }, tryCurrentPrincipal());
       return newDoc;
     }
 
     const saved = await this.casMutate(doc, cur => this.bump({ ...cur, content, ...(catalogue !== undefined ? { catalogue } : {}) }), true);
-    this.events.emit({ type: 'saved', name: saved.name });
+    this.events.emit({ type: 'saved', name: saved.name }, tryCurrentPrincipal());
     return saved;
   }
 
   /** Delete a skill by name. Returns the removed doc, or `undefined`. */
   async delete(name: string): Promise<SkillDoc | undefined> {
-    const key = name.toLowerCase();
-    const doc = this.skills.get(key);
+    const doc = await this.get(name);
     if (doc === undefined) return undefined;
     this.inflight.get(doc.id)?.abort();   // no point analysing a skill we're removing
     this.inflight.delete(doc.id);
     await this.store.delete(doc.id, doc.version);
     await this.knowledge.remove(doc.id);  // retract its index entry — the store no longer owns it
-    this.skills.delete(key);
-    this.events.emit({ type: 'deleted', name: doc.name });
+    this.events.emit({ type: 'deleted', name: doc.name }, tryCurrentPrincipal());
     return doc;
   }
 
@@ -309,8 +315,7 @@ export class SkillManagerImpl implements SkillManager {
    *  hide can't still surface it. Unhiding re-indexes through the normal detached path (analysis may
    *  run). `hidden` is never touched by `save`, so this is the only way it changes. */
   async setHidden(name: string, hidden: boolean): Promise<SkillDoc | undefined> {
-    const key = name.toLowerCase();
-    const doc = this.skills.get(key);
+    const doc = await this.get(name);
     if (doc === undefined) return undefined;
     if ((doc.hidden ?? false) === hidden) return doc;   // already in the requested state
     const saved = await this.casMutate(doc, cur => this.bump({ ...cur, hidden }), false);
@@ -321,7 +326,7 @@ export class SkillManagerImpl implements SkillManager {
     } else {
       void this.reindex(saved);
     }
-    this.events.emit({ type: 'saved', name: saved.name });
+    this.events.emit({ type: 'saved', name: saved.name }, tryCurrentPrincipal());
     return saved;
   }
 
@@ -336,8 +341,7 @@ export class SkillManagerImpl implements SkillManager {
     content:        string,
     catalogSummary?: string,
   ): Promise<boolean> {
-    const key = name.toLowerCase();
-    if (this.skills.has(key)) return false;
+    if (await this.get(name) !== undefined) return false;
     const now = new Date().toISOString();
     const doc: SkillDoc = {
       id:        crypto.randomUUID(),
@@ -350,7 +354,7 @@ export class SkillManagerImpl implements SkillManager {
     };
     await this.store.set(doc.id, doc);
     this.commit(doc, true);
-    this.events.emit({ type: 'saved', name: doc.name });
+    this.events.emit({ type: 'saved', name: doc.name }, tryCurrentPrincipal());
     return true;
   }
 
@@ -358,15 +362,15 @@ export class SkillManagerImpl implements SkillManager {
     this.lifecycle.abort();                                // end the mounted-swap subscription
     for (const ac of this.inflight.values()) ac.abort();   // cancel detached analyses on teardown
     this.inflight.clear();
-    this.skills.clear();
   }
 
   private bump(doc: SkillDoc): SkillDoc {
     return { ...doc, version: Date.now().toString(), updatedAt: new Date().toISOString() };
   }
 
+  // Not a cache write any more (there is no in-memory set) — just the single reindex funnel that
+  // save/import/casMutate/load all route through. Kept so the KnowledgeIndex projection has one entry point.
   private commit(doc: SkillDoc, reindex: boolean): void {
-    this.skills.set(doc.name.toLowerCase(), doc);
     if (reindex) void this.reindex(doc);
   }
 
@@ -410,7 +414,7 @@ export class SkillManagerImpl implements SkillManager {
       if (cur.knowledge?.contentHash === knowledge.contentHash) return; // already current
       const next: SkillDoc = { ...cur, version: Date.now().toString(), knowledge };
       const r = await this.store.cas(id, cur.version, next);
-      if (r.ok) { this.skills.set(next.name.toLowerCase(), next); return; }
+      if (r.ok) return;
     }
   }
 

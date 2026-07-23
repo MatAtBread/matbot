@@ -223,9 +223,9 @@ export type SessionStatus = 'active' | 'archived' | 'pinned';
 export interface Session {
   id:                    string;
   version:               string;
-  ownerPrincipalId:      string;
-  actorPrincipalId?:     string;
-  persona?:              string;
+  // Legacy: persisted sessions may still carry `ownerPrincipalId` / `actorPrincipalId` / `persona`.
+  // They were never read — ownership-at-rest is structural (the storage partition), resolved via the
+  // backend, not a field. Left undeclared; old data keeps them harmlessly as excess properties.
   title?:                string;
   status:                SessionStatus;
   contexts:              string[];
@@ -254,7 +254,6 @@ export interface SystemContextRegistry {
 
 export interface RunConfig {
   provider:   string;
-  persona?:   string;
   sessionId?: string;
   traceId?:   string;
 }

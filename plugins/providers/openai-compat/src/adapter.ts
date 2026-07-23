@@ -93,6 +93,15 @@ export class OpenAICompatAdapter implements ProviderAdapter {
       body['temperature'] = config.parameters.temperature;
     }
 
+    // Forward thinking mode & reasoning effort (used by DeepSeek's OpenAI-compat endpoint; harmless
+    // for standard OpenAI endpoints which ignore unknown top-level keys).
+    if (config.parameters?.thinking) {
+      body.thinking = config.parameters.thinking;
+    }
+    if (config.parameters?.reasoning_effort) {
+      body.reasoning_effort = config.parameters.reasoning_effort;
+    }
+
     const res = await fetch(endpoint, {
       method:  'POST',
       headers: {

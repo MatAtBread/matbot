@@ -7,7 +7,7 @@ import type { MatbotPlugin } from './plugin.js';
 import type { HookRegistry } from './hooks.js';
 import type { ToolTypeIndex, ToolPresenter } from '@matatbread/matbot-plugin-api';
 import { appendMessage, createMessage } from './session.js';
-import { contextSwitch, withUsageScope } from '@matatbread/matbot-plugin-api';
+import { contextSwitch, withUsageScope, isReadOnlyError } from '@matatbread/matbot-plugin-api';
 import { runSession } from './runner.js';
 
 export interface SessionRunnerDeps {
@@ -211,7 +211,17 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
           // while queued. That is what stops a mid-turn submit from clobbering session state. A robo
           // resubmission's blocks already carry `origin: 'robo'` (stamped where it was enqueued).
           session = appendMessage(session, createMessage({ role: 'user', content, traceId: head.traceId, providerName: head.provider }));
-          await deps.store.set(session.id, session);
+          try {
+            await deps.store.set(session.id, session);
+          } catch (e) {
+            // A read-only store rejects the persist-at-turn-start write (e.g. a session shared read-only
+            // from another profile's partition). That is a per-turn condition, not a host fault: surface
+            // it as a turn error and drop this submission rather than let it escape the detached pump and
+            // crash the process. Any other write failure stays fatal.
+            if (!isReadOnlyError(e)) throw e;
+            emit(s, { type: 'error', error: e.message, traceId: head.traceId });
+            continue;
+          }
         }
 
         const resolved = await deps.resolveProvider(head.provider);

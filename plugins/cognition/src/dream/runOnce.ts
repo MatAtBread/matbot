@@ -128,10 +128,10 @@ async function fetchUnassignedFacts(store: Store<RememberedFact>, nowIso: string
  * fail with a clear, actionable message rather than silently dropping skills (which would make
  * routing decisions inscrutable).
  */
-function buildCandidates(
+async function buildCandidates(
   services: MatbotMachine,
   blocklist: readonly string[],
-): SkillCandidate[] {
+): Promise<SkillCandidate[]> {
   const manager = services.SkillManager;
   if (manager === undefined) {
     throw new Error('dream-time requires a SkillManager service; none is registered.');
@@ -139,10 +139,8 @@ function buildCandidates(
   const blocked = new Set(blocklist);
   const candidates: SkillCandidate[] = [];
   const missing: string[] = [];
-  for (const summary of manager.list()) {
-    if (blocked.has(summary.name)) continue;
-    const doc = manager.get(summary.name);
-    if (doc === undefined) continue;   // raced with a delete — fine, just skip
+  for (const doc of await manager.all()) {
+    if (blocked.has(doc.name)) continue;
     const k = doc.knowledge;
     if (k === undefined) {
       missing.push(doc.name);
@@ -324,7 +322,7 @@ export async function* runOnce(
     throw new Error('dream-time requires a SkillManager service; none is registered.');
   }
   const facts      = services.createStore<RememberedFact>('remembered_facts');
-  const candidates = buildCandidates(services, settings.blocklist);
+  const candidates = await buildCandidates(services, settings.blocklist);
 
   // Helpers that finalise a run record. All exits go through one of these.
   const finish = (
@@ -465,7 +463,7 @@ export async function* runOnce(
 
     for (const [skill, members] of bySkill) {
       if (mergeBudget <= 0) break;
-      const doc = manager.get(skill);
+      const doc = await manager.get(skill);
       if (doc === undefined) continue;   // raced a delete between buildCandidates() and now — leave its facts for a future pass
 
       const cluster = members.slice(0, Math.min(settings.maxClusterSize, mergeBudget));

@@ -181,7 +181,23 @@ export async function boot(env: BootEnv): Promise<void> {
   // and register/remove/revert are the sanctioned write path.
   const providerSeed = new Map<string, ProviderConfig>();
   for (const [name, cfg] of Object.entries(config.providers))         providerSeed.set(name, { ...cfg, name });
-  for (const [name, cfg] of Object.entries(loadPersistedProviders())) providerSeed.set(name, { ...cfg, name });
+  for (const [name, cfg] of Object.entries(loadPersistedProviders())) {
+    // A provider persisted by an OLDER bundle may carry a build-specific synthetic `mbmod:` module id
+    // that no longer exists in this build's import map. Left as-is it imports as an unknown-scheme URL
+    // (the `mbmod:` CORS/ERR_FAILED boot failure). Repair a still-known synthetic id to its stable
+    // package name (what the wizard now persists); drop a stale-across-builds one with a clear notice
+    // rather than seeding a guaranteed-broken provider. A plain package name passes through untouched.
+    let module = cfg.module;
+    if (module.startsWith('mbmod:')) {
+      const canonical = specNames[module];
+      if (canonical === undefined) {
+        console.warn(`[matbot] provider "${name}" was saved with a stale, build-specific module ("${module}") that this build can't resolve — skipping it. Re-add the provider to fix.`);
+        continue;
+      }
+      module = canonical;
+    }
+    providerSeed.set(name, { ...cfg, name, module });
+  }
   const providers = new ProviderRegistryImpl(providerSeed);
 
   // First run (or cleared storage): collect the full provider config — name, adapter, URL, model, key.

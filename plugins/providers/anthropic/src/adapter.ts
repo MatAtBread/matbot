@@ -47,6 +47,15 @@ export class AnthropicAdapter implements ProviderAdapter {
       body['temperature'] = config.parameters.temperature;
     }
 
+    // Forward thinking mode & output config into the body (used by DeepSeek's Anthropic-compat
+    // endpoint; harmless for Claude, which already accepts `thinking` per the Messages API spec).
+    if (config.parameters?.thinking) {
+      body.thinking = config.parameters.thinking;
+    }
+    if (config.parameters?.output_config) {
+      body.output_config = config.parameters.output_config;
+    }
+
     const headers: Record<string, string> = {
       'content-type':     'application/json',
       'x-api-key':        apiKey,
@@ -55,7 +64,7 @@ export class AnthropicAdapter implements ProviderAdapter {
 
     // Enable extended thinking + prompt caching betas if requested
     const betas: string[] = ['prompt-caching-2024-07-31'];
-    if (config.parameters?.['thinking']) betas.push('interleaved-thinking-2025-05-14');
+    if (config.parameters?.thinking) betas.push('interleaved-thinking-2025-05-14');
     headers['anthropic-beta'] = betas.join(',');
 
     const res = await fetch(`${endpoint}/v1/messages`, {

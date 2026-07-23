@@ -1,5 +1,65 @@
 # @matatbread/matbot-frontend-web
 
+## 0.3.4
+
+### Patch Changes
+
+- 53bf4f8: Partitioned live events now cover skills as well as files, and a profile created mid-session is watched
+  without a restart.
+
+  - **Skills fan-out.** `SkillManager.watch()` now yields origin-stamped events (`Routed<SkillEvent>`, the
+    acting principal), and the web firehose filters `skill-changed` per connection just like files. A profile
+    that isolates the `skills` namespace sees only its own skill CRUD; profiles that don't still see the
+    shared/base skills. (The `SkillManager`'s in-memory catalogue is still principal-blind — a separate,
+    deeper fix — but the event stream is now partition-correct.)
+  - **One generic visibility predicate.** `WatchVisibility` gains `visible(viewer, namespace, origin)` (was a
+    file-specific `visibleTo`), defined as `route(viewer, ns) === route(origin, ns)`: routing _both_ sides
+    makes it correct whether the origin is a partition (files) or the acting principal (skills), and yields
+    "global events for namespaces you haven't isolated, own-partition only for those you have".
+  - **Dynamic partitions — no restart.** The profiles backend now feeds one long-lived, origin-stamped file
+    broadcaster from a watch pump per partition, and starts a pump the moment a profile is created — so a
+    profile made after the frontend connected receives its file events live. (Previously the partition set was
+    snapshotted when the watch began, needing a restart to pick up a new profile.)
+  - **`profile` tool renamed to `profile_action`** for consistency with the other `*_action` tools.
+
+- 36fee95: The web frontend now honours an `x-matbot-principal` request header as a generic per-request identity
+  override, taking precedence over any registered `WebPrincipalResolver` (`headerPrincipal(req) ?? resolver
+?? default`). This lets a browser act as a chosen identity even when a resolver (e.g. web-principal-user
+  or auth) pins a default. The `headerPrincipal` helper is exported. The shared UI also shows a profile
+  selector (left of the title) when a `profile` tool is registered, sending the selected profile as that
+  header; it stays hidden otherwise, so default deployments are unchanged. Each profile row gains a gear that
+  edits which namespaces the profile isolates — a checklist populated from the tool's `available_namespaces`
+  action, applied via `set_isolated` — and the new-profile row gains a matching (collapsed) chooser so a
+  profile's isolated set can be picked at creation.
+
+  The URL fragment now accepts an optional leading profile: `#<profile>:<session>~<params>`, every part
+  optional so existing `#<session>` / `#<session>~<params>` links are untouched. At load — before any
+  session loads — a `#<profile>:…` prefix (or a lone `#<profile>` that names an existing profile) adopts
+  that profile, then strips itself from the hash. Each profile row in the selector gains a link icon that
+  copies its shareable `#<profile>` URL to the clipboard.
+
+- a3cfbfa: Serve profile-partitioned files by URL. A browser GET (an `<img>`, a download link) can't send the
+  `x-matbot-principal` header, so `url_for_resource` now bakes the current principal into the path as a
+  leading `~<principal>` segment when profile-aware storage is active, and the `GET /files` route parses it
+  back out and reads under that principal. `~` is excluded from principal ids and namespaces, so the
+  segment is unambiguous; without profiles the URL is byte-identical to before.
+
+  Also fixes a deep-link bug: the `hashchange` handler didn't strip a `#<profile>:` prefix the way the
+  load-time parser does, so navigating to a profile deep-link mid-session treated `profile:session` as a
+  session id. It now splits the profile off — switching (reload) when it differs from the active one,
+  stripping it in place when it matches — before parsing the session fragment.
+
+- c3a1b00: The chat header gains a share button (shown only when a `profile` tool is registered and a session is
+  open). Clicking it pops a small menu of target profiles — those that isolate `sessions`, minus the
+  active one — and each pick POSTs `share` (`{ namespace: 'sessions', id: <session>, target }`) for the
+  open conversation, reporting success or the backend's error inline. A session shared IN from another
+  profile (resolved via the `owner` action on open) hides the share button — you can't re-share what you
+  don't own — and shows a "read-only · &lt;owner&gt;" badge. It all stays hidden in default deployments, so
+  nothing changes when profile-aware storage isn't active.
+- Updated dependencies [c3a1b00]
+  - @matatbread/matbot-plugin-api@0.3.4
+  - @matatbread/matbot-core@0.3.4
+
 ## 0.3.3
 
 ### Patch Changes

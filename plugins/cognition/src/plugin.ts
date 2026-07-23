@@ -35,7 +35,7 @@ async function seedCognition(services: MatbotMachine): Promise<void> {
   // retired "Remember this" skill (so an install seeded under the old model converts in place rather
   // than ending up with both a skill-load trigger and a remember_fact trigger firing in parallel).
   if (triggers) {
-    const legacy = triggers.query({ tool: 'skill_action', params: { action: 'load', name: 'Remember this' } });
+    const legacy = await triggers.query({ tool: 'skill_action', params: { action: 'load', name: 'Remember this' } });
     if (legacy.length > 0) {
       for (const t of legacy) await triggers.update(t.id, { invoke: { tool: 'remember_fact' }, conditions: REMEMBER_CONDITIONS });
     } else {
@@ -207,7 +207,7 @@ it is purely a data maintenance function.
       // else on the first mount when one is. Re-seed on each remount is a no-op (importIfAbsent). The
       // Triggers service is seeded opportunistically in the same pass when present. Order-independent
       // and self-healing, with no resident hook.
-      services.mounted.consume(
+      services.mounted.observe(
         { key: 'SkillManager', replay: true, signal: lifecycle.signal },
         m => seedCognition(m),
       );
