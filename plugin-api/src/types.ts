@@ -950,6 +950,13 @@ export type PipelineEvent =
   // threw), carried live so a frontend renders them without waiting for a session reload. The blocks
   // are already persisted in the session; this event is purely the live-delivery channel.
   | { type: 'marker';         content: MessageContent[]; traceId: string }
+  // A mid-turn steer that INTERRUPTED the running turn (see `SteeringPolicy`). Emitted synchronously
+  // when the steer is accepted, so the new user bubble lands in correct stream order and a frontend
+  // knows the imminent `aborted` (reason 'steer') on `interruptedTraceId` is a yield, not a dead-end:
+  // keep that turn's partial work rendered and expect a continuation. `traceId`/`rootTraceId` identify
+  // the steer submission itself (the continuation turn). Late subscribers reconstruct the bubble from
+  // the pump's per-turn `queued` replay seed / committed store order — this is purely live delivery.
+  | { type: 'steer';          content: MessageContent[]; interruptedTraceId: string; traceId: string; rootTraceId: string }
   | { type: 'error';          error: string;          traceId: string }
   | { type: 'system-context'; text: string;           traceId: string };
 
@@ -988,6 +995,11 @@ export interface SubmitOpenOpts extends OpenOpts {
   /** When true, this submission may be merged with others drained in the same batch. Default false
    *  (queue mode: one turn per submission). */
   concatQueue?: boolean;
+  /** Disposition for a submission arriving while a turn is running (see {@link SteeringPolicy}):
+   *  'queue' waits for the turn boundary (default), 'interrupt' stops the running turn — keeping its
+   *  committed partial work — and runs this next, 'auto' defers to the registered SteeringPolicy (else
+   *  the host default). Meaningless when nothing is running (degrades to a plain enqueue). */
+  mode?:        SteeringMode;
   /** Interactive prompt implementation for this submission's turn. The frontend owns delivery —
    *  it must target the frontend's per-session client connections, not a single request. */
   prompt?:      PromptFn;
@@ -1010,4 +1022,36 @@ export interface SessionRunner {
   /** Snapshot of a session's live state: whether a turn is running and how many submissions wait
    *  behind it. `busy` is `running || queued > 0`. */
   status(sessionId: string): { busy: boolean; running: boolean; queued: number };
+}
+
+// ── Steering ────────────────────────────────────────────────────────────────────
+
+/** Disposition of a submission that arrives while a turn is running. `interrupt` stops the running
+ *  turn (its committed partial work is preserved) and runs the new message next; `queue` waits for the
+ *  turn boundary. */
+export type SteeringDecision = 'queue' | 'interrupt';
+/** The wire-level request (see `SubmitOpenOpts.mode`). `auto` defers the decision to the registered
+ *  {@link SteeringPolicy} (else the host default). */
+export type SteeringMode = SteeringDecision | 'auto';
+
+/**
+ * How the runner disposes of a mid-turn submission under `mode: 'auto'`, and how an interrupt's
+ * continuation is nudged. An optional, registerable service ({@link MatbotServices}); absent ⇒ the
+ * runner uses its own defaults. Both members are optional so a plugin may override one, the other, or
+ * both. `classify` is deliberately NOT assumed to be an LLM — a regex or a semantic classifier is a
+ * first-class implementation (return synchronously); an LLM `singleTurn` returns a promise.
+ */
+export interface SteeringPolicy {
+  /**
+   * Consulted only for `mode: 'auto'` while a turn is running. `session` is the COMMITTED session
+   * (history up to the running turn's start — the in-flight partial is not reachable at submit time);
+   * `steer` is the incoming submission. Return synchronously (regex) or async (semantic / singleTurn).
+   * Absent ⇒ the host default disposition.
+   */
+  classify?(ctx: { session: Session; steer: MessageContent[] }): SteeringDecision | Promise<SteeringDecision>;
+  /**
+   * The ephemeral "keep going, noting the above" context folded onto an interrupt's continuation turn
+   * (never persisted). Absent ⇒ the host default nudge.
+   */
+  nudge?(ctx: { session: Session; steer: MessageContent[] }): MessageContent[];
 }

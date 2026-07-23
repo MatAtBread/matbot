@@ -1461,6 +1461,27 @@
       max-width: 260px;
     }
     #provider-select:hover { color: #374151; }
+    /* Steering-mode toggle: queue ↔ interrupt, pushed to the RHS of the meta row. */
+    #mode-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-left: auto;
+      color: #9ca3af;
+      user-select: none;
+    }
+    #mode-toggle .switch { position: relative; display: inline-block; width: 30px; height: 16px; }
+    #mode-toggle .switch input { opacity: 0; width: 0; height: 0; }
+    #mode-toggle .slider {
+      position: absolute; inset: 0; cursor: pointer;
+      background: #d1d5db; border-radius: 999px; transition: background .15s;
+    }
+    #mode-toggle .slider::before {
+      content: ""; position: absolute; height: 12px; width: 12px; left: 2px; top: 2px;
+      background: #fff; border-radius: 50%; transition: transform .15s;
+    }
+    #mode-toggle input:checked + .slider { background: #6b7280; }
+    #mode-toggle input:checked + .slider::before { transform: translateX(14px); }
     #input-row {
       display: flex;
       gap: 6px;
@@ -2041,6 +2062,11 @@
       <div id="input-meta">
         <span>Provider:</span>
         <select id="provider-select"></select>
+        <span id="mode-toggle" title="How a message sent mid-turn is handled — queue: wait for the current turn to finish; interrupt: stop it (keeping its work so far) and steer immediately">
+          <span class="mode-label">queue</span>
+          <label class="switch"><input type="checkbox" id="mode-interrupt" checked><span class="slider"></span></label>
+          <span class="mode-label">interrupt</span>
+        </span>
       </div>
       <div id="input-row">
         <textarea id="input" rows="1" placeholder="Shift+⬅️ to send, ⬅️ for newline"></textarea>

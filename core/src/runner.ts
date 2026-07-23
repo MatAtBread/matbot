@@ -10,6 +10,15 @@ import { HookRegistry } from './hooks.js';
 import { appendMessage, createMessage } from './session.js';
 import { addUsage } from './usage.js';
 
+// Substituted for an errored tool result when the turn was aborted (e.g. a mid-turn steer interrupt):
+// the tool was cut off, not genuinely faulty, and the raw abort reason ("Error: steer") is a leaked
+// internal token that reads as a real failure. A steer's continuation turn is the one place a model
+// reads this, so the wording tells it the call was interrupted and leaves re-running to its judgement —
+// deliberately NOT "re-run it", so a side-effecting tool isn't reflexively repeated.
+const INTERRUPTED_TOOL_RESULT = {
+  error: 'Tool call interrupted before completion — the turn was interrupted while it was running. It may not have run to completion, and any side effect may or may not have occurred. Re-run it only if you still need its result.',
+} as const;
+
 export interface RunSessionOpts {
   session:        Session;
   config:         RunConfig;
@@ -316,6 +325,14 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
       } catch (e) {
         result  = { error: String(e) };
         isError = true;
+      }
+
+      // A tool that errored under an aborted signal did so because it was cut off (a steer interrupt,
+      // a user cancel), not a genuine fault — reframe it before it is recorded, so the raw abort reason
+      // never reaches the model or the transcript. Covers both the throw and the yielded-`error` paths;
+      // a successful result is left untouched.
+      if (signal.aborted && isError) {
+        result = INTERRUPTED_TOOL_RESULT;
       }
 
       // toolresult — last chance to transform the result before it's recorded/yielded (hard redaction),

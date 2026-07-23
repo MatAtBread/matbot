@@ -180,6 +180,7 @@ function makeInProcessTransport(services) {
         prompt:      makePromptFn(sid, traceId),
         traceId,
         concatQueue: body.concatQueue ?? false,
+        mode:        body.mode ?? 'auto',
       });
       updateBusy(sid);
 

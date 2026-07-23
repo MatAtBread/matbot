@@ -2,6 +2,7 @@ import type {
   Session, Message, MessageContent, Principal, PromptFn, PipelineEvent,
   Store, ToolRegistry, SystemContextRegistry, Vault, FileStore, Tool,
   ProviderAdapter, ProviderConfig, SessionRunner, SessionView, OpenOpts, SubmitOpenOpts,
+  SteeringPolicy, SteeringDecision,
 } from './types.js';
 import type { MatbotPlugin } from './plugin.js';
 import type { HookRegistry } from './hooks.js';
@@ -22,6 +23,10 @@ export interface SessionRunnerDeps {
   // Resolved live (registers after boot): picks which tools are advertised to the model per provider
   // call. Absent ⇒ the whole turn snapshot is advertised. Threaded into runSession per turn.
   toolPresenter?:  () => ToolPresenter | undefined;
+  // Resolved live (registers after boot): decides how a mid-turn submission under `mode: 'auto'` is
+  // disposed (queue vs interrupt) and supplies an interrupt's continuation nudge. Absent ⇒ the runner's
+  // own defaults (DEFAULT_STEERING_POLICY / DEFAULT_STEER_NUDGE).
+  steeringPolicy?: () => SteeringPolicy | undefined;
   hooks?:          HookRegistry;
   systemContext?:  SystemContextRegistry;
   vault?:          Vault;
@@ -50,10 +55,29 @@ interface QueuedItem {
   // message already exists) and hands `ephemeral` (the trigger tool's output) to runSession, which
   // tail-folds it for this run only. `content` is empty for such an item — there is no new bubble.
   redo?: { ephemeral: MessageContent[] };
+  // Turn-scoped ephemeral context to fold onto this item's turn (tail-folded, never persisted) — used
+  // to carry an interrupt's "keep going, noting the above" nudge. Feeds runSession's injectedEphemeral,
+  // the same path `redo` uses; the two are mutually exclusive in practice (redo re-runs an existing
+  // turn with no new message, a steer introduces a new user message).
+  injectEphemeral?: MessageContent[];
   prompt?:     PromptFn;
 }
 
 const MAX_RESUBMIT_DEPTH = 8;
+
+// Disposition for a `mode: 'auto'` mid-turn submission when no SteeringPolicy is registered (or it
+// declares no `classify`). Interrupt-by-default: a message sent while the agent works stops the
+// running turn (its committed partial work is preserved) and runs next. Flip to 'queue' to make the
+// conservative "wait for the turn boundary" the default — this const is the single knob.
+const DEFAULT_STEERING_POLICY: SteeringDecision = 'interrupt';
+
+// The ephemeral nudge folded onto an interrupt's continuation when no SteeringPolicy supplies one. It
+// biases the model to continue the interrupted task while accounting for the steer, rather than pivot
+// wholesale — the dial between "I'll get to that in a minute" and a full reprioritisation.
+const DEFAULT_STEER_NUDGE: MessageContent[] = [{
+  type: 'text',
+  text: 'The user sent the message above while you were working. Take it into account and keep going — continue the task you were on, incorporating this new input rather than discarding your progress.',
+}];
 
 // Marker creator for a retract-and-rerun: its `data.retracted` carries the popped (superseded) turn
 // messages so a frontend can render them struck-through and a post-mortem can audit them. Core-owned
@@ -69,6 +93,10 @@ interface SessionState {
   // submissions interleaved among them (see the batch-building loop in pump). Concat and queued mix freely.
   queue:       QueuedItem[];
   running:     boolean;
+  // traceId of the turn currently running (set at pump loop top, cleared when the turn ends). Lets an
+  // interrupt name the turn it is yielding, so a frontend correlates the `steer` event's
+  // `interruptedTraceId` with the `aborted` (reason 'steer') it is about to see.
+  runningTraceId: string | undefined;
   ac:          AbortController | undefined;
   subscribers: Set<Sink>;
   // Events of the *current* turn, replayed to a subscriber that joins mid-turn. Cleared at each
@@ -134,7 +162,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
   const stateFor = (id: string): SessionState => {
     let s = states.get(id);
     if (s === undefined) {
-      s = { queue: [], running: false, ac: undefined, subscribers: new Set(), replay: [] };
+      s = { queue: [], running: false, runningTraceId: undefined, ac: undefined, subscribers: new Set(), replay: [] };
       states.set(id, s);
     }
     return s;
@@ -176,6 +204,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
           while (s.queue.length > 0 && s.queue[0]!.concatQueue) batch.push(s.queue.shift()!);
         }
         const content = batch.flatMap(i => i.content);
+        s.runningTraceId = head.traceId;
         s.replay = [];
         // Seed replay with the running turn's user message as a single merged `queued`, mirroring the
         // message persisted just below. notify() (in open()) reaches only subscribers that are live at
@@ -230,6 +259,10 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
           continue;
         }
 
+        // A redo re-runs an existing turn with its ephemeral; a steer carries an interrupt's nudge. The
+        // two never coincide on one item, so either supplies runSession's injectedEphemeral.
+        const inject = head.redo?.ephemeral ?? head.injectEphemeral;
+
         const ac = new AbortController();
         s.ac = ac;
         // Fold each tool's wire contract — the `params`/`result` text flattened from its single contract
@@ -276,7 +309,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
               ...(deps.configPath    !== undefined ? { configPath:    deps.configPath    } : {}),
               ...(deps.vault         !== undefined ? { vault:         deps.vault         } : {}),
               ...(head.prompt        !== undefined ? { prompt:        head.prompt        } : {}),
-              ...(head.redo          !== undefined ? { injectedEphemeral: head.redo.ephemeral } : {}),
+              ...(inject             !== undefined ? { injectedEphemeral: inject } : {}),
             })) {
               emit(s, ev);
             }
@@ -391,6 +424,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
       }
     } finally {
       s.running = false;
+      s.runningTraceId = undefined;
       s.replay  = [];
       // Deterministic busy→idle signal: running is now false, so any subscriber draining the stream
       // (a frontend's status tracker) reads an authoritative idle the moment it sees this — no racing
@@ -416,22 +450,75 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
         }
         s = stateFor(opts.sessionId);
         traceId = opts.traceId ?? crypto.randomUUID();
-        const concatQueue = opts.concatQueue ?? false;
-        s.queue.push({
-          traceId,
-          rootTraceId:   traceId,
-          content:       opts.content,
-          provider:      opts.provider,
-          principal:     opts.principal,
-          concatQueue,
-          resubmitDepth: 0,
-          ...(opts.prompt !== undefined ? { prompt: opts.prompt } : {}),
-        });
-        // Announce the submission on the stream as part of the live delta, before its turn's events.
-        // If it runs immediately `queued` is 0 (no wait); otherwise it's how many are ahead. concatQueue
-        // tells a frontend whether this submission will merge into the running batch (so it can fold the
-        // bubble) or run as its own turn.
-        notify(s, { type: 'queued', content: opts.content, queued: aheadOf(s, s.queue.length - 1), concatQueue, traceId, rootTraceId: traceId });
+        const { content, provider, principal } = opts;
+        const mode = opts.mode ?? 'queue';
+
+        // Decide interrupt vs queue for a submission arriving mid-turn. Steering is only meaningful
+        // while a turn is running; with nothing running it enqueues and runs next regardless of mode.
+        // The decision — and, on interrupt, the abort+unshift — happen here synchronously against
+        // s.running (re-checked after any classify/nudge await) so an interrupt can never land on the
+        // wrong (a later) turn: the fatal race of deciding across a wire is closed by deciding in-runner.
+        let interrupt = false;
+        if (mode !== 'queue' && s.running) {
+          const policy = deps.steeringPolicy?.();
+          // Fetch the committed session once (history up to the running turn's start) only when a policy
+          // member actually needs it: classify under `auto`, and nudge on any interrupt. The common
+          // no-policy interrupt path (e.g. the web default) does no extra read.
+          const wantClassify = mode === 'auto' && policy?.classify !== undefined;
+          const wantNudge    = policy?.nudge !== undefined;
+          const committed = (wantClassify || wantNudge) ? await deps.store.get(opts.sessionId) : null;
+
+          const decision: SteeringDecision = mode === 'interrupt'
+            ? 'interrupt'
+            : policy?.classify !== undefined
+              ? (committed ? await policy.classify({ session: committed, steer: content }) : DEFAULT_STEERING_POLICY)
+              : DEFAULT_STEERING_POLICY;
+
+          // Any await above may have outlived the running turn; only interrupt one still live.
+          if (decision === 'interrupt' && s.running) {
+            const nudge = policy?.nudge !== undefined && committed
+              ? policy.nudge({ session: committed, steer: content })
+              : DEFAULT_STEER_NUDGE;
+            const interruptedTraceId = s.runningTraceId ?? '';
+            // Head of the queue (ahead of anything else already queued): the steer runs immediately
+            // after the interrupted turn commits its partial work. Own turn (never concat).
+            s.queue.unshift({
+              traceId,
+              rootTraceId:     traceId,
+              content,
+              provider,
+              principal,
+              concatQueue:     false,
+              resubmitDepth:   0,
+              injectEphemeral: nudge,
+              ...(opts.prompt !== undefined ? { prompt: opts.prompt } : {}),
+            });
+            // Announce the steer before aborting so a subscriber places the new bubble and reads the
+            // imminent `aborted` (reason 'steer') as a yield, not a dead-end.
+            notify(s, { type: 'steer', content, interruptedTraceId, traceId, rootTraceId: traceId });
+            s.ac?.abort('steer');
+            interrupt = true;
+          }
+        }
+
+        if (!interrupt) {
+          const concatQueue = opts.concatQueue ?? false;
+          s.queue.push({
+            traceId,
+            rootTraceId:   traceId,
+            content,
+            provider,
+            principal,
+            concatQueue,
+            resubmitDepth: 0,
+            ...(opts.prompt !== undefined ? { prompt: opts.prompt } : {}),
+          });
+          // Announce the submission on the stream as part of the live delta, before its turn's events.
+          // If it runs immediately `queued` is 0 (no wait); otherwise it's how many are ahead. concatQueue
+          // tells a frontend whether this submission will merge into the running batch (so it can fold the
+          // bubble) or run as its own turn.
+          notify(s, { type: 'queued', content, queued: aheadOf(s, s.queue.length - 1), concatQueue, traceId, rootTraceId: traceId });
+        }
         void pump(opts.sessionId, s);
       }
 

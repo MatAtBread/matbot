@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type {
   MatbotPlugin, Principal, Session, Store, Tool, ToolRegistry, FileStore, Vault,
-  FormField, PromptFn, SessionRunner, PluginRegistryEvent, WatchVisibility,
+  FormField, PromptFn, SessionRunner, PluginRegistryEvent, WatchVisibility, SteeringMode,
   StoreChange, FileMetaData,
 } from '@matatbread/matbot-core';
 import { createSession, promptCancelledError, runAs, tryCurrentPrincipal } from '@matatbread/matbot-core';
@@ -65,6 +65,7 @@ interface SubmitBody {
   sessionId?:   string;
   traceId?:     string;
   concatQueue?: boolean;      // true (default): merge into the running turn's batch; false: own turn
+  mode?:        SteeringMode; // disposition for a mid-turn submit; default 'auto' (see SteeringPolicy)
 }
 
 // Last-resort anonymous identity, used only when no boot principal is established and no resolver
@@ -548,6 +549,7 @@ export function createWebServer(deps: WebServerDeps) {
           prompt:      promptFn,
           traceId,
           concatQueue: body.concatQueue ?? false, // per-submission; conservative default (own turn) when unspecified
+          mode:        body.mode ?? 'auto',        // the web frontend opts into steering; 'auto' defers to the SteeringPolicy (else host default)
         });
         updateBusy(targetId);
         json(res, 200, { queued: view.queued, traceId: view.traceId });

@@ -2,7 +2,7 @@ import type {
   FileStore, StoreChange, Principal, Vault, Message, ModelParameters,
   ProviderAdapter, ProviderConfig, ProviderRegistry, Tool, ToolRegistry, FrontendInfo,
   Store, Session, SystemContextRegistry, KnowledgeIndex, PromptFn, SessionRunner, Usage,
-  TypeScriptStripper, ToolTypeIndex, ToolPresenter,
+  TypeScriptStripper, ToolTypeIndex, ToolPresenter, SteeringPolicy,
 } from './types.js';
 import type { Routed } from './broadcast.js';
 import type { HookRegistry } from './hooks.js';
@@ -111,6 +111,11 @@ export interface MatbotServices {
    *  registered by a partitioning storage backend. Absent ⇒ frontends use the plain `fileStore.watch()`.
    *  See {@link WatchVisibility}. */
   readonly WatchVisibility?: WatchVisibility | undefined;
+  /** Optional steering policy: decides how a mid-turn submission under `mode: 'auto'` is disposed
+   *  (queue vs interrupt) and supplies the nudge folded onto an interrupt's continuation. Absent ⇒ the
+   *  runner uses its own defaults. A plain registered service, consumed by the runner as a member.
+   *  See {@link SteeringPolicy}. */
+  readonly SteeringPolicy?: SteeringPolicy | undefined;
 }
 
 /** The assembled machine: registry services wired to the fixed runtime — what `setup()` receives. */
