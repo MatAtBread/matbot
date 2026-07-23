@@ -1,9 +1,10 @@
 import type {
-  FileStore, Vault, Message, ModelParameters,
+  FileStore, FileEvent, Principal, Vault, Message, ModelParameters,
   ProviderAdapter, ProviderConfig, ProviderRegistry, Tool, ToolRegistry, FrontendInfo,
   Store, Session, SystemContextRegistry, KnowledgeIndex, PromptFn, SessionRunner, Usage,
   TypeScriptStripper, ToolTypeIndex, ToolPresenter,
 } from './types.js';
+import type { Routed } from './broadcast.js';
 import type { HookRegistry } from './hooks.js';
 
 export const PLUGIN_API_VERSION = '0.1';
@@ -106,6 +107,10 @@ export interface MatbotServices {
    *  whole turn snapshot. A plain registered service (not a swap-member); consumed as a member. See
    *  {@link ToolPresenter}. */
   readonly ToolPresenter?: ToolPresenter | undefined;
+  /** Optional partition-aware file-watch layer (cross-partition observation + per-connection visibility),
+   *  registered by a partitioning storage backend. Absent ⇒ frontends use the plain `fileStore.watch()`.
+   *  See {@link WatchVisibility}. */
+  readonly WatchVisibility?: WatchVisibility | undefined;
 }
 
 /** The assembled machine: registry services wired to the fixed runtime — what `setup()` receives. */
@@ -478,6 +483,21 @@ export interface StorageBackend {
   createStore<T extends { id: string; version: string }>(namespace: string): Store<T>;
   readonly fileStore: FileStore;
   close?(): Promise<void>;
+}
+
+/**
+ * The partition-aware file-watch layer, registered by a storage backend that partitions files per
+ * principal (the profiles backend). Consumed by a frontend firehose so it can (a) observe file events
+ * across *every* partition, each stamped with the {@link Routed} origin that produced it, and (b) decide,
+ * per SSE connection, whether a given event is visible to that connection's principal. Absent ⇒ no
+ * partitioning: the frontend falls back to the plain single-stream `fileStore.watch()` with no filter.
+ * The origin/visibility split is generic (files today; the same shape serves skills/stores later).
+ */
+export interface WatchVisibility {
+  /** Every partition's file events, merged into one stream, each tagged with its origin partition. */
+  watch(signal?: AbortSignal): AsyncIterable<Routed<FileEvent>>;
+  /** Would a connection owned by `viewer` see this event — i.e. does `viewer` route to the origin's partition? */
+  visibleTo(viewer: Principal, event: Routed<FileEvent>): boolean;
 }
 
 // ── Plugin interface ──────────────────────────────────────────────────────────

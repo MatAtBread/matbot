@@ -93,6 +93,9 @@ export const plugin: MatbotPluginSpec = {
       resolvePrincipal: (req) => headerPrincipal(req) ?? (services.WebPrincipalResolver ?? defaultWebPrincipal)(req),
       ...(services.workdir    !== undefined ? { workdir:    services.workdir    } : {}),
       ...(services.files      !== undefined ? { files:      services.files      } : {}),
+      // Partition-aware file watch, if a partitioning backend registered one (profiles loads first, so it's
+      // present by now). Absent ⇒ the firehose uses the plain files.watch() with no per-connection filter.
+      ...(services.WatchVisibility !== undefined ? { watchVisibility: services.WatchVisibility } : {}),
       ...(services.configPath !== undefined ? { configPath: services.configPath } : {}),
     });
 

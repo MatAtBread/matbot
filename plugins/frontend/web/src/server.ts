@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type {
   MatbotPlugin, Principal, Session, Store, Tool, ToolRegistry, FileStore, Vault,
-  FormField, PromptFn, SessionRunner, PluginRegistryEvent,
+  FormField, PromptFn, SessionRunner, PluginRegistryEvent, WatchVisibility,
 } from '@matatbread/matbot-core';
 import { createSession, promptCancelledError, runAs, tryCurrentPrincipal } from '@matatbread/matbot-core';
 import type { SkillManager } from '@matatbread/matbot-skills';
@@ -26,6 +26,10 @@ export interface WebServerDeps {
   cors?:          string;  // Access-Control-Allow-Origin value, default '*'
   workdir?:       string;
   files?:         FileStore;
+  /** Optional partition-aware file-watch layer. When present, the firehose observes file events across
+   *  every partition (origin-stamped) and filters each SSE connection by its principal; absent ⇒ the
+   *  plain single-stream `files.watch()` with no filter (the non-partitioned default). */
+  watchVisibility?: WatchVisibility;
   configPath?:    string;
   /** Derives the security principal for each request. Defaults to {@link defaultWebPrincipal}. */
   resolvePrincipal?: WebPrincipalResolver;
@@ -161,24 +165,46 @@ export function createWebServer(deps: WebServerDeps) {
   // busy/idle, file changes, and tool/skill/plugin CRUD — each tagged by name and demuxed client-side.
   // Browsers cap HTTP/1.1 at ~6 sockets per host; a separate SSE connection per panel would exhaust
   // that and starve ordinary fetches (the sidebar load, tool calls), so the whole UI shares one socket.
-  const globalListeners = new Set<ServerResponse>();
+  // Each listener carries its connection's principal, so file events can be filtered per connection when
+  // storage partitions them (see the WatchVisibility path below). Non-partitioned deployments ignore it.
+  const globalListeners = new Map<ServerResponse, Principal>();
 
-  const broadcast = (msg: string): void => {
-    for (const res of globalListeners) { if (res.writable) res.write(msg); else globalListeners.delete(res); }
+  const broadcast = (msg: string, visible?: (principal: Principal) => boolean): void => {
+    for (const [res, principal] of globalListeners) {
+      if (visible !== undefined && !visible(principal)) continue;
+      if (res.writable) res.write(msg); else globalListeners.delete(res);
+    }
   };
 
   // Per-file watchers (GET /events/files/:ns/:name), keyed `<namespace>/<name>` so single-file streams
   // don't collide across namespaces. Separate from the global stream: a targeted watch, not the firehose.
-  const fileEventListeners = new Map<string, Set<ServerResponse>>();
+  // Each entry maps a connection to its principal, for the same per-connection visibility filter.
+  const fileEventListeners = new Map<string, Map<ServerResponse, Principal>>();
   const watchAc            = new AbortController();
 
-  if (deps.files?.watch) {
+  // File-change firehose. With a partition-aware backend (WatchVisibility), observe every partition's
+  // events — each carrying its origin — and gate each connection by whether its principal routes to that
+  // origin. Without one, fall back to the plain single stream with no filter — byte-identical to before.
+  const wv = deps.watchVisibility;
+  if (wv) {
+    void (async () => {
+      for await (const event of wv.watch(watchAc.signal)) {
+        const msg = sseEvent('file-changed', event.value);
+        broadcast(msg, principal => wv.visibleTo(principal, event));
+        const subs = fileEventListeners.get(`${event.value.namespace ?? ''}/${event.value.name}`);
+        if (subs) for (const [res, principal] of subs) {
+          if (!wv.visibleTo(principal, event)) continue;
+          if (res.writable) res.write(msg); else subs.delete(res);
+        }
+      }
+    })();
+  } else if (deps.files?.watch) {
     void (async () => {
       for await (const event of deps.files!.watch!(watchAc.signal)) {
         const msg = sseEvent('file-changed', event);
         broadcast(msg);
         const subs = fileEventListeners.get(`${event.namespace ?? ''}/${event.name}`);
-        if (subs) for (const res of subs) { if (res.writable) res.write(msg); else subs.delete(res); }
+        if (subs) for (const [res] of subs) { if (res.writable) res.write(msg); else subs.delete(res); }
       }
     })();
   }
@@ -400,7 +426,7 @@ export function createWebServer(deps: WebServerDeps) {
       // place it after frontend-web), so deps.skills() now resolves.
       const skills = deps.skills?.();
       if (skills) startSkillWatch(skills);
-      globalListeners.add(res);
+      globalListeners.set(res, principal);
       req.on('close', () => { globalListeners.delete(res); });
       return; // keep connection open
     }
@@ -708,8 +734,8 @@ export function createWebServer(deps: WebServerDeps) {
       res.write(sseComment(`watching ${key}`));
 
       let subs = fileEventListeners.get(key);
-      if (subs === undefined) { subs = new Set(); fileEventListeners.set(key, subs); }
-      subs.add(res);
+      if (subs === undefined) { subs = new Map(); fileEventListeners.set(key, subs); }
+      subs.set(res, principal);
       req.on('close', () => {
         const s = fileEventListeners.get(key);
         if (s) { s.delete(res); if (s.size === 0) fileEventListeners.delete(key); }
@@ -762,12 +788,12 @@ export function createWebServer(deps: WebServerDeps) {
     busyState.clear();
 
     // Close the multiplexed global event stream(s).
-    for (const res of globalListeners) res.end();
+    for (const res of globalListeners.keys()) res.end();
     globalListeners.clear();
 
     // Stop the watch loops and close the per-file watch SSE connections.
     watchAc.abort();
-    for (const subs of fileEventListeners.values()) for (const res of subs) res.end();
+    for (const subs of fileEventListeners.values()) for (const res of subs.keys()) res.end();
     fileEventListeners.clear();
 
     // Resolve all pending prompts so callers don't hang.

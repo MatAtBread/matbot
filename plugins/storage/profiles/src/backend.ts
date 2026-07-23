@@ -1,10 +1,10 @@
 import { promises as fs } from 'node:fs';
 import { dirname, join, sep } from 'node:path';
-import type { Store, FileStore, StorageBackend, Principal } from '@matatbread/matbot-plugin-api';
+import type { Store, FileStore, FileEvent, StorageBackend, Principal, Routed } from '@matatbread/matbot-plugin-api';
 import { readOnlyError } from '@matatbread/matbot-plugin-api';
 import { tryCurrentPrincipal } from '@matatbread/matbot-core';
 import { FilesystemStorageBackend } from '@matatbread/matbot-storage-filesystem';
-import { ProfilesFileStore } from './file-store.js';
+import { ProfilesFileStore, mergeRoutedFiles, type FileSource } from './file-store.js';
 
 /**
  * A stored partition of storage keyed by principal id. `id` doubles as the principal id and the
@@ -44,6 +44,11 @@ export interface ProfileDirectory {
   share(namespace: string, id: string, target: string): Promise<void>;
   unshare(namespace: string, id: string, target: string): Promise<void>;
   ownerOf(namespace: string, id: string): Promise<Principal | undefined>;
+  // Cross-partition file watch + its per-connection visibility predicate — the `WatchVisibility` service
+  // surface, exposed here so the plugin can register it. `watchFiles` merges every partition's file
+  // events (origin-stamped); `visibleToFiles` answers whether `viewer` routes to an event's origin.
+  watchFiles(signal?: AbortSignal): AsyncIterable<Routed<FileEvent>>;
+  visibleToFiles(viewer: Principal, event: Routed<FileEvent>): boolean;
 }
 
 /** Narrow any active StorageBackend to its {@link ProfileDirectory} facet by method presence, or undefined. */
@@ -58,6 +63,8 @@ export function asProfileDirectory(backend: unknown): ProfileDirectory | undefin
     && typeof b.share               === 'function'
     && typeof b.unshare             === 'function'
     && typeof b.ownerOf             === 'function'
+    && typeof b.watchFiles          === 'function'
+    && typeof b.visibleToFiles      === 'function'
     ? (b as ProfileDirectory)
     : undefined;
 }
@@ -273,6 +280,26 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
   // keys on principal.id and never reads .type).
   async ownerOf(namespace: string, id: string): Promise<Principal | undefined> {
     return this.sharedOwner(this.route(namespace), namespace, id);
+  }
+
+  // ── Cross-partition file watch (the WatchVisibility service surface) ───────────────
+
+  // Merge every partition's file events into one origin-stamped stream. Base + one per profile; a
+  // profile that doesn't isolate files has an empty file dir (it writes to base), so it contributes
+  // nothing — harmless. Partitions are captured at subscribe time (see mergeRoutedFiles).
+  watchFiles(signal?: AbortSignal): AsyncIterable<Routed<FileEvent>> {
+    const sources: FileSource[] = [{ origin: undefined, store: this.base.fileStore }];
+    for (const p of this.profiles.values()) {
+      sources.push({ origin: { id: p.id, type: 'user' }, store: this.partitionFor(p.id).fileStore });
+    }
+    return mergeRoutedFiles(sources, signal);
+  }
+
+  // Does `viewer` route files to the partition this event came from? Files are the single `files` axis
+  // (not per-file-namespace), so the test is route(viewer, FILES_NS) === the event's origin partition
+  // ('' = base). An undefined origin is a base event, visible to everyone who routes files to base.
+  visibleToFiles(viewer: Principal, event: Routed<FileEvent>): boolean {
+    return this.routeFor(viewer.id, FILES_NS) === (event.origin?.id ?? BASE);
   }
 
   private async sharedOwner(partId: string, namespace: string, id: string): Promise<Principal | undefined> {

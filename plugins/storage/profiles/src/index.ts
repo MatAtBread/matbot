@@ -11,6 +11,8 @@ export type { Profile, ProfileDirectory } from './backend.js';
 // pre-scan only runs at boot), so the flag stays false and setup() re-installs the backend.
 let openedByPreScan = false;
 let toolRegistry: ToolRegistry | undefined;
+let machine: MatbotMachine | undefined;
+let watchRegistered = false;
 
 export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,
@@ -39,11 +41,23 @@ export const plugin: MatbotPluginSpec = {
     services.tools.register(createProfileTool(dir));
     services.tools.register(createShareTool(dir));
     toolRegistry = services.tools;
+    machine = services;
+
+    // Advertise the partition-aware file-watch layer so a frontend firehose observes every partition's
+    // file events (origin-stamped) and filters each SSE connection by its principal. Delegates live to
+    // the active backend (swap-safe), fail-open on visibility if the facet has gone.
+    await services.register('WatchVisibility', {
+      watch:     (signal) => dir()?.watchFiles(signal) ?? (async function* (): AsyncIterable<never> {})(),
+      visibleTo: (viewer, event) => dir()?.visibleToFiles(viewer, event) ?? true,
+    });
+    watchRegistered = true;
   },
 
   async teardown() {
     toolRegistry?.remove('profile');
     toolRegistry?.remove('share');
     toolRegistry = undefined;
+    if (watchRegistered && machine) { machine.unregister('WatchVisibility'); watchRegistered = false; }
+    machine = undefined;
   },
 };
