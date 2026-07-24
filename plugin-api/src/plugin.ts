@@ -15,6 +15,15 @@ export interface CompletionRequest {
   provider:    string;
   messages:    Message[];
   system?:     string;
+  /**
+   * @deprecated Per-call parameter overrides, shallow-merged over the provider config (request wins).
+   * It DOES work — both hosts (CLI + web-bundle) honour it — but it is a speculative affordance whose
+   * obvious use is an anti-pattern: a caller clamping tokens / disabling thinking for one call takes
+   * control away from the provider config, where parameters belong and stay user-editable. Prefer a
+   * dedicated provider profile (e.g. a `-classify` provider) instead of reaching for this. Kept, not
+   * removed, only because the surface is tiny and a genuine per-call need may yet appear. If you found
+   * this because you set it and it worked — reconsider whether a provider profile is the right home.
+   */
   parameters?: Partial<ModelParameters>;
   signal?:     AbortSignal;
 }
@@ -28,6 +37,9 @@ export interface SingleTurnRequest {
   provider: string;
   prompt:   string;
   system?:  string;
+  /** @deprecated Forwarded verbatim to {@link CompletionRequest.parameters}; same speculative
+   *  anti-pattern caveat — prefer a dedicated provider profile over per-call overrides. */
+  parameters?: Partial<ModelParameters>;
   signal?:  AbortSignal;
 }
 
@@ -455,8 +467,9 @@ export function singleTurnRequest(req: SingleTurnRequest): CompletionRequest {
       id: '', traceId: '', createdAt: new Date().toISOString(), role: 'user',
       content: [{ type: 'text', text: req.prompt }],
     }],
-    ...(req.system !== undefined ? { system: req.system } : {}),
-    ...(req.signal !== undefined ? { signal: req.signal } : {}),
+    ...(req.system     !== undefined ? { system: req.system } : {}),
+    ...(req.parameters !== undefined ? { parameters: req.parameters } : {}),
+    ...(req.signal     !== undefined ? { signal: req.signal } : {}),
   };
 }
 

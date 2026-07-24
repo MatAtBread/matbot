@@ -151,8 +151,10 @@ export class TriggerManager implements Triggers {
         .filter(c => surfaceOfKind(c.kind) === surface));
     if (candidates.length === 0 || subject.text === '') return [];
 
+    const provider = await this.resolveClassifierProvider(turnProvider);
+    const t0 = performance.now();
     const res = await this.services.singleTurn({
-      provider: await this.resolveClassifierProvider(turnProvider),
+      provider,
       signal,
       system:
         'You are a trigger classifier for a conversational assistant. Below is the current exchange — ' +
@@ -162,12 +164,19 @@ export class TriggerManager implements Triggers {
         'relational (refers to what was asked, answered, disputed, or repeated). Fire a condition when, ' +
         `reading the "${subject.label}" in light of the "${context.label}", it holds. Return ONLY a JSON ` +
         'object mapping each condition id (the bracketed value) to an object {"match": true|false, ' +
-        '"why": "<one short sentence citing the specific evidence>"}. No other text.',
+        '"why": "<a terse fragment, at most ~8 words, citing the specific evidence — not a full sentence>"}. No other text.',
       prompt:
         `${context.label} (earlier):\n${context.text === '' ? '(none)' : clip(context.text)}\n\n` +
         `${subject.label} (later — evaluate the conditions against THIS):\n${clip(subject.text)}\n\n` +
         `Conditions:\n${candidates.map(c => `[${c.key}] ${c.rule}`).join('\n')}`,
     });
+    // Instrumentation: the classifier singleTurn sits on the turn's critical path (screen before the
+    // first token; followup before the next turn). Log per-call latency and I/O size so a baseline and
+    // an optimized classify provider can be compared. Cross-platform primitives only (shared plugin).
+    console.debug(
+      `[triggers] ${surface} classifier: provider=${provider} candidates=${candidates.length} ` +
+      `${Math.round(performance.now() - t0)}ms in=${res.usage.inputTokens}tok out=${res.usage.outputTokens}tok`,
+    );
 
     let verdicts: Record<string, unknown> = {};
     try {
