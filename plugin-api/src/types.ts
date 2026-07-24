@@ -310,8 +310,47 @@ export interface ScreenContext {
   /** Unregister the hook currently running. For one-shot hooks that should fire at most once. */
   removeHook(): void;
 }
+/**
+ * A raced screen verdict the runner folds in WITHOUT gating the turn on it. A `screen` hook that starts
+ * expensive work concurrently (e.g. a triggers classifier judging the user message) returns immediately
+ * and hands back one of these instead of blocking on it. The runner polls `claim()` — synchronously,
+ * never awaiting — at each turn-loop edge (before a provider call, on every stream event, and just
+ * before committing). The first time `claim()` returns blocks (the work has settled WITH a correction),
+ * the runner DISCARDS the uncommitted in-progress response and re-runs the loop with those blocks
+ * tail-folded as ephemeral context — an in-situ redo: no store pop, no retraction marker, cleaner than a
+ * post-commit retract. Because the mid-stream poll runs before each event is emitted, a verdict faster
+ * than time-to-first-token is caught before any token reaches the frontend (the clean path); a slower
+ * one aborts the in-flight provider request, saving the unstreamed remainder. If it never fires before
+ * the turn commits, the turn commits normally and any correction is left to a post-commit `followup`.
+ *
+ * `claim()` MUST be exactly-once: return the correction on the first successful poll and `undefined`
+ * forever after (not settled, no correction, or already claimed). The hook uses that single delivery to
+ * coordinate with its own post-commit path — a claimed verdict is never also delivered by `followup`.
+ */
+export interface DeferredScreen {
+  claim(): DeferredCorrection | undefined;
+}
+/**
+ * A claimed raced-verdict correction. `ephemeral` is tail-folded onto the re-run's outgoing messages
+ * and never persisted (the transient "for this answer only" twin); `durable` is folded onto the turn's
+ * user message — persisted, visible (the hook marks it `origin: 'robo'`), and carried live as a
+ * `robo-user` event — so it updates the conversation rather than informing one answer (a `contextual`
+ * trigger's semantics, preserved even though the verdict now lands mid-turn instead of before it). At
+ * least one is non-empty when returned.
+ */
+export interface DeferredCorrection {
+  ephemeral?: MessageContent[];
+  durable?:   MessageContent[];
+}
 export interface ScreenResult {
   session?:   Session;
+  /**
+   * A raced verdict the runner folds in without gating on it (see {@link DeferredScreen}). Lets a
+   * screen hook race expensive work — a classifier — against generation: return immediately, hand this
+   * back, and the runner restarts the turn in-situ if the verdict fires before commit. A hook that
+   * would rather gate the turn (block until the verdict) just returns `ephemeral` as usual instead.
+   */
+  deferred?:  DeferredScreen;
   /** Turn-scoped context appended onto the tail of this turn's outgoing messages (the freshest
    *  input the model reads), never persisted. At the tail, not a system prefix, so a directive
    *  keeps its salience and the cached system/history prefix stays stable across turns. */
@@ -401,8 +440,13 @@ export interface FollowupResult {
    * defect that the injected context dissolves on the redo, so it won't re-fire; `resubmitDepth` (a
    * redo carries parent+1) caps an ill-formed one. `resubmit` and `retractAndRerun` are independent
    * capabilities — a single turn returning both is not expected, but both head-enqueue if it does.
+   *
+   * `context` is folded EPHEMERALLY onto the redo (for-this-answer-only). `durable` is instead folded
+   * onto the re-run's user message — persisted, visible (mark it `origin: 'robo'`), carried live as a
+   * `robo-user` event — so a `contextual`-kind correction updates the conversation durably even when it
+   * lands post-commit. At least one of the two is present.
    */
-  retractAndRerun?: { context: MessageContent[] };
+  retractAndRerun?: { context?: MessageContent[]; durable?: MessageContent[] };
   /**
    * Durable `marker` blocks to append to the just-committed session (LLM-invisible; for tracing /
    * cross-references). The second durable-write capability after `screen` — safe here for the same

@@ -322,7 +322,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
           if (!ac.signal.aborted && hooks) {
             const committed = await deps.store.get(id);
             if (committed && head.resubmitDepth < MAX_RESUBMIT_DEPTH) {
-              let followup: { resubmits: MessageContent[][]; markers: MessageContent[]; retract?: { context: MessageContent[] } } = { resubmits: [], markers: [] };
+              let followup: { resubmits: MessageContent[][]; markers: MessageContent[]; retract?: { context: MessageContent[]; durable: MessageContent[] } } = { resubmits: [], markers: [] };
               await contextSwitch(head.principal, async () => {
                 followup = await hooks.runFollowup({
                   session:       committed,
@@ -381,7 +381,12 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
               if (followup.retract) {
                 const lastUserIdx = committed.messages.findLastIndex(m => m.role === 'user');
                 const popped = lastUserIdx >= 0 ? committed.messages.slice(lastUserIdx + 1) : [];
-                const kept   = lastUserIdx >= 0 ? committed.messages.slice(0, lastUserIdx + 1) : committed.messages;
+                // `durable` correction (a contextual fire that landed post-commit) folds onto the user
+                // message we keep — persisted, so the redo AND every later turn see it in history, the
+                // exact durability the clean in-situ path gives. `context` stays ephemeral (redo only).
+                const durable = followup.retract.durable ?? [];
+                const kept = (lastUserIdx >= 0 ? committed.messages.slice(0, lastUserIdx + 1) : committed.messages)
+                  .map((m, i) => (durable.length > 0 && i === lastUserIdx ? { ...m, content: [...m.content, ...durable] } : m));
                 const retractionMsg: Message = {
                   id:        crypto.randomUUID(),
                   role:      'marker',
@@ -390,7 +395,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
                   // `retracted` is what was popped (the superseded answer); `injected` is the ephemeral
                   // context fed to the redo — neither is otherwise persisted, so the pair fully traces
                   // the swap for a post-mortem (and a frontend can render the strike-through + the cause).
-                  content:   [{ type: 'marker', creator: RETRACTION_CREATOR, data: { retracted: popped, injected: followup.retract.context, traceId: head.traceId } }],
+                  content:   [{ type: 'marker', creator: RETRACTION_CREATOR, data: { retracted: popped, injected: followup.retract.context ?? [], traceId: head.traceId } }],
                 };
                 // Any followup markers ride along as a trailing marker message (not folded into the
                 // retraction marker) so each creator's trace stays its own block.
@@ -398,6 +403,9 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
                   ? [{ id: crypto.randomUUID(), role: 'marker', createdAt: new Date().toISOString(), traceId: head.traceId, content: followup.markers }]
                   : [];
                 await deps.store.set(id, { ...committed, messages: [...kept, retractionMsg, ...trailing] });
+                // Emit the durable fold live (as a robo-user on the kept user turn) before the retraction
+                // marker, mirroring the screen-time durable path's ordering.
+                if (durable.length > 0) notify(s, { type: 'robo-user', content: durable, traceId: head.traceId });
                 notify(s, { type: 'marker', content: retractionMsg.content, traceId: head.traceId });
                 if (trailing.length > 0) notify(s, { type: 'marker', content: followup.markers, traceId: head.traceId });
 
@@ -410,7 +418,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
                   principal:     head.principal,
                   concatQueue:   false,
                   resubmitDepth: head.resubmitDepth + 1,
-                  redo:          { ephemeral: followup.retract.context },
+                  redo:          { ephemeral: followup.retract.context ?? [] },
                   ...(head.prompt !== undefined ? { prompt: head.prompt } : {}),
                 });
               }

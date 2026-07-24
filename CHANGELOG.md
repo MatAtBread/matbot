@@ -9,6 +9,48 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## Unreleased
+
+_Concurrent screen-phase classification: a screen hook can race a verdict against the turn instead of gating the first token on it._
+
+### API gaps filled
+
+- **`ScreenResult.deferred` — a raced screen verdict the runner folds in without gating the turn.** A
+  new `DeferredScreen { claim(): DeferredCorrection | undefined }` lets a `screen` hook start expensive
+  work (e.g. a classifier judging the user message) concurrently and return immediately, handing the
+  runner a poll handle instead of blocking. The runner polls `claim()` — synchronously, never awaited —
+  at each turn-loop edge: before each provider call, on every stream event, and just before commit. The
+  first time it returns a correction (the work settled), the runner **discards the uncommitted
+  in-progress response and re-runs the loop with the correction folded in** — an in-situ redo, no store
+  pop and no retraction marker, cheaper than a post-commit retract. Because the mid-stream poll runs
+  before each event is emitted, a verdict faster than time-to-first-token is caught before any token
+  reaches the frontend; a slower one aborts the in-flight provider request (a per-call `AbortController`
+  linked to the turn signal) to stop backend generation. `claim()` is exactly-once — a hook uses that
+  single delivery to coordinate the in-situ path with its own post-commit fallback, so a verdict is
+  never delivered twice.
+
+- **`DeferredCorrection { ephemeral?, durable? }` and `FollowupResult.retractAndRerun.durable`.** A
+  claimed correction — and a post-commit retract — can now carry `durable` blocks folded onto the turn's
+  user message (persisted, marked `origin: 'robo'`, carried live as a `robo-user` event) as well as, or
+  instead of, `ephemeral` tail-fold blocks. This preserves a durable-context correction's persistence
+  even though the verdict now lands mid-turn (in-situ) or post-commit (retract) rather than before
+  generation. `retractAndRerun.context` is correspondingly optional (a durable-only retract).
+
+### Optional
+
+- **triggers: the user-phase classifier races the turn instead of blocking the first token.** The
+  `screen` hook kicks off classify+dispatch concurrently and hands the runner a `DeferredScreen` rather
+  than awaiting the verdict; the correction is delivered on whichever path wins — a pre-first-token grace
+  inject, the runner's in-situ restart, or the post-commit `followup` retract. This removes the
+  classifier round-trip (~2.5s) from the critical path of the ~90% of turns where nothing fires, while a
+  fire still corrects the turn: a `contextual` fire folds durably onto the user message, an `ephemeral`
+  fire tail-folds — on all three delivery paths. A result-fire that lands after commit still supersedes
+  the answer via the existing retract-redo. New `classifierGraceMs` setting (default `0`): `0` is a pure
+  race (no added latency); a positive value holds the first token up to that long so a fast classifier
+  injects cleanly before generation rather than racing it — one knob spanning fully-responsive to
+  fully-clean. A raced verdict is traced by a `user-insitu-fired` marker (clean path, no retraction
+  marker exists) or `user-retract-fired` (post-commit).
+
 ## 0.3.4
 
 _User profiles, profile-specific backend correctness, and cross-profile resource sharing._
