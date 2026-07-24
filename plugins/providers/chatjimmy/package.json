@@ -1,0 +1,29 @@
+{
+  "name": "@matatbread/matbot-provider-chatjimmy",
+  "private": true,
+  "matbotRuntime": [
+    "node"
+  ],
+  "version": "0.3.5",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "files": [
+    "src"
+  ],
+  "description": "ChatJimmy provider adapter — a very fast hosted llama endpoint, handy for odd-ball / latency tests. Not published.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@matatbread/matbot-plugin-api": "workspace:^"
+  },
+  "devDependencies": {
+    "typescript": "catalog:",
+    "@matatbread/matbot-plugin-api": "workspace:^"
+  }
+}
