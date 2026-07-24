@@ -9,11 +9,25 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
-## Unreleased
+## 0.3.5
 
-_Concurrent screen-phase classification: a screen hook can race a verdict against the turn instead of gating the first token on it._
+_Two runner-level turn-control features: mid-turn steering (interrupt a running turn and redirect it) and concurrent screen-phase classification (race a verdict against the turn instead of gating the first token on it)._
 
 ### API gaps filled
+
+- **Mid-turn steering — a submission arriving while a turn runs can now interrupt it.** `SubmitOpenOpts`
+  gains `mode: 'queue' | 'interrupt' | 'auto'` (default `queue`, backward-compatible). `interrupt` stops
+  the running turn — keeping its committed partial work (the agentic loop already commits coherently on
+  abort, so no dangling tool-call) — and runs the new message next with a "keep going, noting the above"
+  nudge, rather than waiting for the turn boundary. The decision is made inside the runner, synchronously
+  against the running state, so an interrupt can never land on a later turn. A new optional
+  `SteeringPolicy` service (`MatbotServices`) drives `mode: 'auto'`: its `classify` (regex / semantic /
+  LLM — not assumed to be an LLM) decides queue vs interrupt and its `nudge` supplies the continuation
+  nudge; absent ⇒ host defaults (`DEFAULT_STEERING_POLICY = 'interrupt'`, built-in nudge). A new
+  `PipelineEvent` variant `steer` announces the interrupt so a frontend places the new bubble and reads
+  the imminent `aborted` (reason `'steer'`) as a yield. A tool that errors while the turn is aborted no
+  longer leaks the raw abort reason into its result — the runner records a neutral "interrupted before
+  completion" message so the continuation turn doesn't reflexively re-run a side-effecting tool.
 
 - **`ScreenResult.deferred` — a raced screen verdict the runner folds in without gating the turn.** A
   new `DeferredScreen { claim(): DeferredCorrection | undefined }` lets a `screen` hook start expensive
@@ -37,6 +51,12 @@ _Concurrent screen-phase classification: a screen hook can race a verdict agains
   generation. `retractAndRerun.context` is correspondingly optional (a durable-only retract).
 
 ### Optional
+
+- **frontend/web: opts into steering.** `POST /sessions/:id/submit` accepts `mode`, defaulting to `auto`
+  (interrupt-by-default with no policy registered). The UI adds a queue↔interrupt toggle beside the
+  provider select, renders the `steer` event as its user bubble live, and no longer re-renders the
+  session from the interrupted turn's `aborted` snapshot (which lacked the not-yet-persisted steer message
+  and wiped the live bubble until a manual refresh). Other frontends are unchanged (runner default `queue`).
 
 - **triggers: the user-phase classifier races the turn instead of blocking the first token.** The
   `screen` hook kicks off classify+dispatch concurrently and hands the runner a `DeferredScreen` rather

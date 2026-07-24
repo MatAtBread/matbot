@@ -1,5 +1,13 @@
 # @matatbread/matbot-tool-ask-user
 
+## 0.3.5
+
+### Patch Changes
+
+- Updated dependencies [3e662d0]
+- Updated dependencies
+  - @matatbread/matbot-plugin-api@0.3.5
+
 ## 0.3.4
 
 ### Patch Changes
