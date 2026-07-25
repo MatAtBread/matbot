@@ -2,7 +2,7 @@ import { dirname, join } from 'node:path';
 import type { MatbotPluginSpec, MatbotMachine, ToolRegistry } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import { ProfilesStorageBackend, asProfileDirectory } from './backend.js';
-import { createProfileTool, createShareTool } from './tool.js';
+import { createProfileTool, createShareTool, type SkillCopier } from './tool.js';
 
 export { ProfilesStorageBackend, asProfileDirectory } from './backend.js';
 export type { Profile, ProfileDirectory } from './backend.js';
@@ -45,8 +45,12 @@ export const plugin: MatbotPluginSpec = {
     // they follow any later StorageBackend swap and work the moment a deferred hot-load swap lands — even
     // if that is after this setup() returns — and never pin a stale or hot-reloaded instance.
     const dir = () => asProfileDirectory(services.StorageBackend);
+    // SkillManager is read loosely (offer loosely) — the `copy` action routes skills through it so the
+    // duplicate is indexed + evented; absent, copy falls back to a structural doc copy. Resolved live per
+    // call so a skills plugin (un)loaded after this setup is picked up without re-registering the tool.
+    const skills = () => (services as { SkillManager?: SkillCopier }).SkillManager;
     services.tools.register(createProfileTool(dir));
-    services.tools.register(createShareTool(dir));
+    services.tools.register(createShareTool(dir, skills));
     toolRegistry = services.tools;
     machine = services;
 
@@ -55,7 +59,7 @@ export const plugin: MatbotPluginSpec = {
     // the active backend (swap-safe), fail-open on visibility if the facet has gone.
     await services.register('WatchVisibility', {
       watchFiles: (signal) => dir()?.watchFiles(signal) ?? (async function* (): AsyncIterable<never> {})(),
-      visible:    (viewer, ns, origin) => dir()?.visible(viewer, ns, origin) ?? true,
+      visible:    (viewer, ns, id, origin) => dir()?.visible(viewer, ns, id, origin) ?? true,
     });
     watchRegistered = true;
   },

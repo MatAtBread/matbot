@@ -1,5 +1,31 @@
 import type { Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext } from '@matatbread/matbot-plugin-api';
+import { runAs } from '@matatbread/matbot-core';
 import type { ProfileDirectory } from './backend.js';
+
+// Minimal structural view of the SkillManager service (from @matatbread/matbot-skills), read LOOSELY so
+// this plugin needn't depend on skills (offer loosely). `copy` routes skills through save() — under
+// runAs(target) it writes into the target partition, emits the change event, AND indexes into the
+// KnowledgeIndex, none of which a raw partition doc-copy does. Absent ⇒ skills copy falls back to the
+// backend's structural doc copy (correct at rest; surfaces on the next skills reload).
+export interface SkillCopier {
+  all(): Promise<{ id: string; name: string; content: string; catalogue?: boolean }[]>;
+  save(name: string, content: string, catalogue?: boolean): Promise<unknown>;
+}
+
+// Copy one skill (by id or name) or the whole set (`*`) from the current principal's partition into
+// `target`'s, through the SkillManager so each lands indexed + evented. The target must isolate skills,
+// else save() under runAs(target) would route to the shared base and leak the skill to everyone.
+async function copySkills(sm: SkillCopier, dir: ProfileDirectory, id: string, target: string): Promise<void> {
+  const profile = dir.listProfiles().find(p => p.id === target);
+  if (profile === undefined)              throw new Error(`Unknown target profile "${target}".`);
+  if (!profile.isolated.includes('skills')) throw new Error(`Profile "${target}" does not isolate "skills", so it already reads the shared base data — nothing to copy into.`);
+  const all    = await sm.all();
+  const picked = id === '*' ? all : all.filter(s => s.id === id || s.name === id);
+  if (picked.length === 0) throw new Error(`No skill "${id}" to copy.`);
+  await runAs({ id: target, type: 'user' }, async () => {
+    for (const s of picked) await sm.save(s.name, s.content, s.catalogue);
+  });
+}
 
 // A namespace name in the `profile` contract. Structurally just `string` (callers and generated code pass
 // plain strings, and the checker resolves it to `string`), but the *name* survives verbatim into the tool's
@@ -24,7 +50,8 @@ declare module '@matatbread/matbot-plugin-api' {
     share:
       | ToolContract<{ shared: true },         { action?: 'share'; namespace: IsolatableNamespace; id: string; target: string }>
       | ToolContract<{ unshared: true },       { action: 'unshare'; namespace: IsolatableNamespace; id: string; target: string }>
-      | ToolContract<{ owner: string | null }, { action: 'owner'; namespace: IsolatableNamespace; id: string }>;
+      | ToolContract<{ copied: true },         { action: 'copy'; namespace: IsolatableNamespace; id: string; target: string }>
+      | ToolContract<{ owner: string | null } | { owners: Record<string, string> }, { action: 'owner'; namespace: IsolatableNamespace; id: string }>;
   }
 }
 
@@ -113,7 +140,10 @@ export function createProfileTool(getDir: () => ProfileDirectory | undefined): T
 // Companion to the `profile` tool: shares an individual stored item (a session, a fact, …) between
 // profiles. Kept a separate tool — sharing is about an item + a target, not the profile registry the
 // `profile` tool manages. Resolves the directory live per call, like `profile`.
-export function createShareTool(getDir: () => ProfileDirectory | undefined): Tool<ToolResultOf<'share'>> {
+export function createShareTool(
+  getDir:    () => ProfileDirectory | undefined,
+  getSkills: () => SkillCopier | undefined,
+): Tool<ToolResultOf<'share'>> {
   const executor: ToolExecutor<ToolResultOf<'share'>> = {
     async *execute(input: unknown, _ctx: ToolContext) {
       const args = input as { action?: string; namespace?: string; id?: string; target?: string };
@@ -124,6 +154,10 @@ export function createShareTool(getDir: () => ProfileDirectory | undefined): Too
       try {
         switch (args.action ?? 'share') {
           case 'owner': {
+            if (id === '*') {
+              yield { type: 'result', value: { owners: await dir.sharedInOwners(ns) } };
+              return;
+            }
             const owner = await dir.ownerOf(ns, id);
             yield { type: 'result', value: { owner: owner === undefined ? null : owner.id } };
             return;
@@ -134,6 +168,17 @@ export function createShareTool(getDir: () => ProfileDirectory | undefined): Too
             yield { type: 'result', value: { unshared: true } };
             return;
           }
+          case 'copy': {
+            if (!args.target) { yield { type: 'error', message: 'action "copy" requires "target".' }; return; }
+            const target = args.target.trim();
+            // Skills carry indexed, evented state the SkillManager owns — route them through it so a copy
+            // is searchable + live at once; every other namespace is a structural partition copy.
+            const sm = getSkills();
+            if (ns === 'skills' && sm !== undefined) await copySkills(sm, dir, id, target);
+            else                                     await dir.copy(ns, id, target);
+            yield { type: 'result', value: { copied: true } };
+            return;
+          }
           case 'share': {
             if (!args.target) { yield { type: 'error', message: 'share requires "target".' }; return; }
             await dir.share(ns, id, args.target.trim());
@@ -141,7 +186,7 @@ export function createShareTool(getDir: () => ProfileDirectory | undefined): Too
             return;
           }
           default:
-            yield { type: 'error', message: `Unknown action "${String(args.action)}". Expected share, unshare, or owner.` };
+            yield { type: 'error', message: `Unknown action "${String(args.action)}". Expected share, unshare, copy, or owner.` };
         }
       } catch (e) {
         yield { type: 'error', message: e instanceof Error ? e.message : String(e) };
@@ -152,21 +197,31 @@ export function createShareTool(getDir: () => ProfileDirectory | undefined): Too
   return {
     name: 'share',
     description:
-      'Share a single stored item you own with another storage profile, or reverse it. `share` (the ' +
-      'default action) exposes the item — e.g. a `sessions` conversation — read-only in the target ' +
-      'profile\'s partition: the target reads your live item, not a copy, and only you can edit it. ' +
-      '`unshare` removes that exposure. `owner` reports which profile owns the item the current profile ' +
-      'would read (null when you own it) — the read-only signal. Sharing exists only because profiles do; ' +
-      'only a namespace the target profile isolates can be shared into (a base/global namespace is already ' +
-      'shared by everyone). Names an item by (`namespace`, `id`) and, for share/unshare, a `target` profile.',
+      'Share a single stored item you own with another storage profile, copy it, or reverse a share. ' +
+      'The `namespace` is the ISOLATION axis a profile partitions on (see the `profile` tool\'s ' +
+      '`available_namespaces`), NOT a content category. In particular, to share or copy a stored FILE — ' +
+      'including a workspace file — always use `namespace: "files"` with `id` set to the file\'s path; do ' +
+      'NOT use the file\'s content namespace (e.g. "workspace"), which is not an isolatable axis and cannot ' +
+      'be shared. ' +
+      '`share` (the default action) exposes the item — e.g. a `sessions` conversation, or a stored file ' +
+      '(`namespace: "files"`, `id` = the file path) — read-only in the target profile\'s partition: the target ' +
+      'reads your live item, not a copy, and only you can edit it. `unshare` removes that exposure. ' +
+      '`copy` instead writes an independent duplicate the target fully owns and can edit (item ids are ' +
+      'preserved). `owner` reports which profile owns the item the current profile would read (null when ' +
+      'you own it) — the read-only signal; `owner` with `id` of `*` instead returns an `owners` map of ' +
+      'every shared-in item in the namespace to its owner, to gate a whole list in one call. For ' +
+      'share/unshare/copy an `id` of `*` means the WHOLE namespace (every item in it). Sharing and copying ' +
+      'exist only because profiles do; only a namespace ' +
+      'the target profile isolates can be shared or copied into (a base/global namespace is already shared ' +
+      'by everyone). Names an item by (`namespace`, `id`) and, for share/unshare/copy, a `target` profile.',
     inputSchema: {
       type:       'object',
       required:   ['namespace', 'id'],
       properties: {
-        action:    { type: 'string', enum: ['share', 'unshare', 'owner'], description: 'Operation to perform; defaults to "share".' },
-        namespace: { type: 'string', description: 'Storage namespace of the item, e.g. "sessions".' },
-        id:        { type: 'string', description: 'Id of the item to share.' },
-        target:    { type: 'string', description: 'Target profile name. Required for share and unshare.' },
+        action:    { type: 'string', enum: ['share', 'unshare', 'copy', 'owner'], description: 'Operation to perform; defaults to "share".' },
+        namespace: { type: 'string', description: 'Isolation namespace of the item (as listed by profile_action available_namespaces), e.g. "sessions". For any stored file use "files" (not the file\'s content namespace like "workspace").' },
+        id:        { type: 'string', description: 'Id of the item, or "*" for the whole namespace (share/unshare/copy; owner returns the shared-in owners map).' },
+        target:    { type: 'string', description: 'Target profile name. Required for share, unshare, and copy.' },
       },
     },
     executor,

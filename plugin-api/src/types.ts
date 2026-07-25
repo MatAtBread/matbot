@@ -738,6 +738,26 @@ export interface FileHandle extends FileMetaData {
 
 export type FileEvent = FileMetaData & { changed: Array<keyof FileMetaData> };
 
+/**
+ * The generic, self-describing change envelope every partitioned CRUD stream emits (files, skills, and
+ * future partitioned stores) — the payload half of a {@link Routed} event, whose `origin` carries the
+ * acting principal/partition. It supersedes the per-stream bespoke shapes (the old `SkillEvent`, the raw
+ * `FileEvent` on the wire) so a frontend firehose can filter and route every stream through ONE predicate.
+ *
+ * `namespace` is the ROUTING namespace the change lives under — `'files'`, `'skills'`, or a document
+ * namespace — NOT a content sub-namespace (a file's own `metadata.namespace`, e.g. `'workspace'`, rides in
+ * `detail`). Pairing `namespace` + `id` is exactly what `WatchVisibility.visible` needs to decide, per
+ * connection, whether the viewer routes that item to the same partition (or has it shared in). `detail`
+ * carries an optional rich payload for in-place UI updates — a file change ships its {@link FileMetaData}
+ * so a sidebar row can update its size without a re-fetch; a skill change needs none (a refresh ping).
+ */
+export interface StoreChange {
+  readonly operation: 'saved' | 'deleted';
+  readonly namespace: string;
+  readonly id:        string;
+  readonly detail?:   unknown;
+}
+
 export interface FileFilter {
   sessionId?:     string;
   mimeType?:      string;

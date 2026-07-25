@@ -298,9 +298,14 @@ function makeInProcessTransport(services) {
     } finally { statusListeners.delete(l); }
   }
 
+  // Normalise to the same self-describing StoreChange the HTTP firehose delivers ({operation, namespace,
+  // id, detail}), so app.js reads one shape whichever transport is live. In-process is single-principal, so
+  // there is no partition filtering — just reshape the raw event.
   async function* fileEvents(signal) {
     if (!services.files || !services.files.watch) return;
-    for await (const event of services.files.watch(signal)) yield event;
+    for await (const ev of services.files.watch(signal)) {
+      yield { operation: 'saved', namespace: 'files', id: ev.id, detail: ev };
+    }
   }
 
   async function* toolEvents(signal) {
@@ -309,7 +314,7 @@ function makeInProcessTransport(services) {
 
   async function* skillEvents(signal) {
     if (!services.SkillManager) return;
-    for await (const event of services.SkillManager.watch(signal)) yield event;
+    for await (const event of services.SkillManager.watch(signal)) yield event.value;
   }
 
   async function* pluginEvents(signal) {

@@ -248,6 +248,23 @@
       color: #ef4444;
     }
     .file-action-btn:hover { background: #fecaca; }
+    /* Share reuses the action-btn frame but a neutral (non-destructive) colour. */
+    .file-share-btn { color: #6b7280; }
+    .file-share-btn:hover { background: #e5e7eb; }
+    .file-share-btn svg { width: 13px; height: 13px; display: block; }
+    /* Shared-IN marker: always visible (outside the hover-only .file-actions), since read-only status
+       must be legible at rest, not just on hover. */
+    .file-ro-badge {
+      flex-shrink: 0;
+      font-size: 0.82em;
+      font-weight: 500;
+      color: #92400e;
+      background: #fef3c7;
+      border: 1px solid #fde68a;
+      border-radius: 9px;
+      padding: 0 6px;
+      white-space: nowrap;
+    }
 
     .plugin-entry {
       margin: 1px 0;
@@ -1879,6 +1896,8 @@
     .profile-menu .pm-item { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-radius: 6px; cursor: pointer; }
     .profile-menu .pm-item:hover { background: #f3f4f6; }
     .profile-menu .pm-item.active { font-weight: 600; }
+    .profile-menu .pm-item.pm-disabled { cursor: default; color: #9ca3af; }
+    .profile-menu .pm-item.pm-disabled:hover { background: none; }
     .profile-menu .pm-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .profile-menu .pm-link { border: none; background: none; cursor: pointer; font-size: 0.9em; line-height: 1; padding: 2px 4px; opacity: 0.65; }
     .profile-menu .pm-link:hover { opacity: 1; }

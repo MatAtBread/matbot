@@ -1,6 +1,6 @@
-import { promises as fs } from 'node:fs';
+import { promises as fs, type Dirent } from 'node:fs';
 import { dirname, join, sep } from 'node:path';
-import type { Store, FileStore, FileEvent, StorageBackend, Principal, Routed } from '@matatbread/matbot-plugin-api';
+import type { Store, FileStore, FileEvent, StoreChange, StorageBackend, Principal, Routed } from '@matatbread/matbot-plugin-api';
 import { readOnlyError, createBroadcaster } from '@matatbread/matbot-plugin-api';
 import { tryCurrentPrincipal } from '@matatbread/matbot-core';
 import { FilesystemStorageBackend } from '@matatbread/matbot-storage-filesystem';
@@ -44,11 +44,20 @@ export interface ProfileDirectory {
   share(namespace: string, id: string, target: string): Promise<void>;
   unshare(namespace: string, id: string, target: string): Promise<void>;
   ownerOf(namespace: string, id: string): Promise<Principal | undefined>;
+  // Every item in `namespace` that is shared INTO the current principal's partition, mapped to its owner
+  // profile id — the bulk form of `ownerOf` (the `owner` action with `id:'*'`). Read from the in-memory
+  // shared-in set, so a UI can gate a whole file/session list's share affordance in one round-trip.
+  sharedInOwners(namespace: string): Promise<Record<string, string>>;
+  // Duplicate an item (or `'*'` = the whole namespace) into `target`'s partition as a real, independent
+  // copy the target fully owns — unlike `share`'s live read-only link. Item ids are preserved (a fresh
+  // isolated partition keeps intra-set references valid); a shared-in source is dereferenced to its live
+  // content. Skills route through the SkillManager (not this backend) so the copy is indexed + evented.
+  copy(namespace: string, id: string, target: string): Promise<void>;
   // The `WatchVisibility` service surface, exposed here so the plugin can register it. `watchFiles`
   // subscribes to the live origin-stamped file stream (all partitions, dynamic); `visible` is the generic
   // per-connection predicate for any partitioned kind (files, skills, …), keyed on the event's namespace.
-  watchFiles(signal?: AbortSignal): AsyncIterable<Routed<FileEvent>>;
-  visible(viewer: Principal, namespace: string, origin: Principal | undefined): boolean;
+  watchFiles(signal?: AbortSignal): AsyncIterable<Routed<StoreChange>>;
+  visible(viewer: Principal, namespace: string, id: string, origin: Principal | undefined): boolean;
 }
 
 /** Narrow any active StorageBackend to its {@link ProfileDirectory} facet by method presence, or undefined. */
@@ -63,6 +72,8 @@ export function asProfileDirectory(backend: unknown): ProfileDirectory | undefin
     && typeof b.share               === 'function'
     && typeof b.unshare             === 'function'
     && typeof b.ownerOf             === 'function'
+    && typeof b.sharedInOwners      === 'function'
+    && typeof b.copy                === 'function'
     && typeof b.watchFiles          === 'function'
     && typeof b.visible             === 'function'
     ? (b as ProfileDirectory)
@@ -89,6 +100,19 @@ const DEFAULT_ISOLATED = ['sessions'];
 // per-file-namespace. A profile whose isolated set includes it keeps its whole file area partitioned.
 // No document store uses this namespace, so it never collides with a routed createStore.
 const FILES_NS = 'files';
+
+// The slice of a file's sidecar meta that locates its data file on disk (mirrors the filesystem file
+// store's own layout resolution). `dataFile` = new anonymous entry; `id` present = legacy anonymous
+// (data at `<id>.data`); neither = named entry (data path === the id).
+interface FileMeta { dataFile?: string; id?: string }
+
+// A file-watch event as the generic, self-describing change envelope: routing namespace `files` (the axis
+// a profile isolates — NOT the file's content namespace, which rides in `detail` for in-place UI updates),
+// the file id, and the FileEvent itself as detail. The underlying fileStore.watch only signals writes, so
+// the operation is always 'saved'.
+function fileChange(ev: FileEvent): StoreChange {
+  return { operation: 'saved', namespace: FILES_NS, id: ev.id, detail: ev };
+}
 
 /**
  * A StorageBackend that partitions selected namespaces per web principal. It does not wrap the active
@@ -122,8 +146,13 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
   // One long-lived, origin-stamped file-event stream fed by a pump per partition (base + each profile,
   // and each profile the moment it's created). watchFiles() just subscribes — so a profile made
   // mid-session is watched live, without the restart a subscribe-time partition snapshot would need.
-  private readonly fileEvents                  = createBroadcaster<FileEvent>();
+  private readonly fileEvents                  = createBroadcaster<StoreChange>();
   private readonly lifecycle                   = new AbortController();
+  // Per (partition, namespace) set of item ids symlinked IN from another partition — i.e. the items shared
+  // into that profile. visible()'s OR-clause reads it so an owner's edit to a shared-in item reaches the
+  // sharee's firehose connection without an fs.lstat per event (visible runs sync, per conn × event). Built
+  // eagerly at open() by scanning each partition for symlinks, then maintained on every share/unshare.
+  private readonly sharedIn                    = new Map<string, Set<string>>();
 
   private constructor(dotData: string, base: StorageBackend) {
     this.dotData   = dotData;
@@ -133,7 +162,8 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
     // shared with the document side, so a profile's files land under the same profiles/<id>/ root.
     this.fileStore = new ProfilesFileStore(() => {
       const part = this.route(FILES_NS);
-      return part === BASE ? this.base.fileStore : this.partitionFor(part).fileStore;
+      if (part === BASE) return this.base.fileStore;        // base area: byte-identical, never guarded
+      return this.guardedFileStore(part, this.partitionFor(part).fileStore);
     });
     this.registry  = base.createStore<Profile>(PROFILE_REGISTRY_NS);
     this.watchPartition(undefined, this.base.fileStore);     // base file area (always present)
@@ -147,6 +177,8 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
       backend.profiles.set(p.id, p);
       for (const ns of p.isolated) backend.observed.add(ns);
       backend.watchPartition({ id: p.id, type: 'user' }, backend.partitionFor(p.id).fileStore);
+      await backend.scanSharedIn(p.id);
+      await backend.scanSharedInFiles(p.id);
     }
     for (const ns of DEFAULT_ISOLATED) backend.observed.add(ns);
     backend.observed.add(FILES_NS);                          // offer files as a toggle even before any file op
@@ -157,7 +189,7 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
   // lifetime. `origin` undefined = base. The underlying fileStore.watch ends on lifecycle abort (close()).
   private watchPartition(origin: Principal | undefined, store: FileStore): void {
     void (async () => {
-      try { for await (const ev of store.watch(this.lifecycle.signal)) this.fileEvents.emit(ev, origin); }
+      try { for await (const ev of store.watch(this.lifecycle.signal)) this.fileEvents.emit(fileChange(ev), origin); }
       catch (e) { console.error(`[storage-profiles] file watch for "${origin?.id ?? 'base'}" ended:`, e instanceof Error ? e.message : e); }
     })();
   }
@@ -263,58 +295,360 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
 
   // ── Sharing (item-grain; filesystem mechanism = symlink) ──────────────────────────
 
+  // A precise reason a share/copy can't land in `target` for `namespace`. The earlier wording ("already
+  // reads the shared base — nothing to share into") wrongly implied the target already had the item; it
+  // doesn't, because an isolated namespace is private to its owner unless shared INTO a profile that also
+  // isolates it. So report the intersection of the two profiles' isolated sets (the only shareable axes),
+  // and — when the namespace isn't an isolatable axis at all — steer a mis-typed file share (the common
+  // `workspace` ≠ `files` slip) to the `files` axis. Only called with a live directory, so it never has to
+  // account for the profile plugin being absent.
+  private cannotShareInto(action: 'share' | 'copy', namespace: string, target: string): string {
+    const targetIso  = this.profiles.get(target)?.isolated ?? [];
+    const myId       = tryCurrentPrincipal()?.id;
+    const myIso      = (myId !== undefined ? this.profiles.get(myId)?.isolated : undefined) ?? [];
+    const both       = myIso.filter(n => targetIso.includes(n) && !ALWAYS_BASE.has(n));
+    const isolatable = new Set([...this.availableNamespaces(), ...targetIso, ...myIso]);
+    const hint = isolatable.has(namespace) ? ''
+      : ` Note: "${namespace}" is not an isolatable namespace — to ${action} a stored FILE (including a workspace file) use namespace "files" with id set to the file's path, not the file's content namespace.`;
+    const common = both.length
+      ? `The only namespaces you can ${action} with "${target}" are the ones you BOTH isolate: ${both.join(', ')}.`
+      : `You and "${target}" isolate no namespace in common ("${target}" isolates: ${targetIso.join(', ') || 'nothing'}), so there is nothing to ${action} between you.`;
+    return `"${target}" doesn't isolate "${namespace}", so it has no private "${namespace}" partition to ${action} into and cannot see your isolated "${namespace}" items. ${common}${hint}`;
+  }
+
   // Expose one item the current principal owns in `target`'s partition as a symlink to the owner's real
   // file — get()/query() read straight through it, so the sharee sees the live single source. Idempotent.
+  // `id` may be a single item or `'*'` — the whole source namespace, each item linked in turn (idempotent;
+  // source-side symlinks, i.e. items themselves shared in, are skipped rather than errored).
   async share(namespace: string, id: string, target: string): Promise<void> {
-    const sid = this.safeId(id);
     if (ALWAYS_BASE.has(namespace)) throw new Error(`Namespace "${namespace}" is shared globally; individual items can't be shared.`);
     if (this.profiles.get(target) === undefined) throw new Error(`Unknown target profile "${target}".`);
     const sourcePart = this.route(namespace);               // owner = current principal
     const targetPart = this.routeFor(target, namespace);
-    if (targetPart === BASE)        throw new Error(`Profile "${target}" does not isolate "${namespace}", so it already reads the shared base data — nothing to share into.`);
+    if (targetPart === BASE)        throw new Error(this.cannotShareInto('share', namespace, target));
     if (targetPart === sourcePart)  throw new Error(`"${id}" already lives in "${target}"'s partition.`);
+    if (namespace === FILES_NS) {
+      const glob = id === '*';
+      const ids  = glob ? await this.listFileIds(this.nsDir(sourcePart, FILES_NS)) : [id];
+      for (const fid of ids) await this.shareFile(fid, sourcePart, targetPart, glob);
+      return;
+    }
+    const glob = id === '*';
+    const ids  = glob ? await this.docIds(sourcePart, namespace) : [id];
+    for (const one of ids) await this.shareDoc(one, namespace, sourcePart, targetPart, glob);
+  }
+
+  // Link one document into the target as a symlink to the owner's real `<id>.json`. `glob` (the `*` path)
+  // skips an already-shared-in source rather than erroring on it.
+  private async shareDoc(id: string, namespace: string, sourcePart: string, targetPart: string, glob: boolean): Promise<void> {
+    const sid = this.safeId(id);
     const src = join(this.nsDir(sourcePart, namespace), `${sid}.json`);
     const dst = join(this.nsDir(targetPart, namespace), `${sid}.json`);
     const st  = await fs.lstat(src).catch(() => undefined);
-    if (st === undefined)     throw new Error(`No "${id}" in "${namespace}" to share.`);
-    if (st.isSymbolicLink())  throw new Error(`"${id}" is itself shared in — share it from its owner.`);
+    if (st === undefined)    { if (glob) return; throw new Error(`No "${id}" in "${namespace}" to share.`); }
+    if (st.isSymbolicLink()) { if (glob) return; throw new Error(`"${id}" is itself shared in — share it from its owner.`); }
     await fs.mkdir(dirname(dst), { recursive: true });
     try { await fs.symlink(src, dst); }
     catch (e) { if ((e as { code?: string }).code !== 'EEXIST') throw e; } // already shared ⇒ idempotent
+    this.noteSharedIn(targetPart, namespace, sid);
   }
 
   // Remove a share by unlinking the target-side symlink. Only ever unlinks a symlink — never the owner's
-  // real file — so it is safe even if `target` happens to own a same-id item of its own.
+  // real file — so it is safe even if `target` happens to own a same-id item of its own. `id === '*'`
+  // unlinks every shared-in symlink the namespace holds in the target partition.
   async unshare(namespace: string, id: string, target: string): Promise<void> {
     const targetPart = this.routeFor(target, namespace);
     if (targetPart === BASE) return;
-    const dst = join(this.nsDir(targetPart, namespace), `${this.safeId(id)}.json`);
-    const st  = await fs.lstat(dst).catch(() => undefined);
-    if (st?.isSymbolicLink()) await fs.unlink(dst);
+    if (namespace === FILES_NS) {
+      const ids = id === '*' ? [...(this.sharedIn.get(this.sharedInKey(targetPart, FILES_NS)) ?? [])] : [id];
+      for (const fid of ids) await this.unshareFile(fid, targetPart);
+      return;
+    }
+    const ids = id === '*' ? [...(this.sharedIn.get(this.sharedInKey(targetPart, namespace)) ?? [])] : [id];
+    for (const one of ids) {
+      const sid = this.safeId(one);
+      const dst = join(this.nsDir(targetPart, namespace), `${sid}.json`);
+      const st  = await fs.lstat(dst).catch(() => undefined);
+      if (st?.isSymbolicLink()) await fs.unlink(dst);
+      this.dropSharedIn(targetPart, namespace, sid);
+    }
   }
 
   // Who owns the item the current principal would read for (namespace, id): undefined when owned here
   // (real file / absent / not shared in), otherwise the source partition's principal (id only — routing
   // keys on principal.id and never reads .type).
   async ownerOf(namespace: string, id: string): Promise<Principal | undefined> {
-    return this.sharedOwner(this.route(namespace), namespace, id);
+    const part = this.route(namespace);
+    return namespace === FILES_NS
+      ? this.sharedFileOwner(part, id)
+      : this.sharedOwner(part, namespace, id);
+  }
+
+  // Owners of every shared-in item in the current partition's namespace, in one pass. The shared-in id set
+  // is already in memory (built at open(), maintained on share/unshare); resolving each owner reads the one
+  // symlink per shared-in item — bounded by the (typically small) shared-in set, never the whole namespace.
+  async sharedInOwners(namespace: string): Promise<Record<string, string>> {
+    const part = this.route(namespace);
+    const ids  = this.sharedIn.get(this.sharedInKey(part, namespace));
+    const out: Record<string, string> = {};
+    if (ids === undefined) return out;
+    for (const id of ids) {
+      const owner = namespace === FILES_NS
+        ? await this.sharedFileOwner(part, id)
+        : await this.sharedOwner(part, namespace, id);
+      if (owner !== undefined) out[id] = owner.id;
+    }
+    return out;
+  }
+
+  // A file is a PAIR on disk — a data file plus its `<id>.meta.json` sidecar — so sharing one links both
+  // (documents are a single `<id>.json`). The data path is derived from the sidecar exactly as the
+  // filesystem file store does: `dataFile` for new anonymous entries, `<id>.data` for legacy anonymous,
+  // else the id itself for named files (whose id mirrors the on-disk name and may be nested → `/`).
+  private async shareFile(id: string, sourcePart: string, targetPart: string, glob = false): Promise<void> {
+    const fid     = this.safeFileId(id);
+    const srcArea = this.nsDir(sourcePart, FILES_NS);
+    const dstArea = this.nsDir(targetPart, FILES_NS);
+    const metaSrc = join(srcArea, `${fid}.meta.json`);
+    const st      = await fs.lstat(metaSrc).catch(() => undefined);
+    if (st === undefined)    { if (glob) return; throw new Error(`No file "${id}" to share.`); }
+    if (st.isSymbolicLink()) { if (glob) return; throw new Error(`"${id}" is itself shared in — share it from its owner.`); }
+    const dataRel = this.dataRelOf(fid, JSON.parse(await fs.readFile(metaSrc, 'utf8')) as FileMeta);
+    await this.linkInto(join(srcArea, dataRel), join(dstArea, dataRel));
+    await this.linkInto(metaSrc,                join(dstArea, `${fid}.meta.json`));
+    this.noteSharedIn(targetPart, FILES_NS, fid);
+  }
+
+  // Drop a shared-in file by unlinking its target-side symlinks (both meta and data). Only ever unlinks
+  // symlinks — a real file the target happens to own under the same name is left untouched, matching
+  // unshare(). The data path is read back through the (still-linked) meta before the meta link is removed.
+  private async unshareFile(id: string, targetPart: string): Promise<void> {
+    const fid     = this.safeFileId(id);
+    const dstArea = this.nsDir(targetPart, FILES_NS);
+    const metaDst = join(dstArea, `${fid}.meta.json`);
+    const st      = await fs.lstat(metaDst).catch(() => undefined);
+    if (st?.isSymbolicLink()) {
+      const dataRel = await fs.readFile(metaDst, 'utf8')
+        .then(t => this.dataRelOf(fid, JSON.parse(t) as FileMeta)).catch(() => fid);
+      const dataDst = join(dstArea, dataRel);
+      if ((await fs.lstat(dataDst).catch(() => undefined))?.isSymbolicLink()) await fs.unlink(dataDst);
+      await fs.unlink(metaDst);
+    }
+    this.dropSharedIn(targetPart, FILES_NS, fid);
+  }
+
+  // The data file's path relative to a file area, from its sidecar meta (see shareFile).
+  private dataRelOf(fid: string, meta: FileMeta): string {
+    return meta.dataFile ?? (meta.id !== undefined ? `${fid}.data` : fid);
+  }
+
+  // ── Copy (independent duplicate-with-ownership; the `copy` action) ────────────────
+
+  // Copy an item — or `'*'`, the whole namespace — into `target`'s partition as a real, target-owned
+  // duplicate (not a symlink). SKILLS are NOT handled here: they must go through the SkillManager (in the
+  // caller, under runAs(target)) to be indexed + evented, so the share tool intercepts them before this.
+  async copy(namespace: string, id: string, target: string): Promise<void> {
+    if (ALWAYS_BASE.has(namespace)) throw new Error(`Namespace "${namespace}" is shared globally; there is nothing to copy into a profile.`);
+    if (this.profiles.get(target) === undefined) throw new Error(`Unknown target profile "${target}".`);
+    const sourcePart = this.route(namespace);
+    const targetPart = this.routeFor(target, namespace);
+    if (targetPart === BASE)       throw new Error(this.cannotShareInto('copy', namespace, target));
+    if (targetPart === sourcePart) throw new Error(`"${id}" already lives in "${target}"'s partition.`);
+    return namespace === FILES_NS
+      ? this.copyFiles(id, sourcePart, targetPart)
+      : this.copyDocs(id, namespace, sourcePart, targetPart);
+  }
+
+  // Document copy: read the source partition's raw store (a shared-in symlink derefs to live content),
+  // write THROUGH the target partition's raw store so ids/version are preserved verbatim (bypassing the
+  // read-only guard is correct — the target owns this new copy). Writing straight to the sub-store means
+  // no partitioned firehose for plain doc kinds (they surface on reload), matching their pre-copy behaviour.
+  private async copyDocs(id: string, namespace: string, sourcePart: string, targetPart: string): Promise<void> {
+    const src   = this.subStore<{ id: string; version: string }>(sourcePart, namespace);
+    const dst   = this.subStore<{ id: string; version: string }>(targetPart, namespace);
+    const items = id === '*'
+      ? (await src.query({})).items
+      : await (async () => {
+          const one = await src.get(id);
+          if (one === null) throw new Error(`No "${id}" in "${namespace}" to copy.`);
+          return [one];
+        })();
+    for (const item of items) await dst.set(item.id, item);
+  }
+
+  // File copy: duplicate the data + `<id>.meta.json` PAIR with copyFile (which dereferences a symlinked
+  // source → an independent copy). The new files land in the target file area, whose watch pump fires the
+  // firehose, so a copied file goes live for the target without a reload.
+  private async copyFiles(id: string, sourcePart: string, targetPart: string): Promise<void> {
+    const srcArea = this.nsDir(sourcePart, FILES_NS);
+    const dstArea = this.nsDir(targetPart, FILES_NS);
+    const ids = id === '*' ? await this.listFileIds(srcArea) : [this.safeFileId(id)];
+    for (const fid of ids) {
+      const metaSrc = join(srcArea, `${fid}.meta.json`);
+      const raw     = await fs.readFile(metaSrc, 'utf8').catch(() => undefined);
+      if (raw === undefined) { if (id === '*') continue; throw new Error(`No file "${id}" to copy.`); }
+      const dataRel = this.dataRelOf(fid, JSON.parse(raw) as FileMeta);
+      await this.copyInto(join(srcArea, dataRel), join(dstArea, dataRel));
+      await this.copyInto(metaSrc,                join(dstArea, `${fid}.meta.json`));
+    }
+  }
+
+  private async copyInto(src: string, dst: string): Promise<void> {
+    await fs.mkdir(dirname(dst), { recursive: true });
+    await fs.copyFile(src, dst);                             // follows a symlinked source → real content copy
+  }
+
+  // Ids of every document a partition holds in a namespace (real + shared-in), for the `*` fan-out.
+  private async docIds(partId: string, namespace: string): Promise<string[]> {
+    const { items } = await this.subStore<{ id: string; version: string }>(partId, namespace).query({});
+    return items.map(i => i.id);
+  }
+
+  // Ids of every file in a partition's file area (recursing named subdirs), for the `*` fan-out. The id is
+  // the sidecar's path within the area minus `.meta.json` (nested for named files, flat for anonymous).
+  private async listFileIds(area: string): Promise<string[]> {
+    const out: string[] = [];
+    const walk = async (dir: string): Promise<void> => {
+      let entries: Dirent[];
+      try { entries = await fs.readdir(dir, { withFileTypes: true }); } catch { return; }
+      for (const e of entries) {
+        const full = join(dir, e.name);
+        if (e.isDirectory()) { await walk(full); continue; }
+        if (e.name.endsWith('.meta.json')) out.push(full.slice(area.length + 1, -'.meta.json'.length));
+      }
+    };
+    await walk(area);
+    return out;
+  }
+
+  private async linkInto(src: string, dst: string): Promise<void> {
+    await fs.mkdir(dirname(dst), { recursive: true });
+    try { await fs.symlink(src, dst); }
+    catch (e) { if ((e as { code?: string }).code !== 'EEXIST') throw e; } // already shared ⇒ idempotent
+  }
+
+  // A read-only guard over a profile partition's file store, symmetric with guardWrite() on the document
+  // side: a `put(name)`/`putTemp(name)` onto a file shared IN from another partition would fork the owner's
+  // data (writeData's rename replaces the data symlink) and write through the meta symlink to the owner, so
+  // it is refused. Anonymous puts (no name → fresh UUID) never collide with a shared-in id, so they pass;
+  // get/list/watch/delete delegate straight through (unlinking a shared-in file's own symlinks is allowed).
+  // The shared-in check is the synchronous cache (name === id for named files); the owner is resolved from
+  // disk only on the throw path.
+  private guardedFileStore(partId: string, inner: FileStore): FileStore {
+    const guard = async (name: string | undefined): Promise<void> => {
+      if (name === undefined || !this.sharedIn.get(this.sharedInKey(partId, FILES_NS))?.has(name)) return;
+      const owner = await this.sharedFileOwner(partId, name);
+      throw readOnlyError(FILES_NS, name, owner?.id ?? '');
+    };
+    return {
+      put:       async (name, mime, data, meta) => { await guard(name); return inner.put(name, mime, data, meta); },
+      putTemp:   async (name, mime, data)       => { await guard(name); return inner.putTemp(name, mime, data); },
+      get:       id       => inner.get(id),
+      getByName: (n, ns)  => inner.getByName(n, ns),
+      delete:    id       => inner.delete(id),
+      list:      f        => inner.list(f),
+      watch:     signal   => inner.watch(signal),
+    };
   }
 
   // ── Partitioned watch (the WatchVisibility service surface) ────────────────────────
 
   // Subscribe to the live, origin-stamped file-event stream (base + every partition, including profiles
   // created after this call — the pumps feed one broadcaster). Never snapshots a partition set.
-  watchFiles(signal?: AbortSignal): AsyncIterable<Routed<FileEvent>> {
+  watchFiles(signal?: AbortSignal): AsyncIterable<Routed<StoreChange>> {
     return this.fileEvents.subscribe(signal);
   }
 
-  // Would `viewer` see an event in `namespace` from `origin`? They see it iff they route that namespace to
-  // the same partition: route(viewer, ns) === route(origin, ns). Routing BOTH sides (rather than comparing
-  // origin.id to a partition) makes it correct whether `origin` is a partition principal (files, tagged by
-  // the pump) or the acting principal (skills, stamped at write), and yields "global events for namespaces
-  // the viewer hasn't isolated, own-partition only for those it has". `undefined` origin ⇒ base.
-  visible(viewer: Principal, namespace: string, origin: Principal | undefined): boolean {
-    return this.routeFor(viewer.id, namespace) === this.routeFor(origin?.id, namespace);
+  // Would `viewer` see the change to (`namespace`, `id`) from `origin`? Two ways yes:
+  //   1. They route that namespace to the same partition as `origin`: route(viewer,ns) === route(origin,ns).
+  //      Routing BOTH sides (not comparing origin.id to a partition) makes it correct whether `origin` is a
+  //      partition principal (files, tagged by the pump) or the acting principal (skills, stamped at write),
+  //      and yields "global events for namespaces the viewer hasn't isolated, own-partition for those it has".
+  //   2. The item is shared INTO the viewer's partition — the owner edits a shared-in item, so origin=owner
+  //      routes elsewhere, yet the viewer holds a live link to it and must see the update. Answered from the
+  //      eagerly-built sharedIn cache, so no fs stat on this hot per-(conn × event) path.
+  // `undefined` origin ⇒ base.
+  visible(viewer: Principal, namespace: string, id: string, origin: Principal | undefined): boolean {
+    const viewerPart = this.routeFor(viewer.id, namespace);
+    if (viewerPart === this.routeFor(origin?.id, namespace)) return true;
+    return this.sharedIn.get(this.sharedInKey(viewerPart, namespace))?.has(id) ?? false;
+  }
+
+  // ── Shared-in cache (feeds visible()'s OR-clause) ─────────────────────────────────
+
+  private sharedInKey(partId: string, namespace: string): string {
+    return `${partId}::${namespace}`;
+  }
+
+  private noteSharedIn(partId: string, namespace: string, id: string): void {
+    const key = this.sharedInKey(partId, namespace);
+    let set = this.sharedIn.get(key);
+    if (set === undefined) { set = new Set(); this.sharedIn.set(key, set); }
+    set.add(id);
+  }
+
+  private dropSharedIn(partId: string, namespace: string, id: string): void {
+    this.sharedIn.get(this.sharedInKey(partId, namespace))?.delete(id);
+  }
+
+  // Seed the shared-in cache for a profile by scanning its partition for document symlinks (each a
+  // shared-in item). `<ns>/<id>.json` symlinks only; the `files` area is a coarse pair-based axis handled
+  // by its own mechanism (Task E), so it is skipped here. Best-effort — a missing partition dir is empty.
+  private async scanSharedIn(partId: string): Promise<void> {
+    const root = join(this.dotData, 'profiles', partId);
+    let nsDirs: Dirent[];
+    try { nsDirs = await fs.readdir(root, { withFileTypes: true }); } catch { return; }
+    for (const nsDir of nsDirs) {
+      if (!nsDir.isDirectory() || nsDir.name === FILES_NS) continue;
+      let entries: Dirent[];
+      try { entries = await fs.readdir(join(root, nsDir.name), { withFileTypes: true }); } catch { continue; }
+      for (const e of entries) {
+        if (e.isSymbolicLink() && e.name.endsWith('.json')) {
+          this.noteSharedIn(partId, nsDir.name, e.name.slice(0, -'.json'.length));
+        }
+      }
+    }
+  }
+
+  // Seed the shared-in cache for a profile's FILE area: any `<...>.meta.json` sidecar that is a symlink is
+  // a shared-in file (its id is the sidecar's path within the area, minus the suffix — nested for named
+  // files). The document scan (scanSharedIn) skips the files dir precisely because its shape differs.
+  private async scanSharedInFiles(partId: string): Promise<void> {
+    const root = this.nsDir(partId, FILES_NS);
+    const walk = async (dir: string): Promise<void> => {
+      let entries: Dirent[];
+      try { entries = await fs.readdir(dir, { withFileTypes: true }); } catch { return; }
+      for (const e of entries) {
+        const full = join(dir, e.name);
+        if (e.isDirectory()) { await walk(full); continue; }
+        if (e.isSymbolicLink() && e.name.endsWith('.meta.json')) {
+          const rel = full.slice(root.length + 1, -'.meta.json'.length);
+          this.noteSharedIn(partId, FILES_NS, rel);
+        }
+      }
+    };
+    await walk(root);
+  }
+
+  // Owner of a shared-in file: undefined unless its sidecar symlink resolves into another partition.
+  private async sharedFileOwner(partId: string, id: string): Promise<Principal | undefined> {
+    const path = join(this.nsDir(partId, FILES_NS), `${this.safeFileId(id)}.meta.json`);
+    let link: string;
+    try {
+      const st = await fs.lstat(path);
+      if (!st.isSymbolicLink()) return undefined;
+      link = await fs.readlink(path);
+    } catch { return undefined; }
+    return { id: this.partitionOfPath(link), type: 'user' };
+  }
+
+  // A file id may be a nested name (`reports/2024.txt`) — unlike a document id (safeId) it can contain
+  // `/` and `.`. Reject only what would escape the file area: absolute paths and any `..`/empty segment.
+  private safeFileId(id: string): string {
+    if (id.length === 0 || id.startsWith('/') || id.split('/').some(s => s === '' || s === '..')) {
+      throw new Error(`Invalid file id: "${id}"`);
+    }
+    return id;
   }
 
   private async sharedOwner(partId: string, namespace: string, id: string): Promise<Principal | undefined> {
