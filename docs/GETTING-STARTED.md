@@ -74,8 +74,9 @@ Available provider types:
   2. openai-compat  (@matatbread/matbot-provider-openai-compat)
   3. google  (@matatbread/matbot-provider-google)
   4. customer-services  (@matatbread/matbot-provider-customer-services)
+  5. chatjimmy  (@matatbread/matbot-provider-chatjimmy)
 
-Choose a type [1-4]: 1
+Choose a type [1-5]: 1
 Provider name: deepseek
 Model name: deepseek-v4-flash
 Endpoint URL: https://api.deepseek.com/anthropic

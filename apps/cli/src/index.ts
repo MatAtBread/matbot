@@ -554,11 +554,14 @@ interface ProviderPackage { type: string; name: string; dir: string; }
 // The provider adapters the CLI ships with (its dependencies). Resolved through the module graph
 // rather than a directory scan, so discovery works identically when installed (node_modules) and in
 // the monorepo (workspace symlinks). A user can `plugin add` other providers after setup.
+// Listing a name here is not enough: it must also be a dependency of this package, or nothing links
+// it into the CLI's node_modules and the resolve below silently skips it.
 const BUNDLED_PROVIDERS = [
   '@matatbread/matbot-provider-anthropic',
   '@matatbread/matbot-provider-openai-compat',
   '@matatbread/matbot-provider-google',
   '@matatbread/matbot-provider-customer-services',
+  '@matatbread/matbot-provider-chatjimmy'
 ];
 
 async function discoverProviders(): Promise<ProviderPackage[]> {

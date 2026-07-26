@@ -49,9 +49,6 @@ export class ChatJimmyAdapter implements ProviderAdapter {
     const endpoint = config.endpoint ?? DEFAULT_ENDPOINT;
     const model    = config.model    ?? DEFAULT_MODEL;
 
-    const t0 = performance.now();
-
-    // Build the flat chat message list
     const chatMessages: Array<{ role: string; content: string }> = [];
     for (const m of messages) {
       if (m.role === 'user') {
@@ -67,9 +64,6 @@ export class ChatJimmyAdapter implements ProviderAdapter {
       throw new Error('ChatJimmy requires at least one user message');
     }
 
-    const t1 = performance.now();
-    console.log(`[chatjimmy] Message build: ${(t1 - t0).toFixed(1)}ms — ${chatMessages.length} messages from ${messages.length} input`);
-
     const body = JSON.stringify({
       messages: chatMessages,
       chatOptions: {
@@ -79,9 +73,6 @@ export class ChatJimmyAdapter implements ProviderAdapter {
       },
       attachment: null,
     });
-
-    const t2 = performance.now();
-    console.log(`[chatjimmy] Body serialization: ${(t2 - t1).toFixed(1)}ms`);
 
     const res = await fetch(endpoint, {
       method: 'POST',
@@ -94,18 +85,12 @@ export class ChatJimmyAdapter implements ProviderAdapter {
       signal,
     });
 
-    const t3 = performance.now();
-    console.log(`[chatjimmy] HTTP response received: ${(t3 - t2).toFixed(1)}ms (status ${res.status})`);
-
     if (!res.ok) {
       const text = await res.text().catch(() => res.statusText);
       throw new Error(`ChatJimmy ${res.status}: ${text}`);
     }
 
     const text = await res.text();
-
-    const t4 = performance.now();
-    console.log(`[chatjimmy] Body read: ${(t4 - t3).toFixed(1)}ms (${text.length} bytes)`);
 
     // Strip stats block
     const statsStart = text.lastIndexOf('<|stats|>');
@@ -116,11 +101,6 @@ export class ChatJimmyAdapter implements ProviderAdapter {
     if (statsStart >= 0 && statsEnd > statsStart) {
       try { stats = JSON.parse(text.slice(statsStart + 9, statsEnd)) as ChatJimmyStats; } catch {}
     }
-
-    const t5 = performance.now();
-    console.log(`[chatjimmy] Stats parse: ${(t5 - t4).toFixed(1)}ms`);
-    console.log(`[chatjimmy] HC1 chip says: ${stats.prefill_tokens ?? '?'} prefill tokens @ ${stats.prefill_rate?.toFixed(0) ?? '?'} tok/s, ${stats.decode_tokens ?? '?'} decode tokens @ ${stats.decode_rate?.toFixed(0) ?? '?'} tok/s, TTFT=${(stats.ttft ?? 0) * 1000}ms, chip time=${((stats.total_time ?? 0) * 1000).toFixed(2)}ms, net roundtrip=${stats.roundtrip_time ?? '?'}ms`);
-    console.log(`[chatjimmy] TOTAL adapter time: ${(t5 - t0).toFixed(1)}ms`);
 
     if (responseText) {
       yield { type: 'text-delta', delta: responseText };
