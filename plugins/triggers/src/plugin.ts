@@ -118,7 +118,17 @@ function suppressedMarker(cause: SuppressCause, reason: string, triggers: FiredS
   return { type: 'marker', creator: 'triggers', data: { event: 'suppressed', cause, reason, triggers } };
 }
 function retractFiredMarker(triggers: FiredSource[]): MessageContent {
-  return { type: 'marker', creator: 'triggers', data: { event: 'retract-fired', triggers } };
+  return { type: 'marker', creator: 'triggers', data: { event: 'retract-fired', surface: 'agent', triggers } };
+}
+
+// The agent-surface twin of `userInsituFiredMarker`: a `followup`-kind fire keeps the response and
+// resubmits a robo turn, so — unlike a retract — nothing else records it (no core retraction marker,
+// no suppression). Without this the steer arrives with no trace of WHICH rule judged the response and
+// why, which the model then guesses at backwards from the rule text (and those guesses can re-match
+// the same rule, looping invisibly). Deliberately NOT read back by the convergence guard: that guard
+// is retract-only, and `retractActiveLastTurn` keys on `retract-fired`.
+function followupFiredMarker(triggers: FiredSource[]): MessageContent {
+  return { type: 'marker', creator: 'triggers', data: { event: 'followup-fired', surface: 'agent', triggers } };
 }
 
 // True when the latest turn is a retract-redo: a `matbot-retraction` marker sits after the last genuine
@@ -422,9 +432,10 @@ export async function setupTriggers(services: MatbotMachine): Promise<TriggerMan
         };
       }
       if (followupBodies.length > 0) {
+        markers.push(followupFiredMarker(followupSources));
         return {
           resubmit: { content: [{ type: 'text', origin: 'robo', text: fence(followupBodies.join(JOIN)) }] },
-          ...(markers.length > 0 ? { markers } : {}),
+          markers,
         };
       }
       // No model-facing result from any trigger — only markers (silent side-effects), if any.
