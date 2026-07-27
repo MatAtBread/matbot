@@ -6,7 +6,7 @@ import { ChatUI } from './ui.js';
 // identically so the two augmentations agree.
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
-    url_for_resource: ToolContract<{ url: string | null }, { namespace: string; name: string }>;  // a URL for the file, or null if not publicly viewable
+    url_for_resource: ToolContract<{ url: string | null }, { name: string }>;  // a URL for the file, or null if not publicly viewable
   }
 }
 
@@ -18,24 +18,21 @@ const urlForResourceTool: Tool<ToolResultOf<'url_for_resource'>> = {
   name: 'url_for_resource',
   description:
     'Return a URL for a stored file the user can open, or null when it is not publicly viewable. Use this ' +
-    'to hand the user a link to a file (e.g. a workspace artifact) rather than guessing a path. Only files ' +
-    'marked viewable are served — workspace files are (namespace "workspace"); most other namespaces return null.\n\n' +
-    'Parameters: { namespace: string, name: string } — `name` is the file path within the namespace (for a ' +
-    'workspace file, the same path you wrote it under).',
+    'to hand the user a link to a file rather than guessing a path. Pass the same path the file was ' +
+    'stored under. Only files marked viewable get a URL.',
   inputSchema: {
     type:     'object',
-    required: ['namespace', 'name'],
+    required: ['name'],
     properties: {
-      namespace: { type: 'string', description: 'The file namespace, e.g. "workspace".' },
-      name:      { type: 'string', description: 'The file path/name within the namespace.' },
+      name: { type: 'string', description: 'The path the file was stored under (e.g. "report.md", "charts/data.csv").' },
     },
   },
   executor: {
     async *execute(input: unknown, ctx: ToolContext) {
-      const { namespace, name } = input as { namespace?: string; name?: string };
-      if (!namespace || !name) { yield { type: 'error', message: 'url_for_resource requires "namespace" and "name".' }; return; }
+      const { name } = input as { name?: string };
+      if (!name) { yield { type: 'error', message: 'url_for_resource requires "name".' }; return; }
       if (!ctx.files) { yield { type: 'result', value: { url: null } }; return; }
-      const handle = await ctx.files.getByName(name, namespace);
+      const handle = await ctx.files.getByName(name);
       if (!handle || !handle.allowed) { yield { type: 'result', value: { url: null } }; return; }
 
       const chunks: Uint8Array[] = [];

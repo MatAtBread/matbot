@@ -3,7 +3,7 @@ import { PLUGIN_API_VERSION }                from '@matatbread/matbot-plugin-api
 
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
-    url_for_resource: ToolContract<{ url: string | null }, { namespace: string; name: string }>;  // a shareable URL for the file, or null if not publicly viewable
+    url_for_resource: ToolContract<{ url: string | null }, { name: string }>;  // a shareable URL for the file, or null if not publicly viewable
   }
 }
 import { watchPlugins, tryCurrentPrincipal }  from '@matatbread/matbot-core';
@@ -29,28 +29,30 @@ function makeUrlForResourceTool(services: MatbotMachine): Tool<ToolResultOf<'url
     name: 'url_for_resource',
     description:
       'Return a shareable HTTP URL for a stored file, or null when it is not publicly viewable. Use this ' +
-      'to hand the user a link to a file (e.g. a workspace artifact) rather than guessing a path. Only files ' +
-      'marked viewable are served — workspace files are (namespace "workspace"); most other namespaces return null.\n\n' +
-      'Parameters: { namespace: string, name: string } — `name` is the file path within the namespace (for a ' +
-      'workspace file, the same path you wrote it under).',
+      'to hand the user a link to a file rather than guessing a path. Pass the same path the file was ' +
+      'stored under. Only files marked viewable get a URL.',
     inputSchema: {
       type:     'object',
-      required: ['namespace', 'name'],
+      required: ['name'],
       properties: {
-        namespace: { type: 'string', description: 'The file namespace, e.g. "workspace".' },
-        name:      { type: 'string', description: 'The file path/name within the namespace.' },
+        name: { type: 'string', description: 'The path the file was stored under (e.g. "report.md", "charts/data.csv").' },
       },
     },
     executor: {
       async *execute(input: unknown, ctx: ToolContext) {
-        const { namespace, name } = input as { namespace?: string; name?: string };
-        if (!namespace || !name) { yield { type: 'error', message: 'url_for_resource requires "namespace" and "name".' }; return; }
+        const { name } = input as { name?: string };
+        if (!name) { yield { type: 'error', message: 'url_for_resource requires "name".' }; return; }
         if (!ctx.files) { yield { type: 'result', value: { url: null } }; return; }
-        const handle = await ctx.files.getByName(name, namespace);
+        const handle = await ctx.files.getByName(name);
         if (!handle || !handle.allowed) { yield { type: 'result', value: { url: null } }; return; }
+        // The route's namespace segment comes from the stored handle, never from the caller: the file's
+        // content namespace is an implementation detail of whichever tool wrote it, and asking the model
+        // for it invited confusion with `share`'s isolation-axis namespace (they are different levels).
+        // No stored namespace ⇒ no addressable path under this route, so report it as not viewable.
+        if (handle.namespace === undefined) { yield { type: 'result', value: { url: null } }; return; }
         const principalId = services.tools?.resolve('profile_action') ? tryCurrentPrincipal()?.id : undefined;
         const prefix = principalId ? `~${encodeURIComponent(principalId)}/` : '';
-        const path = `${encodeURIComponent(namespace)}/${name.split('/').map(encodeURIComponent).join('/')}`;
+        const path = `${encodeURIComponent(handle.namespace)}/${name.split('/').map(encodeURIComponent).join('/')}`;
         yield { type: 'result', value: { url: `/files/${prefix}${path}` } };
       },
     },
