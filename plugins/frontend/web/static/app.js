@@ -403,6 +403,13 @@ function renderFiles(files) {
     // place the state can be read: it gets its own always-visible line (outside the hover-only actions)
     // naming the owner, plus a lock and an accent stripe. The share button is withheld too — you can't
     // re-share what you don't own.
+    // Shared-in rows get a real second line holding the badge and the (hover-only) actions, so the
+    // actions stay right-aligned beside the owner text instead of wrapping onto a third line.
+    const line2 = owner != null ? document.createElement('div') : null;
+    if (line2) {
+      line2.className = 'file-line2';
+      div.appendChild(line2);
+    }
     if (owner != null) {
       const badge = document.createElement('span');
       badge.className = 'file-ro-badge';
@@ -410,7 +417,7 @@ function renderFiles(files) {
       const label = document.createElement('span');
       label.textContent = sharedBy + ' · read-only';
       badge.appendChild(label);
-      div.appendChild(badge);
+      line2.appendChild(badge);
     }
     const actions = document.createElement('div');
     actions.className = 'file-actions';
@@ -436,7 +443,7 @@ function renderFiles(files) {
       }
     };
     actions.appendChild(delBtn);
-    div.appendChild(actions);
+    (line2 ?? div).appendChild(actions);
     el.appendChild(div);
   }
 }

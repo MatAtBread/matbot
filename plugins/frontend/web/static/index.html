@@ -254,8 +254,10 @@
     .file-share-btn svg { width: 13px; height: 13px; display: block; }
     /* Shared-IN marker: always visible (outside the hover-only .file-actions), since read-only status
        must be legible at rest, not just on hover — and the file itself opens as raw bytes in a new tab,
-       which can't carry a banner. An amber stripe marks the row; the badge wraps onto its own full-width
-       second line (flex-basis:100%) so the owner fits without squeezing the name. */
+       which can't carry a banner. An amber stripe marks the row; the owner text moves onto a full-width
+       second line (.file-line2) so it fits without squeezing the name. The hover-only actions ride on
+       that same second line, right-aligned — hence the line is a real element rather than the badge
+       simply claiming flex-basis:100%, which would push the actions onto a third line. */
     .file-item.shared-in {
       flex-wrap: wrap;
       border-left: 2px solid #fbbf24;
@@ -263,8 +265,16 @@
       background: #fffbeb;
     }
     .file-item.shared-in:hover { background: #fef3c7; }
-    .file-ro-badge {
+    .file-line2 {
       flex: 0 0 100%;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+    }
+    .file-line2 .file-actions { margin-left: auto; }
+    .file-ro-badge {
+      flex: 1 1 auto;
       display: flex;
       align-items: center;
       gap: 4px;
