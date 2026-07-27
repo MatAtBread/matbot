@@ -253,18 +253,28 @@
     .file-share-btn:hover { background: #e5e7eb; }
     .file-share-btn svg { width: 13px; height: 13px; display: block; }
     /* Shared-IN marker: always visible (outside the hover-only .file-actions), since read-only status
-       must be legible at rest, not just on hover. */
+       must be legible at rest, not just on hover — and the file itself opens as raw bytes in a new tab,
+       which can't carry a banner. An amber stripe marks the row; the badge wraps onto its own full-width
+       second line (flex-basis:100%) so the owner fits without squeezing the name. */
+    .file-item.shared-in {
+      flex-wrap: wrap;
+      border-left: 2px solid #fbbf24;
+      padding-left: 8px;
+      background: #fffbeb;
+    }
+    .file-item.shared-in:hover { background: #fef3c7; }
     .file-ro-badge {
-      flex-shrink: 0;
+      flex: 0 0 100%;
+      display: flex;
+      align-items: center;
+      gap: 4px;
       font-size: 0.82em;
       font-weight: 500;
       color: #92400e;
-      background: #fef3c7;
-      border: 1px solid #fde68a;
-      border-radius: 9px;
-      padding: 0 6px;
-      white-space: nowrap;
+      min-width: 0;
     }
+    .file-ro-badge svg  { width: 10px; height: 10px; flex-shrink: 0; }
+    .file-ro-badge span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
     .plugin-entry {
       margin: 1px 0;

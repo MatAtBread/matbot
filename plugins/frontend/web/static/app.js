@@ -375,10 +375,14 @@ function renderFiles(files) {
     return;
   }
   for (const f of files) {
+    // `owner` is '' for the shared base/global partition, a profile id otherwise; absent ⇒ owned here.
+    const owner = fileOwners[f.path];
+    const sharedBy = owner ? 'shared by "' + owner + '"' : 'shared globally';
     const div = document.createElement('div');
-    div.className = 'file-item' + (updatedFiles.has(f.path) ? ' updated' : '');
+    div.className = 'file-item' + (updatedFiles.has(f.path) ? ' updated' : '') + (owner != null ? ' shared-in' : '');
     div.dataset.path = f.path;
-    div.title = f.path + (f.size !== undefined ? ' (' + formatSize(f.size) + ')' : '');
+    div.title = f.path + (f.size !== undefined ? ' (' + formatSize(f.size) + ')' : '')
+      + (owner != null ? ' — ' + sharedBy + ', read-only here' : '');
     div.onclick = () => {
       updatedFiles.delete(f.path);
       div.classList.remove('updated');
@@ -394,15 +398,18 @@ function renderFiles(files) {
       sizeEl.textContent = formatSize(f.size);
       div.appendChild(sizeEl);
     }
-    // A file shared IN from another profile is read-only here \u2014 the backend rejects a write to it. Show an
-    // always-visible badge (owner named) and withhold the share button (you can't re-share what you don't
-    // own). `owner` is '' for the shared base/global partition, a profile id otherwise; absent \u21d2 owned here.
-    const owner = fileOwners[f.path];
+    // A file shared IN from another profile is read-only here — the backend rejects a write to it. Clicking
+    // it opens the raw bytes in a new tab, which can carry no banner of its own, so this row is the only
+    // place the state can be read: it gets its own always-visible line (outside the hover-only actions)
+    // naming the owner, plus a lock and an accent stripe. The share button is withheld too — you can't
+    // re-share what you don't own.
     if (owner != null) {
       const badge = document.createElement('span');
       badge.className = 'file-ro-badge';
-      badge.textContent = 'read-only';
-      badge.title = 'Shared by "' + (owner || 'global') + '" \u2014 read-only here';
+      badge.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>';
+      const label = document.createElement('span');
+      label.textContent = sharedBy + ' · read-only';
+      badge.appendChild(label);
       div.appendChild(badge);
     }
     const actions = document.createElement('div');

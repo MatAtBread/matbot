@@ -35,5 +35,8 @@ documents, and gains a duplicate-with-ownership mode.
   description makes the same isolation-axis-vs-content-namespace distinction explicit.
 - **Web frontend (showcase).** File items in the sidebar gain a share affordance mirroring the session one:
   a share button (targets = profiles that isolate `files`) calling `share` with `namespace: 'files'`, and a
-  read-only badge naming the owner on a file shared in from another profile (share button withheld). The
+  read-only marker on a file shared in from another profile (share button withheld, delete relabelled
+  "Remove from my view"). Since a file opens as raw bytes in a new tab — a surface that can carry no banner
+  of its own — the list row is where the state has to read: a shared-in row is tinted, stripe-marked, and
+  carries its own always-visible line naming the owner ("shared by …" / "shared globally" · read-only). The
   file list stays profile-agnostic — ownership comes from a single `owner`/`*` call, not the workspace tool.
