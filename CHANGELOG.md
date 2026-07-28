@@ -9,6 +9,20 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## Unreleased
+
+### Bug fixes
+
+- **Two provider profiles naming one adapter by different specifiers no longer knock each other out.**
+  The provider-factory registry is keyed by canonical plugin name, but `instantiateProvider`'s
+  specifier→name fallback only matched the exact literal string a plugin was loaded with. So a profile
+  written as a path (`./plugins/providers/openai-compat`) and one written as the package name
+  (`@matatbread/matbot-provider-openai-compat`) missed each other: whichever was used first loaded the
+  adapter, and the other force-loaded it again and died on "Plugin … is already registered", surfacing
+  as `provider "…" has no loadable adapter`. Which profile broke depended on use order within the
+  process, making it look intermittent. `instantiateProvider` now derives the canonical name through the
+  host `PluginResolver` before force-loading. Stored profiles are still never rewritten.
+
 ## 0.3.5
 
 _Two runner-level turn-control features — mid-turn steering (interrupt a running turn and redirect it) and concurrent screen-phase classification (race a verdict against the turn instead of gating the first token on it) — plus the completion of the multi-profile storage work released in 0.3.4: item-grain sharing now spans files as well as documents, a shared item stays live in every viewer's UI, and the tool vocabulary around stored files is disambiguated._

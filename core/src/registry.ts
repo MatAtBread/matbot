@@ -175,9 +175,14 @@ export async function instantiateProvider(services: MatbotRuntime, config: Provi
   // already). The stored profile is NEVER rewritten: it stays exactly as the source wrote it (yaml path,
   // npm name, or a storage-backend manifest entry), so `provider list` reports the source truth rather than
   // a mix of specifiers and package names that depends on which profiles happen to have been used.
+  // The specifier→name scan only matches the *exact* string a profile was loaded with, so two profiles
+  // naming one adapter by different specifiers (a yaml path and the package name) miss each other; the
+  // host resolver closes that gap by deriving the canonical name the registry is actually keyed by —
+  // without it the second specifier force-loads and dies on "already registered".
   const name = tryResolveProviderFactory(config.module) !== undefined
     ? config.module
-    : getPluginNameForSpecifier(config.module);
+    : getPluginNameForSpecifier(config.module)
+      ?? await services.resolver?.identify(config.module).catch(() => undefined);
   if (name !== undefined) {
     const factory = tryResolveProviderFactory(name);
     if (factory !== undefined) return factory(config);
