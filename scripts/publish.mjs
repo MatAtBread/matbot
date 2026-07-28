@@ -40,9 +40,12 @@ const skipGit = argv.includes('--no-git');
 const otp = argv.includes('--otp') ? argv[argv.indexOf('--otp') + 1] : null;
 
 const REGISTRY = 'https://registry.npmjs.org';
-// npm's read path is a CDN; a just-published version can 404 for a few seconds. Long enough to
-// outlast that, short enough that a genuine failure doesn't hang a release.
+// npm's read path is a CDN; a just-published version can 404 for a while. Long enough to outlast
+// that, short enough that a genuine failure doesn't hang a release. A brand-new package's FIRST
+// version is the slow case — measured at over two minutes — so it gets its own budget.
 const VERIFY_ATTEMPTS = 12;
+const SETTLE_ATTEMPTS = 6;
+const SETTLE_ATTEMPTS_NEW = 14;
 const VERIFY_BASE_MS = 2000;
 
 const c = { red: s => `\x1b[31m${s}\x1b[0m`, green: s => `\x1b[32m${s}\x1b[0m`, yellow: s => `\x1b[33m${s}\x1b[0m`, dim: s => `\x1b[2m${s}\x1b[0m`, bold: s => `\x1b[1m${s}\x1b[0m` };
@@ -222,23 +225,38 @@ function publishBatch() {
   }
 }
 
-const ALREADY_PUBLISHED = /EPUBLISHCONFLICT|cannot publish over|previously published versions/i;
+// Is this exact version on the registry? Retried, because the read path lags the write path — the
+// answer immediately after a publish is "not yet" long before it is "no".
+async function isPublished(pkg, attempts = 1) {
+  for (let i = 0; i < attempts; i++) {
+    if (i) await sleep(Math.min(2000 * i, 10000));
+    const { versions } = await fetchPackument(pkg.name);
+    if (Object.hasOwn(versions, pkg.version)) return true;
+  }
+  return false;
+}
 
-function publishOne(pkg) {
+async function publishOne(pkg) {
   if (dryRun) { console.log(c.dim(`   --dry-run: would publish ${pkg.name}@${pkg.version}`)); return 'dry'; }
   const args = ['publish', '--no-git-checks', '--access', 'public', ...(otp ? ['--otp', otp] : [])];
-  // With no code supplied, hand the child the terminal so pnpm can prompt for one; piping is what
-  // turns a promptable OTP into ERR_PNPM_OTP_NON_INTERACTIVE.
+  // With no code supplied, hand the child the terminal so pnpm can prompt for one (and so its
+  // browser-auth flow is usable); piping is what turns a promptable OTP into
+  // ERR_PNPM_OTP_NON_INTERACTIVE.
   const stdio = otp || !process.stdin.isTTY ? ['ignore', 'pipe', 'pipe'] : 'inherit';
   try {
     run('pnpm', args, { cwd: pkg.dir, stdio });
     return 'published';
   } catch (err) {
+    // A non-zero exit does NOT mean the version isn't there — "you cannot publish over 0.3.5"
+    // is a *failure to re-publish something that already succeeded*. Never classify that from the
+    // child's stderr: with an inherited terminal nothing is captured, and pnpm's wording is not a
+    // contract. Ask the registry; it is the only thing that actually knows.
+    if (await isPublished(pkg, 4)) return 'exists';
     const output = `${err.stdout ?? ''}${err.stderr ?? ''}`;
-    if (ALREADY_PUBLISHED.test(output)) return 'exists';
     if (OTP_REQUIRED.test(output)) return 'otp';
     console.log(c.red(`   ✗ ${pkg.name}@${pkg.version}`));
-    console.log(output.split('\n').filter(l => /error|ERR!/i.test(l)).map(l => `       ${l}`).join('\n'));
+    const detail = output.split('\n').filter(l => /error|ERR!/i.test(l) && !/^\s+at /.test(l));
+    if (detail.length) console.log(detail.map(l => `       ${l.trim()}`).join('\n'));
     return 'failed';
   }
 }
@@ -299,7 +317,7 @@ step(2, `Publish (${missing().length} package(s))`);
 
 const canary = missing()[0];
 console.log(`   canary: ${canary.name}@${canary.version}`);
-const canaryResult = publishOne(canary);
+const canaryResult = await publishOne(canary);
 if (canaryResult === 'otp') {
   console.log(`\n${c.red(c.bold('Stopped before the batch: '))}${otpAdvice(who)}`);
   process.exit(1);
@@ -312,38 +330,53 @@ console.log(`   ${c.green('✓')} canary ${canaryResult === 'exists' ? 'already 
 
 publishBatch();
 
-step(3, 'Reconcile');
-state = await registryState(pkgs);
-let outstanding = missing();
+// Poll until the registry agrees, or until patience runs out. Returns what is still absent.
+async function settle(attempts, label) {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    state = await registryState(pkgs);
+    if (!missing().length || attempt === attempts) break;
+    const wait = Math.min(VERIFY_BASE_MS * attempt, 15000);
+    console.log(c.dim(`   ${missing().length} not yet readable; ${label} in ${wait / 1000}s (${attempt}/${attempts - 1})`));
+    await sleep(wait);
+  }
+  return missing();
+}
+
+// Wait for the write to become readable BEFORE deciding anything is outstanding. Reconciling off a
+// read taken the instant the batch returns means re-publishing packages that already succeeded and
+// reading their "cannot publish over" rejection as failure — noise that looks exactly like a
+// broken release. A first publish of a brand-new package propagates slowest, so it sets the pace.
+step(3, 'Settle');
+let outstanding = await settle(brandNew.length ? SETTLE_ATTEMPTS_NEW : SETTLE_ATTEMPTS, 'rechecking');
+console.log(`   ${c.green('✓')} registry agrees on ${pkgs.length - outstanding.length}/${pkgs.length}`);
+
+step(4, 'Reconcile');
 if (!outstanding.length) console.log(`   ${c.green('✓')} nothing left behind by the batch`);
 for (const pkg of outstanding) {
-  const result = publishOne(pkg);
+  const result = await publishOne(pkg);
   if (result === 'published') console.log(`   ${c.green('✓')} ${pkg.name}@${pkg.version} ${c.dim('(retried individually)')}`);
   if (result === 'exists') console.log(`   ${c.green('✓')} ${pkg.name}@${pkg.version} ${c.dim('(already on npm)')}`);
   if (result === 'otp') {
     // Every remaining package will fail identically; 44 more copies of the same error helps nobody.
     console.log(`\n${c.red(c.bold('Stopped: '))}${otpAdvice(who)}`);
-    process.exit(1);
+    break;
   }
 }
 
-step(4, 'Verify');
-for (let attempt = 1; attempt <= VERIFY_ATTEMPTS; attempt++) {
-  state = await registryState(pkgs);
-  outstanding = missing();
-  if (!outstanding.length) break;
-  if (attempt === VERIFY_ATTEMPTS) break;
-  const wait = Math.min(VERIFY_BASE_MS * attempt, 15000);
-  console.log(c.dim(`   ${outstanding.length} not yet readable; retrying in ${wait / 1000}s (${attempt}/${VERIFY_ATTEMPTS - 1})`));
-  await sleep(wait);
-}
+step(5, 'Verify');
+outstanding = await settle(VERIFY_ATTEMPTS, 'retrying');
 
-if (outstanding.length) {
-  console.log(`\n${c.red(c.bold(`${outstanding.length} package(s) did not publish:`))}`);
-  for (const p of outstanding) console.log(`   ${c.red('✗')} ${p.name}@${p.version}  ${c.dim(p.rel)}`);
-  console.log(c.dim('\n   Re-run `pnpm publish-all` — it resumes from live registry state and skips what landed.'));
-  process.exit(1);
+// However the run got here, it ends by saying plainly what is on npm and what is not. That
+// sentence — not the exit code, not which subcommands complained — is the point of the script.
+const landed = pkgs.length - outstanding.length;
+console.log(`\n${c.bold('── Result')}`);
+if (!outstanding.length) {
+  for (const pkg of pkgs) ensureTag(pkg);
+  console.log(`   ${c.green(c.bold(`✓ all ${pkgs.length} packages are on npm at ${pkgs[0].version}`))}`);
+  process.exit(0);
 }
-
-for (const pkg of pkgs) ensureTag(pkg);
-console.log(`\n${c.green(c.bold(`✓ all ${pkgs.length} packages published and readable at ${pkgs[0].version}`))}`);
+console.log(`   ${c.green(`${landed}/${pkgs.length} published`)} — ${c.red(`${outstanding.length} missing:`)}`);
+for (const p of outstanding) console.log(`   ${c.red('✗')} ${p.name}@${p.version}  ${c.dim(p.rel)}`);
+console.log(c.dim('\n   Re-run `pnpm publish-all` — it resumes from live registry state and skips what landed.'));
+console.log(c.dim('   If npm is merely slow, `pnpm publish-check` will show them as published shortly.'));
+process.exit(1);

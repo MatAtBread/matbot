@@ -834,10 +834,21 @@ Every `@matatbread/*` package is in one `fixed` group, so they all move together
 one version number across the workspace.
 
 `pnpm publish-all` (`scripts/publish.mjs`) treats **the registry, not a command's exit code, as the
-source of truth**. It reads what npm actually has, publishes only the difference, retries anything
-the batch left behind (a version that already exists counts as success), then polls until every
-package is *readable* — npm's read path is a CDN and lags its write path by seconds, which
-otherwise looks exactly like a failure.
+source of truth**: preflight → canary → settle → reconcile → verify. It reads what npm actually
+has, publishes only the difference, waits for those writes to become readable, retries anything the
+batch left behind, and ends with a **Result block that states plainly how many packages are on npm
+and names any that are not**. That sentence is the point of the script — a release should never
+leave you reading scrollback to work out what shipped.
+
+Two things it deliberately does *not* trust:
+
+- **A subprocess's exit code.** `You cannot publish over the previously published versions` is a
+  failure to *re*-publish something that already succeeded. Every publish result is confirmed by
+  asking the registry for that exact version, never by matching the error text — which is also why
+  it stays correct when the child inherits the terminal and prints nothing we can capture.
+- **A read taken the instant a write returns.** npm's read path is a CDN that lags its write path;
+  a brand-new package's first version has been measured taking over two minutes to appear. Acting
+  on that read is what turns a *successful* release into a screen of E403s.
 
 The practical consequence: **a failed release is fixed by running it again.** It resumes from live
 registry state rather than replaying a transcript, so re-running skips what landed and finishes
