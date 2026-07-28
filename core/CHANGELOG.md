@@ -1,5 +1,16 @@
 # @matatbread/matbot-core
 
+## 0.3.6
+
+### Patch Changes
+
+- `instantiateProvider` resolves a provider's adapter by canonical plugin name before force-loading it.
+  The factory registry is keyed by canonical name, but the specifier→name fallback only matched the exact
+  literal string a plugin was loaded with, so two profiles naming one adapter by different specifiers (a
+  yaml path and the package name) missed each other: whichever was used first registered the plugin, and
+  the second force-loaded it again, threw "already registered", and surfaced as
+  `provider "…" has no loadable adapter`. Stored profiles are still never rewritten.
+
 ## 0.3.5
 
 ### Patch Changes
