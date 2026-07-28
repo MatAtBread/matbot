@@ -25,6 +25,7 @@
 //   node scripts/publish.mjs --check     # preflight + report drift only; publishes nothing
 //   node scripts/publish.mjs --dry-run   # everything except the actual publish calls
 //   node scripts/publish.mjs --no-git    # skip clean-tree/branch gates (CI already knows)
+//   node scripts/publish.mjs --otp 123456  # one 2FA code for the whole batch
 
 import { execFileSync, execFile } from 'node:child_process';
 import { readFileSync, existsSync } from 'node:fs';
@@ -36,6 +37,7 @@ const argv = process.argv.slice(2);
 const checkOnly = argv.includes('--check');
 const dryRun = argv.includes('--dry-run');
 const skipGit = argv.includes('--no-git');
+const otp = argv.includes('--otp') ? argv[argv.indexOf('--otp') + 1] : null;
 
 const REGISTRY = 'https://registry.npmjs.org';
 // npm's read path is a CDN; a just-published version can 404 for a few seconds. Long enough to
@@ -111,6 +113,7 @@ function checkAuth(problems) {
   try {
     const who = run('npm', ['whoami', '--registry', REGISTRY], { stdio: ['ignore', 'pipe', 'ignore'] }).trim();
     console.log(`   ${c.green('✓')} authenticated to npm as ${c.bold(who)}`);
+    return who;
   } catch {
     problems.push(
       'npm rejected the stored credentials (E401). The token in ~/.npmrc is missing, expired or revoked.\n' +
@@ -118,8 +121,26 @@ function checkAuth(problems) {
       '     update //registry.npmjs.org/:_authToken), then re-run. Note npm is phasing out classic\n' +
       '     tokens that bypass 2FA for direct publishing, which expires them without warning.',
     );
+    return null;
   }
 }
+
+const OTP_REQUIRED = /EOTP|ERR_PNPM_OTP|one-time pass|otp required|requires additional authentication/i;
+
+function otpAdvice(who) {
+  return 'the registry demands a 2FA one-time code for writes (EOTP), and a batch publish has no way to prompt for one.\n' +
+    `     Fix (permanent): create a Granular Access Token at https://www.npmjs.com/settings/${who ?? '<user>'}/tokens\n` +
+    '     with Read/Write on the @matatbread scope, and put it in ~/.npmrc as\n' +
+    '     //registry.npmjs.org/:_authToken=<token>. Granular tokens publish without an OTP —\n' +
+    "     the browser-session token `npm login` writes does not, whatever the account's 2FA mode says.\n" +
+    '     Fix (one-off): re-run as `pnpm publish-all --otp <code>`.';
+}
+
+// There is no cheap preflight for "may this credential publish?". `whoami` only proves it can
+// read, and a dist-tag write — the obvious no-op probe — is NOT gated the way publishing is, so it
+// returns a confident pass on a credential publish will reject. A ✓ that can be wrong is worse
+// than no check, so instead of predicting, publish ONE package and look: same cost (it had to be
+// published anyway), but the batch stops after one failure rather than forty-five.
 
 function checkGit(problems, advisories) {
   if (skipGit) return;
@@ -194,7 +215,7 @@ function exportTargets(exports) {
 function publishBatch() {
   if (dryRun) return console.log(c.dim('   --dry-run: skipping `changeset publish`'));
   try {
-    run('pnpm', ['exec', 'changeset', 'publish'], { stdio: 'inherit' });
+    run('pnpm', ['exec', 'changeset', 'publish', ...(otp ? ['--otp', otp] : [])], { stdio: 'inherit' });
   } catch {
     // Not fatal on its own — RECONCILE reads the registry to find out what actually landed.
     console.log(c.yellow('   `changeset publish` exited non-zero; reconciling against the registry'));
@@ -205,12 +226,17 @@ const ALREADY_PUBLISHED = /EPUBLISHCONFLICT|cannot publish over|previously publi
 
 function publishOne(pkg) {
   if (dryRun) { console.log(c.dim(`   --dry-run: would publish ${pkg.name}@${pkg.version}`)); return 'dry'; }
+  const args = ['publish', '--no-git-checks', '--access', 'public', ...(otp ? ['--otp', otp] : [])];
+  // With no code supplied, hand the child the terminal so pnpm can prompt for one; piping is what
+  // turns a promptable OTP into ERR_PNPM_OTP_NON_INTERACTIVE.
+  const stdio = otp || !process.stdin.isTTY ? ['ignore', 'pipe', 'pipe'] : 'inherit';
   try {
-    run('pnpm', ['publish', '--no-git-checks', '--access', 'public'], { cwd: pkg.dir, stdio: ['ignore', 'pipe', 'pipe'] });
+    run('pnpm', args, { cwd: pkg.dir, stdio });
     return 'published';
   } catch (err) {
     const output = `${err.stdout ?? ''}${err.stderr ?? ''}`;
     if (ALREADY_PUBLISHED.test(output)) return 'exists';
+    if (OTP_REQUIRED.test(output)) return 'otp';
     console.log(c.red(`   ✗ ${pkg.name}@${pkg.version}`));
     console.log(output.split('\n').filter(l => /error|ERR!/i.test(l)).map(l => `       ${l}`).join('\n'));
     return 'failed';
@@ -236,7 +262,7 @@ const advisories = [];
 const pkgs = workspacePackages();
 
 step(1, 'Preflight');
-checkAuth(problems);
+const who = checkAuth(problems);
 checkGit(problems, advisories);
 checkManifests(pkgs, problems, advisories);
 
@@ -270,6 +296,20 @@ if (!missing().length) {
 }
 
 step(2, `Publish (${missing().length} package(s))`);
+
+const canary = missing()[0];
+console.log(`   canary: ${canary.name}@${canary.version}`);
+const canaryResult = publishOne(canary);
+if (canaryResult === 'otp') {
+  console.log(`\n${c.red(c.bold('Stopped before the batch: '))}${otpAdvice(who)}`);
+  process.exit(1);
+}
+if (canaryResult === 'failed') {
+  console.log(`\n${c.red(c.bold('Stopped before the batch'))} — the first package failed, so the other ${missing().length - 1} would too.`);
+  process.exit(1);
+}
+console.log(`   ${c.green('✓')} canary ${canaryResult === 'exists' ? 'already on npm' : 'published'} — proceeding with the batch`);
+
 publishBatch();
 
 step(3, 'Reconcile');
@@ -280,6 +320,11 @@ for (const pkg of outstanding) {
   const result = publishOne(pkg);
   if (result === 'published') console.log(`   ${c.green('✓')} ${pkg.name}@${pkg.version} ${c.dim('(retried individually)')}`);
   if (result === 'exists') console.log(`   ${c.green('✓')} ${pkg.name}@${pkg.version} ${c.dim('(already on npm)')}`);
+  if (result === 'otp') {
+    // Every remaining package will fail identically; 44 more copies of the same error helps nobody.
+    console.log(`\n${c.red(c.bold('Stopped: '))}${otpAdvice(who)}`);
+    process.exit(1);
+  }
 }
 
 step(4, 'Verify');

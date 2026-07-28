@@ -851,3 +851,24 @@ and gets out of the way.
 
 `--check` audits without publishing, `--dry-run` runs everything but the publish calls, and
 `--no-git` drops the clean-tree/tag gates for CI.
+
+### The credential must be a granular access token
+
+`npm login` writes a **browser-session** token. npm accepts it for reads — `npm whoami` is happy —
+but demands a 2FA one-time code when you actually publish, whatever the account's 2FA mode says.
+A batch publish has nowhere to prompt, so every package fails with `ERR_PNPM_OTP_NON_INTERACTIVE`.
+
+Use a **Granular Access Token** instead (npmjs.com → Access Tokens → Generate New Token → Granular),
+with Read/Write on the `@matatbread` scope, in `~/.npmrc`:
+
+```
+//registry.npmjs.org/:_authToken=npm_xxxxxxxx
+```
+
+Granular tokens publish without an OTP — that is what they are for. For a one-off release on a
+session token, `pnpm publish-all --otp <code>` passes one code to the whole batch.
+
+Note there is deliberately **no preflight check for this**. Reads and even a dist-tag write both
+succeed on a credential that publishing will reject, so any such check would hand you a confident ✓
+and then fail anyway. Instead the script publishes **one canary package first** and stops if it
+fails — same cost, but you find out after one package rather than forty-five.
