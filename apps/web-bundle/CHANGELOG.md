@@ -4,6 +4,8 @@
 
 ### Patch Changes
 
+- Added a `files` allowlist to the published package: the tarball no longer ships `tsconfig.json`
+  or `tsconfig.tsbuildinfo`.
 - Updated dependencies [3e662d0]
 - Updated dependencies
   - @matatbread/matbot-plugin-api@0.3.5

@@ -19,6 +19,9 @@
   "scripts": {
     "typecheck": "tsc --noEmit"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "peerDependencies": {
     "@matatbread/matbot-plugin-api": "workspace:^"
   },

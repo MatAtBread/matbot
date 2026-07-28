@@ -19,6 +19,15 @@
   ],
   "license": "Apache-2.0",
   "type": "module",
+  "files": [
+    "dist",
+    "src",
+    "assemble.mjs",
+    "serve.mjs",
+    "index.template.html",
+    "matbot.web.json",
+    "matbot.web-demo.json"
+  ],
   "scripts": {
     "typecheck": "tsc --noEmit",
     "assemble": "node assemble.mjs",

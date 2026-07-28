@@ -19,7 +19,8 @@
     "changeset": "changeset",
     "version-packages": "changeset version",
     "publish-app": "pnpm --filter '@matatbread/matbot-cli...' publish",
-    "publish-all": "changeset publish"
+    "publish-all": "node scripts/publish.mjs",
+    "publish-check": "node scripts/publish.mjs --check"
   },
   "devDependencies": {
     "@changesets/cli": "^2.31.0",

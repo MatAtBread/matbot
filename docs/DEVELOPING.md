@@ -821,3 +821,33 @@ in-memory — no service worker, no `fetch` at boot, no in-page stripping for th
   in plaintext. Single-user local use only.
 - **Interactive `plugin add`** — requires a human click; cannot be driven
   non-interactively.
+## Releasing
+
+```
+pnpm changeset          # describe the change (one file per change, committed with it)
+pnpm version-packages   # consume changesets: bump versions, fold into CHANGELOGs
+pnpm publish-check      # dry audit: what would publish, and what would stop it
+pnpm publish-all        # preflight → publish → reconcile → verify
+```
+
+Every `@matatbread/*` package is in one `fixed` group, so they all move together — a release is
+one version number across the workspace.
+
+`pnpm publish-all` (`scripts/publish.mjs`) treats **the registry, not a command's exit code, as the
+source of truth**. It reads what npm actually has, publishes only the difference, retries anything
+the batch left behind (a version that already exists counts as success), then polls until every
+package is *readable* — npm's read path is a CDN and lags its write path by seconds, which
+otherwise looks exactly like a failure.
+
+The practical consequence: **a failed release is fixed by running it again.** It resumes from live
+registry state rather than replaying a transcript, so re-running skips what landed and finishes
+what didn't. There is no manual clean-up path and no need to work out which of ~45 packages made it.
+
+Preflight blocks on the things that kill a whole run — an expired npm token (checked against the
+registry, because an expired token looks identical to a good one on disk), a dirty tree, a split
+version group, an entry point missing from disk or excluded by `files`. Anything that merely *ships
+imperfectly* — a missing `files` field, changesets accumulated since this version was cut — warns
+and gets out of the way.
+
+`--check` audits without publishing, `--dry-run` runs everything but the publish calls, and
+`--no-git` drops the clean-tree/tag gates for CI.
