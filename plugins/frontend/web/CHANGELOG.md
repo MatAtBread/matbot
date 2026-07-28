@@ -33,6 +33,89 @@
   - @matatbread/matbot-plugin-api@0.3.5
   - @matatbread/matbot-core@0.3.5
 
+- 86fd3fe: File-item sharing and a `copy` action for the `share` tool — item-grain sharing now spans files, not just
+  documents, and gains a duplicate-with-ownership mode.
+
+  - **File sharing.** `share`/`unshare`/`ownerOf` now handle the `files` axis (`id` = the file id): a file
+    is a data + `<id>.meta.json` PAIR on disk, so sharing links both into the target's file area (named files
+    may be nested → the target subdir is created), reads flow through the symlinks to the owner's live file,
+    and `unshare` unlinks the pair. `ownerOf('files', id)` reports the owning profile (the read-only badge
+    signal). A shared-in file is **read-only**: a `put`/`putTemp` under the shared name throws `ReadOnlyError`
+    (it would fork the data and write through the meta symlink to the owner); anonymous puts and delete pass.
+    The shared-in file set is seeded at open() (scanning each partition's file area for `.meta.json` symlinks)
+    and feeds both the write-guard and Task B's live-watch OR-clause, so an owner's edit to a shared file
+    reaches every sharee's firehose connection.
+  - **`copy` action.** A new `action: 'copy'` on the `share` tool writes an independent duplicate the target
+    fully owns and can edit (unlike `share`'s read-only link). Item ids are preserved (a fresh isolated
+    partition keeps intra-set references valid); a shared-in source is dereferenced to its live content.
+    Documents copy through the target partition's store; files copy the data + meta pair (a copied file goes
+    live via the target's watch pump); skills route through the `SkillManager` (discovered loosely) under
+    `runAs(target)` so the copy is indexed into the KnowledgeIndex and evented, falling back to a structural
+    doc copy when skills isn't loaded.
+  - **`id: '*'`.** `share`, `unshare`, and `copy` accept `*` to mean the whole namespace — every item in the
+    source namespace (share skips items that are themselves shared in; unshare drops all target-side links).
+  - **Bulk ownership.** The `owner` action with `id: '*'` returns an `owners` map of every shared-in item in
+    the namespace to its owner profile (read from the in-memory shared-in set), so a UI can gate a whole
+    file/session list's share affordance in one round-trip instead of one `owner` call per item.
+  - **Clearer share/copy failures.** When a target profile doesn't isolate the namespace, the error no longer
+    claims it "already reads the shared base data" (which read as "the target already has this item" — false
+    for an item in your own isolated partition). It now names the intersection of the two profiles' isolated
+    sets (the only namespaces shareable between them) and, when the namespace isn't an isolatable axis at all,
+    redirects a mis-typed file share to `namespace: "files"` (the common `workspace` ≠ `files` slip). The tool
+    description makes the same isolation-axis-vs-content-namespace distinction explicit.
+  - **Web frontend (showcase).** File items in the sidebar gain a share affordance mirroring the session one:
+    a share button (targets = profiles that isolate `files`) calling `share` with `namespace: 'files'`, and a
+    read-only marker on a file shared in from another profile (share button withheld, delete relabelled
+    "Remove from my view"). Since a file opens as raw bytes in a new tab — a surface that can carry no banner
+    of its own — the list row is where the state has to read: a shared-in row is tinted, stripe-marked, and
+    carries its own always-visible line naming the owner ("shared by …" / "shared globally" · read-only). The
+    file list stays profile-agnostic — ownership comes from a single `owner`/`*` call, not the workspace tool.
+
+- 86fd3fe: Shared-item live watch: an owner's edit to an item shared **into** another profile now reaches the
+  sharee's live view, and every partitioned CRUD stream is unified behind one self-describing change envelope.
+
+  - **API gaps filled.** New `StoreChange` (plugin-api) — `{ operation: 'saved' | 'deleted'; namespace; id;
+detail? }`, the payload half of a `Routed` event. It is the generic, self-describing shape every
+    partitioned stream now emits (files, skills, future partitioned stores), carrying its own **routing**
+    namespace (`'files'` / `'skills'` / a document namespace — not a file's content sub-namespace, which
+    rides in `detail`) and item id. This is exactly what a per-connection visibility filter needs, so the
+    frontend firehose no longer hardcodes a per-stream routing namespace.
+  - **Breaking (optional service).** `WatchVisibility.visible` gains an `id` parameter —
+    `visible(viewer, namespace, id, origin)` — and `watchFiles` now yields `Routed<StoreChange>` (was
+    `Routed<FileEvent>`). `SkillManager.watch` yields `Routed<StoreChange>` (the bespoke `SkillEvent` type is
+    removed). Only consumers of these newer surfaces (the profiles backend, the web firehose) are affected.
+  - **Optional (storage-profiles).** `visible` now returns true not only when viewer and origin route the
+    namespace to the same partition, but also when the item is **shared into** the viewer's partition — so an
+    owner editing a shared-in item is seen live by every sharee, closing the live-update regression profiles
+    introduced. Backed by a per-`(partition, namespace)` shared-in id-set built eagerly at open() (scanning
+    partitions for symlinks) and maintained on every `share`/`unshare`, so `visible` stays synchronous with no
+    `fs` stat on the hot per-connection path.
+  - **Optional (frontend/web).** The `/events` firehose feeds `visible` straight from each self-describing
+    `StoreChange` (no per-stream namespace constant); the in-process and HTTP transports both normalise file
+    and skill events to the same `StoreChange` shape so the UI reads one shape whichever transport is live.
+
+- 11ee5c1: `url_for_resource` no longer takes a `namespace` — the word now means exactly one thing on the wire.
+
+  The parameter was asking the model for a file's _content_ namespace (`"workspace"`), while the `share`
+  tool's identically-named parameter takes a storage _isolation axis_ (`"files"`). Same name, two different
+  levels, contradictory values for the same file — so a model that had correctly learned one binding
+  generalised it to the other and produced calls that could not resolve. The frontend tools are the
+  exposure half of stored files and have no business asking which sub-namespace a file was written under.
+
+  `url_for_resource({ name })` now looks the file up by the path it was stored under and sources the route's
+  namespace segment from the stored handle, so the minted URL is unchanged. A file with no stored namespace
+  has no addressable path under the `/files/<namespace>/<name>` route and reports as not viewable rather
+  than minting a URL that would 404. Both frontends (served + in-process DOM) change identically, as they
+  share one merged `ToolContracts` entry.
+
+  `workspace` survives only as the name of the tool and the UI panel; `files` only as the storage namespace
+  and isolation axis. Neither word now appears at both levels, so `share`'s `namespace: "files"` is the only
+  namespace the model is ever asked to supply for a file.
+
+- Updated dependencies [86fd3fe]
+  - @matatbread/matbot-plugin-api@0.3.5
+  - @matatbread/matbot-core@0.3.5
+
 ## 0.3.4
 
 ### Patch Changes

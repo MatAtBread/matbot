@@ -9,6 +9,10 @@
   - @matatbread/matbot-plugin-api@0.3.5
   - @matatbread/matbot-core@0.3.5
 
+- Updated dependencies [86fd3fe]
+  - @matatbread/matbot-plugin-api@0.3.5
+  - @matatbread/matbot-core@0.3.5
+
 ## 0.3.4
 
 ### Patch Changes

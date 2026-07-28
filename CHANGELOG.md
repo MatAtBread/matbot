@@ -11,7 +11,7 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ## 0.3.5
 
-_Two runner-level turn-control features: mid-turn steering (interrupt a running turn and redirect it) and concurrent screen-phase classification (race a verdict against the turn instead of gating the first token on it)._
+_Two runner-level turn-control features — mid-turn steering (interrupt a running turn and redirect it) and concurrent screen-phase classification (race a verdict against the turn instead of gating the first token on it) — plus the completion of the multi-profile storage work released in 0.3.4: item-grain sharing now spans files as well as documents, a shared item stays live in every viewer's UI, and the tool vocabulary around stored files is disambiguated._
 
 ### API gaps filled
 
@@ -50,6 +50,13 @@ _Two runner-level turn-control features: mid-turn steering (interrupt a running 
   even though the verdict now lands mid-turn (in-situ) or post-commit (retract) rather than before
   generation. `retractAndRerun.context` is correspondingly optional (a durable-only retract).
 
+- **`StoreChange { operation, namespace, id, detail? }` — a self-describing store-change envelope.** A
+  partitioned change now names its own routing namespace and id, so a consumer filters an event without a
+  per-stream namespace constant compiled in. `WatchVisibility.watchFiles` yields `Routed<StoreChange>` in
+  place of `Routed<FileEvent>`, and `visible()` gains an `id` parameter
+  (`visible(viewer, namespace, id, origin)`) so visibility is decided per item rather than per stream —
+  which is what lets one firehose carry every partition's changes, filtered per connection.
+
 ### Optional
 
 - **frontend/web: opts into steering.** `POST /sessions/:id/submit` accepts `mode`, defaulting to `auto`
@@ -70,6 +77,61 @@ _Two runner-level turn-control features: mid-turn steering (interrupt a running 
   injects cleanly before generation rather than racing it — one knob spanning fully-responsive to
   fully-clean. A raced verdict is traced by a `user-insitu-fired` marker (clean path, no retraction
   marker exists) or `user-retract-fired` (post-commit).
+
+- **triggers: a followup fire records why it fired.** A `followup`-kind trigger now leaves a durable
+  marker naming the condition that matched, so a resubmitted robo turn is traceable rather than appearing
+  unprompted.
+
+- **storage/profiles: item-grain sharing spans files, and gains `copy`.** `share`/`unshare`/`ownerOf`
+  handle the `files` axis — a file is a data + `.meta.json` PAIR on disk, so sharing links both into the
+  target's file area, reads flow through the symlinks to the owner's live file, and `ownerOf` reports the
+  owning profile. A shared-in file is **read-only**: a `put` under the shared name throws `ReadOnlyError`
+  rather than forking the data and writing through the meta symlink to the owner. A new `copy` action
+  writes an independent duplicate the target fully owns, preserving item ids and dereferencing a shared-in
+  source; skills route through the `SkillManager` (discovered loosely) so the copy is indexed into the
+  KnowledgeIndex, falling back to a structural document copy when skills isn't loaded. `share`, `unshare`
+  and `copy` accept `id: '*'` for a whole namespace, and `owner` with `'*'` returns an owners map so a UI
+  can gate a list in one round-trip instead of one call per item. Share/copy failures now name the
+  intersection of the two profiles' isolated namespaces instead of claiming the target "already reads the
+  shared base data".
+
+- **storage/profiles + frontend/web: a shared item stays live.** An owner's edit to a shared file now
+  reaches every sharee's event stream: the shared-in set is seeded at open (scanning each partition's file
+  area for `.meta.json` symlinks) and feeds both the write-guard and the watch's visibility clause.
+
+- **frontend/web: read-only shared files are legible in the Workspace list.** A file opens as raw bytes in
+  a new tab — a surface that can carry no banner — so the row carries the state: a file shared in from
+  another profile is tinted and stripe-marked and shows an always-visible line naming the owner ("shared
+  by …" / "shared globally") and its read-only status, with the share button withheld and delete
+  relabelled. The file list stays profile-agnostic; ownership comes from one `owner`/`*` call. The sidebar
+  panel is now titled "Workspace".
+
+- **frontend/web + frontend/dom: `url_for_resource` drops its `namespace` parameter.** The parameter asked
+  for a file's *content* namespace (`"workspace"`) while the `share` tool's identically-named parameter
+  takes a storage *isolation axis* (`"files"`) — one name, two levels, contradictory values for the same
+  file, so a model that had learned one binding generalised it to the other and produced calls that could
+  not resolve. The tool now takes `{ name }`, resolves the file by the path it was stored under, and
+  sources the route's namespace segment from the stored handle; minted URLs are unchanged. A file with no
+  stored namespace reports as not viewable rather than minting a URL that would 404.
+
+- **tools/bash: the legacy in-tool docker executor is removed.** `createBashTool(docker?)` had no caller,
+  so the branch was unreachable — and strictly worse than `docker-bash`, which owns the sandboxed
+  implementation (same tool name and input shape, plus a persistent container, read-only project root, an
+  output byte cap and a `bash_config` tool). `DockerConfig` and `createBashTool` are gone; `bashTool` is a
+  plain constant. The tool description, the `cwd` schema and the README no longer describe the working
+  directory as "the session workspace": it is a private scratch area for temporary scripts and
+  intermediate data, and nothing written there is visible to the user, servable, or shareable.
+
+- **tools/workspace: the tool describes itself as matbot's cloud file storage.** The description now
+  frames the store as the user's own files in a managed cloud drive (not the local disk) backing the
+  Workspace panel, and directs the model here — rather than to bash — whenever the user speaks of a file,
+  saving output, uploads, downloads or generated artifacts.
+
+- **providers/chatjimmy: published.** The ChatJimmy adapter is no longer `private` — it publishes as
+  `@matatbread/matbot-provider-chatjimmy`, is a dependency of the CLI, appears in the first-run setup
+  wizard's provider list, and resolves by bare package name from an installed matbot as well as a source
+  checkout. A hosted llama endpoint: keyless, non-streaming, text-only and no tool-calling — useful as a
+  low-latency comparison point rather than a general-purpose provider.
 
 ## 0.3.4
 
