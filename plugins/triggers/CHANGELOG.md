@@ -1,5 +1,11 @@
 # @matatbread/matbot-triggers
 
+## 0.3.7
+
+### Patch Changes
+
+- @matatbread/matbot-plugin-api@0.3.7
+
 ## 0.3.5
 
 ### Patch Changes
@@ -33,6 +39,7 @@
 
 - Updated dependencies [3e662d0]
 - Updated dependencies
+
   - @matatbread/matbot-plugin-api@0.3.5
 
 - a6a4009: Agent-surface `followup` firings now leave an audit trail. A `retract` fire was already traced (a

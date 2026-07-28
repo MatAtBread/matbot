@@ -1,5 +1,12 @@
 # @matatbread/matbot-frontend-web
 
+## 0.3.7
+
+### Patch Changes
+
+- @matatbread/matbot-core@0.3.7
+- @matatbread/matbot-plugin-api@0.3.7
+
 ## 0.3.5
 
 ### Patch Changes
@@ -30,6 +37,7 @@
 
 - Updated dependencies [3e662d0]
 - Updated dependencies
+
   - @matatbread/matbot-plugin-api@0.3.5
   - @matatbread/matbot-core@0.3.5
 

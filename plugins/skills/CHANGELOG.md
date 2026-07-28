@@ -1,11 +1,18 @@
 # @matatbread/matbot-skills
 
+## 0.3.7
+
+### Patch Changes
+
+- @matatbread/matbot-plugin-api@0.3.7
+
 ## 0.3.5
 
 ### Patch Changes
 
 - Updated dependencies [3e662d0]
 - Updated dependencies
+
   - @matatbread/matbot-plugin-api@0.3.5
 
 - 86fd3fe: Shared-item live watch: an owner's edit to an item shared **into** another profile now reaches the

@@ -9,6 +9,26 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## 0.3.7
+
+_A single provider fix: the Anthropic adapter's prompt caching now survives interactive think-time gaps and agentic tool loops._
+
+### Optional
+
+- **providers/anthropic — prompt caching now survives interactive use.** On-disk session usage put this
+  adapter at ~43% cache hit against 91% for a server-auto-cached provider, from two causes. The 5-minute
+  cache TTL expired across ordinary think-time gaps (~81% cold miss at 5-30min, ~100% beyond), and the
+  message breakpoint was only placed when the second-to-last *user* turn ended in a `text` block — so
+  tool-result turns (role `user`, last block a `tool_result`) got no breakpoint at all, leaving agentic
+  tool loops uncached. Both re-processed the whole prefix as fresh input, inflating input-token throughput
+  against the endpoint's rate limit. The adapter now defaults to the 1-hour TTL
+  (`{ type: 'ephemeral', ttl: '1h' }` + the `extended-cache-ttl-2025-04-11` beta), with
+  `parameters.cacheTtl: '5m'` to opt back; the message breakpoint is placed on the last block whatever its
+  type and rolls across the two most-recent messages (advancing the write frontier while keeping the
+  earlier breakpoint inside the 20-block lookback); and the system prompt is sent as a block array with its
+  own breakpoint, anchoring tools + system together even when a long tool turn pushes the message
+  breakpoints out of lookback range. Common case: 4 breakpoints, Anthropic's maximum.
+
 ## 0.3.6
 
 _A single core fix: a provider profile that names its adapter by a different specifier than a sibling profile no longer intermittently fails to resolve._
