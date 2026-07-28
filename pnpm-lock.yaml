@@ -35,6 +35,9 @@ importers:
       '@matatbread/matbot-provider-anthropic':
         specifier: workspace:^
         version: link:../../plugins/providers/anthropic
+      '@matatbread/matbot-provider-chatjimmy':
+        specifier: workspace:^
+        version: link:../../plugins/providers/chatjimmy
       '@matatbread/matbot-provider-customer-services':
         specifier: workspace:^
         version: link:../../plugins/providers/customer-services
@@ -325,6 +328,15 @@ importers:
       '@matatbread/matbot-core':
         specifier: workspace:^
         version: link:../../../core
+      '@matatbread/matbot-plugin-api':
+        specifier: workspace:^
+        version: link:../../../plugin-api
+      typescript:
+        specifier: 'catalog:'
+        version: 6.0.3
+
+  plugins/providers/chatjimmy:
+    devDependencies:
       '@matatbread/matbot-plugin-api':
         specifier: workspace:^
         version: link:../../../plugin-api

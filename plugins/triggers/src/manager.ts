@@ -162,7 +162,7 @@ export class TriggerManager implements Triggers {
         'relational (refers to what was asked, answered, disputed, or repeated). Fire a condition when, ' +
         `reading the "${subject.label}" in light of the "${context.label}", it holds. Return ONLY a JSON ` +
         'object mapping each condition id (the bracketed value) to an object {"match": true|false, ' +
-        '"why": "<one short sentence citing the specific evidence>"}. No other text.',
+        '"why": "<a terse fragment, at most ~8 words, citing the specific evidence — not a full sentence>"}. No other text.',
       prompt:
         `${context.label} (earlier):\n${context.text === '' ? '(none)' : clip(context.text)}\n\n` +
         `${subject.label} (later — evaluate the conditions against THIS):\n${clip(subject.text)}\n\n` +

@@ -1,5 +1,5 @@
 import type {
-  Session, MessageContent, Usage, ProviderMeta,
+  Session, MessageContent, Usage, ProviderMeta, DeferredCorrection,
   PipelineEvent, RunConfig, ProviderAdapter, ProviderConfig,
   Tool, ToolRegistry, ToolContext, Store, FileStore, SystemContextRegistry, Vault, PromptFn, FormField,
 } from './types.js';
@@ -9,6 +9,15 @@ import { currentUsageSink } from '@matatbread/matbot-plugin-api';
 import { HookRegistry } from './hooks.js';
 import { appendMessage, createMessage } from './session.js';
 import { addUsage } from './usage.js';
+
+// Substituted for an errored tool result when the turn was aborted (e.g. a mid-turn steer interrupt):
+// the tool was cut off, not genuinely faulty, and the raw abort reason ("Error: steer") is a leaked
+// internal token that reads as a real failure. A steer's continuation turn is the one place a model
+// reads this, so the wording tells it the call was interrupted and leaves re-running to its judgement —
+// deliberately NOT "re-run it", so a side-effecting tool isn't reflexively repeated.
+const INTERRUPTED_TOOL_RESULT = {
+  error: 'Tool call interrupted before completion — the turn was interrupted while it was running. It may not have run to completion, and any side effect may or may not have occurred. Re-run it only if you still need its result.',
+} as const;
 
 export interface RunSessionOpts {
   session:        Session;
@@ -111,8 +120,42 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
   // drops non-result content from tool-role messages — a separate trailing message would break on
   // one or the other).
   // injectedEphemeral (a pump-supplied retract-redo's context) leads, then screen's own — both share
-  // the identical tail-fold path below.
-  const ephemeral = [...(opts.injectedEphemeral ?? []), ...screen.ephemeral];
+  // the identical tail-fold path below. Mutable: a raced screen verdict (below) folds its correction
+  // in here when it fires, and the loop re-runs with it.
+  let ephemeral = [...(opts.injectedEphemeral ?? []), ...screen.ephemeral];
+
+  // Raced screen verdicts (see DeferredScreen): polled — synchronously, never awaited — at each loop
+  // edge. `pollDeferred` claims any that have fired this poll (exactly once each) and merges their
+  // corrections; `applyCorrection` then folds them in and returns any durable blocks to emit live.
+  const deferred = screen.deferred;
+  const pollDeferred = (): DeferredCorrection | undefined => {
+    if (deferred.length === 0) return undefined;
+    const ephemeralC: MessageContent[] = [];
+    const durableC:   MessageContent[] = [];
+    for (const d of deferred) {
+      const c = d.claim();
+      if (!c) continue;
+      if (c.ephemeral) ephemeralC.push(...c.ephemeral);
+      if (c.durable)   durableC.push(...c.durable);
+    }
+    return (ephemeralC.length > 0 || durableC.length > 0) ? { ephemeral: ephemeralC, durable: durableC } : undefined;
+  };
+  // Apply a claimed correction: `ephemeral` leads the tail-fold for the re-run; `durable` is folded onto
+  // the turn's user message (persisted, re-run sees it in history) and RETURNED so the caller emits it
+  // live as a `robo-user` event — the durable twin, preserving a contextual fire's persistence even
+  // though the verdict landed mid-turn. Mutates `ephemeral`/`session` in place.
+  const applyCorrection = (c: DeferredCorrection): MessageContent[] => {
+    if (c.ephemeral && c.ephemeral.length > 0) ephemeral = [...c.ephemeral, ...ephemeral];
+    if (c.durable && c.durable.length > 0) {
+      const idx = session.messages.findLastIndex(m => m.role === 'user');
+      if (idx >= 0) {
+        session = { ...session, messages: session.messages.map((m, i) =>
+          i === idx ? { ...m, content: [...m.content, ...c.durable!] } : m) };
+        return c.durable;
+      }
+    }
+    return [];
+  };
 
   // ── 2. System context (built once per submit, never persisted) ─────────────
 
@@ -138,10 +181,18 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
       return;
     }
 
+    // A raced screen verdict that already fired (settled during setup, or while a previous tool round
+    // ran): fold its correction in before generating, so this call is informed directly rather than
+    // discarded. This is the no-waste path — the verdict landed before we spent any tokens.
+    const early = pollDeferred();
+    if (early) { const dur = applyCorrection(early); if (dur.length > 0) yield { type: 'robo-user', content: dur, traceId }; }
+
     const pendingCalls: Array<{ id: string; name: string; input: unknown; meta?: ProviderMeta }> = [];
     const assistantParts: MessageContent[] = [];
     let textAcc = '';
     let turnUsage: Usage | undefined;
+    // Set if a raced verdict fires mid-generation: discard this response and re-run the loop (below).
+    let restart = false;
 
     // One provider call. The outgoing array (system context + history, with screen's ephemeral
     // blocks appended onto the tail message) is assembled here and handed to `contribute` hooks for
@@ -164,8 +215,21 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
     const advertised = opts.toolPresenter
       ? await opts.toolPresenter.present([...tools.values()], { session, provider: config.provider })
       : [...tools.values()];
+    // Per-call signal linked to the turn signal: an in-situ restart aborts THIS provider call (callAc)
+    // to cancel the in-flight request and stop backend generation, without aborting the whole turn.
+    const callAc = new AbortController();
+    const callSignal = AbortSignal.any([signal, callAc.signal]);
     try {
-      for await (const ev of provider.complete(outgoing, providerConfig, advertised, signal)) {
+      for await (const ev of provider.complete(outgoing, providerConfig, advertised, callSignal)) {
+        // A raced verdict firing mid-generation changes the premise: discard this doomed response and
+        // restart the loop with the correction folded in. Polled BEFORE the event is emitted, so a
+        // classifier faster than time-to-first-token is caught before any token reaches the frontend.
+        const hit = pollDeferred();
+        if (hit) {
+          const dur = applyCorrection(hit);
+          if (dur.length > 0) yield { type: 'robo-user', content: dur, traceId };
+          restart = true; callAc.abort('screen-restart'); break;
+        }
         switch (ev.type) {
           case 'text-delta':
             textAcc += ev.delta;
@@ -202,7 +266,11 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
         }
       }
     } catch (e: any) {
-      if (signal.aborted) {
+      // A provider call cancelled by an in-situ restart (callAc, not the turn signal) is expected — fall
+      // through to the restart below rather than surfacing it as a turn abort or an error.
+      if (restart || (callAc.signal.aborted && !signal.aborted)) {
+        restart = true;
+      } else if (signal.aborted) {
         // Save whatever the LLM streamed before the abort hit.
         if (textAcc) assistantParts.push({ type: 'text', text: textAcc });
         if (assistantParts.length > 0) {
@@ -214,10 +282,21 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
         await store.set(session.id, session);
         yield { type: 'aborted', reason: typeof signal.reason === 'string' ? signal.reason : 'user-abort', session, traceId };
         return;
+      } else {
+        yield { type: 'error', error: String(e) + (('cause' in e && e.cause) ? ' ('+String(e.cause)+')' : '' ), traceId };
+        return;
       }
-      yield { type: 'error', error: String(e) + (('cause' in e && e.cause) ? ' ('+String(e.cause)+')' : '' ), traceId };
-      return;
     }
+
+    // In-situ restart: discard this iteration's (uncommitted) response and re-run the loop with the
+    // raced correction now folded into `ephemeral`. No store write, no retraction marker — the clean
+    // counterpart to a post-commit `followup` retract.
+    if (restart) continue;
+
+    // Pre-commit poll: the verdict may have settled exactly as the stream ended. Discard and re-run
+    // rather than commit-then-retract, keeping the correction on the cheaper in-situ path.
+    const late = pollDeferred();
+    if (late) { const dur = applyCorrection(late); if (dur.length > 0) yield { type: 'robo-user', content: dur, traceId }; continue; }
 
     // Build and store assistant message
     if (textAcc)           assistantParts.push({ type: 'text', text: textAcc });
@@ -316,6 +395,14 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
       } catch (e) {
         result  = { error: String(e) };
         isError = true;
+      }
+
+      // A tool that errored under an aborted signal did so because it was cut off (a steer interrupt,
+      // a user cancel), not a genuine fault — reframe it before it is recorded, so the raw abort reason
+      // never reaches the model or the transcript. Covers both the throw and the yielded-`error` paths;
+      // a successful result is left untouched.
+      if (signal.aborted && isError) {
+        result = INTERRUPTED_TOOL_RESULT;
       }
 
       // toolresult — last chance to transform the result before it's recorded/yielded (hard redaction),

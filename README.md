@@ -148,6 +148,7 @@ All the plugins are optional - install and try out as you please. You can use th
 | | `openai-compat` | OpenAI-compatible chat completions |
 | | `google` | Google Gemini (native `generateContent`) |
 | | `customer-services` | Free built-in demo LLM — no API key needed |
+| | `chatjimmy` | Hosted llama endpoint — non-streaming, text-only, keyless; a very low-latency comparison point |
 | **Storage** | `storage/filesystem` | Filesystem backend (Node; the CLI's default store) |
 | | `storage/sqlite` | SQLite backend (Node) |
 | | `storage/google-drive` | Google Drive backend (browser) |

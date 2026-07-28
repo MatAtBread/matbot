@@ -737,6 +737,7 @@ Store-backed index with optional Cloudflare BGE reranker.
 | `@matatbread/matbot-provider-openai-compat` | provider | OpenAI-compatible chat completions |
 | `@matatbread/matbot-provider-google` | provider | Google Gemini (native `generateContent`; OpenAI-compat fallback by endpoint path) |
 | `@matatbread/matbot-provider-customer-services` | provider | Free built-in demo LLM — no API key needed |
+| `@matatbread/matbot-provider-chatjimmy` | provider | Hosted llama endpoint — non-streaming, text-only, keyless; a very low-latency comparison point |
 | `@matatbread/matbot-storage-filesystem` | storage backend | Filesystem-backed Store + FileStore (Node; content-addressed, CAS-safe; the CLI's default) |
 | `@matatbread/matbot-storage-sqlite` | storage backend | SQLite-backed Store + FileStore (Node) |
 | `@matatbread/matbot-storage-google-drive` | storage backend | Google Drive-backed Store + FileStore (browser; Google Identity Services auth) |

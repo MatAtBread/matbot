@@ -1,5 +1,5 @@
 import type {
-  Hook, HookPoint, Message, MessageContent, Session,
+  Hook, HookPoint, Message, MessageContent, Session, DeferredScreen,
   ScreenContext, ContributeContext, ToolCallContext, ToolCallResult, ToolResultContext, FollowupContext,
 } from './types.js';
 
@@ -88,9 +88,12 @@ export class HookRegistry {
 
   // screen folds across hooks: each sees the session as shaped so far, accumulates ephemeral, and
   // the first `abort` short-circuits (the partial session is returned so the caller can persist it).
-  async runScreen(ctx: Omit<ScreenContext, 'removeHook'>): Promise<{ session: Session; ephemeral: MessageContent[]; durable: MessageContent[]; markers: MessageContent[]; abort?: string }> {
+  async runScreen(ctx: Omit<ScreenContext, 'removeHook'>): Promise<{ session: Session; ephemeral: MessageContent[]; durable: MessageContent[]; markers: MessageContent[]; deferred: DeferredScreen[]; abort?: string }> {
     let session = ctx.session;
     const ephemeral: MessageContent[] = [];
+    // Raced verdicts handed back by hooks: the runner polls each without gating the turn (see
+    // DeferredScreen). Usually zero or one; an array so several racing hooks compose.
+    const deferred: DeferredScreen[] = [];
     // Handler-returned markers: appended to the session here (so they persist) and accumulated so the
     // runner can also emit them live — keeping a live draw and a reload identical.
     const handlerMarkers: MessageContent[] = [];
@@ -122,13 +125,14 @@ export class HookRegistry {
       if (r.ephemeral)                   ephemeral.push(...r.ephemeral);
       if (r.durable && r.durable.length) foldDurable(r.durable);
       if (r.markers && r.markers.length) appendMarkers(r.markers);
+      if (r.deferred)                    deferred.push(r.deferred);
       if (r.abort) {
         const drained = this.drainFailureMarkers(session);
-        return { session: drained.session, ephemeral, durable, markers: [...handlerMarkers, ...drained.markers], abort: r.abort };
+        return { session: drained.session, ephemeral, durable, markers: [...handlerMarkers, ...drained.markers], deferred, abort: r.abort };
       }
     }
     const drained = this.drainFailureMarkers(session);
-    return { session: drained.session, ephemeral, durable, markers: [...handlerMarkers, ...drained.markers] };
+    return { session: drained.session, ephemeral, durable, markers: [...handlerMarkers, ...drained.markers], deferred };
   }
 
   // contribute folds the outgoing array through each hook — a pure transform pipeline; the stored
@@ -169,17 +173,22 @@ export class HookRegistry {
   // turn), any durable markers (appended to the committed session by the pump), and any
   // retract-and-rerun requests. A turn can be popped only once, so multiple hooks' retraction
   // contexts merge into a single redo (in practice only one fires); `retract` is omitted when none did.
-  async runFollowup(ctx: Omit<FollowupContext, 'removeHook'>): Promise<{ resubmits: MessageContent[][]; markers: MessageContent[]; retract?: { context: MessageContent[] } }> {
-    const resubmits: MessageContent[][] = [];
-    const markers:   MessageContent[]   = [];
-    const retract:   MessageContent[]   = [];
+  async runFollowup(ctx: Omit<FollowupContext, 'removeHook'>): Promise<{ resubmits: MessageContent[][]; markers: MessageContent[]; retract?: { context: MessageContent[]; durable: MessageContent[] } }> {
+    const resubmits:    MessageContent[][] = [];
+    const markers:      MessageContent[]   = [];
+    const retractCtx:   MessageContent[]   = [];
+    const retractDur:   MessageContent[]   = [];
     for (const hook of this.hooks.get('followup') ?? []) {
       if (hook.on !== 'followup') continue;
       const r = await this.invoke(hook, () => hook.handler({ ...ctx, removeHook: () => this.removeOne('followup', hook) }));
       if (r?.resubmit)        resubmits.push(r.resubmit.content);
-      if (r?.retractAndRerun) retract.push(...r.retractAndRerun.context);
+      if (r?.retractAndRerun) {
+        if (r.retractAndRerun.context) retractCtx.push(...r.retractAndRerun.context);
+        if (r.retractAndRerun.durable) retractDur.push(...r.retractAndRerun.durable);
+      }
       if (r?.markers)         markers.push(...r.markers);
     }
-    return { resubmits, markers, ...(retract.length > 0 ? { retract: { context: retract } } : {}) };
+    const retracting = retractCtx.length > 0 || retractDur.length > 0;
+    return { resubmits, markers, ...(retracting ? { retract: { context: retractCtx, durable: retractDur } } : {}) };
   }
 }

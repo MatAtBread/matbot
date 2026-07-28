@@ -8,6 +8,7 @@
 // localStorage keys
 const LS_FONT_SIZE      = 'fontSize';
 const LS_PROVIDER       = 'provider';
+const LS_STEER_MODE     = 'steerMode';
 const LS_SIDEBAR        = 'sidebarSections';
 const LS_SIDEBAR_WIDTH  = 'sidebarWidth';
 
@@ -145,6 +146,20 @@ const sendBtn        = document.getElementById('send-btn');
 const stopBtn        = document.getElementById('stop-btn');
 const newBtn         = document.getElementById('new-btn');
 const providerSel    = document.getElementById('provider-select');
+
+// Steering mode for /submit: 'queue' (wait for the running turn to finish) vs 'interrupt' (stop it —
+// keeping its committed partial work — and steer immediately). A per-browser toggle beside the provider
+// select, mainly for testing; defaults to 'interrupt'. Sent explicitly on every submit, so it overrides
+// the server's own default.
+const modeToggle = document.getElementById('mode-interrupt');
+if (modeToggle) {
+  const saved = localStorage[LS_STEER_MODE];
+  modeToggle.checked = saved ? saved === 'interrupt' : true;   // default: interrupt
+  modeToggle.addEventListener('change', () => {
+    localStorage.setItem(LS_STEER_MODE, modeToggle.checked ? 'interrupt' : 'queue');
+  });
+}
+const currentSteerMode = () => (modeToggle && !modeToggle.checked ? 'queue' : 'interrupt');
 const burgerBtn      = document.getElementById('burger');
 const sidebarOverlay = document.getElementById('sidebar-overlay');
 
@@ -2324,7 +2339,7 @@ async function postSubmit(sid, content, concat = false) {
   const provider = providerSel.value;
   if (!provider) return;
   try {
-    await T.submit(sid, { content, provider, concatQueue: concat });
+    await T.submit(sid, { content, provider, concatQueue: concat, mode: currentSteerMode() });
   } catch (e) {
     showSubmitError(content, e.name === 'TimeoutError' ? 'submit timed out (no response)' : (e.message || String(e)));
   }
@@ -2436,6 +2451,27 @@ async function renderTurn(sid, traceId) {
             }
           }
           if (ev.queued === 0) markStarted();
+          break;
+        }
+
+        case 'steer': {
+          // A mid-turn steer that interrupted a running turn. Its user bubble arrives here, live only:
+          // on reload / late-connect the message is in committed history (renderSession draws it) and
+          // the runner also seeds this turn's replay with a `queued`, so this event fires just once, at
+          // the interrupt moment. Render like an immediately-running submission — it runs next, right
+          // after the interrupted turn commits its partial work.
+          if (!userBubble) {
+            const text = (ev.content ?? []).filter(c => c.type === 'text').map(c => c.text).join('\n');
+            const existing = messagesEl.querySelector(`.message[data-trace="${traceId}"]`);
+            if (existing) {
+              userBubble = existing;
+              userBubbleText = existing.querySelector('.md-body')?.textContent ?? text;
+            } else if (text) {
+              userBubble = appendUserBubble(text, undefined, false, traceId);
+              userBubbleText = text;
+            }
+          }
+          markStarted();
           break;
         }
 
@@ -2696,8 +2732,11 @@ async function renderTurn(sid, traceId) {
 
         case 'aborted': {
           removeLoading();
-          if (ev.reason === 'user-abort') {
-            // Partial content already in DOM and saved to store — nothing to re-render.
+          if (ev.reason === 'user-abort' || ev.reason === 'steer') {
+            // Partial content already in DOM and saved to store — nothing to re-render. For a steer
+            // (mid-turn interrupt) the interrupted turn's work is deliberately kept — the steer bubble
+            // and its continuation render after it. Re-rendering from ev.session here would wipe the
+            // live steer bubble, which isn't persisted until its own turn runs (persist-at-turn-start).
           } else {
             if (turnWrap) turnWrap.remove();
             if (ev.session) renderSession(ev.session);

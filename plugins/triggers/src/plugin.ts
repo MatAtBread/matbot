@@ -1,5 +1,5 @@
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
-import type { MatbotPluginSpec, MatbotMachine, Store, Message, MessageContent } from '@matatbread/matbot-plugin-api';
+import type { MatbotPluginSpec, MatbotMachine, Store, Message, MessageContent, Session, PromptFn, DeferredCorrection } from '@matatbread/matbot-plugin-api';
 import { TriggerManager } from './manager.js';
 import { dispatchTrigger, renderResult } from './dispatch.js';
 import { createTriggerActionTool, createTriggersConfigTool } from './tools.js';
@@ -11,6 +11,30 @@ import type { Trigger, Triggers, FiredCondition } from './types.js';
 interface FiredSource {
   id:      string;
   matched: FiredCondition[];
+}
+
+/** The outcome of the concurrent user-phase evaluation (see the racing note in {@link setupTriggers}):
+ *  the rendered result bodies split by delivery — `ephemeral` (a `ephemeral`-kind fire, informs one
+ *  answer) vs `durable` (a `contextual`-kind fire, folds onto the user turn and persists) — plus the
+ *  firing sources and any markers (a silent side-effect's tool markers, or a trace). All empty ⇒
+ *  nothing fired / nothing to do. */
+interface UserPhaseOutcome {
+  ephemeralBodies: string[];
+  durableBodies:   string[];
+  sources:         FiredSource[];
+  markers:         MessageContent[];
+}
+
+/** A user-phase evaluation in flight for one turn, shared between the three places that may deliver its
+ *  correction: the runner's in-situ restart (via the `DeferredScreen.claim()` the screen hook returns),
+ *  an optional pre-first-token grace inject (screen, when `classifierGraceMs > 0`), and the post-commit
+ *  `followup` retract. `ready`/`correction` let the runner poll synchronously; `claimed` is the
+ *  exactly-once latch — whoever delivers sets it, so the other two see it and don't re-deliver. */
+interface UserPhaseInFlight {
+  verdict:    Promise<UserPhaseOutcome>;
+  ready:      boolean;
+  correction: DeferredCorrection;   // fenced ephemeral/durable blocks; both empty ⇒ no result-fire
+  claimed:    boolean;
 }
 
 declare module '@matatbread/matbot-plugin-api' {
@@ -48,15 +72,34 @@ function fence(body: string): string {
     `Take it into account when responding.]\n\n${body}\n\n[End of additional context.]`;
 }
 
-// A durable trace of a user-phase injection. For `ephemeral-inject` the injected `text` is never
-// otherwise persisted, so without this a post-mortem can't see what the system fed the model before it
-// answered; for `durable-inject` the text IS persisted (folded onto the user turn), so `text` is
-// omitted and the marker records only WHICH condition fired and why. LLM-invisible like any marker; a
-// frontend may ignore it (diagnostic, not user-facing). `triggers` are the firing sources (id +
-// matched conditions). (The agent-phase injections are traced elsewhere: a retract redo's context by
-// the core retraction marker, and a `followup` resubmit by its persisted robo turn.)
-function injectionMarker(event: 'ephemeral-inject' | 'durable-inject', triggers: FiredSource[], text?: string): MessageContent {
-  return { type: 'marker', creator: 'triggers', data: { event, surface: 'user', triggers, ...(text !== undefined ? { text } : {}) } };
+// A durable trace that a user-phase result-fire caused a retract-redo. The redo's injected context is
+// already recorded by the core retraction marker, but that marker doesn't know about triggers — this
+// records WHICH user-phase trigger(s)/condition(s) drove the supersede, so a false-positive post-mortem
+// can see why. A distinct `event` from the agent-phase `retract-fired` so the agent convergence guard
+// (retractActiveLastTurn) never mistakes a user-phase source for one of its own retract rules.
+function userRetractFiredMarker(triggers: FiredSource[]): MessageContent {
+  return { type: 'marker', creator: 'triggers', data: { event: 'user-retract-fired', surface: 'user', triggers } };
+}
+
+// A user-phase result-fire delivered on the CLEAN path — folded into the turn in-situ (the runner
+// restarted a doomed generation) or before the first token (the screen grace inject) — rather than as a
+// post-commit retract. No `matbot-retraction` marker exists in that case (nothing was popped), so this
+// is the whole durable trace that the correction fired and via which trigger(s)/condition(s).
+function userInsituFiredMarker(triggers: FiredSource[]): MessageContent {
+  return { type: 'marker', creator: 'triggers', data: { event: 'user-insitu-fired', surface: 'user', triggers } };
+}
+
+// Fence a user-phase outcome's result bodies into a delivery-ready correction: ephemeral bodies become a
+// plain fenced block (tail-folded for one answer), durable bodies become a fenced `origin: 'robo'` block
+// (folded onto the user turn, persisted + visible). Either side may be empty.
+function fenceCorrection(out: UserPhaseOutcome): DeferredCorrection {
+  return {
+    ...(out.ephemeralBodies.length > 0 ? { ephemeral: [{ type: 'text', text: fence(out.ephemeralBodies.join(JOIN)) }] } : {}),
+    ...(out.durableBodies.length   > 0 ? { durable:   [{ type: 'text', text: fence(out.durableBodies.join(JOIN)), origin: 'robo' as const }] } : {}),
+  };
+}
+function hasCorrection(c: DeferredCorrection): boolean {
+  return (c.ephemeral?.length ?? 0) > 0 || (c.durable?.length ?? 0) > 0;
 }
 
 // The core retraction marker's creator (core/src/session-runner.ts). Hardcoded as a
@@ -75,7 +118,17 @@ function suppressedMarker(cause: SuppressCause, reason: string, triggers: FiredS
   return { type: 'marker', creator: 'triggers', data: { event: 'suppressed', cause, reason, triggers } };
 }
 function retractFiredMarker(triggers: FiredSource[]): MessageContent {
-  return { type: 'marker', creator: 'triggers', data: { event: 'retract-fired', triggers } };
+  return { type: 'marker', creator: 'triggers', data: { event: 'retract-fired', surface: 'agent', triggers } };
+}
+
+// The agent-surface twin of `userInsituFiredMarker`: a `followup`-kind fire keeps the response and
+// resubmits a robo turn, so — unlike a retract — nothing else records it (no core retraction marker,
+// no suppression). Without this the steer arrives with no trace of WHICH rule judged the response and
+// why, which the model then guesses at backwards from the rule text (and those guesses can re-match
+// the same rule, looping invisibly). Deliberately NOT read back by the convergence guard: that guard
+// is retract-only, and `retractActiveLastTurn` keys on `retract-fired`.
+function followupFiredMarker(triggers: FiredSource[]): MessageContent {
+  return { type: 'marker', creator: 'triggers', data: { event: 'followup-fired', surface: 'agent', triggers } };
 }
 
 // True when the latest turn is a retract-redo: a `matbot-retraction` marker sits after the last genuine
@@ -125,17 +178,21 @@ function textOf(msg: Message | undefined): string {
  * Wire the triggers subsystem: build the {@link TriggerManager}, load persisted triggers, register
  * the `Triggers` service and the `trigger_action` tool, then install the two evaluation hooks:
  *
- *   user  — a `screen` hook (pre-response) that judges `user`-phase conditions against the incoming
- *           message, invokes each fired trigger's tool, and delivers the result per the fired
- *           condition's `kind`: `ephemeral` (inject for this turn only, never persisted) or
- *           `contextual` (fold DURABLY onto the user message — persisted + visible — so it updates
- *           the conversation rather than informing one answer).
- *   agent — a `followup` hook (post-commit) that judges agent-surface conditions against the
+ *   user  — a `screen` hook (pre-response) that KICKS OFF the `user`-phase classify+dispatch but does
+ *           NOT await it: the classifier races the turn's own generation instead of gating the first
+ *           token. Its verdict is consumed post-commit by the `followup` hook (below), so a user-phase
+ *           result-fire supersedes the answer via a retract-redo rather than informing it in advance.
+ *           This collapses the user surface toward the agent one — both are now concurrent-classify +
+ *           post-turn-correct, differing only in subject (user message vs response). The `ephemeral`
+ *           /`contextual` kinds no longer split delivery (a pre-response injection point is gone): any
+ *           result-fire is delivered as a retract; a silent side-effect (no result) needs no delivery.
+ *   agent — the `followup` hook (post-commit) also judges agent-surface conditions against the
  *           assistant's response, invokes each fired trigger's tool, and delivers the result per the
  *           fired condition's `kind`: `retract` (discard the response and re-run with the result
- *           injected) or `followup` (keep the response and resubmit the result as a robo turn).
+ *           injected) or `followup` (keep the response and resubmit the result as a robo turn). It
+ *           merges the raced user-phase outcome into the same retract/resubmit decision.
  *
- * Both phases fence the injected payload (see {@link fence}) so the model reads it as system-supplied
+ * Both surfaces fence the injected payload (see {@link fence}) so the model reads it as system-supplied
  * context, not a user utterance.
  *
  * Returns the manager so a specialization (a node watcher, say) could attach to the same instance.
@@ -155,9 +212,61 @@ export async function setupTriggers(services: MatbotMachine): Promise<TriggerMan
   services.tools.register(createTriggerActionTool(manager));
   services.tools.register(createTriggersConfigTool(services));
 
-  // user phase — pre-response. Judges the incoming user message and delivers each fired trigger's tool
-  // result by its kind: `ephemeral` informs this response only; `contextual` folds durably onto the
-  // user turn so it persists into the conversation.
+  // In-flight user-phase evaluations, keyed by the turn's traceId. The `screen` hook kicks one off
+  // (without awaiting) so the classifier races the turn's generation; the runner claims it in-situ via
+  // the DeferredScreen, or the `followup` hook (same traceId) consumes-and-deletes it post-commit. An
+  // entry exists only for a genuine, non-redo user turn. Keyed by traceId, so concurrent turns across
+  // sessions never collide.
+  const pendingUserPhase = new Map<string, UserPhaseInFlight>();
+
+  // Optional pre-first-token grace: how long `screen` waits for the verdict before handing off to the
+  // race. 0 (default) ⇒ pure race (the responsive path — no added latency, correction lands in-situ or
+  // as a retract). A positive value trades that responsiveness back for cleanliness: a classifier that
+  // settles within the window injects BEFORE the first token (the old "slow but clean" feel), a slower
+  // one still races. Read live so a triggers_config/settings change takes effect next turn.
+  const resolveGraceMs = async (): Promise<number> => {
+    const v = await services.settings().get<number | string>('classifierGraceMs');
+    const n = typeof v === 'string' ? Number(v) : v;
+    return typeof n === 'number' && Number.isFinite(n) && n > 0 ? n : 0;
+  };
+
+  // Judge the user message and dispatch every fired user-phase trigger, partitioning result bodies by
+  // kind: `contextual` → durable (folded onto the user turn, persisted), everything else → ephemeral
+  // (informs one answer). A silent fire contributes only its tool's markers. Runs off the turn's
+  // critical path (kicked off in `screen`); the correction is delivered later on whichever path wins.
+  const runUserPhase = async (ctx: { session: Session; signal: AbortSignal; provider: string; prompt?: PromptFn }): Promise<UserPhaseOutcome> => {
+    const lastUser = ctx.session.messages.findLast(l => l.role === 'user');
+    const fired = await manager.evaluate(
+      'user',
+      { label: 'latest user message', text: textOf(lastUser) },
+      { label: 'preceding assistant message', text: textOf(ctx.session.messages.findLast(
+        l => l.role === 'assistant' && l.content.some(c => c.type === 'text'),
+      )) },
+      ctx.signal,
+      ctx.provider,
+    );
+    const ephemeralBodies: string[]         = [];
+    const durableBodies:   string[]         = [];
+    const sources:         FiredSource[]    = [];
+    const markers:         MessageContent[] = [];
+    for (const { trigger, kinds, matched } of fired) {
+      const out = await dispatchTrigger(services, trigger, { session: ctx.session, signal: ctx.signal, provider: ctx.provider, ...(ctx.prompt !== undefined ? { prompt: ctx.prompt } : {}) });
+      if (out.hadResult) {
+        // Contextual dominates: a trigger carrying both kinds folds durable (a superset of ephemeral —
+        // it persists AND informs this answer), mirroring the agent surface's retract-over-followup.
+        if (kinds.includes('contextual')) durableBodies.push(renderResult(out.result));
+        else                              ephemeralBodies.push(renderResult(out.result));
+        sources.push({ id: trigger.id, matched });
+      }
+      markers.push(...out.markers);
+    }
+    return { ephemeralBodies, durableBodies, sources, markers };
+  };
+
+  // user phase — kicked off pre-response, NOT awaited. Judging the user message concurrently with the
+  // turn keeps the classifier off the pre-first-token critical path. The correction is delivered by
+  // whichever of three points wins: the runner's in-situ restart (via the returned DeferredScreen), a
+  // pre-first-token grace inject (when `classifierGraceMs > 0`), or the post-commit `followup` retract.
   services.hooks.register({
     on: 'screen',
     async handler(ctx) {
@@ -165,62 +274,55 @@ export async function setupTriggers(services: MatbotMachine): Promise<TriggerMan
       // Skip our own agent-phase robo resubmissions — they are not real user turns.
       if (!lastUser || lastUser.content.every(c => c.origin === 'robo')) return;
 
-      // Guard: a retract-redo re-runs this same user turn. The user-phase (ephemeral/contextual)
-      // triggers already fired — and their side effects (e.g. remember_fact's store write, or a
-      // contextual fold persisted onto the user message) already happened — on the original attempt,
-      // so re-firing here double-applies them. Hold off, and record why (suppression is never silent).
-      // The redo still gets the retract correction via the injected context.
+      // Guard: a retract-redo re-runs this same user turn. The user-phase triggers already fired — and
+      // their side effects (e.g. remember_fact's store write) already happened — on the original
+      // attempt, so re-firing would double-apply them. Don't kick a second evaluation off; the redo
+      // already carries the retract correction as injected context. Record why (never silent).
       if (isRetractRedo(ctx.session.messages)) {
         return { markers: [suppressedMarker('user-redo', 'user-phase triggers held off: retract-redo (user message already processed on the original attempt)', [])] };
       }
 
-      const fired = await manager.evaluate(
-        'user',
-        { label: 'latest user message', text: textOf(lastUser) },
-        { label: 'preceding assistant message', text: textOf(ctx.session.messages.findLast(
-          l => l.role === 'assistant' && l.content.some(c => c.type === 'text'),
-        )) },
-        ctx.signal,
-        ctx.config.provider,
-      );
-      if (fired.length === 0) return;
+      // No traceId ⇒ can't correlate to the followup hook that consumes the verdict; skip racing (a
+      // direct runSession caller without a traceId simply gets no user-phase triggers). In the pump —
+      // the only real entry point — traceId is always set.
+      const traceId = ctx.config.traceId;
+      if (traceId === undefined) return;
 
-      // Partition fired triggers' output by delivery. A trigger can carry both kinds on this surface;
-      // if any `contextual` condition fired the output goes durable, since a durable fold is also sent
-      // on this very turn (it lands in the user message before the provider call) — it is a superset of
-      // ephemeral, so "contextual dominates" loses nothing, mirroring retract-over-followup on the
-      // agent surface. Markers are collected regardless — they persist whichever path runs.
-      const ephemeralBodies:  string[]         = [];
-      const ephemeralSources: FiredSource[]    = [];
-      const durableBodies:    string[]         = [];
-      const durableSources:   FiredSource[]    = [];
-      const markers:          MessageContent[] = [];
-      for (const { trigger, kinds, matched } of fired) {
-        const out = await dispatchTrigger(services, trigger, { session: ctx.session, signal: ctx.signal, provider: ctx.config.provider, ...(ctx.prompt !== undefined ? { prompt: ctx.prompt } : {}) });
-        if (out.hadResult) {
-          if (kinds.includes('contextual')) {
-            durableBodies.push(renderResult(out.result));
-            durableSources.push({ id: trigger.id, matched: matched.filter(m => m.kind === 'contextual') });
-          } else {
-            ephemeralBodies.push(renderResult(out.result));
-            ephemeralSources.push({ id: trigger.id, matched: matched.filter(m => m.kind === 'ephemeral') });
-          }
+      // Kick off classify+dispatch; do not await. The record's `ready`/`fenced` let the runner poll
+      // synchronously; `.catch` neutralises an aborted-turn rejection (the classifier shares the turn's
+      // signal) so it never surfaces as an unhandled rejection.
+      const rec: UserPhaseInFlight = { verdict: undefined as unknown as Promise<UserPhaseOutcome>, ready: false, correction: {}, claimed: false };
+      rec.verdict = runUserPhase({ session: ctx.session, signal: ctx.signal, provider: ctx.config.provider, ...(ctx.prompt !== undefined ? { prompt: ctx.prompt } : {}) })
+        .then(out => { rec.ready = true; rec.correction = fenceCorrection(out); return out; })
+        .catch((): UserPhaseOutcome => { rec.ready = true; return { ephemeralBodies: [], durableBodies: [], sources: [], markers: [] }; });
+      pendingUserPhase.set(traceId, rec);
+
+      // Optional grace: wait up to `classifierGraceMs` for the verdict before racing. If it lands with a
+      // result-fire, deliver it as ordinary ephemeral (injected before the first token — the clean path)
+      // and latch `claimed` so neither the runner nor followup re-delivers it. At 0 (default) this is
+      // skipped entirely — pure race, no added latency.
+      const graceMs = await resolveGraceMs();
+      if (graceMs > 0) {
+        await Promise.race([rec.verdict, new Promise(r => setTimeout(r, graceMs))]);
+        if (rec.ready && hasCorrection(rec.correction) && !rec.claimed) {
+          rec.claimed = true;
+          return {
+            ...(rec.correction.ephemeral ? { ephemeral: rec.correction.ephemeral } : {}),
+            ...(rec.correction.durable   ? { durable:   rec.correction.durable   } : {}),
+          };
         }
-        markers.push(...out.markers);
       }
-      // Trace each injection. The ephemeral text is never otherwise persisted, so the marker carries it;
-      // the durable text rides the user message itself, so its marker records only the firing sources.
-      if (ephemeralBodies.length > 0) markers.push(injectionMarker('ephemeral-inject', ephemeralSources, ephemeralBodies.join(JOIN)));
-      if (durableBodies.length   > 0) markers.push(injectionMarker('durable-inject',   durableSources));
-      if (ephemeralBodies.length === 0 && durableBodies.length === 0 && markers.length === 0) return;
 
+      // Race path: hand the runner a deferred that claims the correction exactly once for an in-situ
+      // restart (or a pre-generation fold). Not settled / no result / already claimed ⇒ undefined.
       return {
-        // The dispatcher appends markers to the session AND emits them live (consistent draw/reload).
-        // `ephemeral` informs only this turn; `durable` folds onto the user turn (origin: 'robo'),
-        // persists, and is carried live as a robo-user event.
-        ...(markers.length         > 0 ? { markers } : {}),
-        ...(ephemeralBodies.length > 0 ? { ephemeral: [{ type: 'text', text: fence(ephemeralBodies.join(JOIN)) }] } : {}),
-        ...(durableBodies.length   > 0 ? { durable:   [{ type: 'text', text: fence(durableBodies.join(JOIN)), origin: 'robo' as const }] } : {}),
+        deferred: {
+          claim: (): DeferredCorrection | undefined => {
+            if (!rec.ready || rec.claimed || !hasCorrection(rec.correction)) return undefined;
+            rec.claimed = true;
+            return rec.correction;
+          },
+        },
       };
     },
   });
@@ -234,7 +336,19 @@ export async function setupTriggers(services: MatbotMachine): Promise<TriggerMan
   services.hooks.register({
     on: 'followup',
     async handler(ctx) {
+      // Consume the raced user-phase record kicked off in `screen` (present only for a genuine, non-redo
+      // user turn). Delete-on-read keeps the map bounded; an aborted turn (followup skipped entirely)
+      // leaves at most one orphan whose promise already .catch'd itself into a harmless value.
+      const traceId = ctx.config.traceId;
+      const rec     = traceId !== undefined ? pendingUserPhase.get(traceId) : undefined;
+      if (traceId !== undefined) pendingUserPhase.delete(traceId);
+
       if (ctx.resubmitDepth > 0) return;
+
+      const userOut: UserPhaseOutcome = rec ? await rec.verdict : { ephemeralBodies: [], durableBodies: [], sources: [], markers: [] };
+      // `claimed` ⇒ the correction was already delivered on the clean path (the runner's in-situ restart
+      // or the screen grace inject), so it must NOT also enter the retract context below.
+      const insitu = rec?.claimed ?? false;
 
       const fired = await manager.evaluate(
         'agent',
@@ -245,23 +359,24 @@ export async function setupTriggers(services: MatbotMachine): Promise<TriggerMan
         ctx.signal,
         ctx.config.provider,
       );
-      if (fired.length === 0) return;
 
       // Convergence guard: a retract rule that already retracted on the PREVIOUS turn and is about to
       // again has not converged (the redo didn't dissolve its condition). Hold those rules off so a
       // mis-tuned retract can't pop-and-redo every turn forever. A well-behaved rule self-terminates
-      // (its redo cures the defect, so it won't fire next turn) and never lands here.
+      // (its redo cures the defect, so it won't fire next turn) and never lands here. (User-phase fires
+      // need no such guard: `screen` skips them on a redo, so they fire at most once per user message.)
       const heldOff = retractActiveLastTurn(ctx.session.messages);
 
-      // Partition fired triggers' output by their kind. A trigger can carry both retract and followup
-      // conditions; if any retract condition fired, the trigger is treated as retract (a wrong answer
-      // can't be merely steered). Markers are collected regardless — they persist whichever path runs.
+      // Partition agent fired triggers' output by their kind. A trigger can carry both retract and
+      // followup conditions; if any retract condition fired, the trigger is treated as retract (a wrong
+      // answer can't be merely steered). Markers are collected regardless — they persist whichever path
+      // runs. The raced user-phase markers ride alongside from the start.
       const retractBodies:   string[]         = [];
       const retractSources:  FiredSource[]    = [];
       const followupBodies:  string[]         = [];
       const followupSources: FiredSource[]    = [];
       const suppressed:      FiredSource[]    = [];
-      const markers:         MessageContent[] = [];
+      const markers:         MessageContent[] = [...userOut.markers];
       for (const { trigger, kinds, matched } of fired) {
         if (kinds.includes('retract') && heldOff.has(trigger.id)) {
           suppressed.push({ id: trigger.id, matched: matched.filter(m => m.kind === 'retract') });
@@ -284,26 +399,43 @@ export async function setupTriggers(services: MatbotMachine): Promise<TriggerMan
         markers.push(suppressedMarker('retract-convergence', 'retract held off: this rule was active on the previous turn and is still matching (non-converging)', suppressed));
       }
 
-      // Retract dominates: if any trigger judged the response WRONG, the response is discarded, so a
-      // steer that critiques it has lost its subject — skip the followup bodies this turn. That skip is
-      // a suppression too, so it leaves a `suppressed` marker (not just a log): a followup that "didn't
-      // fire" because a retract preempted it is answerable from the session. The redo's injected context
-      // is recorded by the core retraction marker; the `retract-fired` marker lets the next turn's
-      // convergence guard see this firing.
-      if (retractBodies.length > 0) {
+      // A user-phase result-fire already delivered on the clean path (in-situ / grace) is traced but does
+      // NOT re-enter the turn — it's already there. Only an UNclaimed one lands here, meaning the verdict
+      // arrived after commit: it supersedes the answer via retract. Its ephemeral bodies lead the context
+      // (they address the QUESTION; an agent retract addresses the ANSWER); its durable bodies (a
+      // contextual fire) fold onto the re-run's user message so the correction persists, not just informs.
+      const userHadFire = userOut.ephemeralBodies.length > 0 || userOut.durableBodies.length > 0;
+      if (insitu && userHadFire) markers.push(userInsituFiredMarker(userOut.sources));
+      const userEph = insitu ? [] : userOut.ephemeralBodies;
+      const userDur = insitu ? [] : userOut.durableBodies;
+      const retractContext = [...userEph, ...retractBodies];
+      const retractDurable = userDur;
+
+      // Retract dominates: if ANY trigger (user- or agent-phase) judged the exchange wrong, the response
+      // is discarded, so a steer that critiques it has lost its subject — skip the followup bodies this
+      // turn. That skip is a suppression too, so it leaves a `suppressed` marker (answerable from the
+      // session). The redo's injected context is recorded by the core retraction marker; the phase-tagged
+      // `retract-fired` markers let a post-mortem (and, for agent, the next turn's convergence guard)
+      // see which side fired.
+      if (retractContext.length > 0 || retractDurable.length > 0) {
         if (followupBodies.length > 0) {
           markers.push(suppressedMarker('followup-shadowed', 'followup steer skipped: a retract on the same turn supersedes the response it would critique', followupSources));
         }
-        markers.push(retractFiredMarker(retractSources));
+        if (userEph.length > 0 || userDur.length > 0) markers.push(userRetractFiredMarker(userOut.sources));
+        if (retractBodies.length > 0)                 markers.push(retractFiredMarker(retractSources));
         return {
-          retractAndRerun: { context: [{ type: 'text', text: fence(retractBodies.join(JOIN)) }] },
+          retractAndRerun: {
+            ...(retractContext.length > 0 ? { context: [{ type: 'text', text: fence(retractContext.join(JOIN)) }] } : {}),
+            ...(retractDurable.length > 0 ? { durable: [{ type: 'text', text: fence(retractDurable.join(JOIN)), origin: 'robo' as const }] } : {}),
+          },
           markers,
         };
       }
       if (followupBodies.length > 0) {
+        markers.push(followupFiredMarker(followupSources));
         return {
           resubmit: { content: [{ type: 'text', origin: 'robo', text: fence(followupBodies.join(JOIN)) }] },
-          ...(markers.length > 0 ? { markers } : {}),
+          markers,
         };
       }
       // No model-facing result from any trigger — only markers (silent side-effects), if any.

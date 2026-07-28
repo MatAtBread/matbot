@@ -355,6 +355,9 @@ export async function boot(env: BootEnv): Promise<void> {
       if (rawCfg === undefined) throw new Error(`complete(): unknown provider "${req.provider}". Available: ${[...providers.keys()].join(', ')}`);
       const resolved: ProviderConfig = {
         ...rawCfg,
+        // Per-call overrides shallow-merged over the config's own parameters (request wins). See the
+        // @deprecated note on CompletionRequest.parameters — honoured, but a provider profile is preferred.
+        ...(req.parameters !== undefined ? { parameters: { ...rawCfg.parameters, ...req.parameters } } : {}),
         ...(rawCfg.credentials !== undefined ? { credentials: await resolveCredentials(rawCfg.credentials, vault) } : {}),
         ...(rawCfg.endpoint    !== undefined ? { endpoint: await resolveInteractive(rawCfg.endpoint, vault) } : {}),
       };
@@ -467,6 +470,7 @@ export async function boot(env: BootEnv): Promise<void> {
     unloadPlugin:  services.unloadPlugin.bind(services),
     toolTypeIndex: () => services.ToolTypeIndex,   // fold each tool's wire contract into its description at dispatch
     toolPresenter: () => services.ToolPresenter,   // resolved live: a tool-search/deferral plugin registers it after boot
+    steeringPolicy: () => services.SteeringPolicy, // resolved live: a steering plugin registers it after boot
   });
 
   // Load provider plugins first as a warm-up so the first turn needn't load its adapter mid-response.

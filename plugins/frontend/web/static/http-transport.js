@@ -9,7 +9,7 @@
 //   callTool(name, input)                          -> Promise<any>     buffered tool call (throws on error)
 //   createSession()                                -> Promise<{ id }>
 //   sessionBusy(id)                                -> Promise<boolean>
-//   submit(sid, { content, provider, concatQueue }) -> Promise<{ queued, traceId }>  (throws on failure)
+//   submit(sid, { content, provider, concatQueue, mode }) -> Promise<{ queued, traceId }>  (throws on failure)
 //   sessionEvents(sid, signal)                     -> AsyncIterable<PipelineEvent>   all turn output for the session
 //   answerPrompt(sid, body)                        -> Promise<void>    body = { answer } | { cancel: true }
 //   answerEnv(sid, body)                           -> Promise<void>    body = { callId, ok, value } | { callId, ok:false, error }

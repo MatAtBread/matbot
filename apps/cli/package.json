@@ -3,7 +3,7 @@
   "matbotRuntime": [
     "node"
   ],
-  "version": "0.3.4",
+  "version": "0.3.5",
   "engines": {
     "node": ">=24.0.0"
   },
@@ -49,7 +49,8 @@
     "@matatbread/matbot-provider-anthropic": "workspace:^",
     "@matatbread/matbot-provider-openai-compat": "workspace:^",
     "@matatbread/matbot-provider-google": "workspace:^",
-    "@matatbread/matbot-provider-customer-services": "workspace:^"
+    "@matatbread/matbot-provider-customer-services": "workspace:^",
+    "@matatbread/matbot-provider-chatjimmy": "workspace:^"
   },
   "devDependencies": {
     "@types/node": "catalog:",
