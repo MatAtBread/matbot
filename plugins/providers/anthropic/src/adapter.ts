@@ -1,6 +1,6 @@
 import type { ProviderAdapter, ProviderConfig, Message, Tool, CompletionEvent, HealthStatus } from '@matatbread/matbot-plugin-api';
 import { parseSSE } from '@matatbread/matbot-core/providers-base';
-import { toAnthropicMessages, toAnthropicSystem, toAnthropicTools } from './convert.js';
+import { toAnthropicMessages, toAnthropicSystem, toAnthropicTools, type CacheControl } from './convert.js';
 
 const DEFAULT_ENDPOINT   = 'https://api.anthropic.com';
 const ANTHROPIC_VERSION  = '2023-06-01';
@@ -30,17 +30,24 @@ export class AnthropicAdapter implements ProviderAdapter {
     const endpoint = config.endpoint ?? DEFAULT_ENDPOINT;
     const apiKey   = config.credentials?.['apiKey'] ?? '';
 
+    // Default to the 1-hour cache TTL: matbot sessions are interactive, and on-disk usage showed the
+    // 5-minute default expiring across normal think-time gaps (>5min → ~100% cold miss), which both
+    // tanked the cache hit rate and inflated input-token throughput against the (Azure) rate limit.
+    // A provider can opt back to the 5-minute default with `parameters.cacheTtl: '5m'`.
+    const oneHour = config.parameters?.cacheTtl !== '5m';
+    const cache: CacheControl = oneHour ? { type: 'ephemeral', ttl: '1h' } : { type: 'ephemeral' };
+
     const body: Record<string, unknown> = {
       model:      config.model,
       max_tokens: config.parameters?.maxTokens ?? DEFAULT_MAX_TOKENS,
-      messages:   toAnthropicMessages(messages),
+      messages:   toAnthropicMessages(messages, cache),
       stream:     true,
     };
 
-    const system = toAnthropicSystem(messages);
+    const system = toAnthropicSystem(messages, cache);
     if (system) body['system'] = system;
 
-    const toolDefs = toAnthropicTools(tools);
+    const toolDefs = toAnthropicTools(tools, cache);
     if (toolDefs.length > 0) body['tools'] = toolDefs;
 
     if (config.parameters?.temperature !== undefined) {
@@ -64,6 +71,7 @@ export class AnthropicAdapter implements ProviderAdapter {
 
     // Enable extended thinking + prompt caching betas if requested
     const betas: string[] = ['prompt-caching-2024-07-31'];
+    if (oneHour) betas.push('extended-cache-ttl-2025-04-11');   // required for the 1h cache TTL
     if (config.parameters?.thinking) betas.push('interleaved-thinking-2025-05-14');
     headers['anthropic-beta'] = betas.join(',');
 

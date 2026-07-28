@@ -2,14 +2,14 @@ import type { Message, Tool, JSONSchema } from '@matatbread/matbot-plugin-api';
 
 // ── Internal Anthropic API types ──────────────────────────────────────────────
 
-type CacheControl = { type: 'ephemeral' };
+export type CacheControl = { type: 'ephemeral'; ttl?: '5m' | '1h' };
 
 type AnthropicTextBlock        = { type: 'text';              text: string;           cache_control?: CacheControl };
 type AnthropicThinkingBlock    = { type: 'thinking';          thinking: string; signature: string };
 type AnthropicRedactedThinking = { type: 'redacted_thinking'; data: string };
-type AnthropicImageBlock       = { type: 'image';             source: { type: 'base64'; media_type: string; data: string } | { type: 'url'; url: string } };
-type AnthropicToolUse          = { type: 'tool_use';          id: string; name: string; input: unknown };
-type AnthropicToolResult       = { type: 'tool_result';       tool_use_id: string; content: string; is_error?: boolean };
+type AnthropicImageBlock       = { type: 'image';             source: { type: 'base64'; media_type: string; data: string } | { type: 'url'; url: string }; cache_control?: CacheControl };
+type AnthropicToolUse          = { type: 'tool_use';          id: string; name: string; input: unknown; cache_control?: CacheControl };
+type AnthropicToolResult       = { type: 'tool_result';       tool_use_id: string; content: string; is_error?: boolean; cache_control?: CacheControl };
 type AnthropicContent          = AnthropicTextBlock | AnthropicThinkingBlock | AnthropicRedactedThinking | AnthropicImageBlock | AnthropicToolUse | AnthropicToolResult;
 
 export interface AnthropicMessage {
@@ -26,7 +26,15 @@ export interface AnthropicToolDef {
 
 // ── Message conversion ────────────────────────────────────────────────────────
 
-export function toAnthropicMessages(messages: Message[]): AnthropicMessage[] {
+// cache_control is valid on any block type we emit as a message's last block (text / image /
+// tool_use / tool_result). thinking/redacted blocks are stripped before this point and the API
+// rejects cache_control on them, so the last block is always cacheable.
+function cacheLastBlock(msg: AnthropicMessage, cc: CacheControl): void {
+  const last = msg.content[msg.content.length - 1];
+  if (last) (last as { cache_control?: CacheControl }).cache_control = cc;
+}
+
+export function toAnthropicMessages(messages: Message[], cc: CacheControl): AnthropicMessage[] {
   const result: AnthropicMessage[] = [];
 
   for (const msg of messages) {
@@ -89,44 +97,44 @@ export function toAnthropicMessages(messages: Message[]): AnthropicMessage[] {
     if (content.length > 0) result.push({ role, content });
   }
 
-  // Cache the second-to-last user turn (stable across the next request)
-  const userTurns = result.reduce<number[]>((acc, m, i) => {
-    if (m.role === 'user') acc.push(i);
-    return acc;
-  }, []);
-
-  if (userTurns.length >= 2) {
-    const idx  = userTurns[userTurns.length - 2]!;
-    const turn = result[idx]!;
-    const last = turn.content[turn.content.length - 1];
-    if (last && last.type === 'text') {
-      (last as AnthropicTextBlock).cache_control = { type: 'ephemeral' };
-    }
-  }
+  // Roll a cache breakpoint across the two most-recent messages. Each turn advances the cache write
+  // frontier to the newest content (which becomes stable history next turn), while the earlier of the
+  // two stays within the 20-block lookback so the next request finds a prior entry to read from.
+  // Placed on the last block whatever its type: tool-result turns (role 'user', last block a
+  // tool_result) are cacheable, and the old text-only guard skipped them entirely — the dominant
+  // cause of uncached agentic tool loops.
+  const lastMsg = result[result.length - 1];
+  if (lastMsg) cacheLastBlock(lastMsg, cc);
+  const prevMsg = result[result.length - 2];
+  if (prevMsg) cacheLastBlock(prevMsg, cc);
 
   return result;
 }
 
-export function toAnthropicSystem(messages: Message[]): string | undefined {
+// Returned as a block array (not a bare string) so the system prompt carries its own cache breakpoint.
+// It renders after `tools`, so this breakpoint caches tools + system together as one stable anchor —
+// robust even when a long tool turn pushes the message breakpoints past the 20-block lookback.
+export function toAnthropicSystem(messages: Message[], cc: CacheControl): AnthropicTextBlock[] | undefined {
   const parts = messages
     .filter(m => m.role === 'system')
     .flatMap(m => m.content)
     .filter(c => c.type === 'text')
     .map(c => (c as { type: 'text'; text: string }).text);
 
-  return parts.length > 0 ? parts.join('\n\n') : undefined;
+  return parts.length > 0 ? [{ type: 'text', text: parts.join('\n\n'), cache_control: cc }] : undefined;
 }
 
-export function toAnthropicTools(tools: readonly Tool[]): AnthropicToolDef[] {
+export function toAnthropicTools(tools: readonly Tool[], cc: CacheControl): AnthropicToolDef[] {
   const defs: AnthropicToolDef[] = tools.map(t => ({
     name:         t.name,
     description:  t.description,
     input_schema: t.inputSchema,
   }));
 
-  // Cache tool definitions — they're stable across turns
+  // Cache tool definitions — they're stable across turns. Kept as a separate anchor from the system
+  // breakpoint so tools still read from cache if the system prompt ever varies between turns.
   if (defs.length > 0) {
-    defs[defs.length - 1]!.cache_control = { type: 'ephemeral' };
+    defs[defs.length - 1]!.cache_control = cc;
   }
 
   return defs;
