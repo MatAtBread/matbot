@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import type {
   MatbotPlugin, Principal, Session, Store, Tool, ToolRegistry, FileStore, Vault,
   FormField, PromptFn, SessionRunner, PluginRegistryEvent, WatchVisibility,
+  StoreChange, FileMetaData,
 } from '@matatbread/matbot-core';
 import { createSession, promptCancelledError, runAs, tryCurrentPrincipal } from '@matatbread/matbot-core';
 import type { SkillManager } from '@matatbread/matbot-skills';
@@ -10,12 +11,10 @@ import { makeWebEnvTool } from './web-env.js';
 import { promises } from "node:fs";
 const { readFile } = promises;
 
-// The routing namespace each partitioned event stream is filtered on (WatchVisibility.visible): a viewer
-// sees an event iff it routes that namespace to the same partition the event came from. Files use the
-// single file-isolation axis ('files'); skills use their store namespace ('skills'). Global streams
-// (tool/plugin CRUD) are never partitioned and are broadcast unfiltered.
-const FILE_WATCH_NS  = 'files';
-const SKILL_WATCH_NS = 'skills';
+// Every partitioned event now arrives as a self-describing StoreChange (its own routing namespace + id),
+// so WatchVisibility.visible is fed straight from the event — no per-stream namespace constant. Global
+// streams (tool/plugin CRUD) are never partitioned and are broadcast unfiltered.
+const fileMeta = (sc: StoreChange): FileMetaData | undefined => sc.detail as FileMetaData | undefined;
 
 export interface WebServerDeps {
   store:          Store<Session>;
@@ -215,11 +214,13 @@ export function createWebServer(deps: WebServerDeps) {
     if (wv) {
       void (async () => {
         for await (const event of wv.watchFiles(watchAc.signal)) {
-          const msg = sseEvent('file-changed', event.value);
-          broadcast(msg, principal => wv.visible(principal, FILE_WATCH_NS, event.origin));
-          const subs = fileEventListeners.get(`${event.value.namespace ?? ''}/${event.value.name}`);
+          const sc  = event.value;
+          const msg = sseEvent('file-changed', sc);
+          const meta = fileMeta(sc);
+          broadcast(msg, principal => wv.visible(principal, sc.namespace, sc.id, event.origin));
+          const subs = fileEventListeners.get(`${meta?.namespace ?? ''}/${meta?.name ?? ''}`);
           if (subs) for (const [res, principal] of subs) {
-            if (!wv.visible(principal, FILE_WATCH_NS, event.origin)) continue;
+            if (!wv.visible(principal, sc.namespace, sc.id, event.origin)) continue;
             if (res.writable) res.write(msg); else subs.delete(res);
           }
         }
@@ -227,7 +228,8 @@ export function createWebServer(deps: WebServerDeps) {
     } else if (deps.files?.watch) {
       void (async () => {
         for await (const event of deps.files!.watch!(watchAc.signal)) {
-          const msg = sseEvent('file-changed', event);
+          const sc: StoreChange = { operation: 'saved', namespace: 'files', id: event.id, detail: event };
+          const msg = sseEvent('file-changed', sc);
           broadcast(msg);
           const subs = fileEventListeners.get(`${event.namespace ?? ''}/${event.name}`);
           if (subs) for (const [res] of subs) { if (res.writable) res.write(msg); else subs.delete(res); }
@@ -256,8 +258,9 @@ export function createWebServer(deps: WebServerDeps) {
     const wv = deps.watchVisibility?.();
     void (async () => {
       for await (const event of skills.watch(watchAc.signal)) {
-        const msg = sseEvent('skill-changed', event.value);
-        broadcast(msg, wv ? (principal => wv.visible(principal, SKILL_WATCH_NS, event.origin)) : undefined);
+        const sc  = event.value;
+        const msg = sseEvent('skill-changed', sc);
+        broadcast(msg, wv ? (principal => wv.visible(principal, sc.namespace, sc.id, event.origin)) : undefined);
       }
     })();
   }

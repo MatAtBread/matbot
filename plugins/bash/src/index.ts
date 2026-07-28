@@ -12,12 +12,6 @@ declare module '@matatbread/matbot-plugin-api' {
   }
 }
 
-export interface DockerConfig {
-  image:    string;
-  /** Docker --network value. Defaults to Docker's own default (bridge). */
-  network?: string;
-}
-
 interface BashInput {
   script:   string;
   cwd?:     string;
@@ -129,72 +123,38 @@ function createLocalExecutor(): ToolExecutor<ToolResultOf<'bash'>> {
   };
 }
 
-function createDockerExecutor(docker: DockerConfig): ToolExecutor<ToolResultOf<'bash'>> {
-  return {
-    async *execute(input: unknown, ctx: ToolContext) {
-      const { script, env, timeout } = input as BashInput;
-
-      const args = ['run', '--rm', '-i'];
-
-      if (docker.network !== undefined) {
-        args.push('--network', docker.network);
-      }
-
-      // Mount the session workspace so scripts can read/write workspace files.
-      const workdir = ctx.workdir ?? process.cwd();
-      args.push('-v', `${workdir}:/workspace`, '--workdir', '/workspace');
-
-      // Only pass explicitly provided env vars — do not leak process.env into the container.
-      for (const [k, v] of Object.entries(env ?? {})) {
-        args.push('-e', `${k}=${v}`);
-      }
-
-      args.push(docker.image, 'bash', '-c', script);
-
-      yield* spawnAndStream('docker', args, {
-        ...(timeout !== undefined ? { timeout } : {}),
-        env: {}, signal: ctx.signal,
-      });
-    },
-  };
-}
-
-// ── Tool factory ──────────────────────────────────────────────────────────────
+// ── Tool ──────────────────────────────────────────────────────────────────────
 
 const TOOL_DESCRIPTION =
   'Run a bash script and stream stdout/stderr in real time. ' +
   'Pass any shell command or multi-line script in the `script` field — it is executed as `bash -c <script>`. ' +
   'Output streams line by line as it is produced. A non-zero exit code yields an error event with accumulated stdout/stderr attached. ' +
-  'Use for file operations, build steps, running tests, package installs, or any shell automation. ' +
-  'The working directory defaults to the session workspace.';
+  'Use for build steps, running tests, package installs, or any shell automation. ' +
+  'The working directory defaults to a private scratch directory for temporary scripts and intermediate ' +
+  'data: it is local to this tool, is not visible to the user, and cannot be served or shared. Files the ' +
+  'user asked for do NOT belong here — write those with whichever tool manages stored files.';
 
 const INPUT_SCHEMA = {
   type:       'object',
   required:   ['script'],
   properties: {
     script:  { type: 'string', description: 'Bash script or command to run (passed to `bash -c`).' },
-    cwd:     { type: 'string', description: 'Working directory. Defaults to the session workspace.' },
+    cwd:     { type: 'string', description: 'Working directory. Defaults to the private scratch directory.' },
     env:     { type: 'object', additionalProperties: { type: 'string' }, description: 'Extra environment variables to set.' },
     timeout: { type: 'number', description: 'Kill the process after this many milliseconds.' },
   },
 } as const;
 
-/**
- * Creates a `bash` tool backed by either a local shell or a Docker container.
- * The tool name and input schema are identical in both cases — callers (including
- * the LLM) cannot distinguish the two implementations.
- */
-export function createBashTool(docker?: DockerConfig): Tool<ToolResultOf<'bash'>> {
-  return {
-    name:        'bash',
-    description: TOOL_DESCRIPTION,    inputSchema: INPUT_SCHEMA,
-    executor:    docker ? createDockerExecutor(docker) : createLocalExecutor(),
-  };
-}
+// Runs on the host, unsandboxed. For a container-isolated `bash` of the same name and shape, load
+// `@matatbread/matbot-tool-docker-bash` instead — it owns the sandboxed implementation.
+export const bashTool: Tool<ToolResultOf<'bash'>> = {
+  name:        'bash',
+  description: TOOL_DESCRIPTION,
+  inputSchema: INPUT_SCHEMA,
+  executor:    createLocalExecutor(),
+};
 
 // ── Plugin ────────────────────────────────────────────────────────────────────
-
-export const bashTool: Tool<ToolResultOf<'bash'>> = createBashTool();
 
 export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,

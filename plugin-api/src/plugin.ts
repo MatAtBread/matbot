@@ -1,5 +1,5 @@
 import type {
-  FileStore, FileEvent, Principal, Vault, Message, ModelParameters,
+  FileStore, StoreChange, Principal, Vault, Message, ModelParameters,
   ProviderAdapter, ProviderConfig, ProviderRegistry, Tool, ToolRegistry, FrontendInfo,
   Store, Session, SystemContextRegistry, KnowledgeIndex, PromptFn, SessionRunner, Usage,
   TypeScriptStripper, ToolTypeIndex, ToolPresenter,
@@ -494,18 +494,23 @@ export interface StorageBackend {
  * The origin/visibility split is generic (files today; the same shape serves skills/stores later).
  */
 export interface WatchVisibility {
-  /** Every partition's file events, merged into one stream, each tagged with its origin partition. */
-  watchFiles(signal?: AbortSignal): AsyncIterable<Routed<FileEvent>>;
+  /** Every partition's file events, merged into one stream, each a self-describing {@link StoreChange}
+   *  (routing namespace `'files'`, the file id, and the {@link FileMetaData} in `detail`) tagged with the
+   *  origin partition — so the firehose filters and routes files through the same predicate as any stream. */
+  watchFiles(signal?: AbortSignal): AsyncIterable<Routed<StoreChange>>;
   /**
    * The per-connection visibility predicate for ANY partitioned event stream (files, skills, …): would a
-   * connection owned by `viewer` see an event in `namespace` produced by `origin`? Defined as
-   * `route(viewer, namespace) === route(origin, namespace)` — the two see it iff they route that namespace
-   * to the same partition. This yields the intended behavior uniformly: a viewer sees global/base events
-   * for namespaces it does NOT isolate, and only its own partition's events for namespaces it does.
+   * connection owned by `viewer` see the change to (`namespace`, `id`) produced by `origin`? True iff the
+   * viewer routes that namespace to the same partition as `origin` — `route(viewer, namespace) ===
+   * route(origin, namespace)` — OR the item is shared INTO the viewer's partition (the owner edits a
+   * shared-in item: origin=owner ≠ the viewer's route, yet the viewer holds a live link to it). This yields
+   * the intended behavior uniformly: global/base events for namespaces the viewer has NOT isolated,
+   * own-partition events for those it has, plus live updates to items shared in from another partition.
    * `origin` may be a partition principal (files, tagged by the merge) or the acting principal (skills,
-   * stamped at write) — routing both sides makes either correct. `undefined` origin ⇒ base.
+   * stamped at write) — routing both sides makes either correct. `undefined` origin ⇒ base. `id` is the
+   * store id of the changed item; it drives the shared-in check.
    */
-  visible(viewer: Principal, namespace: string, origin: Principal | undefined): boolean;
+  visible(viewer: Principal, namespace: string, id: string, origin: Principal | undefined): boolean;
 }
 
 // ── Plugin interface ──────────────────────────────────────────────────────────

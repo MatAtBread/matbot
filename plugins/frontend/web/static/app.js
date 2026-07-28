@@ -19,6 +19,9 @@ let sending = false;          // current session busy? mirrors the server's 'ses
 const busySessions   = new Set();
 const unreadSessions = new Set();
 const updatedFiles   = new Set();
+// path → owning profile id for files shared IN from another profile (read-only here). Refreshed with the
+// file list in one `share`/`owner`/`*` call; empty when profiles are inactive. Gates the per-file share UI.
+let   fileOwners     = {};
 
 // ── Scroll control ────────────────────────────────────────────────────────────
 //
@@ -372,10 +375,14 @@ function renderFiles(files) {
     return;
   }
   for (const f of files) {
+    // `owner` is '' for the shared base/global partition, a profile id otherwise; absent ⇒ owned here.
+    const owner = fileOwners[f.path];
+    const sharedBy = owner ? 'shared by "' + owner + '"' : 'shared globally';
     const div = document.createElement('div');
-    div.className = 'file-item' + (updatedFiles.has(f.path) ? ' updated' : '');
+    div.className = 'file-item' + (updatedFiles.has(f.path) ? ' updated' : '') + (owner != null ? ' shared-in' : '');
     div.dataset.path = f.path;
-    div.title = f.path + (f.size !== undefined ? ' (' + formatSize(f.size) + ')' : '');
+    div.title = f.path + (f.size !== undefined ? ' (' + formatSize(f.size) + ')' : '')
+      + (owner != null ? ' — ' + sharedBy + ', read-only here' : '');
     div.onclick = () => {
       updatedFiles.delete(f.path);
       div.classList.remove('updated');
@@ -391,12 +398,41 @@ function renderFiles(files) {
       sizeEl.textContent = formatSize(f.size);
       div.appendChild(sizeEl);
     }
+    // A file shared IN from another profile is read-only here — the backend rejects a write to it. Clicking
+    // it opens the raw bytes in a new tab, which can carry no banner of its own, so this row is the only
+    // place the state can be read: it gets its own always-visible line (outside the hover-only actions)
+    // naming the owner, plus a lock and an accent stripe. The share button is withheld too — you can't
+    // re-share what you don't own.
+    // Shared-in rows get a real second line holding the badge and the (hover-only) actions, so the
+    // actions stay right-aligned beside the owner text instead of wrapping onto a third line.
+    const line2 = owner != null ? document.createElement('div') : null;
+    if (line2) {
+      line2.className = 'file-line2';
+      div.appendChild(line2);
+    }
+    if (owner != null) {
+      const badge = document.createElement('span');
+      badge.className = 'file-ro-badge';
+      badge.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>';
+      const label = document.createElement('span');
+      label.textContent = sharedBy + ' · read-only';
+      badge.appendChild(label);
+      line2.appendChild(badge);
+    }
     const actions = document.createElement('div');
     actions.className = 'file-actions';
+    if (profilesActive && owner == null) {
+      const shareFileBtn = document.createElement('button');
+      shareFileBtn.className = 'file-action-btn file-share-btn';
+      shareFileBtn.title = 'Share with another profile';
+      shareFileBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4"/></svg>';
+      shareFileBtn.onclick = (e) => { e.stopPropagation(); openFileShareMenu(shareFileBtn, f.path); };
+      actions.appendChild(shareFileBtn);
+    }
     const delBtn = document.createElement('button');
     delBtn.className = 'file-action-btn';
     delBtn.textContent = '\u00d7';
-    delBtn.title = 'Delete';
+    delBtn.title = owner != null ? 'Remove from my view (unshare)' : 'Delete';
     delBtn.onclick = async (e) => {
       e.stopPropagation();
       try {
@@ -407,7 +443,7 @@ function renderFiles(files) {
       }
     };
     actions.appendChild(delBtn);
-    div.appendChild(actions);
+    (line2 ?? div).appendChild(actions);
     el.appendChild(div);
   }
 }
@@ -416,6 +452,14 @@ async function loadFiles() {
   try {
     const data = await callTool('workspace_action', { action: 'list' });
     const files = Array.isArray(data) ? data : (data?.files ?? []);
+    // The workspace tool is profile-agnostic — it lists whatever the routed file store returns (shared-in
+    // files included, via symlinks) with no ownership. Ownership is a profiles concern, so ask the `share`
+    // tool once for the whole `files` namespace's shared-in owners and gate the per-file UI on it.
+    fileOwners = {};
+    if (profilesActive) {
+      try { fileOwners = (await callTool('share', { action: 'owner', namespace: 'files', id: '*' })).owners || {}; }
+      catch { fileOwners = {}; }
+    }
     renderFiles(files);
   } catch (e) {
     const msg = String(e);
@@ -438,6 +482,64 @@ async function loadFiles() {
     } else {
       renderFiles([]);
     }
+  }
+}
+
+// Per-file share picker — mirrors the session share menu (setupShare) but for the `files` namespace, keyed
+// by the file's path (its id). Reuses the shared `#share-menu` element (only one menu is open at a time)
+// and its outside-click close, registered once in setupShare; the anchoring button's own click stops
+// propagation so opening doesn't immediately re-close. Targets are profiles that isolate `files`.
+async function openFileShareMenu(anchor, path) {
+  const menu = document.getElementById('share-menu');
+  if (!menu) return;
+  menu.innerHTML = '';
+  const loading = document.createElement('div');
+  loading.className = 'sm-title'; loading.textContent = 'Loading profiles…';
+  menu.appendChild(loading);
+  const r = anchor.getBoundingClientRect();
+  menu.style.left  = 'auto';
+  menu.style.right = (window.innerWidth - r.right) + 'px';
+  menu.style.top   = (r.bottom + 6) + 'px';
+  menu.hidden = false;
+
+  let profiles;
+  try { profiles = (await callTool('profile_action', { action: 'list' })).profiles; }
+  catch { menu.hidden = true; return; }
+  const active = currentProfileName();
+  const others = profiles.filter(p => p.name !== active);
+
+  menu.innerHTML = '';
+  const title = document.createElement('div');
+  title.className = 'sm-title';
+  title.textContent = others.length ? 'Share this file with:' : 'No other profiles to share into.';
+  menu.appendChild(title);
+
+  // Show every profile (the full list), but a file can only be shared into one that isolates `files` — a
+  // profile that doesn't read the shared base area, so there is nothing to share into. Those stay visible
+  // but disabled with the reason, rather than being dropped from the list.
+  for (const p of others) {
+    const canShare = (p.isolated || []).includes('files');
+    const item   = document.createElement('div');
+    item.className = 'pm-item' + (canShare ? '' : ' pm-disabled');
+    const nm     = document.createElement('span'); nm.className = 'pm-name';   nm.textContent = p.name;
+    const status = document.createElement('span'); status.className = 'sm-status';
+    item.appendChild(nm); item.appendChild(status);
+    if (canShare) {
+      item.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        status.textContent = '…'; item.title = '';
+        try {
+          await callTool('share', { namespace: 'files', id: path, target: p.name });
+          status.textContent = '✓';
+        } catch (err) {
+          status.textContent = '✗'; item.title = String(err && err.message || err);
+        }
+      });
+    } else {
+      status.textContent = '—';
+      item.title = 'This profile does not isolate "files" — it reads the shared base files, so there is nothing to share into.';
+    }
+    menu.appendChild(item);
   }
 }
 
@@ -2818,12 +2920,14 @@ async function init() {
     }
   })();
 
-  // Subscribe to file-change events. The stream carries every namespace; this panel shows the
-  // workspace, so ignore events for other namespaces before touching it.
+  // Subscribe to file-change events. Each arrives as a StoreChange ({operation, namespace:'files', id,
+  // detail}); the file's own metadata (content namespace, name, size) rides in `detail`. This panel shows
+  // the workspace, so ignore changes to files in other content namespaces before touching it.
   (async function connectFileWatchStream() {
     for await (const event of T.fileEvents(new AbortController().signal)) {
-      if (event.namespace !== 'workspace') continue;
-      const { name } = event;
+      const meta = event.detail || {};
+      if (meta.namespace !== 'workspace') continue;
+      const { name } = meta;
       const el = document.getElementById('file-list');
       const item = el?.querySelector('[data-path="' + CSS.escape(name) + '"]');
       if (item) {
@@ -2831,7 +2935,7 @@ async function init() {
         item.classList.add('updated');
         // Update the size display if present.
         const sizeEl = item.querySelector('.file-size');
-        if (sizeEl && event.size !== undefined) sizeEl.textContent = formatSize(event.size);
+        if (sizeEl && meta.size !== undefined) sizeEl.textContent = formatSize(meta.size);
       } else {
         // New file — mark updated before reloading so the dot appears.
         updatedFiles.add(name);

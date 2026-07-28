@@ -181,11 +181,16 @@ const workspaceExecutor: ToolExecutor<ToolResultOf<'workspace_action'>> = {
 const workspaceTool: Tool<ToolResultOf<'workspace_action'>> = {
   name: 'workspace_action',
   description:
-    'Read, write, list, and delete files in the **workspace** — a small scratch ' +
-    'and transfer area, NOT the host filesystem. Use it for files the user uploads or downloads, ' +
-    'generated artifacts (reports, charts, exports), and working notes or to-do lists. It is not a code ' +
-    'workspace: files here are not executable. Workspace files are publicly viewable; if a tool is available ' +
-    'to mint a shareable link for a stored file, prefer it over guessing a URL.\n\n' +
+    'Read, write, list, and delete files in **matbot\'s cloud file storage** — the user\'s own files, kept ' +
+    'in matbot\'s managed store (think a cloud drive, NOT the local disk), that the user has priority access ' +
+    'to and direct visibility over (it backs the Workspace panel in the UI). PREFER this tool over shell/bash ' +
+    'or any raw filesystem access whenever the user speaks of "a file", "the workspace", saving or reading ' +
+    'output, uploads, downloads, generated artifacts (reports, charts, exports), or working notes and to-do ' +
+    'lists — those live in this cloud store, visible to the user, not on the host disk. It is a scratch-and- ' +
+    'transfer area, NOT a code workspace: files here are not executable. These files are publicly viewable; ' +
+    'if a tool is available to mint a shareable link for a stored file, prefer it over guessing a URL. To ' +
+    'share one of these files with another storage profile, use the share tool with namespace "files" and id ' +
+    'set to the file\'s path.\n\n' +
     'For `list`, `path` is a filename prefix, not a directory — "." and "/" match nothing.\n' +
     "Use encoding 'base64' for binary files (images, PDFs, zips); 'utf8' (the default) for text.",
   inputSchema: {
