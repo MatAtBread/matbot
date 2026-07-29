@@ -1528,13 +1528,50 @@ function usageByProvider(messages, traceId) {
   return [...map].map(([provider, usage]) => ({ provider, usage }));
 }
 
-// One details block listing per-provider usage for a turn, eliding any zero count. `perProvider` is the
-// output of usageByProvider; an empty array means nothing to render (caller should skip).
-function makeTokenStatsBlock(perProvider) {
+// The turn's wall-clock time: the createdAt of its last message. Messages only acquire a timestamp when
+// the pump commits them, so this reads the persisted session (the `done` event's copy, or the reload) —
+// never the live delta, which carries none.
+function turnTimestamp(messages, traceId) {
+  let at;
+  for (const m of (messages || [])) if (m.traceId === traceId && m.createdAt) at = m.createdAt;
+  return at;
+}
+
+// Same-day turns show just the clock; older ones need the date to be worth reading at all.
+function formatTurnTime(at) {
+  const d = new Date(at);
+  if (isNaN(d.getTime())) return '';
+  const time = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  const now  = new Date();
+  const sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+  return sameDay ? time : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ', ' + time;
+}
+
+// The turn's footer: per-provider usage (eliding any zero count) with the turn's time trailing the
+// summary. `perProvider` is the output of usageByProvider; with no usage the footer degrades to the
+// bare time, so a turn whose provider reported nothing still gets one. Both empty ⇒ null (caller skips).
+function makeTurnFooter(perProvider, at) {
+  const timeEl = at ? (() => {
+    const el = document.createElement('span');
+    el.className = 'turn-time';
+    el.textContent = formatTurnTime(at);
+    el.title = new Date(at).toLocaleString();
+    return el;
+  })() : null;
+
+  if (!perProvider.length) {
+    if (!timeEl) return null;
+    const solo = document.createElement('div');
+    solo.className = 'token-stats turn-time-solo';
+    solo.appendChild(timeEl);
+    return solo;
+  }
+
   const det = document.createElement('details');
   det.className = 'token-stats';
   const sum = document.createElement('summary');
-  sum.textContent = 'tokens';
+  sum.appendChild(document.createTextNode('tokens'));
+  if (timeEl) sum.appendChild(timeEl);
   det.appendChild(sum);
   const body = document.createElement('div');
   body.className = 'token-stats-body';
@@ -1557,21 +1594,20 @@ function makeTokenStatsBlock(perProvider) {
   return det;
 }
 
-// Attach the per-provider token block to each turn already rendered into the DOM, exactly as the live
-// `done` path does — appended to the turn's last assistant wrap (the turn's bottom). Used on reload, so
-// historical turns show the same accounting as if they had just streamed. Idempotent: skips a turn whose
-// wrap already carries a block, and turns with no recorded usage.
+// Attach the footer to each turn already rendered into the DOM, exactly as the live `done` path does —
+// appended to the turn's last assistant wrap (the turn's bottom). Used on reload, so historical turns show
+// the same accounting as if they had just streamed. Idempotent: skips a turn whose wrap already carries one.
 function applyTurnUsageBlocks(messages) {
   const seen = new Set();
   for (const m of (messages || [])) {
     if (!m.traceId || seen.has(m.traceId)) continue;
     seen.add(m.traceId);
-    const perProvider = usageByProvider(messages, m.traceId);
-    if (!perProvider.length) continue;
+    const footer = makeTurnFooter(usageByProvider(messages, m.traceId), turnTimestamp(messages, m.traceId));
+    if (!footer) continue;
     const wraps = messagesEl.querySelectorAll('.message.assistant[data-trace="' + m.traceId + '"]');
     const lastWrap = wraps[wraps.length - 1];
     if (!lastWrap || lastWrap.querySelector(':scope > .token-stats')) continue;
-    lastWrap.appendChild(makeTokenStatsBlock(perProvider));
+    lastWrap.appendChild(footer);
   }
 }
 
@@ -2762,7 +2798,8 @@ async function renderTurn(sid, traceId) {
           // Per-provider token accounting for this turn, from the persisted session — so it includes
           // spend by tools that ran their own completions (single_turn, ask_inner_voice, dream_time).
           const perProvider = usageByProvider(ev.session?.messages, traceId);
-          if (turnWrap && perProvider.length > 0) turnWrap.appendChild(makeTokenStatsBlock(perProvider));
+          const turnFooter  = makeTurnFooter(perProvider, turnTimestamp(ev.session?.messages, traceId));
+          if (turnWrap && turnFooter) turnWrap.appendChild(turnFooter);
           loadFiles();
           // Back-fill origIdx on any dividers added without an index this turn.
           if (ev.session) {
