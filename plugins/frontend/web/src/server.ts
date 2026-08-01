@@ -1,20 +1,14 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type {
   MatbotPlugin, Principal, Session, Store, Tool, ToolRegistry, FileStore, Vault,
-  FormField, PromptFn, SessionRunner, PluginRegistryEvent, WatchVisibility, SteeringMode,
-  StoreChange, FileMetaData,
+  FormField, PromptFn, SessionRunner, WatchVisibility, SteeringMode,
+  Notifier, Notification,
 } from '@matatbread/matbot-core';
 import { createSession, promptCancelledError, runAs, tryCurrentPrincipal } from '@matatbread/matbot-core';
-import type { SkillManager } from '@matatbread/matbot-skills';
 import { sseComment, sseEvent } from './sse-writer.js';
 import { makeWebEnvTool } from './web-env.js';
 import { promises } from "node:fs";
 const { readFile } = promises;
-
-// Every partitioned event now arrives as a self-describing StoreChange (its own routing namespace + id),
-// so WatchVisibility.visible is fed straight from the event — no per-stream namespace constant. Global
-// streams (tool/plugin CRUD) are never partitioned and are broadcast unfiltered.
-const fileMeta = (sc: StoreChange): FileMetaData | undefined => sc.detail as FileMetaData | undefined;
 
 export interface WebServerDeps {
   store:          Store<Session>;
@@ -23,21 +17,19 @@ export interface WebServerDeps {
   vault:          Vault;
   loadPlugin:     (specifier: string) => Promise<MatbotPlugin>;
   unloadPlugin:   (specifier: string) => Promise<boolean>;
-  watchPlugins?:  (signal?: AbortSignal) => AsyncIterable<PluginRegistryEvent>;
   tools?:         ToolRegistry;
-  // Resolved lazily (a thunk, not a captured value) because the skills plugin may register its
-  // SkillManager *after* frontend-web sets up — load order isn't guaranteed. Returns undefined until
-  // then; the watch loop is started on first /events connect, by which point boot is complete.
-  skills?:        () => SkillManager | undefined;
   cors?:          string;  // Access-Control-Allow-Origin value, default '*'
   workdir?:       string;
   files?:         FileStore;
-  /** Optional partition-aware file-watch layer. Resolved lazily (a thunk, like {@link skills}) because a
+  /** Optional partition-aware file-watch layer. Resolved lazily (a thunk, not a captured value) because a
    *  partitioning storage backend may register it *after* frontend-web sets up — capturing a value here
    *  would snapshot `undefined` and silently fall back to base-only watching. When present, the firehose
    *  observes file events across every partition (origin-stamped) and filters each SSE connection by its
    *  principal; absent ⇒ the plain single-stream `files.watch()` with no filter (the non-partitioned default). */
   watchVisibility?: () => WatchVisibility | undefined;
+  /** The notification bus this frontend both publishes to (a session created over HTTP) and subscribes
+   *  to (the firehose). */
+  notifier:       Notifier;
   configPath?:    string;
   /** Derives the security principal for each request. Defaults to {@link defaultWebPrincipal}. */
   resolvePrincipal?: WebPrincipalResolver;
@@ -196,82 +188,33 @@ export function createWebServer(deps: WebServerDeps) {
     }
   };
 
-  // Per-file watchers (GET /events/files/:ns/:name), keyed `<namespace>/<name>` so single-file streams
-  // don't collide across namespaces. Separate from the global stream: a targeted watch, not the firehose.
-  // Each entry maps a connection to its principal, for the same per-connection visibility filter.
-  const fileEventListeners = new Map<string, Map<ServerResponse, Principal>>();
-  const watchAc            = new AbortController();
+  const watchAc = new AbortController();
 
-  // File-change firehose — started once, on the first /events connect (like the skill watch), so the
-  // WatchVisibility layer, which a partitioning backend may register *after* frontend-web sets up, is
-  // resolved when it's certainly present rather than snapshotted as undefined at construction. With it,
-  // observe every partition's events — each carrying its origin — and gate each connection by whether its
-  // principal routes to that origin. Without it, fall back to the plain single stream with no filter.
-  let fileWatchStarted = false;
-  function startFileWatch(): void {
-    if (fileWatchStarted) return;
-    fileWatchStarted = true;
+  // ── The firehose ────────────────────────────────────────────────────────────
+  //
+  // ONE subscription to the notification bus feeds every global SSE listener. Producers publish onto
+  // the bus from wherever the change actually happens (a skill saved mid-turn, a session minted over
+  // HTTP, a share landing in another profile); this frontend is purely a sink, with exactly one path
+  // from "something changed" to a connected browser.
+  //
+  // Filtering is per (connection × notification) against the same visibility predicate as before: a
+  // store-change carrying a principal is shown only to connections whose principal routes that
+  // (namespace, id) to the same partition, or has it shared in. A notification with no principal is a
+  // global fact (registry changes) and reaches everyone.
+  let firehoseStarted = false;
+  function startFirehose(): void {
+    if (firehoseStarted) return;
+    firehoseStarted = true;
+    // Resolved on first connect, not at construction: a partitioning backend may register
+    // WatchVisibility *after* frontend-web sets up, and snapshotting undefined would silently
+    // downgrade every connection to unfiltered.
     const wv = deps.watchVisibility?.();
-    if (wv) {
-      void (async () => {
-        for await (const event of wv.watchFiles(watchAc.signal)) {
-          const sc  = event.value;
-          const msg = sseEvent('file-changed', sc);
-          const meta = fileMeta(sc);
-          broadcast(msg, principal => wv.visible(principal, sc.namespace, sc.id, event.origin));
-          const subs = fileEventListeners.get(`${meta?.namespace ?? ''}/${meta?.name ?? ''}`);
-          if (subs) for (const [res, principal] of subs) {
-            if (!wv.visible(principal, sc.namespace, sc.id, event.origin)) continue;
-            if (res.writable) res.write(msg); else subs.delete(res);
-          }
-        }
-      })();
-    } else if (deps.files?.watch) {
-      void (async () => {
-        for await (const event of deps.files!.watch!(watchAc.signal)) {
-          const sc: StoreChange = { operation: 'saved', namespace: 'files', id: event.id, detail: event };
-          const msg = sseEvent('file-changed', sc);
-          broadcast(msg);
-          const subs = fileEventListeners.get(`${event.namespace ?? ''}/${event.name}`);
-          if (subs) for (const [res] of subs) { if (res.writable) res.write(msg); else subs.delete(res); }
-        }
-      })();
-    }
-  }
+    const visibleTo = (n: Notification): ((principal: Principal) => boolean) | undefined =>
+      wv !== undefined && n.kind === 'store-change' && n.principal !== undefined
+        ? principal => wv.visible(principal, n.namespace, n.id, n.principal)
+        : undefined;
 
-  if (deps.tools) {
-    void (async () => {
-      for await (const event of deps.tools!.watch(watchAc.signal)) broadcast(sseEvent('tool-changed', event));
-    })();
-  }
-
-  // Skill content CRUD (save/delete), including saves the LLM makes mid-turn via skill_action. The
-  // SkillManager is resolved lazily on first /events connect (see deps.skills) because the skills plugin
-  // may load after frontend-web; the watch loop starts at most once, the first time a client subscribes.
-  let skillWatchStarted = false;
-
-  function startSkillWatch(skills: SkillManager): void {
-    if (skillWatchStarted) return;
-    skillWatchStarted = true;
-    // Skills are partitioned (a profile can isolate the `skills` namespace), and every partition's CRUD
-    // flows through the one SkillManager broadcaster, each event stamped with its acting principal. So the
-    // stream is dynamic for free; we just filter per connection by the same visibility predicate as files.
-    const wv = deps.watchVisibility?.();
-    void (async () => {
-      for await (const event of skills.watch(watchAc.signal)) {
-        const sc  = event.value;
-        const msg = sseEvent('skill-changed', sc);
-        broadcast(msg, wv ? (principal => wv.visible(principal, sc.namespace, sc.id, event.origin)) : undefined);
-      }
-    })();
-  }
-
-  // Plugin load/unload. Covers tool-less plugins (pure provider/hook/storage — e.g. the storage backend
-  // itself) that the tool-changed stream can't see.
-  if (deps.watchPlugins) {
-    void (async () => {
-      for await (const event of deps.watchPlugins!(watchAc.signal)) broadcast(sseEvent('plugin-changed', event));
-    })();
+    deps.notifier.consume(n => broadcast(sseEvent('notification', n), visibleTo(n)), watchAc.signal);
   }
 
   function sendToSession(sessionId: string, msg: string): void {
@@ -390,17 +333,17 @@ export function createWebServer(deps: WebServerDeps) {
     const onAbort = () => ac.abort();
     signal.addEventListener('abort', onAbort, { once: true });
     const timer = setTimeout(() => ac.abort(), Math.max(0, bootGraceUntil - Date.now()));
-    const it = reg.watch(ac.signal)[Symbol.asyncIterator]();
+    const stream = deps.notifier.subscribe(ac.signal,
+      n => n.kind === 'registry' && n.registry === 'tools' && n.operation === 'added' && n.name === name);
+    const it = stream[Symbol.asyncIterator]();
     try {
       const first = it.next();                     // subscribes synchronously (before the first await)
       const raced = reg.resolve(name);             // catch a register() landing between the check above and subscribe
       if (raced) return raced;
       let r = await first;
       while (r.done !== true) {
-        if (r.value.type === 'registered' && r.value.name === name) {
-          const t = reg.resolve(name);
-          if (t) return t;
-        }
+        const t = reg.resolve(name);               // filtered to this tool's registration — just re-read it
+        if (t) return t;
         r = await it.next();
       }
       return reg.resolve(name);
@@ -446,8 +389,8 @@ export function createWebServer(deps: WebServerDeps) {
       json(res, 200, { status: 'ok' }); return;
     }
 
-    // --- GET /events --- (one multiplexed SSE stream: session busy/idle, file changes, and tool/skill/
-    // plugin CRUD, demuxed client-side by event name. One socket for the whole UI — see globalListeners.)
+    // --- GET /events --- (one multiplexed SSE stream: session busy/idle plus every notification,
+    // demuxed client-side by event name. One socket for the whole UI — see globalListeners.)
     if (method === 'GET' && url === '/events') {
       res.writeHead(200, {
         'content-type':  'text/event-stream',
@@ -463,11 +406,9 @@ export function createWebServer(deps: WebServerDeps) {
         if (!deps.run.status(sessionId).busy) { updateBusy(sessionId); continue; }
         res.write(sseEvent('session-busy', { sessionId, busy: true }));
       }
-      // Wire skill CRUD lazily: by first connect the skills plugin has finished setup (load order may
-      // place it after frontend-web), so deps.skills() now resolves.
-      const skills = deps.skills?.();
-      if (skills) startSkillWatch(skills);
-      startFileWatch();
+      // Started on first connect, not at construction: a partitioning backend may register
+      // WatchVisibility after frontend-web's setup, and the firehose must resolve it live.
+      startFirehose();
       globalListeners.set(res, principal);
       req.on('close', () => { globalListeners.delete(res); });
       return; // keep connection open
@@ -520,9 +461,17 @@ export function createWebServer(deps: WebServerDeps) {
       const promptFn = ((p: string | FormField, defaultValue?: string): Promise<string> =>
         new Promise<string>((resolve, reject) => {
           const def = typeof p === 'string' ? defaultValue : p.default;
+          // Every settle path funnels through these two, so announcing here covers all of them: an answer
+          // from any viewer, an abort, and the no-viewers-left release. The dialog is drawn in EVERY
+          // browser attached to the session but can only be answered once — without this the other
+          // browsers would sit on a dead prompt forever.
+          const settled = (): void => {
+            pendingPrompts.delete(targetId);
+            sendToSession(targetId, sseEvent('prompt-resolved', { type: 'prompt-resolved', traceId }));
+          };
           pendingPrompts.set(targetId, {
-            resolve: answer => { pendingPrompts.delete(targetId); resolve(answer || def || ''); },
-            cancel:  ()     => { pendingPrompts.delete(targetId); reject(promptCancelledError()); },
+            resolve: answer => { settled(); resolve(answer || def || ''); },
+            cancel:  ()     => { settled(); reject(promptCancelledError()); },
           });
           sendToSession(targetId, sseEvent('prompt', {
             type: 'prompt',
@@ -765,27 +714,6 @@ export function createWebServer(deps: WebServerDeps) {
       return;
     }
 
-    // --- GET /events/files/<namespace>/<name> --- (SSE: single-file watch)
-    const fileEventMatch = /^\/events\/files\/([^/]+)\/(.+)$/.exec(url);
-    if (method === 'GET' && fileEventMatch) {
-      if (!deps.files?.watch) { json(res, 404, { error: 'File watch not available' }); return; }
-      let key: string;
-      try { key = `${decodeURIComponent(fileEventMatch[1]!)}/${decodeURIComponent(fileEventMatch[2]!)}`; }
-      catch { json(res, 400, { error: 'Invalid path encoding' }); return; }
-
-      res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', 'connection': 'keep-alive' });
-      res.write(sseComment(`watching ${key}`));
-
-      let subs = fileEventListeners.get(key);
-      if (subs === undefined) { subs = new Map(); fileEventListeners.set(key, subs); }
-      subs.set(res, principal);
-      req.on('close', () => {
-        const s = fileEventListeners.get(key);
-        if (s) { s.delete(res); if (s.size === 0) fileEventListeners.delete(key); }
-      });
-      return;
-    }
-
     // --- GET /files/[~<principal>/]<namespace>/<name> --- (read-only static access; only files marked `allowed`)
     // A browser GET (img/anchor/download) can't send the x-matbot-principal header, so a profiled file's
     // owning partition rides in the path as an optional leading `~<principal>` segment (minted by
@@ -834,10 +762,7 @@ export function createWebServer(deps: WebServerDeps) {
     for (const res of globalListeners.keys()) res.end();
     globalListeners.clear();
 
-    // Stop the watch loops and close the per-file watch SSE connections.
-    watchAc.abort();
-    for (const subs of fileEventListeners.values()) for (const res of subs.keys()) res.end();
-    fileEventListeners.clear();
+    watchAc.abort();                              // ends the firehose subscription
 
     // Resolve all pending prompts so callers don't hang.
     for (const entry of pendingPrompts.values()) entry.resolve('');

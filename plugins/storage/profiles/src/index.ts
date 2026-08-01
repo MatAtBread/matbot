@@ -45,6 +45,14 @@ export const plugin: MatbotPluginSpec = {
     // they follow any later StorageBackend swap and work the moment a deferred hot-load swap lands — even
     // if that is after this setup() returns — and never pin a stale or hot-reloaded instance.
     const dir = () => asProfileDirectory(services.StorageBackend);
+    // Share/unshare/copy are the only mutations that change a partition's visible set without passing
+    // through a Store or the file watch — give the backend the bus so they can announce themselves.
+    // Via the mount table, not a bare call: on a hot load our own register() above is deferred to the
+    // next quiescent edge, so the backend isn't live yet at this point. `replay` covers the boot
+    // pre-scan (already mounted), and a later swap re-attaches.
+    services.mounted.observe({ key: 'StorageBackend', replay: true }, m => {
+      asProfileDirectory(m.StorageBackend)?.attachNotifier(services.Notifier);
+    });
     // SkillManager is read loosely (offer loosely) — the `copy` action routes skills through it so the
     // duplicate is indexed + evented; absent, copy falls back to a structural doc copy. Resolved live per
     // call so a skills plugin (un)loaded after this setup is picked up without re-registering the tool.
@@ -54,12 +62,11 @@ export const plugin: MatbotPluginSpec = {
     toolRegistry = services.tools;
     machine = services;
 
-    // Advertise the partition-aware file-watch layer so a frontend firehose observes every partition's
-    // file events (origin-stamped) and filters each SSE connection by its principal. Delegates live to
-    // the active backend (swap-safe), fail-open on visibility if the facet has gone.
+    // Advertise the per-connection visibility predicate so a frontend firehose filters each SSE
+    // connection by its principal. Delegates live to the active backend (swap-safe), fail-open if the
+    // facet has gone.
     await services.register('WatchVisibility', {
-      watchFiles: (signal) => dir()?.watchFiles(signal) ?? (async function* (): AsyncIterable<never> {})(),
-      visible:    (viewer, ns, id, origin) => dir()?.visible(viewer, ns, id, origin) ?? true,
+      visible: (viewer, ns, id, origin) => dir()?.visible(viewer, ns, id, origin) ?? true,
     });
     watchRegistered = true;
   },

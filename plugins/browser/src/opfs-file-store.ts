@@ -1,4 +1,4 @@
-import type { FileEvent, FileFilter, FileHandle, FileStore, MimeType } from '@matatbread/matbot-core';
+import type { FileFilter, FileHandle, FileStore, MimeType } from '@matatbread/matbot-core';
 
 interface OPFSMeta {
   id:          string;
@@ -165,12 +165,5 @@ export class OPFSFileStore implements FileStore {
 
   async putTemp(name: string, mimeType: MimeType, data: AsyncIterable<Uint8Array>): Promise<FileHandle> {
     return this.put(name, mimeType, data);
-  }
-
-  // OPFS has no native change notification; watch() is not implementable in the browser
-  // without a SharedWorker or polling. Yield nothing and return when the signal fires.
-  async *watch(signal?: AbortSignal): AsyncIterable<FileEvent> {
-    if (signal === undefined || signal.aborted) return;
-    await new Promise<void>(resolve => { signal.addEventListener('abort', () => resolve(), { once: true }); });
   }
 }

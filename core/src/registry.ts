@@ -1,5 +1,5 @@
-import type { Tool, ToolRegistry, Hook, PromptFn, FormField, FrontendInfo, PluginRegistryEvent, ProviderAdapter, ProviderConfig } from './types.js';
-import { createBroadcaster } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolRegistry, Hook, PromptFn, FormField, FrontendInfo, ProviderAdapter, ProviderConfig } from './types.js';
+import { scopedNotifier } from '@matatbread/matbot-plugin-api';
 import type {
   MatbotPlugin, MatbotMachine, MatbotRuntime, Mounted,
   ProviderAdapterFactory, StoreFactory,
@@ -34,14 +34,13 @@ const state = {
   overwriteAllTools: undefined as boolean | undefined,  // persisted "overwrite on collision, this install" choice, loaded lazily
 };
 
-// Read-only observation of plugin load/unload, for consumers that key off plugin presence (e.g. the
-// web plugins panel refreshing live when a backend restores a plugin set out of band). Module-level,
-// not in `state` — it owns subscribers across the registry's lifetime, not per-plugin data.
-const pluginEvents = createBroadcaster<PluginRegistryEvent>();
-
-export async function* watchPlugins(signal?: AbortSignal): AsyncIterable<PluginRegistryEvent> {
-  // Plugin CRUD is global — no origin — so unwrap the envelope to the bare event the panel expects.
-  for await (const { value } of pluginEvents.subscribe(signal)) yield value;
+// Plugin load/unload is announced on the Notifier as `{ kind: 'registry', registry: 'plugins' }`, for
+// consumers that key off plugin presence (e.g. the web plugins panel refreshing live when a backend
+// restores a plugin set out of band). It was a module-level broadcaster of its own, which is the same
+// primitive the bus already is. `loaded` is announced by the loader — the only caller of
+// registerPlugin, and the one place holding the machine this registry deliberately doesn't.
+export function announcePluginLoaded(services: MatbotMachine, name: string): void {
+  services.Notifier.notify({ kind: 'registry', source: 'plugins', registry: 'plugins', name, operation: 'added' });
 }
 
 // Settings namespace + key under which the user's "overwrite all colliding tools" choice
@@ -150,8 +149,6 @@ export function registerPlugin(plugin: MatbotPlugin): void {
   for (const [type, factory] of Object.entries(plugin.storage ?? {})) {
     state.storage.set(type, factory);
   }
-
-  pluginEvents.emit({ type: 'loaded', name: plugin.name });
 }
 
 // ── Resolution ────────────────────────────────────────────────────────────────
@@ -331,13 +328,16 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotMachine,
       specifier: plugin.specifier,
       ...(plugin.source !== undefined ? { source: plugin.source } : {}),
     },
+    // Everything this plugin publishes is attributed to it by default — the notification analogue of
+    // stamping `pluginName` on its tools. Reads through the host's swap proxy, so a registered
+    // distributed Notifier takes effect for a plugin that captured this in setup().
+    get Notifier() { return scopedNotifier(services.Notifier, plugin.name); },
     tools: {
       register:      registerTool,
       remove:        (name: string) => services.tools.remove(name),
       resolve:       (name: string) => services.tools.resolve(name),
       list:          ()             => services.tools.list(),
       removeByPlugin:(name: string) => services.tools.removeByPlugin(name),
-      watch:         (signal?: AbortSignal) => services.tools.watch(signal),
     },
     hooks: {
       register(hook: Hook) {
@@ -396,7 +396,7 @@ export async function unloadPlugin(pluginName: string, services: MatbotMachine):
   state.frontendPlugins.delete(pluginName);
 
   state.plugins.splice(idx, 1);
-  pluginEvents.emit({ type: 'unloaded', name: pluginName });
+  services.Notifier.notify({ kind: 'registry', source: 'plugins', registry: 'plugins', name: pluginName, operation: 'removed' });
   await Promise.race([
     plugin.teardown?.(),
     new Promise<void>((_, reject) => setTimeout(() => reject(new Error(`Teardown timeout for plugin ${pluginName}`)), 10000))

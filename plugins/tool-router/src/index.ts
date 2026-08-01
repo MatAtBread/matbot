@@ -451,13 +451,10 @@ searching over declining or improvising.`,
     };
     const enqueue = (name: string): void => { queue.push(name); void pump(); };
     for (const t of services.tools.list()) enqueue(t.name);
-    void (async () => {
-      try {
-        for await (const ev of services.tools.watch()) {
-          idx = null;                                                    // tool set changed → rebuild BM25 index lazily
-          if (ev.type === 'registered') enqueue(ev.name);
-        }
-      } catch { /* watch ended */ }
-    })();
+    services.Notifier.consume(n => {
+      if (n.kind !== 'registry') return;
+      idx = null;                                                        // tool set changed → rebuild BM25 index lazily
+      if (n.operation === 'added') enqueue(n.name);
+    }, undefined, n => n.kind === 'registry' && n.registry === 'tools');
   },
 };

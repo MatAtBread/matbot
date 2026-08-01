@@ -780,13 +780,11 @@ export interface FileHandle extends FileMetaData {
   stream(signal?: AbortSignal): AsyncIterable<Uint8Array>;
 }
 
-export type FileEvent = FileMetaData & { changed: Array<keyof FileMetaData> };
-
 /**
  * The generic, self-describing change envelope every partitioned CRUD stream emits (files, skills, and
  * future partitioned stores) — the payload half of a {@link Routed} event, whose `origin` carries the
- * acting principal/partition. It supersedes the per-stream bespoke shapes (the old `SkillEvent`, the raw
- * `FileEvent` on the wire) so a frontend firehose can filter and route every stream through ONE predicate.
+ * acting principal/partition. It supersedes the per-stream bespoke shapes (the old `SkillEvent`) so a
+ * frontend firehose can filter and route every stream through ONE predicate.
  *
  * `namespace` is the ROUTING namespace the change lives under — `'files'`, `'skills'`, or a document
  * namespace — NOT a content sub-namespace (a file's own `metadata.namespace`, e.g. `'workspace'`, rides in
@@ -823,8 +821,6 @@ export interface FileStore {
   delete(id: string): Promise<void>;
   list(filter?: FileFilter): AsyncIterable<FileHandle>;
   putTemp(name: string, mimeType: MimeType, data: AsyncIterable<Uint8Array>): Promise<FileHandle>;
-  /** Observe file changes. Implementations that cannot watch their backing store omit this. */
-  watch(signal?: AbortSignal): AsyncIterable<FileEvent>;
 }
 
 // ── Frontend ──────────────────────────────────────────────────────────────────
@@ -886,19 +882,16 @@ export type HealthStatus =
 
 // ── Registries ────────────────────────────────────────────────────────────────
 
-export type ToolRegistryEvent =
-  | { type: 'registered'; name: string; pluginName?: string }
-  | { type: 'removed';    name: string };
-
+/** Tool CRUD is observed on the {@link Notifier}, as `{ kind: 'registry', registry: 'tools' }` — this
+ *  registry had its own broadcaster over the same primitive, which is duplication, not layering. One
+ *  notification per tool (removeByPlugin announces a `removed` per matched tool); the registering
+ *  plugin's name rides in `detail`, advisory as ever — resolve the name for anything authoritative. */
 export interface ToolRegistry {
   register(tool: Tool): void;
   remove(name: string): void;
   resolve(name: string): Tool | null;
   list(): readonly Tool[];
   removeByPlugin(pluginName: string): void;
-  /** Observe tool CRUD as it happens. Read-only — observers cannot veto a registration. One event
-   *  per tool (removeByPlugin emits a `removed` per matched tool). The stream ends when `signal` aborts. */
-  watch(signal?: AbortSignal): AsyncIterable<ToolRegistryEvent>;
 }
 
 /** What the runner tells a {@link ToolPresenter} about the call it's about to make. */
@@ -947,10 +940,6 @@ export interface ProviderRegistry extends ReadonlyMap<string, ProviderConfig> {
    */
   revert(name: string): void;
 }
-
-export type PluginRegistryEvent =
-  | { type: 'loaded';   name: string }
-  | { type: 'unloaded'; name: string };
 
 // ── Pipeline events ─────────────────────────────────────────────────────────────
 

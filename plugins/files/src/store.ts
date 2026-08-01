@@ -1,8 +1,8 @@
 import { mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { createReadStream, watch } from 'node:fs';
+import { createReadStream } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
-import type { FileEvent, FileFilter, FileHandle, FileMetaData, FileStore, MimeType } from '@matatbread/matbot-core';
+import type { FileFilter, FileHandle, FileMetaData, FileStore, MimeType } from '@matatbread/matbot-core';
 
 // Only what the filesystem cannot derive: semantic metadata.
 interface FileMeta {
@@ -196,85 +196,4 @@ export class FilesystemFileStore implements FileStore {
   async putTemp(name: string, mimeType: MimeType, data: AsyncIterable<Uint8Array>): Promise<FileHandle> {
     return this.put(name, mimeType, data);
   }
-
-  async *watch(signal?: AbortSignal): AsyncIterable<FileEvent> {
-    // A per-subscriber bridge over the external `fs.watch` source — deliberately NOT the shared
-    // `createBroadcaster` fan-out (that's for internally-emitted events like the sqlite store's). Each
-    // subscriber owns its own fs.watch; the profiles backend merges one such stream per partition.
-    // fs.watch throws ENOENT on a missing directory, so ensure it exists first — mirroring put()/list().
-    // This bites when a registered StorageBackend is the boot backend: the host skips its own files-dir
-    // mkdir, so nothing else has created the directory before the frontend starts watching it.
-    await this.ensureDir();
-    const queue:     FileEvent[]                             = [];
-    const prevMeta   = new Map<string, FileMetaData>();
-    const debounces  = new Map<string, ReturnType<typeof setTimeout>>();
-    let   notify:    (() => void) | undefined;
-    let   done       = false;
-
-    const wake = (): void => { const fn = notify; notify = undefined; fn?.(); };
-
-    const handleChange = async (id: string): Promise<void> => {
-      const handle = await this.get(id);
-      if (!handle) { prevMeta.delete(id); return; }
-      queue.push(buildFileEvent(handle, prevMeta.get(id)));
-      prevMeta.set(id, metaFromHandle(handle));
-      wake();
-    };
-
-    const watcher = watch(this.dir, { recursive: true }, (_, filename) => {
-      if (typeof filename !== 'string') return;
-      if (filename.endsWith('.meta.json') || filename.endsWith('.tmp')) return;
-      const id = filename.endsWith('.data') ? filename.slice(0, -'.data'.length) : filename;
-      const t  = debounces.get(id);
-      if (t !== undefined) clearTimeout(t);
-      debounces.set(id, setTimeout(() => { debounces.delete(id); void handleChange(id); }, 50));
-    });
-
-    const onAbort = (): void => { done = true; watcher.close(); wake(); };
-    signal?.addEventListener('abort', onAbort, { once: true });
-
-    try {
-      while (!done) {
-        while (queue.length > 0) yield queue.shift()!;
-        if (done) break;
-        await new Promise<void>(r => { notify = r; });
-      }
-    } finally {
-      watcher.close();
-      signal?.removeEventListener('abort', onAbort);
-      for (const t of debounces.values()) clearTimeout(t);
-    }
-  }
-}
-
-// ── FileEvent helpers ─────────────────────────────────────────────────────────
-
-const META_KEYS: ReadonlyArray<keyof FileMetaData> = [
-  'id', 'version', 'name', 'mimeType', 'size', 'createdAt',
-  'sessionId', 'messageId', 'namespace', 'allowed',
-];
-
-function metaFromHandle(h: FileHandle): FileMetaData {
-  return {
-    id:        h.id,
-    version:   h.version,
-    name:      h.name,
-    mimeType:  h.mimeType,
-    size:      h.size,
-    createdAt: h.createdAt,
-    ...(h.sessionId !== undefined ? { sessionId: h.sessionId } : {}),
-    ...(h.messageId !== undefined ? { messageId: h.messageId } : {}),
-    ...(h.namespace !== undefined ? { namespace: h.namespace } : {}),
-    ...(h.allowed   !== undefined ? { allowed:   h.allowed   } : {}),
-  };
-}
-
-function buildFileEvent(handle: FileHandle, prev: FileMetaData | undefined): FileEvent {
-  const meta = metaFromHandle(handle);
-  const a    = meta as unknown as Record<string, unknown>;
-  const b    = prev as unknown as Record<string, unknown> | undefined;
-  const changed = b === undefined
-    ? [...META_KEYS]
-    : META_KEYS.filter(k => a[k] !== b[k]);
-  return { ...meta, changed };
 }

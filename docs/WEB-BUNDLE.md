@@ -47,9 +47,10 @@ context — re-expressed without HTTP. Streaming is the same `AsyncIterable<Pipe
 emits natively; in-process is simply that iterable, HTTP demuxes it back out of one SSE stream.
 
 All SSE streams live under a dedicated `/events/` prefix — `GET /events/sessions` (busy/idle),
-`/events/sessions/:id` (per-session turns), `/events/files`, `/events/files/:ns/:name`,
-`/events/tools`, `/events/plugins` — so no author-controlled path segment can shadow a route (a tool
-named `events` no longer collides with `POST /tools/:name`).
+`/events/sessions/:id` (per-session turns) and `/events` (one multiplexed global stream carrying
+`session-busy` plus every `notification`, which replaced the per-kind `/events/files`,
+`/events/files/:ns/:name`, `/events/tools` and `/events/plugins` streams) — so no author-controlled
+path segment can shadow a route (a tool named `events` no longer collides with `POST /tools/:name`).
 
 ### The `browser` export condition
 

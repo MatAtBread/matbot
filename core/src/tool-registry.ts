@@ -1,26 +1,36 @@
-import type { Tool, ToolRegistry, ToolRegistryEvent } from './types.js';
-import { createBroadcaster } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolRegistry, Notifier } from './types.js';
 
 export class ToolRegistryImpl implements ToolRegistry {
   private readonly tools = new Map<string, Tool>();
-  private readonly events = createBroadcaster<ToolRegistryEvent>();
+  // The host's notifier proxy, injected at boot (both hosts build it before this registry). Held as the
+  // proxy, not a resolved impl, so a later register('Notifier', …) takes effect here too. Optional: a
+  // registry built without one (tests) simply announces nothing.
+  private readonly notifier: Notifier | undefined;
 
-  constructor(initial?: Iterable<Tool>) {
+  constructor(initial?: Iterable<Tool>, notifier?: Notifier) {
     if (initial !== undefined) for (const tool of initial) this.tools.set(tool.name, tool);
+    this.notifier = notifier;
+  }
+
+  private announce(name: string, operation: 'added' | 'removed', pluginName?: string): void {
+    this.notifier?.notify({
+      kind: 'registry', source: 'tools', registry: 'tools', name, operation,
+      ...(pluginName !== undefined ? { detail: { pluginName } } : {}),
+    });
   }
 
   register(tool: Tool): void {
     this.tools.set(tool.name, tool);
-    this.events.emit({ type: 'registered', name: tool.name, ...(tool.pluginName !== undefined ? { pluginName: tool.pluginName } : {}) });
+    this.announce(tool.name, 'added', tool.pluginName);
   }
 
   remove(name: string): void {
-    if (this.tools.delete(name)) this.events.emit({ type: 'removed', name });
+    if (this.tools.delete(name)) this.announce(name, 'removed');
   }
 
   removeByPlugin(pluginName: string): void {
     for (const [name, tool] of this.tools) {
-      if (tool.pluginName === pluginName && this.tools.delete(name)) this.events.emit({ type: 'removed', name });
+      if (tool.pluginName === pluginName && this.tools.delete(name)) this.announce(name, 'removed');
     }
   }
 
@@ -30,10 +40,5 @@ export class ToolRegistryImpl implements ToolRegistry {
 
   list(): Tool[] {
     return [...this.tools.values()];
-  }
-
-  async *watch(signal?: AbortSignal): AsyncIterable<ToolRegistryEvent> {
-    // Tool CRUD is global — no origin — so unwrap the envelope to the bare event.
-    for await (const { value } of this.events.subscribe(signal)) yield value;
   }
 }

@@ -5,6 +5,7 @@ import type {
   TypeScriptStripper, ToolTypeIndex, ToolPresenter, SteeringPolicy,
 } from './types.js';
 import type { Routed } from './broadcast.js';
+import type { Notifier } from './notify.js';
 import type { HookRegistry } from './hooks.js';
 
 export const PLUGIN_API_VERSION = '0.1';
@@ -114,6 +115,12 @@ export interface MatbotServices {
    *  reference held across a swap keeps resolving to the live backend. Always present (boot default). */
   readonly Vault: Vault;
   readonly KnowledgeIndex: KnowledgeIndex;
+  /** The notification bus — every "something changed" fact, one fan-out. Also the `register('Notifier',
+   *  impl)` swap key: the host boots an in-process broadcaster, a plugin may swap in a distributed one
+   *  (and unloading it reverts to the boot default). Capture-safe behind a proxy. Always present.
+   *  Within a plugin's `setup()` this is scoped, so published notifications carry that plugin's name.
+   *  See {@link Notifier}. */
+  readonly Notifier: Notifier;
   /** Optional tool-presentation policy: chooses which tools are advertised to the model per provider
    *  call (a large-library search/deferral plugin registers one). Absent ⇒ the runner advertises the
    *  whole turn snapshot. A plain registered service (not a swap-member); consumed as a member. See
@@ -504,18 +511,13 @@ export interface StorageBackend {
 }
 
 /**
- * The partition-aware file-watch layer, registered by a storage backend that partitions files per
- * principal (the profiles backend). Consumed by a frontend firehose so it can (a) observe file events
- * across *every* partition, each stamped with the {@link Routed} origin that produced it, and (b) decide,
- * per SSE connection, whether a given event is visible to that connection's principal. Absent ⇒ no
- * partitioning: the frontend falls back to the plain single-stream `fileStore.watch()` with no filter.
- * The origin/visibility split is generic (files today; the same shape serves skills/stores later).
+ * The per-connection visibility layer, registered by a storage backend that partitions per principal (the
+ * profiles backend). Consumed by a frontend firehose to decide, per SSE connection, whether a given
+ * notification is visible to that connection's principal. Absent ⇒ no partitioning, and every connection
+ * sees everything. Generic across kinds: it answers on (`namespace`, `id`, `origin`), so files, skills and
+ * stores all route through the one predicate.
  */
 export interface WatchVisibility {
-  /** Every partition's file events, merged into one stream, each a self-describing {@link StoreChange}
-   *  (routing namespace `'files'`, the file id, and the {@link FileMetaData} in `detail`) tagged with the
-   *  origin partition — so the firehose filters and routes files through the same predicate as any stream. */
-  watchFiles(signal?: AbortSignal): AsyncIterable<Routed<StoreChange>>;
   /**
    * The per-connection visibility predicate for ANY partitioned event stream (files, skills, …): would a
    * connection owned by `viewer` see the change to (`namespace`, `id`) produced by `origin`? True iff the

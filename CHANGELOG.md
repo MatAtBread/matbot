@@ -9,6 +9,82 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## 0.3.8
+
+_One notification bus replaces every bespoke "something changed" channel. Three private streams are
+deleted outright; the web UI reads one stream; live session/file/skill/share updates now reach a
+second browser._
+
+### Breaking changes
+
+- **`ToolRegistry.watch()` and `watchPlugins()` removed**, with `ToolRegistryEvent` and
+  `PluginRegistryEvent`. Both registries were broadcasters over the same primitive the new bus is, so
+  keeping them was duplication rather than layering. They publish
+  `{ kind: 'registry', registry: 'tools' | 'plugins' }` instead, and consumers subscribe to
+  `services.Notifier`. A `tools` notification carries the registering plugin's name in the advisory
+  `detail`; resolve the name for anything authoritative. `SkillManager.watch()` went the same way.
+- **`FileStore.watch()` removed**, with `FileEvent` and `WatchVisibility.watchFiles`. It existed to
+  detect writes made outside matbot — but matbot writes `.data` and nothing else, and every in-process
+  writer now announces itself, so no first-party feature depended on it. As a core interface it was
+  actively misleading: only the filesystem store implemented it, sqlite re-broadcast its own writes
+  (which the bus already carries), and Drive and OPFS returned a stream that yields nothing — making
+  "this backend cannot watch" indistinguishable from "nothing has changed". Watching arbitrary
+  filesystem activity is a plugin's job: it can watch whatever it likes and publish onto the bus, which
+  every sink already understands. `WatchVisibility` keeps `visible()` — the part that was ever a
+  contract rather than a transport.
+
+### API gaps filled
+
+- **`Notifier`** — a swappable `MatbotServices` member with an in-process host default:
+  `notify` / `subscribe` / `consume` over one `Notification` envelope. Matbot owns the envelope and the
+  registration surface, not delivery: no persistence, no replay, no delivery guarantee, so a sink
+  re-queries on attach and treats a notification as invalidation. Within a plugin's `setup()` it is
+  scoped, so published notifications carry that plugin's name.
+  - The envelope discriminates on `kind` (the shape — `store-change`, `registry`, or an augmentation of
+    `Notifications`) *and* carries attribution (`instance` / `plugin` / `source`) as separate fields, so
+    a sink can filter on either or both. `principal` is ownership — whose data changed, the input to
+    `WatchVisibility.visible` — and is never conflated with the producer fields. `kind` is **open at
+    runtime**, so a `switch` over it must always have a `default`.
+  - **Identity, never value.** A `store-change` carries `namespace`/`id`/`operation`; `detail` is
+    advisory (a cosmetic in-place UI update at most). Events are stale the moment a concurrent writer
+    lands, so consumers read through the store.
+  - **Distributed left open, not built.** A registered implementation may forward off-box; it stamps
+    `instance` on ingress and must not re-forward a foreign `instance` — that is the loop break.
+- **`notifyingStore(store, notifier, namespace, source)`** — wraps a store so every successful write
+  announces itself. For a namespace with one writer an explicit `notify` is clearer; this is for one
+  with many (`sessions` has nine), where it cannot be forgotten by the next writer to arrive.
+
+### Bug fixes
+
+- **Changes that had no channel at all now have one.** A session created, renamed, archived or
+  auto-titled in one browser reaches another; a first share or an unshare reaches the recipient's list;
+  a file deletion is representable (`FileEvent` had no operation, and the filesystem watch dropped
+  deletes entirely).
+- **Deleting a shared-in item un-shares it.** The profiles backend routes a `Store.delete` (and a
+  `FileStore.delete`) of an item shared INTO the current partition through its own `unshare` path,
+  rather than relying on the raw unlink happening to spare the owner's file: the shared-in cache is
+  updated and the change announced, where before both were stranded. No API change — a delete is a
+  delete to the caller, which may not have profiles loaded at all; only that layer can tell the two
+  apart.
+
+### Optional
+
+- **frontend/web — one notification stream.** Replaces `file-changed` / `skill-changed` /
+  `tool-changed` / `plugin-changed`, with matching in-process wiring in the browser transport, and
+  re-lists sessions live. `session-busy` deliberately stays its own event: it replays current state on
+  connect, which the bus does not carry. `GET /events/files/:ns/:name` is removed (no consumer); the
+  multiplexed `/events` stream still carries every file notification.
+- **frontend/web — an interactive prompt answered in another browser.** `prompt-resolved` is emitted
+  from the settle path every answer, cancel and abort funnels through, and the UI retires its dialog on
+  it. The prompt case no longer *awaits* the answer inside the turn's event loop: parking there stalled
+  every later event of that turn in the other browsers — including the `prompt-resolved` that would
+  have retired their dialog.
+- **frontend/web — a shared-in session's `×` unshares** instead of archiving it (an archive is a write,
+  which raised `ReadOnlyError` once shared-in sessions appeared live in the list); rename is withheld
+  there for the same reason.
+- **workspace, background — writes and deletes announce themselves**, carrying the content namespace
+  and name so a frontend can update a row in place rather than re-listing.
+
 ## 0.3.7
 
 _A single provider fix: the Anthropic adapter's prompt caching now survives interactive think-time gaps and agentic tool loops._

@@ -23,6 +23,8 @@ const updatedFiles   = new Set();
 // path → owning profile id for files shared IN from another profile (read-only here). Refreshed with the
 // file list in one `share`/`owner`/`*` call; empty when profiles are inactive. Gates the per-file share UI.
 let   fileOwners     = {};
+// Same, for sessions shared IN: session id → owning profile id. Refreshed with the session list.
+let   sessionOwners  = {};
 
 // ── Scroll control ────────────────────────────────────────────────────────────
 //
@@ -302,6 +304,13 @@ async function apiListSessions() {
   try {
     const sessions = await callTool('session_action', { action: 'list' });
     sessionsBanner.style.display = 'none';
+    // Ownership is a profiles concern the session tool knows nothing about — resolve the whole list's
+    // shared-in owners in one call, exactly as loadFiles() does, so every render can gate on it.
+    sessionOwners = {};
+    if (profilesActive) {
+      try { sessionOwners = (await callTool('share', { action: 'owner', namespace: 'sessions', id: '*' })).owners || {}; }
+      catch { sessionOwners = {}; }
+    }
     return sessions;
   } catch (e) {
     if (String(e).includes('404')) sessionsBanner.style.display = 'flex';
@@ -350,9 +359,15 @@ async function renameSession(id, current) {
   } catch (e) { alert('Rename failed: ' + e.message); }
 }
 
+// The × on a session. On one you own it hides (archives) it — a write. On one shared IN it must not be a
+// write at all: the doc belongs to another partition and is read-only here, so removing it from your view
+// is un-sharing it from this profile. (The file list gets there by a different route — its × is a real
+// delete, which the profiles backend turns into the same unshare.)
 async function hideSession(id) {
+  const owner = sessionOwners[id];
   try {
-    await callTool('session_action', { action: 'hide', sessionId: id });
+    if (owner != null) await callTool('share', { action: 'unshare', namespace: 'sessions', id, target: currentProfileName() });
+    else               await callTool('session_action', { action: 'hide', sessionId: id });
     const sessions = await apiListSessions();
     if (id === currentSessionId) {
       currentSessionId = sessions[0]?.id ?? null;
@@ -363,7 +378,7 @@ async function hideSession(id) {
       if (chatHeaderEl) chatTitleEl.textContent = '';
     }
     renderSessions(sessions);
-  } catch (e) { alert('Hide failed: ' + e.message); }
+  } catch (e) { alert((owner != null ? 'Unshare failed: ' : 'Hide failed: ') + e.message); }
 }
 
 async function apiNewSession() {
@@ -1647,13 +1662,14 @@ function renderSessions(sessions) {
     renameBtn.title = 'Rename';
     renameBtn.onclick = e => { e.stopPropagation(); renameSession(s.id, s.title || ''); };
 
+    const owner = sessionOwners[s.id];
     const hideBtn = document.createElement('button');
     hideBtn.className = 'session-action-btn';
     hideBtn.textContent = '\u00d7';
-    hideBtn.title = 'Hide';
+    hideBtn.title = owner != null ? 'Remove from my view (unshare)' : 'Hide';
     hideBtn.onclick = e => { e.stopPropagation(); hideSession(s.id); };
 
-    actions.appendChild(renameBtn);
+    if (owner == null) actions.appendChild(renameBtn);   // rename is a write — refused on a shared-in session
     actions.appendChild(hideBtn);
     el.appendChild(labelEl);
     el.appendChild(actions);
@@ -2401,6 +2417,10 @@ async function renderTurn(sid, traceId) {
   let turnWrap   = null;   // assistant wrap, created lazily
   let loadingEl  = null;
   let started    = false;
+  // The turn's outstanding interactive prompt, if any: `{ dismiss }`. The dialog is drawn in every
+  // browser attached to the session but answered in only one, so the others are retired by the
+  // server's `prompt-resolved`. Cleared as soon as it settles here, so our own answer's echo is a no-op.
+  let livePrompt = null;
 
   // First visible activity for this turn: drop the queued egg-timer and create the assistant wrap
   // with loading dots. Idempotent.
@@ -2636,11 +2656,22 @@ async function renderTurn(sid, traceId) {
           // Cancel is the "give up" path (default on); only an explicit cancelable:false suppresses it.
           const cancelable   = !(field && field.cancelable === false);
           const allowOther   = !!(field && field.type === 'select' && field.allowOther);
-          const result = await new Promise(resolve => {
+          const answered = new Promise(resolve => {
             const block = document.createElement('div');
             block.className = 'prompt-block';
             // Settle the dialog: disable every control (incl. the cancel ×) once answered or cancelled.
             const done = () => block.querySelectorAll('button, input').forEach(el => { el.disabled = true; });
+            // Retire the dialog without answering — someone else got there first. Resolving with
+            // `dismissed` keeps the single settle path below from POSTing an answer nobody asked for.
+            livePrompt = { dismiss: () => {
+              done();
+              block.classList.add('settled');
+              const note = document.createElement('div');
+              note.className = 'prompt-note';
+              note.textContent = 'Answered elsewhere.';
+              block.appendChild(note);
+              resolve({ dismissed: true });
+            } };
             if (cancelable) {
               const x = document.createElement('button');
               x.type = 'button';
@@ -2741,7 +2772,19 @@ async function renderTurn(sid, traceId) {
               inp.focus();
             }
           });
-          await T.answerPrompt(sid, result.cancelled ? { cancel: true } : { answer: result.answer });
+          // Deliberately NOT awaited: this loop must keep consuming the turn's events while the dialog is
+          // up. Parking here stalls everything behind it — including the `prompt-resolved` that retires
+          // this very dialog when another browser answers, which is a deadlock, not just a lag.
+          void answered.then(result => {
+            livePrompt = null;
+            if (result.dismissed) return;
+            return T.answerPrompt(sid, result.cancelled ? { cancel: true } : { answer: result.answer });
+          });
+          break;
+        }
+
+        case 'prompt-resolved': {
+          livePrompt?.dismiss();
           break;
         }
 
@@ -2996,63 +3039,65 @@ async function init() {
     }
   })();
 
-  // Subscribe to file-change events. Each arrives as a StoreChange ({operation, namespace:'files', id,
-  // detail}); the file's own metadata (content namespace, name, size) rides in `detail`. This panel shows
-  // the workspace, so ignore changes to files in other content namespaces before touching it.
-  (async function connectFileWatchStream() {
-    for await (const event of T.fileEvents(new AbortController().signal)) {
-      const meta = event.detail || {};
-      if (meta.namespace !== 'workspace') continue;
-      const { name } = meta;
-      const el = document.getElementById('file-list');
-      const item = el?.querySelector('[data-path="' + CSS.escape(name) + '"]');
-      if (item) {
-        updatedFiles.add(name);
-        item.classList.add('updated');
-        // Update the size display if present.
-        const sizeEl = item.querySelector('.file-size');
-        if (sizeEl && meta.size !== undefined) sizeEl.textContent = formatSize(meta.size);
-      } else {
-        // New file — mark updated before reloading so the dot appears.
-        updatedFiles.add(name);
-        loadFiles();
+  // ONE notification stream drives every live panel. Each notification is a self-describing fact —
+  // `kind` selects the shape, `namespace`/`id` say what changed — already filtered server-side to what
+  // this connection's principal may see. Never treat one as a delta to apply: it carries identity, not
+  // state, so the only sound reaction is to re-read what changed (the file row's advisory `detail` is
+  // the one exception, and only ever cosmetic).
+  //
+  // NOTE the `default` fall-through: `kind` is open at runtime — a plugin, or a bridge from another
+  // matbot, can publish a kind this build has never heard of — so an unrecognised notification must be
+  // ignored, never treated as an error.
+  (async function connectNotificationStream() {
+    // Panel re-queries are debounced: one plugin load fires many registry notifications, and we want a
+    // single re-query per burst rather than one per event.
+    const debounced = (fn, ms = 150) => {
+      let timer = null;
+      return () => { if (timer) return; timer = setTimeout(() => { timer = null; fn(); }, ms); };
+    };
+    const refreshSkills   = debounced(loadSkills);
+    const refreshPlugins  = debounced(loadPlugins);
+    const refreshFiles    = debounced(loadFiles);
+    // A session appearing or vanishing — a second browser on this profile creating one, a fork, a
+    // session shared in from another profile. The list had no live source at all before.
+    const refreshSessions = debounced(async () => { renderSessions(await apiListSessions()); });
+
+    for await (const n of T.notifications(new AbortController().signal)) {
+      switch (n.kind) {
+        case 'store-change':
+          switch (n.namespace) {
+            case 'files':    onFileChanged(n, refreshFiles); break;
+            case 'skills':   refreshSkills();                break;
+            case 'sessions': refreshSessions();              break;
+            default: break;                                  // a namespace no panel shows
+          }
+          break;
+        // Tool churn refreshes skills (skills are tools, and one may be registered out of band — e.g.
+        // the Drive backend restoring matbot-skills at boot); plugin churn refreshes the plugins panel,
+        // covering the tool-less plugins the tool registry can't see.
+        case 'registry':
+          if (n.registry === 'tools') refreshSkills(); else refreshPlugins();
+          break;
+        default: break;
       }
     }
   })();
 
-  // Tool-registry CRUD → refresh the skills panel (skills are tools; a skill_action registered out
-  // of band — e.g. the Drive backend restoring matbot-skills at boot, after this UI's one-shot loads
-  // — surfaces here). Debounced: one plugin load fires many tool-changed events, want one re-query.
-  (async function connectToolWatchStream() {
-    if (!T.toolEvents) return;
-    let timer = null;
-    for await (const _event of T.toolEvents(new AbortController().signal)) {
-      if (timer) continue;
-      timer = setTimeout(() => { timer = null; loadSkills(); }, 150);
-    }
-  })();
-
-  // Skill content saved/deleted — incl. by the LLM mid-turn via skill_action, which this UI's own
-  // save/delete buttons already refresh after locally but has no other way to learn about.
-  (async function connectSkillWatchStream() {
-    if (!T.skillEvents) return;
-    let timer = null;
-    for await (const _event of T.skillEvents(new AbortController().signal)) {
-      if (timer) continue;
-      timer = setTimeout(() => { timer = null; loadSkills(); }, 150);
-    }
-  })();
-
-  // Plugin load/unload → refresh the plugins panel. Catches tool-less plugins the tool stream can't
-  // see (pure provider/hook/storage), and supersedes the old poll-on-`plugin`-tool-success refresh.
-  (async function connectPluginWatchStream() {
-    if (!T.pluginEvents) return;
-    let timer = null;
-    for await (const _event of T.pluginEvents(new AbortController().signal)) {
-      if (timer) continue;
-      timer = setTimeout(() => { timer = null; loadPlugins(); }, 150);
-    }
-  })();
+  // A file changed. The workspace panel shows one content namespace, so ignore the rest. An already-
+  // listed row updates in place from the advisory `detail` (cosmetic only — size and the updated dot);
+  // anything else re-lists, which is also how a first share, a copy, or a delete reaches the list.
+  function onFileChanged(n, refreshFiles) {
+    if (n.operation === 'deleted') { refreshFiles(); return; }
+    const meta = n.detail || {};
+    if (meta.namespace !== 'workspace') return;
+    const { name } = meta;
+    const item = document.getElementById('file-list')?.querySelector('[data-path="' + CSS.escape(name) + '"]');
+    updatedFiles.add(name);
+    if (!item) { refreshFiles(); return; }
+    item.classList.add('updated');
+    const sizeEl = item.querySelector('.file-size');
+    if (sizeEl && meta.size !== undefined) sizeEl.textContent = formatSize(meta.size);
+  }
 
   renderSessions(sessions);
 

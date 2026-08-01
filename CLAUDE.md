@@ -295,6 +295,51 @@ When `parameters.thinking` is set, complete `{ type: 'thinking', thinking, signa
 
 ---
 
+## Notifications
+
+`Notifier` is the one fan-out for every "something changed" fact — a swappable `MatbotServices`
+member with an in-process host default. Matbot owns the **envelope and the registration surface**;
+it does not own delivery (no persistence, replay, or guarantees — that's what a registered
+distributed impl is for).
+
+```ts
+services.Notifier.notify({ kind: 'store-change', source: 'skill', operation: 'saved',
+                           namespace: 'skills', id, principal });
+services.Notifier.consume(n => { … }, signal, n => n.kind === 'store-change');
+```
+
+**Two discriminants, both filterable.** `kind` selects the payload shape (`store-change`,
+`registry`, or an augmentation of `Notifications`); `instance`/`plugin`/`source` are attribution.
+A sink filters on either or both. `plugin` is stamped from the emitting plugin's scope.
+
+**`kind` is open at runtime** — a foreign plugin or a bridged remote server can publish one this
+build has never seen. Always `default` a `switch` over it; exhaustiveness checking is unsound here.
+
+**`principal` is ownership, not attribution** — whose data changed, and the input to
+`WatchVisibility.visible`. Never conflate it with the producer fields.
+
+**Identity, never value.** A `store-change` carries `namespace`/`id`/`operation`; `detail` is
+advisory (a cosmetic in-place UI update at most). Events are queued per subscriber and are stale
+the moment a concurrent writer lands, so a consumer re-reads through the store. A sink attaching
+mid-flight has missed what preceded it — **re-query on attach**; never put current state on the bus.
+
+**Emit where the change happens**, not where a tool call happens: a detached child's completion and
+an HTTP-created session are both real changes with no tool executor in scope.
+
+**A private stream is not a second bus.** The tool registry, the plugin registry and the SkillManager
+each had their own broadcaster over the same primitive; all three now publish onto the bus and have no
+`watch()`. `FileStore.watch` went too — it existed to detect writes made *outside* matbot, which is a
+plugin's job, not a core interface every backend must implement (two of four faked it with a stream
+that yields nothing, making "cannot watch" indistinguishable from "nothing changed"). Matbot writes
+`.data` and nothing else; anything richer — run a turn when a file arrives — is a plugin that watches
+what it likes and publishes onto the bus, which `MatbotServices` already makes easy.
+
+The one exception is `session-busy`: it replays current state on connect, which the bus refuses to
+carry, so the frontend keeps it as its own SSE event.
+
+**Distributed is left open, not built.** A registered `Notifier` may forward off-box; it stamps
+`instance` on ingress and must not re-forward a foreign `instance` — that is the loop break.
+
 ## Markers
 
 Opaque, durable annotations in the message stream — `{ type: 'marker', creator: string, data: unknown }`. Stored as marker-role messages, **elided from LLM submission**, **persisted unchanged**, **preserved by compaction**. A tool emits one via `marker` `ToolEvent`; the triggers dispatcher collects and persists them for silent-side-effect trace. For type safety, augment `MarkerData` registry (same pattern as `MatbotServices`).

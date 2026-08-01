@@ -114,12 +114,9 @@ class ToolTypeIndexImpl implements ToolTypeIndex {
 
   constructor(machine: MatbotMachine) {
     this.machine = machine;
-    void this.watchTools();
-  }
-
-  private async watchTools(): Promise<void> {
-    try { for await (const _ev of this.machine.tools.watch(this.ac.signal)) this.dirty = true; }
-    catch { /* signal aborted on teardown */ }
+    // Any tool CRUD invalidates the generated dts; the event itself carries nothing we need.
+    machine.Notifier.consume(() => { this.dirty = true; }, this.ac.signal,
+      n => n.kind === 'registry' && n.registry === 'tools');
   }
 
   close(): void { this.ac.abort(); }

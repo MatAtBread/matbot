@@ -15,8 +15,7 @@
 //   answerEnv(sid, body)                           -> Promise<void>    body = { callId, ok, value } | { callId, ok:false, error }
 //   abort(sid)                                     -> Promise<void>
 //   statusEvents(signal)                           -> AsyncIterable<{ sessionId, busy }>
-//   fileEvents(signal)                             -> AsyncIterable<{ namespace, name, size }>
-//   skillEvents(signal)                            -> AsyncIterable<{ type: 'saved'|'deleted', name }>
+//   notifications(signal)                          -> AsyncIterable<Notification>
 //   openFile(namespace, path)                      -> void
 
 (function () {
@@ -193,11 +192,12 @@
     })();
   }
 
-  function statusEvents(signal) { return globalEventStream('session-busy',   signal); }
-  function fileEvents(signal)   { return globalEventStream('file-changed',   signal); }
-  function toolEvents(signal)   { return globalEventStream('tool-changed',   signal); }
-  function pluginEvents(signal) { return globalEventStream('plugin-changed', signal); }
-  function skillEvents(signal)  { return globalEventStream('skill-changed',  signal); }
+  // session-busy stays its own event: it is transient state, replayed on connect, not a durable fact —
+  // exactly what the notification bus deliberately does not carry.
+  function statusEvents(signal) { return globalEventStream('session-busy', signal); }
+  // Everything else — file/skill/session/share changes and tool/plugin registry churn — arrives as one
+  // notification stream, already filtered server-side to what this connection's principal may see.
+  function notifications(signal) { return globalEventStream('notification', signal); }
 
   function openFile(namespace, path) {
     const profileName = currentProfile();
@@ -207,6 +207,6 @@
   window.matbotTransport = {
     hostRuntime: 'node',
     callTool, createSession, sessionBusy, submit,
-    sessionEvents, answerPrompt, answerEnv, abort, statusEvents, fileEvents, toolEvents, pluginEvents, skillEvents, openFile,
+    sessionEvents, answerPrompt, answerEnv, abort, statusEvents, notifications, openFile,
   };
 })();

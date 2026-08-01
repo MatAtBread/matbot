@@ -89,6 +89,8 @@ interface Schedule {
 let scheduleStore:   Store<Schedule> | undefined;
 let activeConfigPath: string | undefined;
 let activeFiles:     FileStore | undefined;
+// Set in setup(); announces a finished job's captured output file. No-op before setup.
+let notifyOutput: ((id: string, principal: Principal | undefined, name: string) => void) | undefined;
 let pluginAc:        AbortController | undefined;
 const activeLoops    = new Map<string, AbortController>();
 // One entry per schedule while it is sleeping; aborting it wakes the sleep early.
@@ -163,6 +165,10 @@ function spawnJob(configPath: string, prompt: string, output?: string, files?: F
 
   if (captureOut && child.stdout !== null && output !== undefined && files !== undefined) {
     files.put(output, mimeFromName(output), stdoutStream(child.stdout), { namespace: 'workspace', allowed: true })
+      // The parent owns this write (it pipes the detached child's stdout), so completion is observable
+      // here — the file landing IS the job finishing. Announced explicitly rather than left to the file
+      // store's own watch, which not every backend has and which cannot say who the job ran as.
+      .then(handle => notifyOutput?.(handle.id, principal, output))
       .catch((err: unknown) => process.stderr.write(
         `[background] output capture failed for "${output}": ${err instanceof Error ? err.message : String(err)}\n`,
       ));
@@ -493,6 +499,11 @@ export const plugin: MatbotPluginSpec = {
     if (services.isSubAgent()) return;
     activeConfigPath = services.configPath;
     activeFiles      = services.files;
+    notifyOutput = (id, principal, name) => services.Notifier.notify({
+      kind: 'store-change', source: 'job-output', operation: 'saved', namespace: 'files', id,
+      detail: { namespace: 'workspace', name },      // lets a frontend place the row without re-listing
+      ...(principal !== undefined ? { principal } : {}),
+    });
     scheduleStore    = services.createStore<Schedule>('schedules');
     pluginAc         = new AbortController();
     const result     = await scheduleStore.query({});

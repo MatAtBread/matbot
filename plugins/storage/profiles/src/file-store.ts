@@ -1,4 +1,4 @@
-import type { FileEvent, FileFilter, FileHandle, FileStore, MimeType } from '@matatbread/matbot-plugin-api';
+import type { FileFilter, FileHandle, FileStore, MimeType } from '@matatbread/matbot-plugin-api';
 
 /**
  * A {@link FileStore} that routes every op to a per-principal partition's file store, mirroring how
@@ -46,12 +46,5 @@ export class ProfilesFileStore implements FileStore {
 
   putTemp(name: string, mimeType: MimeType, data: AsyncIterable<Uint8Array>): Promise<FileHandle> {
     return this.pick().putTemp(name, mimeType, data);
-  }
-
-  watch(signal?: AbortSignal): AsyncIterable<FileEvent> {
-    // Routes on the principal in force when watch() is called — one partition's stream. The
-    // cross-partition firehose (a server watching ALL partitions, filtered per connection) is Task 2b;
-    // until then a profile that isolates files gets no live file events, base watching is unchanged.
-    return this.pick().watch(signal);
   }
 }
