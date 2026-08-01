@@ -124,6 +124,9 @@ function corsHeaders(origin: string): Record<string, string> {
     'access-control-allow-origin':  origin,
     'access-control-allow-headers': 'content-type, authorization',
     'access-control-allow-methods': 'GET, POST, OPTIONS',
+    // Without this a cross-origin page cannot read the version header at all (it isn't CORS-safelisted),
+    // so the client's staleness check would silently never fire.
+    'access-control-expose-headers': 'x-matbot-version',
   };
 }
 
@@ -256,6 +259,29 @@ export function createWebServer(deps: WebServerDeps) {
 
   const webEnvTool = makeWebEnvTool(evalInBrowser);
 
+  // The harness version stamped on every response as `x-matbot-version`, so a browser can notice it is
+  // running against a server that has since been restarted on a different build and reload itself. The
+  // single source is `about_matbot` — the same tool the UI already calls at bootstrap to fill
+  // #matbot-version, which is what the client compares this header against; deriving it from this
+  // package's own package.json instead would compare two unrelated version lines. Resolved once, in the
+  // background (the tool registers after this server starts listening — see the boot grace note above),
+  // and left undefined on failure: no header, so the client's check stays inert rather than false-firing.
+  let harnessVersion: string | undefined;
+  void (async () => {
+    const tool = await resolveToolReady('about_matbot', watchAc.signal);
+    if (!tool) return;
+    const ac = new AbortController();
+    try {
+      for await (const ev of tool.executor.execute({}, makeToolCtx(ac))) {
+        if (ev.type === 'result') {
+          const v = (ev.value as { version?: unknown }).version;
+          if (typeof v === 'string') harnessVersion = v;
+          return;
+        }
+      }
+    } catch { /* no version header; the client simply doesn't check */ }
+  })();
+
   // Broadcast a session's busy/idle transition to the global status listeners (sidebar), deduped
   // against the last value. Authoritative busy comes from the runner (running || queued > 0).
   function updateBusy(sessionId: string): void {
@@ -283,6 +309,9 @@ export function createWebServer(deps: WebServerDeps) {
     for (const [k, v] of Object.entries(corsHeaders(origin))) {
       res.setHeader(k, v);
     }
+    // Every response carries the serving build, including the SSE streams and the static assets. Routes
+    // that writeHead their own header object keep this one — writeHead merges over what setHeader set.
+    if (harnessVersion !== undefined) res.setHeader('x-matbot-version', harnessVersion);
 
     if (method === 'OPTIONS') { res.writeHead(204).end(); return; }
 
@@ -356,9 +385,11 @@ export function createWebServer(deps: WebServerDeps) {
 
   function static200(res: ServerResponse, contentType: string, path: string) {
     return async () => {
-      try { 
+      try {
+        // `no-cache` so the version-mismatch reload actually re-fetches the UI rather than replaying the
+        // cached copy whose staleness triggered it.
         const body = await readFile(new URL(path, import.meta.url), "utf-8");
-        res.writeHead(200, { 'content-type': contentType, 'content-length': Buffer.byteLength(body) });
+        res.writeHead(200, { 'content-type': contentType, 'cache-control': 'no-cache', 'content-length': Buffer.byteLength(body) });
         res.end(body);
       } catch (e: any) {
         json(res, e.code === 'ENOENT' ? 404 : 500, { error: String(e) });

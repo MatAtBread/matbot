@@ -9,6 +9,19 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## Unreleased
+
+### Optional
+
+- **frontend/web — a stale tab reloads itself.** Every response carries the running harness version as
+  `x-matbot-version` (exposed via CORS, so a cross-origin page can actually read it), and the HTTP
+  transport compares it against the version the page loaded with — the one already on screen in
+  `#matbot-version`, which app.js fills from `about_matbot` at bootstrap, so there is one version line
+  and nothing extra stamped into the page. On a mismatch the page reloads once. A server restarted on a
+  new build no longer leaves a long-lived tab running UI code against an API it no longer matches.
+  Static assets are served `cache-control: no-cache` so the reload re-fetches them rather than replaying
+  the stale copy that triggered it.
+
 ## 0.3.8
 
 _One notification bus replaces every bespoke "something changed" channel. Three private streams are
