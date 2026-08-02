@@ -780,26 +780,6 @@ export interface FileHandle extends FileMetaData {
   stream(signal?: AbortSignal): AsyncIterable<Uint8Array>;
 }
 
-/**
- * The generic, self-describing change envelope every partitioned CRUD stream emits (files, skills, and
- * future partitioned stores) — the payload half of a {@link Routed} event, whose `origin` carries the
- * acting principal/partition. It supersedes the per-stream bespoke shapes (the old `SkillEvent`) so a
- * frontend firehose can filter and route every stream through ONE predicate.
- *
- * `namespace` is the ROUTING namespace the change lives under — `'files'`, `'skills'`, or a document
- * namespace — NOT a content sub-namespace (a file's own `metadata.namespace`, e.g. `'workspace'`, rides in
- * `detail`). Pairing `namespace` + `id` is exactly what `WatchVisibility.visible` needs to decide, per
- * connection, whether the viewer routes that item to the same partition (or has it shared in). `detail`
- * carries an optional rich payload for in-place UI updates — a file change ships its {@link FileMetaData}
- * so a sidebar row can update its size without a re-fetch; a skill change needs none (a refresh ping).
- */
-export interface StoreChange {
-  readonly operation: 'saved' | 'deleted';
-  readonly namespace: string;
-  readonly id:        string;
-  readonly detail?:   unknown;
-}
-
 export interface FileFilter {
   sessionId?:     string;
   mimeType?:      string;
@@ -882,7 +862,7 @@ export type HealthStatus =
 
 // ── Registries ────────────────────────────────────────────────────────────────
 
-/** Tool CRUD is observed on the {@link Notifier}, as `{ kind: 'registry', registry: 'tools' }` — this
+/** Tool CRUD is observed on the {@link Notifier}, as a `RegistryChange` with `registry: 'tools'` — this
  *  registry had its own broadcaster over the same primitive, which is duplication, not layering. One
  *  notification per tool (removeByPlugin announces a `removed` per matched tool); the registering
  *  plugin's name rides in `detail`, advisory as ever — resolve the name for anything authoritative. */

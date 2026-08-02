@@ -14,10 +14,12 @@ import { tryCurrentPrincipal } from './principal-context.js';
  *
  * A producer never sets `instance`: undefined means "this matbot". A bridge stamps it on ingress, so a
  * forwarded event stays attributable to the server that produced it and never loops back out.
+ *
+ * `kind` is deliberately absent here: it is not something an arm declares but something its
+ * {@link Notifications} key *is*, grafted on by {@link Notification}. Declaring it on the arm as well
+ * would be the same string written twice with nothing keeping the two honest.
  */
 export interface NotificationBase {
-  /** The shape tag. Selects the arm of {@link Notifications} — narrow on this to read the payload. */
-  readonly kind:       string;
   /** Producing plugin's name; `core` is reserved for the host and core itself. Defaulted from the
    *  emitting plugin's scope, so an ordinary producer never sets it. It stays overridable rather than
    *  enforced because relaying another producer's event is a legitimate act — that is exactly what a
@@ -32,17 +34,24 @@ export interface NotificationBase {
 }
 
 /**
- * A stored item changed. Carries identity, never the value: an event is queued per subscriber and is
- * stale the moment a concurrent writer lands, so a consumer that acts on a payload races the store it
- * is mirroring. Read through the store by `id` to get truth; treat this as invalidation.
+ * The thing addressed by `(namespace, id)` is no longer what you last read — re-read it.
+ *
+ * Deliberately named for that contract and not for a medium: this is published by `Store` writes
+ * (via {@link notifyingStore}), by `FileStore` writes, and by a share/unshare that passes through
+ * neither. **Use it whenever the change is an invalidation of an addressable item**, wherever the item
+ * lives — including a plugin watching something matbot doesn't own. Define a `kind` of your own only
+ * when you carry information a consumer *cannot* get by re-reading (progress, a measurement, an
+ * external event); squeezing that in here as `detail` is the mistake this note exists to prevent.
+ *
+ * Carries identity, never the value: an event is queued per subscriber and is stale the moment a
+ * concurrent writer lands, so a consumer that acts on a payload races the source it is mirroring.
  *
  * `namespace` is the ROUTING namespace (`files`, `skills`, `sessions`, a document namespace) — the axis
  * a profile isolates and `visible` routes on — not a content sub-namespace. `detail` is advisory only:
  * a cheap payload for an in-place UI update (a file's size) that a consumer may render but must never
  * treat as authoritative.
  */
-export interface StoreChangeNotification extends NotificationBase {
-  readonly kind:      'store-change';
+export interface ItemChange extends NotificationBase {
   readonly namespace: string;
   readonly id:        string;
   readonly operation: 'saved' | 'deleted';
@@ -50,20 +59,39 @@ export interface StoreChangeNotification extends NotificationBase {
 }
 
 /** A process-global registry gained or lost a member (tools, plugins). No owner, no item identity. */
-export interface RegistryNotification extends NotificationBase {
-  readonly kind:      'registry';
+export interface RegistryChange extends NotificationBase {
   readonly registry:  string;
   readonly name:      string;
   readonly operation: 'added' | 'removed';
 }
 
 /**
+ * The wire tags for the two kinds defined here. A `kind` is a globally-scoped token — unlike a type
+ * name, which an importer can rename out of a clash — so these exist to give one back: import the const
+ * under whatever local name suits (`import { ItemChangeKind as Changed }`) and use it as a `case` label
+ * or in a filter. `satisfies` ties each to a real key, so a typo fails the build here instead of
+ * becoming a predicate that silently never matches.
+ */
+export const ItemChangeKind     = '@matatbread/matbot-plugin-api#ItemChange'     satisfies keyof Notifications;
+export const RegistryChangeKind = '@matatbread/matbot-plugin-api#RegistryChange' satisfies keyof Notifications;
+
+/**
  * The registry of notification shapes, keyed by `kind` — augment it exactly like `MatbotServices` /
  * `MarkerData` / `ToolContracts` to add your own:
  *
+ *   export interface JobProgress extends NotificationBase { done: number; total: number }
+ *
  *   declare module '@matatbread/matbot-plugin-api' {
- *     interface Notifications { 'job-progress': JobProgressNotification }
+ *     interface Notifications { '@fnarr/jobs#JobProgress': JobProgress }
  *   }
+ *
+ * **The key is `<package-name>#<InterfaceName>` — no translation, no invention.** As with the service
+ * registry, the string is the erasure-time stand-in for a type identity; unlike a type name, it is
+ * globally scoped and an importer cannot rename it out of a collision, so the package name (already
+ * unique, npm guarantees it) qualifies it. The prefix names the package that *defines* the shape, never
+ * the one emitting it — `plugin` is the emitter, and four different plugins emit `ItemChange`. The rule
+ * is enforced by {@link Qualified} at the `notify` call; export the key as a const beside the interface
+ * (see {@link ItemChangeKind}) so consumers get a renameable handle back.
  *
  * **The set is open at runtime.** A kind can arrive from a plugin that isn't in this build, or bridged
  * from another server — so a `switch (n.kind)` over notifications must always have a `default`, and
@@ -72,18 +100,33 @@ export interface RegistryNotification extends NotificationBase {
  * system edge.
  */
 export interface Notifications {
-  'store-change': StoreChangeNotification;
-  'registry':     RegistryNotification;
+  '@matatbread/matbot-plugin-api#ItemChange':    ItemChange;
+  '@matatbread/matbot-plugin-api#RegistryChange': RegistryChange;
 }
 
-export type Notification = Notifications[keyof Notifications];
+/** A notification as a consumer sees it: the arm, plus the `kind` its registry key supplies. Grafting
+ *  `kind` on here rather than declaring it per-arm is what makes "the tag equals the key" unrepresentable
+ *  rather than a convention to police. */
+export type Notification = {
+  [K in keyof Notifications]: Notifications[K] & { readonly kind: K };
+}[keyof Notifications];
 
-/** What a producer passes to {@link Notifier.notify}: any registered arm, minus the `plugin` the runtime
- *  stamps. Mapped over the registry (not `Omit<Notification, …>`) so it distributes across arms and picks
- *  up augmentations. `plugin` stays settable for the one caller that legitimately relays another's event —
- *  a bridge replaying a remote notification. */
+/** One arm as a standalone type, for the rare annotation that wants a single kind rather than the union. */
+export type Notified<K extends keyof Notifications> = Notifications[K] & { readonly kind: K };
+
+/** Fails an arm whose key isn't `<package>#<Name>`. Intersected into {@link NotifyInput}, so a malformed
+ *  key surfaces at the `notify` call — in the compilation that declared the augmentation, since the
+ *  mapped type is resolved at the use site. Nothing at runtime; see `createNotifier` for the producers
+ *  TypeScript can't see. */
+type Qualified<K> = K extends `${string}#${string}` ? unknown
+  : { 'ERROR — notification kind must be `<package-name>#<InterfaceName>`': K };
+
+/** What a producer passes to {@link Notifier.notify}: any registered arm, plus its key as `kind`, minus
+ *  the `plugin` the runtime stamps. Mapped over the registry (not `Omit<Notification, …>`) so it
+ *  distributes across arms and picks up augmentations. `plugin` stays settable for the one caller that
+ *  legitimately relays another's event — a bridge replaying a remote notification. */
 export type NotifyInput = {
-  [K in keyof Notifications]: Omit<Notifications[K], 'plugin'> & { plugin?: string };
+  [K in keyof Notifications]: Qualified<K> & Omit<Notifications[K], 'plugin'> & { readonly kind: K; plugin?: string };
 }[keyof Notifications];
 
 /** Per-subscriber predicate. Applied at emit time, so a subscriber never queues what it didn't ask for. */
@@ -126,7 +169,16 @@ export function createNotifier(defaultPlugin: string): Notifier {
   const events = createBroadcaster<Notification>();
   return {
     notify(notification) {
-      events.emit({ ...notification, plugin: notification.plugin ?? defaultPlugin } as Notification);
+      const plugin = notification.plugin ?? defaultPlugin;
+      // The type-level rule is erased by the time this runs, and TypeScript never saw the producers that
+      // matter most here: a plain-JS plugin, or a bridge injecting another instance's traffic. Warn, don't
+      // throw — `notify` is contractually non-throwing, and a badly-named kind is a hygiene fault, not a
+      // delivery failure. Only the shape is checkable; that the prefix names the *definer* is not, since
+      // the emitter legitimately differs from it.
+      if (!notification.kind.includes('#')) {
+        console.warn(`[matbot] ${plugin} published unqualified notification kind "${notification.kind}" — expected <package-name>#<InterfaceName>`);
+      }
+      events.emit({ ...notification, plugin } as Notification);
     },
     async *subscribe(signal?: AbortSignal, filter?: NotificationFilter) {
       for await (const event of events.subscribe(signal, filter ? e => filter(e.value) : undefined)) yield event.value;
@@ -165,7 +217,7 @@ export function notifyingStore<T extends { id: string; version: string }>(
   const announce = (operation: 'saved' | 'deleted', id: string): void => {
     const principal = tryCurrentPrincipal();
     notifier.notify({
-      kind: 'store-change', source, operation, namespace, id,
+      kind: ItemChangeKind, source, operation, namespace, id,
       ...(principal !== undefined ? { principal } : {}),
     });
   };

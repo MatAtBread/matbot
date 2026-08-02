@@ -1,7 +1,7 @@
 import { dirname, join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, RegistryChangeKind } from '@matatbread/matbot-plugin-api';
 import type { MatbotMachine, MatbotPluginSpec, ToolTypeIndex } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins } from '@matatbread/matbot-core';
 import { buildMatbotToolsDts } from './build-dts.js';
@@ -116,7 +116,7 @@ class ToolTypeIndexImpl implements ToolTypeIndex {
     this.machine = machine;
     // Any tool CRUD invalidates the generated dts; the event itself carries nothing we need.
     machine.Notifier.consume(() => { this.dirty = true; }, this.ac.signal,
-      n => n.kind === 'registry' && n.registry === 'tools');
+      n => n.kind === RegistryChangeKind && n.registry === 'tools');
   }
 
   close(): void { this.ac.abort(); }

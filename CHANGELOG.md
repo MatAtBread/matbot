@@ -11,6 +11,39 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ## Unreleased
 
+### Breaking changes
+
+- **A notification `kind` is now `<package-name>#<InterfaceName>`.** `'store-change'` →
+  `'@matatbread/matbot-plugin-api#ItemChange'`, `'registry'` →
+  `'@matatbread/matbot-plugin-api#RegistryChange'`, and the interfaces are renamed `ItemChange` /
+  `RegistryChange` to match. A `kind` is a globally-scoped wire token and, unlike a type name, an
+  importer cannot rename it out of a collision: two plugins choosing the same bare word is an
+  unfixable declaration-merge conflict in `Notifications`, and across a bridge it is a silent
+  mis-narrowing of one instance's payload into another's shape. The package name already being
+  unique, it does the qualifying. The prefix names the package that *defines* the shape, never the
+  one emitting it — `plugin` is the emitter, and four plugins emit `ItemChange`. `ItemChangeKind`
+  and `RegistryChangeKind` are exported (from `plugin-api` and re-exported by `core`) so a consumer
+  gets a renameable handle back: `import { ItemChangeKind as Changed }`.
+- **A notification arm no longer declares `kind`.** `NotificationBase` drops the field; `Notification`
+  grafts each arm's `Notifications` key on. Writing the tag twice — once as the key, once as a literal
+  field — was a duplication with nothing keeping the halves honest, and it is now unrepresentable. An
+  augmenting plugin declares the interface, registers it under `'<package>#<Name>'`, and is done.
+  `NotifyInput` rejects an unqualified key at the `notify` call site (in the compilation that declared
+  the augmentation, since the mapped type resolves at the use site), and `createNotifier` warns at
+  runtime for the producers TypeScript never sees: a plain-JS plugin, or a bridge injecting a foreign
+  instance's traffic.
+- **`StoreChangeNotification` is now `ItemChange`** — renamed for its contract, not its mechanism. It
+  was already a misnomer at two of its five emitters: workspace announces a `FileStore` write, and the
+  profiles backend announces a share/unshare that passes through no `Store` at all. What every emitter
+  actually publishes is "the thing addressed by `(namespace, id)` is stale — re-read it", which is
+  medium-independent, and `notifyingStore` is merely its most convenient emitter. The name mattered
+  because it was the first question a plugin author had to answer to use the bus, and it was a question
+  about matbot's internals. The rule is now: publish `ItemChange` for any invalidation of an addressable
+  item, whatever holds it; define a kind of your own only when you carry something a consumer cannot
+  get by re-reading (progress, a measurement) — `detail` is not the place for it.
+- **The unused pre-bus `StoreChange` envelope is removed from `types.ts`** — a leftover the
+  notification arm duplicated field-for-field, with no remaining reader.
+
 ### Optional
 
 - **frontend/web — a stale tab reloads itself.** Every response carries the running harness version as

@@ -1,5 +1,5 @@
 import type {
-  FileStore, StoreChange, Principal, Vault, Message, ModelParameters,
+  FileStore, Principal, Vault, Message, ModelParameters,
   ProviderAdapter, ProviderConfig, ProviderRegistry, Tool, ToolRegistry, FrontendInfo,
   Store, Session, SystemContextRegistry, KnowledgeIndex, PromptFn, SessionRunner, Usage,
   TypeScriptStripper, ToolTypeIndex, ToolPresenter, SteeringPolicy,

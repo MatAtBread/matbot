@@ -1,5 +1,5 @@
 import type { Tool, ToolExecutor, ToolContext, ToolContract, ToolResultOf, MatbotPluginSpec, MatbotMachine } from '@matatbread/matbot-plugin-api';
-import { PLUGIN_API_VERSION, tryCurrentPrincipal } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, tryCurrentPrincipal, ItemChangeKind } from '@matatbread/matbot-plugin-api';
 
 // Set in setup(); announces this tool's own writes and deletes. A file store's `watch` may also see a
 // write (the filesystem one does) — a duplicate notification is harmless, since a consumer re-queries
@@ -222,7 +222,7 @@ export const plugin: MatbotPluginSpec = {
     announceFile = (id, operation, name) => {
       const principal = tryCurrentPrincipal();
       services.Notifier.notify({
-        kind: 'store-change', source: 'workspace', operation, namespace: 'files', id,
+        kind: ItemChangeKind, source: 'workspace', operation, namespace: 'files', id,
         // Advisory, and the file store's own watch supplies the same two fields when it has one: the
         // content namespace + name a frontend needs to place the row it is being told about. Without it a
         // consumer can only re-list, which is correct but loses the in-place update on backends that

@@ -1,9 +1,9 @@
-import type { Store, KnowledgeIndex, KnowledgeEntry, MatbotMachine, StoreChangeNotification } from '@matatbread/matbot-plugin-api';
-import { tryCurrentPrincipal } from '@matatbread/matbot-plugin-api';
+import type { Store, KnowledgeIndex, KnowledgeEntry, MatbotMachine, ItemChange } from '@matatbread/matbot-plugin-api';
+import { tryCurrentPrincipal, ItemChangeKind } from '@matatbread/matbot-plugin-api';
 import type { SkillDoc } from './types.js';
 
 // The routing namespace the `skills` store is created under (skills/plugin.ts) — the axis a profile
-// isolates and the firehose filters skill changes on. Stamped onto every emitted StoreChange.
+// isolates and the firehose filters skill changes on. Stamped onto every emitted ItemChange.
 const SKILLS_NS = 'skills';
 
 type SkillAnalysis  = { entities: string[]; tags: string[]; summary: string; classification: { procedural: number; informational: number } };
@@ -266,10 +266,10 @@ export class SkillManagerImpl implements SkillManager {
   // `principal` is the acting identity, so a partitioned firehose can filter per connection (a
   // boot/import with none in scope is a global fact). `id` is the store id the shared-in check keys on;
   // `name` rides in advisory `detail` so a consumer that wants it need not re-fetch.
-  private emitChange(operation: StoreChangeNotification['operation'], doc: Pick<SkillDoc, 'id' | 'name'>): void {
+  private emitChange(operation: ItemChange['operation'], doc: Pick<SkillDoc, 'id' | 'name'>): void {
     const principal = tryCurrentPrincipal();
     this.services.Notifier.notify({
-      kind: 'store-change', source: 'skill', operation, namespace: SKILLS_NS, id: doc.id,
+      kind: ItemChangeKind, source: 'skill', operation, namespace: SKILLS_NS, id: doc.id,
       detail: { name: doc.name },
       ...(principal !== undefined ? { principal } : {}),
     });

@@ -1,3 +1,4 @@
+import { RegistryChangeKind } from '@matatbread/matbot-plugin-api';
 import type { Tool, ToolRegistry, Notifier } from './types.js';
 
 export class ToolRegistryImpl implements ToolRegistry {
@@ -14,7 +15,7 @@ export class ToolRegistryImpl implements ToolRegistry {
 
   private announce(name: string, operation: 'added' | 'removed', pluginName?: string): void {
     this.notifier?.notify({
-      kind: 'registry', source: 'tools', registry: 'tools', name, operation,
+      kind: RegistryChangeKind, source: 'tools', registry: 'tools', name, operation,
       ...(pluginName !== undefined ? { detail: { pluginName } } : {}),
     });
   }

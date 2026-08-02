@@ -4,7 +4,7 @@ import type {
   FormField, PromptFn, SessionRunner, WatchVisibility, SteeringMode,
   Notifier, Notification,
 } from '@matatbread/matbot-core';
-import { createSession, promptCancelledError, runAs, tryCurrentPrincipal } from '@matatbread/matbot-core';
+import { createSession, promptCancelledError, runAs, tryCurrentPrincipal, ItemChangeKind, RegistryChangeKind } from '@matatbread/matbot-core';
 import { sseComment, sseEvent } from './sse-writer.js';
 import { makeWebEnvTool } from './web-env.js';
 import { promises } from "node:fs";
@@ -201,7 +201,7 @@ export function createWebServer(deps: WebServerDeps) {
   // from "something changed" to a connected browser.
   //
   // Filtering is per (connection × notification) against the same visibility predicate as before: a
-  // store-change carrying a principal is shown only to connections whose principal routes that
+  // ItemChange carrying a principal is shown only to connections whose principal routes that
   // (namespace, id) to the same partition, or has it shared in. A notification with no principal is a
   // global fact (registry changes) and reaches everyone.
   let firehoseStarted = false;
@@ -213,7 +213,7 @@ export function createWebServer(deps: WebServerDeps) {
     // downgrade every connection to unfiltered.
     const wv = deps.watchVisibility?.();
     const visibleTo = (n: Notification): ((principal: Principal) => boolean) | undefined =>
-      wv !== undefined && n.kind === 'store-change' && n.principal !== undefined
+      wv !== undefined && n.kind === ItemChangeKind && n.principal !== undefined
         ? principal => wv.visible(principal, n.namespace, n.id, n.principal)
         : undefined;
 
@@ -363,7 +363,7 @@ export function createWebServer(deps: WebServerDeps) {
     signal.addEventListener('abort', onAbort, { once: true });
     const timer = setTimeout(() => ac.abort(), Math.max(0, bootGraceUntil - Date.now()));
     const stream = deps.notifier.subscribe(ac.signal,
-      n => n.kind === 'registry' && n.registry === 'tools' && n.operation === 'added' && n.name === name);
+      n => n.kind === RegistryChangeKind && n.registry === 'tools' && n.operation === 'added' && n.name === name);
     const it = stream[Symbol.asyncIterator]();
     try {
       const first = it.next();                     // subscribes synchronously (before the first await)

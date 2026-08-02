@@ -303,22 +303,53 @@ it does not own delivery (no persistence, replay, or guarantees — that's what 
 distributed impl is for).
 
 ```ts
-services.Notifier.notify({ kind: 'store-change', source: 'skill', operation: 'saved',
+services.Notifier.notify({ kind: ItemChangeKind, source: 'skill', operation: 'saved',
                            namespace: 'skills', id, principal });
-services.Notifier.consume(n => { … }, signal, n => n.kind === 'store-change');
+services.Notifier.consume(n => { … }, signal, n => n.kind === ItemChangeKind);
 ```
 
-**Two discriminants, both filterable.** `kind` selects the payload shape (`store-change`,
-`registry`, or an augmentation of `Notifications`); `instance`/`plugin`/`source` are attribution.
-A sink filters on either or both. `plugin` is stamped from the emitting plugin's scope.
+**Two discriminants, both filterable.** `kind` selects the payload shape (`ItemChange`,
+`RegistryChange`, or an augmentation of `Notifications`); `instance`/`plugin`/`source` are
+attribution. A sink filters on either or both. `plugin` is stamped from the emitting plugin's scope.
+
+**`kind` is `<package-name>#<InterfaceName>`, and nothing declares it twice.** The `Notifications`
+key *is* the tag — an arm never declares a `kind` field; `Notification` grafts the key on, so "the
+tag matches the key" is unrepresentable rather than a convention to police:
+
+```ts
+export interface JobProgress extends NotificationBase { done: number; total: number }
+export const JobProgressKind = '@fnarr/jobs#JobProgress' satisfies keyof Notifications;
+
+declare module '@matatbread/matbot-plugin-api' {
+  interface Notifications { '@fnarr/jobs#JobProgress': JobProgress }
+}
+```
+
+Qualified because, unlike a type name, a `kind` is globally scoped and an importer *cannot* rename
+it out of a collision — two plugins picking the same bare word is an unfixable declaration-merge
+conflict in a file neither owns, and across a bridge it is a silent mis-narrowing. The package name
+is already unique, so it does the qualifying; the exported const gives the renameable handle back.
+The prefix names the package that **defines** the shape, never the one emitting it (`plugin` is the
+emitter — four plugins emit `ItemChange`). Enforced by the `Qualified<K>` arm of `NotifyInput` at
+the `notify` call, and warned about at runtime for producers TypeScript never saw. Do **not** use
+the emitter/kind pair as a compound discriminant: relaying rewrites `plugin`, and one shape emitted
+by four plugins would become four types.
 
 **`kind` is open at runtime** — a foreign plugin or a bridged remote server can publish one this
 build has never seen. Always `default` a `switch` over it; exhaustiveness checking is unsound here.
 
+**Which kind do I publish?** `ItemChange` whenever the fact is "the thing addressed by
+`(namespace, id)` is stale — re-read it", *whatever holds it*: a `Store` (via `notifyingStore`), a
+`FileStore`, a share that passes through neither, a directory a plugin watches. It is deliberately not
+named `StoreChange` — the medium is an implementation concern, and making a plugin author answer "is
+my thing a Store?" to use the bus was the wrong first question. Define a kind of your own only when
+you carry something a consumer **cannot** get by re-reading — progress, a measurement, an external
+event. That is a new shape, not a new source; `detail` is not the place to smuggle it.
+
 **`principal` is ownership, not attribution** — whose data changed, and the input to
 `WatchVisibility.visible`. Never conflate it with the producer fields.
 
-**Identity, never value.** A `store-change` carries `namespace`/`id`/`operation`; `detail` is
+**Identity, never value.** An `ItemChange` carries `namespace`/`id`/`operation`; `detail` is
 advisory (a cosmetic in-place UI update at most). Events are queued per subscriber and are stale
 the moment a concurrent writer lands, so a consumer re-reads through the store. A sink attaching
 mid-flight has missed what preceded it — **re-query on attach**; never put current state on the bus.

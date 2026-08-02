@@ -8,7 +8,7 @@ import type { Readable }    from 'node:stream';
 import type {
   MatbotPluginSpec, MatbotMachine, Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext, FileStore, Store, Principal,
 } from '@matatbread/matbot-plugin-api';
-import { PLUGIN_API_VERSION, currentPrincipal } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, currentPrincipal, ItemChangeKind } from '@matatbread/matbot-plugin-api';
 
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
@@ -500,7 +500,7 @@ export const plugin: MatbotPluginSpec = {
     activeConfigPath = services.configPath;
     activeFiles      = services.files;
     notifyOutput = (id, principal, name) => services.Notifier.notify({
-      kind: 'store-change', source: 'job-output', operation: 'saved', namespace: 'files', id,
+      kind: ItemChangeKind, source: 'job-output', operation: 'saved', namespace: 'files', id,
       detail: { namespace: 'workspace', name },      // lets a frontend place the row without re-listing
       ...(principal !== undefined ? { principal } : {}),
     });

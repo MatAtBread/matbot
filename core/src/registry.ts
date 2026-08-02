@@ -1,5 +1,5 @@
 import type { Tool, ToolRegistry, Hook, PromptFn, FormField, FrontendInfo, ProviderAdapter, ProviderConfig } from './types.js';
-import { scopedNotifier } from '@matatbread/matbot-plugin-api';
+import { scopedNotifier, RegistryChangeKind } from '@matatbread/matbot-plugin-api';
 import type {
   MatbotPlugin, MatbotMachine, MatbotRuntime, Mounted,
   ProviderAdapterFactory, StoreFactory,
@@ -34,13 +34,13 @@ const state = {
   overwriteAllTools: undefined as boolean | undefined,  // persisted "overwrite on collision, this install" choice, loaded lazily
 };
 
-// Plugin load/unload is announced on the Notifier as `{ kind: 'registry', registry: 'plugins' }`, for
+// Plugin load/unload is announced on the Notifier as a `RegistryChange` with `registry: 'plugins'`, for
 // consumers that key off plugin presence (e.g. the web plugins panel refreshing live when a backend
 // restores a plugin set out of band). It was a module-level broadcaster of its own, which is the same
 // primitive the bus already is. `loaded` is announced by the loader — the only caller of
 // registerPlugin, and the one place holding the machine this registry deliberately doesn't.
 export function announcePluginLoaded(services: MatbotMachine, name: string): void {
-  services.Notifier.notify({ kind: 'registry', source: 'plugins', registry: 'plugins', name, operation: 'added' });
+  services.Notifier.notify({ kind: RegistryChangeKind, source: 'plugins', registry: 'plugins', name, operation: 'added' });
 }
 
 // Settings namespace + key under which the user's "overwrite all colliding tools" choice
@@ -396,7 +396,7 @@ export async function unloadPlugin(pluginName: string, services: MatbotMachine):
   state.frontendPlugins.delete(pluginName);
 
   state.plugins.splice(idx, 1);
-  services.Notifier.notify({ kind: 'registry', source: 'plugins', registry: 'plugins', name: pluginName, operation: 'removed' });
+  services.Notifier.notify({ kind: RegistryChangeKind, source: 'plugins', registry: 'plugins', name: pluginName, operation: 'removed' });
   await Promise.race([
     plugin.teardown?.(),
     new Promise<void>((_, reject) => setTimeout(() => reject(new Error(`Teardown timeout for plugin ${pluginName}`)), 10000))

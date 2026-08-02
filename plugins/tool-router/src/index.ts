@@ -1,4 +1,4 @@
-import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, RegistryChangeKind } from '@matatbread/matbot-plugin-api';
 import type { MatbotPluginSpec, Message, MessageContent, Tool, ToolPresenter, PresentContext } from '@matatbread/matbot-plugin-api';
 
 // tool-router — the model never sees the whole tool library. Each provider call it sees `tool_search` plus a
@@ -452,9 +452,9 @@ searching over declining or improvising.`,
     const enqueue = (name: string): void => { queue.push(name); void pump(); };
     for (const t of services.tools.list()) enqueue(t.name);
     services.Notifier.consume(n => {
-      if (n.kind !== 'registry') return;
+      if (n.kind !== RegistryChangeKind) return;
       idx = null;                                                        // tool set changed → rebuild BM25 index lazily
       if (n.operation === 'added') enqueue(n.name);
-    }, undefined, n => n.kind === 'registry' && n.registry === 'tools');
+    }, undefined, n => n.kind === RegistryChangeKind && n.registry === 'tools');
   },
 };

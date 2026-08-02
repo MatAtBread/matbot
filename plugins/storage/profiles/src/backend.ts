@@ -1,7 +1,7 @@
 import { promises as fs, type Dirent } from 'node:fs';
 import { dirname, join, sep } from 'node:path';
 import type { Store, FileStore, StorageBackend, Principal, Notifier } from '@matatbread/matbot-plugin-api';
-import { readOnlyError } from '@matatbread/matbot-plugin-api';
+import { readOnlyError, ItemChangeKind } from '@matatbread/matbot-plugin-api';
 import { tryCurrentPrincipal } from '@matatbread/matbot-core';
 import { FilesystemStorageBackend } from '@matatbread/matbot-storage-filesystem';
 import { ProfilesFileStore } from './file-store.js';
@@ -186,7 +186,7 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
   private announce(operation: 'saved' | 'deleted', source: string, namespace: string, id: string, partition: string): void {
     if (partition === BASE) return;
     this.notifier?.notify({
-      kind: 'store-change', source, operation, namespace, id,
+      kind: ItemChangeKind, source, operation, namespace, id,
       principal: { id: partition, type: 'user' },
     });
   }

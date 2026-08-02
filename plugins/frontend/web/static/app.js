@@ -3063,8 +3063,11 @@ async function init() {
     const refreshSessions = debounced(async () => { renderSessions(await apiListSessions()); });
 
     for await (const n of T.notifications(new AbortController().signal)) {
+      // A notification kind is `<package>#<Interface>` — globally unique, because a bridged instance or a
+      // plugin this build has never seen can publish one. plugin-api exports these two as consts for TS
+      // consumers; this is a plain script, so they are spelled out.
       switch (n.kind) {
-        case 'store-change':
+        case '@matatbread/matbot-plugin-api#ItemChange':
           switch (n.namespace) {
             case 'files':    onFileChanged(n, refreshFiles); break;
             case 'skills':   refreshSkills();                break;
@@ -3075,7 +3078,7 @@ async function init() {
         // Tool churn refreshes skills (skills are tools, and one may be registered out of band — e.g.
         // the Drive backend restoring matbot-skills at boot); plugin churn refreshes the plugins panel,
         // covering the tool-less plugins the tool registry can't see.
-        case 'registry':
+        case '@matatbread/matbot-plugin-api#RegistryChange':
           if (n.registry === 'tools') refreshSkills(); else refreshPlugins();
           break;
         default: break;
