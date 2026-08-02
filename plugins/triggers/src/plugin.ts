@@ -210,6 +210,12 @@ function fireHistory(messages: Message[]): FireHistory {
   return { thisTurn, since };
 }
 
+// The second of the two guards that read the same marker stream (see retractActiveLastTurn above),
+// and they are NOT redundant: the convergence guard is a diagnosis — this retract rule did not
+// converge, so hold it until it stops matching, re-arming on its own suppressions so it stays held —
+// while a cool-down is a declared rate, indifferent to whether the rule is well-behaved and expiring
+// on a fixed schedule. One is the machine noticing a defect; the other is an author's policy.
+//
 // The reason a trigger's own cool-down holds it back this turn, or undefined to let it fire. Reported
 // rather than returned as a boolean because a suppression is never silent — the reason lands in the
 // marker, so "why didn't the inner voice fire?" is answerable from the session months later.
@@ -230,6 +236,24 @@ function cooldownHold(cooldown: TriggerCooldown | undefined, id: string, hist: F
     }
   }
   return undefined;
+}
+
+/** Split what the classifier fired into the triggers that may act and the suppression markers for
+ *  those their own cool-down holds back. Both phases run this identically — the cool-down governs a
+ *  trigger, not a surface, so the user and agent surfaces share one budget and must share one
+ *  decision. Generic in the fired element so each caller keeps its own extra fields (`kinds`). */
+function applyCooldown<T extends { trigger: Trigger; matched: FiredCondition[] }>(
+  fired: T[],
+  hist:  FireHistory,
+): { kept: T[]; markers: MessageContent[] } {
+  const kept:    T[]              = [];
+  const markers: MessageContent[] = [];
+  for (const f of fired) {
+    const hold = cooldownHold(f.trigger.cooldown, f.trigger.id, hist);
+    if (hold === undefined) kept.push(f);
+    else markers.push(suppressedMarker('cooldown', `trigger held off by its own cool-down: ${hold}`, [{ id: f.trigger.id, matched: f.matched }]));
+  }
+  return { kept, markers };
 }
 
 function textOf(msg: Message | undefined): string {
@@ -313,13 +337,9 @@ export async function setupTriggers(services: MatbotMachine): Promise<TriggerMan
     const markers:         MessageContent[] = [];
     // A per-trigger cool-down applies to both surfaces: matching says the trigger is relevant, the
     // cool-down says whether it may act again this soon. Held-off triggers are traced, never silent.
-    const hist = fireHistory(ctx.session.messages);
-    for (const { trigger, kinds, matched } of fired) {
-      const hold = cooldownHold(trigger.cooldown, trigger.id, hist);
-      if (hold !== undefined) {
-        markers.push(suppressedMarker('cooldown', `trigger held off by its own cool-down: ${hold}`, [{ id: trigger.id, matched }]));
-        continue;
-      }
+    const cooled = applyCooldown(fired, fireHistory(ctx.session.messages));
+    markers.push(...cooled.markers);
+    for (const { trigger, kinds, matched } of cooled.kept) {
       const out = await dispatchTrigger(services, trigger, { session: ctx.session, signal: ctx.signal, provider: ctx.provider, ...(ctx.prompt !== undefined ? { prompt: ctx.prompt } : {}) });
       if (out.hadResult) {
         // Contextual dominates: a trigger carrying both kinds folds durable (a superset of ephemeral —
@@ -455,12 +475,9 @@ export async function setupTriggers(services: MatbotMachine): Promise<TriggerMan
         hist.thisTurn.set(s.id, (hist.thisTurn.get(s.id) ?? 0) + 1);
         hist.since.set(s.id, 0);
       }
-      for (const { trigger, kinds, matched } of fired) {
-        const hold = cooldownHold(trigger.cooldown, trigger.id, hist);
-        if (hold !== undefined) {
-          markers.push(suppressedMarker('cooldown', `trigger held off by its own cool-down: ${hold}`, [{ id: trigger.id, matched }]));
-          continue;
-        }
+      const cooled = applyCooldown(fired, hist);
+      markers.push(...cooled.markers);
+      for (const { trigger, kinds, matched } of cooled.kept) {
         if (kinds.includes('retract') && heldOff.has(trigger.id)) {
           suppressed.push({ id: trigger.id, matched: matched.filter(m => m.kind === 'retract') });
           continue;
