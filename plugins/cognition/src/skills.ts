@@ -1,4 +1,4 @@
-import type { TriggerKind, TriggerCondition } from "@matatbread/matbot-triggers";
+import type { TriggerKind, TriggerCondition, TriggerCooldown } from "@matatbread/matbot-triggers";
 
 /**
  * Built-in cognition skills, seeded create-if-absent into the active SkillManager at setup. The
@@ -11,6 +11,9 @@ export interface SeedSkill {
   name:     string;
   content:  string;
   triggers: { kind: TriggerKind; trigger: string }[];
+  /** Rate limit for the seeded trigger, when firing every time the conditions match would be a spin
+   *  rather than a service. Absent ⇒ unlimited. */
+  cooldown?: TriggerCooldown;
 }
 
 export const INNER_VOICE: SeedSkill = {
@@ -25,7 +28,14 @@ export const INNER_VOICE: SeedSkill = {
       "kind": "followup",
       "trigger": "MATCH if any of these patterns appear in the response:\n\n* Claims that seem unrelated to the data, contradictory, or contain a significant data anomaly. \n* The response itself uses words like \"suspiciously\", \"surprisingly\", \"unusually\", \"doesn't seem right\", \"looks low/high\" about its own results — this means the model has detected an anomaly but is rationalising it instead of investigating, or the response presents data without any cross-validation against a second source, sanity check, or comparison to known baselines — especially for narrow-scope queries where anomalies are more likely. \n\nDo NOT MATCH if the response ends in a question asking the user for clarification."
     }
-  ]
+  ],
+  // The inner voice is a circuit-breaker, not a co-pilot. Its followup rule ("the answer sounds
+  // uncertain / uncross-checked") is *correctly* matched by the very answers a critique produces, so
+  // without a limit it re-arms itself: critique → revised answer that still hedges → critique, turn
+  // after turn. Two fires per turn (the user asking for a second opinion, plus one critique of the
+  // response) is the ceiling, and one quiet turn after that guarantees the user gets an uninterrupted
+  // turn to react before it may fire again.
+  "cooldown": { maxPerTurn: 2, quietTurns: 1 }
 };
 
 export const COGNITION_SKILLS: readonly SeedSkill[] = [INNER_VOICE];

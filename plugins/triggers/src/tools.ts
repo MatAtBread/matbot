@@ -1,6 +1,6 @@
 import type { Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext, MatbotMachine } from '@matatbread/matbot-plugin-api';
 import type { TriggerManager } from './manager.js';
-import type { TriggerCondition, TriggerKind, Trigger } from './types.js';
+import type { TriggerCondition, TriggerCooldown, TriggerKind, Trigger } from './types.js';
 
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
@@ -10,8 +10,8 @@ declare module '@matatbread/matbot-plugin-api' {
       | ToolContract<{ triggers: Trigger[] }, { action: 'list' }>
       | ToolContract<{ triggers: Trigger[] }, { action: 'query'; tool?: string; params?: object }>
       | ToolContract<Trigger,                 { action: 'get'; id: string }>
-      | ToolContract<{ id: string },          { action: 'add'; conditions: TriggerCondition[]; tool: string; params?: object; enabled?: boolean }>
-      | ToolContract<Trigger,                 { action: 'update'; id: string; conditions?: TriggerCondition[]; tool?: string; params?: object; enabled?: boolean }>
+      | ToolContract<{ id: string },          { action: 'add'; conditions: TriggerCondition[]; tool: string; params?: object; enabled?: boolean; cooldown?: TriggerCooldown }>
+      | ToolContract<Trigger,                 { action: 'update'; id: string; conditions?: TriggerCondition[]; tool?: string; params?: object; enabled?: boolean; cooldown?: TriggerCooldown }>
       | ToolContract<Trigger,                 { action: 'disable'; id: string }>
       | ToolContract<Trigger,                 { action: 'enable'; id: string }>
       | ToolContract<{ id: string },          { action: 'remove'; id: string }>
@@ -53,14 +53,22 @@ const GUIDANCE =
   'invoke naming a tool that is not present fails soft — the trigger simply does nothing until it ' +
   'is. To fire a skill on a condition, invoke `skill_action` with `{ action: "use", name }` — `use` ' +
   'applies the skill as a directive (the firing case). (`{ action: "load" }` returns raw content for ' +
-  'reading/editing, not for firing — a `load` result is bare text the model may misread as the user speaking.)';
+  'reading/editing, not for firing — a `load` result is bare text the model may misread as the user speaking.)\n\n' +
+  'An optional `cooldown` rate-limits firing independently of matching — `{ maxPerTurn, quietTurns }`. ' +
+  'A turn is one genuine user message and everything that follows it (a retract redo or a follow-up ' +
+  'robo turn belongs to the turn that caused it). `maxPerTurn` caps fires within a turn across both ' +
+  'surfaces; `quietTurns` holds the trigger off for that many LATER turns after a fire (1 ⇒ never on ' +
+  'consecutive turns). Absent ⇒ unlimited, which is right for most triggers: a trigger that captures ' +
+  'what the user just said SHOULD fire every turn, and rate-limiting it silently loses data. Use a ' +
+  'cool-down for triggers whose consequence is a self-directed steer (critique, verify, reconsider), ' +
+  'where matching every turn is correct but acting every turn is a spin.';
 
 type TriggerActionInput =
   | { action: 'list' }
   | { action: 'query';  tool?: string; params?: unknown }
   | { action: 'get';    id: string }
-  | { action: 'add';    conditions: TriggerCondition[]; tool: string; params?: unknown; enabled?: boolean }
-  | { action: 'update'; id: string; conditions?: TriggerCondition[]; tool?: string; params?: unknown; enabled?: boolean }
+  | { action: 'add';    conditions: TriggerCondition[]; tool: string; params?: unknown; enabled?: boolean; cooldown?: unknown }
+  | { action: 'update'; id: string; conditions?: TriggerCondition[]; tool?: string; params?: unknown; enabled?: boolean; cooldown?: unknown }
   | { action: 'disable'; id: string }
   | { action: 'enable';  id: string }
   | { action: 'remove'; id: string }
@@ -73,6 +81,15 @@ function queryFilter(a: { tool?: unknown; params?: unknown }): { tool?: string; 
     ...(typeof a.tool === 'string' ? { tool: a.tool } : {}),
     ...(a.params !== undefined ? { params: a.params } : {}),
   };
+}
+
+// A cool-down is valid if every field it carries is a non-negative integer. `null` clears it (the
+// only way back to "unlimited" through a patch, since an omitted field means "leave unchanged").
+function validCooldown(x: unknown): x is TriggerCooldown {
+  if (x === null || typeof x !== 'object') return false;
+  const c = x as { maxPerTurn?: unknown; quietTurns?: unknown };
+  const ok = (v: unknown): boolean => v === undefined || (typeof v === 'number' && Number.isInteger(v) && v >= 0);
+  return ok(c.maxPerTurn) && ok(c.quietTurns);
 }
 
 // A condition is valid if it has a recognised `kind` and a string `rule`.
@@ -114,10 +131,12 @@ export function createTriggerActionTool(manager: TriggerManager): Tool<ToolResul
           if (!validConditions(a.conditions)) { yield { type: 'error', message: `action "add" requires "conditions": [{ kind: ${KINDS.join('|')}, rule: string }].` }; return; }
           if (a.conditions.length === 0)      { yield { type: 'error', message: 'action "add" requires at least one condition.' }; return; }
           if (typeof a.tool !== 'string')     { yield { type: 'error', message: 'action "add" requires a string "tool" to invoke.' }; return; }
+          if (a.cooldown !== undefined && !validCooldown(a.cooldown)) { yield { type: 'error', message: '"cooldown" must be { maxPerTurn?: integer >= 0, quietTurns?: integer >= 0 }.' }; return; }
           const t = await manager.add({
             conditions: a.conditions,
             invoke:     { tool: a.tool, ...(a.params !== undefined ? { params: a.params } : {}) },
-            ...(a.enabled !== undefined ? { enabled: a.enabled } : {}),
+            ...(a.enabled  !== undefined ? { enabled:  a.enabled            } : {}),
+            ...(a.cooldown !== undefined ? { cooldown: a.cooldown as TriggerCooldown } : {}),
           });
           yield { type: 'result', value: { id: t.id } };
           return;
@@ -128,6 +147,7 @@ export function createTriggerActionTool(manager: TriggerManager): Tool<ToolResul
           if (!a.id) { yield { type: 'error', message: 'action "update" requires "id".' }; return; }
           if (a.conditions !== undefined && !validConditions(a.conditions)) { yield { type: 'error', message: '"conditions" must be [{ kind, rule }].' }; return; }
           if (a.tool !== undefined && typeof a.tool !== 'string')           { yield { type: 'error', message: '"tool" must be a string.' }; return; }
+          if (a.cooldown !== undefined && a.cooldown !== null && !validCooldown(a.cooldown)) { yield { type: 'error', message: '"cooldown" must be { maxPerTurn?: integer >= 0, quietTurns?: integer >= 0 }, or null to remove every limit.' }; return; }
           const priorTool = (a.tool !== undefined || a.params !== undefined)
             ? (await manager.get(a.id))?.invoke.tool ?? ''
             : '';
@@ -137,6 +157,8 @@ export function createTriggerActionTool(manager: TriggerManager): Tool<ToolResul
               ? { invoke: { tool: a.tool ?? priorTool, ...(a.params !== undefined ? { params: a.params } : {}) } }
               : {}),
             ...(a.enabled !== undefined ? { enabled: a.enabled } : {}),
+            // null clears every limit; an omitted `cooldown` leaves the stored one untouched.
+            ...(a.cooldown !== undefined ? { cooldown: (a.cooldown === null ? {} : a.cooldown) as TriggerCooldown } : {}),
           });
           if (t === undefined) { yield { type: 'error', message: `Trigger not found: "${a.id}"` }; return; }
           yield { type: 'result', value: t };
@@ -189,7 +211,8 @@ export function createTriggerActionTool(manager: TriggerManager): Tool<ToolResul
             triggers.push(await manager.add({
               conditions: t.conditions,
               invoke,
-              ...(t.enabled !== undefined ? { enabled: t.enabled } : {}),
+              ...(t.enabled  !== undefined ? { enabled:  t.enabled  } : {}),
+              ...(t.cooldown !== undefined ? { cooldown: t.cooldown } : {}),
             }));
           }
           yield { type: 'result', value: { triggers } };
@@ -231,6 +254,8 @@ export function createTriggerActionTool(manager: TriggerManager): Tool<ToolResul
         toTool:     { type: 'string', description: 'New tool the selected triggers should invoke. Required for move/copy.' },
         toParams:   { type: 'object', description: 'New params for the selected triggers\' invocation (move/copy).' },
         enabled:    { type: 'boolean', description: 'On add/update, set false to keep but suspend the trigger (absent ⇒ enabled). To toggle an existing trigger, prefer the dedicated "disable"/"enable" actions.' },
+        cooldown:   { type: ['object', 'null'], description: 'On add/update, rate-limit firing: { maxPerTurn, quietTurns }. Omit to leave unchanged (absent ⇒ unlimited); null on update removes every limit.',
+          properties: { maxPerTurn: { type: 'integer', description: 'Most fires allowed within one turn.' }, quietTurns: { type: 'integer', description: 'Later turns held off after a fire; 1 ⇒ never on consecutive turns.' } } },
       },
     },
     executor,

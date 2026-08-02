@@ -84,7 +84,8 @@ export class TriggerManager implements Triggers {
       version:    Date.now().toString(),
       conditions: spec.conditions,
       invoke:     spec.invoke,
-      ...(spec.enabled !== undefined ? { enabled: spec.enabled } : {}),
+      ...(spec.enabled  !== undefined ? { enabled:  spec.enabled  } : {}),
+      ...(spec.cooldown !== undefined ? { cooldown: spec.cooldown } : {}),
       createdAt:  now,
       updatedAt:  now,
     };
@@ -100,6 +101,7 @@ export class TriggerManager implements Triggers {
       ...(patch.conditions !== undefined ? { conditions: patch.conditions } : {}),
       ...(patch.invoke     !== undefined ? { invoke:     patch.invoke     } : {}),
       ...(patch.enabled    !== undefined ? { enabled:    patch.enabled    } : {}),
+      ...(patch.cooldown   !== undefined ? { cooldown:   patch.cooldown   } : {}),
       version:   Date.now().toString(),
       updatedAt: new Date().toISOString(),
     }));

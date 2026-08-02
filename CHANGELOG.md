@@ -46,6 +46,18 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Optional
 
+- **triggers — a trigger can carry a cool-down.** `Trigger.cooldown` (`{ maxPerTurn?, quietTurns? }`)
+  rate-limits *firing* independently of *matching*, because a rule can be correctly matched turn after
+  turn while acting on it every time is a spin rather than a service. The `retract` kind had a
+  convergence guard; `followup` had nothing, so a critique-style trigger could fire on turn after turn
+  — its own consequence being the very thing its rule matches. Both limits are counted from the durable
+  fire markers already in the session, so a cool-down survives restart, reload and a backend swap with
+  no in-memory state, and only *result-bearing* fires count (a silent side-effect trigger such as
+  `remember_fact` never spends budget). A held-off trigger leaves a `suppressed` marker with cause
+  `cooldown` naming the reason — suppression is never silent. Absent ⇒ unlimited, which stays the
+  default. Settable via `trigger_action` add/update (`null` on update clears every limit).
+- **cognition — the Inner voice trigger ships with `{ maxPerTurn: 2, quietTurns: 1 }`**, backfilled
+  onto installs seeded before the field existed (skipped if the field was since tuned or cleared).
 - **frontend/web — a stale tab reloads itself.** Every response carries the running harness version as
   `x-matbot-version` (exposed via CORS, so a cross-origin page can actually read it), and the HTTP
   transport compares it against the version the page loaded with — the one already on screen in
