@@ -82,6 +82,11 @@ second browser._
   correctness. Set it only where the promise is actually kept — a read-modify-write path (pull a page,
   edit a document, `cas` it back) must not, since the instance it edits may be one another caller is
   still reading.
+- **`ComposedCallContext`** — the read-only identity of the call a composed function is running under
+  (`callId`, `sessionId`, `provider`, `workdir`, `signal`), for hosts that inject a calling surface into
+  model-authored code. Deliberately much narrower than `ToolContext`: identity, not capability, so
+  `vault`, `files`, `prompt` and plugin (un)loading stay reachable only through tool contracts. A tool
+  with real source still takes `ToolContext` and needs none of this.
 
 ### Bug fixes
 
@@ -98,6 +103,27 @@ second browser._
 
 ### Optional
 
+- **function-tools — an apostrophe in a comment no longer breaks `define`.** The scanners locating a
+  definition's parameter list and body tracked string literals but not comments, so a possessive or a
+  contraction in prose (`another conversation's provider`) opened a string that swallowed the rest of the
+  source. The body was then unlocatable and the author was told the *return type* was missing — an error
+  about a line they had written correctly, which `noTypeCheck` could not bypass because it is raised
+  before the type-check. The field report had bisected it down to "comments containing colons or
+  em-dashes", both of which parse fine; a single `'` was the whole cause. All four scanners now skip
+  strings, templates and comments through one helper. Three fixes fall out of the same root: a comment
+  ahead of the definition is trivia rather than "not a function definition" (it also no longer lands
+  between `function` and the name at compile time), a comment inside the parameter list stays out of the
+  parsed parameter type, and an unlocatable body now says so instead of blaming the signature.
+- **function-tools — a composition can read the call it is running under.** `tool` and `toolInContext`
+  carried the calling context *downwards* — every `await tool.x(…)` already inherited the session — but
+  exposed none of it to the body, so a composition could not name the session it was in, and no tool
+  reports it (`session_action` takes an explicit `sessionId`; `whoami` returns a principal). A third
+  injected binding, `context`, now sits beside them, rebuilt per invocation so a `define`d function
+  compiled once still reads the session it is currently running under. It is declared in the generated
+  dts rather than only described in the tool description: that same string backs the type-check gate, so
+  prose alone would have produced bodies that fail the check they were told to write against. A
+  parameter named `tool`, `toolInContext` or `context` is now rejected by `define`/`lambda` — as a
+  duplicate formal it silently shadowed the injection (last binding wins) instead of erroring.
 - **frontend/web — one notification stream.** Replaces `file-changed` / `skill-changed` /
   `tool-changed` / `plugin-changed`, with matching in-process wiring in the browser transport, and
   re-lists sessions live. `session-busy` deliberately stays its own event: it replays current state on

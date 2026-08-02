@@ -145,8 +145,9 @@ class ToolTypeIndexImpl implements ToolTypeIndex {
     // tool.x(params)` narrows its result by the params, and a non-existent tool name is a compile error.
     // `toolInContext(override)` is the sibling factory for a context override. Both derived, never
     // hand-authored; `check()` uses this same string, so what a generator is shown is exactly what it is
-    // graded against.
-    return `${this.registryBlock(this.cache!)}\ndeclare const tool: import('@matatbread/matbot-plugin-api').ToolProxy;\ndeclare const toolInContext: import('@matatbread/matbot-plugin-api').ToolBox;\n`;
+    // graded against — which is also why `context` is declared here and not merely described in prose:
+    // undeclared, every body reading it would fail the very check this string backs.
+    return `${this.registryBlock(this.cache!)}\ndeclare const tool: import('@matatbread/matbot-plugin-api').ToolProxy;\ndeclare const toolInContext: import('@matatbread/matbot-plugin-api').ToolBox;\ndeclare const context: import('@matatbread/matbot-plugin-api').ComposedCallContext;\n`;
   }
 
   async wireContracts(): Promise<Record<string, { params: string; result: string }>> {

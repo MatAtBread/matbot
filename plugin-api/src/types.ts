@@ -731,6 +731,25 @@ export interface ToolContext {
 }
 
 /**
+ * The read-only facts about the call a composed function is running under, injected into a
+ * `tool_function` body as the ambient `context` binding beside `tool`/`toolInContext`. Deliberately
+ * narrower than {@link ToolContext}: the identity of the call, not its capabilities — `vault`,
+ * `files`, `prompt` and plugin (un)loading stay off a surface authored by a model and reachable only
+ * through the tool contracts. A tool with real source takes `ToolContext` and needs none of this.
+ *
+ * Not `ToolCallContext` — that name belongs to the `toolcall` hook's context; this is the composed
+ * caller's own view, not a hook's view of a call about to run.
+ */
+export interface ComposedCallContext {
+  readonly callId:    string;
+  readonly sessionId: string;
+  /** The provider key driving the turn — the same one nested `tool.x(…)` calls inherit. */
+  readonly provider?: string;
+  readonly workdir?:  string;
+  readonly signal:    AbortSignal;
+}
+
+/**
  * A tool's runtime. `R` is the type of the `value` carried by its `result` event — declared once,
  * at the source, so the executor's yields and the tool's {@link ToolContracts} registry entry can't
  * silently drift. The `unknown` default keeps untyped executors compiling untouched, and covariance

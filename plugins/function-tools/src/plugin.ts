@@ -3,7 +3,7 @@ import type {
   JSONSchema, MatbotMachine, MatbotPluginSpec, PluginSettings,
   Tool, ToolContext, ToolEvent, ToolContract, ToolResultOf,
 } from '@matatbread/matbot-plugin-api';
-import { buildAsyncFn, runFunction, type CompiledFn } from './compile.js';
+import { buildAsyncFn, runFunction, INJECTED, type CompiledFn } from './compile.js';
 import { parseSignature, paramsSchema, type ParsedParam, type ParsedSignature } from './signature.js';
 
 const TOOL_NAME   = 'tool_function';
@@ -20,6 +20,15 @@ function paramsTypeText(params: ParsedParam[]): string {
   return params.length === 0
     ? '{}'
     : `{ ${params.map(p => `${p.name}${p.optional ? '?' : ''}: ${p.type ?? 'unknown'}`).join('; ')} }`;
+}
+
+/** The injected bindings are formals ahead of the function's own, so a parameter of the same name shadows
+ *  one — legal (sloppy-mode duplicate formals, last binding wins) and therefore silent: the body would read
+ *  its own argument where it wrote `context`. Reject it with the reason instead. */
+function assertNoInjectedClash(params: ParsedParam[]): void {
+  const clash = params.find(p => (INJECTED as readonly string[]).includes(p.name));
+  if (clash === undefined) return;
+  throw new Error(`parameter "${clash.name}" collides with an injected binding (${INJECTED.join(', ')}) — inside the body it would shadow it. Rename the parameter.`);
 }
 
 /** The type-check snippet for a parsed function: its body as an async fn, checked against the live tool
@@ -74,6 +83,7 @@ class FunctionStore {
     const sig = parseSignature(definition);
     if (sig.name === undefined) throw new Error('define requires a NAMED function, e.g. `weather(city: string): string { … }`.');
     if (sig.name === TOOL_NAME) throw new Error(`"${TOOL_NAME}" is reserved.`);
+    assertNoInjectedClash(sig.params);
     if (sig.returnType === undefined) throw new Error('define requires an explicit return type — it is verified against the body and becomes the tool\'s result contract, e.g. `weather(city: string): string { … }`. Use `: void` for a side-effect-only tool, or `: unknown` if the result is genuinely dynamic.');
     const clash = this.machine.tools.resolve(sig.name);
     if (clash !== null && !this.defined.has(sig.name)) {
@@ -153,6 +163,25 @@ tools that are actually registered. Every tool call MUST be awaited — the whol
 function (so a recursive self-call must be awaited too). Return a JSON-serialisable value; that becomes
 the result the model sees. Each tool call is echoed to stdout, so the run is observable.
 
+THE INJECTED BINDINGS — three names are already in scope in every body. Use them directly; do NOT declare
+them as parameters, do NOT redeclare them with const/let, and do NOT try to import or construct them (a
+parameter of the same name is rejected, because it would shadow the injection):
+
+  tool           the proxy above — \`await tool.<tool_name>(params)\`
+  toolInContext  the factory above — \`await toolInContext({ provider }).<tool_name>(params)\`
+  context        the call you are running under, read-only, exactly:
+                   { callId: string; sessionId: string; provider?: string; workdir?: string; signal: AbortSignal }
+
+\`context\` is how you answer "which session/turn am I in?" from inside a function — there is no tool that
+reports it (\`session_action\` takes a \`sessionId\` as an explicit param; \`whoami\` returns the principal, not
+the session). So the CURRENT session is \`context.sessionId\`:
+
+  const s = await tool.session_action({ action: 'get', sessionId: context.sessionId });
+
+Pass \`context.signal\` to any \`fetch\` you make so a long run stays cancellable. Note that \`context\` is
+informational: a nested \`tool.<name>()\` call ALREADY inherits this session, signal and provider, so only
+pass its fields on where the callee takes them as explicit parameters (as \`session_action\` does above).
+
 Before composing, run \`{ action: 'types' }\` to fetch TypeScript declarations of what the available tools'
 calls resolve to — write \`await tool.x(...)\` against those real return types instead of guessing shapes.
 
@@ -182,6 +211,13 @@ Functions use method-shorthand syntax — NOT arrow functions:
       return n + ' plugins match "' + check + '"';
     }
   → registers tool "count_plugins" taking { check: string }.
+
+  define (definition) using the injected \`context\` — no sessionId parameter needed, it knows where it is:
+    turn_count(): number {
+      const s = await tool.session_action({ action: 'get', sessionId: context.sessionId });
+      return s.messages.length;
+    }
+  → registers tool "turn_count" taking {}.
 
   lambda (definition + params):
     definition: (args: { names: string[] }): string[] { return args.names.map(n => n.toUpperCase()); }
@@ -234,6 +270,10 @@ function functionTool(machine: MatbotMachine, store: FunctionStore): Tool<ToolRe
             if (sig !== undefined && sig.params.length > 1) {
               yield errorEvent('lambda takes exactly ONE argument — the `params` object. Declare a single object parameter and read fields from it, e.g. (args: { a: number; b: number }): number { return args.a + args.b; }');
               return;
+            }
+            if (sig !== undefined) {
+              try { assertNoInjectedClash(sig.params); }
+              catch (e) { yield errorEvent(e instanceof Error ? e.message : String(e)); return; }
             }
             // Type-check the body against the live tool types before running (node only; opt out with
             // noTypeCheck). Syntax was already gated by buildAsyncFn above.

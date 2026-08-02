@@ -54,6 +54,9 @@ importers:
         specifier: workspace:^
         version: link:../../plugins/tool-plugin
     devDependencies:
+      '@matatbread/matbot-function-tools':
+        specifier: workspace:^
+        version: link:../../plugins/function-tools
       '@types/node':
         specifier: 'catalog:'
         version: 22.19.19

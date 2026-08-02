@@ -156,7 +156,9 @@ class BrowserToolTypeIndex implements ToolTypeIndex {
     // left bare; harmless in the shown text, which is enough for a composer to write `await tool.x(params)`.
     return `import type { ToolContract } from '@matatbread/matbot-plugin-api';\n`
       + `declare module '@matatbread/matbot-plugin-api' {\n  interface ToolContracts {\n${arms.join('\n')}\n  }\n}\n`
-      + `declare const tool: import('@matatbread/matbot-plugin-api').ToolProxy;\n`;
+      + `declare const tool: import('@matatbread/matbot-plugin-api').ToolProxy;\n`
+      + `declare const toolInContext: import('@matatbread/matbot-plugin-api').ToolBox;\n`
+      + `declare const context: import('@matatbread/matbot-plugin-api').ComposedCallContext;\n`;
   }
 
   async check(): Promise<string[]> { return []; }

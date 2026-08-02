@@ -54,6 +54,7 @@
   },
   "devDependencies": {
     "@types/node": "catalog:",
-    "typescript": "catalog:"
+    "typescript": "catalog:",
+    "@matatbread/matbot-function-tools": "workspace:^"
   }
 }
