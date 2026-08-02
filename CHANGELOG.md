@@ -103,6 +103,14 @@ second browser._
 
 ### Optional
 
+- **edit-session — editing the running session is refused instead of silently discarded.** `session_edit`
+  reported success for a `cut`, `split` or `compact` aimed at the session the calling turn was running in,
+  and nothing survived: the runner takes one in-memory copy of the session at turn start and writes it back
+  at turn end, so the tool's committed CAS was overwritten moments later. `split` failed worst — its new
+  session survived while the truncation of the original did not, leaving a dangling half. The three
+  destructive actions now error on the current session, naming why; `fork` still works there (it writes a
+  new document), though it forks the committed state without the turn's uncommitted tail. Editing any other
+  session is unaffected.
 - **function-tools — an apostrophe in a comment no longer breaks `define`.** The scanners locating a
   definition's parameter list and body tracked string literals but not comments, so a possessive or a
   contraction in prose (`another conversation's provider`) opened a string that swallowed the rest of the
