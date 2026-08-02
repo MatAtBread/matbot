@@ -317,6 +317,32 @@ async function apiListSessions() {
     return [];
   }
 }
+// Every trigger for "re-draw the session list" funnels through here, and they coalesce.
+//
+// `session_action list` is the most expensive call this UI makes: the store has no projection, so
+// listing re-reads and JSON-parses every session document in full — whole message histories — to build
+// four summary fields per row. It must therefore run once per change, not once per *notice* of a change.
+// Before this, deleting a session paid for two: the click handler listed immediately, and the change
+// notification listed again ~150ms later, re-rendering a sidebar that had already settled.
+//
+// A trailing debounce collapses them: the click schedules a run, the notification it causes lands inside
+// the window and joins it, and both get the same promise. Nothing depends on the notification arriving —
+// the click's own call is what guarantees the refresh — so a disconnected SSE degrades to exactly the
+// old behaviour rather than a stale list.
+let sessionsRefresh = null;
+function refreshSessions(delay = 150) {
+  if (sessionsRefresh) return sessionsRefresh;
+  sessionsRefresh = new Promise(resolve => {
+    setTimeout(async () => {
+      sessionsRefresh = null;
+      const sessions = await apiListSessions();
+      renderSessions(sessions);
+      resolve(sessions);
+    }, delay);
+  });
+  return sessionsRefresh;
+}
+
 async function apiGetSession(id)  { try { return await callTool('session_action', { action: 'get', sessionId: id }); } catch { return null; } }
 async function apiSessionBusy(id) { return T.sessionBusy(id); }
 async function apiListProviders() { try { return (await callTool('provider', { action: 'list' })).providers.map(p => p.name); } catch { return []; } }
@@ -355,7 +381,7 @@ async function renameSession(id, current) {
   try {
     await callTool('session_action', { action: 'rename', sessionId: id, title: title.trim() });
     if (id === currentSessionId && chatHeaderEl) chatTitleEl.textContent = title.trim();
-    apiListSessions().then(renderSessions);
+    refreshSessions();
   } catch (e) { alert('Rename failed: ' + e.message); }
 }
 
@@ -368,7 +394,10 @@ async function hideSession(id) {
   try {
     if (owner != null) await callTool('share', { action: 'unshare', namespace: 'sessions', id, target: currentProfileName() });
     else               await callTool('session_action', { action: 'hide', sessionId: id });
-    const sessions = await apiListSessions();
+    // Drop the row now rather than after the coalesced list returns: the write has already succeeded,
+    // so this is showing the truth early, not guessing. Without it the debounce window would read as lag.
+    sessionListEl.querySelector('[data-sid="' + CSS.escape(id) + '"]')?.remove();
+    const sessions = await refreshSessions();
     if (id === currentSessionId) {
       currentSessionId = sessions[0]?.id ?? null;
       if (currentSessionId) { await openSession(currentSessionId); return; }
@@ -1921,7 +1950,7 @@ async function handleDividerAction(divider, action) {
       const result = await callTool('session_edit', { action: 'fork', sessionId: currentSessionId, msgIndex: msgIdx });
       if (result?.newSessionId) {
         await openSession(result.newSessionId);
-        apiListSessions().then(renderSessions);
+        refreshSessions();
       }
     } else if (action === 'cut') {
       if (!confirm('Delete all messages from this point forward?')) return;
@@ -1934,7 +1963,7 @@ async function handleDividerAction(divider, action) {
       if (result?.newSessionId) {
         // Navigate to the current (trimmed) session
         await openSession(result.currentSessionId);
-        apiListSessions().then(renderSessions);
+        refreshSessions();
       }
     } else if (action === 'compact') {
       if (!confirm('Strip thinking blocks and tool calls from messages before this point?')) return;
@@ -2276,8 +2305,8 @@ async function openSession(id, scrollTarget) {
   unreadSessions.delete(id);
   sessionListEl.querySelector('[data-sid="' + id + '"]')?.classList.remove('unread');
   location.hash = id;
-  const [sessions, session, busy] = await Promise.all([apiListSessions(), apiGetSession(id), apiSessionBusy(id)]);
-  renderSessions(sessions);
+  void refreshSessions();
+  const [session, busy] = await Promise.all([apiGetSession(id), apiSessionBusy(id)]);
   if (session) {
     renderSession(session, undefined, scrollTarget);
     if (chatHeaderEl) chatTitleEl.textContent = session.title ?? '';
@@ -2301,8 +2330,7 @@ async function handleNewSession() {
     showEmpty();
     setBusyState(false); // a brand-new session is idle; clear any Stop carried over from the last view
     if (chatHeaderEl) chatTitleEl.textContent = '';
-    const sessions = await apiListSessions();
-    renderSessions(sessions);
+    await refreshSessions();
     inputEl.focus();
   } catch (e) {
     alert('New session failed: ' + e.message);
@@ -2973,7 +3001,7 @@ async function renderTurn(sid, traceId) {
     // Don't markStarted() here — a turn that was only queued then cancelled must not spawn an empty
     // assistant wrap. Just clear any loading dots that are still showing.
     if (loadingEl) { loadingEl.remove(); loadingEl = null; }
-    apiListSessions().then(renderSessions);
+    refreshSessions();
     loadFiles();
     // If the output extends below the viewport fold, morph the send button
     // into a ▼ down-arrow so the user can jump to the bottom with one click.
@@ -3148,8 +3176,9 @@ async function init() {
     const refreshPlugins  = debounced(loadPlugins);
     const refreshFiles    = debounced(loadFiles);
     // A session appearing or vanishing — a second browser on this profile creating one, a fork, a
-    // session shared in from another profile. The list had no live source at all before.
-    const refreshSessions = debounced(async () => { renderSessions(await apiListSessions()); });
+    // session shared in from another profile. Not debounced here: it shares the module-level
+    // `refreshSessions`, so a change this browser just made coalesces with the refresh its own click
+    // already scheduled instead of paying for a second full list.
 
     for await (const n of T.notifications(new AbortController().signal)) {
       // A notification kind is `<package>#<Interface>` — globally unique, because a bridged instance or a
