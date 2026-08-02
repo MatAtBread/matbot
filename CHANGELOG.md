@@ -122,6 +122,13 @@ second browser._
   ahead of the definition is trivia rather than "not a function definition" (it also no longer lands
   between `function` and the name at compile time), a comment inside the parameter list stays out of the
   parsed parameter type, and an unlocatable body now says so instead of blaming the signature.
+- **function-tools — a quote inside a regex literal no longer loses the whole tool.** The signature
+  scanner skipped strings and comments but read regex literals as code, so the apostrophe in
+  `/[A-Za-z'-]+/` — or the odd third double quote in `/"[^"]+"/` — opened a string that swallowed the
+  rest of the definition. The failure is worse than the comment case it mirrors: `define` blames brace
+  balance, and on reload the tool is simply absent, with nothing logged and no partial registration to
+  notice. Regex literals are now inert like strings and comments, told apart from division by the
+  preceding significant token, with `/` inside a character class not ending the literal.
 - **function-tools — a composition can now be silent.** A composition always yielded a `result`, even
   when it returned nothing, so `undefined` reached the model as a result rather than as the absence of
   one. That made the observational-dispatch contract unreachable from userland: the triggers dispatcher

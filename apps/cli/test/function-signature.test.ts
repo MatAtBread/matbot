@@ -109,3 +109,31 @@ test('a composition returning undefined yields no result event', async () => {
   for await (const ev of runFunction(machine, ctx, speaking, [])) spoke.push(ev);
   assert.deepEqual(spoke, [{ type: 'result', value: 'said' }]);
 });
+
+// Regex literals are inert, for the same reason comments are: `/[A-Za-z'-]+/` and `/"[^"]+"/` carry
+// quote characters that are punctuation to the regex and a string opener to a scanner. Field case: a
+// composition whose key-extraction regex held one apostrophe and three double quotes failed to
+// register at all — `define` reported unbalanced braces, and on reload the tool simply wasn't there.
+test('quotes inside a regex literal do not open a string', () => {
+  const bodies: Record<string, string> = {
+    apostropheInClass: `const r = /[A-Za-z'-]{1,}/g;`,
+    oddDoubleQuotes:   `const r = /"[^"]+"/g;`,
+    slashInClass:      `const r = /[/]/;`,
+    afterReturnKeyword:`if (/^x/.test('x')) { /* ok */ }`,
+    alternation:       `const r = /"[^"]+"|[A-Z][A-Za-z'-]{1,}|\\d[\\d,.]*/g;`,
+  };
+  for (const [name, line] of Object.entries(bodies)) {
+    const sig = parseSignature(`f(): string {\n  ${line}\n  return 'x';\n}`);
+    assert.equal(sig.returnType, 'string', `${name}: body lost`);
+  }
+});
+
+// Division must not be mistaken for a regex opener — the scanner would swallow to the next `/`.
+test('division is not read as a regex literal', () => {
+  const sig = parseSignature(`f(a: number, b: number): number {\n  const half = (a + b) / 2;\n  const q = a / b;\n  return half / q;\n}`);
+  assert.equal(sig.returnType, 'number');
+  assert.deepEqual(sig.params, [
+    { name: 'a', optional: false, type: 'number' },
+    { name: 'b', optional: false, type: 'number' },
+  ]);
+});
