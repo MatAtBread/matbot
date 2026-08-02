@@ -4,6 +4,8 @@ import type {
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 
 import { buildUnits, deriveKeys, selectEvidence, renderExtracts, wordRe, type KeyGroup, type Unit } from './evidence.js';
+import { createProvenanceConfigTool } from './config.js';
+import { CLASSIFIER_PROVIDER_KEY } from './keys.js';
 
 /**
  * Where did a claim come from? Not whether it is true — provenance, which unlike truth is a CLOSED
@@ -46,7 +48,6 @@ interface ProvenanceInput {
   provider?:  string;
 }
 
-const CLASSIFIER_PROVIDER_KEY = 'classifierProvider';
 const MAX_CLAIMS   = 8;
 const PROMPT_CHARS = 8000;
 
@@ -175,20 +176,16 @@ function makeTool(services: MatbotMachine): Tool<ToolResultOf<'determine_provena
   return {
     name: 'determine_provenance',
     description:
-      'Trace where claims came from — provenance, not truth. Searches THIS session\'s tool results and ' +
-      'user messages for each claim\'s literal keys (proper nouns, numbers, and their formatting ' +
-      'variants), reads what it finds, and for anything the session cannot account for re-asks the same ' +
-      'model cold, with none of this context, to tell a fact from the weights apart from a confabulation.\n' +
-      'Per claim it returns one of:\n' +
-      '  retrieved   — a tool result in this session carries it (definitive)\n' +
-      '  given       — the user said it\n' +
-      '  derived     — computable from material that is here (the value is absent, its operands are not)\n' +
-      '  model-prior — not here, but the model asserts it without this context\n' +
-      '  unsourced   — not here, and the model does not assert it cold: confabulated\n' +
-      'Pass `keys` when you know the discriminating term: a key appearing nowhere then zeroes the ' +
-      'search, which IS the answer. `unsourced` means NOT SOURCED HERE, never false — training data is a ' +
-      'legitimate origin, and the policy for an unsourced claim is yours. Citations are returned verbatim ' +
-      'so a verdict can be checked rather than trusted.',
+      `Trace where claims came from — provenance, not truth. Searches a session's tool results and user messages for each claim's literal keys (proper nouns, numbers, and their formatting variants), reads what it finds, and for anything the session cannot account for re-asks the same model cold, with none of this context, to tell a fact from the weights apart from a confabulation.
+Per claim it returns one of:
+  retrieved   — a tool result in this session carries it (definitive)
+  given       — the user said it
+  derived     — computable from material that is here (the value is absent, its operands are not)
+  model-prior — not here, but the model asserts it without this context
+  unsourced   — not here, and the model does not assert it cold: confabulated
+
+Omit \`sessionId\` to trace against the specific session - this is more accurate and efficient that passing the current session ID. Pass \`sessionId\` to trace against another session.
+Pass \`keys\` when you know the discriminating term: a key appearing nowhere then zeroes the search, which IS the answer. \`unsourced\` means NOT SOURCED HERE, never false — training data is a legitimate origin, and the policy for an unsourced claim is yours. Citations are returned verbatim so a verdict can be checked rather than trusted.`,
     inputSchema: {
       type:     'object',
       required: ['claims'],
@@ -206,7 +203,7 @@ function makeTool(services: MatbotMachine): Tool<ToolResultOf<'determine_provena
           },
         },
         probe:     { type: 'boolean', description: 'Set false to skip the cold re-ask; unsourced and model-prior are then both reported as unsourced.' },
-        sessionId: { type: 'string',  description: 'Trace against another session. Defaults to the current one, which mid-turn is fresher than the store.' },
+        sessionId: { type: 'string',  description: 'Trace against another session. Defaults to the current session.' },
         provider:  { type: 'string',  description: 'Model for reading the extracts. Defaults to the pinned classifier, else the current turn\'s. Never applies to the cold probe.' },
       },
     },
@@ -219,5 +216,6 @@ export const plugin: MatbotPluginSpec = {
 
   async setup(services: MatbotMachine) {
     services.tools.register(makeTool(services));
+    services.tools.register(createProvenanceConfigTool(services));
   },
 };

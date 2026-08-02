@@ -23,7 +23,9 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./evidence": "./src/evidence.ts"
+    "./evidence": "./src/evidence.ts",
+    "./config": "./src/config.ts",
+    "./keys": "./src/keys.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"

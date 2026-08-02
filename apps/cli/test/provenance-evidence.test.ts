@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   buildUnits, deriveKeys, selectEvidence, excerpt, renderExtracts, wordRe,
 } from '@matatbread/matbot-provenance/evidence';
+import { CLASSIFIER_PROVIDER_KEY } from '@matatbread/matbot-provenance/keys';
 import type { Session } from '@matatbread/matbot-plugin-api';
 
 // Every bug this file guards against was the same one: a positional cap deciding, on the reader's
@@ -130,9 +131,41 @@ test('the plugin registers determine_provenance', async () => {
     settings: () => ({ get: async () => undefined }),
     providers: { has: () => false },
   } as never);
-  assert.equal(registered.length, 1);
-  assert.equal(registered[0]!.name, 'determine_provenance');
-  const schema = registered[0]!.inputSchema as { required: string[]; properties: Record<string, unknown> };
+  assert.deepEqual(registered.map(t => t.name).sort(), ['determine_provenance', 'provenance_config']);
+  const schema = registered.find(t => t.name === 'determine_provenance')!.inputSchema as { required: string[]; properties: Record<string, unknown> };
   assert.deepEqual(schema.required, ['claims']);
   assert.deepEqual(Object.keys(schema.properties).sort(), ['claims', 'probe', 'provider', 'sessionId']);
+});
+
+// The pin is written by one tool and read by another: a drifting key would silently mean "configured,
+// and ignored", which reads as the classifier setting having no effect at all.
+test('provenance_config writes the key determine_provenance reads', async () => {
+  const { createProvenanceConfigTool } = await import('@matatbread/matbot-provenance/config');
+  const store = new Map<string, unknown>();
+  const tool = createProvenanceConfigTool({
+    settings:  () => ({
+      get:    async (k: string) => store.get(k),
+      set:    async (k: string, v: unknown) => { store.set(k, v); },
+      delete: async (k: string) => { store.delete(k); },
+    }),
+    providers: { has: (n: string) => n === 'fast-model', keys: () => ['fast-model', 'big-model'] },
+  } as never);
+
+  const run = async (input: unknown): Promise<unknown> => {
+    let out: unknown;
+    for await (const ev of tool.executor.execute(input, {} as never)) {
+      if (ev.type === 'result') out = ev.value;
+      if (ev.type === 'error')  out = { error: ev.message };
+    }
+    return out;
+  };
+
+  assert.deepEqual(await run({ action: 'get' }), { classifierProvider: null, available: ['fast-model', 'big-model'] });
+  assert.deepEqual(await run({ action: 'set', provider: 'fast-model' }), { classifierProvider: 'fast-model' });
+  assert.equal(store.get(CLASSIFIER_PROVIDER_KEY), 'fast-model');
+  assert.deepEqual(await run({ action: 'get' }), { classifierProvider: 'fast-model', available: ['fast-model', 'big-model'] });
+  // An unconfigured provider is refused rather than pinned to a name that will fail at call time.
+  assert.match(String((await run({ action: 'set', provider: 'nope' }) as { error: string }).error), /Unknown provider/);
+  assert.deepEqual(await run({ action: 'clear' }), { classifierProvider: null });
+  assert.equal(store.has(CLASSIFIER_PROVIDER_KEY), false);
 });

@@ -117,7 +117,9 @@ second browser._
   whole-word on the claim's keys, so nothing is ever decided by a positional cap; the single budget sits
   at the prompt boundary, spent best-ranked-first, and an over-long extract is windowed on its match. The
   reading runs on the pinned `classifierProvider` or the turn's model; the cold probe always uses the
-  turn's model, since it is that model's prior being measured.
+  turn's model, since it is that model's prior being measured. `provenance_config` (get/set/clear) pins
+  the reader onto a small/fast model, refusing a provider that is not configured; it deliberately cannot
+  reach the probe.
 - **edit-session — editing the running session is refused instead of silently discarded.** `session_edit`
   reported success for a `cut`, `split` or `compact` aimed at the session the calling turn was running in,
   and nothing survived: the runner takes one in-memory copy of the session at turn start and writes it back
