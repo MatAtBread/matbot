@@ -4,6 +4,18 @@
 
 ### Patch Changes
 
+- **A trigger can carry a cool-down.** `Trigger.cooldown` (`{ maxPerTurn?, quietTurns? }`) rate-limits
+  _firing_ independently of _matching_, because a rule can be correctly matched turn after turn while
+  acting on it every time is a spin rather than a service. The `retract` kind had a convergence guard;
+  `followup` had nothing, so a critique-style trigger could fire on turn after turn — its own
+  consequence being the very thing its rule matches. Both limits are counted from the durable fire
+  markers already in the session, so a cool-down survives restart, reload and a backend swap with no
+  in-memory state, and only _result-bearing_ fires count (a silent side-effect trigger such as
+  `remember_fact` never spends budget). A held-off trigger leaves a `suppressed` marker with cause
+  `cooldown` naming the reason — suppression is never silent. Absent ⇒ unlimited, which stays the
+  default. Settable via `trigger_action` add/update, where `null` on update clears every limit and a
+  `maxPerTurn` of 0 is rejected rather than silently disabling the trigger.
+
 - Updated dependencies
   - @matatbread/matbot-plugin-api@0.3.8
 

@@ -4,6 +4,26 @@
 
 ### Patch Changes
 
+- **A stale tab reloads itself.** Every response carries the running harness version as
+  `x-matbot-version` (exposed via CORS, so a cross-origin page can actually read it), and the HTTP
+  transport compares it against the version the page loaded with — the one already on screen in
+  `#matbot-version`, which app.js fills from `about_matbot` at bootstrap, so there is one version line
+  and nothing extra stamped into the page. On a mismatch the page reloads once, so a server restarted
+  on a new build no longer leaves a long-lived tab running UI code against an API it no longer matches.
+  Static assets are served `cache-control: no-cache` so the reload re-fetches them rather than
+  replaying the stale copy that triggered it.
+
+- **One session list per change, not one per notice.** Every mutation listed the sessions twice: the
+  click handler listed immediately, and the change notification that same write published listed again,
+  re-rendering a sidebar that had already settled — new with the bus, since sessions had no live channel
+  before. All triggers (click, fork, split, new session, and the end of every completed turn) now funnel
+  through one trailing-debounced `refreshSessions()`. Nothing depends on the notification arriving — the
+  click's own call guarantees the refresh — so a disconnected stream degrades to the previous behaviour
+  rather than a stale list, and the hidden row is dropped from the DOM on success so the debounce window
+  does not read as lag.
+
+- **A trigger's cool-down is editable in both trigger editors.**
+
 - Notification bus: one swappable service carrying every "something changed" fact.
 
   Five unrelated mechanisms used to tell a frontend something had changed — two core registry
@@ -17,12 +37,23 @@
   - **`Notifier`** (`MatbotServices`, swappable, host boot default): `notify` / `subscribe` / `consume`
     over one `Notification` envelope. Within a plugin's `setup()` it is scoped, so published
     notifications carry that plugin's name.
-  - **The envelope** discriminates on `kind` (the shape — `store-change`, `registry`, or an
+  - **The envelope** discriminates on `kind` (the shape — `ItemChange`, `RegistryChange`, or an
     augmentation) _and_ carries attribution (`instance` / `plugin` / `source`) as separate fields, so a
     sink can filter on either or both. `principal` — whose data it is — stays distinct from
     attribution: it is what `WatchVisibility.visible` consumes. `kind` is **open at runtime**, so a
     `switch` over it must always have a `default`.
-  - **Identity, never value.** A `store-change` carries `namespace`/`id`/`operation`; `detail` is
+  - **A `kind` is `<package-name>#<InterfaceName>`** — `'@matatbread/matbot-plugin-api#ItemChange'`,
+    `'@matatbread/matbot-plugin-api#RegistryChange'`. A `kind` is globally scoped and, unlike a type
+    name, an importer cannot rename it out of a collision: two plugins picking the same bare word is an
+    unfixable declaration-merge conflict in `Notifications`, and across a bridge a silent
+    mis-narrowing. The package name — already unique — qualifies it, and names the package that
+    _defines_ the shape, never the one emitting it (`plugin` is the emitter; four plugins emit
+    `ItemChange`). `ItemChangeKind` / `RegistryChangeKind` are exported so consumers get a renameable
+    handle back. An arm never declares `kind` itself: `NotificationBase` has no such field and
+    `Notification` grafts each arm's `Notifications` key on, so the tag cannot disagree with the key it
+    is registered under. `NotifyInput` rejects an unqualified key at the `notify` call, and
+    `createNotifier` warns at runtime for producers TypeScript never saw (plain JS, a bridge).
+  - **Identity, never value.** An `ItemChange` carries `namespace`/`id`/`operation`; `detail` is
     explicitly advisory. Consumers re-read through the store — an event is invalidation, not state. No
     persistence or replay: a sink re-queries on attach.
   - **New notifications**: every write to the `sessions` namespace (create, the turn pump's title
@@ -56,8 +87,8 @@
 
   **Breaking: `ToolRegistry.watch()` and `watchPlugins()` are removed**, along with
   `ToolRegistryEvent` and `PluginRegistryEvent`. Both registries were broadcasters over the same
-  primitive the bus is, so keeping them was duplication rather than layering: they now publish
-  `{ kind: 'registry', registry: 'tools' | 'plugins' }` and consumers subscribe to the bus. `tools`
+  primitive the bus is, so keeping them was duplication rather than layering: they now publish a
+  `RegistryChange` with `registry: 'tools' | 'plugins'` and consumers subscribe to the bus. `tools`
   notifications carry the registering plugin's name in the advisory `detail` (resolve the name for
   anything authoritative). Ported: `tool-router`, `tool-types`, the frontend's tool-resolve boot-grace
   wait, and the two bridges the frontend used to run. `SkillManager.watch()` went the same way.

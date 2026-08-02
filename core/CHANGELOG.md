@@ -4,6 +4,11 @@
 
 ### Patch Changes
 
+- **`StoreQuery.immutable` is accepted by the query validator**, and `ItemChangeKind` /
+  `RegistryChangeKind` are re-exported from `@matatbread/matbot-core` alongside `createNotifier`,
+  `scopedNotifier` and `notifyingStore`, so a plugin linking only against core gets the renameable
+  handles without reaching into `plugin-api`.
+
 - Notification bus: one swappable service carrying every "something changed" fact.
 
   Five unrelated mechanisms used to tell a frontend something had changed — two core registry
@@ -17,12 +22,23 @@
   - **`Notifier`** (`MatbotServices`, swappable, host boot default): `notify` / `subscribe` / `consume`
     over one `Notification` envelope. Within a plugin's `setup()` it is scoped, so published
     notifications carry that plugin's name.
-  - **The envelope** discriminates on `kind` (the shape — `store-change`, `registry`, or an
+  - **The envelope** discriminates on `kind` (the shape — `ItemChange`, `RegistryChange`, or an
     augmentation) _and_ carries attribution (`instance` / `plugin` / `source`) as separate fields, so a
     sink can filter on either or both. `principal` — whose data it is — stays distinct from
     attribution: it is what `WatchVisibility.visible` consumes. `kind` is **open at runtime**, so a
     `switch` over it must always have a `default`.
-  - **Identity, never value.** A `store-change` carries `namespace`/`id`/`operation`; `detail` is
+  - **A `kind` is `<package-name>#<InterfaceName>`** — `'@matatbread/matbot-plugin-api#ItemChange'`,
+    `'@matatbread/matbot-plugin-api#RegistryChange'`. A `kind` is globally scoped and, unlike a type
+    name, an importer cannot rename it out of a collision: two plugins picking the same bare word is an
+    unfixable declaration-merge conflict in `Notifications`, and across a bridge a silent
+    mis-narrowing. The package name — already unique — qualifies it, and names the package that
+    _defines_ the shape, never the one emitting it (`plugin` is the emitter; four plugins emit
+    `ItemChange`). `ItemChangeKind` / `RegistryChangeKind` are exported so consumers get a renameable
+    handle back. An arm never declares `kind` itself: `NotificationBase` has no such field and
+    `Notification` grafts each arm's `Notifications` key on, so the tag cannot disagree with the key it
+    is registered under. `NotifyInput` rejects an unqualified key at the `notify` call, and
+    `createNotifier` warns at runtime for producers TypeScript never saw (plain JS, a bridge).
+  - **Identity, never value.** An `ItemChange` carries `namespace`/`id`/`operation`; `detail` is
     explicitly advisory. Consumers re-read through the store — an event is invalidation, not state. No
     persistence or replay: a sink re-queries on attach.
   - **New notifications**: every write to the `sessions` namespace (create, the turn pump's title
@@ -56,8 +72,8 @@
 
   **Breaking: `ToolRegistry.watch()` and `watchPlugins()` are removed**, along with
   `ToolRegistryEvent` and `PluginRegistryEvent`. Both registries were broadcasters over the same
-  primitive the bus is, so keeping them was duplication rather than layering: they now publish
-  `{ kind: 'registry', registry: 'tools' | 'plugins' }` and consumers subscribe to the bus. `tools`
+  primitive the bus is, so keeping them was duplication rather than layering: they now publish a
+  `RegistryChange` with `registry: 'tools' | 'plugins'` and consumers subscribe to the bus. `tools`
   notifications carry the registering plugin's name in the advisory `detail` (resolve the name for
   anything authoritative). Ported: `tool-router`, `tool-types`, the frontend's tool-resolve boot-grace
   wait, and the two bridges the frontend used to run. `SkillManager.watch()` went the same way.

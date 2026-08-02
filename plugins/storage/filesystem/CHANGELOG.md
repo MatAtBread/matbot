@@ -4,6 +4,17 @@
 
 ### Patch Changes
 
+- **A listing query no longer re-parses documents that have not changed.** `FilesystemStore` honours
+  `StoreQuery.immutable` with a parse cache validated by a fresh `stat` (mtime + size) on **every**
+  query — not by write-through invalidation — so a document written by another process (a detached
+  background job, an editor) invalidates exactly like a local one, and a stale entry cannot outlive
+  the stat that disagrees with it. Writes through the store additionally drop their own entry, closing
+  the window where a rewrite of identical length within one filesystem timestamp tick would look
+  unchanged. Bounded at 64 MB of source bytes, least-recently-used evicted, so a store larger than the
+  budget degrades to the previous behaviour for the overflow rather than growing without limit.
+  Measured on 213 real session documents (52 MB): 591ms cold, 6ms warm; a query without the flag is
+  unchanged at 535ms.
+
 - Updated dependencies
   - @matatbread/matbot-plugin-api@0.3.8
   - @matatbread/matbot-core@0.3.8

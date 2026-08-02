@@ -9,84 +9,6 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
-## Unreleased
-
-### Breaking changes
-
-- **A notification `kind` is now `<package-name>#<InterfaceName>`.** `'store-change'` →
-  `'@matatbread/matbot-plugin-api#ItemChange'`, `'registry'` →
-  `'@matatbread/matbot-plugin-api#RegistryChange'`, and the interfaces are renamed `ItemChange` /
-  `RegistryChange` to match. A `kind` is a globally-scoped wire token and, unlike a type name, an
-  importer cannot rename it out of a collision: two plugins choosing the same bare word is an
-  unfixable declaration-merge conflict in `Notifications`, and across a bridge it is a silent
-  mis-narrowing of one instance's payload into another's shape. The package name already being
-  unique, it does the qualifying. The prefix names the package that *defines* the shape, never the
-  one emitting it — `plugin` is the emitter, and four plugins emit `ItemChange`. `ItemChangeKind`
-  and `RegistryChangeKind` are exported (from `plugin-api` and re-exported by `core`) so a consumer
-  gets a renameable handle back: `import { ItemChangeKind as Changed }`.
-- **A notification arm no longer declares `kind`.** `NotificationBase` drops the field; `Notification`
-  grafts each arm's `Notifications` key on. Writing the tag twice — once as the key, once as a literal
-  field — was a duplication with nothing keeping the halves honest, and it is now unrepresentable. An
-  augmenting plugin declares the interface, registers it under `'<package>#<Name>'`, and is done.
-  `NotifyInput` rejects an unqualified key at the `notify` call site (in the compilation that declared
-  the augmentation, since the mapped type resolves at the use site), and `createNotifier` warns at
-  runtime for the producers TypeScript never sees: a plain-JS plugin, or a bridge injecting a foreign
-  instance's traffic.
-- **`StoreChangeNotification` is now `ItemChange`** — renamed for its contract, not its mechanism. It
-  was already a misnomer at two of its five emitters: workspace announces a `FileStore` write, and the
-  profiles backend announces a share/unshare that passes through no `Store` at all. What every emitter
-  actually publishes is "the thing addressed by `(namespace, id)` is stale — re-read it", which is
-  medium-independent, and `notifyingStore` is merely its most convenient emitter. The name mattered
-  because it was the first question a plugin author had to answer to use the bus, and it was a question
-  about matbot's internals. The rule is now: publish `ItemChange` for any invalidation of an addressable
-  item, whatever holds it; define a kind of your own only when you carry something a consumer cannot
-  get by re-reading (progress, a measurement) — `detail` is not the place for it.
-- **The unused pre-bus `StoreChange` envelope is removed from `types.ts`** — a leftover the
-  notification arm duplicated field-for-field, with no remaining reader.
-
-### API gaps filled
-
-- **`StoreQuery.immutable`** — the caller's promise not to mutate the documents a query returns,
-  which frees a backend to hand back shared instances rather than freshly-materialised ones. A pure
-  optimisation hint: a backend may ignore it and nothing changes, so it is never load-bearing for
-  correctness. Set it only where the promise is actually kept — a read-modify-write path (pull a page,
-  edit a document, `cas` it back) must not, since the instance it edits may be one another caller is
-  still reading.
-
-### Optional
-
-- **storage/filesystem + sessions — listing sessions no longer re-parses every conversation.**
-  `Store` has no projection, so `session_action list` read and JSON-parsed every session document
-  whole — every message of every conversation — to produce four summary fields per row: 591ms for
-  52MB across 213 sessions, on every sidebar refresh. `FilesystemStore` now honours
-  `StoreQuery.immutable` with a parse cache validated by a fresh `stat` (mtime + size) on every query,
-  so a document written by another process — a detached background job, an editor — invalidates
-  exactly like a local write, and a stale entry cannot outlive the stat that disagrees with it; writes
-  through the store additionally drop their own entry, closing the same-timestamp window. Bounded at
-  64MB of source bytes, least-recently-used evicted, so a larger store degrades to the previous
-  behaviour for the overflow instead of growing without limit. Warm listing: 6ms.
-
-- **triggers — a trigger can carry a cool-down.** `Trigger.cooldown` (`{ maxPerTurn?, quietTurns? }`)
-  rate-limits *firing* independently of *matching*, because a rule can be correctly matched turn after
-  turn while acting on it every time is a spin rather than a service. The `retract` kind had a
-  convergence guard; `followup` had nothing, so a critique-style trigger could fire on turn after turn
-  — its own consequence being the very thing its rule matches. Both limits are counted from the durable
-  fire markers already in the session, so a cool-down survives restart, reload and a backend swap with
-  no in-memory state, and only *result-bearing* fires count (a silent side-effect trigger such as
-  `remember_fact` never spends budget). A held-off trigger leaves a `suppressed` marker with cause
-  `cooldown` naming the reason — suppression is never silent. Absent ⇒ unlimited, which stays the
-  default. Settable via `trigger_action` add/update (`null` on update clears every limit).
-- **cognition — the Inner voice trigger ships with `{ maxPerTurn: 2, quietTurns: 1 }`**, backfilled
-  onto installs seeded before the field existed (skipped if the field was since tuned or cleared).
-- **frontend/web — a stale tab reloads itself.** Every response carries the running harness version as
-  `x-matbot-version` (exposed via CORS, so a cross-origin page can actually read it), and the HTTP
-  transport compares it against the version the page loaded with — the one already on screen in
-  `#matbot-version`, which app.js fills from `about_matbot` at bootstrap, so there is one version line
-  and nothing extra stamped into the page. On a mismatch the page reloads once. A server restarted on a
-  new build no longer leaves a long-lived tab running UI code against an API it no longer matches.
-  Static assets are served `cache-control: no-cache` so the reload re-fetches them rather than replaying
-  the stale copy that triggered it.
-
 ## 0.3.8
 
 _One notification bus replaces every bespoke "something changed" channel. Three private streams are
@@ -97,10 +19,10 @@ second browser._
 
 - **`ToolRegistry.watch()` and `watchPlugins()` removed**, with `ToolRegistryEvent` and
   `PluginRegistryEvent`. Both registries were broadcasters over the same primitive the new bus is, so
-  keeping them was duplication rather than layering. They publish
-  `{ kind: 'registry', registry: 'tools' | 'plugins' }` instead, and consumers subscribe to
-  `services.Notifier`. A `tools` notification carries the registering plugin's name in the advisory
-  `detail`; resolve the name for anything authoritative. `SkillManager.watch()` went the same way.
+  keeping them was duplication rather than layering. They publish a `RegistryChange` with
+  `registry: 'tools' | 'plugins'` instead, and consumers subscribe to `services.Notifier`. A `tools`
+  notification carries the registering plugin's name in the advisory `detail`; resolve the name for
+  anything authoritative. `SkillManager.watch()` went the same way.
 - **`FileStore.watch()` removed**, with `FileEvent` and `WatchVisibility.watchFiles`. It existed to
   detect writes made outside matbot — but matbot writes `.data` and nothing else, and every in-process
   writer now announces itself, so no first-party feature depended on it. As a core interface it was
@@ -110,6 +32,10 @@ second browser._
   filesystem activity is a plugin's job: it can watch whatever it likes and publish onto the bus, which
   every sink already understands. `WatchVisibility` keeps `visible()` — the part that was ever a
   contract rather than a transport.
+- **The `StoreChange` envelope is removed from `types.ts`.** The self-describing change shape that the
+  partitioned CRUD streams passed around is superseded by `ItemChange` on the bus, which carries the
+  same `namespace`/`id`/`operation`/`detail` plus attribution and ownership. Nothing reads the old
+  envelope any more.
 
 ### API gaps filled
 
@@ -118,19 +44,44 @@ second browser._
   registration surface, not delivery: no persistence, no replay, no delivery guarantee, so a sink
   re-queries on attach and treats a notification as invalidation. Within a plugin's `setup()` it is
   scoped, so published notifications carry that plugin's name.
-  - The envelope discriminates on `kind` (the shape — `store-change`, `registry`, or an augmentation of
-    `Notifications`) *and* carries attribution (`instance` / `plugin` / `source`) as separate fields, so
-    a sink can filter on either or both. `principal` is ownership — whose data changed, the input to
-    `WatchVisibility.visible` — and is never conflated with the producer fields. `kind` is **open at
-    runtime**, so a `switch` over it must always have a `default`.
-  - **Identity, never value.** A `store-change` carries `namespace`/`id`/`operation`; `detail` is
+  - The envelope discriminates on `kind` (the shape — `ItemChange`, `RegistryChange`, or an
+    augmentation of `Notifications`) *and* carries attribution (`instance` / `plugin` / `source`) as
+    separate fields, so a sink can filter on either or both. `principal` is ownership — whose data
+    changed, the input to `WatchVisibility.visible` — and is never conflated with the producer fields.
+    `kind` is **open at runtime**, so a `switch` over it must always have a `default`.
+  - **A `kind` is `<package-name>#<InterfaceName>`** — `'@matatbread/matbot-plugin-api#ItemChange'`,
+    `'@matatbread/matbot-plugin-api#RegistryChange'`. Unlike a type name, a `kind` is globally scoped
+    and an importer cannot rename it out of a collision: two plugins choosing the same bare word is an
+    unfixable declaration-merge conflict in `Notifications`, and across a bridge it is a silent
+    mis-narrowing of one instance's payload into another's shape. The package name, already unique,
+    does the qualifying, and it names the package that *defines* the shape, never the one emitting it
+    (`plugin` is the emitter; four plugins emit `ItemChange`). `ItemChangeKind` and `RegistryChangeKind`
+    are exported from `plugin-api` and re-exported by `core`, so a consumer gets a renameable handle
+    back: `import { ItemChangeKind as Changed }`.
+  - **An arm never declares `kind`.** `NotificationBase` has no such field; `Notification` grafts each
+    arm's `Notifications` key on, so the tag cannot disagree with the key it is registered under. An
+    augmenting plugin declares its interface, registers it under `'<package>#<Name>'`, and is done.
+    `NotifyInput` rejects an unqualified key at the `notify` call site (in the compilation that declared
+    the augmentation, since the mapped type resolves at the use site), and `createNotifier` warns at
+    runtime for the producers TypeScript never sees: a plain-JS plugin, or a bridge injecting a foreign
+    instance's traffic.
+  - **Identity, never value.** An `ItemChange` carries `namespace`/`id`/`operation`; `detail` is
     advisory (a cosmetic in-place UI update at most). Events are stale the moment a concurrent writer
-    lands, so consumers read through the store.
+    lands, so consumers read through the store. Publish `ItemChange` for any invalidation of an
+    addressable item, whatever holds it — a `Store`, a `FileStore`, a share that passes through neither;
+    define a kind of your own only when you carry something a consumer cannot get by re-reading
+    (progress, a measurement), which `detail` is not the place for.
   - **Distributed left open, not built.** A registered implementation may forward off-box; it stamps
     `instance` on ingress and must not re-forward a foreign `instance` — that is the loop break.
 - **`notifyingStore(store, notifier, namespace, source)`** — wraps a store so every successful write
   announces itself. For a namespace with one writer an explicit `notify` is clearer; this is for one
   with many (`sessions` has nine), where it cannot be forgotten by the next writer to arrive.
+- **`StoreQuery.immutable`** — the caller's promise not to mutate the documents a query returns,
+  which frees a backend to hand back shared instances rather than freshly-materialised ones. A pure
+  optimisation hint: a backend may ignore it and nothing changes, so it is never load-bearing for
+  correctness. Set it only where the promise is actually kept — a read-modify-write path (pull a page,
+  edit a document, `cas` it back) must not, since the instance it edits may be one another caller is
+  still reading.
 
 ### Bug fixes
 
@@ -160,8 +111,48 @@ second browser._
 - **frontend/web — a shared-in session's `×` unshares** instead of archiving it (an archive is a write,
   which raised `ReadOnlyError` once shared-in sessions appeared live in the list); rename is withheld
   there for the same reason.
+- **frontend/web — one session list per change, not one per notice.** Every mutation used to list the
+  sessions twice: the click handler listed immediately, and the change notification that same write
+  published listed again, re-rendering a sidebar that had already settled — new with the bus, since
+  sessions had no live channel before. All triggers (click, fork, split, new session, and the end of
+  every completed turn) now funnel through one trailing-debounced `refreshSessions()`; nothing depends
+  on the notification arriving, so a disconnected stream degrades to the old behaviour rather than a
+  stale list.
+- **frontend/web — a stale tab reloads itself.** Every response carries the running harness version as
+  `x-matbot-version` (exposed via CORS, so a cross-origin page can actually read it), and the HTTP
+  transport compares it against the version the page loaded with — the one already on screen in
+  `#matbot-version`, which app.js fills from `about_matbot` at bootstrap, so there is one version line
+  and nothing extra stamped into the page. On a mismatch the page reloads once. A server restarted on a
+  new build no longer leaves a long-lived tab running UI code against an API it no longer matches.
+  Static assets are served `cache-control: no-cache` so the reload re-fetches them rather than replaying
+  the stale copy that triggered it.
 - **workspace, background — writes and deletes announce themselves**, carrying the content namespace
   and name so a frontend can update a row in place rather than re-listing.
+- **storage/filesystem + sessions — listing sessions no longer re-parses every conversation.**
+  `Store` has no projection, so `session_action list` read and JSON-parsed every session document
+  whole — every message of every conversation — to produce four summary fields per row: 591ms for
+  52MB across 213 sessions, on every sidebar refresh. `FilesystemStore` now honours
+  `StoreQuery.immutable` with a parse cache validated by a fresh `stat` (mtime + size) on every query,
+  so a document written by another process — a detached background job, an editor — invalidates
+  exactly like a local write, and a stale entry cannot outlive the stat that disagrees with it; writes
+  through the store additionally drop their own entry, closing the same-timestamp window. Bounded at
+  64MB of source bytes, least-recently-used evicted, so a larger store degrades to the previous
+  behaviour for the overflow instead of growing without limit. Warm listing: 6ms.
+- **triggers — a trigger can carry a cool-down.** `Trigger.cooldown` (`{ maxPerTurn?, quietTurns? }`)
+  rate-limits *firing* independently of *matching*, because a rule can be correctly matched turn after
+  turn while acting on it every time is a spin rather than a service. The `retract` kind had a
+  convergence guard; `followup` had nothing, so a critique-style trigger could fire on turn after turn
+  — its own consequence being the very thing its rule matches. Both limits are counted from the durable
+  fire markers already in the session, so a cool-down survives restart, reload and a backend swap with
+  no in-memory state, and only *result-bearing* fires count (a silent side-effect trigger such as
+  `remember_fact` never spends budget). A held-off trigger leaves a `suppressed` marker with cause
+  `cooldown` naming the reason — suppression is never silent. Absent ⇒ unlimited, which stays the
+  default. Settable via `trigger_action` add/update (`null` on update clears every limit), and editable
+  in both of the web frontend's trigger editors.
+- **cognition — the Inner voice trigger ships with `{ maxPerTurn: 2, quietTurns: 1 }`**, backfilled
+  onto installs seeded before the field existed (skipped if the field was since tuned or cleared).
+- **rumsfeld — `find_fact` and `contextual_search` descriptions disambiguated**, so the model stops
+  reaching for one where it wants the other.
 
 ## 0.3.7
 

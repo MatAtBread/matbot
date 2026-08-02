@@ -416,7 +416,9 @@ Reload from disk without restart (`plugin reload`; `loadPlugins(..., bustCache =
 
 `CHANGELOG.md` records **functional** changes only. Omit stylistic, refactoring, docs-only merges.
 
-**Sections:** `## Unreleased` → `## Previously`. Within each, four categories in order:
+**Sections:** one `## <version>` per release, newest first; work not yet versioned goes under
+`## Unreleased` until the release it lands in is cut, then folds into that version's section. Within
+each, four categories in order:
 1. **Breaking changes** — core contract changes
 2. **API gaps filled** — new core API surface
 3. **Bug fixes** — core fixes

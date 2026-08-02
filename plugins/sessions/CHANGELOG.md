@@ -4,6 +4,11 @@
 
 ### Patch Changes
 
+- **`session_action` `list` and `query` set `StoreQuery.immutable`.** Both summarise the documents
+  they read and never edit them, so the promise is kept; on a backend that honours it (the filesystem
+  store) a sidebar refresh stops re-parsing every conversation in full to produce four summary fields
+  per row.
+
 - Updated dependencies
   - @matatbread/matbot-plugin-api@0.3.8
   - @matatbread/matbot-core@0.3.8
