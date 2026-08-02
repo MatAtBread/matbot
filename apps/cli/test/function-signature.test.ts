@@ -87,3 +87,25 @@ test('the reported definition also runs, resolving the session from the injected
   assert.equal(sawSessionId, 'sess-abc');
   assert.deepEqual(events.at(-1), { type: 'result', value: { session: 'My chat', provider: 'a-model' } });
 });
+
+// A composition that returns nothing yields no `result` event. `undefined` is "no result", not "a
+// result that is undefined": the triggers dispatcher fires only on a yielded result, so a composition
+// used as a trigger's `invoke` could not stay silent while it always yielded one — which is the
+// difference between an adjudicator that says nothing and one that wakes the model to say nothing.
+test('a composition returning undefined yields no result event', async () => {
+  const machine = { tools: { resolve: () => null } } as unknown as MatbotMachine;
+  const ctx = {
+    callId: 'c1', session: { id: 'sess-abc' }, signal: new AbortController().signal,
+    prompt: () => Promise.reject(new Error('non-interactive')),
+  } as unknown as ToolContext;
+
+  const silent = await buildAsyncFn(stripper, `f(): string | undefined { return undefined; }`, []);
+  const events: ToolEvent[] = [];
+  for await (const ev of runFunction(machine, ctx, silent, [])) events.push(ev);
+  assert.deepEqual(events, []);
+
+  const speaking = await buildAsyncFn(stripper, `f(): string | undefined { return 'said'; }`, []);
+  const spoke: ToolEvent[] = [];
+  for await (const ev of runFunction(machine, ctx, speaking, [])) spoke.push(ev);
+  assert.deepEqual(spoke, [{ type: 'result', value: 'said' }]);
+});

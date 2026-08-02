@@ -81,5 +81,10 @@ export async function* runFunction(
     await new Promise<void>(r => { wake = r; });
   }
   if (errored) { yield { type: 'error', message: msg(error) }; return; }
-  yield { type: 'result', value: result };
+  // `undefined` is "no result", not "a result that is undefined": a composition that returns nothing
+  // yields no `result` event, exactly like a hand-written tool whose work is a side-effect. This is the
+  // difference between a silent verdict and a noisy one — the triggers dispatcher fires only on a
+  // yielded result, so a composition used as a trigger's `invoke` could not stay silent while it always
+  // yielded. Downstream already expects result-less tools (the Anthropic converter names one).
+  if (result !== undefined) yield { type: 'result', value: result };
 }

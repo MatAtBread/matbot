@@ -122,6 +122,14 @@ second browser._
   ahead of the definition is trivia rather than "not a function definition" (it also no longer lands
   between `function` and the name at compile time), a comment inside the parameter list stays out of the
   parsed parameter type, and an unlocatable body now says so instead of blaming the signature.
+- **function-tools — a composition can now be silent.** A composition always yielded a `result`, even
+  when it returned nothing, so `undefined` reached the model as a result rather than as the absence of
+  one. That made the observational-dispatch contract unreachable from userland: the triggers dispatcher
+  fires on a yielded result, so a composition used as a trigger's `invoke` could never be the silent
+  side-effect the contract describes — every fire woke the model, including the ones whose verdict was
+  "nothing to do here". A composition returning `undefined` now yields no `result` event, like any
+  hand-written tool whose work is a side-effect (result-less tools were already expected downstream —
+  the Anthropic converter names one). Declare the return type as `T | undefined` to use it.
 - **function-tools — a composition can read the call it is running under.** `tool` and `toolInContext`
   carried the calling context *downwards* — every `await tool.x(…)` already inherited the session — but
   exposed none of it to the body, so a composition could not name the session it was in, and no tool
