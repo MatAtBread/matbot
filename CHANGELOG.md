@@ -103,6 +103,21 @@ second browser._
 
 ### Optional
 
+- **provenance (new plugin) — `determine_provenance`.** Traces where a claim came from rather than
+  whether it is true. Provenance, unlike truth, is a *closed* question: anything not in the session came
+  from the model's weights or from nowhere, so the session is already the provenance record and the
+  answer is found by searching it — never by asking the model how it knows, which it cannot answer
+  (recall and invention are the same event from the inside). Per claim it returns `retrieved` (a tool
+  result carries it), `given` (the user said it), `derived` (computable from material that is here),
+  `model-prior` (absent here, but the model asserts it cold — measured by re-asking the same model with
+  none of this context), or `unsourced`, with the extracts the verdict rests on quoted verbatim so it can
+  be checked rather than trusted. `unsourced` means NOT SOURCED HERE, never false: training data is a
+  legitimate origin and the policy for an unsourced claim belongs to the caller. Tool results are split
+  into units — one per `items[]` entry, per table row (carrying its header), per bullet — and matched
+  whole-word on the claim's keys, so nothing is ever decided by a positional cap; the single budget sits
+  at the prompt boundary, spent best-ranked-first, and an over-long extract is windowed on its match. The
+  reading runs on the pinned `classifierProvider` or the turn's model; the cold probe always uses the
+  turn's model, since it is that model's prior being measured.
 - **edit-session — editing the running session is refused instead of silently discarded.** `session_edit`
   reported success for a `cut`, `split` or `compact` aimed at the session the calling turn was running in,
   and nothing survived: the runner takes one in-memory copy of the session at turn start and writes it back
