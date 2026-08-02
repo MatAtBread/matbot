@@ -13,7 +13,8 @@ churn and less likely to affect a consumer who doesn't use them.
 
 _One notification bus replaces every bespoke "something changed" channel. Three private streams are
 deleted outright; the web UI reads one stream; live session/file/skill/share updates now reach a
-second browser._
+second browser. Also: a new `provenance` plugin traces a claim to the tool result or user message it
+came from, and a running turn now owns its session document rather than losing edits to it silently._
 
 ### Breaking changes
 
