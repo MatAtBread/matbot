@@ -44,7 +44,27 @@ churn and less likely to affect a consumer who doesn't use them.
 - **The unused pre-bus `StoreChange` envelope is removed from `types.ts`** — a leftover the
   notification arm duplicated field-for-field, with no remaining reader.
 
+### API gaps filled
+
+- **`StoreQuery.immutable`** — the caller's promise not to mutate the documents a query returns,
+  which frees a backend to hand back shared instances rather than freshly-materialised ones. A pure
+  optimisation hint: a backend may ignore it and nothing changes, so it is never load-bearing for
+  correctness. Set it only where the promise is actually kept — a read-modify-write path (pull a page,
+  edit a document, `cas` it back) must not, since the instance it edits may be one another caller is
+  still reading.
+
 ### Optional
+
+- **storage/filesystem + sessions — listing sessions no longer re-parses every conversation.**
+  `Store` has no projection, so `session_action list` read and JSON-parsed every session document
+  whole — every message of every conversation — to produce four summary fields per row: 591ms for
+  52MB across 213 sessions, on every sidebar refresh. `FilesystemStore` now honours
+  `StoreQuery.immutable` with a parse cache validated by a fresh `stat` (mtime + size) on every query,
+  so a document written by another process — a detached background job, an editor — invalidates
+  exactly like a local write, and a stale entry cannot outlive the stat that disagrees with it; writes
+  through the store additionally drop their own entry, closing the same-timestamp window. Bounded at
+  64MB of source bytes, least-recently-used evicted, so a larger store degrades to the previous
+  behaviour for the overflow instead of growing without limit. Warm listing: 6ms.
 
 - **triggers — a trigger can carry a cool-down.** `Trigger.cooldown` (`{ maxPerTurn?, quietTurns? }`)
   rate-limits *firing* independently of *matching*, because a rule can be correctly matched turn after

@@ -93,11 +93,11 @@ function validateFilter(f: Filter, ptr: string): void {
   }
 }
 
-const QUERY_KEYS = new Set(['where', 'sort', 'limit', 'cursor']);
+const QUERY_KEYS = new Set(['where', 'sort', 'limit', 'cursor', 'immutable']);
 
 export function validateQuery(q: StoreQuery): void {
   if (q === null || typeof q !== 'object' || Array.isArray(q))
-    throw new StoreQueryError('query must be an object with optional keys: where, sort, limit, cursor', '/', 'MALFORMED');
+    throw new StoreQueryError('query must be an object with optional keys: where, sort, limit, cursor, immutable', '/', 'MALFORMED');
 
   // Reject unknown top-level keys. Without this the envelope is silently permissive: a clause placed
   // under a wrong key (e.g. `filter` instead of `where`, an SQL-ism LLMs reach for) is dropped, the

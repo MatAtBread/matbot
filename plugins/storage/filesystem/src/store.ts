@@ -3,12 +3,58 @@ import { join } from 'node:path';
 import type { Store, StoreQuery, QueryResult, CASResult } from '@matatbread/matbot-plugin-api';
 import { executeQuery } from '@matatbread/matbot-core/storage-base';
 
+interface Parsed<T> { mtimeMs: number; size: number; doc: T }
+
+// Cap on the source bytes held parsed. A store larger than this keeps the hottest documents and lets
+// the rest fall back to a fresh read, rather than growing without bound.
+const PARSE_CACHE_BYTES = 64 * 1024 * 1024;
+
 export class FilesystemStore<T extends { id: string; version: string }> implements Store<T> {
   private initPromise: Promise<void> | undefined;
   private locks = new Map<string, Promise<unknown>>();
 
+  /**
+   * Parsed documents from previous `immutable` queries, keyed by file name. `Store` has no projection,
+   * so a summary listing must read every document in the namespace whole: for `sessions` that is every
+   * message of every conversation parsed to answer a question about four fields — 517ms for 52MB in one
+   * real profile, on every sidebar refresh. The read is unavoidable; re-parsing what has not changed
+   * is not.
+   *
+   * Validity is a fresh `stat` (mtime + size) on every query, never write-through invalidation — 3ms
+   * for the same 213 files — so a document written by another process (a detached background job, an
+   * editor) invalidates exactly like a local write, and a stale entry cannot outlive the stat that
+   * disagrees with it. Writes through this store additionally drop their own entry, closing the window
+   * where a rewrite of identical length within the same filesystem timestamp tick would look unchanged.
+   *
+   * Only `immutable` queries read or fill it, so a shared instance is never handed to a caller that
+   * might edit it. Insertion order is the LRU order: a hit re-inserts.
+   */
+  private parsed = new Map<string, Parsed<T>>();
+  private parsedBytes = 0;
+
   private readonly dir: string;
   constructor(dir: string) { this.dir = dir; }
+
+  private remember(name: string, entry: Parsed<T>): void {
+    const prev = this.parsed.get(name);
+    if (prev !== undefined) this.parsedBytes -= prev.size;
+    this.parsed.set(name, entry);
+    this.parsedBytes += entry.size;
+    for (const [key, value] of this.parsed) {
+      if (this.parsedBytes <= PARSE_CACHE_BYTES) break;
+      if (key === name) continue;
+      this.parsed.delete(key);
+      this.parsedBytes -= value.size;
+    }
+  }
+
+  private forget(id: string): void {
+    const name = `${id}.json`;
+    const prev = this.parsed.get(name);
+    if (prev === undefined) return;
+    this.parsed.delete(name);
+    this.parsedBytes -= prev.size;
+  }
 
   // ── Initialisation ───────────────────────────────────────────────────────────
 
@@ -60,6 +106,7 @@ export class FilesystemStore<T extends { id: string; version: string }> implemen
   async set(id: string, value: T): Promise<void> {
     await this.init();
     await this.writeAtomic(this.filePath(id), JSON.stringify(value, null, 2));
+    this.forget(id);
   }
 
   async cas(id: string, expected: string, next: T): Promise<CASResult<T>> {
@@ -81,6 +128,7 @@ export class FilesystemStore<T extends { id: string; version: string }> implemen
       }
       try {
         await fs.unlink(this.filePath(id));
+        this.forget(id);
         return true;
       } catch {
         return false;
@@ -104,9 +152,24 @@ export class FilesystemStore<T extends { id: string; version: string }> implemen
       entries
         .filter(e => /^[\w-]+\.json$/.test(e))
         .map(async e => {
+          const path = join(this.dir, e);
           try {
-            pool.push(JSON.parse(await fs.readFile(join(this.dir, e), 'utf8')) as T);
-          } catch { /* skip corrupted */ }
+            if (q.immutable !== true) {
+              pool.push(JSON.parse(await fs.readFile(path, 'utf8')) as T);
+              return;
+            }
+            const stat = await fs.stat(path);
+            const hit  = this.parsed.get(e);
+            if (hit !== undefined && hit.mtimeMs === stat.mtimeMs && hit.size === stat.size) {
+              this.parsed.delete(e);          // re-insert: insertion order is the LRU order
+              this.parsed.set(e, hit);
+              pool.push(hit.doc);
+              return;
+            }
+            const doc = JSON.parse(await fs.readFile(path, 'utf8')) as T;
+            pool.push(doc);
+            this.remember(e, { mtimeMs: stat.mtimeMs, size: stat.size, doc });
+          } catch { /* skip corrupted, or vanished between readdir and read */ }
         }),
     );
 
