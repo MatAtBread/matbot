@@ -83,10 +83,13 @@ export interface TriggerInvoke {
  * fire on consecutive turns, and rate-limiting them would silently lose data.
  */
 export interface TriggerCooldown {
-  /** Most fires allowed within one turn, counting both surfaces. Absent ⇒ unlimited. */
+  /** Most fires allowed within one turn, counting both surfaces. At least 1: the two fields have
+   *  opposite polarity — this one counts PERMITTED fires, so 0 would mean "never fires", which is
+   *  `enabled: false` reached silently through a rate limit and is rejected. Absent ⇒ unlimited. */
   maxPerTurn?: number;
   /** Genuine user turns the trigger stays held off for after a fire. 1 ⇒ never on consecutive turns
-   *  (a fire on turn N is held off on N+1, allowed again on N+2). Absent/0 ⇒ no quiet period. */
+   *  (a fire on turn N is held off on N+1, allowed again on N+2). This one counts BLOCKED turns, so
+   *  0 is an honest "no delay" and means the same as absent. */
   quietTurns?: number;
 }
 

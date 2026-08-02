@@ -1053,12 +1053,12 @@ function makeCooldownFields(cooldown) {
 
   const fields = document.createElement('div');
   fields.className = 'cooldown-fields';
-  const field = (cls, text, title, value) => {
+  const field = (cls, text, title, min, value) => {
     const l = document.createElement('label');
     l.title = title;
     const input = document.createElement('input');
     input.type = 'number';
-    input.min = '0';
+    input.min = String(min);
     input.step = '1';
     input.className = cls;
     input.placeholder = '∞';
@@ -1070,24 +1070,33 @@ function makeCooldownFields(cooldown) {
   };
   // A turn is one genuine user message and everything that follows it — a retract redo or a follow-up
   // robo turn belongs to the turn that caused it, so neither hands the trigger a fresh budget.
-  field('cd-max', 'max fires per turn', 'Most times this trigger may fire within one turn, counting both the user and agent surfaces.', cooldown?.maxPerTurn);
-  field('cd-quiet', 'quiet turns after firing', 'Later turns the trigger is held off for after it fires. 1 = never on consecutive turns.', cooldown?.quietTurns);
+  // The two minimums differ because the quantities have opposite polarity: `maxPerTurn` counts
+  // PERMITTED fires, so 0 would mean "never fires" — which is the Suspend toggle's job, reached
+  // silently through a number box — while `quietTurns` counts BLOCKED turns, where 0 is a plain "no
+  // delay" and agrees with blank.
+  field('cd-max', 'max fires per turn', 'Most times this trigger may fire within one turn, counting both the user and agent surfaces. Blank for no limit; to stop it firing entirely, suspend it instead.', 1, cooldown?.maxPerTurn);
+  field('cd-quiet', 'quiet turns after firing', 'Later turns the trigger is held off for after it fires. 1 = never on consecutive turns; 0 or blank = no delay.', 0, cooldown?.quietTurns);
   wrap.appendChild(fields);
   return wrap;
 }
 
 // Read a cool-down back out of `scope`, or null when both fields are blank — null is what
 // trigger_action's update takes to clear every limit, so emptying the boxes really does mean
-// unlimited rather than "leave whatever was stored".
+// unlimited rather than "leave whatever was stored". A value that isn't a whole number at or above
+// the field's minimum THROWS to the modal's error line: silently treating it as blank would save the
+// opposite of what was typed (unlimited), and both save paths already surface a throw.
 function readCooldown(scope) {
-  const num = (cls) => {
+  const num = (cls, min, label) => {
     const raw = scope.querySelector(cls)?.value.trim() ?? '';
     if (raw === '') return undefined;
     const n = Number(raw);
-    return Number.isInteger(n) && n >= 0 ? n : undefined;
+    if (!Number.isInteger(n) || n < min) {
+      throw new Error(`"${label}" must be a whole number of ${min} or more, or blank for no limit.`);
+    }
+    return n;
   };
-  const maxPerTurn = num('.cd-max');
-  const quietTurns = num('.cd-quiet');
+  const maxPerTurn = num('.cd-max', 1, 'max fires per turn');
+  const quietTurns = num('.cd-quiet', 0, 'quiet turns after firing');
   if (maxPerTurn === undefined && quietTurns === undefined) return null;
   return {
     ...(maxPerTurn !== undefined ? { maxPerTurn } : {}),

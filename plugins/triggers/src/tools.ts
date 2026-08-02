@@ -83,14 +83,22 @@ function queryFilter(a: { tool?: unknown; params?: unknown }): { tool?: string; 
   };
 }
 
-// A cool-down is valid if every field it carries is a non-negative integer. `null` clears it (the
-// only way back to "unlimited" through a patch, since an omitted field means "leave unchanged").
+// A cool-down is valid if every field it carries is a whole number at or above its own minimum, which
+// differ by polarity: `maxPerTurn` counts PERMITTED fires, so 0 would mean "never fires" — an alias
+// for `disable` reached through a rate limit, silently and without the suspend flag a reader would
+// look for — while `quietTurns` counts BLOCKED turns, where 0 is an honest "no delay". `null` clears
+// the whole thing (the only way back to unlimited through a patch, since an omitted field means
+// "leave unchanged").
 function validCooldown(x: unknown): x is TriggerCooldown {
   if (x === null || typeof x !== 'object') return false;
   const c = x as { maxPerTurn?: unknown; quietTurns?: unknown };
-  const ok = (v: unknown): boolean => v === undefined || (typeof v === 'number' && Number.isInteger(v) && v >= 0);
-  return ok(c.maxPerTurn) && ok(c.quietTurns);
+  const ok = (v: unknown, min: number): boolean => v === undefined || (typeof v === 'number' && Number.isInteger(v) && v >= min);
+  return ok(c.maxPerTurn, 1) && ok(c.quietTurns, 0);
 }
+const COOLDOWN_ERR =
+  '"cooldown" must be { maxPerTurn?: integer >= 1, quietTurns?: integer >= 0 }. ' +
+  'maxPerTurn 0 is rejected: a trigger that may never fire is a suspended trigger — use the ' +
+  '"disable" action, which keeps the conditions and is visible as such.';
 
 // A condition is valid if it has a recognised `kind` and a string `rule`.
 function validConditions(x: unknown): x is TriggerCondition[] {
@@ -131,7 +139,7 @@ export function createTriggerActionTool(manager: TriggerManager): Tool<ToolResul
           if (!validConditions(a.conditions)) { yield { type: 'error', message: `action "add" requires "conditions": [{ kind: ${KINDS.join('|')}, rule: string }].` }; return; }
           if (a.conditions.length === 0)      { yield { type: 'error', message: 'action "add" requires at least one condition.' }; return; }
           if (typeof a.tool !== 'string')     { yield { type: 'error', message: 'action "add" requires a string "tool" to invoke.' }; return; }
-          if (a.cooldown !== undefined && !validCooldown(a.cooldown)) { yield { type: 'error', message: '"cooldown" must be { maxPerTurn?: integer >= 0, quietTurns?: integer >= 0 }.' }; return; }
+          if (a.cooldown !== undefined && !validCooldown(a.cooldown)) { yield { type: 'error', message: COOLDOWN_ERR }; return; }
           const t = await manager.add({
             conditions: a.conditions,
             invoke:     { tool: a.tool, ...(a.params !== undefined ? { params: a.params } : {}) },
@@ -147,7 +155,7 @@ export function createTriggerActionTool(manager: TriggerManager): Tool<ToolResul
           if (!a.id) { yield { type: 'error', message: 'action "update" requires "id".' }; return; }
           if (a.conditions !== undefined && !validConditions(a.conditions)) { yield { type: 'error', message: '"conditions" must be [{ kind, rule }].' }; return; }
           if (a.tool !== undefined && typeof a.tool !== 'string')           { yield { type: 'error', message: '"tool" must be a string.' }; return; }
-          if (a.cooldown !== undefined && a.cooldown !== null && !validCooldown(a.cooldown)) { yield { type: 'error', message: '"cooldown" must be { maxPerTurn?: integer >= 0, quietTurns?: integer >= 0 }, or null to remove every limit.' }; return; }
+          if (a.cooldown !== undefined && a.cooldown !== null && !validCooldown(a.cooldown)) { yield { type: 'error', message: COOLDOWN_ERR + ' Pass null to remove every limit.' }; return; }
           const priorTool = (a.tool !== undefined || a.params !== undefined)
             ? (await manager.get(a.id))?.invoke.tool ?? ''
             : '';
@@ -255,7 +263,7 @@ export function createTriggerActionTool(manager: TriggerManager): Tool<ToolResul
         toParams:   { type: 'object', description: 'New params for the selected triggers\' invocation (move/copy).' },
         enabled:    { type: 'boolean', description: 'On add/update, set false to keep but suspend the trigger (absent ⇒ enabled). To toggle an existing trigger, prefer the dedicated "disable"/"enable" actions.' },
         cooldown:   { type: ['object', 'null'], description: 'On add/update, rate-limit firing: { maxPerTurn, quietTurns }. Omit to leave unchanged (absent ⇒ unlimited); null on update removes every limit.',
-          properties: { maxPerTurn: { type: 'integer', description: 'Most fires allowed within one turn.' }, quietTurns: { type: 'integer', description: 'Later turns held off after a fire; 1 ⇒ never on consecutive turns.' } } },
+          properties: { maxPerTurn: { type: 'integer', minimum: 1, description: 'Most fires allowed within one turn (>= 1; to stop a trigger firing at all, use "disable").' }, quietTurns: { type: 'integer', minimum: 0, description: 'Later turns held off after a fire; 1 ⇒ never on consecutive turns, 0 ⇒ no delay.' } } },
       },
     },
     executor,
