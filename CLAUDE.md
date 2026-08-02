@@ -346,6 +346,17 @@ my thing a Store?" to use the bus was the wrong first question. Define a kind of
 you carry something a consumer **cannot** get by re-reading — progress, a measurement, an external
 event. That is a new shape, not a new source; `detail` is not the place to smuggle it.
 
+**`namespace` is an address space, not a plugin.** It looks 1:1 with plugins from the web UI's
+`switch`, and it isn't: `files` is emitted by workspace, by background (a detached job's output), and
+by the profiles backend (a share); `sessions` has no plugin at all — the host wraps that store in
+`notifyingStore`, behind which sit the turn pump, `session_action`, `session_edit` and the frontend;
+and the profiles backend takes `namespace` as a *parameter*, announcing for every space, none of which
+it owns. So a per-plugin `kind` cannot be derived — the emitter is not the owner — and it would
+duplicate `plugin`, contradicting it exactly where it matters. Consumers reflect this: the visibility
+filter and the tool-registry watchers dispatch on `kind` alone and never look at `namespace`. Only the
+UI switches on `namespace` after `kind`, because it has a panel per space — its own layout concern, and
+the reason a new space flows past `default` instead of breaking every consumer.
+
 **`principal` is ownership, not attribution** — whose data changed, and the input to
 `WatchVisibility.visible`. Never conflate it with the producer fields.
 
