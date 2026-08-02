@@ -119,7 +119,8 @@ second browser._
   reading runs on the pinned `classifierProvider` or the turn's model; the cold probe always uses the
   turn's model, since it is that model's prior being measured. `provenance_config` (get/set/clear) pins
   the reader onto a small/fast model, refusing a provider that is not configured; it deliberately cannot
-  reach the probe.
+  reach the probe. Bundled into the browser artifact (on-demand, not auto-loaded), since the plugin uses
+  no Node primitives.
 - **edit-session — editing the running session is refused instead of silently discarded.** `session_edit`
   reported success for a `cut`, `split` or `compact` aimed at the session the calling turn was running in,
   and nothing survived: the runner takes one in-memory copy of the session at turn start and writes it back
