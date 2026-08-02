@@ -903,6 +903,7 @@ const skillEditorSave    = document.getElementById('skill-editor-save');
 const skillEditorRoot    = document.getElementById('skill-editor');
 const skillTriggerList    = document.getElementById('skill-trigger-list');
 const skillTriggerSuspend = document.getElementById('skill-trigger-suspend');
+const skillTriggerCooldown = document.getElementById('skill-trigger-cooldown');
 const TRIGGER_KINDS = ['ephemeral', 'contextual', 'retract', 'followup'];
 let editingSkillName = null;
 let skillEditor = null;   // TinyMDE.Editor, created lazily on first open
@@ -1037,6 +1038,63 @@ function renderSkillMetadata(catalogue, knowledge) {
   });
 }
 
+// A trigger's conditions say WHEN it is relevant; its cool-down says how often it may ACT on that —
+// a rule can be correctly matched turn after turn while firing every time is a spin rather than a
+// service (a critique trigger matches the very response it caused). Two integers, both optional:
+// blank is unlimited, which stays the default. Shared by the skill editor and the tool-trigger cards.
+function makeCooldownFields(cooldown) {
+  const wrap = document.createElement('div');
+  wrap.className = 'trigger-cooldown';
+
+  const lbl = document.createElement('div');
+  lbl.className = 'tt-field-label';
+  lbl.textContent = 'Cool-down — how often it may fire, whatever its conditions judge (blank = no limit)';
+  wrap.appendChild(lbl);
+
+  const fields = document.createElement('div');
+  fields.className = 'cooldown-fields';
+  const field = (cls, text, title, value) => {
+    const l = document.createElement('label');
+    l.title = title;
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.min = '0';
+    input.step = '1';
+    input.className = cls;
+    input.placeholder = '∞';
+    input.value = Number.isInteger(value) ? String(value) : '';
+    const span = document.createElement('span');
+    span.textContent = text;
+    l.append(input, span);
+    fields.appendChild(l);
+  };
+  // A turn is one genuine user message and everything that follows it — a retract redo or a follow-up
+  // robo turn belongs to the turn that caused it, so neither hands the trigger a fresh budget.
+  field('cd-max', 'max fires per turn', 'Most times this trigger may fire within one turn, counting both the user and agent surfaces.', cooldown?.maxPerTurn);
+  field('cd-quiet', 'quiet turns after firing', 'Later turns the trigger is held off for after it fires. 1 = never on consecutive turns.', cooldown?.quietTurns);
+  wrap.appendChild(fields);
+  return wrap;
+}
+
+// Read a cool-down back out of `scope`, or null when both fields are blank — null is what
+// trigger_action's update takes to clear every limit, so emptying the boxes really does mean
+// unlimited rather than "leave whatever was stored".
+function readCooldown(scope) {
+  const num = (cls) => {
+    const raw = scope.querySelector(cls)?.value.trim() ?? '';
+    if (raw === '') return undefined;
+    const n = Number(raw);
+    return Number.isInteger(n) && n >= 0 ? n : undefined;
+  };
+  const maxPerTurn = num('.cd-max');
+  const quietTurns = num('.cd-quiet');
+  if (maxPerTurn === undefined && quietTurns === undefined) return null;
+  return {
+    ...(maxPerTurn !== undefined ? { maxPerTurn } : {}),
+    ...(quietTurns !== undefined ? { quietTurns } : {}),
+  };
+}
+
 // One condition row: a phase <select> + the rubric <textarea>, both disabled (read-only) until ✎ is
 // clicked; × removes the row. New rows (no `c`) start editable. Nothing is persisted until Save,
 // which replaces the skill's trigger conditions wholesale (conditions have no stable id).
@@ -1093,6 +1151,14 @@ function renderTriggers(conditions) {
   for (const c of conditions) skillTriggerList.appendChild(makeTriggerRow(c));
 }
 
+// The cool-down belongs to the primary trigger (save consolidates a skill's triggers to one), so the
+// editor shows a single control rather than one per flattened condition row.
+function renderSkillCooldown(cooldown) {
+  if (!skillTriggerCooldown) return;
+  skillTriggerCooldown.innerHTML = '';
+  skillTriggerCooldown.appendChild(makeCooldownFields(cooldown));
+}
+
 // Reflect the suspend toggle: check the box and light up the amber "on" styling. A suspended trigger
 // keeps its conditions but is excluded from evaluation (the `disable` action), so it stops firing
 // without being deleted — the fix for a trigger that matches too eagerly.
@@ -1120,9 +1186,13 @@ async function saveTriggers(name) {
   for (const id of editingTriggerExtraIds) await callTool('trigger_action', { action: 'remove', id });
   editingTriggerExtraIds = [];
 
+  // null clears every limit — the update action's documented way back to unlimited, since an omitted
+  // `cooldown` means "leave the stored one alone".
+  const cooldown = skillTriggerCooldown ? readCooldown(skillTriggerCooldown) : null;
+
   if (editingTriggerId) {
     if (conditions.length) {
-      await callTool('trigger_action', { action: 'update', id: editingTriggerId, conditions });
+      await callTool('trigger_action', { action: 'update', id: editingTriggerId, conditions, cooldown });
     } else {
       await callTool('trigger_action', { action: 'remove', id: editingTriggerId });
       editingTriggerId = null;
@@ -1130,6 +1200,7 @@ async function saveTriggers(name) {
   } else if (conditions.length) {
     const res = await callTool('trigger_action', {
       action: 'add', conditions, tool: 'skill_action', params: { action: 'use', name },
+      ...(cooldown ? { cooldown } : {}),
     });
     editingTriggerId = res?.id ?? null;
   }
@@ -1169,6 +1240,7 @@ async function openSkillEditor(name) {
   editingTriggerExtraIds = [];
   renderTriggers([]);
   setTriggerSuspend(false);
+  renderSkillCooldown(null);
   renderSkillMetadata(false, null);
   setSkillTab('content');
   skillEditorOverlay.classList.add('open');
@@ -1183,6 +1255,8 @@ async function openSkillEditor(name) {
       editingTriggerId = trigs[0]?.id ?? null;
       editingTriggerExtraIds = trigs.slice(1).map((t) => t.id);
       renderTriggers(trigs.flatMap((t) => (Array.isArray(t.conditions) ? t.conditions : [])));
+      // Like the conditions, the primary's cool-down is the one that survives consolidation.
+      renderSkillCooldown(trigs[0]?.cooldown ?? null);
       // Suspended only when every trigger firing this skill is disabled — since save consolidates them
       // to one, a mixed state resolves to that single primary's state on the next save anyway.
       setTriggerSuspend(trigs.length > 0 && trigs.every((t) => t.enabled === false));
@@ -1333,6 +1407,8 @@ function makeToolTriggerCard(trigger) {
   else conds.appendChild(makeTriggerRow());   // start a new trigger with one editable row
   card.append(cLbl, conds);
 
+  card.appendChild(makeCooldownFields(trigger?.cooldown));
+
   const addCond = document.createElement('button');
   addCond.className = 'tt-add-cond skill-editor-btn';
   addCond.textContent = '+ Add condition';
@@ -1389,18 +1465,22 @@ async function saveToolTriggers() {
       catch { throw new Error('Parameters must be valid JSON (or left blank).'); }
     }
     const enabled = card.querySelector('.tt-enabled input').checked;
+    // null on update clears every limit, so emptying both boxes means unlimited rather than "leave
+    // the stored cool-down alone"; on add there is nothing to clear, so it is simply omitted.
+    const cooldown = readCooldown(card);
 
     if (!conditions.length) continue;   // no conditions ⇒ never fires; not persisted (removed below if it had an id)
     if (id) {
       keptIds.add(id);
       await callTool('trigger_action', {
-        action: 'update', id, conditions, tool: toolTriggerTool, enabled,
+        action: 'update', id, conditions, tool: toolTriggerTool, enabled, cooldown,
         ...(params !== undefined ? { params } : {}),
       });
     } else {
       await callTool('trigger_action', {
         action: 'add', conditions, tool: toolTriggerTool, enabled,
         ...(params !== undefined ? { params } : {}),
+        ...(cooldown ? { cooldown } : {}),
       });
     }
   }
