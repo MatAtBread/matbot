@@ -1,6 +1,6 @@
-import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, notifyingStore } from '@matatbread/matbot-plugin-api';
 import type {
-  JSONSchema, MatbotMachine, MatbotPluginSpec, PluginSettings,
+  JSONSchema, MatbotMachine, MatbotPluginSpec, Store,
   Tool, ToolContext, ToolEvent, ToolContract, ToolResultOf,
 } from '@matatbread/matbot-plugin-api';
 import { buildAsyncFn, runFunction, INJECTED, type CompiledFn } from './compile.js';
@@ -8,9 +8,18 @@ import { parseSignature, paramsSchema, type ParsedParam, type ParsedSignature } 
 
 const TOOL_NAME   = 'tool_function';
 const PLUGIN_NAME = 'function-tools';
-const STORE_KEY   = 'functions';
+const NAMESPACE   = 'functions';
 
 interface FunctionRecord { name: string; definition: string; description?: string }
+
+/** A stored function. Its `id` IS its name — names are already unique (they are tool-registry keys),
+ *  so there is no second identity to keep in step, and a rename is a delete plus an add. */
+interface FunctionDoc { id: string; version: string; definition: string; description?: string }
+
+const recordOf = (doc: FunctionDoc): FunctionRecord => ({
+  name: doc.id, definition: doc.definition,
+  ...(doc.description !== undefined ? { description: doc.description } : {}),
+});
 
 // Placeholder used as a defined tool's description when the caller supplies none — fill in as desired.
 const PLACEHOLDER_DESCRIPTION = 'A user-defined function tool.';
@@ -58,26 +67,43 @@ type ToolFunctionAction =
   | { action: 'types' }
   | { action: 'remove'; name: string };
 
-/** Owns the defined functions: derives+compiles each into a registered tool, and persists the sources. */
+/**
+ * Owns the defined functions: derives+compiles each into a registered tool, and persists the sources
+ * as one document per function in the `functions` namespace.
+ *
+ * There is no in-memory copy of the data — every read goes through the store proxy, so it follows a
+ * backend swap and the current principal's partition, and a second writer is seen. The one thing held
+ * here is `registered`: the names this plugin has put into the tool registry, which is ownership (what
+ * to unregister on reload/teardown), not a cache of the documents.
+ */
 class FunctionStore {
-  private readonly machine:  MatbotMachine;
-  private readonly settings: PluginSettings;
-  private readonly defined = new Map<string, FunctionRecord>();
+  private readonly machine: MatbotMachine;
+  private readonly store:   Store<FunctionDoc>;
+  private readonly registered = new Set<string>();
 
-  constructor(machine: MatbotMachine, settings: PluginSettings) {
-    this.machine  = machine;
-    this.settings = settings;
+  constructor(machine: MatbotMachine, store: Store<FunctionDoc>) {
+    this.machine = machine;
+    this.store   = store;
   }
 
+  /** Register a tool for every stored function, dropping any this plugin registered that is no longer
+   *  there. Idempotent, so it serves both boot and a StorageBackend swap (which replaces the whole set). */
   async reload(): Promise<void> {
-    const persisted = await this.settings.get<{ functions: FunctionRecord[] }>(STORE_KEY);
-    for (const rec of persisted?.functions ?? []) {
-      try { await this.registerTool(rec); this.defined.set(rec.name, rec); }
-      catch (e) { console.warn(`[${PLUGIN_NAME}] skipping "${rec.name}": ${e instanceof Error ? e.message : String(e)}`); }
+    const { items } = await this.store.query({ immutable: true });
+    const seen = new Set<string>();
+    for (const doc of items) {
+      try { await this.registerTool(recordOf(doc)); seen.add(doc.id); }
+      catch (e) { console.warn(`[${PLUGIN_NAME}] skipping "${doc.id}": ${e instanceof Error ? e.message : String(e)}`); }
     }
+    for (const name of this.registered) if (!seen.has(name)) this.machine.tools.remove(name);
+    this.registered.clear();
+    for (const name of seen) this.registered.add(name);
   }
 
-  list(): FunctionRecord[] { return [...this.defined.values()]; }
+  async list(): Promise<FunctionRecord[]> {
+    const { items } = await this.store.query({ sort: [{ field: 'id', dir: 'asc' }], immutable: true });
+    return items.map(recordOf);
+  }
 
   async define(definition: string, description?: string, noTypeCheck = false): Promise<{ name: string; parameters: ParsedParam[] }> {
     const sig = parseSignature(definition);
@@ -86,7 +112,7 @@ class FunctionStore {
     assertNoInjectedClash(sig.params);
     if (sig.returnType === undefined) throw new Error('define requires an explicit return type — it is verified against the body and becomes the tool\'s result contract, e.g. `weather(city: string): string { … }`. Use `: void` for a side-effect-only tool, or `: unknown` if the result is genuinely dynamic.');
     const clash = this.machine.tools.resolve(sig.name);
-    if (clash !== null && !this.defined.has(sig.name)) {
+    if (clash !== null && !this.registered.has(sig.name)) {
       throw new Error(`A tool named "${sig.name}" already exists and wasn't defined here — choose another name.`);
     }
     // Type-check the body against the live tool types before registering — a strong signal the composition
@@ -97,27 +123,33 @@ class FunctionStore {
       const diags = await index.check(checkSnippet(sig));
       if (diags.length > 0) throw new Error(`type error(s) — fix and re-define, or pass noTypeCheck to bypass:\n${diags.join('\n')}`);
     }
-    const rec: FunctionRecord = {
-      name: sig.name,
+    const doc: FunctionDoc = {
+      id:      sig.name,
+      version: Date.now().toString(),
       definition,
       ...(description !== undefined && description.trim() !== '' ? { description: description.trim() } : {}),
     };
-    await this.registerTool(rec);      // compiles; throws on bad source before anything is persisted
-    this.defined.set(sig.name, rec);
-    await this.persist();
+    await this.registerTool(recordOf(doc));   // compiles; throws on bad source before anything is persisted
+    // No CAS: a define is an unconditional "this name now means this source", not a read-modify-write,
+    // and the name is the whole identity. Only this one document is touched, so two concurrent defines
+    // of different names can no longer lose each other.
+    await this.store.set(doc.id, doc);
+    this.registered.add(doc.id);
     return { name: sig.name, parameters: sig.params };
   }
 
   async remove(name: string): Promise<boolean> {
-    if (!this.defined.has(name)) return false;
+    const doc = await this.store.get(name);
+    if (doc === null) return false;
+    await this.store.delete(name, doc.version);
     this.machine.tools.remove(name);
-    this.defined.delete(name);
-    await this.persist();
+    this.registered.delete(name);
     return true;
   }
 
   removeAll(): void {
-    for (const name of this.defined.keys()) this.machine.tools.remove(name);
+    for (const name of this.registered) this.machine.tools.remove(name);
+    this.registered.clear();
   }
 
   private async registerTool(rec: FunctionRecord): Promise<void> {
@@ -144,10 +176,6 @@ class FunctionStore {
     };
     this.machine.tools.remove(rec.name);   // replace on re-define; no-op when absent
     this.machine.tools.register(tool);
-  }
-
-  private async persist(): Promise<void> {
-    await this.settings.set(STORE_KEY, { functions: [...this.defined.values()] });
   }
 }
 
@@ -286,7 +314,7 @@ function functionTool(machine: MatbotMachine, store: FunctionStore): Tool<ToolRe
             return;
           }
           case 'list':
-            yield { type: 'result', value: { functions: store.list() } };
+            yield { type: 'result', value: { functions: await store.list() } };
             return;
           case 'types': {
             const index = machine.ToolTypeIndex;
@@ -312,18 +340,28 @@ function functionTool(machine: MatbotMachine, store: FunctionStore): Tool<ToolRe
 }
 
 export function createFunctionToolsPlugin(): MatbotPluginSpec {
-  let store: FunctionStore | undefined;
+  let store:     FunctionStore | undefined;
+  let lifecycle: AbortController | undefined;
   return {
     apiVersion: PLUGIN_API_VERSION,
     manifest: { description: 'Author and run TypeScript functions that compose registered tools (`tool_function`: define/lambda/list/remove).' },
 
     async setup(services) {
-      store = new FunctionStore(services, services.settings());
-      await store.reload();
-      services.tools.register(functionTool(services, store));
+      lifecycle = new AbortController();
+      const docs = notifyingStore(
+        services.createStore<FunctionDoc>(NAMESPACE), services.Notifier, NAMESPACE, 'function',
+      );
+      const fns = new FunctionStore(services, docs);
+      store = fns;
+      await fns.reload();
+      // The registered tools are state derived from the store at setup time, so they must be rebuilt
+      // when a deferred StorageBackend swap lands on a different `functions` set. No `replay` — the
+      // boot load is above; this reacts only to future swaps.
+      services.mounted.observe({ key: 'StorageBackend', signal: lifecycle.signal }, () => void fns.reload());
+      services.tools.register(functionTool(services, fns));
     },
 
-    async teardown() { store?.removeAll(); },
+    async teardown() { lifecycle?.abort(); store?.removeAll(); },
   };
 }
 

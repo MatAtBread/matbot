@@ -104,6 +104,22 @@ came from, and a running turn now owns its session document rather than losing e
 
 ### Optional
 
+- **function-tools — defined functions move from plugin settings to a `functions` store. Existing
+  definitions are NOT migrated in code and will be lost.** Settings is a key-value bucket for
+  configuration, held as one document per plugin: every `define` read-modify-wrote the plugin's entire
+  settings document to append to an unbounded array (27 KB in one real install), two concurrent defines
+  clobbered each other wholesale, and the set was invisible to the notification bus. Each function is now
+  its own document in the `functions` namespace, keyed by its name — writes are per-function and
+  independent, `list` reads through the store proxy instead of an in-memory snapshot (so it follows a
+  backend swap and the current principal's partition, and sees a second writer), and define/remove
+  announce themselves as `ItemChange` like every other stored thing. The plugin also re-registers its
+  tools when a deferred `StorageBackend` swap lands, which it previously never did — the compiled tools
+  were whichever set the backend held at boot. One behavioural consequence: `settings` is pinned to the
+  base partition and can never be isolated per profile, so defined functions were unavoidably global;
+  `functions` is an ordinary namespace, so a profile can now isolate (or share) its own set. To carry
+  definitions across the upgrade, copy each entry of the old settings `functions` array into
+  `.data/functions/<name>.json` as `{ id: <name>, version: <ms>, definition, description? }`, or
+  re-`define` them.
 - **provenance (new plugin) — `determine_provenance`.** Traces where a claim came from rather than
   whether it is true. Provenance, unlike truth, is a *closed* question: anything not in the session came
   from the model's weights or from nowhere, so the session is already the provenance record and the
