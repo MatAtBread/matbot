@@ -11,7 +11,7 @@
 // The in-process transport is server.ts re-expressed without HTTP: per-session subscribe, the busy
 // tracker, prompt parking, and the buffered tool-call ctx, all ported faithfully.
 
-import { createSession, currentPrincipal, promptCancelledError, watchPlugins } from '@matatbread/matbot-core';
+import { createSession, currentPrincipal, promptCancelledError } from '@matatbread/matbot-core';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 // The SAME tool definition the Node frontend registers (server.ts/plugin.ts) — identical name,
 // description, and schema in both UIs; only the evalInBrowser transport differs (hub vs HTTP SSE).
@@ -108,9 +108,15 @@ function makeInProcessTransport(services) {
   function makePromptFn(sid, traceId) {
     return (p, defaultValue) => new Promise((resolve, reject) => {
       const def = typeof p === 'string' ? defaultValue : p.default;
+      // Mirror server.ts: every settle path funnels through these, and each announces the prompt dead so
+      // an attached UI can retire its dialog (one window here, but app.js is shared with the HTTP build).
+      const settled = () => {
+        pendingPrompts.delete(sid);
+        for (const inject of hub(sid)) inject({ type: 'prompt-resolved', traceId });
+      };
       pendingPrompts.set(sid, {
-        resolve: answer => { pendingPrompts.delete(sid); resolve(answer || def || ''); },
-        cancel:  ()     => { pendingPrompts.delete(sid); reject(promptCancelledError()); },
+        resolve: answer => { settled(); resolve(answer || def || ''); },
+        cancel:  ()     => { settled(); reject(promptCancelledError()); },
       });
       const ev = {
         type: 'prompt',
@@ -299,27 +305,10 @@ function makeInProcessTransport(services) {
     } finally { statusListeners.delete(l); }
   }
 
-  // Normalise to the same self-describing StoreChange the HTTP firehose delivers ({operation, namespace,
-  // id, detail}), so app.js reads one shape whichever transport is live. In-process is single-principal, so
-  // there is no partition filtering — just reshape the raw event.
-  async function* fileEvents(signal) {
-    if (!services.files || !services.files.watch) return;
-    for await (const ev of services.files.watch(signal)) {
-      yield { operation: 'saved', namespace: 'files', id: ev.id, detail: ev };
-    }
-  }
-
-  async function* toolEvents(signal) {
-    for await (const event of services.tools.watch(signal)) yield event;
-  }
-
-  async function* skillEvents(signal) {
-    if (!services.SkillManager) return;
-    for await (const event of services.SkillManager.watch(signal)) yield event.value;
-  }
-
-  async function* pluginEvents(signal) {
-    for await (const event of watchPlugins(signal)) yield event;
+  // The same single notification stream app.js consumes over HTTP — here it is the bus itself, with no
+  // SSE in between. In-process is single-principal, so nothing is filtered.
+  function notifications(signal) {
+    return services.Notifier.subscribe(signal);
   }
 
   // No HTTP file route in-process, so materialise the bytes into a blob: URL (mirror the dom
@@ -339,7 +328,7 @@ function makeInProcessTransport(services) {
   return {
     hostRuntime: 'browser',
     callTool, createSession: createSessionFn, sessionBusy, submit,
-    sessionEvents, answerPrompt, answerEnv, abort, statusEvents, fileEvents, toolEvents, pluginEvents, skillEvents, openFile,
+    sessionEvents, answerPrompt, answerEnv, abort, statusEvents, notifications, openFile,
   };
 }
 

@@ -1,5 +1,11 @@
-import type { Tool, ToolExecutor, ToolContext, ToolContract, ToolResultOf, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
-import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolContext, ToolContract, ToolResultOf, MatbotPluginSpec, MatbotMachine } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, tryCurrentPrincipal, ItemChangeKind } from '@matatbread/matbot-plugin-api';
+
+// Set in setup(); announces this tool's own writes and deletes. A file store's `watch` may also see a
+// write (the filesystem one does) — a duplicate notification is harmless, since a consumer re-queries
+// rather than applying a delta — but a DELETE is announced here or nowhere: the filesystem watch cannot
+// express one, and a backend need not implement watch at all. No-op before setup.
+let announceFile: (id: string, operation: 'saved' | 'deleted', name: string) => void = () => {};
 
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
@@ -132,6 +138,7 @@ const workspaceExecutor: ToolExecutor<ToolResultOf<'workspace_action'>> = {
           return;
         }
 
+        announceFile(handle.id, 'saved', safe);
         yield { type: 'result', value: { path: safe, bytes: handle.size } };
         return;
       }
@@ -168,6 +175,7 @@ const workspaceExecutor: ToolExecutor<ToolResultOf<'workspace_action'>> = {
         if (!handle) { yield { type: 'error', message: `File not found: "${safe}"` }; return; }
 
         await ctx.files.delete(handle.id);
+        announceFile(handle.id, 'deleted', safe);
         yield { type: 'result', value: { path: safe } };
         return;
       }
@@ -210,4 +218,18 @@ const workspaceTool: Tool<ToolResultOf<'workspace_action'>> = {
 export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,
   tools: [workspaceTool],
+  async setup(services: MatbotMachine) {
+    announceFile = (id, operation, name) => {
+      const principal = tryCurrentPrincipal();
+      services.Notifier.notify({
+        kind: ItemChangeKind, source: 'workspace', operation, namespace: 'files', id,
+        // Advisory, and the file store's own watch supplies the same two fields when it has one: the
+        // content namespace + name a frontend needs to place the row it is being told about. Without it a
+        // consumer can only re-list, which is correct but loses the in-place update on backends that
+        // cannot watch (sqlite, Drive) — i.e. exactly where this announcement is the only signal.
+        detail: { namespace: WORKSPACE_NS, name },
+        ...(principal !== undefined ? { principal } : {}),
+      });
+    };
+  },
 };

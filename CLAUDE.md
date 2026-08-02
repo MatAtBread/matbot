@@ -295,6 +295,93 @@ When `parameters.thinking` is set, complete `{ type: 'thinking', thinking, signa
 
 ---
 
+## Notifications
+
+`Notifier` is the one fan-out for every "something changed" fact — a swappable `MatbotServices`
+member with an in-process host default. Matbot owns the **envelope and the registration surface**;
+it does not own delivery (no persistence, replay, or guarantees — that's what a registered
+distributed impl is for).
+
+```ts
+services.Notifier.notify({ kind: ItemChangeKind, source: 'skill', operation: 'saved',
+                           namespace: 'skills', id, principal });
+services.Notifier.consume(n => { … }, signal, n => n.kind === ItemChangeKind);
+```
+
+**Two discriminants, both filterable.** `kind` selects the payload shape (`ItemChange`,
+`RegistryChange`, or an augmentation of `Notifications`); `instance`/`plugin`/`source` are
+attribution. A sink filters on either or both. `plugin` is stamped from the emitting plugin's scope.
+
+**`kind` is `<package-name>#<InterfaceName>`, and nothing declares it twice.** The `Notifications`
+key *is* the tag — an arm never declares a `kind` field; `Notification` grafts the key on, so "the
+tag matches the key" is unrepresentable rather than a convention to police:
+
+```ts
+export interface JobProgress extends NotificationBase { done: number; total: number }
+export const JobProgressKind = '@fnarr/jobs#JobProgress' satisfies keyof Notifications;
+
+declare module '@matatbread/matbot-plugin-api' {
+  interface Notifications { '@fnarr/jobs#JobProgress': JobProgress }
+}
+```
+
+Qualified because, unlike a type name, a `kind` is globally scoped and an importer *cannot* rename
+it out of a collision — two plugins picking the same bare word is an unfixable declaration-merge
+conflict in a file neither owns, and across a bridge it is a silent mis-narrowing. The package name
+is already unique, so it does the qualifying; the exported const gives the renameable handle back.
+The prefix names the package that **defines** the shape, never the one emitting it (`plugin` is the
+emitter — four plugins emit `ItemChange`). Enforced by the `Qualified<K>` arm of `NotifyInput` at
+the `notify` call, and warned about at runtime for producers TypeScript never saw. Do **not** use
+the emitter/kind pair as a compound discriminant: relaying rewrites `plugin`, and one shape emitted
+by four plugins would become four types.
+
+**`kind` is open at runtime** — a foreign plugin or a bridged remote server can publish one this
+build has never seen. Always `default` a `switch` over it; exhaustiveness checking is unsound here.
+
+**Which kind do I publish?** `ItemChange` whenever the fact is "the thing addressed by
+`(namespace, id)` is stale — re-read it", *whatever holds it*: a `Store` (via `notifyingStore`), a
+`FileStore`, a share that passes through neither, a directory a plugin watches. It is deliberately not
+named `StoreChange` — the medium is an implementation concern, and making a plugin author answer "is
+my thing a Store?" to use the bus was the wrong first question. Define a kind of your own only when
+you carry something a consumer **cannot** get by re-reading — progress, a measurement, an external
+event. That is a new shape, not a new source; `detail` is not the place to smuggle it.
+
+**`namespace` is an address space, not a plugin.** It looks 1:1 with plugins from the web UI's
+`switch`, and it isn't: `files` is emitted by workspace, by background (a detached job's output), and
+by the profiles backend (a share); `sessions` has no plugin at all — the host wraps that store in
+`notifyingStore`, behind which sit the turn pump, `session_action`, `session_edit` and the frontend;
+and the profiles backend takes `namespace` as a *parameter*, announcing for every space, none of which
+it owns. So a per-plugin `kind` cannot be derived — the emitter is not the owner — and it would
+duplicate `plugin`, contradicting it exactly where it matters. Consumers reflect this: the visibility
+filter and the tool-registry watchers dispatch on `kind` alone and never look at `namespace`. Only the
+UI switches on `namespace` after `kind`, because it has a panel per space — its own layout concern, and
+the reason a new space flows past `default` instead of breaking every consumer.
+
+**`principal` is ownership, not attribution** — whose data changed, and the input to
+`WatchVisibility.visible`. Never conflate it with the producer fields.
+
+**Identity, never value.** An `ItemChange` carries `namespace`/`id`/`operation`; `detail` is
+advisory (a cosmetic in-place UI update at most). Events are queued per subscriber and are stale
+the moment a concurrent writer lands, so a consumer re-reads through the store. A sink attaching
+mid-flight has missed what preceded it — **re-query on attach**; never put current state on the bus.
+
+**Emit where the change happens**, not where a tool call happens: a detached child's completion and
+an HTTP-created session are both real changes with no tool executor in scope.
+
+**A private stream is not a second bus.** The tool registry, the plugin registry and the SkillManager
+each had their own broadcaster over the same primitive; all three now publish onto the bus and have no
+`watch()`. `FileStore.watch` went too — it existed to detect writes made *outside* matbot, which is a
+plugin's job, not a core interface every backend must implement (two of four faked it with a stream
+that yields nothing, making "cannot watch" indistinguishable from "nothing changed"). Matbot writes
+`.data` and nothing else; anything richer — run a turn when a file arrives — is a plugin that watches
+what it likes and publishes onto the bus, which `MatbotServices` already makes easy.
+
+The one exception is `session-busy`: it replays current state on connect, which the bus refuses to
+carry, so the frontend keeps it as its own SSE event.
+
+**Distributed is left open, not built.** A registered `Notifier` may forward off-box; it stamps
+`instance` on ingress and must not re-forward a foreign `instance` — that is the loop break.
+
 ## Markers
 
 Opaque, durable annotations in the message stream — `{ type: 'marker', creator: string, data: unknown }`. Stored as marker-role messages, **elided from LLM submission**, **persisted unchanged**, **preserved by compaction**. A tool emits one via `marker` `ToolEvent`; the triggers dispatcher collects and persists them for silent-side-effect trace. For type safety, augment `MarkerData` registry (same pattern as `MatbotServices`).
@@ -329,7 +416,9 @@ Reload from disk without restart (`plugin reload`; `loadPlugins(..., bustCache =
 
 `CHANGELOG.md` records **functional** changes only. Omit stylistic, refactoring, docs-only merges.
 
-**Sections:** `## Unreleased` → `## Previously`. Within each, four categories in order:
+**Sections:** one `## <version>` per release, newest first; work not yet versioned goes under
+`## Unreleased` until the release it lands in is cut, then folds into that version's section. Within
+each, four categories in order:
 1. **Breaking changes** — core contract changes
 2. **API gaps filled** — new core API surface
 3. **Bug fixes** — core fixes

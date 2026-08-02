@@ -6,9 +6,7 @@ declare module '@matatbread/matbot-plugin-api' {
     url_for_resource: ToolContract<{ url: string | null }, { name: string }>;  // a shareable URL for the file, or null if not publicly viewable
   }
 }
-import { watchPlugins, tryCurrentPrincipal }  from '@matatbread/matbot-core';
-// Type import also brings the `SkillManager` augmentation of MatbotMachine into scope.
-import type { SkillManager }                 from '@matatbread/matbot-skills';
+import { tryCurrentPrincipal }  from '@matatbread/matbot-core';
 import { createWebServer, defaultWebPrincipal, headerPrincipal, urlPrincipal } from './server.js';
 import process                               from 'node:process';
 
@@ -83,11 +81,7 @@ export const plugin: MatbotPluginSpec = {
       vault: services.Vault,
       loadPlugin:    services.loadPlugin.bind(services),
       unloadPlugin:  services.unloadPlugin.bind(services),
-      watchPlugins,
       tools:         services.tools,
-      // Resolve the SkillManager per call, not once here: frontend-web loads before the skills plugin,
-      // so a snapshot would capture undefined forever (services.SkillManager is a live registry getter).
-      skills:        () => services.SkillManager,
       // An explicit `x-matbot-principal` header wins over any registered resolver (so a browser acting as
       // a chosen profile is honoured even when web-principal-user/auth pins a default identity); absent it,
       // a registered WebPrincipalResolver takes effect, else the header-aware default. Resolver looked up
@@ -98,6 +92,7 @@ export const plugin: MatbotPluginSpec = {
       // Partition-aware file watch, resolved per call (a thunk, like `skills`): a partitioning backend may
       // register it after frontend-web sets up, and the firehose only reads it on the first /events connect.
       watchVisibility: () => services.WatchVisibility,
+      notifier:        services.Notifier,
       ...(services.configPath !== undefined ? { configPath: services.configPath } : {}),
     });
 

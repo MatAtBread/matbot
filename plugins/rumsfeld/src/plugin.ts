@@ -38,7 +38,9 @@ export function createRumsfeldPlugin(): MatbotPluginSpec {
         name:        'contextual_search',
         description: `Load context for an unknown concept, system, term, or entity - returns a whole knowledge document to read.
 
-      For a single specific fact (a city, a URL, a date) rather than a document, use find_fact instead.
+      For a single specific fact, attribute, property or datum (such as a city, a URL, a date) rather than a document, use find_fact instead.
+      Use this regardless of any facts you already know about the term — partial knowledge is not a reason to use find_fact.
+      If unsure whether the question asks for a single attribute or about the entity itself, use contextual_search: a full entry can be summarised, but a single extracted fact cannot be un-flattened.
 
       Examples:
         - Is <unknown> currently working?
@@ -56,7 +58,7 @@ export function createRumsfeldPlugin(): MatbotPluginSpec {
 
       Markers of "unknown" terms are:
       - use of definite articles, demonstratives or possessives ("the", "my", "his", "that", "Fred's") even if the noun is common, for example "my Volvo" isn't a reference to Volvo's in general, it's about the user's specific car which they assume you have information about.
-      - words that are clearly novel proper nouns or nouns used in a non-standard or domain-specific way, for example "the Xmit system" or "What does Xmit say?".
+      - words that are clearly novel proper nouns or nouns used in a non-standard or domain-specific way, for example "the Xmit system" or "What does Xmit say?" ("Xmit" is an example of a novel proper noun).
       - when the user directly uses the term 'skill' in their query, for example "Use your skill about <unknown> to do <unknown>".
       - Deictic words such as "here", "there", "the other one", "home" which imply contextual knowledge, but none was present.
 
@@ -153,11 +155,22 @@ Reply with JSON only, no prose: {"result": {"fact": string, "source": string}[] 
 
       services.tools.register({
         name: 'find_fact',
-        description: `Retrieve a fact from stored knowledge - whatever the knowledge index happens to hold. Its contents are open-ended: personal details, a system's URL, a configured threshold, someone's birthday, domain-specific knowledge - or anything else that has been stored. Whenever a request turns on some fact that might be recorded, this can likely answer it.
+        description: `Retrieve a single fact, attribute, datum or property about the specified terms from stored knowledge. Use contextual_search if you want a whole document or richer context rather than a single specific fact.
 
-Use this, not contextual_search, when you want the precise answer rather than a whole document to read. It searches the index, reads across the best matches (the fact may not be in the top-ranked entry), and returns just the answers as an array of strings - or null if the knowledge doesn't contain it. It never invents an answer.
+        The results are bounded to a single domain:
+        - a personal detail such as a user's home city or birthday,
+        - a URL for the specified search terms,
+        - a configured threshold or numeric value
+        - any single piece of information that has been stored.
 
-Provide "question" (the fact sought, e.g. "the user's home city") and "terms" (specific search keys that locate it - proper nouns, named systems, or personal identifiers; for a personal or deictic fact, search the user's name or "user"/"profile", not a bare generic noun). Returns string[] or null`,
+        If unsure whether the question asks for a single attribute or about the entity itself, use contextual_search: a full entry can be summarised, but a single extracted fact cannot be un-flattened.
+
+        Whenever a request turns on some fact that might be recorded, this can likely answer it.
+
+        It searches the index, reads across the best matches (the fact may not be in the top-ranked entry), and returns just the answers as an array of strings - or null if the knowledge doesn't contain it. It never invents an answer.
+
+        Provide "question" (the fact sought, e.g. "the user's home city") and "terms" (specific search keys that locate it - proper nouns, named systems, or personal identifiers; for a personal or deictic fact, search the
+        user's name or "user"/"profile", not a bare generic noun). Returns string[] or null. If the responseis nuill, contextual_search can be used to read the full entry and see if it contains the fact.`,
         inputSchema: {
           type: 'object',
           required: ['question', 'terms'],

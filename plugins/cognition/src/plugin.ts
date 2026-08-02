@@ -21,12 +21,19 @@ async function seedCognition(services: MatbotMachine): Promise<void> {
   for (const skill of COGNITION_SKILLS) {
     await skills.importIfAbsent(skill.name, skill.content);
     if (triggers && skill.triggers.length > 0) {
-      await triggers.importIfAbsent({
+      const seeded = await triggers.importIfAbsent({
         conditions: skill.triggers.map(t => ({ kind: t.kind, rule: t.trigger })),
         // `use`, not `load`: a fired trigger should make the skill take effect (its content as a
         // directive), not just surface the raw text.
         invoke:     { tool: 'skill_action', params: { action: 'use', name: skill.name } },
+        ...(skill.cooldown !== undefined ? { cooldown: skill.cooldown } : {}),
       });
+      // Backfill the cool-down onto an install seeded before it existed — those triggers are the ones
+      // observed looping. Only when the field is entirely absent, so a user who tuned or cleared it
+      // (`cooldown: {}`) keeps their choice.
+      if (skill.cooldown !== undefined && seeded.cooldown === undefined) {
+        await triggers.update(seeded.id, { cooldown: skill.cooldown });
+      }
     }
   }
 

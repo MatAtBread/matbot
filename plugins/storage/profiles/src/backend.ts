@@ -1,7 +1,7 @@
 import { promises as fs, type Dirent } from 'node:fs';
 import { dirname, join, sep } from 'node:path';
-import type { Store, FileStore, FileEvent, StoreChange, StorageBackend, Principal, Routed } from '@matatbread/matbot-plugin-api';
-import { readOnlyError, createBroadcaster } from '@matatbread/matbot-plugin-api';
+import type { Store, FileStore, StorageBackend, Principal, Notifier } from '@matatbread/matbot-plugin-api';
+import { readOnlyError, ItemChangeKind } from '@matatbread/matbot-plugin-api';
 import { tryCurrentPrincipal } from '@matatbread/matbot-core';
 import { FilesystemStorageBackend } from '@matatbread/matbot-storage-filesystem';
 import { ProfilesFileStore } from './file-store.js';
@@ -53,11 +53,13 @@ export interface ProfileDirectory {
   // isolated partition keeps intra-set references valid); a shared-in source is dereferenced to its live
   // content. Skills route through the SkillManager (not this backend) so the copy is indexed + evented.
   copy(namespace: string, id: string, target: string): Promise<void>;
-  // The `WatchVisibility` service surface, exposed here so the plugin can register it. `watchFiles`
-  // subscribes to the live origin-stamped file stream (all partitions, dynamic); `visible` is the generic
+  // The `WatchVisibility` service surface, exposed here so the plugin can register it: the generic
   // per-connection predicate for any partitioned kind (files, skills, …), keyed on the event's namespace.
-  watchFiles(signal?: AbortSignal): AsyncIterable<Routed<StoreChange>>;
   visible(viewer: Principal, namespace: string, id: string, origin: Principal | undefined): boolean;
+  // Hand the backend the notification bus. Share/unshare/copy change what a partition can see without
+  // touching a Store, so they announce themselves — but the backend is opened by the
+  // boot pre-scan, before a machine exists, so the bus is attached from setup() rather than injected.
+  attachNotifier(notifier: Notifier): void;
 }
 
 /** Narrow any active StorageBackend to its {@link ProfileDirectory} facet by method presence, or undefined. */
@@ -74,7 +76,6 @@ export function asProfileDirectory(backend: unknown): ProfileDirectory | undefin
     && typeof b.ownerOf             === 'function'
     && typeof b.sharedInOwners      === 'function'
     && typeof b.copy                === 'function'
-    && typeof b.watchFiles          === 'function'
     && typeof b.visible             === 'function'
     ? (b as ProfileDirectory)
     : undefined;
@@ -106,14 +107,6 @@ const FILES_NS = 'files';
 // (data at `<id>.data`); neither = named entry (data path === the id).
 interface FileMeta { dataFile?: string; id?: string }
 
-// A file-watch event as the generic, self-describing change envelope: routing namespace `files` (the axis
-// a profile isolates — NOT the file's content namespace, which rides in `detail` for in-place UI updates),
-// the file id, and the FileEvent itself as detail. The underlying fileStore.watch only signals writes, so
-// the operation is always 'saved'.
-function fileChange(ev: FileEvent): StoreChange {
-  return { operation: 'saved', namespace: FILES_NS, id: ev.id, detail: ev };
-}
-
 /**
  * A StorageBackend that partitions selected namespaces per web principal. It does not wrap the active
  * backend service — it composes the filesystem *primitive* directly (one {@link FilesystemStorageBackend}
@@ -143,16 +136,14 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
   // A lower bound (lazily-created namespaces appear only once touched) — good for UI suggestions, not for
   // hard validation. ALWAYS_BASE members are filtered out at read time in availableNamespaces().
   private readonly observed                    = new Set<string>();
-  // One long-lived, origin-stamped file-event stream fed by a pump per partition (base + each profile,
-  // and each profile the moment it's created). watchFiles() just subscribes — so a profile made
-  // mid-session is watched live, without the restart a subscribe-time partition snapshot would need.
-  private readonly fileEvents                  = createBroadcaster<StoreChange>();
-  private readonly lifecycle                   = new AbortController();
   // Per (partition, namespace) set of item ids symlinked IN from another partition — i.e. the items shared
   // into that profile. visible()'s OR-clause reads it so an owner's edit to a shared-in item reaches the
   // sharee's firehose connection without an fs.lstat per event (visible runs sync, per conn × event). Built
   // eagerly at open() by scanning each partition for symlinks, then maintained on every share/unshare.
   private readonly sharedIn                    = new Map<string, Set<string>>();
+  // Set by the plugin's setup() — open() runs during the boot pre-scan, before any machine exists, so
+  // the bus arrives later. Absent (pre-setup, or a host with no notifier) ⇒ share/copy stay silent.
+  private notifier: Notifier | undefined;
 
   private constructor(dotData: string, base: StorageBackend) {
     this.dotData   = dotData;
@@ -166,7 +157,6 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
       return this.guardedFileStore(part, this.partitionFor(part).fileStore);
     });
     this.registry  = base.createStore<Profile>(PROFILE_REGISTRY_NS);
-    this.watchPartition(undefined, this.base.fileStore);     // base file area (always present)
   }
 
   static async open(dotData: string): Promise<ProfilesStorageBackend> {
@@ -176,7 +166,6 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
     for (const p of items) {
       backend.profiles.set(p.id, p);
       for (const ns of p.isolated) backend.observed.add(ns);
-      backend.watchPartition({ id: p.id, type: 'user' }, backend.partitionFor(p.id).fileStore);
       await backend.scanSharedIn(p.id);
       await backend.scanSharedInFiles(p.id);
     }
@@ -185,13 +174,21 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
     return backend;
   }
 
-  // Pump one partition's file events into the shared broadcaster, tagged with its origin, for the backend's
-  // lifetime. `origin` undefined = base. The underlying fileStore.watch ends on lifecycle abort (close()).
-  private watchPartition(origin: Principal | undefined, store: FileStore): void {
-    void (async () => {
-      try { for await (const ev of store.watch(this.lifecycle.signal)) this.fileEvents.emit(fileChange(ev), origin); }
-      catch (e) { console.error(`[storage-profiles] file watch for "${origin?.id ?? 'base'}" ended:`, e instanceof Error ? e.message : e); }
-    })();
+  /** Hand the backend the notification bus once a machine exists (see {@link notifier}). */
+  attachNotifier(notifier: Notifier): void {
+    this.notifier = notifier;
+  }
+
+  // Announce a share/unshare/copy to the bus. These mutate a partition's *visible set* without ever
+  // passing through a Store or the file area's watch pump, so they are invisible to every other signal —
+  // this is the only notice a sharee's list gets that an item arrived or left. `principal` is the
+  // partition whose view changed (the target), not the actor, because that is what decides who re-lists.
+  private announce(operation: 'saved' | 'deleted', source: string, namespace: string, id: string, partition: string): void {
+    if (partition === BASE) return;
+    this.notifier?.notify({
+      kind: ItemChangeKind, source, operation, namespace, id,
+      principal: { id: partition, type: 'user' },
+    });
   }
 
   // ── StorageBackend ─────────────────────────────────────────────────────────────
@@ -202,9 +199,10 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
     return {
       get:    (id)                  => pick().get(id),
       query:  (q)                   => pick().query(q),
-      // delete is exempt from the read-only guard: unlinking a symlink IS un-sharing, and never reaches
-      // the owner's file — so a sharee deleting a shared-in item just drops their own link.
-      delete: (id, expectedVersion) => pick().delete(id, expectedVersion),
+      // Deleting an item shared IN is un-sharing it: it drops this partition's link and never reaches the
+      // owner's document. Effected here rather than at the caller — the API surface is unchanged (a delete
+      // is a delete; profiles need not even be loaded), and only this layer can tell the two apart.
+      delete: (id, expectedVersion) => this.deleteOrUnshare(namespace, id, expectedVersion),
       set:    async (id, value)          => { await this.guardWrite(namespace, id); return pick().set(id, value); },
       cas:    async (id, expected, next) => { await this.guardWrite(namespace, id); return pick().cas(id, expected, next); },
     };
@@ -214,6 +212,19 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
   // symlink with a real file in this partition (writeAtomic's rename), silently forking the owner's data.
   // Refuse it. Only profile partitions ever hold shared-in links (share() rejects a base target), so a
   // base-routed write skips the stat entirely.
+  // Unlinking the symlink would already leave the owner's document intact, but only by luck: the shared-in
+  // cache would keep claiming the item is visible here, and nothing would announce the change. Route it
+  // through the same path an explicit unshare takes instead. Reports `true` — from the caller's side the
+  // item is gone, which is what it asked for.
+  private async deleteOrUnshare(namespace: string, id: string, expectedVersion?: string): Promise<boolean> {
+    const part = this.route(namespace);
+    if (part !== BASE && this.sharedIn.get(this.sharedInKey(part, namespace))?.has(this.safeId(id))) {
+      await this.unshareOne(namespace, id, part);
+      return true;
+    }
+    return this.subStore(part, namespace).delete(id, expectedVersion);
+  }
+
   private async guardWrite(namespace: string, id: string): Promise<void> {
     const part = this.route(namespace);
     if (part === BASE) return;
@@ -224,7 +235,6 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
   }
 
   async close(): Promise<void> {
-    this.lifecycle.abort();                                  // stop every partition's file-watch pump
     await this.base.close?.();
     for (const p of this.partitions.values()) await p.close?.();
   }
@@ -249,7 +259,6 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
     };
     await this.registry.set(id, profile);
     this.profiles.set(id, profile);
-    this.watchPartition({ id, type: 'user' }, this.partitionFor(id).fileStore);   // watch it live — no restart
     return profile;
   }
 
@@ -351,6 +360,7 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
     try { await fs.symlink(src, dst); }
     catch (e) { if ((e as { code?: string }).code !== 'EEXIST') throw e; } // already shared ⇒ idempotent
     this.noteSharedIn(targetPart, namespace, sid);
+    this.announce('saved', 'share', namespace, sid, targetPart);
   }
 
   // Remove a share by unlinking the target-side symlink. Only ever unlinks a symlink — never the owner's
@@ -359,19 +369,18 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
   async unshare(namespace: string, id: string, target: string): Promise<void> {
     const targetPart = this.routeFor(target, namespace);
     if (targetPart === BASE) return;
-    if (namespace === FILES_NS) {
-      const ids = id === '*' ? [...(this.sharedIn.get(this.sharedInKey(targetPart, FILES_NS)) ?? [])] : [id];
-      for (const fid of ids) await this.unshareFile(fid, targetPart);
-      return;
-    }
     const ids = id === '*' ? [...(this.sharedIn.get(this.sharedInKey(targetPart, namespace)) ?? [])] : [id];
-    for (const one of ids) {
-      const sid = this.safeId(one);
-      const dst = join(this.nsDir(targetPart, namespace), `${sid}.json`);
-      const st  = await fs.lstat(dst).catch(() => undefined);
-      if (st?.isSymbolicLink()) await fs.unlink(dst);
-      this.dropSharedIn(targetPart, namespace, sid);
-    }
+    for (const one of ids) await this.unshareOne(namespace, one, targetPart);
+  }
+
+  private async unshareOne(namespace: string, id: string, targetPart: string): Promise<void> {
+    if (namespace === FILES_NS) return this.unshareFile(id, targetPart);
+    const sid = this.safeId(id);
+    const dst = join(this.nsDir(targetPart, namespace), `${sid}.json`);
+    const st  = await fs.lstat(dst).catch(() => undefined);
+    if (st?.isSymbolicLink()) await fs.unlink(dst);
+    this.dropSharedIn(targetPart, namespace, sid);
+    this.announce('deleted', 'unshare', namespace, sid, targetPart);
   }
 
   // Who owns the item the current principal would read for (namespace, id): undefined when owned here
@@ -417,6 +426,7 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
     await this.linkInto(join(srcArea, dataRel), join(dstArea, dataRel));
     await this.linkInto(metaSrc,                join(dstArea, `${fid}.meta.json`));
     this.noteSharedIn(targetPart, FILES_NS, fid);
+    this.announce('saved', 'share', FILES_NS, fid, targetPart);
   }
 
   // Drop a shared-in file by unlinking its target-side symlinks (both meta and data). Only ever unlinks
@@ -435,6 +445,7 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
       await fs.unlink(metaDst);
     }
     this.dropSharedIn(targetPart, FILES_NS, fid);
+    this.announce('deleted', 'unshare', FILES_NS, fid, targetPart);
   }
 
   // The data file's path relative to a file area, from its sidecar meta (see shareFile).
@@ -473,7 +484,10 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
           if (one === null) throw new Error(`No "${id}" in "${namespace}" to copy.`);
           return [one];
         })();
-    for (const item of items) await dst.set(item.id, item);
+    for (const item of items) {
+      await dst.set(item.id, item);
+      this.announce('saved', 'copy', namespace, item.id, targetPart);
+    }
   }
 
   // File copy: duplicate the data + `<id>.meta.json` PAIR with copyFile (which dereferences a symlinked
@@ -490,6 +504,9 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
       const dataRel = this.dataRelOf(fid, JSON.parse(raw) as FileMeta);
       await this.copyInto(join(srcArea, dataRel), join(dstArea, dataRel));
       await this.copyInto(metaSrc,                join(dstArea, `${fid}.meta.json`));
+      // The target area's watch pump also sees this write, so a copy may announce twice. Harmless:
+      // a notification is an invalidation hint and consumers re-query — never a delta to apply.
+      this.announce('saved', 'copy', FILES_NS, fid, targetPart);
     }
   }
 
@@ -531,7 +548,8 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
   // side: a `put(name)`/`putTemp(name)` onto a file shared IN from another partition would fork the owner's
   // data (writeData's rename replaces the data symlink) and write through the meta symlink to the owner, so
   // it is refused. Anonymous puts (no name → fresh UUID) never collide with a shared-in id, so they pass;
-  // get/list/watch/delete delegate straight through (unlinking a shared-in file's own symlinks is allowed).
+  // get/list delegate straight through; delete of a shared-in file is routed to unshareFile for the
+  // same reason the document side routes to unshareOne — the raw unlink would strand the shared-in cache.
   // The shared-in check is the synchronous cache (name === id for named files); the owner is resolved from
   // disk only on the throw path.
   private guardedFileStore(partId: string, inner: FileStore): FileStore {
@@ -545,19 +563,17 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
       putTemp:   async (name, mime, data)       => { await guard(name); return inner.putTemp(name, mime, data); },
       get:       id       => inner.get(id),
       getByName: (n, ns)  => inner.getByName(n, ns),
-      delete:    id       => inner.delete(id),
+      delete:    async id => {
+        if (this.sharedIn.get(this.sharedInKey(partId, FILES_NS))?.has(this.safeFileId(id))) {
+          return this.unshareFile(id, partId);
+        }
+        return inner.delete(id);
+      },
       list:      f        => inner.list(f),
-      watch:     signal   => inner.watch(signal),
     };
   }
 
-  // ── Partitioned watch (the WatchVisibility service surface) ────────────────────────
-
-  // Subscribe to the live, origin-stamped file-event stream (base + every partition, including profiles
-  // created after this call — the pumps feed one broadcaster). Never snapshots a partition set.
-  watchFiles(signal?: AbortSignal): AsyncIterable<Routed<StoreChange>> {
-    return this.fileEvents.subscribe(signal);
-  }
+  // ── Partitioned visibility (the WatchVisibility service surface) ────────────────────
 
   // Would `viewer` see the change to (`namespace`, `id`) from `origin`? Two ways yes:
   //   1. They route that namespace to the same partition as `origin`: route(viewer,ns) === route(origin,ns).

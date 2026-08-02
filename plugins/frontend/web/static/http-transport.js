@@ -15,8 +15,7 @@
 //   answerEnv(sid, body)                           -> Promise<void>    body = { callId, ok, value } | { callId, ok:false, error }
 //   abort(sid)                                     -> Promise<void>
 //   statusEvents(signal)                           -> AsyncIterable<{ sessionId, busy }>
-//   fileEvents(signal)                             -> AsyncIterable<{ namespace, name, size }>
-//   skillEvents(signal)                            -> AsyncIterable<{ type: 'saved'|'deleted', name }>
+//   notifications(signal)                          -> AsyncIterable<Notification>
 //   openFile(namespace, path)                      -> void
 
 (function () {
@@ -49,10 +48,29 @@
     const p = currentProfile();
     return p ? { ...(headers || {}), 'x-matbot-principal': p } : (headers || undefined);
   }
+  // Every response carries the serving harness version as `x-matbot-version`. The version this page
+  // loaded against is the one already on screen — app.js writes `about_matbot`'s version into
+  // #matbot-version at bootstrap — so that element IS the baseline; nothing extra is stamped anywhere.
+  // When the server is restarted on a new version under a long-lived tab the two diverge, and the page
+  // reloads rather than keep running UI code against an API it no longer matches. Read lazily, not
+  // captured: it is filled asynchronously during bootstrap, and until then there is no baseline to
+  // compare (the header is simply ignored).
+  let reloading = false;
+  function checkVersion(res) {
+    if (reloading) return;
+    const loaded = document.getElementById('matbot-version')?.textContent?.replace(/^v/, '') || '';
+    const served = res.headers.get('x-matbot-version');
+    if (!loaded || !served || served === loaded) return;
+    // Guard the pathological case of a reload landing on the old version again — reload at most once.
+    reloading = true;
+    console.warn('[matbot] server version ' + served + ' != loaded ' + loaded + ' — reloading');
+    location.reload();
+  }
+
   function apiFetch(url, opts) {
     const o = opts || {};
     const headers = withProfile(o.headers);
-    return fetch(url, headers ? { ...o, headers } : o);
+    return fetch(url, headers ? { ...o, headers } : o).then(res => { checkVersion(res); return res; });
   }
 
   async function callTool(toolName, input) {
@@ -193,11 +211,12 @@
     })();
   }
 
-  function statusEvents(signal) { return globalEventStream('session-busy',   signal); }
-  function fileEvents(signal)   { return globalEventStream('file-changed',   signal); }
-  function toolEvents(signal)   { return globalEventStream('tool-changed',   signal); }
-  function pluginEvents(signal) { return globalEventStream('plugin-changed', signal); }
-  function skillEvents(signal)  { return globalEventStream('skill-changed',  signal); }
+  // session-busy stays its own event: it is transient state, replayed on connect, not a durable fact —
+  // exactly what the notification bus deliberately does not carry.
+  function statusEvents(signal) { return globalEventStream('session-busy', signal); }
+  // Everything else — file/skill/session/share changes and tool/plugin registry churn — arrives as one
+  // notification stream, already filtered server-side to what this connection's principal may see.
+  function notifications(signal) { return globalEventStream('notification', signal); }
 
   function openFile(namespace, path) {
     const profileName = currentProfile();
@@ -207,6 +226,6 @@
   window.matbotTransport = {
     hostRuntime: 'node',
     callTool, createSession, sessionBusy, submit,
-    sessionEvents, answerPrompt, answerEnv, abort, statusEvents, fileEvents, toolEvents, pluginEvents, skillEvents, openFile,
+    sessionEvents, answerPrompt, answerEnv, abort, statusEvents, notifications, openFile,
   };
 })();

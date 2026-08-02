@@ -23,6 +23,8 @@ const updatedFiles   = new Set();
 // path → owning profile id for files shared IN from another profile (read-only here). Refreshed with the
 // file list in one `share`/`owner`/`*` call; empty when profiles are inactive. Gates the per-file share UI.
 let   fileOwners     = {};
+// Same, for sessions shared IN: session id → owning profile id. Refreshed with the session list.
+let   sessionOwners  = {};
 
 // ── Scroll control ────────────────────────────────────────────────────────────
 //
@@ -302,12 +304,45 @@ async function apiListSessions() {
   try {
     const sessions = await callTool('session_action', { action: 'list' });
     sessionsBanner.style.display = 'none';
+    // Ownership is a profiles concern the session tool knows nothing about — resolve the whole list's
+    // shared-in owners in one call, exactly as loadFiles() does, so every render can gate on it.
+    sessionOwners = {};
+    if (profilesActive) {
+      try { sessionOwners = (await callTool('share', { action: 'owner', namespace: 'sessions', id: '*' })).owners || {}; }
+      catch { sessionOwners = {}; }
+    }
     return sessions;
   } catch (e) {
     if (String(e).includes('404')) sessionsBanner.style.display = 'flex';
     return [];
   }
 }
+// Every trigger for "re-draw the session list" funnels through here, and they coalesce.
+//
+// `session_action list` is the most expensive call this UI makes: the store has no projection, so
+// listing re-reads and JSON-parses every session document in full — whole message histories — to build
+// four summary fields per row. It must therefore run once per change, not once per *notice* of a change.
+// Before this, deleting a session paid for two: the click handler listed immediately, and the change
+// notification listed again ~150ms later, re-rendering a sidebar that had already settled.
+//
+// A trailing debounce collapses them: the click schedules a run, the notification it causes lands inside
+// the window and joins it, and both get the same promise. Nothing depends on the notification arriving —
+// the click's own call is what guarantees the refresh — so a disconnected SSE degrades to exactly the
+// old behaviour rather than a stale list.
+let sessionsRefresh = null;
+function refreshSessions(delay = 150) {
+  if (sessionsRefresh) return sessionsRefresh;
+  sessionsRefresh = new Promise(resolve => {
+    setTimeout(async () => {
+      sessionsRefresh = null;
+      const sessions = await apiListSessions();
+      renderSessions(sessions);
+      resolve(sessions);
+    }, delay);
+  });
+  return sessionsRefresh;
+}
+
 async function apiGetSession(id)  { try { return await callTool('session_action', { action: 'get', sessionId: id }); } catch { return null; } }
 async function apiSessionBusy(id) { return T.sessionBusy(id); }
 async function apiListProviders() { try { return (await callTool('provider', { action: 'list' })).providers.map(p => p.name); } catch { return []; } }
@@ -346,14 +381,23 @@ async function renameSession(id, current) {
   try {
     await callTool('session_action', { action: 'rename', sessionId: id, title: title.trim() });
     if (id === currentSessionId && chatHeaderEl) chatTitleEl.textContent = title.trim();
-    apiListSessions().then(renderSessions);
+    refreshSessions();
   } catch (e) { alert('Rename failed: ' + e.message); }
 }
 
+// The × on a session. On one you own it hides (archives) it — a write. On one shared IN it must not be a
+// write at all: the doc belongs to another partition and is read-only here, so removing it from your view
+// is un-sharing it from this profile. (The file list gets there by a different route — its × is a real
+// delete, which the profiles backend turns into the same unshare.)
 async function hideSession(id) {
+  const owner = sessionOwners[id];
   try {
-    await callTool('session_action', { action: 'hide', sessionId: id });
-    const sessions = await apiListSessions();
+    if (owner != null) await callTool('share', { action: 'unshare', namespace: 'sessions', id, target: currentProfileName() });
+    else               await callTool('session_action', { action: 'hide', sessionId: id });
+    // Drop the row now rather than after the coalesced list returns: the write has already succeeded,
+    // so this is showing the truth early, not guessing. Without it the debounce window would read as lag.
+    sessionListEl.querySelector('[data-sid="' + CSS.escape(id) + '"]')?.remove();
+    const sessions = await refreshSessions();
     if (id === currentSessionId) {
       currentSessionId = sessions[0]?.id ?? null;
       if (currentSessionId) { await openSession(currentSessionId); return; }
@@ -363,7 +407,7 @@ async function hideSession(id) {
       if (chatHeaderEl) chatTitleEl.textContent = '';
     }
     renderSessions(sessions);
-  } catch (e) { alert('Hide failed: ' + e.message); }
+  } catch (e) { alert((owner != null ? 'Unshare failed: ' : 'Hide failed: ') + e.message); }
 }
 
 async function apiNewSession() {
@@ -888,6 +932,7 @@ const skillEditorSave    = document.getElementById('skill-editor-save');
 const skillEditorRoot    = document.getElementById('skill-editor');
 const skillTriggerList    = document.getElementById('skill-trigger-list');
 const skillTriggerSuspend = document.getElementById('skill-trigger-suspend');
+const skillTriggerCooldown = document.getElementById('skill-trigger-cooldown');
 const TRIGGER_KINDS = ['ephemeral', 'contextual', 'retract', 'followup'];
 let editingSkillName = null;
 let skillEditor = null;   // TinyMDE.Editor, created lazily on first open
@@ -1022,6 +1067,72 @@ function renderSkillMetadata(catalogue, knowledge) {
   });
 }
 
+// A trigger's conditions say WHEN it is relevant; its cool-down says how often it may ACT on that —
+// a rule can be correctly matched turn after turn while firing every time is a spin rather than a
+// service (a critique trigger matches the very response it caused). Two integers, both optional:
+// blank is unlimited, which stays the default. Shared by the skill editor and the tool-trigger cards.
+function makeCooldownFields(cooldown) {
+  const wrap = document.createElement('div');
+  wrap.className = 'trigger-cooldown';
+
+  const lbl = document.createElement('div');
+  lbl.className = 'tt-field-label';
+  lbl.textContent = 'Cool-down — how often it may fire, whatever its conditions judge (blank = no limit)';
+  wrap.appendChild(lbl);
+
+  const fields = document.createElement('div');
+  fields.className = 'cooldown-fields';
+  const field = (cls, text, title, min, value) => {
+    const l = document.createElement('label');
+    l.title = title;
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.min = String(min);
+    input.step = '1';
+    input.className = cls;
+    input.placeholder = '∞';
+    input.value = Number.isInteger(value) ? String(value) : '';
+    const span = document.createElement('span');
+    span.textContent = text;
+    l.append(input, span);
+    fields.appendChild(l);
+  };
+  // A turn is one genuine user message and everything that follows it — a retract redo or a follow-up
+  // robo turn belongs to the turn that caused it, so neither hands the trigger a fresh budget.
+  // The two minimums differ because the quantities have opposite polarity: `maxPerTurn` counts
+  // PERMITTED fires, so 0 would mean "never fires" — which is the Suspend toggle's job, reached
+  // silently through a number box — while `quietTurns` counts BLOCKED turns, where 0 is a plain "no
+  // delay" and agrees with blank.
+  field('cd-max', 'max fires per turn', 'Most times this trigger may fire within one turn, counting both the user and agent surfaces. Blank for no limit; to stop it firing entirely, suspend it instead.', 1, cooldown?.maxPerTurn);
+  field('cd-quiet', 'quiet turns after firing', 'Later turns the trigger is held off for after it fires. 1 = never on consecutive turns; 0 or blank = no delay.', 0, cooldown?.quietTurns);
+  wrap.appendChild(fields);
+  return wrap;
+}
+
+// Read a cool-down back out of `scope`, or null when both fields are blank — null is what
+// trigger_action's update takes to clear every limit, so emptying the boxes really does mean
+// unlimited rather than "leave whatever was stored". A value that isn't a whole number at or above
+// the field's minimum THROWS to the modal's error line: silently treating it as blank would save the
+// opposite of what was typed (unlimited), and both save paths already surface a throw.
+function readCooldown(scope) {
+  const num = (cls, min, label) => {
+    const raw = scope.querySelector(cls)?.value.trim() ?? '';
+    if (raw === '') return undefined;
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n < min) {
+      throw new Error(`"${label}" must be a whole number of ${min} or more, or blank for no limit.`);
+    }
+    return n;
+  };
+  const maxPerTurn = num('.cd-max', 1, 'max fires per turn');
+  const quietTurns = num('.cd-quiet', 0, 'quiet turns after firing');
+  if (maxPerTurn === undefined && quietTurns === undefined) return null;
+  return {
+    ...(maxPerTurn !== undefined ? { maxPerTurn } : {}),
+    ...(quietTurns !== undefined ? { quietTurns } : {}),
+  };
+}
+
 // One condition row: a phase <select> + the rubric <textarea>, both disabled (read-only) until ✎ is
 // clicked; × removes the row. New rows (no `c`) start editable. Nothing is persisted until Save,
 // which replaces the skill's trigger conditions wholesale (conditions have no stable id).
@@ -1078,6 +1189,14 @@ function renderTriggers(conditions) {
   for (const c of conditions) skillTriggerList.appendChild(makeTriggerRow(c));
 }
 
+// The cool-down belongs to the primary trigger (save consolidates a skill's triggers to one), so the
+// editor shows a single control rather than one per flattened condition row.
+function renderSkillCooldown(cooldown) {
+  if (!skillTriggerCooldown) return;
+  skillTriggerCooldown.innerHTML = '';
+  skillTriggerCooldown.appendChild(makeCooldownFields(cooldown));
+}
+
 // Reflect the suspend toggle: check the box and light up the amber "on" styling. A suspended trigger
 // keeps its conditions but is excluded from evaluation (the `disable` action), so it stops firing
 // without being deleted — the fix for a trigger that matches too eagerly.
@@ -1105,9 +1224,13 @@ async function saveTriggers(name) {
   for (const id of editingTriggerExtraIds) await callTool('trigger_action', { action: 'remove', id });
   editingTriggerExtraIds = [];
 
+  // null clears every limit — the update action's documented way back to unlimited, since an omitted
+  // `cooldown` means "leave the stored one alone".
+  const cooldown = skillTriggerCooldown ? readCooldown(skillTriggerCooldown) : null;
+
   if (editingTriggerId) {
     if (conditions.length) {
-      await callTool('trigger_action', { action: 'update', id: editingTriggerId, conditions });
+      await callTool('trigger_action', { action: 'update', id: editingTriggerId, conditions, cooldown });
     } else {
       await callTool('trigger_action', { action: 'remove', id: editingTriggerId });
       editingTriggerId = null;
@@ -1115,6 +1238,7 @@ async function saveTriggers(name) {
   } else if (conditions.length) {
     const res = await callTool('trigger_action', {
       action: 'add', conditions, tool: 'skill_action', params: { action: 'use', name },
+      ...(cooldown ? { cooldown } : {}),
     });
     editingTriggerId = res?.id ?? null;
   }
@@ -1154,6 +1278,7 @@ async function openSkillEditor(name) {
   editingTriggerExtraIds = [];
   renderTriggers([]);
   setTriggerSuspend(false);
+  renderSkillCooldown(null);
   renderSkillMetadata(false, null);
   setSkillTab('content');
   skillEditorOverlay.classList.add('open');
@@ -1168,6 +1293,8 @@ async function openSkillEditor(name) {
       editingTriggerId = trigs[0]?.id ?? null;
       editingTriggerExtraIds = trigs.slice(1).map((t) => t.id);
       renderTriggers(trigs.flatMap((t) => (Array.isArray(t.conditions) ? t.conditions : [])));
+      // Like the conditions, the primary's cool-down is the one that survives consolidation.
+      renderSkillCooldown(trigs[0]?.cooldown ?? null);
       // Suspended only when every trigger firing this skill is disabled — since save consolidates them
       // to one, a mixed state resolves to that single primary's state on the next save anyway.
       setTriggerSuspend(trigs.length > 0 && trigs.every((t) => t.enabled === false));
@@ -1318,6 +1445,8 @@ function makeToolTriggerCard(trigger) {
   else conds.appendChild(makeTriggerRow());   // start a new trigger with one editable row
   card.append(cLbl, conds);
 
+  card.appendChild(makeCooldownFields(trigger?.cooldown));
+
   const addCond = document.createElement('button');
   addCond.className = 'tt-add-cond skill-editor-btn';
   addCond.textContent = '+ Add condition';
@@ -1374,18 +1503,22 @@ async function saveToolTriggers() {
       catch { throw new Error('Parameters must be valid JSON (or left blank).'); }
     }
     const enabled = card.querySelector('.tt-enabled input').checked;
+    // null on update clears every limit, so emptying both boxes means unlimited rather than "leave
+    // the stored cool-down alone"; on add there is nothing to clear, so it is simply omitted.
+    const cooldown = readCooldown(card);
 
     if (!conditions.length) continue;   // no conditions ⇒ never fires; not persisted (removed below if it had an id)
     if (id) {
       keptIds.add(id);
       await callTool('trigger_action', {
-        action: 'update', id, conditions, tool: toolTriggerTool, enabled,
+        action: 'update', id, conditions, tool: toolTriggerTool, enabled, cooldown,
         ...(params !== undefined ? { params } : {}),
       });
     } else {
       await callTool('trigger_action', {
         action: 'add', conditions, tool: toolTriggerTool, enabled,
         ...(params !== undefined ? { params } : {}),
+        ...(cooldown ? { cooldown } : {}),
       });
     }
   }
@@ -1528,13 +1661,50 @@ function usageByProvider(messages, traceId) {
   return [...map].map(([provider, usage]) => ({ provider, usage }));
 }
 
-// One details block listing per-provider usage for a turn, eliding any zero count. `perProvider` is the
-// output of usageByProvider; an empty array means nothing to render (caller should skip).
-function makeTokenStatsBlock(perProvider) {
+// The turn's wall-clock time: the createdAt of its last message. Messages only acquire a timestamp when
+// the pump commits them, so this reads the persisted session (the `done` event's copy, or the reload) —
+// never the live delta, which carries none.
+function turnTimestamp(messages, traceId) {
+  let at;
+  for (const m of (messages || [])) if (m.traceId === traceId && m.createdAt) at = m.createdAt;
+  return at;
+}
+
+// Same-day turns show just the clock; older ones need the date to be worth reading at all.
+function formatTurnTime(at) {
+  const d = new Date(at);
+  if (isNaN(d.getTime())) return '';
+  const time = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  const now  = new Date();
+  const sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+  return sameDay ? time : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ', ' + time;
+}
+
+// The turn's footer: per-provider usage (eliding any zero count) with the turn's time trailing the
+// summary. `perProvider` is the output of usageByProvider; with no usage the footer degrades to the
+// bare time, so a turn whose provider reported nothing still gets one. Both empty ⇒ null (caller skips).
+function makeTurnFooter(perProvider, at) {
+  const timeEl = at ? (() => {
+    const el = document.createElement('span');
+    el.className = 'turn-time';
+    el.textContent = formatTurnTime(at);
+    el.title = new Date(at).toLocaleString();
+    return el;
+  })() : null;
+
+  if (!perProvider.length) {
+    if (!timeEl) return null;
+    const solo = document.createElement('div');
+    solo.className = 'token-stats turn-time-solo';
+    solo.appendChild(timeEl);
+    return solo;
+  }
+
   const det = document.createElement('details');
   det.className = 'token-stats';
   const sum = document.createElement('summary');
-  sum.textContent = 'tokens';
+  sum.appendChild(document.createTextNode('tokens'));
+  if (timeEl) sum.appendChild(timeEl);
   det.appendChild(sum);
   const body = document.createElement('div');
   body.className = 'token-stats-body';
@@ -1557,21 +1727,20 @@ function makeTokenStatsBlock(perProvider) {
   return det;
 }
 
-// Attach the per-provider token block to each turn already rendered into the DOM, exactly as the live
-// `done` path does — appended to the turn's last assistant wrap (the turn's bottom). Used on reload, so
-// historical turns show the same accounting as if they had just streamed. Idempotent: skips a turn whose
-// wrap already carries a block, and turns with no recorded usage.
+// Attach the footer to each turn already rendered into the DOM, exactly as the live `done` path does —
+// appended to the turn's last assistant wrap (the turn's bottom). Used on reload, so historical turns show
+// the same accounting as if they had just streamed. Idempotent: skips a turn whose wrap already carries one.
 function applyTurnUsageBlocks(messages) {
   const seen = new Set();
   for (const m of (messages || [])) {
     if (!m.traceId || seen.has(m.traceId)) continue;
     seen.add(m.traceId);
-    const perProvider = usageByProvider(messages, m.traceId);
-    if (!perProvider.length) continue;
+    const footer = makeTurnFooter(usageByProvider(messages, m.traceId), turnTimestamp(messages, m.traceId));
+    if (!footer) continue;
     const wraps = messagesEl.querySelectorAll('.message.assistant[data-trace="' + m.traceId + '"]');
     const lastWrap = wraps[wraps.length - 1];
     if (!lastWrap || lastWrap.querySelector(':scope > .token-stats')) continue;
-    lastWrap.appendChild(makeTokenStatsBlock(perProvider));
+    lastWrap.appendChild(footer);
   }
 }
 
@@ -1611,13 +1780,14 @@ function renderSessions(sessions) {
     renameBtn.title = 'Rename';
     renameBtn.onclick = e => { e.stopPropagation(); renameSession(s.id, s.title || ''); };
 
+    const owner = sessionOwners[s.id];
     const hideBtn = document.createElement('button');
     hideBtn.className = 'session-action-btn';
     hideBtn.textContent = '\u00d7';
-    hideBtn.title = 'Hide';
+    hideBtn.title = owner != null ? 'Remove from my view (unshare)' : 'Hide';
     hideBtn.onclick = e => { e.stopPropagation(); hideSession(s.id); };
 
-    actions.appendChild(renameBtn);
+    if (owner == null) actions.appendChild(renameBtn);   // rename is a write — refused on a shared-in session
     actions.appendChild(hideBtn);
     el.appendChild(labelEl);
     el.appendChild(actions);
@@ -1780,7 +1950,7 @@ async function handleDividerAction(divider, action) {
       const result = await callTool('session_edit', { action: 'fork', sessionId: currentSessionId, msgIndex: msgIdx });
       if (result?.newSessionId) {
         await openSession(result.newSessionId);
-        apiListSessions().then(renderSessions);
+        refreshSessions();
       }
     } else if (action === 'cut') {
       if (!confirm('Delete all messages from this point forward?')) return;
@@ -1793,7 +1963,7 @@ async function handleDividerAction(divider, action) {
       if (result?.newSessionId) {
         // Navigate to the current (trimmed) session
         await openSession(result.currentSessionId);
-        apiListSessions().then(renderSessions);
+        refreshSessions();
       }
     } else if (action === 'compact') {
       if (!confirm('Strip thinking blocks and tool calls from messages before this point?')) return;
@@ -2135,8 +2305,8 @@ async function openSession(id, scrollTarget) {
   unreadSessions.delete(id);
   sessionListEl.querySelector('[data-sid="' + id + '"]')?.classList.remove('unread');
   location.hash = id;
-  const [sessions, session, busy] = await Promise.all([apiListSessions(), apiGetSession(id), apiSessionBusy(id)]);
-  renderSessions(sessions);
+  void refreshSessions();
+  const [session, busy] = await Promise.all([apiGetSession(id), apiSessionBusy(id)]);
   if (session) {
     renderSession(session, undefined, scrollTarget);
     if (chatHeaderEl) chatTitleEl.textContent = session.title ?? '';
@@ -2160,8 +2330,7 @@ async function handleNewSession() {
     showEmpty();
     setBusyState(false); // a brand-new session is idle; clear any Stop carried over from the last view
     if (chatHeaderEl) chatTitleEl.textContent = '';
-    const sessions = await apiListSessions();
-    renderSessions(sessions);
+    await refreshSessions();
     inputEl.focus();
   } catch (e) {
     alert('New session failed: ' + e.message);
@@ -2365,6 +2534,10 @@ async function renderTurn(sid, traceId) {
   let turnWrap   = null;   // assistant wrap, created lazily
   let loadingEl  = null;
   let started    = false;
+  // The turn's outstanding interactive prompt, if any: `{ dismiss }`. The dialog is drawn in every
+  // browser attached to the session but answered in only one, so the others are retired by the
+  // server's `prompt-resolved`. Cleared as soon as it settles here, so our own answer's echo is a no-op.
+  let livePrompt = null;
 
   // First visible activity for this turn: drop the queued egg-timer and create the assistant wrap
   // with loading dots. Idempotent.
@@ -2600,11 +2773,22 @@ async function renderTurn(sid, traceId) {
           // Cancel is the "give up" path (default on); only an explicit cancelable:false suppresses it.
           const cancelable   = !(field && field.cancelable === false);
           const allowOther   = !!(field && field.type === 'select' && field.allowOther);
-          const result = await new Promise(resolve => {
+          const answered = new Promise(resolve => {
             const block = document.createElement('div');
             block.className = 'prompt-block';
             // Settle the dialog: disable every control (incl. the cancel ×) once answered or cancelled.
             const done = () => block.querySelectorAll('button, input').forEach(el => { el.disabled = true; });
+            // Retire the dialog without answering — someone else got there first. Resolving with
+            // `dismissed` keeps the single settle path below from POSTing an answer nobody asked for.
+            livePrompt = { dismiss: () => {
+              done();
+              block.classList.add('settled');
+              const note = document.createElement('div');
+              note.className = 'prompt-note';
+              note.textContent = 'Answered elsewhere.';
+              block.appendChild(note);
+              resolve({ dismissed: true });
+            } };
             if (cancelable) {
               const x = document.createElement('button');
               x.type = 'button';
@@ -2705,7 +2889,19 @@ async function renderTurn(sid, traceId) {
               inp.focus();
             }
           });
-          await T.answerPrompt(sid, result.cancelled ? { cancel: true } : { answer: result.answer });
+          // Deliberately NOT awaited: this loop must keep consuming the turn's events while the dialog is
+          // up. Parking here stalls everything behind it — including the `prompt-resolved` that retires
+          // this very dialog when another browser answers, which is a deadlock, not just a lag.
+          void answered.then(result => {
+            livePrompt = null;
+            if (result.dismissed) return;
+            return T.answerPrompt(sid, result.cancelled ? { cancel: true } : { answer: result.answer });
+          });
+          break;
+        }
+
+        case 'prompt-resolved': {
+          livePrompt?.dismiss();
           break;
         }
 
@@ -2762,7 +2958,8 @@ async function renderTurn(sid, traceId) {
           // Per-provider token accounting for this turn, from the persisted session — so it includes
           // spend by tools that ran their own completions (single_turn, ask_inner_voice, dream_time).
           const perProvider = usageByProvider(ev.session?.messages, traceId);
-          if (turnWrap && perProvider.length > 0) turnWrap.appendChild(makeTokenStatsBlock(perProvider));
+          const turnFooter  = makeTurnFooter(perProvider, turnTimestamp(ev.session?.messages, traceId));
+          if (turnWrap && turnFooter) turnWrap.appendChild(turnFooter);
           loadFiles();
           // Back-fill origIdx on any dividers added without an index this turn.
           if (ev.session) {
@@ -2804,7 +3001,7 @@ async function renderTurn(sid, traceId) {
     // Don't markStarted() here — a turn that was only queued then cancelled must not spawn an empty
     // assistant wrap. Just clear any loading dots that are still showing.
     if (loadingEl) { loadingEl.remove(); loadingEl = null; }
-    apiListSessions().then(renderSessions);
+    refreshSessions();
     loadFiles();
     // If the output extends below the viewport fold, morph the send button
     // into a ▼ down-arrow so the user can jump to the bottom with one click.
@@ -2959,63 +3156,69 @@ async function init() {
     }
   })();
 
-  // Subscribe to file-change events. Each arrives as a StoreChange ({operation, namespace:'files', id,
-  // detail}); the file's own metadata (content namespace, name, size) rides in `detail`. This panel shows
-  // the workspace, so ignore changes to files in other content namespaces before touching it.
-  (async function connectFileWatchStream() {
-    for await (const event of T.fileEvents(new AbortController().signal)) {
-      const meta = event.detail || {};
-      if (meta.namespace !== 'workspace') continue;
-      const { name } = meta;
-      const el = document.getElementById('file-list');
-      const item = el?.querySelector('[data-path="' + CSS.escape(name) + '"]');
-      if (item) {
-        updatedFiles.add(name);
-        item.classList.add('updated');
-        // Update the size display if present.
-        const sizeEl = item.querySelector('.file-size');
-        if (sizeEl && meta.size !== undefined) sizeEl.textContent = formatSize(meta.size);
-      } else {
-        // New file — mark updated before reloading so the dot appears.
-        updatedFiles.add(name);
-        loadFiles();
+  // ONE notification stream drives every live panel. Each notification is a self-describing fact —
+  // `kind` selects the shape, `namespace`/`id` say what changed — already filtered server-side to what
+  // this connection's principal may see. Never treat one as a delta to apply: it carries identity, not
+  // state, so the only sound reaction is to re-read what changed (the file row's advisory `detail` is
+  // the one exception, and only ever cosmetic).
+  //
+  // NOTE the `default` fall-through: `kind` is open at runtime — a plugin, or a bridge from another
+  // matbot, can publish a kind this build has never heard of — so an unrecognised notification must be
+  // ignored, never treated as an error.
+  (async function connectNotificationStream() {
+    // Panel re-queries are debounced: one plugin load fires many registry notifications, and we want a
+    // single re-query per burst rather than one per event.
+    const debounced = (fn, ms = 150) => {
+      let timer = null;
+      return () => { if (timer) return; timer = setTimeout(() => { timer = null; fn(); }, ms); };
+    };
+    const refreshSkills   = debounced(loadSkills);
+    const refreshPlugins  = debounced(loadPlugins);
+    const refreshFiles    = debounced(loadFiles);
+    // A session appearing or vanishing — a second browser on this profile creating one, a fork, a
+    // session shared in from another profile. Not debounced here: it shares the module-level
+    // `refreshSessions`, so a change this browser just made coalesces with the refresh its own click
+    // already scheduled instead of paying for a second full list.
+
+    for await (const n of T.notifications(new AbortController().signal)) {
+      // A notification kind is `<package>#<Interface>` — globally unique, because a bridged instance or a
+      // plugin this build has never seen can publish one. plugin-api exports these two as consts for TS
+      // consumers; this is a plain script, so they are spelled out.
+      switch (n.kind) {
+        case '@matatbread/matbot-plugin-api#ItemChange':
+          switch (n.namespace) {
+            case 'files':    onFileChanged(n, refreshFiles); break;
+            case 'skills':   refreshSkills();                break;
+            case 'sessions': refreshSessions();              break;
+            default: break;                                  // a namespace no panel shows
+          }
+          break;
+        // Tool churn refreshes skills (skills are tools, and one may be registered out of band — e.g.
+        // the Drive backend restoring matbot-skills at boot); plugin churn refreshes the plugins panel,
+        // covering the tool-less plugins the tool registry can't see.
+        case '@matatbread/matbot-plugin-api#RegistryChange':
+          if (n.registry === 'tools') refreshSkills(); else refreshPlugins();
+          break;
+        default: break;
       }
     }
   })();
 
-  // Tool-registry CRUD → refresh the skills panel (skills are tools; a skill_action registered out
-  // of band — e.g. the Drive backend restoring matbot-skills at boot, after this UI's one-shot loads
-  // — surfaces here). Debounced: one plugin load fires many tool-changed events, want one re-query.
-  (async function connectToolWatchStream() {
-    if (!T.toolEvents) return;
-    let timer = null;
-    for await (const _event of T.toolEvents(new AbortController().signal)) {
-      if (timer) continue;
-      timer = setTimeout(() => { timer = null; loadSkills(); }, 150);
-    }
-  })();
-
-  // Skill content saved/deleted — incl. by the LLM mid-turn via skill_action, which this UI's own
-  // save/delete buttons already refresh after locally but has no other way to learn about.
-  (async function connectSkillWatchStream() {
-    if (!T.skillEvents) return;
-    let timer = null;
-    for await (const _event of T.skillEvents(new AbortController().signal)) {
-      if (timer) continue;
-      timer = setTimeout(() => { timer = null; loadSkills(); }, 150);
-    }
-  })();
-
-  // Plugin load/unload → refresh the plugins panel. Catches tool-less plugins the tool stream can't
-  // see (pure provider/hook/storage), and supersedes the old poll-on-`plugin`-tool-success refresh.
-  (async function connectPluginWatchStream() {
-    if (!T.pluginEvents) return;
-    let timer = null;
-    for await (const _event of T.pluginEvents(new AbortController().signal)) {
-      if (timer) continue;
-      timer = setTimeout(() => { timer = null; loadPlugins(); }, 150);
-    }
-  })();
+  // A file changed. The workspace panel shows one content namespace, so ignore the rest. An already-
+  // listed row updates in place from the advisory `detail` (cosmetic only — size and the updated dot);
+  // anything else re-lists, which is also how a first share, a copy, or a delete reaches the list.
+  function onFileChanged(n, refreshFiles) {
+    if (n.operation === 'deleted') { refreshFiles(); return; }
+    const meta = n.detail || {};
+    if (meta.namespace !== 'workspace') return;
+    const { name } = meta;
+    const item = document.getElementById('file-list')?.querySelector('[data-path="' + CSS.escape(name) + '"]');
+    updatedFiles.add(name);
+    if (!item) { refreshFiles(); return; }
+    item.classList.add('updated');
+    const sizeEl = item.querySelector('.file-size');
+    if (sizeEl && meta.size !== undefined) sizeEl.textContent = formatSize(meta.size);
+  }
 
   renderSessions(sessions);
 

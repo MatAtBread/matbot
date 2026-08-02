@@ -1,4 +1,4 @@
-import type { FileEvent, FileFilter, FileHandle, FileStore, MimeType } from '@matatbread/matbot-core';
+import type { FileFilter, FileHandle, FileStore, MimeType } from '@matatbread/matbot-core';
 import type { DriveClient } from './drive-client.js';
 
 const DATA_SUFFIX = '.data';
@@ -190,12 +190,5 @@ export class DriveFileStore implements FileStore {
 
   async putTemp(name: string, mimeType: MimeType, data: AsyncIterable<Uint8Array>): Promise<FileHandle> {
     return this.put(name, mimeType, data);
-  }
-
-  // Drive has no cheap push change-feed; watch() yields nothing and resolves when the signal fires
-  // (same as the OPFS store).
-  async *watch(signal?: AbortSignal): AsyncIterable<FileEvent> {
-    if (signal === undefined || signal.aborted) return;
-    await new Promise<void>(resolve => { signal.addEventListener('abort', () => resolve(), { once: true }); });
   }
 }

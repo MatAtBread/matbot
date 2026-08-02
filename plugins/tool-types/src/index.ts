@@ -1,7 +1,7 @@
 import { dirname, join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, RegistryChangeKind } from '@matatbread/matbot-plugin-api';
 import type { MatbotMachine, MatbotPluginSpec, ToolTypeIndex } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins } from '@matatbread/matbot-core';
 import { buildMatbotToolsDts } from './build-dts.js';
@@ -114,12 +114,9 @@ class ToolTypeIndexImpl implements ToolTypeIndex {
 
   constructor(machine: MatbotMachine) {
     this.machine = machine;
-    void this.watchTools();
-  }
-
-  private async watchTools(): Promise<void> {
-    try { for await (const _ev of this.machine.tools.watch(this.ac.signal)) this.dirty = true; }
-    catch { /* signal aborted on teardown */ }
+    // Any tool CRUD invalidates the generated dts; the event itself carries nothing we need.
+    machine.Notifier.consume(() => { this.dirty = true; }, this.ac.signal,
+      n => n.kind === RegistryChangeKind && n.registry === 'tools');
   }
 
   close(): void { this.ac.abort(); }
@@ -148,8 +145,9 @@ class ToolTypeIndexImpl implements ToolTypeIndex {
     // tool.x(params)` narrows its result by the params, and a non-existent tool name is a compile error.
     // `toolInContext(override)` is the sibling factory for a context override. Both derived, never
     // hand-authored; `check()` uses this same string, so what a generator is shown is exactly what it is
-    // graded against.
-    return `${this.registryBlock(this.cache!)}\ndeclare const tool: import('@matatbread/matbot-plugin-api').ToolProxy;\ndeclare const toolInContext: import('@matatbread/matbot-plugin-api').ToolBox;\n`;
+    // graded against — which is also why `context` is declared here and not merely described in prose:
+    // undeclared, every body reading it would fail the very check this string backs.
+    return `${this.registryBlock(this.cache!)}\ndeclare const tool: import('@matatbread/matbot-plugin-api').ToolProxy;\ndeclare const toolInContext: import('@matatbread/matbot-plugin-api').ToolBox;\ndeclare const context: import('@matatbread/matbot-plugin-api').ComposedCallContext;\n`;
   }
 
   async wireContracts(): Promise<Record<string, { params: string; result: string }>> {

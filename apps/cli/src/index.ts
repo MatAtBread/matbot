@@ -20,9 +20,9 @@ import { appendMessage, createMessage,
          unifyServices, forwardingProxy, makeSwappable, singleTurnRequest,
          createMountTable, onContextQuiesce, flushIfQuiescent,
          createSingleTurnTool, createAboutMatbotTool,
-         isMissingSecretError,
+         isMissingSecretError, createNotifier, notifyingStore,
          wireDescription}            from '@matatbread/matbot-core';
-import type { MatbotMachine, MatbotServices, PluginSettings, Vault, SessionRunner,
+import type { MatbotMachine, MatbotServices, PluginSettings, Vault, SessionRunner, Notifier,
               MatbotPlugin, StorageBackend, KnowledgeIndex, PromptFn, FormField, SwapFn } from '@matatbread/matbot-core';
 import { systemPrincipal }                 from '@matatbread/matbot-core';
 import { createAlsPrincipalCarrier }       from './principal-als.js';
@@ -835,6 +835,10 @@ async function main(): Promise<void> {
   // It must be listed before any plugin whose setup() calls createStore.
   let activeStorageBackend: StorageBackend | undefined;
   let knowledgeImpl: KnowledgeIndex = new LookupKnowledgeIndex();
+  // The boot notification bus: in-process fan-out, everything the host itself publishes attributed to
+  // `core`. Swappable like the vault — register('Notifier', …) points this at a distributed impl.
+  let activeNotifier: Notifier = createNotifier('core');
+  const notifierProxy       = forwardingProxy<Notifier>(() => activeNotifier);
   // Capture-safe service handles (see forwardingProxy): a captured reference — including a destructure
   // like `const { KnowledgeIndex, StorageBackend } = services` — keeps resolving to the live impl across
   // a register()-driven swap, instead of pinning whatever was current at capture time.
@@ -892,8 +896,11 @@ async function main(): Promise<void> {
     return entry[0] as Store<T>;
   };
 
-  // sessions and fileStore are stable proxy references — safe to capture anywhere.
-  const store     = createStore<Session>('sessions');
+  // sessions and fileStore are stable proxy references — safe to capture anywhere. Sessions are wrapped
+  // so every write announces itself: the namespace has many writers (the turn pump's title derivation and
+  // persists, session_action rename/hide/unhide, session_edit fork/split, a session minted over HTTP), and
+  // one wrapper covers them all — including the next writer to arrive.
+  const store     = notifyingStore(createStore<Session>('sessions'), notifierProxy, 'sessions', 'session');
 
   // Boot defaults, captured for revert-on-unregister: a plugin that swaps a core service in via
   // register() reverts to these when it is unloaded, instead of leaving a dangling reference to the
@@ -901,6 +908,7 @@ async function main(): Promise<void> {
   // config-supplied backend never poses as the host base.)
   const bootVault                  = activeVault;
   const bootKnowledge              = knowledgeImpl;
+  const bootNotifier               = activeNotifier;
 
   // The live file proxy starts on the pre-scanned backend (if any), falling back to the host base.
   const [fileStore, swapFiles] = makeSwappable<FileStore>(activeStorageBackend?.fileStore ?? bootFileStore);
@@ -954,7 +962,7 @@ async function main(): Promise<void> {
   };
 
   // toolReg is shared: plugins register into it via services, runSession reads it
-  const toolReg = new ToolRegistryImpl(createBuiltinTools());
+  const toolReg = new ToolRegistryImpl(createBuiltinTools(), notifierProxy);
 
   // hookReg is shared: plugins register hooks via services, runSession fires them
   const hookReg = new HookRegistry();
@@ -984,6 +992,7 @@ async function main(): Promise<void> {
       if (key === 'StorageBackend')      stageSwap(value as StorageBackend);
       else if (key === 'KnowledgeIndex') swapKnowledge(value as KnowledgeIndex);
       else if (key === 'Vault')          activeVault = value as Vault;
+      else if (key === 'Notifier')       activeNotifier = value as Notifier;
       else serviceRegistry.set(key as string, value);
       if (key !== 'StorageBackend') { mountTable.markDirty(key); flushIfQuiescent(); }
     },
@@ -994,6 +1003,7 @@ async function main(): Promise<void> {
       if (key === 'StorageBackend')      stageSwap(bootBackend);
       else if (key === 'KnowledgeIndex') knowledgeImpl = bootKnowledge;
       else if (key === 'Vault')          activeVault = bootVault;
+      else if (key === 'Notifier')       activeNotifier = bootNotifier;
       else serviceRegistry.delete(key);
       if (key !== 'StorageBackend') { mountTable.markDirty(key as keyof MatbotServices); flushIfQuiescent(); }
     },
@@ -1079,6 +1089,7 @@ async function main(): Promise<void> {
     get run() { return sessionRunner; },
     files:     fileStore,
     Vault:     vault,
+    Notifier:  notifierProxy,
     hooks:          hookReg,
     tools:          toolReg,
     systemContext:  systemContextReg,

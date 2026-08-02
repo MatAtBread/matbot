@@ -98,7 +98,6 @@ export function createRememberFactTool(services: MatbotMachine): Tool {
       }
 
       if (facts.length === 0) {
-        console.info(`[remember_fact] no durable facts found in message ${msg.id}.`);
         return;
       }
 

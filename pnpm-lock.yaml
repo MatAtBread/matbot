@@ -32,6 +32,9 @@ importers:
       '@matatbread/matbot-files-node':
         specifier: workspace:^
         version: link:../../plugins/files
+      '@matatbread/matbot-provenance':
+        specifier: workspace:^
+        version: link:../../plugins/provenance
       '@matatbread/matbot-provider-anthropic':
         specifier: workspace:^
         version: link:../../plugins/providers/anthropic
@@ -54,6 +57,9 @@ importers:
         specifier: workspace:^
         version: link:../../plugins/tool-plugin
     devDependencies:
+      '@matatbread/matbot-function-tools':
+        specifier: workspace:^
+        version: link:../../plugins/function-tools
       '@types/node':
         specifier: 'catalog:'
         version: 22.19.19
@@ -310,6 +316,15 @@ importers:
       '@types/node':
         specifier: 'catalog:'
         version: 22.19.19
+      typescript:
+        specifier: 'catalog:'
+        version: 6.0.3
+
+  plugins/provenance:
+    devDependencies:
+      '@matatbread/matbot-plugin-api':
+        specifier: workspace:^
+        version: link:../../plugin-api
       typescript:
         specifier: 'catalog:'
         version: 6.0.3

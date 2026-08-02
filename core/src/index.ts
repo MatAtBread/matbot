@@ -19,6 +19,7 @@ export { unifyServices }      from '@matatbread/matbot-plugin-api';
 export { forwardingProxy, makeSwappable, singleTurnRequest, createMountTable } from '@matatbread/matbot-plugin-api';
 // Observation-stream primitives (broadcaster + the bare-subscribe wrapper); the host wires `mounted`.
 export { createBroadcaster, subscribable } from '@matatbread/matbot-plugin-api';
+export { createNotifier, scopedNotifier, notifyingStore, ItemChangeKind, RegistryChangeKind } from '@matatbread/matbot-plugin-api';
 export type { Subscribable, Broadcaster } from '@matatbread/matbot-plugin-api';
 // Ambient security principal: interface is a type (carried by `export type *`); these are the values.
 export {

@@ -3,7 +3,7 @@ import type { MatbotPluginSpec, MatbotMachine, Store, Message, MessageContent, S
 import { TriggerManager } from './manager.js';
 import { dispatchTrigger, renderResult } from './dispatch.js';
 import { createTriggerActionTool, createTriggersConfigTool } from './tools.js';
-import type { Trigger, Triggers, FiredCondition } from './types.js';
+import type { Trigger, Triggers, FiredCondition, TriggerCooldown } from './types.js';
 
 /** A firing trigger's id plus the specific condition(s) that matched — the unit markers trace, so a
  *  post-mortem can see not just that a trigger fired but which rubric the classifier judged true and
@@ -113,7 +113,7 @@ const RETRACTION_CREATOR = 'matbot-retraction';
 // `retractFiredMarker` records which triggers/conditions caused a retract. Both are LLM-invisible
 // diagnostics. The convergence guard reads back BOTH retract-fired AND its own `retract-convergence`
 // suppressions (see retractActiveLastTurn).
-type SuppressCause = 'user-redo' | 'retract-convergence' | 'followup-shadowed';
+type SuppressCause = 'user-redo' | 'retract-convergence' | 'followup-shadowed' | 'cooldown';
 function suppressedMarker(cause: SuppressCause, reason: string, triggers: FiredSource[]): MessageContent {
   return { type: 'marker', creator: 'triggers', data: { event: 'suppressed', cause, reason, triggers } };
 }
@@ -168,6 +168,92 @@ function retractActiveLastTurn(messages: Message[]): Set<string> {
     }
   }
   return ids;
+}
+
+// Every marker event that records a trigger ACTUALLY firing (as opposed to being held off), across both
+// surfaces and all three delivery paths. This is the durable fire log the cool-down is counted from —
+// there is no in-memory counter, so a cool-down holds across restart, reload and a backend swap.
+const FIRE_EVENTS = new Set(['retract-fired', 'followup-fired', 'user-insitu-fired', 'user-retract-fired']);
+
+/** Per-trigger firing history, in turns. `thisTurn` counts fires inside the current turn region (since
+ *  the last genuine user message; a redo or robo resubmit belongs to that same turn). `since` is how
+ *  many genuine user turns ago each trigger last fired — 0 meaning this turn. Absent from `since` ⇒
+ *  never fired in the retained history. */
+interface FireHistory {
+  thisTurn: Map<string, number>;
+  since:    Map<string, number>;
+}
+
+// One backward scan of the message tail, counting genuine (non-robo) user messages as turn boundaries.
+// Deliberately counts only fires, NOT cool-down suppressions: a quiet period is a fixed window that must
+// expire on its own, unlike the retract convergence guard (which re-arms on suppression precisely so a
+// still-matching rule stays held off indefinitely).
+function fireHistory(messages: Message[]): FireHistory {
+  const thisTurn = new Map<string, number>();
+  const since    = new Map<string, number>();
+  let turnsBack  = 0;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!;
+    if (m.role === 'user' && !m.content.every(c => c.origin === 'robo')) { turnsBack++; continue; }
+    for (const c of m.content) {
+      if (c.type !== 'marker' || c.creator !== 'triggers') continue;
+      const d = c.data as { event?: unknown; triggers?: unknown };
+      if (typeof d?.event !== 'string' || !FIRE_EVENTS.has(d.event) || !Array.isArray(d.triggers)) continue;
+      for (const t of d.triggers) {
+        const id = (t as { id?: unknown })?.id;
+        if (typeof id !== 'string') continue;
+        if (!since.has(id)) since.set(id, turnsBack);
+        if (turnsBack === 0) thisTurn.set(id, (thisTurn.get(id) ?? 0) + 1);
+      }
+    }
+  }
+  return { thisTurn, since };
+}
+
+// The second of the two guards that read the same marker stream (see retractActiveLastTurn above),
+// and they are NOT redundant: the convergence guard is a diagnosis — this retract rule did not
+// converge, so hold it until it stops matching, re-arming on its own suppressions so it stays held —
+// while a cool-down is a declared rate, indifferent to whether the rule is well-behaved and expiring
+// on a fixed schedule. One is the machine noticing a defect; the other is an author's policy.
+//
+// The reason a trigger's own cool-down holds it back this turn, or undefined to let it fire. Reported
+// rather than returned as a boolean because a suppression is never silent — the reason lands in the
+// marker, so "why didn't the inner voice fire?" is answerable from the session months later.
+function cooldownHold(cooldown: TriggerCooldown | undefined, id: string, hist: FireHistory): string | undefined {
+  if (!cooldown) return undefined;
+  const { maxPerTurn, quietTurns } = cooldown;
+  if (maxPerTurn !== undefined) {
+    const fired = hist.thisTurn.get(id) ?? 0;
+    if (fired >= maxPerTurn) return `already fired ${fired}× this turn (maxPerTurn ${maxPerTurn})`;
+  }
+  // Counts COMPLETED turns only (`since >= 1`): the quiet period governs later turns, while repeats
+  // within the turn that fired are `maxPerTurn`'s business. Otherwise the two limits would fight —
+  // a quiet period of 1 would make any maxPerTurn above 1 unreachable.
+  if (quietTurns !== undefined && quietTurns > 0) {
+    const since = hist.since.get(id);
+    if (since !== undefined && since >= 1 && since <= quietTurns) {
+      return `fired ${since} turn(s) ago, inside its ${quietTurns}-turn quiet period`;
+    }
+  }
+  return undefined;
+}
+
+/** Split what the classifier fired into the triggers that may act and the suppression markers for
+ *  those their own cool-down holds back. Both phases run this identically — the cool-down governs a
+ *  trigger, not a surface, so the user and agent surfaces share one budget and must share one
+ *  decision. Generic in the fired element so each caller keeps its own extra fields (`kinds`). */
+function applyCooldown<T extends { trigger: Trigger; matched: FiredCondition[] }>(
+  fired: T[],
+  hist:  FireHistory,
+): { kept: T[]; markers: MessageContent[] } {
+  const kept:    T[]              = [];
+  const markers: MessageContent[] = [];
+  for (const f of fired) {
+    const hold = cooldownHold(f.trigger.cooldown, f.trigger.id, hist);
+    if (hold === undefined) kept.push(f);
+    else markers.push(suppressedMarker('cooldown', `trigger held off by its own cool-down: ${hold}`, [{ id: f.trigger.id, matched: f.matched }]));
+  }
+  return { kept, markers };
 }
 
 function textOf(msg: Message | undefined): string {
@@ -249,7 +335,11 @@ export async function setupTriggers(services: MatbotMachine): Promise<TriggerMan
     const durableBodies:   string[]         = [];
     const sources:         FiredSource[]    = [];
     const markers:         MessageContent[] = [];
-    for (const { trigger, kinds, matched } of fired) {
+    // A per-trigger cool-down applies to both surfaces: matching says the trigger is relevant, the
+    // cool-down says whether it may act again this soon. Held-off triggers are traced, never silent.
+    const cooled = applyCooldown(fired, fireHistory(ctx.session.messages));
+    markers.push(...cooled.markers);
+    for (const { trigger, kinds, matched } of cooled.kept) {
       const out = await dispatchTrigger(services, trigger, { session: ctx.session, signal: ctx.signal, provider: ctx.provider, ...(ctx.prompt !== undefined ? { prompt: ctx.prompt } : {}) });
       if (out.hadResult) {
         // Contextual dominates: a trigger carrying both kinds folds durable (a superset of ephemeral —
@@ -377,7 +467,17 @@ export async function setupTriggers(services: MatbotMachine): Promise<TriggerMan
       const followupSources: FiredSource[]    = [];
       const suppressed:      FiredSource[]    = [];
       const markers:         MessageContent[] = [...userOut.markers];
-      for (const { trigger, kinds, matched } of fired) {
+      // The raced user-phase fires belong to THIS turn but aren't in the committed messages yet (their
+      // markers ride out on this hook's return), so fold them in before counting — otherwise a trigger
+      // that fired on the user surface would look untouched to its own per-turn cap.
+      const hist = fireHistory(ctx.session.messages);
+      for (const s of userOut.sources) {
+        hist.thisTurn.set(s.id, (hist.thisTurn.get(s.id) ?? 0) + 1);
+        hist.since.set(s.id, 0);
+      }
+      const cooled = applyCooldown(fired, hist);
+      markers.push(...cooled.markers);
+      for (const { trigger, kinds, matched } of cooled.kept) {
         if (kinds.includes('retract') && heldOff.has(trigger.id)) {
           suppressed.push({ id: trigger.id, matched: matched.filter(m => m.kind === 'retract') });
           continue;

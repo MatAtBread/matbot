@@ -1,7 +1,7 @@
 import type { MatbotPlugin, MatbotPluginSpec, MatbotMachine, PluginSource, Runtime } from './plugin.js';
 import type { PromptFn } from './types.js';
 import { incompatibleRuntimeError, notAPluginError } from '@matatbread/matbot-plugin-api';
-import { registerPlugin, setupPlugin, unloadPlugin, recordFailedPlugin, clearFailedPlugin } from './registry.js';
+import { registerPlugin, setupPlugin, unloadPlugin, recordFailedPlugin, clearFailedPlugin, announcePluginLoaded } from './registry.js';
 
 /**
  * The runtime this process is executing in. Detected the same way the rejected-import branch below
@@ -235,6 +235,9 @@ export async function loadPlugins(
     try {
       registerPlugin(plugin);
       registered = true;
+      // Announced at registration, not after setup: a setup throw rolls back through unloadPlugin, which
+      // announces the removal — so an observer sees a matched add/remove pair rather than a bare removal.
+      announcePluginLoaded(services, plugin.name);
       await setupPlugin(plugin, services, prompt);
       loaded.push(plugin);
       // Successful (re)load: a fixed plugin drops off the failed list (reload runs this same path).

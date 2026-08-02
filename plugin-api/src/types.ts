@@ -731,6 +731,25 @@ export interface ToolContext {
 }
 
 /**
+ * The read-only facts about the call a composed function is running under, injected into a
+ * `tool_function` body as the ambient `context` binding beside `tool`/`toolInContext`. Deliberately
+ * narrower than {@link ToolContext}: the identity of the call, not its capabilities — `vault`,
+ * `files`, `prompt` and plugin (un)loading stay off a surface authored by a model and reachable only
+ * through the tool contracts. A tool with real source takes `ToolContext` and needs none of this.
+ *
+ * Not `ToolCallContext` — that name belongs to the `toolcall` hook's context; this is the composed
+ * caller's own view, not a hook's view of a call about to run.
+ */
+export interface ComposedCallContext {
+  readonly callId:    string;
+  readonly sessionId: string;
+  /** The provider key driving the turn — the same one nested `tool.x(…)` calls inherit. */
+  readonly provider?: string;
+  readonly workdir?:  string;
+  readonly signal:    AbortSignal;
+}
+
+/**
  * A tool's runtime. `R` is the type of the `value` carried by its `result` event — declared once,
  * at the source, so the executor's yields and the tool's {@link ToolContracts} registry entry can't
  * silently drift. The `unknown` default keeps untyped executors compiling untouched, and covariance
@@ -780,28 +799,6 @@ export interface FileHandle extends FileMetaData {
   stream(signal?: AbortSignal): AsyncIterable<Uint8Array>;
 }
 
-export type FileEvent = FileMetaData & { changed: Array<keyof FileMetaData> };
-
-/**
- * The generic, self-describing change envelope every partitioned CRUD stream emits (files, skills, and
- * future partitioned stores) — the payload half of a {@link Routed} event, whose `origin` carries the
- * acting principal/partition. It supersedes the per-stream bespoke shapes (the old `SkillEvent`, the raw
- * `FileEvent` on the wire) so a frontend firehose can filter and route every stream through ONE predicate.
- *
- * `namespace` is the ROUTING namespace the change lives under — `'files'`, `'skills'`, or a document
- * namespace — NOT a content sub-namespace (a file's own `metadata.namespace`, e.g. `'workspace'`, rides in
- * `detail`). Pairing `namespace` + `id` is exactly what `WatchVisibility.visible` needs to decide, per
- * connection, whether the viewer routes that item to the same partition (or has it shared in). `detail`
- * carries an optional rich payload for in-place UI updates — a file change ships its {@link FileMetaData}
- * so a sidebar row can update its size without a re-fetch; a skill change needs none (a refresh ping).
- */
-export interface StoreChange {
-  readonly operation: 'saved' | 'deleted';
-  readonly namespace: string;
-  readonly id:        string;
-  readonly detail?:   unknown;
-}
-
 export interface FileFilter {
   sessionId?:     string;
   mimeType?:      string;
@@ -823,8 +820,6 @@ export interface FileStore {
   delete(id: string): Promise<void>;
   list(filter?: FileFilter): AsyncIterable<FileHandle>;
   putTemp(name: string, mimeType: MimeType, data: AsyncIterable<Uint8Array>): Promise<FileHandle>;
-  /** Observe file changes. Implementations that cannot watch their backing store omit this. */
-  watch(signal?: AbortSignal): AsyncIterable<FileEvent>;
 }
 
 // ── Frontend ──────────────────────────────────────────────────────────────────
@@ -886,19 +881,16 @@ export type HealthStatus =
 
 // ── Registries ────────────────────────────────────────────────────────────────
 
-export type ToolRegistryEvent =
-  | { type: 'registered'; name: string; pluginName?: string }
-  | { type: 'removed';    name: string };
-
+/** Tool CRUD is observed on the {@link Notifier}, as a `RegistryChange` with `registry: 'tools'` — this
+ *  registry had its own broadcaster over the same primitive, which is duplication, not layering. One
+ *  notification per tool (removeByPlugin announces a `removed` per matched tool); the registering
+ *  plugin's name rides in `detail`, advisory as ever — resolve the name for anything authoritative. */
 export interface ToolRegistry {
   register(tool: Tool): void;
   remove(name: string): void;
   resolve(name: string): Tool | null;
   list(): readonly Tool[];
   removeByPlugin(pluginName: string): void;
-  /** Observe tool CRUD as it happens. Read-only — observers cannot veto a registration. One event
-   *  per tool (removeByPlugin emits a `removed` per matched tool). The stream ends when `signal` aborts. */
-  watch(signal?: AbortSignal): AsyncIterable<ToolRegistryEvent>;
 }
 
 /** What the runner tells a {@link ToolPresenter} about the call it's about to make. */
@@ -947,10 +939,6 @@ export interface ProviderRegistry extends ReadonlyMap<string, ProviderConfig> {
    */
   revert(name: string): void;
 }
-
-export type PluginRegistryEvent =
-  | { type: 'loaded';   name: string }
-  | { type: 'unloaded'; name: string };
 
 // ── Pipeline events ─────────────────────────────────────────────────────────────
 

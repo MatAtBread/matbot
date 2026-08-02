@@ -47,7 +47,8 @@ const validPlugin  = new URL('./fixtures/valid-plugin.ts', import.meta.url).href
 const throwsInSetup = new URL('./fixtures/throws-in-setup.ts', import.meta.url).href;
 const noopServices = {
   resolver:   undefined,
-  tools:      { register() {}, remove() {}, resolve: () => null, list: () => [], removeByPlugin() {}, watch: () => (async function* () {})() },
+  tools:      { register() {}, remove() {}, resolve: () => null, list: () => [], removeByPlugin() {} },
+  Notifier:   { notify() {}, subscribe: () => (async function* () {})(), consume() {} },
   createStore: () => ({ get: async () => null, set: async () => {}, cas: async () => ({ ok: true }), delete: async () => {} }),
   mounted:    { consume() {} },
   hooks:      { register() {}, removeByPlugin() {} },

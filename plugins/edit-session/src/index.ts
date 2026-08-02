@@ -1,5 +1,5 @@
 import type {
-  MatbotPluginSpec, MatbotMachine, Tool, ToolContract, ToolResultOf, Session, Store, Message, Marker,
+  MatbotPluginSpec, MatbotMachine, Tool, ToolContract, ToolContext, ToolResultOf, Session, Store, Message, Marker,
 } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION, lastActivityAt } from '@matatbread/matbot-plugin-api';
 
@@ -99,7 +99,9 @@ function makeSessionEditTool(store: Store<Session>): Tool<ToolResultOf<'session_
       '  split   — Move: messages before msgIndex move to a new session; the current session keeps\n' +
       '            msgIndex onward. Both sides get cross-link markers.\n' +
       '  compact — Shrink: strip thinking blocks, tool calls, and tool results from messages before\n' +
-      '            msgIndex, keeping user/assistant text — fewer tokens, same thread.',
+      '            msgIndex, keeping user/assistant text — fewer tokens, same thread.\n' +
+      'The session the current turn is running in cannot be cut, split or compacted: the turn owns that ' +
+      'document until it commits. Only `fork` (which writes a new session) is available on it.',
     inputSchema: {
       type:       'object',
       required:   ['action', 'sessionId', 'msgIndex'],
@@ -110,10 +112,24 @@ function makeSessionEditTool(store: Store<Session>): Tool<ToolResultOf<'session_
       },
     },
     executor: {
-      async *execute(input: unknown) {
+      async *execute(input: unknown, ctx: ToolContext) {
         const { action, sessionId, msgIndex } = input as Partial<SessionEditInput>;
         if (!sessionId) { yield { type: 'error', message: 'session_edit requires "sessionId".' }; return; }
         if (typeof msgIndex !== 'number') { yield { type: 'error', message: 'session_edit requires "msgIndex" (number).' }; return; }
+
+        // The running turn owns its session document: the runner takes one in-memory copy at turn start
+        // and writes it back unconditionally at turn end, so a write landing here is overwritten seconds
+        // later — silently, since that write is not a CAS. `split` fails worse than the rest: its new
+        // session survives while the truncation of this one does not, leaving a dangling half. Refuse,
+        // rather than report a success that will not survive the turn. `fork` is exempt — it only writes
+        // a new document — though it forks the committed state, without this turn's uncommitted tail.
+        if (sessionId === ctx.session.id && (action === 'cut' || action === 'split' || action === 'compact')) {
+          yield { type: 'error', message:
+            `Cannot ${action} session "${sessionId}": it is the session this turn is running in, and the ` +
+            'turn owns it until it commits — the edit would be overwritten when the turn ends. Edit it ' +
+            'outside a turn, or use action "fork" (writes a new session, leaves this one untouched).' };
+          return;
+        }
 
         const session = await store.get(sessionId);
         if (!session) { yield { type: 'error', message: `Session "${sessionId}" not found.` }; return; }

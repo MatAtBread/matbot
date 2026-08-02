@@ -34,11 +34,12 @@ satisfy one contract:
 
 The contract (read it in [http-transport.js](../plugins/frontend/web/static/http-transport.js)):
 `hostRuntime`, `callTool`, `createSession`, `sessionBusy`, `submit`, `sessionEvents`,
-`answerPrompt`, `abort`, `statusEvents`, `fileEvents`, `toolEvents`, `pluginEvents`, `openFile`.
-`statusEvents`/`fileEvents`/`toolEvents`/`pluginEvents` are read-only `AsyncIterable` observation
-streams (session busy/idle, file changes, tool-registry CRUD, plugin load/unload); over HTTP each is
-one SSE endpoint under the `/events/…` prefix, in-process each is the matching backend iterable
-(e.g. `services.tools.watch()` / `watchPlugins()`) yielded directly. They let panels keyed off
+`answerPrompt`, `answerEnv`, `abort`, `statusEvents`, `notifications`, `openFile`.
+`statusEvents` and `notifications` are read-only `AsyncIterable` observation streams (session
+busy/idle; every "something changed" fact — files, skills, sessions, tool-registry CRUD, plugin
+load/unload — as one `Notification` sequence discriminated by `kind`). Over HTTP each is one SSE
+event on the multiplexed `/events` stream, already filtered server-side to what the connection's
+principal may see; in-process `notifications` is `services.Notifier` itself. They let panels keyed off
 tool/plugin presence (skills, plugins) refresh live when something loads out of band. (`sessionEvents`
 is the per-session turn demux — one persistent stream per session, not a global observer.) The in-process side
 ([browser.js](../plugins/frontend/web/static/browser.js)) is essentially `server.ts`'s
@@ -47,9 +48,10 @@ context — re-expressed without HTTP. Streaming is the same `AsyncIterable<Pipe
 emits natively; in-process is simply that iterable, HTTP demuxes it back out of one SSE stream.
 
 All SSE streams live under a dedicated `/events/` prefix — `GET /events/sessions` (busy/idle),
-`/events/sessions/:id` (per-session turns), `/events/files`, `/events/files/:ns/:name`,
-`/events/tools`, `/events/plugins` — so no author-controlled path segment can shadow a route (a tool
-named `events` no longer collides with `POST /tools/:name`).
+`/events/sessions/:id` (per-session turns) and `/events` (one multiplexed global stream carrying
+`session-busy` plus every `notification`, which replaced the per-kind `/events/files`,
+`/events/files/:ns/:name`, `/events/tools` and `/events/plugins` streams) — so no author-controlled
+path segment can shadow a route (a tool named `events` no longer collides with `POST /tools/:name`).
 
 ### The `browser` export condition
 

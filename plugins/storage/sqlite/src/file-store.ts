@@ -1,12 +1,10 @@
 import { DatabaseSync } from 'node:sqlite';
-import type { FileStore, FileHandle, FileMetaData, FileEvent, FileFilter, MimeType } from '@matatbread/matbot-plugin-api';
-import { createBroadcaster } from '@matatbread/matbot-plugin-api';
+import type { FileStore, FileHandle, FileMetaData, FileFilter, MimeType } from '@matatbread/matbot-plugin-api';
 
 const file_table_name = 'file_meta';
 
 export class SQLiteFileStore implements FileStore {
   private readonly db:     DatabaseSync;
-  private readonly events = createBroadcaster<FileEvent>();
 
   constructor(db: DatabaseSync) {
     this.db = db;
@@ -67,9 +65,7 @@ export class SQLiteFileStore implements FileStore {
       message_id: opts?.messageId  ?? null,
       allowed:    opts?.allowed ? 1 : null,
     };
-    const handle = this.buildHandle(nextRow);
-    this.emit(buildFileEvent(handle, prevMeta !== undefined ? metaFromRow(prevMeta) : undefined));
-    return handle;
+    return this.buildHandle(nextRow);
   }
 
   async get(id: string): Promise<FileHandle | null> {
@@ -105,15 +101,6 @@ export class SQLiteFileStore implements FileStore {
     return this.put(name, mimeType, data);
   }
 
-  async *watch(signal?: AbortSignal): AsyncIterable<FileEvent> {
-    // Bare events (unwrap the envelope) — a single-partition store has no origin to attribute.
-    for await (const { value } of this.events.subscribe(signal)) yield value;
-  }
-
-  private emit(event: FileEvent): void {
-    this.events.emit(event);
-  }
-
   private buildHandle(row: MetaRow): FileHandle {
     const db = this.db;
     const meta: FileMetaData = {
@@ -144,11 +131,6 @@ export class SQLiteFileStore implements FileStore {
 // Selects all metadata columns except the blob — data is fetched lazily in stream().
 const META_SELECT = `SELECT id, name, mime_type, size, created_at, namespace, session_id, message_id, allowed FROM ${file_table_name}`;
 
-const META_KEYS: ReadonlyArray<keyof FileMetaData> = [
-  'id', 'version', 'name', 'mimeType', 'size', 'createdAt',
-  'sessionId', 'messageId', 'namespace', 'allowed',
-];
-
 interface MetaRow {
   id:         string;
   name:       string;
@@ -159,39 +141,4 @@ interface MetaRow {
   session_id: string | null;
   message_id: string | null;
   allowed:    number | null;
-}
-
-function metaFromRow(row: MetaRow): FileMetaData {
-  return {
-    id:        row.id,
-    version:   row.size.toString(),
-    name:      row.name,
-    mimeType:  row.mime_type,
-    size:      row.size,
-    createdAt: row.created_at,
-    ...(row.namespace  !== null ? { namespace:  row.namespace  } : {}),
-    ...(row.session_id !== null ? { sessionId:  row.session_id } : {}),
-    ...(row.message_id !== null ? { messageId:  row.message_id } : {}),
-    ...(row.allowed                 ? { allowed: true } : {}),
-  };
-}
-
-function buildFileEvent(handle: FileHandle, prev: FileMetaData | undefined): FileEvent {
-  const meta = metaFromRow({
-    id:         handle.id,
-    name:       handle.name,
-    mime_type:  handle.mimeType,
-    size:       handle.size,
-    created_at: handle.createdAt,
-    namespace:  handle.namespace  ?? null,
-    session_id: handle.sessionId  ?? null,
-    message_id: handle.messageId  ?? null,
-    allowed:    handle.allowed ? 1 : null,
-  });
-  const a = meta as unknown as Record<string, unknown>;
-  const b = prev as unknown as Record<string, unknown> | undefined;
-  const changed = b === undefined
-    ? [...META_KEYS]
-    : META_KEYS.filter(k => a[k] !== b[k]);
-  return { ...meta, changed };
 }

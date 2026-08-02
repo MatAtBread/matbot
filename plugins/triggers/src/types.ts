@@ -68,11 +68,38 @@ export interface TriggerInvoke {
   params?: unknown;
 }
 
+/**
+ * An optional rate limit on ONE trigger, independent of whether its conditions match. Conditions say
+ * *when* a trigger is relevant; a cool-down says *how often* it may act on that — the two are
+ * separate because a rule can be genuinely, correctly matched turn after turn (a critic rule matches
+ * every uncertain answer) while acting on it every time is a self-critique spin, not a service.
+ *
+ * Both limits are counted from the durable fire markers already in the session (see the marker
+ * helpers in plugin.ts), so a cool-down survives restarts, session reload and a moved backend without
+ * any in-memory state. A *turn* here is a genuine (non-robo) user message and everything that follows
+ * it — a retract redo or a followup robo turn belongs to the turn that caused it, not a new one.
+ *
+ * Absent ⇒ no limit, which stays the default: most triggers (e.g. capturing a stated fact) SHOULD
+ * fire on consecutive turns, and rate-limiting them would silently lose data.
+ */
+export interface TriggerCooldown {
+  /** Most fires allowed within one turn, counting both surfaces. At least 1: the two fields have
+   *  opposite polarity — this one counts PERMITTED fires, so 0 would mean "never fires", which is
+   *  `enabled: false` reached silently through a rate limit and is rejected. Absent ⇒ unlimited. */
+  maxPerTurn?: number;
+  /** Genuine user turns the trigger stays held off for after a fire. 1 ⇒ never on consecutive turns
+   *  (a fire on turn N is held off on N+1, allowed again on N+2). This one counts BLOCKED turns, so
+   *  0 is an honest "no delay" and means the same as absent. */
+  quietTurns?: number;
+}
+
 export interface Trigger {
   id:         string;
   version:    string;
   conditions: TriggerCondition[];
   invoke:     TriggerInvoke;
+  /** Rate limit on firing, independent of matching. Absent ⇒ unlimited — see {@link TriggerCooldown}. */
+  cooldown?:  TriggerCooldown;
   /** Absent ⇒ enabled. A disabled trigger is kept but never evaluated. */
   enabled?:   boolean;
   createdAt:  string;
@@ -84,6 +111,7 @@ export interface TriggerSpec {
   conditions: TriggerCondition[];
   invoke:     TriggerInvoke;
   enabled?:   boolean;
+  cooldown?:  TriggerCooldown;
 }
 
 /**

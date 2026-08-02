@@ -1,5 +1,15 @@
 # @matatbread/matbot-rumsfeld
 
+## 0.3.8
+
+### Patch Changes
+
+- **`find_fact` and `contextual_search` descriptions disambiguated**, so the model stops reaching for
+  one where it wants the other.
+
+- Updated dependencies
+  - @matatbread/matbot-plugin-api@0.3.8
+
 ## 0.3.7
 
 ### Patch Changes

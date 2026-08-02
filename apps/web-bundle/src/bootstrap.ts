@@ -5,12 +5,12 @@ import {
   installUsageCarrier, createSerialUsageCarrier, recordUsage,
   createMessage, isMissingSecretError, loadPlugins,
   unloadPlugin as unloadPluginFn, unifyServices,
-  forwardingProxy, makeSwappable, singleTurnRequest, createSingleTurnTool, createAboutMatbotTool,
+  forwardingProxy, makeSwappable, singleTurnRequest, createSingleTurnTool, createAboutMatbotTool, createNotifier, notifyingStore,
   createMountTable, onContextQuiesce, flushIfQuiescent,
 } from '@matatbread/matbot-core';
 import type {
   MatbotMachine, MatbotServices, Store, Session, ProviderConfig, ProviderAdapter,
-  PluginSettings, Vault, SessionRunner, KnowledgeIndex,
+  PluginSettings, Vault, SessionRunner, KnowledgeIndex, Notifier,
   PluginResolver, StorageBackend, FileStore, PromptFn, MatbotPlugin, Principal, Runtime, SwapFn, Usage,
 } from '@matatbread/matbot-plugin-api';
 import { LookupKnowledgeIndex } from '@matatbread/matbot-core';
@@ -239,16 +239,22 @@ export async function boot(env: BootEnv): Promise<void> {
     }
     return entry[0] as Store<T>;
   };
-  const store = createStore<Session>('sessions');
   const [fileStore, swapFiles] = makeSwappable<FileStore>(activeStorageBackend.fileStore);
 
+  // Boot notification bus (in-process fan-out); swappable via register('Notifier', …) like the vault.
+  let activeNotifier: Notifier = createNotifier('core');
+  const notifierProxy       = forwardingProxy<Notifier>(() => activeNotifier);
+
   // ── Registries ────────────────────────────────────────────────────────────────────────────
-  const toolReg          = new ToolRegistryImpl();
+  const toolReg          = new ToolRegistryImpl(undefined, notifierProxy);
   const hookReg          = new HookRegistry();
   const systemContextReg = new SystemContextRegistryImpl();
   const serviceRegistry  = new Map<string, unknown>();
 
   let knowledgeImpl: KnowledgeIndex = new LookupKnowledgeIndex();
+  // Wrapped so every session write announces itself — see the CLI host for why the sessions namespace
+  // gets a wrapper rather than an explicit notify per writer.
+  const store = notifyingStore(createStore<Session>('sessions'), notifierProxy, 'sessions', 'session');
   // Capture-safe handles (see forwardingProxy): a captured reference, including a destructure like
   // `const { KnowledgeIndex, StorageBackend } = services`, follows register()-driven swaps.
   const knowledgeProxy      = forwardingProxy<KnowledgeIndex>(() => knowledgeImpl);
@@ -259,6 +265,7 @@ export async function boot(env: BootEnv): Promise<void> {
   // above, before the pre-scan defaulting, so a config backend never poses as the host base.)
   const bootVault                   = activeVault;
   const bootKnowledge               = knowledgeImpl;
+  const bootNotifier                = activeNotifier;
 
   // Re-point every store proxy + the file proxy at `next`. Returns whether anything actually changed,
   // so the caller can skip a redundant `mounted` emit. Synchronous: the repoint completes before this
@@ -335,6 +342,7 @@ export async function boot(env: BootEnv): Promise<void> {
       if (key === 'StorageBackend')      stageSwap(value as StorageBackend);
       else if (key === 'KnowledgeIndex') swapKnowledge(value as KnowledgeIndex);
       else if (key === 'Vault')          activeVault = value as Vault;
+      else if (key === 'Notifier')       activeNotifier = value as Notifier;
       else serviceRegistry.set(key as string, value);
       if (key !== 'StorageBackend') { mountTable.markDirty(key); flushIfQuiescent(); }
     },
@@ -345,6 +353,7 @@ export async function boot(env: BootEnv): Promise<void> {
       if (key === 'StorageBackend')      stageSwap(bootBackend);
       else if (key === 'KnowledgeIndex') knowledgeImpl = bootKnowledge;
       else if (key === 'Vault')          activeVault = bootVault;
+      else if (key === 'Notifier')       activeNotifier = bootNotifier;
       else serviceRegistry.delete(key);
       if (key !== 'StorageBackend') { mountTable.markDirty(key as keyof MatbotServices); flushIfQuiescent(); }
     },
@@ -430,6 +439,7 @@ export async function boot(env: BootEnv): Promise<void> {
     get run() { return sessionRunner; },
     files: fileStore,
     Vault: vault,
+    Notifier: notifierProxy,
     hooks:         hookReg,
     tools:         toolReg,
     systemContext: systemContextReg,

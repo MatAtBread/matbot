@@ -123,8 +123,13 @@ function makeSessionActionTool(store: Store<Session>): Tool<ToolResultOf<'sessio
         switch (args.action) {
           case 'list': {
             const { includeArchived } = args as Extract<SessionInput, { action: 'list' }>;
+            // `immutable`: this path reads four summary fields and never edits a document, so the store
+            // may hand back shared instances — which is what lets it skip re-parsing every session body
+            // on a sidebar refresh (see FilesystemStore's parse cache).
             const { items } = await store.query(
-              includeArchived ? {} : { where: { op: 'neq', field: 'status', value: 'archived' } },
+              includeArchived
+                ? { immutable: true }
+                : { immutable: true, where: { op: 'neq', field: 'status', value: 'archived' } },
             );
             const sorted = items.slice().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
             yield { type: 'result', value: sorted.map(toSummary) };
@@ -164,7 +169,7 @@ function makeSessionActionTool(store: Store<Session>): Tool<ToolResultOf<'sessio
               throw e;
             }
 
-            const { items } = await store.query({});
+            const { items } = await store.query({ immutable: true });   // read-only: summarised, never edited
             const ordered   = applySort(items, page.sort);   // stored-field ordering, before any text synthesis
             const match     = page.where !== undefined ? compileFilter(page.where) : () => true;
 

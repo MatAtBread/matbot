@@ -39,6 +39,18 @@ export interface StoreQuery {
   sort?:   SortSpec[];
   limit?:  number;
   cursor?: string | undefined;
+  /**
+   * The caller's promise not to mutate the returned documents, freeing a backend to hand back shared
+   * instances instead of freshly-materialised ones. A pure optimisation hint: a backend may ignore it
+   * and nothing changes, so it is never load-bearing for correctness — but a backend that honours it
+   * can skip re-materialising documents that have not changed since the last query, which for a
+   * summary listing (read every document, use four fields) is the entire cost of the call.
+   *
+   * Set it only where the promise is actually kept. A read-modify-write path — pull a page, edit a
+   * document, `cas` it back — must NOT set it: the instance it edits may be one another caller is
+   * still reading, and a backend caching it would then be caching an edit that never reached disk.
+   */
+  immutable?: boolean;
 }
 
 export interface QueryResult<T> {

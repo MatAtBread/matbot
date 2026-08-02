@@ -1,5 +1,16 @@
 # @matatbread/matbot-cognition
 
+## 0.3.8
+
+### Patch Changes
+
+- **The Inner voice trigger ships with `{ maxPerTurn: 2, quietTurns: 1 }`**, backfilled onto installs
+  seeded before the field existed (skipped if the field was since tuned or cleared).
+
+- Updated dependencies
+  - @matatbread/matbot-plugin-api@0.3.8
+  - @matatbread/matbot-tool-store@0.3.8
+
 ## 0.3.7
 
 ### Patch Changes
