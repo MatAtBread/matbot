@@ -1,5 +1,18 @@
 # @matatbread/matbot-provider-anthropic
 
+## 0.3.9
+
+### Patch Changes
+
+- **Optional (providers/anthropic).** A thinking block delivered whole on its opener is no longer
+  discarded. The stream handler seeded `{ thinking: '', signature: '' }` on `content_block_start` and
+  filled it from the subsequent deltas, which is what the Anthropic API itself sends; an
+  Anthropic-compatible gateway that puts the entire payload inline on the opener and sends no deltas
+  therefore stored an empty block. The opener's own `thinking` and `signature` are now the seed, so both
+  shapes round-trip.
+  - @matatbread/matbot-core@0.3.9
+  - @matatbread/matbot-plugin-api@0.3.9
+
 ## 0.3.8
 
 ### Patch Changes

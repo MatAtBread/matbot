@@ -144,7 +144,7 @@ function makeTool(services: MatbotMachine): Tool<ToolResultOf<'determine_provena
       for (const l of located) {
         // A vetoed search is decisive: a strict key is absent, so any material found on the OTHER
         // keys would be corroboration for a term the session does not mention. Report it distinctly
-        // from "diffuse" absence so the caller can tell "this specific term isn't here" from "nothing
+        // from diffuse absence so the caller can tell "this specific term isn't here" from "nothing
         // is here". Skip the reader (already skipped: cites was empty) and the cold probe (the veto
         // is about session content, not the model's prior).
         if (l.ev.vetoed) {

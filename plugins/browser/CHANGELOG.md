@@ -1,5 +1,17 @@
 # @matatbread/matbot-browser
 
+## 0.3.9
+
+### Patch Changes
+
+- **Optional (tool-plugin, browser).** The provider tools' `PARAMETERS` list is labelled as an example,
+  not a schema. Both the node `provider` tool and its browser counterpart list `maxTokens` /
+  `temperature` / `topP` under a heading that read as the permitted set, so anything absent from it looked
+  unsupported. `parameters` is passed to the endpoint unmodified and its contents are model- and
+  provider-specific; the heading now says so.
+  - @matatbread/matbot-core@0.3.9
+  - @matatbread/matbot-plugin-api@0.3.9
+
 ## 0.3.8
 
 ### Patch Changes
