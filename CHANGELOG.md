@@ -13,6 +13,18 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Bug fixes
 
+- **A `toolcall` hook returning `abort` no longer discards the whole turn.** It was the one terminal
+  path in the runner that returned without persisting, and nothing is written mid-turn — so a hook
+  aborting on a late round threw away every earlier round's assistant message and tool results along
+  with the current response, all of which the frontend had already drawn. A reload showed a bare user
+  message. The turn is now committed before the `aborted` event.
+  - Committing it requires closing the `tool_use`/`tool_result` pairing, since the assistant message
+    carries a `tool-call` block per pending call and an unpaired `tool_use` is rejected by the next
+    submission (Anthropic 400s; nothing downstream reconciles them). An abort is a turn-level stop
+    rather than a verdict on the tools, so the call the hook judged and any later calls in the same
+    round are recorded as not-run.
+  - The judged call now also gets its `tool:end`. Previously `abort` returned between `tool:start` and
+    `tool:end`, leaving a frontend with a tool bubble that never closed.
 - **`complete()` no longer loses the input and cache token counts of an out-of-band completion.** Both
   hosts accumulated the response's usage by overwriting on each `usage` event rather than folding, but
   an adapter may report one call's usage in several parts: the anthropic adapter sends input and cache

@@ -330,7 +330,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
     const toolResults: MessageContent[] = [];
     const toolMarkers: MessageContent[] = [];
 
-    for (const tc of pendingCalls) {
+    for (const [callIdx, tc] of pendingCalls.entries()) {
       yield { type: 'tool:start', callId: tc.id, name: tc.name, input: tc.input, traceId };
 
       const tool = opts.toolRegistry !== undefined ? opts.toolRegistry.resolve(tc.name) : tools.get(tc.name);
@@ -347,6 +347,29 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
         tool,
       });
       if (decision.abort) {
+        // Commit the turn before leaving. This was the one terminal path that returned without a
+        // persist, and nothing is written mid-turn (see the store.set sites) — so a hook aborting on a
+        // late round discarded the whole turn: every earlier round's assistant message and tool
+        // results, plus this round's response, all of which the frontend had already drawn.
+        //
+        // Committing requires closing the tool_use/tool_result pairing first: the assistant message
+        // above carries a `tool-call` block per pending call, and a `tool_use` left unpaired is
+        // rejected by the next submission (Anthropic 400s; nothing downstream reconciles them). The
+        // abort is a turn-level stop rather than a verdict on the tools, so the calls that never ran
+        // are recorded as not-run. `tool:end` is carried only for the call the hook actually judged —
+        // the rest never had a `tool:start`, so a frontend has no bubble to close for them.
+        const stopped = { error: `Tool call not executed — the turn was aborted (${decision.abort}).` };
+        toolResults.push({ type: 'tool-result', id: tc.id, result: stopped, isError: true });
+        yield { type: 'tool:end', callId: tc.id, result: stopped, isError: true, traceId };
+        for (const rest of pendingCalls.slice(callIdx + 1)) {
+          toolResults.push({ type: 'tool-result', id: rest.id, result: stopped, isError: true });
+        }
+        session = appendMessage(session, createMessage({ role: 'tool', content: toolResults, traceId }));
+        if (toolMarkers.length > 0) {
+          session = appendMessage(session, createMessage({ role: 'marker', content: toolMarkers, traceId }));
+          yield { type: 'marker', content: toolMarkers, traceId };
+        }
+        await store.set(session.id, session);
         yield { type: 'aborted', reason: decision.abort, session, traceId };
         return;
       }
