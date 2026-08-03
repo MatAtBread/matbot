@@ -9,6 +9,25 @@ interface Parsed<T> { mtimeMs: number; size: number; doc: T }
 // the rest fall back to a fresh read, rather than growing without bound.
 const PARSE_CACHE_BYTES = 64 * 1024 * 1024;
 
+/**
+ * The on-disk name for a document id. A `Store` id is an arbitrary string — skills are keyed
+ * `scope:name`, user-scoped state by email address — but a filename cannot hold every string, so
+ * anything outside `[A-Za-z0-9_.-]` is percent-escaped rather than rejected. `.` is left readable
+ * and cannot traverse: `filePath` always appends `.json`, so an id of `..` is the file `...json`,
+ * inside the directory.
+ *
+ * One-directional — nothing decodes. `query` reads each document's `id` from its own contents, and
+ * the parse cache is keyed on the filename at both ends, so the inverse is never needed.
+ *
+ * The name set this replaced (`[\w-]+`) encodes to itself, so documents written before this keep
+ * their filenames — no migration — and `%` cannot occur in one, so the two eras cannot collide.
+ */
+function encodeId(id: string): string {
+  if (id.length === 0) throw new Error('Invalid store id: ""');
+  // encodeURIComponent leaves !'()*~ alone; `*` is a glob and illegal in a Windows filename.
+  return encodeURIComponent(id).replace(/[!'()*~]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+}
+
 export class FilesystemStore<T extends { id: string; version: string }> implements Store<T> {
   private initPromise: Promise<void> | undefined;
   private locks = new Map<string, Promise<unknown>>();
@@ -49,7 +68,8 @@ export class FilesystemStore<T extends { id: string; version: string }> implemen
   }
 
   private forget(id: string): void {
-    const name = `${id}.json`;
+    // Encoded: `remember` keys on the readdir entry, so the raw id would miss and strand the entry.
+    const name = `${encodeId(id)}.json`;
     const prev = this.parsed.get(name);
     if (prev === undefined) return;
     this.parsed.delete(name);
@@ -64,13 +84,8 @@ export class FilesystemStore<T extends { id: string; version: string }> implemen
 
   // ── Helpers ──────────────────────────────────────────────────────────────────
 
-  private safeName(id: string): string {
-    if (!/^[\w-]+$/.test(id)) throw new Error(`Invalid store id: "${id}"`);
-    return id;
-  }
-
   private filePath(id: string): string {
-    return join(this.dir, `${this.safeName(id)}.json`);
+    return join(this.dir, `${encodeId(id)}.json`);
   }
 
   // Promise-chain mutex — serialises concurrent operations on the same key.
@@ -150,7 +165,8 @@ export class FilesystemStore<T extends { id: string; version: string }> implemen
     const pool: T[] = [];
     await Promise.all(
       entries
-        .filter(e => /^[\w-]+\.json$/.test(e))
+        // The names encodeId can produce. Still excludes writeAtomic's `<name>.json.tmp` scratch files.
+        .filter(e => /^[\w.%-]+\.json$/.test(e))
         .map(async e => {
           const path = join(this.dir, e);
           try {

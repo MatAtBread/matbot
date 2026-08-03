@@ -9,6 +9,28 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## Unreleased
+
+### Optional
+
+- **storage/filesystem — a document id that isn't filename-safe is escaped, not rejected.**
+  `FilesystemStore` validated ids against `^[\w-]+$` and threw `Invalid store id` for anything else,
+  but a `Store` id is an arbitrary string: a skill keyed `scope:name` and user-scoped state keyed by
+  email address are both unstorable, so every `get`/`set` for them threw at runtime. Anything outside
+  `[A-Za-z0-9_.-]` is now percent-escaped for the filename instead (`.` left readable — it cannot
+  traverse, since a `.json` suffix is always appended, making an id of `..` the file `...json` inside
+  the store directory). The set that was previously allowed escapes to itself, so existing documents
+  keep their filenames and there is no migration; `%` cannot occur in one of those older names, so the
+  two eras cannot collide. Escaping is one-directional — nothing decodes, because `query` reads each
+  document's `id` from its own contents.
+  - **`query` enumerates them too.** Its directory filter was the same narrow `^[\w-]+\.json$`, so an
+    escaped id would have been written but then skipped by every listing — the widened filter still
+    excludes the `<name>.json.tmp` scratch files an atomic write leaves behind.
+  - **A write now invalidates its own parse-cache entry again.** `forget()` built its key from the raw
+    id while `remember()` keys on the on-disk name; for an id that escapes to something else the two
+    diverged, so `set`/`delete` stranded the stale entry and a subsequent `immutable` query served the
+    superseded document.
+
 ## 0.3.9
 
 _Provenance stops citing itself, and says which of a claim's terms it actually found. Plus: the
