@@ -1253,7 +1253,7 @@ async function main(): Promise<void> {
     ...(rawConfig.credentials !== undefined ? { credentials: await resolveCredentialsInteractive(rawConfig.credentials, vault) } : {}),
     ...(rawConfig.endpoint    !== undefined ? { endpoint: await vault.resolve(rawConfig.endpoint) } : {}),
     ...(rawConfig.parameters  !== undefined ? { parameters: rawConfig.parameters } : {}),
-    ...(rawConfig.fallback    !== undefined ? { fallback:   rawConfig.fallback   } : {}),
+    ...(rawConfig.maxRounds   !== undefined ? { maxRounds:  rawConfig.maxRounds  } : {}),
   };
 
   // ── Session ───────────────────────────────────────────────────────────────────

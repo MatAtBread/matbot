@@ -36,7 +36,17 @@ export interface ProviderConfig {
   credentials?:  Record<string, string>;
   endpoint?:    string;
   parameters?:  ModelParameters;
-  fallback?:    string;
+  /**
+   * Ceiling on the agentic rounds one turn may take against this provider — a round being one provider
+   * call plus the tool batch it asked for. Reaching it ends the turn (`aborted`, reason `round-limit`)
+   * rather than starting another round. Absent ⇒ unbounded, which is the historical behaviour.
+   *
+   * It lives here, per provider, rather than as one global or a per-call override because that is the
+   * unit spend is actually denominated in: a local model can afford to grind, a frontier model at 100×
+   * the rate cannot, and the same deployment runs both. Not in `parameters` — those are forwarded to
+   * the endpoint unmodified, and this never leaves matbot.
+   */
+  maxRounds?:   number;
 }
 
 /**

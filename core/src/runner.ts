@@ -173,6 +173,11 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
 
   // ── 3. Agentic loop ────────────────────────────────────────────────────────
 
+  // Rounds already run against this provider, where a round is one provider call plus the tool batch it
+  // asked for. Compared against the provider profile's own `maxRounds` — a spend ceiling denominated in
+  // the unit spend varies by. Absent ⇒ unbounded (`?? Infinity`), the historical behaviour.
+  let round = 0;
+
   for (;;) {
     // Respect an abort that arrived between turns (e.g. during tool execution).
     if (signal.aborted) {
@@ -180,6 +185,17 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
       yield { type: 'aborted', reason: typeof signal.reason === 'string' ? signal.reason : 'user-abort', session, traceId };
       return;
     }
+
+    // Checked HERE — before starting a round, not part-way through one — so the previous round's tool
+    // results are already appended and there is nothing to reconcile: the same persist-and-yield as the
+    // abort above. A turn stopped by the ceiling was cut short, not faulty, so it ends `aborted` rather
+    // than `error`, and the reason is machine-readable for a frontend that wants to say why.
+    if (round >= (providerConfig.maxRounds ?? Infinity)) {
+      await store.set(session.id, session);
+      yield { type: 'aborted', reason: `round-limit: provider "${config.provider}" allows ${providerConfig.maxRounds} rounds per turn`, session, traceId };
+      return;
+    }
+    round += 1;
 
     // A raced screen verdict that already fired (settled during setup, or while a previous tool round
     // ran): fold its correction in before generating, so this call is informed directly rather than

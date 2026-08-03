@@ -11,8 +11,55 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ## Unreleased
 
+### Breaking changes
+
+- **`ProviderConfig.fallback` is removed.** It was declared in `plugin-api`, explicitly parsed out of
+  `matbot.yaml` by the config loader, and copied field-by-field through the node app — and read by
+  nothing, in any package. Nothing changes at runtime, because nothing ever consulted it; what goes away
+  is a config surface that silently did nothing. Someone could set `fallback: other-profile` on a
+  provider, get no parse error and no warning, and reasonably conclude that a failing provider would
+  fail over. Removed rather than implemented because failover is a real design question — it has to
+  decide how two providers billed for one turn are accounted, and what happens to a tool-call's
+  `ProviderMeta` round-trip token when the retry lands on a provider that never issued it — and a
+  stub answering none of that is worse than nothing. An existing `fallback:` key in a config is
+  ignored exactly as before.
+
+### API gaps filled
+
+- **`ProviderConfig.maxRounds`** — an optional per-profile ceiling on the agentic rounds one turn may
+  take, a round being one provider call plus the tool batch it asked for. Reaching it ends the turn
+  (`aborted`, reason `round-limit: …`) instead of starting another round; absent ⇒ unbounded, which is
+  the previous behaviour, so nothing changes for a config that does not set it. The runner's loop had no
+  upper bound at all, so a model/tool feedback cycle could run until an external timeout or a user
+  cancel.
+  - **On the provider profile, not global and not per-call**, because that is the unit spend is
+    denominated in: a local model can afford to grind where a frontier model at 100× the rate cannot,
+    and one deployment runs both. It is a sibling of `model`/`endpoint` and deliberately **not** a
+    member of `parameters`, which is forwarded to the endpoint unmodified — this never leaves matbot.
+  - **In core rather than as a hook**, because a ceiling reached through a plugin is a ceiling that
+    disappears when the plugin fails to load, and because expressing it as a hook turned out to require
+    three non-obvious things of every consumer: deriving the round number, knowing that `rejectTool`
+    does not actually bound the loop (it only feeds an error back — an uncooperative model keeps
+    driving full-history provider calls), and therefore staging a soft nudge ahead of a hard stop. That
+    is a great deal of subtlety for what should be a number.
+  - Validated at the config boundary: a non-integer or `< 1` value is rejected with a clear message
+    rather than clamped, since silently treating `0` as "no turn may do anything" would read as a
+    broken provider. Settable and visible through the `provider` tool's `add`/`list` as well as
+    `matbot.yaml`.
+
 ### Bug fixes
 
+- **`followup` now runs only for a turn that actually committed.** It is documented as post-commit and
+  the code said it was "skipped on abort", but the gate was `!ac.signal.aborted` — which knows about the
+  two signal-driven aborts (a steer, a user cancel) and not the policy ones. A `screen` hook or a
+  `toolcall` hook refusing a turn, and any turn ending in `error`, therefore still got a followup pass
+  over history containing no completed response, where a hook judging "the assistant's answer" was
+  reading the previous turn's. Worse, a `resubmit` from there undoes the stop that just happened: for
+  the new `maxRounds` ceiling it would have handed out a fresh budget, making the limit worth up to
+  `MAX_RESUBMIT_DEPTH` times what was configured. The pump now tracks which terminal event the turn
+  ended on and runs `followup` only for `done`. A hook that wants to observe a failed or interrupted
+  turn should publish on the `Notifier` from wherever the failure arises, which is where that fact
+  actually is.
 - **A `toolcall` hook returning `abort` no longer discards the whole turn.** It was the one terminal
   path in the runner that returned without persisting, and nothing is written mid-turn — so a hook
   aborting on a late round threw away every earlier round's assistant message and tool results along
