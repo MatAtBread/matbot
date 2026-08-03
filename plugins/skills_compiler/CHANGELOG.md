@@ -1,5 +1,12 @@
 # @matatbread/matbot-tool-skill-compiler
 
+## 0.3.9
+
+### Patch Changes
+
+- @matatbread/matbot-plugin-api@0.3.9
+- @matatbread/matbot-tool-types@0.3.9
+
 ## 0.3.8
 
 ### Patch Changes

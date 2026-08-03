@@ -174,7 +174,7 @@ export function createBrowserProviderTool(admin: ProviderAdmin): Tool<ToolResult
       'them and the tool will not prompt for a key either. `remove` refuses to delete the only ' +
       'configured profile or the one powering the current turn — add a replacement first or switch ' +
       'providers.\n\n' +
-      'PARAMETERS  (pass as the `parameters` object on add)\n' +
+      'PARAMETERS  (pass as the `parameters` object on add). NB: This is an example - the parameters are passed to the LLM endpoint with no modification and are model/provider specific\n' +
       '  maxTokens   — integer, maximum output tokens\n' +
       '  temperature — float 0.0–1.0\n' +
       '  topP        — float, nucleus sampling probability\n' +

@@ -1,5 +1,13 @@
 # @matatbread/matbot-storage-profiles
 
+## 0.3.9
+
+### Patch Changes
+
+- @matatbread/matbot-core@0.3.9
+- @matatbread/matbot-plugin-api@0.3.9
+- @matatbread/matbot-storage-filesystem@0.3.9
+
 ## 0.3.8
 
 ### Patch Changes

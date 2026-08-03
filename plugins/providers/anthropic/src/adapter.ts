@@ -119,11 +119,13 @@ export class AnthropicAdapter implements ProviderAdapter {
 
         case 'content_block_start': {
           const idx   = ev['index'] as number;
-          const block = ev['content_block'] as { type: string; id?: string; name?: string; data?: string };
+          const block = ev['content_block'] as { type: string; id?: string; name?: string; data?: string; thinking?: string; signature?: string };
           if (block.type === 'tool_use') {
             toolInputs.set(idx, { id: block.id ?? '', name: block.name ?? '', json: '' });
           } else if (block.type === 'thinking') {
-            thinkingBlocks.set(idx, { thinking: '', signature: '' });
+            // Providers may deliver the thinking payload inline on the opener rather than as deltas
+            // (e.g. some Anthropic-compat gateways). Seed from the opener so we don't discard it.
+            thinkingBlocks.set(idx, { thinking: block.thinking ?? '', signature: block.signature ?? '' });
           } else if (block.type === 'redacted_thinking') {
             redactedBlocks.set(idx, { data: block.data ?? '' });
           } else if (block.type !== 'text') {

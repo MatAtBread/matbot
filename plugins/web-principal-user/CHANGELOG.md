@@ -1,5 +1,11 @@
 # @matatbread/matbot-web-principal-user
 
+## 0.3.9
+
+### Patch Changes
+
+- @matatbread/matbot-plugin-api@0.3.9
+
 ## 0.3.8
 
 ### Patch Changes

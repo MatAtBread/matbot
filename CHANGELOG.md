@@ -9,6 +9,51 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## 0.3.9
+
+_Provenance stops citing itself, and says which of a claim's terms it actually found. Plus: the
+Anthropic adapter no longer discards a thinking block delivered whole on its opener, and the provider
+tools stop presenting their parameter list as a closed set._
+
+### Optional
+
+- **provenance — a tool can be excluded from the search pool, and `determine_provenance` excludes
+  itself by default.** Its own results are verdicts *about* claims rather than observation of the world,
+  so a second pass over a session it had already judged found its own prior output and cited it as
+  evidence for the very claim that output was a verdict on — circular, and confidently so, since the
+  extract genuinely does contain the claim's every key. The exclusion list resolves at three levels:
+  the `ignoreTools` call parameter, then a pin held by `provenance_config`, then the coded default
+  (`["determine_provenance"]`). An explicit empty array at either settable level means "include
+  everything" and is distinct from omission, which falls through to the next level; the same
+  three-level shape also serves suppressing a verbose tool whose output is noise rather than record.
+  Only tool output is filtered — `USER` messages never are, because a user quoting a tool result is
+  still the user speaking, and the quotation is legitimate provenance for what they were told.
+  `provenance_config` now carries both settings: `set` takes `provider` and/or `ignoreTools` (at least
+  one, each validated independently), `get` reports the current values *and* the coded default so a
+  caller can see what it is overriding, and `clear` resets both.
+- **provenance — a strict-key veto is its own verdict, and every result says which keys were found.**
+  A caller-supplied key appearing nowhere zeroes the search (it always did — material found on the
+  *other* keys would read as corroboration for a term the session does not mention), but the empty
+  result was then indistinguishable from finding nothing at all, and the two mean opposite things:
+  "this specific term isn't here" is a located absence, "nothing bearing on this is here" is a diffuse
+  one. The first is now reported as `vetoed`, skipping both the reader and the cold probe — the veto is
+  about session content, not about the model's prior, so re-asking the model would answer a different
+  question. Alongside it, every verdict carries `keyHits`: per key, whether any spelling of it was seen
+  and which sources it was seen in (`USER`, `TOOL:<name>`). On a composed claim that is the part a
+  verdict alone cannot express — which terms are retrieved and which are fabricated — and a `vetoed`
+  verdict names its offender as the entry with `found: false`. The tool description now asks callers to
+  split composite terms into their discriminating parts, so the veto can pinpoint rather than merely
+  fire.
+- **providers/anthropic — a thinking block delivered whole on its opener is no longer discarded.** The
+  stream handler seeded `{ thinking: '', signature: '' }` on `content_block_start` and filled it from
+  the subsequent deltas, which is what the Anthropic API itself sends; an Anthropic-compatible gateway
+  that puts the entire payload inline on the opener and sends no deltas therefore stored an empty
+  block. The opener's own `thinking` and `signature` are now the seed, so both shapes round-trip.
+- **provider tools — the `PARAMETERS` list is labelled as an example, not a schema.** Both the node
+  `provider` tool and its browser counterpart list `maxTokens` / `temperature` / `topP` under a heading
+  that read as the permitted set, so anything absent from it looked unsupported. `parameters` is passed
+  to the endpoint unmodified and its contents are model- and provider-specific; the heading now says so.
+
 ## 0.3.8
 
 _One notification bus replaces every bespoke "something changed" channel. Three private streams are

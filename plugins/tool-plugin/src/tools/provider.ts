@@ -464,7 +464,7 @@ ${adapterSection}
 CURRENTLY CONFIGURED PROFILES
   ${profileList}
 
-PARAMETERS  (pass as the parameters object)
+PARAMETERS  (pass as the parameters object). NB: This is an example - the parameters are passed to the LLM endpoint with no modification and are model/provider specific
   maxTokens   — integer, maximum output tokens
   temperature — float 0.0–1.0
   topP        — float, nucleus sampling probability
