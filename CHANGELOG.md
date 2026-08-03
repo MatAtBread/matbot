@@ -11,6 +11,19 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ## Unreleased
 
+### Bug fixes
+
+- **`complete()` no longer loses the input and cache token counts of an out-of-band completion.** Both
+  hosts accumulated the response's usage by overwriting on each `usage` event rather than folding, but
+  an adapter may report one call's usage in several parts: the anthropic adapter sends input and cache
+  counts on `message_start` and output tokens on `message_delta`. Last-event-wins therefore returned
+  `inputTokens: 0` with no cache figures for every `complete()` / `singleTurn()` against an Anthropic
+  provider — `single_turn`, a classifier, a titling pass, anything a plugin runs off-conversation — and
+  the same zeroes went into the ambient usage sink, so a tool's attributed spend under-reported too. The
+  loop now folds with `addUsage`, exactly as the runner has always folded a turn's usage, so the two
+  accounting paths agree. Adapters that report one cumulative event at end of stream (google, chatjimmy,
+  and OpenAI-compatible endpoints) are unaffected: folding a single event equals overwriting it.
+
 ### Optional
 
 - **storage/filesystem — a document id that isn't filename-safe is escaped, not rejected.**
