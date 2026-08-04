@@ -1,5 +1,37 @@
 # @matatbread/matbot-core
 
+## 0.4.0
+
+### Minor Changes
+
+- Two turn-loop bug fixes, plus the plugin-api 0.4.0 surface changes re-exported.
+
+  **Bug fixes**
+
+  - A provider call that fails mid-turn now commits the rounds that succeeded. Nothing is written mid-turn,
+    so the failed-call exit returning without a commit discarded the whole turn — and the multi-round case
+    is the tool-using one, so an upstream 500 on round 3 lost two completed rounds of assistant messages and
+    tool results the frontend had already drawn.
+  - A plugin's `services.mounted` interests are dropped on unload. The only cleanup path was an aborted
+    `signal`, which is optional, so a plugin that omitted it left a live handler firing into a torn-down
+    closure — one more per reload generation, silently.
+  - A tool-name collision can no longer crash the process or revive an unloaded plugin's tool: the
+    collision branch is the one `await` in `registerTool` with no caller to own its outcome, so a throw
+    there was an unhandled rejection, and a slow resolution could land after an unload.
+  - `teardownPlugins` named the wrong plugin in its error log (reversed list, unreversed index).
+
+  **Breaking**
+
+  - The duplicate `ProviderRegistry` declared in `core/src/types.ts` is gone. It shadowed plugin-api's via
+    `export type *`, so `import type { ProviderRegistry } from '@matatbread/matbot-core'` silently resolved
+    to the adapter registry rather than the `ProviderConfig` map. Nothing imported it.
+  - Core re-exports plugin-api's `/host` subpath in full, so hosts need no change for that move. Every
+    branded error is now re-exported, including the previously-missing `readOnlyError`/`isReadOnlyError`.
+  - The pre-Store flat-settings migration is dropped; an unrecognised settings document is treated as
+    absent. Every `settings.get()` had been paying for the check.
+  - `runSession` yields `TurnEvent` rather than `PipelineEvent` — a turn never emits the session-level
+    `idle`.
+
 ## 0.3.10
 
 ### Patch Changes

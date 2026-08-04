@@ -9,7 +9,7 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
-## Unreleased
+## 0.4.0
 
 ### Breaking changes
 
@@ -104,6 +104,33 @@ churn and less likely to affect a consumer who doesn't use them.
   `observe()` to that plugin's load extent and aborts it in `unloadPlugin`, alongside the existing
   tool/hook/service removals. `MountConsumeOptions.signal` keeps working and becomes a *narrowing*
   convenience ("end earlier than my unload"), not the cleanup path.
+
+- **`teardownPlugins` named the wrong plugin in its error log.** `Promise.allSettled` ran over the reversed
+  plugin list while the log indexed the unreversed one, so a teardown failure was attributed to the plugin
+  at the mirrored position. Diagnostics only.
+
+### Optional
+
+- Internal refactors with no behavioural change, listed because they move code a consumer may be reading:
+  `plugin-api/src/types.ts` is now a barrel over `types/` (one file per domain, 18 of them — all 77
+  exported names and every declaration body preserved verbatim); host boot assembly split out of
+  `plugin.ts` into `host-machine.ts`; `runSession`'s six exits funnel through one commit-and-yield; the
+  three copies of "fold durable context onto the user turn" became `foldOntoUserTurn` in
+  `plugin-api/src/session.ts`; claiming a raced screen verdict is one step rather than two called at three
+  sites; `bindPluginOps` replaces the two hand-written `ToolContext` plugin-op closures; and
+  `makePluginSettings`' two near-identical CAS retry loops became one `update(mutate)`.
+
+- `ToolContract`'s phantom fields are keyed by non-exported `unique symbol`s, so the type is
+  uninhabitable — a hallucinated result shape can no longer be cast into existence. No effect on
+  `ToolResultOf`/`ToolResultFor`/`ToolProxy`, which only ever `infer` through the arms.
+
+- `unifyServices` no longer traps `has`, so `'Foo' in services` is structural rather than a registry
+  lookup. The documented presence check is unchanged: `services.Foo !== undefined`.
+
+- Docs: the five open-registry augmentation points (`MatbotServices`, `ToolContracts`, `Notifications`,
+  `MarkerData`, `ProviderMeta`) are one technique, now named and explained once — in `docs/DEVELOPING.md`
+  for plugin authors and `CLAUDE.md` for maintainers — with each declaration pointing at it instead of
+  restating it.
 
 ## 0.3.10
 
