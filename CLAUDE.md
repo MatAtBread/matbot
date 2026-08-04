@@ -135,6 +135,29 @@ All runtime state under `.data/` **next to `matbot.yaml`**, never in source:
 
 ---
 
+## Open-registry augmentation
+
+**Five extension points, one technique** — the most distinctive thing about matbot's API, and previously explained five times in five places. Each is an empty (or near-empty) interface in `plugin-api` that a package adds a key to via `declare module`; declaration merging accumulates every loaded plugin's contribution, so `plugin-api` never changes and never learns that the package exists. Helper types derive the real shapes from the merged registry.
+
+| Registry | Key | Value | Home |
+|---|---|---|---|
+| `MatbotServices` | interface name | `Foo?: Foo` | `plugin.ts` |
+| `ToolContracts` | tool name | `ToolContract<Result, Params>` arms | `types/tools.ts` |
+| `Notifications` | `<package-name>#<InterfaceName>` | the notification shape | `notify.ts` |
+| `MarkerData` | marker creator | the `data` shape | `types/messages.ts` |
+| `ProviderMeta` | the package's namespace | its round-trip state | `types/provider.ts` |
+
+Four consequences follow from the technique, and account for most of the per-registry rules stated elsewhere in this document:
+
+1. **The key is the type's identity** — there is no runtime type information at these boundaries, so the string *is* the erasure-time stand-in. Name it after the thing, never a role. `Notifications` qualifies with a package name because a `kind` is globally scoped and an importer cannot rename it out of a collision.
+2. **Open at runtime** — a plugin this build never compiled against, or a bridged remote, can contribute a key. Always `default` a `switch`; exhaustiveness checking over these is unsound.
+3. **Absence is a type** — `?:` is the whole mechanism by which "may not be loaded" reaches a call site. Degrade; never fall back to loading it (*Discovery vs. direct dependency*).
+4. **Unregistered ⇒ loose, not broken** — an unknown tool name yields `unknown`, an unregistered marker creator `data: unknown`. Base types stay permissive so the unions still work.
+
+The author-facing version is `docs/DEVELOPING.md` *Open-registry augmentation*; each of the five declarations points at it rather than restating it.
+
+---
+
 ## Service registry
 
 `MatbotMachine` is the runtime environment passed to every plugin's `setup()` — the intersection `MatbotServices & MatbotRuntime`. **`MatbotRuntime`** is the fixed plumbing (hooks, tools, complete, settings, sessions, createStore, and the registry API itself): always present, never registerable. **`MatbotServices`** is the registry bucket — the swappable, registerable services keyed by interface name (`StorageBackend?`, `Vault`, `KnowledgeIndex`, plus whatever plugins augment in). It alone is the `keyof` domain of `register`/`get` and the surface third-party plugins augment, so `register('hooks', …)` is a *type error*. Optional services are advertised with `register` and consumed as **members** — one access surface:

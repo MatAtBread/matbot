@@ -72,6 +72,9 @@ export interface UsageRecord {
  * A single session interleaves tool-calls from many providers, so this must be an open, additive union
  * (interface augmentation) — a generic type parameter can bind only one provider per instantiation and
  * so could not type a heterogeneous transcript.
+ *
+ * One of matbot's five open-registry augmentation points — same technique at each; see
+ * docs/DEVELOPING.md *Open-registry augmentation* for the shared shape and the rules that follow from it.
  */
 export interface ProviderMeta {}
 

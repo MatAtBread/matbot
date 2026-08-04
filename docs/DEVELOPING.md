@@ -187,6 +187,48 @@ read-write `.data/` tree), so a restart loads from disk rather than re-fetching.
 
 ---
 
+## Open-registry augmentation
+
+matbot's most distinctive API idea, and the one thing worth learning before anything else: **five
+different extension points are the same technique.** Learn it once and you can read all five.
+
+Each is an empty (or near-empty) interface in `plugin-api` that your package *adds a key to* via
+`declare module`. TypeScript merges declarations across the whole program, so the interface ends up
+holding every loaded plugin's contribution — while `plugin-api` itself never changes, and never needs to
+know your package exists. Helper types then derive the real shapes from the merged registry.
+
+| Registry | Key is | You add | So that |
+|---|---|---|---|
+| `MatbotServices` | an **interface name** | `Foo?: Foo` | your service is reachable as `services.Foo`, `?` marking that it may be absent |
+| `ToolContracts` | a **tool name** | `ToolContract<Result, Params>` arms | `await tool.your_tool(params)` narrows its result, and the wire description is derived |
+| `Notifications` | `<package-name>#<InterfaceName>` | your notification shape | `notify`/`consume` are typed and your `kind` cannot collide |
+| `MarkerData` | a **marker creator** | your `data` shape | `Marker<'your-creator'>` reads/writes typed |
+| `ProviderMeta` | your **package's namespace** | e.g. `google?: { … }` | core carries provider round-trip state opaquely and never changes when you add some |
+
+```ts
+declare module '@matatbread/matbot-plugin-api' {
+  interface MatbotServices { Analytics?: Analytics }
+}
+```
+
+Four properties follow from the technique, and explain most of the per-registry rules:
+
+- **The key is the identity.** There is no runtime type information at the boundary, so the string
+  key *is* the type's erasure-time stand-in. Name it after the thing, never after a role — hence
+  "the key is the interface name", and `Notifications` qualifying its keys with a package name (a
+  `kind` is globally scoped, and an importer cannot rename it out of a collision).
+- **It is open at runtime.** A plugin this build never compiled against — or a bridged remote server —
+  can contribute a key. So a `switch` over `Notification['kind']` must always `default`, and
+  exhaustiveness checking over these registries is unsound, unlike a closed union.
+- **Absence is a type, not an error.** `?:` is the entire mechanism by which "this may not be loaded"
+  reaches a call site. Degrade (`if (!services.Analytics) return;`); never fall back to loading it.
+- **Unregistered means loose, not broken.** An unknown tool name yields `unknown`, an unregistered
+  marker creator yields `data: unknown`. The base types stay permissive so the unions still work.
+
+Each of the five declarations carries its own specifics. This is the shared shape underneath.
+
+---
+
 ## Services available in `setup()`
 
 `setup(services)` receives a `MatbotMachine` — the intersection of two interfaces. **`MatbotRuntime`**

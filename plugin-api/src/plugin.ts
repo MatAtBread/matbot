@@ -98,6 +98,9 @@ export interface PluginSelf {
 // ── Services container ────────────────────────────────────────────────────────
 
 /**
+ * One of matbot's five open-registry augmentation points — same technique at each; see
+ * docs/DEVELOPING.md *Open-registry augmentation* for the shared shape and the rules that follow from it.
+ *
  * The registry bucket: the swappable, registerable services, keyed by interface name. This is the
  * `keyof` domain of {@link MatbotRuntime.register}/`get`, and the surface third-party plugins augment
  * (`declare module '@matatbread/matbot-plugin-api' { interface MatbotServices { Foo?: Foo } }`). The

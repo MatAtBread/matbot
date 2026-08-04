@@ -72,6 +72,9 @@ export type ToolEvent<Result = unknown> =
  * key only on the discriminant so a call carrying just that field still matches. When no arm's pattern
  * matches (a non-literal discriminant, or an absence-discriminant the positive patterns can't express),
  * the result falls back to the union of every arm — always sound, just less narrow.
+ *
+ * One of matbot's five open-registry augmentation points — same technique at each; see
+ * docs/DEVELOPING.md *Open-registry augmentation* for the shared shape and the rules that follow from it.
  */
 export interface ToolContracts {}
 
