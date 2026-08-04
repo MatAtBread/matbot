@@ -1,5 +1,5 @@
 import type {
-  Session, MessageContent, Usage, ProviderMeta, DeferredCorrection, TruncatedToolResult,
+  Session, Message, MessageContent, ModelContent, Usage, ProviderMeta, DeferredCorrection, TruncatedToolResult,
   PipelineEvent, RunConfig, ProviderAdapter, ProviderConfig,
   Tool, ToolRegistry, ToolContext, Store, FileStore, SystemContextRegistry, Vault, PromptFn, FormField,
 } from './types.js';
@@ -183,6 +183,10 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
   // the unit spend varies by. Absent ⇒ unbounded (`?? Infinity`), the historical behaviour.
   let round = 0;
 
+  // Tool-supplied media, keyed by the tool message it answers — see the `model-content` ToolEvent.
+  // Turn-scoped and wire-only: it is spliced into the outgoing copy below and dies with this call.
+  const attachments = new Map<string, Message>();
+
   for (;;) {
     // Respect an abort that arrived between turns (e.g. during tool execution).
     if (signal.aborted) {
@@ -224,9 +228,12 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
     // message can be a marker (e.g. a retract-redo leaves the retraction marker as the tail) — folding
     // there would drop the ephemeral with it. -1 ⇒ nothing to fold onto (no non-marker history).
     const foldIdx = ephemeral.length > 0 ? session.messages.findLastIndex(m => m.role !== 'marker') : -1;
-    const history = foldIdx >= 0
-      ? session.messages.map((m, i) =>
-          i === foldIdx ? { ...m, content: [...m.content, ...ephemeral] } : m)
+    const history = foldIdx >= 0 || attachments.size > 0
+      ? session.messages.flatMap((m, i) => {
+          const folded = i === foldIdx ? { ...m, content: [...m.content, ...ephemeral] } : m;
+          const media  = attachments.get(m.id);
+          return media ? [folded, media] : [folded];
+        })
       : session.messages;
     const outgoing = await hookReg.runContribute({
       outgoing: [...systemMsg, ...history],
@@ -368,6 +375,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
 
     const toolResults: MessageContent[] = [];
     const toolMarkers: MessageContent[] = [];
+    const toolMedia:   ModelContent[]   = [];
 
     for (const [callIdx, tc] of pendingCalls.entries()) {
       yield { type: 'tool:start', callId: tc.id, name: tc.name, input: tc.input, traceId };
@@ -479,6 +487,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
             case 'file':     yield { type: 'file', handle: toolEv.handle, traceId }; break;
             case 'result':   result = toolEv.value; break;
             case 'marker':   toolMarkers.push({ type: 'marker', creator: toolEv.creator, data: toolEv.data }); break;
+            case 'model-content': toolMedia.push(...toolEv.content); break;
             case 'progress': yield { type: 'tool:progress', callId: tc.id, pct: toolEv.pct, ...(toolEv.message !== undefined ? { message: toolEv.message } : {}), traceId }; break;
             case 'error':    result = {
               error: toolEv.message,
@@ -517,6 +526,15 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
     // Add tool results message, then loop for the next provider call.
     const toolMsg = createMessage({ role: 'tool', content: toolResults, traceId });
     session = appendMessage(session, toolMsg);
+
+    // Media the tools handed over for the model to look at. Held wire-side only — pinned directly
+    // after the tool message it came from (so it keeps a stable history position, and so the model
+    // reads it as the answer to that call) and spliced into `outgoing` on every remaining round of
+    // this turn. Never appended to `session`: the transcript records what the tool returned, not the
+    // bytes it showed.
+    if (toolMedia.length > 0) {
+      attachments.set(toolMsg.id, createMessage({ role: 'user', content: toolMedia, traceId }));
+    }
 
     // Markers a tool emitted while running: persist as their own marker-role message (elided from
     // provider submission) and carry live so a frontend can render them without a reload.

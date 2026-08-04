@@ -628,12 +628,31 @@ export interface ToolTypeIndex {
 
 // ── Tools ─────────────────────────────────────────────────────────────────────
 
+/**
+ * Media a tool hands to the model to *look at*, as opposed to the JSON it reads as a `result`. The
+ * inline arms of {@link MessageContent} — bytes plus a mime type, carrying their own meaning with no
+ * dependency on anything that could resolve a reference. Where the tool got the bytes (a `FileStore`,
+ * an HTTP fetch, a chart rendered in memory) is entirely the tool's business; the harness never asks.
+ */
+export type ModelContent = Extract<MessageContent, { type: 'image' | 'document' | 'audio' }>;
+
 export type ToolEvent<Result = unknown> =
   | { type: 'stdout';   chunk: string }
   | { type: 'stderr';   chunk: string }
   | { type: 'progress'; pct: number; message?: string }
   | { type: 'result';   value: Result }
   | { type: 'file';     handle: FileHandle }
+  // Media for the model's eyes, pinned to this tool call's result and carried on the wire for the
+  // REST OF THIS TURN only — never persisted. Independent of `result`: the durable record of what the
+  // tool did is its `result`, and a transcript that re-reads clean is the point. A later turn that
+  // needs the bytes again calls the tool again, which is the same pull the model already performed.
+  //
+  // Rest-of-turn rather than next-call-only because withdrawing content the model has already seen
+  // mid-history breaks the prompt cache from that point and leaves it referring to something no longer
+  // there. The corollary is cost: a large document is re-sent on every subsequent round of the turn,
+  // so a tool should hand over the smallest thing that answers the question (a page range, a thumbnail)
+  // and `maxRounds` is the ceiling on how often it is paid for.
+  | { type: 'model-content'; content: ModelContent[] }
   // A durable, LLM-invisible annotation the tool emits as it runs (a link, a status, a trace of a
   // side-effect). Persisted as a `marker`-role message; elided from provider submission like any
   // marker. Independent of `result` — a tool may emit markers and no result (a silent side-effect,

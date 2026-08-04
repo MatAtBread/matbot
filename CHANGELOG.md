@@ -78,6 +78,33 @@ churn and less likely to affect a consumer who doesn't use them.
     rather than clamped, since silently treating `0` as "no turn may do anything" would read as a
     broken provider. Settable and visible through the `provider` tool's `add`/`list` as well as
     `matbot.yaml`.
+- **A tool can hand the model something to look at.** New `model-content` `ToolEvent`, carrying
+  `ModelContent[]` (the inline `image` / `document` / `audio` arms of `MessageContent`). The runner pins
+  the media directly after the tool message it answers and splices it into the outgoing copy for the
+  rest of the turn. Previously a tool could return only what the model *reads* — its `result`, serialised
+  as JSON — so an image or a PDF could reach the model by no route at all.
+  - **Wire-only: never persisted.** The transcript records what the tool returned, not the bytes it
+    showed, so a session does not accumulate base64 and there is no exit path that has to remember to
+    strip it. A later turn needing the bytes again calls the tool again — the same pull the model
+    already performed.
+  - **Rest-of-turn, not next-call-only.** Withdrawing content the model has already seen breaks the
+    prompt cache from that point and leaves it referring to something no longer there. The cost
+    corollary: a large document is re-sent on every subsequent round, so hand over the smallest thing
+    that answers the question, and note that `maxRounds` bounds how often it is paid for.
+  - **No new service and no `FileStore` dependency.** Where the tool got the bytes — a `FileStore`, an
+    HTTP fetch, a chart rendered in memory — is the tool's business; core carries them to the wire and
+    drops them. `files` is optional on both `RunSessionOpts` and `ToolContext`, so routing media through
+    it would have made multimodal impossible without one.
+  - Deliberately *not* a `PipelineEvent`: nothing durable backs it, so a frontend that drew it live
+    would show something that vanishes on reload. A tool that wants the user to see it too has `file`
+    and `marker` already.
+- **`document` reaches Anthropic and Gemini natively.** It degraded to a `[Document: name]` text
+  placeholder in every adapter — the block existed in `MessageContent` and no provider ever received
+  one. Anthropic now gets a native `document` block (base64 for `application/pdf`; `text/*` decoded into
+  a plain-text source, which is the shape that surface takes); Gemini gets `inlineData`, which also
+  covers `audio`. Anything Anthropic has no representation for keeps the placeholder. `openai-compat`
+  is unchanged: it fronts DeepSeek, vLLM, ollama and llama.cpp as well as OpenAI, and the file/audio
+  parts are not portable across them.
 
 ### Bug fixes
 
@@ -114,6 +141,12 @@ churn and less likely to affect a consumer who doesn't use them.
   loop now folds with `addUsage`, exactly as the runner has always folded a turn's usage, so the two
   accounting paths agree. Adapters that report one cumulative event at end of stream (google, chatjimmy,
   and OpenAI-compatible endpoints) are unaffected: folding a single event equals overwriting it.
+- **The anthropic adapter no longer emits adjacent same-role messages.** It rendered one wire message
+  per neutral message, so any two neighbours that landed on the same role went out as-is — which the
+  Messages API does not accept. It was reachable before this release (an assistant turn stripped back
+  to text by a thinking-block elision, next to another assistant turn) and is reachable by construction
+  now that tool-supplied media follows a tool message, itself rendered `user`. Adjacent contents fold
+  into the previous message, which is what the google adapter has always done for the same reason.
 
 ### Optional
 
