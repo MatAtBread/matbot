@@ -75,14 +75,23 @@ export type ToolEvent<Result = unknown> =
  */
 export interface ToolContracts {}
 
+// Phantom carriers for ToolContract's two parameters. `unique symbol` keys rather than `__result`/`__args`
+// so the type is *uninhabitable*: a plugin author cannot name these keys, so no value of ToolContract can
+// be written down by accident (or on purpose, to smuggle a shape past the checker) — where the previous
+// `__`-prefixed properties were merely conventionally-private and constructible with a couple of casts.
+// A cast is the one hole through which a hallucinated result shape survives to runtime, which is why the
+// generated-code checker closes it deterministically; this closes the same hole in the type itself.
+declare const RESULT: unique symbol;
+declare const ARGS:   unique symbol;
+
 /**
  * One overload arm of a multi-action tool registered in {@link ToolContracts}: the `Result` it yields
  * for a call whose params match the discriminating pattern `Args`. `Args` defaults to `unknown` (an
- * arm that matches any params). Purely type-level — the `__` fields are phantom and never constructed.
+ * arm that matches any params). Purely type-level — the fields below are phantom and uninstantiable.
  */
 export interface ToolContract<Result, Args = unknown> {
-  readonly __result: Result;
-  readonly __args:   Args;
+  readonly [RESULT]: Result;
+  readonly [ARGS]:   Args;
 }
 
 type ToolResultArmed<E>           = E extends ToolContract<unknown, unknown> ? true : false;
