@@ -22,16 +22,17 @@ import type {
  * the optional `?` is the single call-site signal of "may be absent, null-check it". Assignment throws,
  * directing callers to `register()` (the swap-aware write path). Applied to both the host services object
  * and the per-plugin scoped object, so plugins see the same surface the host does.
+ *
+ * Only `get` and `set` are trapped. `has` used to fall through to the registry too, which made the plain
+ * language construct `'Foo' in services` perform a registry lookup — no side effect, but a surprise, and
+ * inconsistent with `ownKeys`, which never listed registered services. `in` is therefore structural, and
+ * the presence check remains the documented one: `services.Foo !== undefined`, or `?.`.
  */
 export function unifyServices(services: MatbotMachine): MatbotMachine {
   return new Proxy(services, {
     get(target, key, receiver) {
       if (Reflect.has(target, key)) return Reflect.get(target, key, receiver);
       return typeof key === 'string' ? target.get(key as keyof MatbotServices) : undefined;
-    },
-    has(target, key) {
-      if (Reflect.has(target, key)) return true;
-      return typeof key === 'string' && target.get(key as keyof MatbotServices) !== undefined;
     },
     set(_target, key) {
       throw new Error(

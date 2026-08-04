@@ -8,7 +8,7 @@ import type { ToolPresenter } from '@matatbread/matbot-plugin-api';
 import { currentUsageSink } from '@matatbread/matbot-plugin-api/host';
 import { HookRegistry } from './hooks.js';
 import { appendMessage, createMessage } from './session.js';
-import { foldOntoUserTurn } from '@matatbread/matbot-plugin-api';
+import { foldOntoUserTurn, bindPluginOps } from '@matatbread/matbot-plugin-api';
 import { addUsage } from './usage.js';
 
 // Substituted for an errored tool result when the turn was aborted (e.g. a mid-turn steer interrupt):
@@ -496,8 +496,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
         callId: tc.id, session, signal, vault,
         provider:     config.provider,
         prompt:       promptFn,
-        loadPlugin:   (specifier: string, refresh?: boolean) => opts.loadPlugin(specifier, promptFn, refresh),
-        unloadPlugin: opts.unloadPlugin,
+        ...bindPluginOps(opts, promptFn),
         ...(opts.workdir     !== undefined ? { workdir:     opts.workdir     } : {}),
         ...(opts.configPath  !== undefined ? { configPath:  opts.configPath  } : {}),
         ...(opts.files       !== undefined ? { files:       opts.files       } : {}),
