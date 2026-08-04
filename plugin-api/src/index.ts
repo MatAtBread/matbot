@@ -1,5 +1,5 @@
 export type * from './types.js';
-export { CONFIRM_YES, CONFIRM_NO } from './types.js';
+export { CONFIRM_YES, CONFIRM_NO, isTruncatedToolResult } from './types.js';
 export * from './store-query.js';
 export * from './vault.js';
 export * from './errors.js';

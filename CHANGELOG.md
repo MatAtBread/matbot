@@ -26,6 +26,38 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### API gaps filled
 
+- **A tool call cut off mid-arguments is now a recoverable round, not a dead turn.** When a response hit
+  its token limit part-way through a large tool call, the adapter threw — `Tool "x" arguments could not
+  be parsed … increase the provider's maxTokens` — which ended the whole turn. Raising `maxTokens` only
+  moves the ceiling; it cannot survive one call larger than the new ceiling, so the user got a dead end.
+  The `tool-call` `CompletionEvent` now carries an optional `truncated: { bytes, stopReason? }`, and the
+  runner answers such a call with an error result **without executing it** (`input` is `{}` — the real
+  arguments are unrecoverable, and the wire requires an object). The model reads the failure in the slot
+  it expects and retries smaller, which is the self-correction the loop already performs for a rejected
+  or unknown tool.
+  - **No retry counter.** A model that keeps overflowing burns rounds and meets `maxRounds`, exactly as
+    one repeatedly calling any failing tool does. One bounding mechanism, not two.
+  - **The pairing is what makes it safe**: the assistant message carries a `tool-call` block for the
+    severed call, and an unpaired `tool_use` is rejected by the next submission.
+  - **`toolresult` runs for it** (`toolcall` does not — there is nothing to judge, the call cannot
+    proceed whatever a hook says). That is the seam for advice the harness cannot have: *which* of a
+    given tool's parameters offers a cheaper edit is the tool author's knowledge, not core's. Narrow
+    with the exported `isTruncatedToolResult` rather than duck-typing the result.
+  - Detectable only where arguments stream as a severable JSON *string* — the Anthropic
+    (`input_json_delta`) and OpenAI (`function.arguments`) shapes. Gemini delivers each `functionCall`
+    complete with `args` already an object, so there is nothing to sever; `chatjimmy` and
+    `customer-services` emit no tool calls at all.
+- **A response cut short is recorded instead of vanishing.** A new `truncated` `CompletionEvent`
+  (`reason: 'max-tokens' | 'stream-end'`) reports that the provider stopped the response rather than the
+  model choosing to. The far commoner case has no tool call in it at all — prose stopping mid-sentence —
+  and matbot surfaced that nowhere: the stop reason was read and then used only in an error message that
+  fired for tool calls alone. The runner persists it as a `matbot-truncation` marker and carries it
+  live. Marker-role deliberately: a reader and an audit see it, the model does not — its own text is
+  already truncated in the transcript, and a block telling it so invites narrating the cut-off rather
+  than continuing past it. Acting on it (continue, re-ask with a larger budget) is a `followup` hook's
+  business. Emitted by the anthropic, openai-compat and google adapters; the two text-only adapters
+  expose no finish reason to report.
+  - Note for anyone switching exhaustively over `CompletionEvent`: it has a new arm.
 - **`ProviderConfig.maxRounds`** — an optional per-profile ceiling on the agentic rounds one turn may
   take, a round being one provider call plus the tool batch it asked for. Reaching it ends the turn
   (`aborted`, reason `round-limit: …`) instead of starting another round; absent ⇒ unbounded, which is

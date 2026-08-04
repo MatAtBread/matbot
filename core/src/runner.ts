@@ -1,5 +1,5 @@
 import type {
-  Session, MessageContent, Usage, ProviderMeta, DeferredCorrection,
+  Session, MessageContent, Usage, ProviderMeta, DeferredCorrection, TruncatedToolResult,
   PipelineEvent, RunConfig, ProviderAdapter, ProviderConfig,
   Tool, ToolRegistry, ToolContext, Store, FileStore, SystemContextRegistry, Vault, PromptFn, FormField,
 } from './types.js';
@@ -15,6 +15,11 @@ import { addUsage } from './usage.js';
 // internal token that reads as a real failure. A steer's continuation turn is the one place a model
 // reads this, so the wording tells it the call was interrupted and leaves re-running to its judgement —
 // deliberately NOT "re-run it", so a side-effecting tool isn't reflexively repeated.
+// Creator of the marker recording that a provider cut a response short. Marker-role, so it is durable
+// and visible to a reader while elided from every submission: the model's own text is already truncated
+// in the transcript, and a block telling it so invites narrating the cut-off rather than continuing.
+const TRUNCATION_CREATOR = 'matbot-truncation';
+
 const INTERRUPTED_TOOL_RESULT = {
   error: 'Tool call interrupted before completion — the turn was interrupted while it was running. It may not have run to completion, and any side effect may or may not have occurred. Re-run it only if you still need its result.',
 } as const;
@@ -203,10 +208,12 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
     const early = pollDeferred();
     if (early) { const dur = applyCorrection(early); if (dur.length > 0) yield { type: 'robo-user', content: dur, traceId }; }
 
-    const pendingCalls: Array<{ id: string; name: string; input: unknown; meta?: ProviderMeta }> = [];
+    const pendingCalls: Array<{ id: string; name: string; input: unknown; meta?: ProviderMeta;
+      truncated?: { bytes: number; stopReason?: string } }> = [];
     const assistantParts: MessageContent[] = [];
     let textAcc = '';
     let turnUsage: Usage | undefined;
+    let truncation: { reason: 'max-tokens' | 'stream-end'; raw?: string } | undefined;
     // Set if a raced verdict fires mid-generation: discard this response and re-run the loop (below).
     let restart = false;
 
@@ -268,7 +275,11 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
             break;
           case 'tool-call':
             pendingCalls.push({ id: ev.id, name: ev.name, input: ev.input,
-              ...(ev.meta !== undefined ? { meta: ev.meta } : {}) });
+              ...(ev.meta      !== undefined ? { meta:      ev.meta      } : {}),
+              ...(ev.truncated !== undefined ? { truncated: ev.truncated } : {}) });
+            break;
+          case 'truncated':
+            truncation = { reason: ev.reason, ...(ev.raw !== undefined ? { raw: ev.raw } : {}) };
             break;
           case 'usage':
             turnUsage = addUsage(turnUsage, ev);
@@ -330,7 +341,19 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
         ...(turnUsage !== undefined ? { usage: turnUsage } : {}),
       });
       session = appendMessage(session, assistantMsg);
-    } else {
+    }
+
+    // The provider cut this response short rather than the model choosing to stop. Recorded whether or
+    // not a tool call was caught in it — the commoner case has none, and prose stopping mid-sentence
+    // previously left no trace anywhere. What to DO about it (continue, re-ask with a bigger budget) is
+    // a `followup` hook's call, not the harness's.
+    if (truncation) {
+      const marker: MessageContent = { type: 'marker', creator: TRUNCATION_CREATOR, data: truncation };
+      session = appendMessage(session, createMessage({ role: 'marker', content: [marker], traceId }));
+      yield { type: 'marker', content: [marker], traceId };
+    }
+
+    if (assistantParts.length === 0) {
       // Diagnostic: the provider returned no text, no tool calls, no thinking — a genuinely empty
       // completion. The turn will end with no assistant message, which reads as "the agent never
       // replied". Logged here so a silent no-reply turn is traceable. (textAcc length is shown to
@@ -354,6 +377,39 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
         const err = { error: `Unknown tool: ${tc.name}` };
         toolResults.push({ type: 'tool-result', id: tc.id, result: err, isError: true });
         yield { type: 'tool:end', callId: tc.id, result: err, isError: true, traceId };
+        continue;
+      }
+
+      // Arguments severed mid-stream (the provider hit its token limit part-way through the call).
+      // The call cannot run, but it must still be answered: the assistant message above carries a
+      // `tool-call` block for it, and an unpaired `tool_use` is rejected by the next submission. So it
+      // is recorded as a call that failed — no execution, no side effect — and the model reads the
+      // failure in the slot it expects and retries smaller, which is the ordinary self-correction the
+      // loop already does for a rejected or unknown tool. No retry counter: a model that keeps
+      // overflowing burns rounds and meets `maxRounds`, exactly as one repeatedly calling any failing
+      // tool does.
+      //
+      // `toolcall` is skipped — there is nothing to judge, the call cannot proceed whatever a hook
+      // says — but `toolresult` runs, because it owns the LLM-facing text and is where a consumer
+      // folds in advice the harness cannot have: which of THIS tool's parameters offers a cheaper
+      // edit. See `isTruncatedToolResult`.
+      if (tc.truncated) {
+        const truncated: TruncatedToolResult = {
+          error:
+            `Arguments for "${tc.name}" were cut off after ${tc.truncated.bytes} bytes and could not be parsed` +
+            `${tc.truncated.stopReason !== undefined ? ` (stop reason "${tc.truncated.stopReason}")` : ''}. ` +
+            'The call did NOT run and had no effect. Retry it smaller — fewer operations in one call, ' +
+            'or split the work across several calls.',
+          truncated: { tool: tc.name, bytes: tc.truncated.bytes,
+            ...(tc.truncated.stopReason !== undefined ? { stopReason: tc.truncated.stopReason } : {}) },
+        };
+        const shaped = await hookReg.runToolResult({
+          session, config, signal,
+          toolCall: { id: tc.id, name: tc.name, input: tc.input },
+          tool, result: truncated, isError: true, durationMs: 0,
+        });
+        toolResults.push({ type: 'tool-result', id: tc.id, result: shaped, isError: true });
+        yield { type: 'tool:end', callId: tc.id, result: shaped, isError: true, traceId };
         continue;
       }
 

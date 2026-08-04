@@ -192,24 +192,23 @@ export class OpenAICompatAdapter implements ProviderAdapter {
           yield { type: 'reasoning-block', reasoning: reasoningAcc };
           reasoningAcc = '';
         }
-        let truncatedTool: { name: string; bytes: number } | undefined;
+        // A call whose arguments never parsed was cut off mid-stream (finish_reason 'length' as a
+        // rule). Yielded as a tool-call carrying `truncated` rather than thrown: the runner pairs it
+        // with an error result instead of executing it, so the model self-corrects on the next round.
         for (const [, call] of toolAccum) {
           try {
             yield { type: 'tool-call', id: call.id, name: call.name, input: JSON.parse(call.args || '{}'),
             ...(call.sig ? { meta: { google: { thoughtSignature: call.sig } } } : {}) };
           } catch {
-            truncatedTool ??= { name: call.name, bytes: call.args.length };
+            yield { type: 'tool-call', id: call.id, name: call.name, input: {},
+              truncated: { bytes: call.args.length, stopReason: choice.finish_reason } };
           }
         }
         toolAccum.clear();
-        if (truncatedTool) {
-          throw new Error(
-            `Tool "${truncatedTool.name}" arguments could not be parsed — ${truncatedTool.bytes} bytes received, ` +
-            `finish_reason "${choice.finish_reason}". ` +
-            (choice.finish_reason === 'length'
-              ? 'The response hit the token limit mid tool-call; increase the provider\'s maxTokens.'
-              : 'The provider returned malformed tool arguments.'),
-          );
+        // Separate from the calls above: the RESPONSE was cut short, which is far more often true with
+        // no tool call involved at all — prose stopping mid-sentence, previously surfaced nowhere.
+        if (choice.finish_reason === 'length') {
+          yield { type: 'truncated', reason: 'max-tokens', raw: choice.finish_reason };
         }
         yield { type: 'done' };
       }
@@ -218,21 +217,18 @@ export class OpenAICompatAdapter implements ProviderAdapter {
     // Fallback if the stream ended without a finish_reason (e.g. a dropped connection).
     if (reasoningAcc) yield { type: 'reasoning-block', reasoning: reasoningAcc };
     if (toolAccum.size > 0) {
-      let truncatedTool: { name: string; bytes: number } | undefined;
+      let cutOff = false;
       for (const [, call] of toolAccum) {
         try {
           yield { type: 'tool-call', id: call.id, name: call.name, input: JSON.parse(call.args || '{}'),
             ...(call.sig ? { meta: { google: { thoughtSignature: call.sig } } } : {}) };
         } catch {
-          truncatedTool ??= { name: call.name, bytes: call.args.length };
+          cutOff = true;
+          yield { type: 'tool-call', id: call.id, name: call.name, input: {},
+            truncated: { bytes: call.args.length } };
         }
       }
-      if (truncatedTool) {
-        throw new Error(
-          `Tool "${truncatedTool.name}" arguments could not be parsed — ${truncatedTool.bytes} bytes received ` +
-          `before the stream ended. The provider returned malformed or truncated tool arguments.`,
-        );
-      }
+      if (cutOff) yield { type: 'truncated', reason: 'stream-end' };
     }
 
     if (!sawAny) {

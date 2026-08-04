@@ -147,6 +147,13 @@ export class GoogleAdapter implements ProviderAdapter {
         `(roles: ${messages.map(m => m.role).join(',')}). A 'SAFETY'/'RECITATION' finishReason means the endpoint blocked it.`,
       );
     }
+
+    // The response was cut short rather than finished. No tool-call counterpart here: Gemini delivers
+    // each functionCall complete in one part with `args` already an object, so an argument list cannot
+    // be severed mid-stream the way the Anthropic/OpenAI string-accumulated shapes can — a truncated
+    // Gemini response simply lacks the part.
+    if (lastFinish === 'MAX_TOKENS') yield { type: 'truncated', reason: 'max-tokens', raw: lastFinish };
+
     yield { type: 'done' };
   }
 

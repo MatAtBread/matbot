@@ -16,7 +16,7 @@ export { applyCreateSecret }  from '@matatbread/matbot-plugin-api';
 // unifyServices is a runtime fn; the `export type *` above would otherwise strip its value meaning.
 export { unifyServices }      from '@matatbread/matbot-plugin-api';
 // Same: pure runtime helpers that would otherwise be stripped to type-only by `export type *`.
-export { forwardingProxy, makeSwappable, singleTurnRequest, createMountTable } from '@matatbread/matbot-plugin-api';
+export { forwardingProxy, makeSwappable, singleTurnRequest, createMountTable, isTruncatedToolResult } from '@matatbread/matbot-plugin-api';
 // Observation-stream primitives (broadcaster + the bare-subscribe wrapper); the host wires `mounted`.
 export { createBroadcaster, subscribable } from '@matatbread/matbot-plugin-api';
 export { createNotifier, scopedNotifier, notifyingStore, ItemChangeKind, RegistryChangeKind } from '@matatbread/matbot-plugin-api';

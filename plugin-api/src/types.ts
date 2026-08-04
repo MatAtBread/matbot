@@ -95,7 +95,20 @@ export type CompletionEvent =
   | { type: 'text-delta';          delta: string }
   | { type: 'tool-call';           id: string; name: string; input: unknown;
       /** Provider-specific round-trip metadata for this call, opaque to the harness — see `ProviderMeta`. */
-      meta?: ProviderMeta }
+      meta?: ProviderMeta;
+      /**
+       * Set when the call's arguments were severed mid-stream and never parsed — nearly always the
+       * response hitting its token limit part-way through a large call. `input` is then `{}` (the wire
+       * requires an object; the real arguments are unrecoverable), and the runner does NOT execute the
+       * call: it pairs it with an error result saying so, exactly as it does a rejected one, and the
+       * model self-corrects on the next round.
+       *
+       * Only adapters that accumulate arguments as a streamed JSON *string* can detect this — the
+       * Anthropic (`input_json_delta`) and OpenAI (`function.arguments` fragments) shapes. Gemini
+       * delivers each `functionCall` complete with `args` already an object, so there is nothing to
+       * sever and the field is never set there.
+       */
+      truncated?: { bytes: number; stopReason?: string } }
   | { type: 'tool-result';         id: string; result: unknown }
   | { type: 'thinking';            delta: string }
   | { type: 'thinking-block';      thinking: string; signature: string }
@@ -103,8 +116,47 @@ export type CompletionEvent =
   | { type: 'reasoning-block';     reasoning: string }
   | { type: 'refusal';             text: string }
   | { type: 'unknown-block';       blockType: string; raw: unknown }
+  /**
+   * The response was cut short — the model did not choose to stop. `max-tokens` is the provider saying
+   * so outright (`stop_reason: "max_tokens"` / `finish_reason: "length"` / `finishReason: "MAX_TOKENS"`);
+   * `stream-end` is the stream ending with no finish reason at all, e.g. a dropped connection.
+   *
+   * Emitted whether or not a tool call was caught in it, because the far commoner case has no tool call
+   * in it at all: prose stopping mid-sentence, which matbot previously did not surface anywhere. The
+   * runner records it as a durable `matbot-truncation` marker — LLM-invisible, so it informs the reader
+   * and the audit without the model narrating its own cut-off. Acting on it (continuing, re-asking with
+   * a larger budget) is a `followup` hook's business, not the harness's.
+   */
+  | { type: 'truncated';           reason: 'max-tokens' | 'stream-end'; raw?: string }
   | ({ type: 'usage' } & Usage)
   | { type: 'done' };
+
+/**
+ * The result the runner records for a tool call whose arguments were truncated (see the `truncated`
+ * field on the `tool-call` event). The call did not run and has no side effect.
+ *
+ * The `truncated` addendum is what makes this distinguishable from an ordinary tool failure, so a
+ * `toolresult` hook can recognise it and fold in advice the harness has no business knowing — which
+ * argument to split, which of *this* tool's parameters offers a cheaper edit. Narrow with
+ * {@link isTruncatedToolResult} rather than duck-typing the shape:
+ *
+ *   services.hooks.register({ on: 'toolresult', handler: ctx => {
+ *     if (!isTruncatedToolResult(ctx.result)) return;
+ *     return { result: { ...ctx.result, error: `${ctx.result.error} For a large edit, pass start_line/end_line instead.` } };
+ *   }});
+ */
+export interface TruncatedToolResult {
+  error:     string;
+  truncated: { tool: string; bytes: number; stopReason?: string };
+}
+
+export function isTruncatedToolResult(result: unknown): result is TruncatedToolResult {
+  if (typeof result !== 'object' || result === null) return false;
+  const t = (result as { truncated?: unknown }).truncated;
+  return typeof t === 'object' && t !== null
+    && typeof (t as { tool?: unknown }).tool  === 'string'
+    && typeof (t as { bytes?: unknown }).bytes === 'number';
+}
 
 export interface ProviderAdapter {
   readonly name: string;
@@ -182,6 +234,11 @@ export interface MarkerData {
    *  no-op) and this records it once, so a misconfigured/throwing hook degrades visibly instead of
    *  bricking the turn. `channel` is the hook point, `pluginName` the owning plugin if known. */
   'matbot-hooks': { channel: HookPoint; pluginName?: string; message: string };
+  /** Emitted by the runner when a provider call was cut short rather than finishing (see the
+   *  `truncated` CompletionEvent). Marker-role so the reader and an audit see it while the model does
+   *  not — the model's own text is already truncated in the transcript; a block telling it so would
+   *  invite it to narrate the cut-off rather than continue past it. */
+  'matbot-truncation': { reason: 'max-tokens' | 'stream-end'; raw?: string };
 }
 
 export type Marker<K extends string = string> = {
