@@ -33,6 +33,13 @@ churn and less likely to affect a consumer who doesn't use them.
   `@matatbread/matbot-plugin-api/host` or at core. The boundary is enforced by file layout
   (`host-machine.ts`), not by an export list, so it cannot erode by accident.
 
+- **`ProviderRegistry` is now one interface, not two.** `core/src/types.ts` declared a second, unrelated
+  `ProviderRegistry` (`register(adapter)` / `resolve(name)`) alongside its `export type *` of plugin-api —
+  and an explicit local export wins over a star re-export, so
+  `import type { ProviderRegistry } from '@matatbread/matbot-core'` silently resolved to the adapter
+  registry rather than the `ProviderConfig` map that `services.providers` actually is. Nothing imported it,
+  so nothing changes at runtime; what goes away is a name that resolved to the wrong shape with no error.
+
 ### Bug fixes
 
 - **A tool-name collision can no longer crash the process or revive an unloaded plugin's tool.**
