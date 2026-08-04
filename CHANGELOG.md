@@ -75,6 +75,15 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Bug fixes
 
+- **A provider call that fails mid-turn no longer discards the rounds that succeeded.** Nothing is written
+  mid-turn — `runSession` commits once, at whichever terminal it reaches — so an exit that returned without
+  committing threw the whole turn away. The failed-provider-call exit did exactly that, and the multi-round
+  case is precisely the tool-using one: an upstream 500 or a dropped connection on round 3 lost two
+  completed rounds of assistant messages and tool results that the frontend had already drawn, and that the
+  next turn (which re-reads from the store) would then be missing. The same defect had already been found
+  and fixed on the `toolcall`-abort exit; the shape that allowed both is gone (see the refactor below), and
+  every terminal now commits through one funnel.
+
 - **A tool-name collision can no longer crash the process or revive an unloaded plugin's tool.**
   `ToolRegistry.register` returns `void` because the no-collision path completes in the calling tick, and
   every one of its ~34 call sites fire-and-forgets. That left the collision branch — where the host may

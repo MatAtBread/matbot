@@ -98,8 +98,8 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
   // Every way a turn can end funnels through here: commit the session as it stands, then yield exactly
   // one terminal event. Each exit has its own legitimately different preamble — screen markers, a
   // streamed assistant partial, closing an unpaired tool_use — but the terminal itself must not vary,
-  // and it had: the `toolcall`-abort exit once returned with no commit at all, silently discarding every
-  // completed round of the turn (see its comment below), and the failed-provider-call exit still does.
+  // and twice it had not: both the `toolcall`-abort and failed-provider-call exits returned with no
+  // commit at all, silently discarding every completed round of the turn.
   // Nothing is written mid-turn, so "commit" here means the whole turn or none of it.
   // Closes over the reassigned `session` deliberately, so no exit can commit a stale copy.
   async function* end(terminal: PipelineEvent): AsyncIterable<PipelineEvent> {
@@ -333,7 +333,17 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
         yield* end({ type: 'aborted', reason: abortReason(signal), session, traceId });
         return;
       } else {
-        yield { type: 'error', error: String(e) + (('cause' in e && e.cause) ? ' ('+String(e.cause)+')' : '' ), traceId };
+        // A failed provider call still commits the rounds that succeeded. Nothing is written mid-turn, so
+        // returning without one discarded the whole turn — and the multi-round case is exactly the
+        // tool-using one, so a provider 500 or a dropped connection on round 3 threw away two completed
+        // rounds of assistant messages and tool results the frontend had already drawn, and which the
+        // next turn (which re-reads from the store) would then be missing.
+        //
+        // Nothing partial is appended here, unlike the abort branch above: `textAcc` and `assistantParts`
+        // belong to the call that failed, and the model never finished the thought. The `error` event
+        // carries no session (a failure is not a transcript), so this yields the terminal itself rather
+        // than the session — but it commits first, exactly like every other exit.
+        yield* end({ type: 'error', error: String(e) + (('cause' in e && e.cause) ? ' ('+String(e.cause)+')' : '' ), traceId });
         return;
       }
     }
