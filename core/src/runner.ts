@@ -5,7 +5,7 @@ import type {
 } from './types.js';
 import type { MatbotPlugin } from './plugin.js';
 import type { ToolPresenter } from '@matatbread/matbot-plugin-api';
-import { currentUsageSink } from '@matatbread/matbot-plugin-api';
+import { currentUsageSink } from '@matatbread/matbot-plugin-api/host';
 import { HookRegistry } from './hooks.js';
 import { appendMessage, createMessage } from './session.js';
 import { addUsage } from './usage.js';

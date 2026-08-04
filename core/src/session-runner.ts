@@ -8,7 +8,8 @@ import type { MatbotPlugin } from './plugin.js';
 import type { HookRegistry } from './hooks.js';
 import type { ToolTypeIndex, ToolPresenter } from '@matatbread/matbot-plugin-api';
 import { appendMessage, createMessage } from './session.js';
-import { contextSwitch, withUsageScope, isReadOnlyError } from '@matatbread/matbot-plugin-api';
+import { isReadOnlyError } from '@matatbread/matbot-plugin-api';
+import { contextSwitch, withUsageScope } from '@matatbread/matbot-plugin-api/host';
 import { runSession } from './runner.js';
 
 export interface SessionRunnerDeps {

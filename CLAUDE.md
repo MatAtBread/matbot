@@ -31,6 +31,9 @@ Secrets and configuration go through the `Vault` (`${NAME}` placeholders) or plu
 plugin-api/        — @matatbread/matbot-plugin-api: MatbotPlugin, MatbotServices/MatbotRuntime/
                      MatbotMachine, shared types, principal carrier, errors. The singleton contract;
                      every plugin peer-depends on it. Its own package (never folded into core).
+                       ./host — boot assembly for an EMBEDDER, not a plugin: carrier installers,
+                                swap proxies, the mount table's producer half, HookRegistry,
+                                createNotifier, the broadcaster. See "The /host boundary" below.
 core/              — @matatbread/matbot-core: agentic loop, hook dispatch, plugin loader, config
                      (YAML + .env), security (VaultImpl, Principal origin), knowledge
                      (LookupKnowledgeIndex). Author-facing subpath exports — link against without
@@ -68,6 +71,20 @@ apps/
 ```
 
 **Dependency direction:** `apps` → `plugins/*-node` → `plugins/*` → `core` → `plugin-api`. Nothing in `plugin-api/`, `core/`, or `plugins/` may depend on `apps/`.
+
+### The `/host` boundary
+
+`plugin-api`'s root answers exactly one question: **what does a plugin need in order to be a plugin?** Anything whose audience is an *embedder standing a machine up* lives behind `@matatbread/matbot-plugin-api/host` — carrier installers (`installPrincipalCarrier`, `installUsageCarrier` and the platform carrier factories), the capture-safe swap proxies (`forwardingProxy`, `makeSwappable`), the mount table's producer half (`createMountTable`, `MountTable`), the quiescent-edge machinery (`contextSwitch`, `onContextQuiesce`, `flushIfQuiescent`), `unifyServices`, `singleTurnRequest`, `HookRegistry`, `createNotifier`/`scopedNotifier`, and the `Broadcaster` primitive. `core` re-exports all of it, so an app depending on core needs no direct `/host` import — and no plugin in this repo imports any of it.
+
+**It is a file boundary, not an export list**, so it cannot quietly erode: host assembly lives in `host-machine.ts`, and `index.ts` uses `export type *` plus a named value list for the two files that are deliberately split down the middle. Three subsystems are split rather than moved whole, because each has a real author-facing half:
+
+| Subsystem | Root (plugin) | `/host` (embedder) |
+|---|---|---|
+| principal  | `runAs`, `currentPrincipal`, `tryCurrentPrincipal` | `installPrincipalCarrier`, `enterPrincipal`, `createConstantPrincipalCarrier` |
+| notifications | `Notifier` type, `notifyingStore`, `ItemChangeKind`/`RegistryChangeKind` | `createNotifier`, `scopedNotifier`, `Broadcaster` |
+| mount table | `Mounted`, `MountConsumeOptions`, `MountedMachine` (the contract of `services.mounted`) | `MountTable`, `createMountTable` (driven by register + the quiescent edge) |
+
+Fan-out is the one place the split implies a rule rather than just a location: a plugin that wants to publish an event uses the **`Notifier`**, which is why the raw broadcaster is host-side.
 
 ### Package naming
 - `@matatbread/matbot-foo` — single implementation

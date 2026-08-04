@@ -1,5 +1,6 @@
 import type { Tool, ToolRegistry, Hook, PromptFn, FormField, FrontendInfo, ProviderAdapter, ProviderConfig } from './types.js';
-import { scopedNotifier, RegistryChangeKind } from '@matatbread/matbot-plugin-api';
+import { RegistryChangeKind } from '@matatbread/matbot-plugin-api';
+import { scopedNotifier } from '@matatbread/matbot-plugin-api/host';
 import type {
   MatbotPlugin, MatbotMachine, MatbotRuntime, Mounted,
   ProviderAdapterFactory, StoreFactory,

@@ -11,6 +11,28 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ## Unreleased
 
+### Breaking changes
+
+- **Host boot assembly moved off the `plugin-api` root to `@matatbread/matbot-plugin-api/host`.** The root
+  exported both what a plugin is written against and what an *embedder* uses to stand a machine up, which
+  made carrier installers, swap proxies, the mount table's producer half, `HookRegistry`, `createNotifier`
+  and the `Broadcaster` primitive look like stable author-facing API. They are not, and no plugin in this
+  repo imports one. Moved: `installPrincipalCarrier`, `enterPrincipal`, `createConstantPrincipalCarrier`,
+  `installUsageCarrier`, `createSerialUsageCarrier`, `recordUsage`, `currentUsageSink`, `withUsageScope`,
+  `contextSwitch`, `onContextQuiesce`, `flushIfQuiescent`, `unifyServices`, `forwardingProxy`,
+  `makeSwappable`, `createMountTable`, `singleTurnRequest`, `HookRegistry`, `createBroadcaster`,
+  `subscribable`, `createNotifier`, `scopedNotifier`, and the types `SwapFn`, `MountTable`,
+  `PrincipalCarrier`, `UsageCarrier`, `Subscribable`, `Broadcaster`, `Routed`, `RoutedFilter`.
+
+  Three subsystems are split rather than moved whole, keeping their author-facing half at the root:
+  `runAs`/`currentPrincipal`/`tryCurrentPrincipal`; the `Notifier` type with `notifyingStore` and the two
+  kinds; and `Mounted`/`MountConsumeOptions`/`MountedMachine` (the contract of `services.mounted`).
+
+  **`@matatbread/matbot-core` re-exports the whole of `/host`, so a host that depends on core needs no
+  change.** Only a consumer importing boot machinery directly from `plugin-api` does — repoint it at
+  `@matatbread/matbot-plugin-api/host` or at core. The boundary is enforced by file layout
+  (`host-machine.ts`), not by an export list, so it cannot erode by accident.
+
 ### Bug fixes
 
 - **A tool-name collision can no longer crash the process or revive an unloaded plugin's tool.**
