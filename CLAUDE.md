@@ -164,13 +164,15 @@ A plugin reacts to a registry service (re)mounting or being unloaded through **`
 ```ts
 // cache the backend's documents; rebuild on every swap (initial load was in setup(), so no replay)
 await manager.load();
-services.mounted.observe({ key: 'StorageBackend', signal: manager.signal }, () => void manager.load());
+services.mounted.observe({ key: 'StorageBackend' }, () => void manager.load());
 
 // depend on a peer service that may arrive later; seed now if present (replay) and on each remount
-services.mounted.observe({ key: 'SkillManager', replay: true, signal }, m => seed(m));   // m.SkillManager narrowed present
+services.mounted.observe({ key: 'SkillManager', replay: true }, m => seed(m));   // m.SkillManager narrowed present
 ```
 
 `replay` fires the handler on the next microtask against the current machine if the key is present (the deferred-dependency latch); handlers must be idempotent (a remount re-fires). A cacher that reads straight through a store proxy on each call (e.g. `persist-ki-bge`) needs no subscription — the proxy already follows the swap.
+
+**An interest cannot outlive its owner.** The host binds every plugin-scoped `observe()` to that plugin's load extent, so `unloadPlugin` drops its interests with its tools and hooks. `signal` is therefore a *narrowing* option — "end this subscription earlier than my unload" (a per-session cache, a one-shot latch) — not the cleanup path. It was the cleanup path, and optional, which meant an author who omitted it left a live handler firing into a torn-down closure, one per reload generation, silently (the table logs and swallows a handler throw). Lifetime the host can know is the host's to enforce.
 
 ### Discovery vs. direct dependency
 

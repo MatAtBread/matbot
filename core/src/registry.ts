@@ -30,6 +30,7 @@ const state = {
   serviceKeys:     new Map<string, string[]>(),  // pluginName → MatbotMachine keys it registered
   hookPlugins:        new Set<string>(),         // plugins that registered at least one hook
   systemContextPlugins: new Set<string>(),       // plugins that registered a system-context contributor
+  lifecycles:      new Map<string, AbortController>(),  // pluginName → "this plugin is loaded" signal, aborted on unload
   failedPlugins:   [] as FailedPlugin[],         // plugins the loader skipped, keyed by specifier (last failure wins)
   overwriteAllTools: undefined as boolean | undefined,  // persisted "overwrite on collision, this install" choice, loaded lazily
 };
@@ -303,6 +304,16 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotMachine,
   // own settings — there is no way to name another's.
   const ownSettings = makePluginSettings(services.createStore<SettingsDoc>('settings'), plugin.name);
 
+  // This plugin's load extent. The mount table's only cleanup path is an aborted signal, and the
+  // option is optional — so an author who omits it left an interest that outlives the unload and
+  // keeps firing into a torn-down closure (once per reload generation). Ownership is the host's to
+  // know, not the author's to remember: every scoped observe() is bound to this signal, so `signal`
+  // in the options is a narrowing convenience ("stop earlier than my unload"), never load-bearing.
+  const previous = state.lifecycles.get(plugin.name);
+  previous?.abort();                                  // a reload that skipped unloadPlugin
+  const lifecycle = new AbortController();
+  state.lifecycles.set(plugin.name, lifecycle);
+
   // Per-plugin `mounted`: a thin adapter over the host mount table that delivers *this plugin's* scoped
   // machine (and scoped onUnmount) to handlers. The stable `scoped` object reads through the host's
   // re-pointing proxies/registry, so `scoped[key]` is the host's live service by the time a transition
@@ -312,9 +323,11 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotMachine,
     observe(options, handler) {
       // Forward to the host mount table but deliver *this plugin's* scoped machine — it reads through
       // the same proxies/registry, so scoped[key] is the host's live service. onUnmount is scoped too.
-      const forwarded = options.onUnmount !== undefined
-        ? { ...options, onUnmount: () => options.onUnmount!(scoped) }
-        : options;
+      const forwarded = {
+        ...options,
+        signal: options.signal !== undefined ? AbortSignal.any([lifecycle.signal, options.signal]) : lifecycle.signal,
+        ...(options.onUnmount !== undefined ? { onUnmount: () => options.onUnmount!(scoped) } : {}),
+      };
       services.mounted.observe(forwarded, () => handler(scoped as never));
     },
   };
@@ -382,6 +395,10 @@ export async function unloadPlugin(pluginName: string, services: MatbotMachine):
   services.tools.removeByPlugin(pluginName);
   services.hooks.removeByPlugin(pluginName);
   services.systemContext.removeByPlugin(pluginName);
+  // Drops this plugin's mount interests. Before teardown(), with the other synchronous removals: a
+  // mount handler firing between here and teardown would run against half-removed state.
+  state.lifecycles.get(pluginName)?.abort();
+  state.lifecycles.delete(pluginName);
 
   for (const key of state.serviceKeys.get(pluginName) ?? []) {
     services.unregister(key);

@@ -9,6 +9,20 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## Unreleased
+
+### Bug fixes
+
+- **A plugin's mount interests are dropped on unload.** `services.mounted.observe()`'s only cleanup path
+  was an aborted `signal`, and `signal` was optional — so a plugin that omitted it (`storage/profiles`
+  did) left a live interest behind, whose handler kept firing into a torn-down closure on every later
+  quiescent edge. Because reload is unload + load, each reload generation added another one, and the mount
+  table catches and logs a handler throw, so the accumulation was silent: N stale handlers doing duplicate
+  work against dead state, with a stale cache able to win. The host now binds every plugin-scoped
+  `observe()` to that plugin's load extent and aborts it in `unloadPlugin`, alongside the existing
+  tool/hook/service removals. `MountConsumeOptions.signal` keeps working and becomes a *narrowing*
+  convenience ("end earlier than my unload"), not the cleanup path.
+
 ## 0.3.10
 
 ### Breaking changes

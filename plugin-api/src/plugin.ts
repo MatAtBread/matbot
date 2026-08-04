@@ -355,7 +355,10 @@ export interface MountConsumeOptions<K extends keyof MatbotServices> {
    *  (then on each later remount). Off by default — a cacher that did its initial load in setup() wants
    *  only future transitions; a deferred dependency wants the latch. */
   readonly replay?:    boolean;
-  /** Ends the subscription (the consumer's own teardown). */
+  /** Ends the subscription *earlier* than the observing plugin's unload. Optional because it is a
+   *  narrowing convenience, not the cleanup path: the host binds every plugin-scoped observe() to that
+   *  plugin's load extent, so an interest can never outlive its owner. Pass one only when the
+   *  subscription's life is shorter than the plugin's (a per-session cache, a one-shot latch). */
   readonly signal?:    AbortSignal;
   /** The *dependency's* teardown: fired when `key` is committed-unloaded (removed and not replaced by
    *  the quiescent edge) while this consumer lives on. The stream continues — a later remount re-fires
