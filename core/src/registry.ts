@@ -286,24 +286,6 @@ export function getSpecifierForPlugin(pluginName: string): string | undefined {
 export async function setupPlugin(plugin: MatbotPlugin, services: MatbotMachine, prompt?: PromptFn): Promise<void> {
   state.toolRegistry ??= services.tools;
 
-  // Single choke point for every plugin tool registration (static `plugin.tools` and in-setup
-  // `services.tools.register`). Stamps ownership and resolves name collisions. The no-collision
-  // path runs synchronously (an async fn yields nothing before its first await), so fire-and-forget
-  // callers that don't await still get the tool registered in the same tick.
-  const registerTool = async (tool: Tool): Promise<void> => {
-    const stamped: Tool = { ...tool, pluginName: plugin.name };
-    const existing = services.tools.resolve(stamped.name);
-    if (existing !== null && existing.pluginName !== plugin.name) {
-      const overwrite = await resolveToolCollision(services, stamped.name, existing.pluginName, plugin.name, prompt);
-      if (!overwrite) return;
-    }
-    services.tools.register(stamped);
-  };
-
-  // Plugin-scoped settings: bound to this plugin's identity, built once. A plugin reaches only its
-  // own settings — there is no way to name another's.
-  const ownSettings = makePluginSettings(services.createStore<SettingsDoc>('settings'), plugin.name);
-
   // This plugin's load extent. The mount table's only cleanup path is an aborted signal, and the
   // option is optional — so an author who omits it left an interest that outlives the unload and
   // keeps firing into a torn-down closure (once per reload generation). Ownership is the host's to
@@ -313,6 +295,41 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotMachine,
   previous?.abort();                                  // a reload that skipped unloadPlugin
   const lifecycle = new AbortController();
   state.lifecycles.set(plugin.name, lifecycle);
+
+  // Single choke point for every plugin tool registration (static `plugin.tools` and in-setup
+  // `services.tools.register`). Stamps ownership and resolves name collisions. The no-collision
+  // path runs synchronously (an async fn yields nothing before its first await), so fire-and-forget
+  // callers that don't await still get the tool registered in the same tick — which is the whole
+  // reason `ToolRegistry.register` returns `void`, and every one of its ~34 call sites relies on it.
+  //
+  // That makes the collision branch the one place with an await and no caller to own its outcome, so
+  // it owns its own: a throw from the settings read/write or the prompt (a non-interactive `PromptFn`
+  // rejects with PromptCancelledError) would otherwise be an unhandled rejection — process exit under
+  // Node's default — reached by the ordinary act of two plugins claiming one tool name. Keep-existing
+  // is the safe resolution, so a failure resolves to it. The abort check closes the other end: setup()
+  // has already returned by the time a slow collision resolves, so an unload (or a setup() throw and
+  // its rollback) can land first, and re-inserting the tool would revive one owned by a gone plugin.
+  const registerTool = async (tool: Tool): Promise<void> => {
+    const stamped: Tool = { ...tool, pluginName: plugin.name };
+    const existing = services.tools.resolve(stamped.name);
+    if (existing !== null && existing.pluginName !== plugin.name) {
+      const overwrite = await resolveToolCollision(services, stamped.name, existing.pluginName, plugin.name, prompt)
+        .catch((e: unknown) => {
+          console.error(
+            `[matbot] Could not resolve the "${stamped.name}" tool collision for plugin "${plugin.name}" ` +
+            `— keeping the existing tool:`, e instanceof Error ? e.message : e,
+          );
+          return false;
+        });
+      if (!overwrite) return;
+      if (lifecycle.signal.aborted) return;
+    }
+    services.tools.register(stamped);
+  };
+
+  // Plugin-scoped settings: bound to this plugin's identity, built once. A plugin reaches only its
+  // own settings — there is no way to name another's.
+  const ownSettings = makePluginSettings(services.createStore<SettingsDoc>('settings'), plugin.name);
 
   // Per-plugin `mounted`: a thin adapter over the host mount table that delivers *this plugin's* scoped
   // machine (and scoped onUnmount) to handlers. The stable `scoped` object reads through the host's

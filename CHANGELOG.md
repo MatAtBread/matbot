@@ -13,6 +13,17 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Bug fixes
 
+- **A tool-name collision can no longer crash the process or revive an unloaded plugin's tool.**
+  `ToolRegistry.register` returns `void` because the no-collision path completes in the calling tick, and
+  every one of its ~34 call sites fire-and-forgets. That left the collision branch — where the host may
+  ask the user whether to overwrite — as the one `await` with no caller to own its outcome. A throw there
+  (the settings read, or a `PromptFn` that rejects rather than defaulting, which is the documented
+  non-interactive contract) was an unhandled rejection, i.e. process exit under Node's default, reached by
+  the ordinary act of two plugins claiming one tool name. The branch now owns its own failure and resolves
+  to keep-existing. It also re-checks the plugin's load extent before registering: `setup()` has long
+  returned by the time a slow collision resolves, so an unload — or a `setup()` throw and its rollback —
+  could land first and the late registration would revive a tool owned by a plugin that is gone.
+
 - **A plugin's mount interests are dropped on unload.** `services.mounted.observe()`'s only cleanup path
   was an aborted `signal`, and `signal` was optional — so a plugin that omitted it (`storage/profiles`
   did) left a live interest behind, whose handler kept firing into a torn-down closure on every later

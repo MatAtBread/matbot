@@ -972,6 +972,13 @@ export type HealthStatus =
  *  notification per tool (removeByPlugin announces a `removed` per matched tool); the registering
  *  plugin's name rides in `detail`, advisory as ever — resolve the name for anything authoritative. */
 export interface ToolRegistry {
+  /** Registers `tool` and returns — there is nothing to await. The name is free in the overwhelming
+   *  case, and that path completes in the calling tick, so `setup()` can fire-and-forget. When a
+   *  *different* plugin already owns the name the host may resolve it out of band (it can ask the user),
+   *  in which case the tool lands after `setup()` has returned, or not at all if the user keeps the
+   *  incumbent. The host owns that outcome — a failure to resolve keeps the existing tool, and neither
+   *  case can reject into the caller. Registration order across plugins is not a contract; resolve by
+   *  name at call time. */
   register(tool: Tool): void;
   remove(name: string): void;
   resolve(name: string): Tool | null;
