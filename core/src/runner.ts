@@ -1,5 +1,5 @@
 import type {
-  Session, MessageContent, Usage, ProviderMeta, DeferredCorrection,
+  Session, Message, MessageContent, ModelContent, Usage, ProviderMeta, DeferredCorrection, TruncatedToolResult,
   PipelineEvent, RunConfig, ProviderAdapter, ProviderConfig,
   Tool, ToolRegistry, ToolContext, Store, FileStore, SystemContextRegistry, Vault, PromptFn, FormField,
 } from './types.js';
@@ -15,6 +15,11 @@ import { addUsage } from './usage.js';
 // internal token that reads as a real failure. A steer's continuation turn is the one place a model
 // reads this, so the wording tells it the call was interrupted and leaves re-running to its judgement —
 // deliberately NOT "re-run it", so a side-effecting tool isn't reflexively repeated.
+// Creator of the marker recording that a provider cut a response short. Marker-role, so it is durable
+// and visible to a reader while elided from every submission: the model's own text is already truncated
+// in the transcript, and a block telling it so invites narrating the cut-off rather than continuing.
+const TRUNCATION_CREATOR = 'matbot-truncation';
+
 const INTERRUPTED_TOOL_RESULT = {
   error: 'Tool call interrupted before completion — the turn was interrupted while it was running. It may not have run to completion, and any side effect may or may not have occurred. Re-run it only if you still need its result.',
 } as const;
@@ -173,6 +178,15 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
 
   // ── 3. Agentic loop ────────────────────────────────────────────────────────
 
+  // Rounds already run against this provider, where a round is one provider call plus the tool batch it
+  // asked for. Compared against the provider profile's own `maxRounds` — a spend ceiling denominated in
+  // the unit spend varies by. Absent ⇒ unbounded (`?? Infinity`), the historical behaviour.
+  let round = 0;
+
+  // Tool-supplied media, keyed by the tool message it answers — see the `model-content` ToolEvent.
+  // Turn-scoped and wire-only: it is spliced into the outgoing copy below and dies with this call.
+  const attachments = new Map<string, Message>();
+
   for (;;) {
     // Respect an abort that arrived between turns (e.g. during tool execution).
     if (signal.aborted) {
@@ -181,16 +195,29 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
       return;
     }
 
+    // Checked HERE — before starting a round, not part-way through one — so the previous round's tool
+    // results are already appended and there is nothing to reconcile: the same persist-and-yield as the
+    // abort above. A turn stopped by the ceiling was cut short, not faulty, so it ends `aborted` rather
+    // than `error`, and the reason is machine-readable for a frontend that wants to say why.
+    if (round >= (providerConfig.maxRounds ?? Infinity)) {
+      await store.set(session.id, session);
+      yield { type: 'aborted', reason: `round-limit: provider "${config.provider}" allows ${providerConfig.maxRounds} rounds per turn`, session, traceId };
+      return;
+    }
+    round += 1;
+
     // A raced screen verdict that already fired (settled during setup, or while a previous tool round
     // ran): fold its correction in before generating, so this call is informed directly rather than
     // discarded. This is the no-waste path — the verdict landed before we spent any tokens.
     const early = pollDeferred();
     if (early) { const dur = applyCorrection(early); if (dur.length > 0) yield { type: 'robo-user', content: dur, traceId }; }
 
-    const pendingCalls: Array<{ id: string; name: string; input: unknown; meta?: ProviderMeta }> = [];
+    const pendingCalls: Array<{ id: string; name: string; input: unknown; meta?: ProviderMeta;
+      truncated?: { bytes: number; stopReason?: string } }> = [];
     const assistantParts: MessageContent[] = [];
     let textAcc = '';
     let turnUsage: Usage | undefined;
+    let truncation: { reason: 'max-tokens' | 'stream-end'; raw?: string } | undefined;
     // Set if a raced verdict fires mid-generation: discard this response and re-run the loop (below).
     let restart = false;
 
@@ -201,9 +228,12 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
     // message can be a marker (e.g. a retract-redo leaves the retraction marker as the tail) — folding
     // there would drop the ephemeral with it. -1 ⇒ nothing to fold onto (no non-marker history).
     const foldIdx = ephemeral.length > 0 ? session.messages.findLastIndex(m => m.role !== 'marker') : -1;
-    const history = foldIdx >= 0
-      ? session.messages.map((m, i) =>
-          i === foldIdx ? { ...m, content: [...m.content, ...ephemeral] } : m)
+    const history = foldIdx >= 0 || attachments.size > 0
+      ? session.messages.flatMap((m, i) => {
+          const folded = i === foldIdx ? { ...m, content: [...m.content, ...ephemeral] } : m;
+          const media  = attachments.get(m.id);
+          return media ? [folded, media] : [folded];
+        })
       : session.messages;
     const outgoing = await hookReg.runContribute({
       outgoing: [...systemMsg, ...history],
@@ -252,7 +282,11 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
             break;
           case 'tool-call':
             pendingCalls.push({ id: ev.id, name: ev.name, input: ev.input,
-              ...(ev.meta !== undefined ? { meta: ev.meta } : {}) });
+              ...(ev.meta      !== undefined ? { meta:      ev.meta      } : {}),
+              ...(ev.truncated !== undefined ? { truncated: ev.truncated } : {}) });
+            break;
+          case 'truncated':
+            truncation = { reason: ev.reason, ...(ev.raw !== undefined ? { raw: ev.raw } : {}) };
             break;
           case 'usage':
             turnUsage = addUsage(turnUsage, ev);
@@ -314,7 +348,19 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
         ...(turnUsage !== undefined ? { usage: turnUsage } : {}),
       });
       session = appendMessage(session, assistantMsg);
-    } else {
+    }
+
+    // The provider cut this response short rather than the model choosing to stop. Recorded whether or
+    // not a tool call was caught in it — the commoner case has none, and prose stopping mid-sentence
+    // previously left no trace anywhere. What to DO about it (continue, re-ask with a bigger budget) is
+    // a `followup` hook's call, not the harness's.
+    if (truncation) {
+      const marker: MessageContent = { type: 'marker', creator: TRUNCATION_CREATOR, data: truncation };
+      session = appendMessage(session, createMessage({ role: 'marker', content: [marker], traceId }));
+      yield { type: 'marker', content: [marker], traceId };
+    }
+
+    if (assistantParts.length === 0) {
       // Diagnostic: the provider returned no text, no tool calls, no thinking — a genuinely empty
       // completion. The turn will end with no assistant message, which reads as "the agent never
       // replied". Logged here so a silent no-reply turn is traceable. (textAcc length is shown to
@@ -329,8 +375,9 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
 
     const toolResults: MessageContent[] = [];
     const toolMarkers: MessageContent[] = [];
+    const toolMedia:   ModelContent[]   = [];
 
-    for (const tc of pendingCalls) {
+    for (const [callIdx, tc] of pendingCalls.entries()) {
       yield { type: 'tool:start', callId: tc.id, name: tc.name, input: tc.input, traceId };
 
       const tool = opts.toolRegistry !== undefined ? opts.toolRegistry.resolve(tc.name) : tools.get(tc.name);
@@ -341,12 +388,68 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
         continue;
       }
 
+      // Arguments severed mid-stream (the provider hit its token limit part-way through the call).
+      // The call cannot run, but it must still be answered: the assistant message above carries a
+      // `tool-call` block for it, and an unpaired `tool_use` is rejected by the next submission. So it
+      // is recorded as a call that failed — no execution, no side effect — and the model reads the
+      // failure in the slot it expects and retries smaller, which is the ordinary self-correction the
+      // loop already does for a rejected or unknown tool. No retry counter: a model that keeps
+      // overflowing burns rounds and meets `maxRounds`, exactly as one repeatedly calling any failing
+      // tool does.
+      //
+      // `toolcall` is skipped — there is nothing to judge, the call cannot proceed whatever a hook
+      // says — but `toolresult` runs, because it owns the LLM-facing text and is where a consumer
+      // folds in advice the harness cannot have: which of THIS tool's parameters offers a cheaper
+      // edit. See `isTruncatedToolResult`.
+      if (tc.truncated) {
+        const truncated: TruncatedToolResult = {
+          error:
+            `Arguments for "${tc.name}" were cut off after ${tc.truncated.bytes} bytes and could not be parsed` +
+            `${tc.truncated.stopReason !== undefined ? ` (stop reason "${tc.truncated.stopReason}")` : ''}. ` +
+            'The call did NOT run and had no effect. Retry it smaller — fewer operations in one call, ' +
+            'or split the work across several calls.',
+          truncated: { tool: tc.name, bytes: tc.truncated.bytes,
+            ...(tc.truncated.stopReason !== undefined ? { stopReason: tc.truncated.stopReason } : {}) },
+        };
+        const shaped = await hookReg.runToolResult({
+          session, config, signal,
+          toolCall: { id: tc.id, name: tc.name, input: tc.input },
+          tool, result: truncated, isError: true, durationMs: 0,
+        });
+        toolResults.push({ type: 'tool-result', id: tc.id, result: shaped, isError: true });
+        yield { type: 'tool:end', callId: tc.id, result: shaped, isError: true, traceId };
+        continue;
+      }
+
       const decision = await hookReg.runToolCall({
         session, config, signal,
         toolCall: { id: tc.id, name: tc.name, input: tc.input },
         tool,
       });
       if (decision.abort) {
+        // Commit the turn before leaving. This was the one terminal path that returned without a
+        // persist, and nothing is written mid-turn (see the store.set sites) — so a hook aborting on a
+        // late round discarded the whole turn: every earlier round's assistant message and tool
+        // results, plus this round's response, all of which the frontend had already drawn.
+        //
+        // Committing requires closing the tool_use/tool_result pairing first: the assistant message
+        // above carries a `tool-call` block per pending call, and a `tool_use` left unpaired is
+        // rejected by the next submission (Anthropic 400s; nothing downstream reconciles them). The
+        // abort is a turn-level stop rather than a verdict on the tools, so the calls that never ran
+        // are recorded as not-run. `tool:end` is carried only for the call the hook actually judged —
+        // the rest never had a `tool:start`, so a frontend has no bubble to close for them.
+        const stopped = { error: `Tool call not executed — the turn was aborted (${decision.abort}).` };
+        toolResults.push({ type: 'tool-result', id: tc.id, result: stopped, isError: true });
+        yield { type: 'tool:end', callId: tc.id, result: stopped, isError: true, traceId };
+        for (const rest of pendingCalls.slice(callIdx + 1)) {
+          toolResults.push({ type: 'tool-result', id: rest.id, result: stopped, isError: true });
+        }
+        session = appendMessage(session, createMessage({ role: 'tool', content: toolResults, traceId }));
+        if (toolMarkers.length > 0) {
+          session = appendMessage(session, createMessage({ role: 'marker', content: toolMarkers, traceId }));
+          yield { type: 'marker', content: toolMarkers, traceId };
+        }
+        await store.set(session.id, session);
         yield { type: 'aborted', reason: decision.abort, session, traceId };
         return;
       }
@@ -384,6 +487,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
             case 'file':     yield { type: 'file', handle: toolEv.handle, traceId }; break;
             case 'result':   result = toolEv.value; break;
             case 'marker':   toolMarkers.push({ type: 'marker', creator: toolEv.creator, data: toolEv.data }); break;
+            case 'model-content': toolMedia.push(...toolEv.content); break;
             case 'progress': yield { type: 'tool:progress', callId: tc.id, pct: toolEv.pct, ...(toolEv.message !== undefined ? { message: toolEv.message } : {}), traceId }; break;
             case 'error':    result = {
               error: toolEv.message,
@@ -422,6 +526,15 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
     // Add tool results message, then loop for the next provider call.
     const toolMsg = createMessage({ role: 'tool', content: toolResults, traceId });
     session = appendMessage(session, toolMsg);
+
+    // Media the tools handed over for the model to look at. Held wire-side only — pinned directly
+    // after the tool message it came from (so it keeps a stable history position, and so the model
+    // reads it as the answer to that call) and spliced into `outgoing` on every remaining round of
+    // this turn. Never appended to `session`: the transcript records what the tool returned, not the
+    // bytes it showed.
+    if (toolMedia.length > 0) {
+      attachments.set(toolMsg.id, createMessage({ role: 'user', content: toolMedia, traceId }));
+    }
 
     // Markers a tool emitted while running: persist as their own marker-role message (elided from
     // provider submission) and carry live so a frontend can render them without a reload.

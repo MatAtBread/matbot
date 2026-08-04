@@ -8,9 +8,12 @@ type AnthropicTextBlock        = { type: 'text';              text: string;     
 type AnthropicThinkingBlock    = { type: 'thinking';          thinking: string; signature: string };
 type AnthropicRedactedThinking = { type: 'redacted_thinking'; data: string };
 type AnthropicImageBlock       = { type: 'image';             source: { type: 'base64'; media_type: string; data: string } | { type: 'url'; url: string }; cache_control?: CacheControl };
+// A base64 document source carries PDFs only; plain text has its own source shape and takes the
+// decoded text, not base64. Anything else has no document representation and degrades to a text note.
+type AnthropicDocumentBlock    = { type: 'document';          source: { type: 'base64'; media_type: 'application/pdf'; data: string } | { type: 'text'; media_type: 'text/plain'; data: string }; title?: string; cache_control?: CacheControl };
 type AnthropicToolUse          = { type: 'tool_use';          id: string; name: string; input: unknown; cache_control?: CacheControl };
 type AnthropicToolResult       = { type: 'tool_result';       tool_use_id: string; content: string; is_error?: boolean; cache_control?: CacheControl };
-type AnthropicContent          = AnthropicTextBlock | AnthropicThinkingBlock | AnthropicRedactedThinking | AnthropicImageBlock | AnthropicToolUse | AnthropicToolResult;
+type AnthropicContent          = AnthropicTextBlock | AnthropicThinkingBlock | AnthropicRedactedThinking | AnthropicImageBlock | AnthropicDocumentBlock | AnthropicToolUse | AnthropicToolResult;
 
 export interface AnthropicMessage {
   role:    'user' | 'assistant';
@@ -32,6 +35,12 @@ export interface AnthropicToolDef {
 function cacheLastBlock(msg: AnthropicMessage, cc: CacheControl): void {
   const last = msg.content[msg.content.length - 1];
   if (last) (last as { cache_control?: CacheControl }).cache_control = cc;
+}
+
+// Message content is base64 whatever the mime type; a text document must be sent decoded. atob yields
+// one byte per char, so re-widen through TextDecoder rather than trusting it for anything non-ASCII.
+function decodeBase64Text(data: string): string {
+  return new TextDecoder().decode(Uint8Array.from(atob(data), ch => ch.charCodeAt(0)));
 }
 
 export function toAnthropicMessages(messages: Message[], cc: CacheControl): AnthropicMessage[] {
@@ -82,6 +91,12 @@ export function toAnthropicMessages(messages: Message[], cc: CacheControl): Anth
         case 'file-ref':
           return [{ type: 'text', text: `[Attached file: ${c.name}]` }];
         case 'document':
+          if (c.mimeType === 'application/pdf')
+            return [{ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: c.data },
+              ...(c.name !== undefined ? { title: c.name } : {}) }];
+          if (c.mimeType.startsWith('text/'))
+            return [{ type: 'document', source: { type: 'text', media_type: 'text/plain', data: decodeBase64Text(c.data) },
+              ...(c.name !== undefined ? { title: c.name } : {}) }];
           return [{ type: 'text', text: `[Document: ${c.name ?? c.mimeType}]` }];
         case 'audio':
           return [{ type: 'text', text: `[Audio: ${c.mimeType}]` }];
@@ -94,7 +109,13 @@ export function toAnthropicMessages(messages: Message[], cc: CacheControl): Anth
       }
     });
 
-    if (content.length > 0) result.push({ role, content });
+    // Adjacent same-role messages are not valid wire: fold into the previous one. Arises whenever a
+    // neutral message renders alongside another of the same role — tool results (role 'user' here)
+    // followed by tool-supplied media, or an assistant turn stripped back to text by an elision.
+    const prev = result[result.length - 1];
+    if (content.length === 0)     continue;
+    if (prev && prev.role === role) prev.content.push(...content);
+    else                            result.push({ role, content });
   }
 
   // Roll a cache breakpoint across the two most-recent messages. Each turn advances the cache write

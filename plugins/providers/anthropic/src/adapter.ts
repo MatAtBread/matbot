@@ -94,10 +94,13 @@ export class AnthropicAdapter implements ProviderAdapter {
     const unknownBlocks   = new Map<number, { blockType: string; raw: unknown }>();
     let inputTokens = 0;
     let stopReason: string | undefined;
-    // A tool_use block whose argument JSON failed to parse — almost always because the response
-    // was truncated mid-stream (e.g. max_tokens). Surfaced as a hard error at message_stop rather
-    // than silently delivering `{}` to the tool, which crashes downstream with no diagnostic.
-    let truncatedTool: { name: string; bytes: number } | undefined;
+    // tool_use blocks whose argument JSON never parsed — almost always the response being cut off
+    // mid-call (max_tokens). Held rather than yielded on sight because `stop_reason` arrives later, on
+    // message_delta, and it is what separates "hit the token limit" from "the provider sent malformed
+    // JSON". Flushed at message_stop as tool-calls carrying `truncated`, which the runner pairs with an
+    // error result instead of executing — a recoverable round, not a dead turn.
+    const truncatedTools: Array<{ id: string; name: string; bytes: number }> = [];
+    let sawStop = false;
 
     for await (const line of parseSSE(res.body)) {
       let ev: AEvent;
@@ -160,7 +163,7 @@ export class AnthropicAdapter implements ProviderAdapter {
             try {
               yield { type: 'tool-call', id: call.id, name: call.name, input: JSON.parse(call.json || '{}') };
             } catch {
-              truncatedTool ??= { name: call.name, bytes: call.json.length };
+              truncatedTools.push({ id: call.id, name: call.name, bytes: call.json.length });
             }
             toolInputs.delete(idx);
           }
@@ -200,19 +203,20 @@ export class AnthropicAdapter implements ProviderAdapter {
             try {
               yield { type: 'tool-call', id: call.id, name: call.name, input: JSON.parse(call.json || '{}') };
             } catch {
-              truncatedTool ??= { name: call.name, bytes: call.json.length };
+              truncatedTools.push({ id: call.id, name: call.name, bytes: call.json.length });
             }
           }
           toolInputs.clear();
-          if (truncatedTool) {
-            throw new Error(
-              `Tool "${truncatedTool.name}" arguments could not be parsed — ${truncatedTool.bytes} bytes received` +
-              `${stopReason ? `, stop_reason "${stopReason}"` : ''}. ` +
-              (stopReason === 'max_tokens'
-                ? 'The response hit the token limit mid tool-call; increase the provider\'s maxTokens.'
-                : 'The provider returned malformed tool arguments.'),
-            );
+          sawStop = true;
+          for (const t of truncatedTools) {
+            yield { type: 'tool-call', id: t.id, name: t.name, input: {},
+              truncated: { bytes: t.bytes, ...(stopReason !== undefined ? { stopReason } : {}) } };
           }
+          truncatedTools.length = 0;
+          // Separate from the calls above: this says the RESPONSE was cut short, which is true far more
+          // often with no tool call in it at all (prose stopping mid-sentence). A malformed-JSON call
+          // with an ordinary stop_reason is not a truncated response and must not claim to be.
+          if (stopReason === 'max_tokens') yield { type: 'truncated', reason: 'max-tokens', raw: stopReason };
           yield { type: 'done' };
           break;
         }
@@ -222,6 +226,25 @@ export class AnthropicAdapter implements ProviderAdapter {
           throw new Error(`Anthropic stream error: ${err?.message ?? JSON.stringify(ev)}`);
         }
       }
+    }
+
+    // The stream ended without message_stop — a dropped connection. Anything still open was cut off:
+    // flush it the same way rather than losing the blocks silently and returning a turn that merely
+    // looks short.
+    if (!sawStop) {
+      for (const [, call] of toolInputs) {
+        try {
+          yield { type: 'tool-call', id: call.id, name: call.name, input: JSON.parse(call.json || '{}') };
+        } catch {
+          truncatedTools.push({ id: call.id, name: call.name, bytes: call.json.length });
+        }
+      }
+      toolInputs.clear();
+      for (const t of truncatedTools) {
+        yield { type: 'tool-call', id: t.id, name: t.name, input: {}, truncated: { bytes: t.bytes } };
+      }
+      yield { type: 'truncated', reason: 'stream-end' };
+      yield { type: 'done' };
     }
   }
 

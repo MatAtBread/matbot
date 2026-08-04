@@ -185,8 +185,10 @@ export function toGeminiContents(messages: Message[], currentProvider?: string):
           break;
         }
         case 'file-ref': parts.push({ text: `[Attached file: ${c.name}]` }); break;
-        case 'document': parts.push({ text: `[Document: ${c.name ?? c.mimeType}]` }); break;
-        case 'audio':    parts.push({ text: `[Audio: ${c.mimeType}]` }); break;
+        // Gemini takes documents and audio the same way it takes images — inline bytes plus a mime
+        // type — so there is nothing to degrade.
+        case 'document': parts.push({ inlineData: { mimeType: c.mimeType, data: c.data } }); break;
+        case 'audio':    parts.push({ inlineData: { mimeType: c.mimeType, data: c.data } }); break;
         case 'redacted-thinking':
         case 'reasoning':
         case 'tool-result':      // only in role === 'tool', handled above

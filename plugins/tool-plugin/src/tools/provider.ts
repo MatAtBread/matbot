@@ -10,8 +10,9 @@ declare module '@matatbread/matbot-plugin-api' {
             hasCredentials: boolean;
             endpoint?:      string;
             parameters?:    ModelParameters;
+            maxRounds?:     number;
           }> }, { action: 'list'   }>
-      | ToolContract<{ message: string }, { action: 'add'; name: string; module: string; model: string; endpoint?: string; credentialKey?: string; credentialEnvVar?: string; parameters?: Record<string, unknown> }>
+      | ToolContract<{ message: string }, { action: 'add'; name: string; module: string; model: string; endpoint?: string; credentialKey?: string; credentialEnvVar?: string; parameters?: Record<string, unknown>; maxRounds?: number }>
       | ToolContract<{ message: string }, { action: 'remove'; name: string }>;
   }
 }
@@ -38,6 +39,7 @@ type ProviderInput =
       credentialKey?:    string;
       credentialEnvVar?: string;
       parameters?:       Record<string, unknown>;
+      maxRounds?:        number;
     }
   | { action: 'remove'; name: string };
 
@@ -136,6 +138,7 @@ function buildProviderBlock(opts: {
   envVarName?:    string;
   credentialKey?: string;
   parameters?:    Record<string, unknown>;
+  maxRounds?:     number;
 }): string {
   const lines = [
     `  ${opts.name}:`,
@@ -146,6 +149,9 @@ function buildProviderBlock(opts: {
   if (opts.envVarName) {
     lines.push(`    credentials:`);
     lines.push(`      ${opts.credentialKey ?? 'apiKey'}: \${${opts.envVarName}}`);
+  }
+  if (opts.maxRounds !== undefined) {
+    lines.push(`    maxRounds: ${opts.maxRounds}`);
   }
   if (opts.parameters && Object.keys(opts.parameters).length > 0) {
     lines.push(`    parameters:`);
@@ -246,6 +252,7 @@ function makeExecutor(
               hasCredentials: (cfg.credentials !== undefined && Object.keys(cfg.credentials).length > 0),
               ...(cfg.endpoint   !== undefined ? { endpoint:   cfg.endpoint   } : {}),
               ...(cfg.parameters !== undefined ? { parameters: cfg.parameters } : {}),
+              ...(cfg.maxRounds  !== undefined ? { maxRounds:  cfg.maxRounds  } : {}),
             })),
           },
         };
@@ -254,7 +261,7 @@ function makeExecutor(
 
       // ── add ────────────────────────────────────────────────────────────────
       if (action === 'add') {
-        const { name, module: mod, model, endpoint, credentialKey, credentialEnvVar, parameters } =
+        const { name, module: mod, model, endpoint, credentialKey, credentialEnvVar, parameters, maxRounds } =
           input as Extract<ProviderInput, { action: 'add' }>;
 
         if (providers.has(name)) {
@@ -352,6 +359,7 @@ function makeExecutor(
           ...(envVarName    !== undefined ? { envVarName    } : {}),
           ...(credentialKey !== undefined ? { credentialKey } : {}),
           ...(parameters    !== undefined ? { parameters    } : {}),
+          ...(maxRounds     !== undefined ? { maxRounds     } : {}),
         });
 
         await addProviderToConfig(configPath, block);
@@ -367,6 +375,7 @@ function makeExecutor(
             ? { credentials: { [credentialKey ?? 'apiKey']: `\${${envVarName}}` } }
             : {}),
           ...(parameters !== undefined ? { parameters } : {}),
+          ...(maxRounds  !== undefined ? { maxRounds  } : {}),
         });
 
         yield {
@@ -448,8 +457,9 @@ export function createProviderTool(
     name:     'provider',
     description: `Manage LLM provider profiles in matbot.yaml. Each profile is a named
 configuration combining an adapter module, model identifier, endpoint URL,
-API credentials, and optional generation parameters. Profiles are what users
-select when starting a conversation.
+API credentials, optional generation parameters, and an optional per-turn
+agentic round ceiling. Profiles are what users select when starting a
+conversation.
 
 ACTIONS
   list   — Show all configured profiles.
@@ -463,6 +473,13 @@ ${adapterSection}
 
 CURRENTLY CONFIGURED PROFILES
   ${profileList}
+
+MAX ROUNDS  (maxRounds, a sibling of model/endpoint — NOT a parameter)
+  Ceiling on the agentic rounds one turn may take on this profile, a round
+  being one model call plus the tool batch it asked for. Reaching it ends the
+  turn instead of starting another round. Omit for no ceiling. It is denominated
+  per profile because that is how spend varies: a cheap local model can afford to
+  grind where a frontier model cannot.
 
 PARAMETERS  (pass as the parameters object). NB: This is an example - the parameters are passed to the LLM endpoint with no modification and are model/provider specific
   maxTokens   — integer, maximum output tokens
@@ -518,6 +535,11 @@ When a user asks to add a new LLM or provider, ask for:
           type:                 'object',
           additionalProperties: true,
           description:          'Generation parameters: maxTokens, temperature, topP, thinking, etc. (add only).',
+        },
+        maxRounds: {
+          type:        'integer',
+          minimum:     1,
+          description: 'Optional per-turn ceiling on agentic rounds (one model call plus its tool batch) for this profile. Omit for no ceiling. Not a generation parameter — never sent to the endpoint (add only).',
         },
       },
     },

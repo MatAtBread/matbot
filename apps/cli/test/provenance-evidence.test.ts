@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   buildUnits, deriveKeys, selectEvidence, excerpt, renderExtracts, wordRe,
 } from '@matatbread/matbot-provenance/evidence';
-import { CLASSIFIER_PROVIDER_KEY } from '@matatbread/matbot-provenance/keys';
+import { CLASSIFIER_PROVIDER_KEY, IGNORE_TOOLS_KEY, DEFAULT_IGNORE_TOOLS } from '@matatbread/matbot-provenance/keys';
 import type { Session } from '@matatbread/matbot-plugin-api';
 
 // Every bug this file guards against was the same one: a positional cap deciding, on the reader's
@@ -66,17 +66,27 @@ test('matching is whole-word: "Automation" is not "Tom"', () => {
 
 test('a caller-named key that appears nowhere zeroes the search', () => {
   // "Dermot is Matt's brother-in-law" must not select extracts on the strength of "Matt's" alone.
-  const units = buildUnits(toolResult('c1', 'facts', { items: [{ fact: "Matt's wife is the French speaker" }] }));
-  assert.deepEqual(selectEvidence(units, [['Dermot']], "Dermot is Matt's brother-in-law", true), []);
-  assert.equal(selectEvidence(units, [['Matt']], "Matt's wife speaks French", true).length, 1);
+  const units  = buildUnits(toolResult('c1', 'facts', { items: [{ fact: "Matt's wife is the French speaker" }] }));
+  const absent = selectEvidence(units, [['Dermot']], "Dermot is Matt's brother-in-law", true);
+  assert.deepEqual(absent.units, []);
+  // Empty AND said why: the caller can tell "this term is not here" from "nothing is here", which is
+  // the distinction the whole strict mode exists to draw.
+  assert.equal(absent.vetoed, true);
+  assert.deepEqual(absent.hits, [{ key: 'Dermot', found: false, sources: [] }]);
+  const found = selectEvidence(units, [['Matt']], "Matt's wife speaks French", true);
+  assert.equal(found.units.length, 1);
+  assert.equal(found.vetoed, false);
+  assert.deepEqual(found.hits, [{ key: 'Matt', found: true, sources: ['TOOL:facts'] }]);
 });
 
 test('without caller keys the veto is numbers-only, so vocabulary drift is not confabulation', () => {
   const units = buildUnits(toolResult('c1', 'q', { rows: `period,sales\nQ3,4200000\n${'x'.repeat(400)}` }));
   // "Revenue" is absent (the data says "sales") — a derived word must not veto.
-  assert.ok(selectEvidence(units, deriveKeys('Q3 revenue was 4,200,000'), 'Q3 revenue was 4,200,000', false).length > 0);
+  assert.ok(selectEvidence(units, deriveKeys('Q3 revenue was 4,200,000'), 'Q3 revenue was 4,200,000', false).units.length > 0);
   // A figure that appears nowhere in any spelling must.
-  assert.deepEqual(selectEvidence(units, deriveKeys('Q3 revenue was 9,999,999'), 'Q3 revenue was 9,999,999', false), []);
+  const missing = selectEvidence(units, deriveKeys('Q3 revenue was 9,999,999'), 'Q3 revenue was 9,999,999', false);
+  assert.deepEqual(missing.units, []);
+  assert.equal(missing.vetoed, true);
 });
 
 test('ranking puts the claim-bearing unit first, ahead of same-name noise', () => {
@@ -88,7 +98,7 @@ test('ranking puts the claim-bearing unit first, ahead of same-name noise', () =
     ],
   }));
   const sel = selectEvidence(units, [['Tom'], ['SALT']], 'Tom is a Speech and Language Therapist (SALT)', true);
-  assert.match(sel[0]!.text, /Speech and Language Therapist/);
+  assert.match(sel.units[0]!.text, /Speech and Language Therapist/);
 });
 
 test('an over-long unit is excerpted around the match, never from its head', () => {
@@ -134,7 +144,7 @@ test('the plugin registers determine_provenance', async () => {
   assert.deepEqual(registered.map(t => t.name).sort(), ['determine_provenance', 'provenance_config']);
   const schema = registered.find(t => t.name === 'determine_provenance')!.inputSchema as { required: string[]; properties: Record<string, unknown> };
   assert.deepEqual(schema.required, ['claims']);
-  assert.deepEqual(Object.keys(schema.properties).sort(), ['claims', 'probe', 'provider', 'sessionId']);
+  assert.deepEqual(Object.keys(schema.properties).sort(), ['claims', 'ignoreTools', 'probe', 'provider', 'sessionId']);
 });
 
 // The pin is written by one tool and read by another: a drifting key would silently mean "configured,
@@ -160,12 +170,45 @@ test('provenance_config writes the key determine_provenance reads', async () => 
     return out;
   };
 
-  assert.deepEqual(await run({ action: 'get' }), { classifierProvider: null, available: ['fast-model', 'big-model'] });
+  const defaults = { ignoreTools: [...DEFAULT_IGNORE_TOOLS], ignoreToolsDefault: [...DEFAULT_IGNORE_TOOLS] };
+
+  assert.deepEqual(await run({ action: 'get' }),
+    { classifierProvider: null, ...defaults, available: ['fast-model', 'big-model'] });
   assert.deepEqual(await run({ action: 'set', provider: 'fast-model' }), { classifierProvider: 'fast-model' });
   assert.equal(store.get(CLASSIFIER_PROVIDER_KEY), 'fast-model');
-  assert.deepEqual(await run({ action: 'get' }), { classifierProvider: 'fast-model', available: ['fast-model', 'big-model'] });
+  assert.deepEqual(await run({ action: 'get' }),
+    { classifierProvider: 'fast-model', ...defaults, available: ['fast-model', 'big-model'] });
   // An unconfigured provider is refused rather than pinned to a name that will fail at call time.
   assert.match(String((await run({ action: 'set', provider: 'nope' }) as { error: string }).error), /Unknown provider/);
-  assert.deepEqual(await run({ action: 'clear' }), { classifierProvider: null });
+
+  // The second pin, guarded the same way: unset reports the coded default, set overrides it, and an
+  // explicit [] means "ignore nothing" rather than falling back to the default.
+  assert.deepEqual(await run({ action: 'set', ignoreTools: ['noisy_tool'] }), { ignoreTools: ['noisy_tool'] });
+  assert.deepEqual(store.get(IGNORE_TOOLS_KEY), ['noisy_tool']);
+  assert.deepEqual((await run({ action: 'get' }) as { ignoreTools: string[] }).ignoreTools, ['noisy_tool']);
+  assert.deepEqual(await run({ action: 'set', ignoreTools: [] }), { ignoreTools: [] });
+  assert.deepEqual((await run({ action: 'get' }) as { ignoreTools: string[] }).ignoreTools, []);
+  // `set` with neither is a no-op the caller almost certainly did not mean.
+  assert.match(String((await run({ action: 'set' }) as { error: string }).error), /at least one/);
+
+  assert.deepEqual(await run({ action: 'clear' }), { classifierProvider: null, ignoreTools: null });
   assert.equal(store.has(CLASSIFIER_PROVIDER_KEY), false);
+  assert.equal(store.has(IGNORE_TOOLS_KEY), false);
+});
+
+// The reason the ignore list exists: determine_provenance's own output is a set of verdicts ABOUT
+// claims, not observation of the world, so citing a prior verdict as evidence for the claim it judged
+// is circular — and self-confirming, which is the worst failure this plugin can have.
+test('an ignored tool contributes no evidence, so a verdict cannot cite itself', () => {
+  const s = session([
+    { role: 'assistant', content: [{ type: 'tool-call', id: 'c1', name: 'determine_provenance', input: {} }] },
+    { role: 'tool',      content: [{ type: 'tool-result', id: 'c1', result: [{ claim: 'Tom is a SALT', verdict: 'sourced' }] }] },
+    { role: 'assistant', content: [{ type: 'tool-call', id: 'c2', name: 'find_fact', input: {} }] },
+    { role: 'tool',      content: [{ type: 'tool-result', id: 'c2', result: ['Tom is 25, a Speech and Language Therapist'] }] },
+  ]);
+  assert.ok(buildUnits(s).some(u => u.from === 'TOOL:determine_provenance'), 'fixture is only meaningful if it would otherwise be a unit');
+
+  const filtered = buildUnits(s, new Set(DEFAULT_IGNORE_TOOLS));
+  assert.ok(!filtered.some(u => u.from === 'TOOL:determine_provenance'), 'its own verdicts are not evidence');
+  assert.ok(filtered.some(u => u.from === 'TOOL:find_fact'), 'and only the ignored tool is dropped');
 });

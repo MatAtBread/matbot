@@ -26,6 +26,11 @@ function asRecord(v: YamlValue | undefined, label: string): YamlMap {
   throw new Error(`Config: expected mapping for "${label}", got ${v === undefined ? 'undefined' : typeof v}`);
 }
 
+function asNumber(v: YamlValue | undefined, label: string): number {
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  throw new Error(`Config: expected number for "${label}", got ${v === undefined ? 'undefined' : typeof v}`);
+}
+
 function toModelParameters(raw: YamlMap): ModelParameters {
   const params: ModelParameters = {};
   for (const [k, v] of Object.entries(raw)) {
@@ -52,8 +57,14 @@ function toProviderConfig(name: string, raw: YamlMap): ProviderConfig {
   if (raw['endpoint'] !== undefined) {
     config.endpoint = asString(raw['endpoint'], `providers.${name}.endpoint`);
   }
-  if (raw['fallback'] !== undefined) {
-    config.fallback = asString(raw['fallback'], `providers.${name}.fallback`);
+  if (raw['maxRounds'] !== undefined) {
+    const rounds = asNumber(raw['maxRounds'], `providers.${name}.maxRounds`);
+    // Rejected at the boundary rather than clamped: 0 or a fraction is a typo, and silently treating it
+    // as "no turn may do anything" would look like the provider was broken.
+    if (!Number.isInteger(rounds) || rounds < 1) {
+      throw new Error(`Config: "providers.${name}.maxRounds" must be a positive integer, got ${rounds}`);
+    }
+    config.maxRounds = rounds;
   }
   if (raw['parameters'] !== undefined) {
     config.parameters = toModelParameters(asRecord(raw['parameters'], `providers.${name}.parameters`));

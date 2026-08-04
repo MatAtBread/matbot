@@ -2,7 +2,7 @@ import {
   createSessionRunner, HookRegistry, SystemContextRegistryImpl, ToolRegistryImpl, ProviderRegistryImpl,
   instantiateProvider, getPluginNameForSpecifier, recordServiceKey,
   installPrincipalCarrier, createConstantPrincipalCarrier,
-  installUsageCarrier, createSerialUsageCarrier, recordUsage,
+  installUsageCarrier, createSerialUsageCarrier, recordUsage, addUsage,
   createMessage, isMissingSecretError, loadPlugins,
   unloadPlugin as unloadPluginFn, unifyServices,
   forwardingProxy, makeSwappable, singleTurnRequest, createSingleTurnTool, createAboutMatbotTool, createNotifier, notifyingStore,
@@ -376,18 +376,12 @@ export async function boot(env: BootEnv): Promise<void> {
         ? [createMessage({ role: 'system', content: [{ type: 'text', text: req.system }], traceId: crypto.randomUUID() }), ...req.messages]
         : req.messages;
       let text = '';
+      // Folded, not last-wins — see the same loop in the node app: anthropic reports one call's usage
+      // across two events (input + cache on message_start, output on message_delta).
       let usage: Usage = { inputTokens: 0, outputTokens: 0 };
       for await (const ev of adpt.complete(msgs, resolved, [], req.signal ?? NEVER_ABORT)) {
         if (ev.type === 'text-delta') text += ev.delta;
-        if (ev.type === 'usage') {
-          usage = {
-            inputTokens:  ev.inputTokens,
-            outputTokens: ev.outputTokens,
-            ...(ev.costUsd              !== undefined ? { costUsd:             ev.costUsd              } : {}),
-            ...(ev.cacheReadTokens     !== undefined ? { cacheReadTokens:     ev.cacheReadTokens     } : {}),
-            ...(ev.cacheCreationTokens !== undefined ? { cacheCreationTokens: ev.cacheCreationTokens } : {}),
-          };
-        }
+        if (ev.type === 'usage')      usage = addUsage(usage, ev);
       }
       // Report into the ambient usage sink: a tool running this completion has its spend attributed to
       // the tool call by the runner. No-op outside any tool scope.

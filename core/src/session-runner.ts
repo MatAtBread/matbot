@@ -289,6 +289,14 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
           // the callback: an async iterator returned out of the scope would lose it before it pulls.
           // contextSwitch (not bare runAs): a turn is the transactional unit, so a StorageBackend swap
           // deferred during it lands at this scope's quiescent edge — never mid-CAS.
+          // The terminal event this turn ended on. `followup` is post-COMMIT, and only `done` is a
+          // commit: an `aborted` turn was cut short (a steer, a user cancel, a screen/toolcall hook
+          // refusing it, a provider round ceiling) and an `error` turn produced no response at all, so
+          // in both cases a followup hook would judge history with no completed answer in it — and a
+          // `resubmit` would undo the very stop that just happened, handing a round ceiling a fresh
+          // budget. Tracked here rather than inferred from `ac.signal`, which only knows about the two
+          // signal-driven aborts and not the policy ones.
+          let terminal: PipelineEvent['type'] | undefined;
           await contextSwitch(head.principal, () => withUsageScope(async () => {
             for await (const ev of runSession({
               session,
@@ -311,15 +319,17 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
               ...(head.prompt        !== undefined ? { prompt:        head.prompt        } : {}),
               ...(inject             !== undefined ? { injectedEphemeral: inject } : {}),
             })) {
+              if (ev.type === 'done' || ev.type === 'aborted' || ev.type === 'error') terminal = ev.type;
               emit(s, ev);
             }
           }));
 
           // followup — post-commit, in the queue owner. A hook reads the just-committed turn and may
-          // head-enqueue a robo follow-up (its own real turn, running next). Skipped on abort; runs
-          // under the submitter's principal because a reactor may itself call complete() (a classifier).
+          // head-enqueue a robo follow-up (its own real turn, running next). Runs only for a turn that
+          // committed (see `terminal`), and under the submitter's principal because a reactor may itself
+          // call complete() (a classifier).
           const hooks = deps.hooks;
-          if (!ac.signal.aborted && hooks) {
+          if (terminal === 'done' && hooks) {
             const committed = await deps.store.get(id);
             if (committed && head.resubmitDepth < MAX_RESUBMIT_DEPTH) {
               let followup: { resubmits: MessageContent[][]; markers: MessageContent[]; retract?: { context: MessageContent[]; durable: MessageContent[] } } = { resubmits: [], markers: [] };

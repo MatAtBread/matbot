@@ -388,6 +388,38 @@ Opaque, durable annotations in the message stream — `{ type: 'marker', creator
 
 ---
 
+## Media
+
+The model **pulls** media; nothing pushes it. A tool yields `{ type: 'model-content', content: ModelContent[] }` —
+the inline arms of `MessageContent` (`image` / `document` / `audio`), bytes plus a mime type. The runner
+pins them directly after the tool message they answer and splices them into the **outgoing copy** for
+the rest of the turn. The mirror of a marker: a marker is persisted and invisible to the model; media is
+visible to the model and never persisted.
+
+**Never persisted** — the transcript records what a tool *returned*, not the bytes it *showed*, so a
+session cannot accumulate base64 and no exit path has to remember to strip it. A later turn needing the
+bytes calls the tool again.
+
+**Rest-of-turn, not next-call-only** — withdrawing content the model has already seen breaks the prompt
+cache from that point and leaves it referring to something no longer there. The cost corollary is real:
+a large document is re-sent every subsequent round, so a tool hands over the smallest thing that answers
+the question, and `maxRounds` bounds how often it is paid for.
+
+**No `FileStore` dependency, by construction.** `files` is optional on both `RunSessionOpts` and
+`ToolContext`, so routing media through it would make multimodal impossible without one. Core never asks
+where a tool got the bytes — a `FileStore`, an HTTP fetch, a chart rendered in memory. Storage reads are
+the tool's concern; the loop's concern is the wire.
+
+Not a `PipelineEvent`: nothing durable backs it, so a frontend drawing it live would show something that
+vanishes on reload. A tool that also wants the *user* to see something has `file` and `marker`.
+
+**Durable, user-supplied media is separate, unbuilt work.** It needs a reference that survives reload
+without putting base64 in the store — a future `document` (inline data + metadata) / `document-reference`
+(url, possibly `matbot://…`) split, at which point the `image-url` / `file-ref` arms are reconsidered
+together. Nothing produces those arms today.
+
+---
+
 ## Plugin hot-reload
 
 Reload from disk without restart (`plugin reload`; `loadPlugins(..., bustCache = true)`). Freshness all the way down:

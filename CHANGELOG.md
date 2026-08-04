@@ -9,6 +9,165 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## 0.3.10
+
+### Breaking changes
+
+- **`ProviderConfig.fallback` is removed.** It was declared in `plugin-api`, explicitly parsed out of
+  `matbot.yaml` by the config loader, and copied field-by-field through the node app — and read by
+  nothing, in any package. Nothing changes at runtime, because nothing ever consulted it; what goes away
+  is a config surface that silently did nothing. Someone could set `fallback: other-profile` on a
+  provider, get no parse error and no warning, and reasonably conclude that a failing provider would
+  fail over. Removed rather than implemented because failover is a real design question — it has to
+  decide how two providers billed for one turn are accounted, and what happens to a tool-call's
+  `ProviderMeta` round-trip token when the retry lands on a provider that never issued it — and a
+  stub answering none of that is worse than nothing. An existing `fallback:` key in a config is
+  ignored exactly as before.
+
+### API gaps filled
+
+- **A tool call cut off mid-arguments is now a recoverable round, not a dead turn.** When a response hit
+  its token limit part-way through a large tool call, the adapter threw — `Tool "x" arguments could not
+  be parsed … increase the provider's maxTokens` — which ended the whole turn. Raising `maxTokens` only
+  moves the ceiling; it cannot survive one call larger than the new ceiling, so the user got a dead end.
+  The `tool-call` `CompletionEvent` now carries an optional `truncated: { bytes, stopReason? }`, and the
+  runner answers such a call with an error result **without executing it** (`input` is `{}` — the real
+  arguments are unrecoverable, and the wire requires an object). The model reads the failure in the slot
+  it expects and retries smaller, which is the self-correction the loop already performs for a rejected
+  or unknown tool.
+  - **No retry counter.** A model that keeps overflowing burns rounds and meets `maxRounds`, exactly as
+    one repeatedly calling any failing tool does. One bounding mechanism, not two.
+  - **The pairing is what makes it safe**: the assistant message carries a `tool-call` block for the
+    severed call, and an unpaired `tool_use` is rejected by the next submission.
+  - **`toolresult` runs for it** (`toolcall` does not — there is nothing to judge, the call cannot
+    proceed whatever a hook says). That is the seam for advice the harness cannot have: *which* of a
+    given tool's parameters offers a cheaper edit is the tool author's knowledge, not core's. Narrow
+    with the exported `isTruncatedToolResult` rather than duck-typing the result.
+  - Detectable only where arguments stream as a severable JSON *string* — the Anthropic
+    (`input_json_delta`) and OpenAI (`function.arguments`) shapes. Gemini delivers each `functionCall`
+    complete with `args` already an object, so there is nothing to sever; `chatjimmy` and
+    `customer-services` emit no tool calls at all.
+- **A response cut short is recorded instead of vanishing.** A new `truncated` `CompletionEvent`
+  (`reason: 'max-tokens' | 'stream-end'`) reports that the provider stopped the response rather than the
+  model choosing to. The far commoner case has no tool call in it at all — prose stopping mid-sentence —
+  and matbot surfaced that nowhere: the stop reason was read and then used only in an error message that
+  fired for tool calls alone. The runner persists it as a `matbot-truncation` marker and carries it
+  live. Marker-role deliberately: a reader and an audit see it, the model does not — its own text is
+  already truncated in the transcript, and a block telling it so invites narrating the cut-off rather
+  than continuing past it. Acting on it (continue, re-ask with a larger budget) is a `followup` hook's
+  business. Emitted by the anthropic, openai-compat and google adapters; the two text-only adapters
+  expose no finish reason to report.
+  - Note for anyone switching exhaustively over `CompletionEvent`: it has a new arm.
+- **`ProviderConfig.maxRounds`** — an optional per-profile ceiling on the agentic rounds one turn may
+  take, a round being one provider call plus the tool batch it asked for. Reaching it ends the turn
+  (`aborted`, reason `round-limit: …`) instead of starting another round; absent ⇒ unbounded, which is
+  the previous behaviour, so nothing changes for a config that does not set it. The runner's loop had no
+  upper bound at all, so a model/tool feedback cycle could run until an external timeout or a user
+  cancel.
+  - **On the provider profile, not global and not per-call**, because that is the unit spend is
+    denominated in: a local model can afford to grind where a frontier model at 100× the rate cannot,
+    and one deployment runs both. It is a sibling of `model`/`endpoint` and deliberately **not** a
+    member of `parameters`, which is forwarded to the endpoint unmodified — this never leaves matbot.
+  - **In core rather than as a hook**, because a ceiling reached through a plugin is a ceiling that
+    disappears when the plugin fails to load, and because expressing it as a hook turned out to require
+    three non-obvious things of every consumer: deriving the round number, knowing that `rejectTool`
+    does not actually bound the loop (it only feeds an error back — an uncooperative model keeps
+    driving full-history provider calls), and therefore staging a soft nudge ahead of a hard stop. That
+    is a great deal of subtlety for what should be a number.
+  - Validated at the config boundary: a non-integer or `< 1` value is rejected with a clear message
+    rather than clamped, since silently treating `0` as "no turn may do anything" would read as a
+    broken provider. Settable and visible through the `provider` tool's `add`/`list` as well as
+    `matbot.yaml`.
+- **A tool can hand the model something to look at.** New `model-content` `ToolEvent`, carrying
+  `ModelContent[]` (the inline `image` / `document` / `audio` arms of `MessageContent`). The runner pins
+  the media directly after the tool message it answers and splices it into the outgoing copy for the
+  rest of the turn. Previously a tool could return only what the model *reads* — its `result`, serialised
+  as JSON — so an image or a PDF could reach the model by no route at all.
+  - **Wire-only: never persisted.** The transcript records what the tool returned, not the bytes it
+    showed, so a session does not accumulate base64 and there is no exit path that has to remember to
+    strip it. A later turn needing the bytes again calls the tool again — the same pull the model
+    already performed.
+  - **Rest-of-turn, not next-call-only.** Withdrawing content the model has already seen breaks the
+    prompt cache from that point and leaves it referring to something no longer there. The cost
+    corollary: a large document is re-sent on every subsequent round, so hand over the smallest thing
+    that answers the question, and note that `maxRounds` bounds how often it is paid for.
+  - **No new service and no `FileStore` dependency.** Where the tool got the bytes — a `FileStore`, an
+    HTTP fetch, a chart rendered in memory — is the tool's business; core carries them to the wire and
+    drops them. `files` is optional on both `RunSessionOpts` and `ToolContext`, so routing media through
+    it would have made multimodal impossible without one.
+  - Deliberately *not* a `PipelineEvent`: nothing durable backs it, so a frontend that drew it live
+    would show something that vanishes on reload. A tool that wants the user to see it too has `file`
+    and `marker` already.
+- **`document` reaches Anthropic and Gemini natively.** It degraded to a `[Document: name]` text
+  placeholder in every adapter — the block existed in `MessageContent` and no provider ever received
+  one. Anthropic now gets a native `document` block (base64 for `application/pdf`; `text/*` decoded into
+  a plain-text source, which is the shape that surface takes); Gemini gets `inlineData`, which also
+  covers `audio`. Anything Anthropic has no representation for keeps the placeholder. `openai-compat`
+  is unchanged: it fronts DeepSeek, vLLM, ollama and llama.cpp as well as OpenAI, and the file/audio
+  parts are not portable across them.
+
+### Bug fixes
+
+- **`followup` now runs only for a turn that actually committed.** It is documented as post-commit and
+  the code said it was "skipped on abort", but the gate was `!ac.signal.aborted` — which knows about the
+  two signal-driven aborts (a steer, a user cancel) and not the policy ones. A `screen` hook or a
+  `toolcall` hook refusing a turn, and any turn ending in `error`, therefore still got a followup pass
+  over history containing no completed response, where a hook judging "the assistant's answer" was
+  reading the previous turn's. Worse, a `resubmit` from there undoes the stop that just happened: for
+  the new `maxRounds` ceiling it would have handed out a fresh budget, making the limit worth up to
+  `MAX_RESUBMIT_DEPTH` times what was configured. The pump now tracks which terminal event the turn
+  ended on and runs `followup` only for `done`. A hook that wants to observe a failed or interrupted
+  turn should publish on the `Notifier` from wherever the failure arises, which is where that fact
+  actually is.
+- **A `toolcall` hook returning `abort` no longer discards the whole turn.** It was the one terminal
+  path in the runner that returned without persisting, and nothing is written mid-turn — so a hook
+  aborting on a late round threw away every earlier round's assistant message and tool results along
+  with the current response, all of which the frontend had already drawn. A reload showed a bare user
+  message. The turn is now committed before the `aborted` event.
+  - Committing it requires closing the `tool_use`/`tool_result` pairing, since the assistant message
+    carries a `tool-call` block per pending call and an unpaired `tool_use` is rejected by the next
+    submission (Anthropic 400s; nothing downstream reconciles them). An abort is a turn-level stop
+    rather than a verdict on the tools, so the call the hook judged and any later calls in the same
+    round are recorded as not-run.
+  - The judged call now also gets its `tool:end`. Previously `abort` returned between `tool:start` and
+    `tool:end`, leaving a frontend with a tool bubble that never closed.
+- **`complete()` no longer loses the input and cache token counts of an out-of-band completion.** Both
+  hosts accumulated the response's usage by overwriting on each `usage` event rather than folding, but
+  an adapter may report one call's usage in several parts: the anthropic adapter sends input and cache
+  counts on `message_start` and output tokens on `message_delta`. Last-event-wins therefore returned
+  `inputTokens: 0` with no cache figures for every `complete()` / `singleTurn()` against an Anthropic
+  provider — `single_turn`, a classifier, a titling pass, anything a plugin runs off-conversation — and
+  the same zeroes went into the ambient usage sink, so a tool's attributed spend under-reported too. The
+  loop now folds with `addUsage`, exactly as the runner has always folded a turn's usage, so the two
+  accounting paths agree. Adapters that report one cumulative event at end of stream (google, chatjimmy,
+  and OpenAI-compatible endpoints) are unaffected: folding a single event equals overwriting it.
+- **The anthropic adapter no longer emits adjacent same-role messages.** It rendered one wire message
+  per neutral message, so any two neighbours that landed on the same role went out as-is — which the
+  Messages API does not accept. It was reachable before this release (an assistant turn stripped back
+  to text by a thinking-block elision, next to another assistant turn) and is reachable by construction
+  now that tool-supplied media follows a tool message, itself rendered `user`. Adjacent contents fold
+  into the previous message, which is what the google adapter has always done for the same reason.
+
+### Optional
+
+- **storage/filesystem — a document id that isn't filename-safe is escaped, not rejected.**
+  `FilesystemStore` validated ids against `^[\w-]+$` and threw `Invalid store id` for anything else,
+  but a `Store` id is an arbitrary string: a skill keyed `scope:name` and user-scoped state keyed by
+  email address are both unstorable, so every `get`/`set` for them threw at runtime. Anything outside
+  `[A-Za-z0-9_.-]` is now percent-escaped for the filename instead (`.` left readable — it cannot
+  traverse, since a `.json` suffix is always appended, making an id of `..` the file `...json` inside
+  the store directory). The set that was previously allowed escapes to itself, so existing documents
+  keep their filenames and there is no migration; `%` cannot occur in one of those older names, so the
+  two eras cannot collide. Escaping is one-directional — nothing decodes, because `query` reads each
+  document's `id` from its own contents.
+  - **`query` enumerates them too.** Its directory filter was the same narrow `^[\w-]+\.json$`, so an
+    escaped id would have been written but then skipped by every listing — the widened filter still
+    excludes the `<name>.json.tmp` scratch files an atomic write leaves behind.
+  - **A write now invalidates its own parse-cache entry again.** `forget()` built its key from the raw
+    id while `remember()` keys on the on-disk name; for an id that escapes to something else the two
+    diverged, so `set`/`delete` stranded the stale entry and a subsequent `immutable` query served the
+    superseded document.
+
 ## 0.3.9
 
 _Provenance stops citing itself, and says which of a claim's terms it actually found. Plus: the

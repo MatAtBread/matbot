@@ -1,5 +1,27 @@
 # @matatbread/matbot-core
 
+## 0.3.10
+
+### Patch Changes
+
+- Tool media, per-provider round ceiling, and recovery from a truncated tool call.
+
+  - `model-content` ToolEvent: a tool can hand the model an image, PDF or audio clip to look at. Pinned
+    after the tool message it answers, carried for the rest of the turn, never persisted.
+  - `document` converts natively for Anthropic (base64 PDF, decoded `text/*`) and Gemini (`inlineData`,
+    which also covers audio) instead of degrading to a text placeholder in every adapter.
+  - `ProviderConfig.maxRounds`: a per-profile ceiling on tool rounds per turn. Replaces the removed
+    `ProviderConfig.fallback`, which was declared, parsed, and read by nothing.
+  - A tool call cut off mid-arguments is answered with an error result instead of throwing, so the model
+    self-corrects; a response cut short is recorded as an LLM-invisible `matbot-truncation` marker.
+  - Fixes: `complete()` folds usage events instead of last-event-wins; `followup` no longer runs after an
+    aborted or errored turn; a `toolcall` abort commits the turn; `FilesystemStore` escapes store ids
+    that are not filename-safe rather than rejecting them; the anthropic adapter no longer emits adjacent
+    same-role messages; openai-compat terminates a stream with exactly one `done`.
+
+- Updated dependencies
+  - @matatbread/matbot-plugin-api@0.3.10
+
 ## 0.3.9
 
 ### Patch Changes

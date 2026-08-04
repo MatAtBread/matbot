@@ -16,7 +16,7 @@ import { appendMessage, createMessage,
          teardownPlugins,
          unloadPlugin as unloadPluginFn,
          getPluginNameForSpecifier, getRegisteredPlugins, recordServiceKey,
-         installPrincipalCarrier, installUsageCarrier, recordUsage, usageByProvider, enterPrincipal, currentPrincipal,
+         installPrincipalCarrier, installUsageCarrier, recordUsage, usageByProvider, addUsage, enterPrincipal, currentPrincipal,
          unifyServices, forwardingProxy, makeSwappable, singleTurnRequest,
          createMountTable, onContextQuiesce, flushIfQuiescent,
          createSingleTurnTool, createAboutMatbotTool,
@@ -1039,18 +1039,14 @@ async function main(): Promise<void> {
         : req.messages;
       const signal = req.signal ?? NEVER_ABORT_SIGNAL;
       let text = '';
+      // Folded exactly as the runner folds a turn's usage, because an adapter may report one call's
+      // usage in several parts: anthropic sends input + cache counts on `message_start` and output on
+      // `message_delta`. Taking the last event instead of folding therefore reported inputTokens 0 and
+      // no cache figures for every out-of-band completion against it.
       let usage: Usage = { inputTokens: 0, outputTokens: 0 };
       for await (const ev of adpt.complete(msgs, resolved, [], signal)) {
         if (ev.type === 'text-delta') text += ev.delta;
-        if (ev.type === 'usage') {
-          usage = {
-            inputTokens:  ev.inputTokens,
-            outputTokens: ev.outputTokens,
-            ...(ev.costUsd              !== undefined ? { costUsd:             ev.costUsd              } : {}),
-            ...(ev.cacheReadTokens     !== undefined ? { cacheReadTokens:     ev.cacheReadTokens     } : {}),
-            ...(ev.cacheCreationTokens !== undefined ? { cacheCreationTokens: ev.cacheCreationTokens } : {}),
-          };
-        }
+        if (ev.type === 'usage')      usage = addUsage(usage, ev);
       }
       // Report into the ambient usage sink: a tool running this completion (singleTurn/complete) has
       // its spend attributed to the tool call by the runner. No-op outside any tool scope.
@@ -1257,7 +1253,7 @@ async function main(): Promise<void> {
     ...(rawConfig.credentials !== undefined ? { credentials: await resolveCredentialsInteractive(rawConfig.credentials, vault) } : {}),
     ...(rawConfig.endpoint    !== undefined ? { endpoint: await vault.resolve(rawConfig.endpoint) } : {}),
     ...(rawConfig.parameters  !== undefined ? { parameters: rawConfig.parameters } : {}),
-    ...(rawConfig.fallback    !== undefined ? { fallback:   rawConfig.fallback   } : {}),
+    ...(rawConfig.maxRounds   !== undefined ? { maxRounds:  rawConfig.maxRounds  } : {}),
   };
 
   // ── Session ───────────────────────────────────────────────────────────────────
