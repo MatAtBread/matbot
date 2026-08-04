@@ -1,6 +1,6 @@
 import type {
   Session, Message, MessageContent, ModelContent, Usage, ProviderMeta, TruncatedToolResult,
-  PipelineEvent, RunConfig, ProviderAdapter, ProviderConfig,
+  TurnEvent, RunConfig, ProviderAdapter, ProviderConfig,
   Tool, ToolRegistry, ToolContext, Store, FileStore, SystemContextRegistry, Vault, PromptFn, FormField,
 } from './types.js';
 import type { MatbotPlugin } from './plugin.js';
@@ -75,7 +75,9 @@ export interface RunSessionOpts {
   unloadPlugin:   (specifier: string) => Promise<boolean>;
 }
 
-export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineEvent> {
+// Yields TurnEvent, not PipelineEvent: a single turn never produces the session-level `idle` — that is
+// the pump's, emitted once its queue drains. Saying so in the type is the point of the two-union split.
+export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent> {
   const { config, provider, providerConfig, store, signal } = opts;
   const tools   = opts.tools   ?? new Map<string, Tool>();
   const hookReg = opts.hooks   ?? new HookRegistry();
@@ -103,7 +105,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
   // commit at all, silently discarding every completed round of the turn.
   // Nothing is written mid-turn, so "commit" here means the whole turn or none of it.
   // Closes over the reassigned `session` deliberately, so no exit can commit a stale copy.
-  async function* end(terminal: PipelineEvent): AsyncIterable<PipelineEvent> {
+  async function* end(terminal: TurnEvent): AsyncIterable<TurnEvent> {
     await store.set(session.id, session);
     yield terminal;
   }
@@ -159,7 +161,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
   // Returns whether anything was claimed. What the caller does with that is the part that legitimately
   // differs — proceed, abort the in-flight provider call, or re-run the loop — so it stays at the site.
   const deferred = screen.deferred;
-  async function* claimVerdicts(): AsyncGenerator<PipelineEvent, boolean, undefined> {
+  async function* claimVerdicts(): AsyncGenerator<TurnEvent, boolean, undefined> {
     if (deferred.length === 0) return false;
     const ephemeralC: MessageContent[] = [];
     const durableC:   MessageContent[] = [];

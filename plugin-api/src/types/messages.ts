@@ -7,14 +7,24 @@ import type { ProviderMeta, Usage, UsageRecord } from './provider.js';
 export type MessageRole = 'user' | 'assistant' | 'tool' | 'system' | 'marker';
 
 export type MessageContent = (
+  // ── prose and reasoning: what the model said ──
   | { type: 'text';              text: string }
   | { type: 'thinking';          thinking: string; signature: string }
   | { type: 'redacted-thinking'; data: string }
   | { type: 'reasoning';         reasoning: string }
+  | { type: 'refusal';           text: string }
+
+  // ── inline media: bytes plus a mime type. The first three are also `ModelContent` — the arms a tool
+  //    may hand the model to look at (see the `model-content` ToolEvent). `image-url` and `file-ref`
+  //    are references rather than data, and nothing produces them yet; they are reconsidered together
+  //    when durable user-supplied media is built (a `document` / `document-reference` split). ──
   | { type: 'image';             data: string; mimeType: MimeType }
-  | { type: 'image-url';         url: string; detail?: 'low' | 'high' | 'auto' }
   | { type: 'document';          data: string; mimeType: MimeType; name?: string }
   | { type: 'audio';             data: string; mimeType: MimeType }
+  | { type: 'image-url';         url: string; detail?: 'low' | 'high' | 'auto' }
+  | { type: 'file-ref';          fileId: string; name: string; mimeType: MimeType }
+
+  // ── tool use ──
   | { type: 'tool-call';         id: string; name: string; input: unknown;
       /** Provider-specific round-trip metadata, persisted and re-sent verbatim on replay — see
        *  `ProviderMeta` and the `tool-call` `CompletionEvent`. */
@@ -27,11 +37,14 @@ export type MessageContent = (
        * call, each tagged with the provider billed; never summed at write time, as rates differ.
        */
       usage?: UsageRecord[] }
-  | { type: 'refusal';           text: string }
-  | { type: 'file-ref';          fileId: string; name: string; mimeType: MimeType }
+
+  // ── frontend-facing: rendered to a person, never sent to the model ──
   | { type: 'form';              fields: FormField[]; submitLabel?: string }
   | { type: 'form-response';     values: Record<string, string> }
+  // Durable, opaque annotation — persisted unchanged, elided from every submission. See MarkerData below.
   | { type: 'marker';            creator: string; data: unknown }
+
+  // ── a provider block this build does not know: preserved verbatim rather than dropped ──
   | { type: 'unknown-content';   blockType: string; raw: unknown }
 ) & {
   /**
