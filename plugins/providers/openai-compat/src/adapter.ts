@@ -128,6 +128,10 @@ export class OpenAICompatAdapter implements ProviderAdapter {
     // rather than letting it vanish into a no-reply turn.
     let sawAny     = false;
     let lastFinish: string | null | undefined;
+    // Whether the stream reached a finish_reason and was closed off there. The trailing `done` below
+    // exists for the case it never does (a dropped connection); without this it fired on EVERY stream,
+    // so a healthy completion terminated twice.
+    let finished   = false;
 
     for await (const line of parseSSE(res.body)) {
       let chunk: OAIChunk;
@@ -187,7 +191,7 @@ export class OpenAICompatAdapter implements ProviderAdapter {
       // 'length' is OpenAI's truncation reason (the analogue of Anthropic's max_tokens) — treat
       // it as terminal too, so a tool call cut off mid-arguments is flushed and surfaced here
       // rather than silently dropped to the fallback below.
-      if (choice.finish_reason === 'tool_calls' || choice.finish_reason === 'stop' || choice.finish_reason === 'length') {
+      if (!finished && (choice.finish_reason === 'tool_calls' || choice.finish_reason === 'stop' || choice.finish_reason === 'length')) {
         if (reasoningAcc) {
           yield { type: 'reasoning-block', reasoning: reasoningAcc };
           reasoningAcc = '';
@@ -211,6 +215,7 @@ export class OpenAICompatAdapter implements ProviderAdapter {
           yield { type: 'truncated', reason: 'max-tokens', raw: choice.finish_reason };
         }
         yield { type: 'done' };
+        finished = true;
       }
     }
 
@@ -237,7 +242,7 @@ export class OpenAICompatAdapter implements ProviderAdapter {
         `(roles: ${messages.map(m => m.role).join(',')}). A 'content_filter' finish_reason means the endpoint blocked it.`,
       );
     }
-    yield { type: 'done' };
+    if (!finished) yield { type: 'done' };
   }
 
   async health(): Promise<HealthStatus> {
