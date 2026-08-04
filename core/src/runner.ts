@@ -1,5 +1,5 @@
 import type {
-  Session, Message, MessageContent, ModelContent, Usage, ProviderMeta, DeferredCorrection, TruncatedToolResult,
+  Session, Message, MessageContent, ModelContent, Usage, ProviderMeta, TruncatedToolResult,
   PipelineEvent, RunConfig, ProviderAdapter, ProviderConfig,
   Tool, ToolRegistry, ToolContext, Store, FileStore, SystemContextRegistry, Vault, PromptFn, FormField,
 } from './types.js';
@@ -148,12 +148,19 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
   // in here when it fires, and the loop re-runs with it.
   let ephemeral = [...(opts.injectedEphemeral ?? []), ...screen.ephemeral];
 
-  // Raced screen verdicts (see DeferredScreen): polled — synchronously, never awaited — at each loop
-  // edge. `pollDeferred` claims any that have fired this poll (exactly once each) and merges their
-  // corrections; `applyCorrection` then folds them in and returns any durable blocks to emit live.
+  // Raced screen verdicts (see DeferredScreen): claimed — synchronously, never awaited — at each of the
+  // three loop edges (before generating, mid-stream, and pre-commit). Claiming is one step, so the three
+  // sites cannot disagree about it: take every verdict that has fired since the last claim (exactly once
+  // each), fold `ephemeral` in ahead of what is already queued so the re-run reads it, fold `durable`
+  // onto the user turn (persisted — the re-run and every later turn see it in history), and carry that
+  // durable half live as a `robo-user`, which is what preserves a contextual fire's visible persistence
+  // even though the verdict landed mid-turn.
+  //
+  // Returns whether anything was claimed. What the caller does with that is the part that legitimately
+  // differs — proceed, abort the in-flight provider call, or re-run the loop — so it stays at the site.
   const deferred = screen.deferred;
-  const pollDeferred = (): DeferredCorrection | undefined => {
-    if (deferred.length === 0) return undefined;
+  async function* claimVerdicts(): AsyncGenerator<PipelineEvent, boolean, undefined> {
+    if (deferred.length === 0) return false;
     const ephemeralC: MessageContent[] = [];
     const durableC:   MessageContent[] = [];
     for (const d of deferred) {
@@ -162,20 +169,20 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
       if (c.ephemeral) ephemeralC.push(...c.ephemeral);
       if (c.durable)   durableC.push(...c.durable);
     }
-    return (ephemeralC.length > 0 || durableC.length > 0) ? { ephemeral: ephemeralC, durable: durableC } : undefined;
-  };
-  // Apply a claimed correction: `ephemeral` leads the tail-fold for the re-run; `durable` is folded onto
-  // the turn's user message (persisted, re-run sees it in history) and RETURNED so the caller emits it
-  // live as a `robo-user` event — the durable twin, preserving a contextual fire's persistence even
-  // though the verdict landed mid-turn. Mutates `ephemeral`/`session` in place.
-  const applyCorrection = (c: DeferredCorrection): MessageContent[] => {
-    if (c.ephemeral && c.ephemeral.length > 0) ephemeral = [...c.ephemeral, ...ephemeral];
-    if (c.durable && c.durable.length > 0) {
-      const folded = foldOntoUserTurn(session, c.durable);
-      if (folded !== session) { session = folded; return c.durable; }
+    if (ephemeralC.length === 0 && durableC.length === 0) return false;
+
+    if (ephemeralC.length > 0) ephemeral = [...ephemeralC, ...ephemeral];
+    if (durableC.length > 0) {
+      const folded = foldOntoUserTurn(session, durableC);
+      // Identity-unchanged ⇒ no user message to attach to, so the blocks were dropped: nothing durable
+      // landed, hence nothing to carry live either.
+      if (folded !== session) {
+        session = folded;
+        yield { type: 'robo-user', content: durableC, traceId };
+      }
     }
-    return [];
-  };
+    return true;
+  }
 
   // ── 2. System context (built once per submit, never persisted) ─────────────
 
@@ -223,8 +230,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
     // A raced screen verdict that already fired (settled during setup, or while a previous tool round
     // ran): fold its correction in before generating, so this call is informed directly rather than
     // discarded. This is the no-waste path — the verdict landed before we spent any tokens.
-    const early = pollDeferred();
-    if (early) { const dur = applyCorrection(early); if (dur.length > 0) yield { type: 'robo-user', content: dur, traceId }; }
+    yield* claimVerdicts();
 
     const pendingCalls: Array<{ id: string; name: string; input: unknown; meta?: ProviderMeta;
       truncated?: { bytes: number; stopReason?: string } }> = [];
@@ -268,12 +274,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
         // A raced verdict firing mid-generation changes the premise: discard this doomed response and
         // restart the loop with the correction folded in. Polled BEFORE the event is emitted, so a
         // classifier faster than time-to-first-token is caught before any token reaches the frontend.
-        const hit = pollDeferred();
-        if (hit) {
-          const dur = applyCorrection(hit);
-          if (dur.length > 0) yield { type: 'robo-user', content: dur, traceId };
-          restart = true; callAc.abort('screen-restart'); break;
-        }
+        if (yield* claimVerdicts()) { restart = true; callAc.abort('screen-restart'); break; }
         switch (ev.type) {
           case 'text-delta':
             textAcc += ev.delta;
@@ -352,8 +353,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
 
     // Pre-commit poll: the verdict may have settled exactly as the stream ended. Discard and re-run
     // rather than commit-then-retract, keeping the correction on the cheaper in-situ path.
-    const late = pollDeferred();
-    if (late) { const dur = applyCorrection(late); if (dur.length > 0) yield { type: 'robo-user', content: dur, traceId }; continue; }
+    if (yield* claimVerdicts()) continue;
 
     // Build and store assistant message
     if (textAcc)           assistantParts.push({ type: 'text', text: textAcc });
