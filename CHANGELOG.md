@@ -40,6 +40,25 @@ churn and less likely to affect a consumer who doesn't use them.
   registry rather than the `ProviderConfig` map that `services.providers` actually is. Nothing imported it,
   so nothing changes at runtime; what goes away is a name that resolved to the wrong shape with no error.
 
+- **`Session.contexts` is removed.** A required `string[]` on every session, written by `createSession`,
+  the web server and the skills compiler, and read by *nothing* in any package — system context is
+  contributed through `SystemContextContributor`, not carried on the session. All 188 sessions in the
+  development store had it empty. Old data keeps the field harmlessly as an excess property, exactly like
+  the already-undeclared `ownerPrincipalId`/`persona`; no migration needed.
+
+- **`CompletionRequest.parameters` and `SingleTurnRequest.parameters` are removed.** Both were
+  `@deprecated` with a note explaining that their obvious use is an anti-pattern (a per-call override takes
+  control away from the provider config, where parameters belong and stay user-editable — prefer a
+  dedicated provider profile). Both hosts honoured them and *no caller in the repo set them*. Shipping a
+  deprecated field into a stable line means carrying it to the next major, so it goes now.
+
+### API gaps filled
+
+- **`@matatbread/matbot-core` re-exports every branded error, not most of them.** `readOnlyError`,
+  `isReadOnlyError` and the `ReadOnlyError` type were missing from core's root — `export type *` strips a
+  guard's value meaning, and the explicit re-export list had been kept by hand. A consumer importing from
+  core got some guards and silently missed others, including the one the turn pump itself depends on.
+
 ### Bug fixes
 
 - **A tool-name collision can no longer crash the process or revive an unloaded plugin's tool.**

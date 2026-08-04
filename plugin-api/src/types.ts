@@ -290,12 +290,13 @@ export type SessionStatus = 'active' | 'archived' | 'pinned';
 export interface Session {
   id:                    string;
   version:               string;
-  // Legacy: persisted sessions may still carry `ownerPrincipalId` / `actorPrincipalId` / `persona`.
-  // They were never read — ownership-at-rest is structural (the storage partition), resolved via the
-  // backend, not a field. Left undeclared; old data keeps them harmlessly as excess properties.
+  // Legacy: persisted sessions may still carry `ownerPrincipalId` / `actorPrincipalId` / `persona`, and
+  // `contexts` (a required-but-never-read `string[]`, dropped at 0.4.0 — system context is contributed by
+  // SystemContextContributor, not carried on the session). Never read — ownership-at-rest is structural
+  // (the storage partition), resolved via the backend, not a field. Left undeclared; old data keeps them
+  // harmlessly as excess properties.
   title?:                string;
   status:                SessionStatus;
-  contexts:              string[];
   messages:              Message[];
   parentSessionId?:      string;
   branchPointMessageId?: string;

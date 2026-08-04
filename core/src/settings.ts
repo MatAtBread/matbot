@@ -22,45 +22,51 @@ export function slugSettingsNamespace(name: string): string {
   return name.replace(/[^\w-]+/g, '_');
 }
 
-/** Build a PluginSettings facade over the shared settings store, scoped to one document id. */
+/**
+ * Build a PluginSettings facade over the shared settings store, scoped to one document id.
+ *
+ * Every read used to also decide whether the document was in the pre-Store flat `{ key: value }` format
+ * and, if so, wrap it under a `version: '0'` sentinel that `set`/`delete` then had to recognise and
+ * upgrade with `set` instead of `cas` — a three-site migration paid for on every `settings.get()` by
+ * every plugin, forever. Dropped at 0.4.0: an unrecognised document is treated as absent, so a flat one
+ * would be re-created on first write rather than read. Nothing in the wild is still flat.
+ */
 export function makePluginSettings(store: Store<SettingsDoc>, namespace: string): PluginSettings {
   const id = slugSettingsNamespace(namespace);
 
-  // Handles migration from the old flat-object format (pre-Store).
   const getDoc = async (): Promise<SettingsDoc | null> => {
     const raw = await store.get(id);
-    if (raw === null) return null;
-    if (isSettingsDoc(raw)) return raw;
-    // Old format: flat { key: value } — wrap it so subsequent writes upgrade the file.
-    return { id, version: '0', data: raw as unknown as Record<string, unknown> };
+    return raw !== null && isSettingsDoc(raw) ? raw : null;
+  };
+
+  // One CAS retry loop for both writers: read, apply `mutate`, write. A document that vanished between
+  // read and write (or never existed) is a plain `set`; otherwise `cas` guards the version we read.
+  const update = async (mutate: (data: Record<string, unknown>) => Record<string, unknown> | undefined): Promise<void> => {
+    for (;;) {
+      const doc  = await getDoc();
+      const data = mutate(doc?.data ?? {});
+      if (data === undefined) return;
+      const next: SettingsDoc = { id, version: Date.now().toString(), data };
+      if (doc === null) { await store.set(id, next); return; }
+      const r = await store.cas(id, doc.version, next);
+      if (r.ok) return;
+    }
   };
 
   return {
     async get<T>(key: string): Promise<T | undefined> {
       return (await getDoc())?.data[key] as T | undefined;
     },
-    async set<T>(key: string, value: T): Promise<void> {
-      for (;;) {
-        const doc  = await getDoc();
-        const data = { ...(doc?.data ?? {}), [key]: value as unknown };
-        const next: SettingsDoc = { id, version: Date.now().toString(), data };
-        // version '0' means migrated-but-not-yet-written — use set to upgrade the file.
-        if (doc === null || doc.version === '0') { await store.set(id, next); return; }
-        const r = await store.cas(id, doc.version, next);
-        if (r.ok) return;
-      }
+    set<T>(key: string, value: T): Promise<void> {
+      return update(data => ({ ...data, [key]: value as unknown }));
     },
-    async delete(key: string): Promise<void> {
-      for (;;) {
-        const doc = await getDoc();
-        if (doc === null) return;
-        const data = { ...doc.data };
-        delete data[key];
-        const next: SettingsDoc = { id, version: Date.now().toString(), data };
-        if (doc.version === '0') { await store.set(id, next); return; }
-        const r = await store.cas(id, doc.version, next);
-        if (r.ok) return;
-      }
+    delete(key: string): Promise<void> {
+      return update(data => {
+        if (!(key in data)) return undefined;
+        const next = { ...data };
+        delete next[key];
+        return next;
+      });
     },
   };
 }

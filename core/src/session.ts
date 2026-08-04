@@ -2,7 +2,6 @@ import type { Session, Message, MessageContent, MessageRole, Usage } from './typ
 
 export interface CreateSessionOpts {
   title?:                string;
-  contexts?:             string[];
   parentSessionId?:      string;
   branchPointMessageId?: string;
 }
@@ -16,7 +15,6 @@ export function createSession(opts: CreateSessionOpts = {}): Session {
     ...(opts.parentSessionId      !== undefined ? { parentSessionId:      opts.parentSessionId      } : {}),
     ...(opts.branchPointMessageId !== undefined ? { branchPointMessageId: opts.branchPointMessageId } : {}),
     status:    'active',
-    contexts:  opts.contexts ?? [],
     messages:  [],
     createdAt: now,
     updatedAt: now,

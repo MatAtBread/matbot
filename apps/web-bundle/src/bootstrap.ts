@@ -366,9 +366,6 @@ export async function boot(env: BootEnv): Promise<void> {
       if (rawCfg === undefined) throw new Error(`complete(): unknown provider "${req.provider}". Available: ${[...providers.keys()].join(', ')}`);
       const resolved: ProviderConfig = {
         ...rawCfg,
-        // Per-call overrides shallow-merged over the config's own parameters (request wins). See the
-        // @deprecated note on CompletionRequest.parameters — honoured, but a provider profile is preferred.
-        ...(req.parameters !== undefined ? { parameters: { ...rawCfg.parameters, ...req.parameters } } : {}),
         ...(rawCfg.credentials !== undefined ? { credentials: await resolveCredentials(rawCfg.credentials, vault) } : {}),
         ...(rawCfg.endpoint    !== undefined ? { endpoint: await resolveInteractive(rawCfg.endpoint, vault) } : {}),
       };

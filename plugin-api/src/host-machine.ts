@@ -184,8 +184,7 @@ export function singleTurnRequest(req: SingleTurnRequest): CompletionRequest {
       id: '', traceId: '', createdAt: new Date().toISOString(), role: 'user',
       content: [{ type: 'text', text: req.prompt }],
     }],
-    ...(req.system     !== undefined ? { system: req.system } : {}),
-    ...(req.parameters !== undefined ? { parameters: req.parameters } : {}),
-    ...(req.signal     !== undefined ? { signal: req.signal } : {}),
+    ...(req.system !== undefined ? { system: req.system } : {}),
+    ...(req.signal !== undefined ? { signal: req.signal } : {}),
   };
 }

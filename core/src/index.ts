@@ -2,15 +2,19 @@ export type * from './types.js';
 // matbot's typed errors are duck-typed: factory `xError()` builders + `isXError()` brand guards are
 // runtime values (re-exported here, since the `export type *` above would strip their value meaning),
 // while the `XError` shapes are types (re-exported below). StoreQueryError is still a class value.
+// Every branded error, uniformly: a partial list meant a consumer importing from core got some guards and
+// silently missed others (readOnlyError/isReadOnlyError were absent, though the pump depends on the guard).
 export {
   missingSecretError, isMissingSecretError,
   incompatibleRuntimeError, isIncompatibleRuntimeError,
   notAPluginError, isNotAPluginError,
   promptCancelledError, isPromptCancelledError,
+  readOnlyError, isReadOnlyError,
   StoreQueryError,
 } from '@matatbread/matbot-plugin-api';
 export type {
-  MissingSecretError, IncompatibleRuntimeError, NotAPluginError, PromptCancelledError, MatbotErrorKind,
+  MissingSecretError, IncompatibleRuntimeError, NotAPluginError, PromptCancelledError, ReadOnlyError,
+  MatbotErrorKind,
 } from '@matatbread/matbot-plugin-api';
 export { applyCreateSecret }  from '@matatbread/matbot-plugin-api';
 export { isTruncatedToolResult, notifyingStore, ItemChangeKind, RegistryChangeKind } from '@matatbread/matbot-plugin-api';
