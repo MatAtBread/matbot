@@ -20,6 +20,11 @@ import { addUsage } from './usage.js';
 // in the transcript, and a block telling it so invites narrating the cut-off rather than continuing.
 const TRUNCATION_CREATOR = 'matbot-truncation';
 
+/** An AbortSignal's reason as a turn-terminal string. `reason` is `any` by spec (a caller may abort with
+ *  anything), so the two abort exits both had to narrow it; they narrowed it identically. */
+const abortReason = (signal: AbortSignal): string =>
+  typeof signal.reason === 'string' ? signal.reason : 'user-abort';
+
 const INTERRUPTED_TOOL_RESULT = {
   error: 'Tool call interrupted before completion — the turn was interrupted while it was running. It may not have run to completion, and any side effect may or may not have occurred. Re-run it only if you still need its result.',
 } as const;
@@ -88,15 +93,29 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
   };
   const traceId = config.traceId ?? crypto.randomUUID();
 
+  let session = opts.session;
+
+  // Every way a turn can end funnels through here: commit the session as it stands, then yield exactly
+  // one terminal event. Each exit has its own legitimately different preamble — screen markers, a
+  // streamed assistant partial, closing an unpaired tool_use — but the terminal itself must not vary,
+  // and it had: the `toolcall`-abort exit once returned with no commit at all, silently discarding every
+  // completed round of the turn (see its comment below), and the failed-provider-call exit still does.
+  // Nothing is written mid-turn, so "commit" here means the whole turn or none of it.
+  // Closes over the reassigned `session` deliberately, so no exit can commit a stale copy.
+  async function* end(terminal: PipelineEvent): AsyncIterable<PipelineEvent> {
+    await store.set(session.id, session);
+    yield terminal;
+  }
+
   // ── 1. screen — once per turn: shape/abort the incoming submission ──────────
 
-  const screen = await hookReg.runScreen({ session: opts.session, config, signal, prompt: promptFn });
+  const screen = await hookReg.runScreen({ session, config, signal, prompt: promptFn });
+  session = screen.session;
   if (screen.abort) {
     // Hook-failure (and any other screen-injected) markers carried live, even on abort, so a
     // misconfigured hook surfaces this turn rather than only on a later reload.
     if (screen.markers.length > 0) yield { type: 'marker', content: screen.markers, traceId };
-    await store.set(screen.session.id, screen.session);
-    yield { type: 'aborted', reason: screen.abort, session: screen.session, traceId };
+    yield* end({ type: 'aborted', reason: screen.abort, session, traceId });
     return;
   }
   // Durable context a screen hook folded onto the user message (e.g. a fired `contextual` trigger),
@@ -112,7 +131,6 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
   if (screen.markers.length > 0) {
     yield { type: 'marker', content: screen.markers, traceId };
   }
-  let session = screen.session;
 
   // Turn-scoped ephemeral context from screen — appended to the TAIL of the outgoing messages
   // (onto the content of the freshest history message, preserving its role), never persisted.
@@ -190,8 +208,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
   for (;;) {
     // Respect an abort that arrived between turns (e.g. during tool execution).
     if (signal.aborted) {
-      await store.set(session.id, session);
-      yield { type: 'aborted', reason: typeof signal.reason === 'string' ? signal.reason : 'user-abort', session, traceId };
+      yield* end({ type: 'aborted', reason: abortReason(signal), session, traceId });
       return;
     }
 
@@ -200,8 +217,8 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
     // abort above. A turn stopped by the ceiling was cut short, not faulty, so it ends `aborted` rather
     // than `error`, and the reason is machine-readable for a frontend that wants to say why.
     if (round >= (providerConfig.maxRounds ?? Infinity)) {
-      await store.set(session.id, session);
-      yield { type: 'aborted', reason: `round-limit: provider "${config.provider}" allows ${providerConfig.maxRounds} rounds per turn`, session, traceId };
+      const reason = `round-limit: provider "${config.provider}" allows ${providerConfig.maxRounds} rounds per turn`;
+      yield* end({ type: 'aborted', reason, session, traceId });
       return;
     }
     round += 1;
@@ -313,8 +330,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
             ...(turnUsage !== undefined ? { usage: turnUsage } : {}),
           }));
         }
-        await store.set(session.id, session);
-        yield { type: 'aborted', reason: typeof signal.reason === 'string' ? signal.reason : 'user-abort', session, traceId };
+        yield* end({ type: 'aborted', reason: abortReason(signal), session, traceId });
         return;
       } else {
         yield { type: 'error', error: String(e) + (('cause' in e && e.cause) ? ' ('+String(e.cause)+')' : '' ), traceId };
@@ -427,10 +443,10 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
         tool,
       });
       if (decision.abort) {
-        // Commit the turn before leaving. This was the one terminal path that returned without a
-        // persist, and nothing is written mid-turn (see the store.set sites) — so a hook aborting on a
-        // late round discarded the whole turn: every earlier round's assistant message and tool
-        // results, plus this round's response, all of which the frontend had already drawn.
+        // Commit the turn before leaving (`end`, above — nothing is written mid-turn, so an exit that
+        // skips it discards the whole turn: every earlier round's assistant message and tool results,
+        // plus this round's response, all of which the frontend had already drawn). This path is where
+        // that was first found and fixed.
         //
         // Committing requires closing the tool_use/tool_result pairing first: the assistant message
         // above carries a `tool-call` block per pending call, and a `tool_use` left unpaired is
@@ -449,8 +465,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
           session = appendMessage(session, createMessage({ role: 'marker', content: toolMarkers, traceId }));
           yield { type: 'marker', content: toolMarkers, traceId };
         }
-        await store.set(session.id, session);
-        yield { type: 'aborted', reason: decision.abort, session, traceId };
+        yield* end({ type: 'aborted', reason: decision.abort, session, traceId });
         return;
       }
       if (decision.rejectTool) {
@@ -547,7 +562,5 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
   // ── 4. Persist and finish ──────────────────────────────────────────────────
   // `react` fires post-commit, in pump (the queue owner) — not here.
 
-  await store.set(session.id, session);
-
-  yield { type: 'done', session, traceId };
+  yield* end({ type: 'done', session, traceId });
 }
