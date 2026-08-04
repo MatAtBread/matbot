@@ -2,6 +2,7 @@ import type {
   Hook, HookPoint, HookRegistrar, Message, MessageContent, Session, DeferredScreen,
   ScreenContext, ContributeContext, ToolCallContext, ToolCallResult, ToolResultContext, FollowupContext,
 } from './types.js';
+import { foldOntoUserTurn } from './session.js';
 
 const HOOK_ERROR_CREATOR = 'matbot-hooks';
 
@@ -111,11 +112,10 @@ export class HookRegistry implements HookRegistrar {
     // so a user message is present in practice; this is defensive).
     const durable: MessageContent[] = [];
     const foldDurable = (blocks: MessageContent[]): void => {
-      const idx = session.messages.findLastIndex(m => m.role === 'user');
-      if (idx < 0) return;
+      const folded = foldOntoUserTurn(session, blocks);
+      if (folded === session) return;      // no user message to attach to — dropped, not orphaned
       durable.push(...blocks);
-      session = { ...session, messages: session.messages.map((m, i) =>
-        i === idx ? { ...m, content: [...m.content, ...blocks] } : m) };
+      session = folded;
     };
     for (const hook of this.hooks.get('screen') ?? []) {
       if (hook.on !== 'screen') continue;

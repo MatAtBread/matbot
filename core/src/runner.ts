@@ -8,6 +8,7 @@ import type { ToolPresenter } from '@matatbread/matbot-plugin-api';
 import { currentUsageSink } from '@matatbread/matbot-plugin-api/host';
 import { HookRegistry } from './hooks.js';
 import { appendMessage, createMessage } from './session.js';
+import { foldOntoUserTurn } from '@matatbread/matbot-plugin-api';
 import { addUsage } from './usage.js';
 
 // Substituted for an errored tool result when the turn was aborted (e.g. a mid-turn steer interrupt):
@@ -170,12 +171,8 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
   const applyCorrection = (c: DeferredCorrection): MessageContent[] => {
     if (c.ephemeral && c.ephemeral.length > 0) ephemeral = [...c.ephemeral, ...ephemeral];
     if (c.durable && c.durable.length > 0) {
-      const idx = session.messages.findLastIndex(m => m.role === 'user');
-      if (idx >= 0) {
-        session = { ...session, messages: session.messages.map((m, i) =>
-          i === idx ? { ...m, content: [...m.content, ...c.durable!] } : m) };
-        return c.durable;
-      }
+      const folded = foldOntoUserTurn(session, c.durable);
+      if (folded !== session) { session = folded; return c.durable; }
     }
     return [];
   };
