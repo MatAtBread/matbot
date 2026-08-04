@@ -118,8 +118,9 @@ function or a small registered authorization service — and *enforce* it at eac
 
 ### Step 3 — per-user data
 
-The default `Store`/`FileStore` do **not** partition by principal — sessions carry `ownerPrincipalId`
-but nothing enforces it ([storage/filesystem/src/store.ts](../plugins/storage/filesystem/src/store.ts)).
+The default `Store`/`FileStore` do **not** partition by principal, and there is no ownership field to lean
+on either — `Session` carries none, deliberately. Ownership-at-rest is structural: the storage partition,
+resolved by the backend ([storage/filesystem/src/store.ts](../plugins/storage/filesystem/src/store.ts)).
 Two in-model options:
 
 - **Principal-aware `StorageBackend`** (`register()`-swappable core service): a backend whose
