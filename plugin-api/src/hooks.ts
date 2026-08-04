@@ -1,11 +1,11 @@
 import type {
-  Hook, HookPoint, Message, MessageContent, Session, DeferredScreen,
+  Hook, HookPoint, HookRegistrar, Message, MessageContent, Session, DeferredScreen,
   ScreenContext, ContributeContext, ToolCallContext, ToolCallResult, ToolResultContext, FollowupContext,
 } from './types.js';
 
 const HOOK_ERROR_CREATOR = 'matbot-hooks';
 
-export class HookRegistry {
+export class HookRegistry implements HookRegistrar {
   private readonly hooks = new Map<HookPoint, Hook[]>();
 
   // A hook handler that *throws* is a failure, not an intentional stop (which is a return value:

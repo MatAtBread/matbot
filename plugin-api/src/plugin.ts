@@ -1,14 +1,26 @@
 import type {
   FileStore, Principal, Vault, Message,
   ProviderAdapter, ProviderConfig, ProviderRegistry, Tool, ToolRegistry, FrontendInfo,
-  Store, Session, SystemContextRegistry, KnowledgeIndex, PromptFn, SessionRunner, Usage,
+  Store, Session, SystemContextRegistry, KnowledgeIndex, PromptFn, SessionRunner, Usage, HookRegistrar,
   TypeScriptStripper, ToolTypeIndex, ToolPresenter, SteeringPolicy,
 } from './types.js';
-import type { Routed } from './broadcast.js';
 import type { Notifier } from './notify.js';
-import type { HookRegistry } from './hooks.js';
 
-export const PLUGIN_API_VERSION = '0.1';
+/**
+ * The plugin API contract version: this package's `major.minor`, and nothing else. It sat at `'0.1'`
+ * while the package shipped 0.3.x, so it conveyed no information and could not be reasoned about at a
+ * version boundary — the point at which it is the only thing every third-party plugin hardcodes.
+ *
+ * The gate (`checkApiVersion`, in core's registry) reads it as: **major must match exactly** — a
+ * mismatch is a hard load failure — and a plugin declaring a *newer minor* than the runtime warns and
+ * loads, since it may reach for something absent. Declare it as `apiVersion: PLUGIN_API_VERSION` and it
+ * stays right for free; that is what every plugin in this repo does.
+ *
+ * Bumping 0.1 → 0.4 breaks nothing: at 0.x the major is `'0'` either way, and an older declared minor
+ * does not warn. It matters at 1.0.0, where a plugin still declaring `'0.x'` will fail the major check
+ * loudly instead of loading against a contract it was never built for.
+ */
+export const PLUGIN_API_VERSION = '0.4';
 
 // ── Sub-runner types ──────────────────────────────────────────────────────────
 
@@ -242,7 +254,7 @@ export interface MatbotRuntime {
    *  runSession directly, so concurrent submits queue instead of clobbering the session. */
   readonly run?:            SessionRunner | undefined;
   readonly files?:          FileStore;
-  readonly hooks:           HookRegistry;
+  readonly hooks:           HookRegistrar;
   readonly tools:           ToolRegistry;
   readonly systemContext:   SystemContextRegistry;
   /** Default working directory for tool execution. Plugins that create servers should forward this to tool contexts. */

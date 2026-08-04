@@ -6,7 +6,6 @@ import type {
   ProviderAdapterFactory, StoreFactory,
 } from './plugin.js';
 import { PLUGIN_API_VERSION, unifyServices } from './plugin.js';
-import { HookRegistry } from './hooks.js';
 import { makePluginSettings } from './settings.js';
 import type { SettingsDoc } from './settings.js';
 
@@ -376,7 +375,7 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotMachine,
         services.hooks.register({ ...hook, pluginName: plugin.name } as Hook);
       },
       removeByPlugin: (name: string) => services.hooks.removeByPlugin(name),
-    } as unknown as HookRegistry,
+    },
     systemContext: {
       register(contributor) {
         state.systemContextPlugins.add(plugin.name);

@@ -968,6 +968,18 @@ export type HealthStatus =
 
 // ── Registries ────────────────────────────────────────────────────────────────
 
+/**
+ * What `services.hooks` is: the *registration* half of hook dispatch, and the whole of what a plugin can
+ * do with it. `MatbotRuntime.hooks` was typed as the `HookRegistry` class, so the plugin contract also
+ * advertised the host's dispatch surface (`runScreen`, `runContribute`, `runToolCall`, `runToolResult`,
+ * `runFollowup`) — none of which a plugin may call, and which the scoped per-plugin facade had to be
+ * `as unknown as`-cast to satisfy. The cast was the tell. Core still holds the class where it dispatches.
+ */
+export interface HookRegistrar {
+  register(hook: Hook): void;
+  removeByPlugin(pluginName: string): void;
+}
+
 /** Tool CRUD is observed on the {@link Notifier}, as a `RegistryChange` with `registry: 'tools'` — this
  *  registry had its own broadcaster over the same primitive, which is duplication, not layering. One
  *  notification per tool (removeByPlugin announces a `removed` per matched tool); the registering

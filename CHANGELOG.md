@@ -52,6 +52,20 @@ churn and less likely to affect a consumer who doesn't use them.
   dedicated provider profile). Both hosts honoured them and *no caller in the repo set them*. Shipping a
   deprecated field into a stable line means carrying it to the next major, so it goes now.
 
+- **`MatbotRuntime.hooks` is typed `HookRegistrar`, not the `HookRegistry` class.** A plugin may only
+  `register` and `removeByPlugin`; the class also carries the host's dispatch surface (`runScreen`,
+  `runContribute`, `runToolCall`, `runToolResult`, `runFollowup`), which the plugin contract was
+  advertising. The tell was that the per-plugin scoped facade had to be `as unknown as HookRegistry`-cast
+  to satisfy its own declared type; that cast is gone. `HookRegistry` still exists, `implements
+  HookRegistrar`, and lives in `/host`, where core dispatches from it.
+
+- **`PLUGIN_API_VERSION` is `'0.4'`, and now means this package's `major.minor`.** It read `'0.1'`
+  throughout 0.3.x, so it conveyed nothing — while being the one string every third-party plugin hardcodes.
+  The gate is unchanged (major must match exactly; a *newer* declared minor warns and loads), so at 0.x
+  this breaks nothing: an existing plugin declaring `'0.1'` still loads, which a test now pins. It matters
+  at 1.0.0, where a plugin still declaring `'0.x'` fails loudly instead of loading against a contract it was
+  never built for. Declare `apiVersion: PLUGIN_API_VERSION` and it stays correct for free.
+
 ### API gaps filled
 
 - **`@matatbread/matbot-core` re-exports every branded error, not most of them.** `readOnlyError`,

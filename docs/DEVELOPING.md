@@ -42,7 +42,7 @@ full rule.
 
 | Field | Type | Purpose |
 |---|---|---|
-| `apiVersion` | `string` | Must equal `PLUGIN_API_VERSION` |
+| `apiVersion` | `string` | The contract version this plugin targets, as `major.minor`. Set it to `PLUGIN_API_VERSION` and it stays right for free. The major must match the runtime's exactly (a mismatch is a hard load failure); a *newer* minor than the runtime warns and loads. |
 | `manifest` | `PluginManifest` | Optional metadata: `description?` and the `config?` keys this plugin reads |
 | `tools` | `readonly Tool[]` | Tool implementations to register |
 | `provider` | `ProviderAdapterFactory` | A single LLM adapter factory (`(config) => ProviderAdapter`) |
