@@ -440,10 +440,13 @@ export async function unloadPlugin(pluginName: string, services: MatbotMachine):
 
 /** Run each plugin's teardown() in reverse-registration order. Errors are logged, not thrown. */
 export async function teardownPlugins(): Promise<void> {
-  const results = await Promise.allSettled([...state.plugins].reverse().map(plugin => plugin.teardown?.()));
+  // Reverse once and keep it: indexing the *unreversed* array to name a result reported the wrong
+  // plugin for every failure but the middle one.
+  const ordered = [...state.plugins].reverse();
+  const results = await Promise.allSettled(ordered.map(plugin => plugin.teardown?.()));
   results.forEach((result, i) => {
     if (result.status === 'rejected') {
-      console.error(`[matbot] teardown error in plugin "${state.plugins[i]?.name}":`, result.reason);
+      console.error(`[matbot] teardown error in plugin "${ordered[i]?.name}":`, result.reason);
     }
   });
 }
