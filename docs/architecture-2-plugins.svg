@@ -124,7 +124,7 @@
     <text x="150" y="31" text-anchor="middle" class="boxTitle">new service interfaces</text>
     <text x="25" y="62" class="boxText">Any plugin may augment MatbotServices,</text>
     <text x="25" y="82" class="boxText">then services.register('key', impl).</text>
-    <text x="25" y="102" class="boxText">Consumers use services.get('key') safely.</text>
+    <text x="25" y="102" class="boxText">Consumers read services.Foo?.… safely.</text>
   </g>
   <path class="dash" d="M785 720 C785 650 765 595 760 548"/>
 

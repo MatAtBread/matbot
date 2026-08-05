@@ -3,7 +3,7 @@
 matbot plugins are **process-global**: a plugin's `setup()` runs once, at boot, and registers tools,
 hooks, providers, system-context and stores into a single shared registry. There is no per-user
 plugin set inside one process. But the *surfaces* a plugin installs are consulted **inside the turn's
-`runAs(principal)` scope**, so each can read `currentPrincipal()` and behave per user.
+principal scope**, so each can read `currentPrincipal()` and behave per user.
 
 That split is the whole story, and it yields two deployment models plus one recipe. The models and
 recipe lead; the rationale that justifies each step is annotated at the end.
@@ -35,9 +35,12 @@ which tools a user can *see* (see *the tool-visibility ceiling* below).
 
 > **Mental model:** you do not make plugins user-aware; you make their **surfaces** user-aware.
 > `setup()` is global and runs once at the boot principal, but tools, hooks, system-context
-> contributors and stores all run inside the per-turn `runAs(principal)` scope
-> ([session-runner.ts:204](../core/src/session-runner.ts#L204)), so each reads
-> `currentPrincipal()` and branches per user.
+> contributors and stores all run inside the per-turn principal scope, opened by the pump's
+> `contextSwitch(head.principal, …)` ([session-runner.ts](../core/src/session-runner.ts)), so each
+> reads `currentPrincipal()` and branches per user. (The pump uses `contextSwitch` rather than bare
+> `runAs` because a turn is the transactional unit — it also pages in pending machine state at the
+> quiescent edge. For establishing identity, the two are equivalent: `contextSwitch` layers the
+> machine half on top of `runAs`. A frontend scoping an inbound request or message uses `runAs`.)
 
 ### Step 0 (foundational) — establish per-user identity
 
@@ -84,8 +87,8 @@ single hook that covers them all — by design (see *Why gating is per-entry-poi
 
 **Runner path (model-driven turns) — a central `toolcall` hook.** It fires for *every* tool call
 regardless of which plugin owns the tool, including plugins an admin loads later
-([hooks.ts](../plugin-api/src/hooks.ts) `runToolCall`;
-[runner.ts:201](../core/src/runner.ts#L201)), so one hook in the bootstrap plugin is
+([hooks.ts](../plugin-api/src/hooks.ts) `runToolCall`, dispatched from the tool loop in
+[runner.ts](../core/src/runner.ts)), so one hook in the bootstrap plugin is
 the whole-system chokepoint *for this path*:
 
 ```ts
@@ -118,8 +121,9 @@ function or a small registered authorization service — and *enforce* it at eac
 
 ### Step 3 — per-user data
 
-The default `Store`/`FileStore` do **not** partition by principal — sessions carry `ownerPrincipalId`
-but nothing enforces it ([storage/filesystem/src/store.ts](../plugins/storage/filesystem/src/store.ts)).
+The default `Store`/`FileStore` do **not** partition by principal, and there is no ownership field to lean
+on either — `Session` carries none, deliberately. Ownership-at-rest is structural: the storage partition,
+resolved by the backend ([storage/filesystem/src/store.ts](../plugins/storage/filesystem/src/store.ts)).
 Two in-model options:
 
 - **Principal-aware `StorageBackend`** (`register()`-swappable core service): a backend whose
@@ -133,8 +137,8 @@ Either is correct because `currentPrincipal()` is live at every store call insid
 ### Step 4 (optional) — per-user system prompt
 
 System-context contributors are rebuilt **every turn** inside the principal scope
-([system-context.ts](../core/src/system-context.ts);
-[runner.ts:80-88](../core/src/runner.ts#L80-L88)), not captured at registration. A
+([system-context.ts](../core/src/system-context.ts); `opts.systemContext.build(…)` in
+[runner.ts](../core/src/runner.ts)), not captured at registration. A
 contributor may call `currentPrincipal()` and emit per-user instructions (role, tenant rules,
 persona).
 
@@ -183,14 +187,15 @@ The registry — `state.plugins`, the tool map, providers, hooks
 concurrent session. `loadPlugin` mutates it globally; a bootstrap `setup()` runs once, at the boot
 principal.
 
-The toolset the model sees is built by `deps.tools.list()` at
-[session-runner.ts:194](../core/src/session-runner.ts#L194) — **one line before**
-`runAs(head.principal, …)` opens the principal scope at line 204. So `currentPrincipal()` is **not even
-established** when the menu is assembled. This is why re-implementing `ToolRegistry` the way you'd
-re-implement `Store` cannot rescue per-user *visibility*: `list()` has no principal to branch on.
+The toolset the model sees is built by `deps.tools.list()` in the pump
+([session-runner.ts](../core/src/session-runner.ts)) — **before**
+`contextSwitch(head.principal, …)` opens the principal scope further down the same function. So
+`currentPrincipal()` is **not even established** when the menu is assembled. This is why
+re-implementing `ToolRegistry` the way you'd re-implement `Store` cannot rescue per-user
+*visibility*: `list()` has no principal to branch on.
 
-*Invocation*, by contrast, runs inside the scope — `resolve()` at
-[runner.ts:193](../core/src/runner.ts#L193) and the `toolcall` hook both see the
+*Invocation*, by contrast, runs inside the scope — `toolRegistry.resolve()` in the tool loop
+([runner.ts](../core/src/runner.ts)) and the `toolcall` hook both see the
 principal — which is why per-user *gating* works while per-user *visibility* does not.
 
 **Why `Store` escapes this and plugins don't.** `Store`/`FileStore`/`Vault`/`KnowledgeIndex` can be
@@ -221,6 +226,15 @@ plugin-visibility ceiling is structural.
   with no human present. If that ever changed to fail-closed, your override would silently lose and
   the built-in would stay live — re-opening the seam. Defend with an assertion after load:
   `services.tools.resolve('plugin')?.pluginName === <your plugin>`.
+- **There is one live path to that fail-closed outcome**, so treat the assertion as required, not
+  belt-and-braces: resolving a collision can *throw* — the core-settings read behind
+  `overwriteAllTools`, or a `PromptFn` that rejects rather than defaulting (the documented
+  non-interactive contract) — and `resolveToolCollision`'s caller catches that and **keeps the
+  existing tool** ([registry.ts](../core/src/registry.ts)). Keeping the incumbent is right in general
+  (a throw is no mandate to replace a working tool), and it is exactly wrong for a shadowing
+  bootstrap plugin, because the incumbent *is* the built-in `plugin` tool. That same call site also
+  re-checks the plugin's load extent before registering, so a collision resolving after an unload —
+  or after a `setup()` throw and its rollback — no longer revives the tool.
 
 ### Why tool gating is per-entry-point, not a single hook
 

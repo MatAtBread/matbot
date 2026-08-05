@@ -11,8 +11,10 @@ import {
 import type {
   MatbotMachine, MatbotServices, Store, Session, ProviderConfig, ProviderAdapter,
   PluginSettings, Vault, SessionRunner, KnowledgeIndex, Notifier,
-  PluginResolver, StorageBackend, FileStore, PromptFn, MatbotPlugin, Principal, Runtime, SwapFn, Usage,
+  PluginResolver, StorageBackend, FileStore, PromptFn, MatbotPlugin, Principal, Runtime, Usage,
 } from '@matatbread/matbot-plugin-api';
+// Boot assembly, so from plugin-api's `/host` half — via core, which re-exports it for exactly this.
+import type { SwapFn } from '@matatbread/matbot-core';
 import { LookupKnowledgeIndex } from '@matatbread/matbot-core';
 import { BrowserStorageBackend, LocalStorageVault } from '@matatbread/matbot-browser';
 import { runProviderSetup, type AvailableProvider, type ProviderDraft } from './setup.js';
@@ -364,9 +366,6 @@ export async function boot(env: BootEnv): Promise<void> {
       if (rawCfg === undefined) throw new Error(`complete(): unknown provider "${req.provider}". Available: ${[...providers.keys()].join(', ')}`);
       const resolved: ProviderConfig = {
         ...rawCfg,
-        // Per-call overrides shallow-merged over the config's own parameters (request wins). See the
-        // @deprecated note on CompletionRequest.parameters — honoured, but a provider profile is preferred.
-        ...(req.parameters !== undefined ? { parameters: { ...rawCfg.parameters, ...req.parameters } } : {}),
         ...(rawCfg.credentials !== undefined ? { credentials: await resolveCredentials(rawCfg.credentials, vault) } : {}),
         ...(rawCfg.endpoint    !== undefined ? { endpoint: await resolveInteractive(rawCfg.endpoint, vault) } : {}),
       };

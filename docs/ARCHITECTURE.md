@@ -42,7 +42,9 @@ at runtime.
 ## 3. Turn flow — user → LLM → core services/tools → LLM → frontend
 
 The `SessionRunner` serialises submissions per session: a FIFO queue, concat batching, and a `pump`
-that runs each turn under `runAs(principal)`. Inside `runSession()` a turn proceeds through ordered
+that runs each turn under `contextSwitch(principal)` — establishing the turn's identity *and* paging
+in any machine state (a deferred `StorageBackend` swap, pending mount notifications) that was staged
+while a turn was in flight. Inside `runSession()` a turn proceeds through ordered
 stages — `screen` hooks may mutate or abort the session and add turn-ephemeral context; system context
 is built and contributor plugins join in; `contribute` hooks transform the outgoing copy without
 persisting; the provider is called with system + ephemeral + history plus the current tool list; the

@@ -332,7 +332,7 @@ export function createWebServer(deps: WebServerDeps) {
     const now = new Date().toISOString();
     const stubSession: Session = {
       id: crypto.randomUUID(), version: crypto.randomUUID(),
-      status: 'active', contexts: [], messages: [],
+      status: 'active', messages: [],
       createdAt: now, updatedAt: now,
     };
     return {

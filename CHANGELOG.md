@@ -9,6 +9,129 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## 0.4.0
+
+### Breaking changes
+
+- **Host boot assembly moved off the `plugin-api` root to `@matatbread/matbot-plugin-api/host`.** The root
+  exported both what a plugin is written against and what an *embedder* uses to stand a machine up, which
+  made carrier installers, swap proxies, the mount table's producer half, `HookRegistry`, `createNotifier`
+  and the `Broadcaster` primitive look like stable author-facing API. They are not, and no plugin in this
+  repo imports one. Moved: `installPrincipalCarrier`, `enterPrincipal`, `createConstantPrincipalCarrier`,
+  `installUsageCarrier`, `createSerialUsageCarrier`, `recordUsage`, `currentUsageSink`, `withUsageScope`,
+  `contextSwitch`, `onContextQuiesce`, `flushIfQuiescent`, `unifyServices`, `forwardingProxy`,
+  `makeSwappable`, `createMountTable`, `singleTurnRequest`, `HookRegistry`, `createBroadcaster`,
+  `subscribable`, `createNotifier`, `scopedNotifier`, and the types `SwapFn`, `MountTable`,
+  `PrincipalCarrier`, `UsageCarrier`, `Subscribable`, `Broadcaster`, `Routed`, `RoutedFilter`.
+
+  Three subsystems are split rather than moved whole, keeping their author-facing half at the root:
+  `runAs`/`currentPrincipal`/`tryCurrentPrincipal`; the `Notifier` type with `notifyingStore` and the two
+  kinds; and `Mounted`/`MountConsumeOptions`/`MountedMachine` (the contract of `services.mounted`).
+
+  **`@matatbread/matbot-core` re-exports the whole of `/host`, so a host that depends on core needs no
+  change.** Only a consumer importing boot machinery directly from `plugin-api` does — repoint it at
+  `@matatbread/matbot-plugin-api/host` or at core. The boundary is enforced by file layout
+  (`host-machine.ts`), not by an export list, so it cannot erode by accident.
+
+- **`ProviderRegistry` is now one interface, not two.** `core/src/types.ts` declared a second, unrelated
+  `ProviderRegistry` (`register(adapter)` / `resolve(name)`) alongside its `export type *` of plugin-api —
+  and an explicit local export wins over a star re-export, so
+  `import type { ProviderRegistry } from '@matatbread/matbot-core'` silently resolved to the adapter
+  registry rather than the `ProviderConfig` map that `services.providers` actually is. Nothing imported it,
+  so nothing changes at runtime; what goes away is a name that resolved to the wrong shape with no error.
+
+- **`Session.contexts` is removed.** A required `string[]` on every session, written by `createSession`,
+  the web server and the skills compiler, and read by *nothing* in any package — system context is
+  contributed through `SystemContextContributor`, not carried on the session. All 188 sessions in the
+  development store had it empty. Old data keeps the field harmlessly as an excess property, exactly like
+  the already-undeclared `ownerPrincipalId`/`persona`; no migration needed.
+
+- **`CompletionRequest.parameters` and `SingleTurnRequest.parameters` are removed.** Both were
+  `@deprecated` with a note explaining that their obvious use is an anti-pattern (a per-call override takes
+  control away from the provider config, where parameters belong and stay user-editable — prefer a
+  dedicated provider profile). Both hosts honoured them and *no caller in the repo set them*. Shipping a
+  deprecated field into a stable line means carrying it to the next major, so it goes now.
+
+- **`MatbotRuntime.hooks` is typed `HookRegistrar`, not the `HookRegistry` class.** A plugin may only
+  `register` and `removeByPlugin`; the class also carries the host's dispatch surface (`runScreen`,
+  `runContribute`, `runToolCall`, `runToolResult`, `runFollowup`), which the plugin contract was
+  advertising. The tell was that the per-plugin scoped facade had to be `as unknown as HookRegistry`-cast
+  to satisfy its own declared type; that cast is gone. `HookRegistry` still exists, `implements
+  HookRegistrar`, and lives in `/host`, where core dispatches from it.
+
+- **`PLUGIN_API_VERSION` is `'0.4'`, and now means this package's `major.minor`.** It read `'0.1'`
+  throughout 0.3.x, so it conveyed nothing — while being the one string every third-party plugin hardcodes.
+  The gate is unchanged (major must match exactly; a *newer* declared minor warns and loads), so at 0.x
+  this breaks nothing: an existing plugin declaring `'0.1'` still loads, which a test now pins. It matters
+  at 1.0.0, where a plugin still declaring `'0.x'` fails loudly instead of loading against a contract it was
+  never built for. Declare `apiVersion: PLUGIN_API_VERSION` and it stays correct for free.
+
+### API gaps filled
+
+- **`@matatbread/matbot-core` re-exports every branded error, not most of them.** `readOnlyError`,
+  `isReadOnlyError` and the `ReadOnlyError` type were missing from core's root — `export type *` strips a
+  guard's value meaning, and the explicit re-export list had been kept by hand. A consumer importing from
+  core got some guards and silently missed others, including the one the turn pump itself depends on.
+
+### Bug fixes
+
+- **A provider call that fails mid-turn no longer discards the rounds that succeeded.** Nothing is written
+  mid-turn — `runSession` commits once, at whichever terminal it reaches — so an exit that returned without
+  committing threw the whole turn away. The failed-provider-call exit did exactly that, and the multi-round
+  case is precisely the tool-using one: an upstream 500 or a dropped connection on round 3 lost two
+  completed rounds of assistant messages and tool results that the frontend had already drawn, and that the
+  next turn (which re-reads from the store) would then be missing. The same defect had already been found
+  and fixed on the `toolcall`-abort exit; the shape that allowed both is gone (see the refactor below), and
+  every terminal now commits through one funnel.
+
+- **A tool-name collision can no longer crash the process or revive an unloaded plugin's tool.**
+  `ToolRegistry.register` returns `void` because the no-collision path completes in the calling tick, and
+  every one of its ~34 call sites fire-and-forgets. That left the collision branch — where the host may
+  ask the user whether to overwrite — as the one `await` with no caller to own its outcome. A throw there
+  (the settings read, or a `PromptFn` that rejects rather than defaulting, which is the documented
+  non-interactive contract) was an unhandled rejection, i.e. process exit under Node's default, reached by
+  the ordinary act of two plugins claiming one tool name. The branch now owns its own failure and resolves
+  to keep-existing. It also re-checks the plugin's load extent before registering: `setup()` has long
+  returned by the time a slow collision resolves, so an unload — or a `setup()` throw and its rollback —
+  could land first and the late registration would revive a tool owned by a plugin that is gone.
+
+- **A plugin's mount interests are dropped on unload.** `services.mounted.observe()`'s only cleanup path
+  was an aborted `signal`, and `signal` was optional — so a plugin that omitted it (`storage/profiles`
+  did) left a live interest behind, whose handler kept firing into a torn-down closure on every later
+  quiescent edge. Because reload is unload + load, each reload generation added another one, and the mount
+  table catches and logs a handler throw, so the accumulation was silent: N stale handlers doing duplicate
+  work against dead state, with a stale cache able to win. The host now binds every plugin-scoped
+  `observe()` to that plugin's load extent and aborts it in `unloadPlugin`, alongside the existing
+  tool/hook/service removals. `MountConsumeOptions.signal` keeps working and becomes a *narrowing*
+  convenience ("end earlier than my unload"), not the cleanup path.
+
+- **`teardownPlugins` named the wrong plugin in its error log.** `Promise.allSettled` ran over the reversed
+  plugin list while the log indexed the unreversed one, so a teardown failure was attributed to the plugin
+  at the mirrored position. Diagnostics only.
+
+### Optional
+
+- Internal refactors with no behavioural change, listed because they move code a consumer may be reading:
+  `plugin-api/src/types.ts` is now a barrel over `types/` (one file per domain, 18 of them — all 77
+  exported names and every declaration body preserved verbatim); host boot assembly split out of
+  `plugin.ts` into `host-machine.ts`; `runSession`'s six exits funnel through one commit-and-yield; the
+  three copies of "fold durable context onto the user turn" became `foldOntoUserTurn` in
+  `plugin-api/src/session.ts`; claiming a raced screen verdict is one step rather than two called at three
+  sites; `bindPluginOps` replaces the two hand-written `ToolContext` plugin-op closures; and
+  `makePluginSettings`' two near-identical CAS retry loops became one `update(mutate)`.
+
+- `ToolContract`'s phantom fields are keyed by non-exported `unique symbol`s, so the type is
+  uninhabitable — a hallucinated result shape can no longer be cast into existence. No effect on
+  `ToolResultOf`/`ToolResultFor`/`ToolProxy`, which only ever `infer` through the arms.
+
+- `unifyServices` no longer traps `has`, so `'Foo' in services` is structural rather than a registry
+  lookup. The documented presence check is unchanged: `services.Foo !== undefined`.
+
+- Docs: the five open-registry augmentation points (`MatbotServices`, `ToolContracts`, `Notifications`,
+  `MarkerData`, `ProviderMeta`) are one technique, now named and explained once — in `docs/DEVELOPING.md`
+  for plugin authors and `CLAUDE.md` for maintainers — with each declaration pointing at it instead of
+  restating it.
+
 ## 0.3.10
 
 ### Breaking changes

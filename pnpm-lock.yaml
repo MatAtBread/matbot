@@ -60,6 +60,9 @@ importers:
       '@matatbread/matbot-function-tools':
         specifier: workspace:^
         version: link:../../plugins/function-tools
+      '@matatbread/matbot-tool-types':
+        specifier: workspace:^
+        version: link:../../plugins/tool-types
       '@types/node':
         specifier: 'catalog:'
         version: 22.19.19

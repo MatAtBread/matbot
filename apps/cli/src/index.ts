@@ -394,6 +394,7 @@ matbot — AI CLI
 
 Usage:
   matbot [options] [prompt]
+  matbot start [options]      Headless server mode: load plugins and wait for a frontend
 
 Options:
   --provider    <name>      Provider key from matbot.yaml (default: first in file)
@@ -1019,9 +1020,6 @@ async function main(): Promise<void> {
       }
       const resolved: ProviderConfig = {
         ...rawCfg,
-        // Per-call overrides shallow-merged over the config's own parameters (request wins). See the
-        // @deprecated note on CompletionRequest.parameters — honoured, but a provider profile is preferred.
-        ...(req.parameters !== undefined ? { parameters: { ...rawCfg.parameters, ...req.parameters } } : {}),
         ...(rawCfg.credentials !== undefined ? { credentials: await resolveCredentials(rawCfg.credentials, vault) } : {}),
         ...(rawCfg.endpoint    !== undefined ? { endpoint: await vault.resolve(rawCfg.endpoint) } : {}),
       };

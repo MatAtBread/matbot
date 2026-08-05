@@ -1,13 +1,14 @@
 import type {
-  Session, Message, MessageContent, ModelContent, Usage, ProviderMeta, DeferredCorrection, TruncatedToolResult,
-  PipelineEvent, RunConfig, ProviderAdapter, ProviderConfig,
+  Session, Message, MessageContent, ModelContent, Usage, ProviderMeta, TruncatedToolResult,
+  TurnEvent, RunConfig, ProviderAdapter, ProviderConfig,
   Tool, ToolRegistry, ToolContext, Store, FileStore, SystemContextRegistry, Vault, PromptFn, FormField,
 } from './types.js';
 import type { MatbotPlugin } from './plugin.js';
 import type { ToolPresenter } from '@matatbread/matbot-plugin-api';
-import { currentUsageSink } from '@matatbread/matbot-plugin-api';
+import { currentUsageSink } from '@matatbread/matbot-plugin-api/host';
 import { HookRegistry } from './hooks.js';
 import { appendMessage, createMessage } from './session.js';
+import { foldOntoUserTurn, bindPluginOps } from '@matatbread/matbot-plugin-api';
 import { addUsage } from './usage.js';
 
 // Substituted for an errored tool result when the turn was aborted (e.g. a mid-turn steer interrupt):
@@ -19,6 +20,11 @@ import { addUsage } from './usage.js';
 // and visible to a reader while elided from every submission: the model's own text is already truncated
 // in the transcript, and a block telling it so invites narrating the cut-off rather than continuing.
 const TRUNCATION_CREATOR = 'matbot-truncation';
+
+/** An AbortSignal's reason as a turn-terminal string. `reason` is `any` by spec (a caller may abort with
+ *  anything), so the two abort exits both had to narrow it; they narrowed it identically. */
+const abortReason = (signal: AbortSignal): string =>
+  typeof signal.reason === 'string' ? signal.reason : 'user-abort';
 
 const INTERRUPTED_TOOL_RESULT = {
   error: 'Tool call interrupted before completion — the turn was interrupted while it was running. It may not have run to completion, and any side effect may or may not have occurred. Re-run it only if you still need its result.',
@@ -69,7 +75,9 @@ export interface RunSessionOpts {
   unloadPlugin:   (specifier: string) => Promise<boolean>;
 }
 
-export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineEvent> {
+// Yields TurnEvent, not PipelineEvent: a single turn never produces the session-level `idle` — that is
+// the pump's, emitted once its queue drains. Saying so in the type is the point of the two-union split.
+export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent> {
   const { config, provider, providerConfig, store, signal } = opts;
   const tools   = opts.tools   ?? new Map<string, Tool>();
   const hookReg = opts.hooks   ?? new HookRegistry();
@@ -88,15 +96,29 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
   };
   const traceId = config.traceId ?? crypto.randomUUID();
 
+  let session = opts.session;
+
+  // Every way a turn can end funnels through here: commit the session as it stands, then yield exactly
+  // one terminal event. Each exit has its own legitimately different preamble — screen markers, a
+  // streamed assistant partial, closing an unpaired tool_use — but the terminal itself must not vary,
+  // and twice it had not: both the `toolcall`-abort and failed-provider-call exits returned with no
+  // commit at all, silently discarding every completed round of the turn.
+  // Nothing is written mid-turn, so "commit" here means the whole turn or none of it.
+  // Closes over the reassigned `session` deliberately, so no exit can commit a stale copy.
+  async function* end(terminal: TurnEvent): AsyncIterable<TurnEvent> {
+    await store.set(session.id, session);
+    yield terminal;
+  }
+
   // ── 1. screen — once per turn: shape/abort the incoming submission ──────────
 
-  const screen = await hookReg.runScreen({ session: opts.session, config, signal, prompt: promptFn });
+  const screen = await hookReg.runScreen({ session, config, signal, prompt: promptFn });
+  session = screen.session;
   if (screen.abort) {
     // Hook-failure (and any other screen-injected) markers carried live, even on abort, so a
     // misconfigured hook surfaces this turn rather than only on a later reload.
     if (screen.markers.length > 0) yield { type: 'marker', content: screen.markers, traceId };
-    await store.set(screen.session.id, screen.session);
-    yield { type: 'aborted', reason: screen.abort, session: screen.session, traceId };
+    yield* end({ type: 'aborted', reason: screen.abort, session, traceId });
     return;
   }
   // Durable context a screen hook folded onto the user message (e.g. a fired `contextual` trigger),
@@ -112,7 +134,6 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
   if (screen.markers.length > 0) {
     yield { type: 'marker', content: screen.markers, traceId };
   }
-  let session = screen.session;
 
   // Turn-scoped ephemeral context from screen — appended to the TAIL of the outgoing messages
   // (onto the content of the freshest history message, preserving its role), never persisted.
@@ -129,12 +150,19 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
   // in here when it fires, and the loop re-runs with it.
   let ephemeral = [...(opts.injectedEphemeral ?? []), ...screen.ephemeral];
 
-  // Raced screen verdicts (see DeferredScreen): polled — synchronously, never awaited — at each loop
-  // edge. `pollDeferred` claims any that have fired this poll (exactly once each) and merges their
-  // corrections; `applyCorrection` then folds them in and returns any durable blocks to emit live.
+  // Raced screen verdicts (see DeferredScreen): claimed — synchronously, never awaited — at each of the
+  // three loop edges (before generating, mid-stream, and pre-commit). Claiming is one step, so the three
+  // sites cannot disagree about it: take every verdict that has fired since the last claim (exactly once
+  // each), fold `ephemeral` in ahead of what is already queued so the re-run reads it, fold `durable`
+  // onto the user turn (persisted — the re-run and every later turn see it in history), and carry that
+  // durable half live as a `robo-user`, which is what preserves a contextual fire's visible persistence
+  // even though the verdict landed mid-turn.
+  //
+  // Returns whether anything was claimed. What the caller does with that is the part that legitimately
+  // differs — proceed, abort the in-flight provider call, or re-run the loop — so it stays at the site.
   const deferred = screen.deferred;
-  const pollDeferred = (): DeferredCorrection | undefined => {
-    if (deferred.length === 0) return undefined;
+  async function* claimVerdicts(): AsyncGenerator<TurnEvent, boolean, undefined> {
+    if (deferred.length === 0) return false;
     const ephemeralC: MessageContent[] = [];
     const durableC:   MessageContent[] = [];
     for (const d of deferred) {
@@ -143,24 +171,20 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
       if (c.ephemeral) ephemeralC.push(...c.ephemeral);
       if (c.durable)   durableC.push(...c.durable);
     }
-    return (ephemeralC.length > 0 || durableC.length > 0) ? { ephemeral: ephemeralC, durable: durableC } : undefined;
-  };
-  // Apply a claimed correction: `ephemeral` leads the tail-fold for the re-run; `durable` is folded onto
-  // the turn's user message (persisted, re-run sees it in history) and RETURNED so the caller emits it
-  // live as a `robo-user` event — the durable twin, preserving a contextual fire's persistence even
-  // though the verdict landed mid-turn. Mutates `ephemeral`/`session` in place.
-  const applyCorrection = (c: DeferredCorrection): MessageContent[] => {
-    if (c.ephemeral && c.ephemeral.length > 0) ephemeral = [...c.ephemeral, ...ephemeral];
-    if (c.durable && c.durable.length > 0) {
-      const idx = session.messages.findLastIndex(m => m.role === 'user');
-      if (idx >= 0) {
-        session = { ...session, messages: session.messages.map((m, i) =>
-          i === idx ? { ...m, content: [...m.content, ...c.durable!] } : m) };
-        return c.durable;
+    if (ephemeralC.length === 0 && durableC.length === 0) return false;
+
+    if (ephemeralC.length > 0) ephemeral = [...ephemeralC, ...ephemeral];
+    if (durableC.length > 0) {
+      const folded = foldOntoUserTurn(session, durableC);
+      // Identity-unchanged ⇒ no user message to attach to, so the blocks were dropped: nothing durable
+      // landed, hence nothing to carry live either.
+      if (folded !== session) {
+        session = folded;
+        yield { type: 'robo-user', content: durableC, traceId };
       }
     }
-    return [];
-  };
+    return true;
+  }
 
   // ── 2. System context (built once per submit, never persisted) ─────────────
 
@@ -190,8 +214,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
   for (;;) {
     // Respect an abort that arrived between turns (e.g. during tool execution).
     if (signal.aborted) {
-      await store.set(session.id, session);
-      yield { type: 'aborted', reason: typeof signal.reason === 'string' ? signal.reason : 'user-abort', session, traceId };
+      yield* end({ type: 'aborted', reason: abortReason(signal), session, traceId });
       return;
     }
 
@@ -200,8 +223,8 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
     // abort above. A turn stopped by the ceiling was cut short, not faulty, so it ends `aborted` rather
     // than `error`, and the reason is machine-readable for a frontend that wants to say why.
     if (round >= (providerConfig.maxRounds ?? Infinity)) {
-      await store.set(session.id, session);
-      yield { type: 'aborted', reason: `round-limit: provider "${config.provider}" allows ${providerConfig.maxRounds} rounds per turn`, session, traceId };
+      const reason = `round-limit: provider "${config.provider}" allows ${providerConfig.maxRounds} rounds per turn`;
+      yield* end({ type: 'aborted', reason, session, traceId });
       return;
     }
     round += 1;
@@ -209,8 +232,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
     // A raced screen verdict that already fired (settled during setup, or while a previous tool round
     // ran): fold its correction in before generating, so this call is informed directly rather than
     // discarded. This is the no-waste path — the verdict landed before we spent any tokens.
-    const early = pollDeferred();
-    if (early) { const dur = applyCorrection(early); if (dur.length > 0) yield { type: 'robo-user', content: dur, traceId }; }
+    yield* claimVerdicts();
 
     const pendingCalls: Array<{ id: string; name: string; input: unknown; meta?: ProviderMeta;
       truncated?: { bytes: number; stopReason?: string } }> = [];
@@ -254,12 +276,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
         // A raced verdict firing mid-generation changes the premise: discard this doomed response and
         // restart the loop with the correction folded in. Polled BEFORE the event is emitted, so a
         // classifier faster than time-to-first-token is caught before any token reaches the frontend.
-        const hit = pollDeferred();
-        if (hit) {
-          const dur = applyCorrection(hit);
-          if (dur.length > 0) yield { type: 'robo-user', content: dur, traceId };
-          restart = true; callAc.abort('screen-restart'); break;
-        }
+        if (yield* claimVerdicts()) { restart = true; callAc.abort('screen-restart'); break; }
         switch (ev.type) {
           case 'text-delta':
             textAcc += ev.delta;
@@ -313,11 +330,20 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
             ...(turnUsage !== undefined ? { usage: turnUsage } : {}),
           }));
         }
-        await store.set(session.id, session);
-        yield { type: 'aborted', reason: typeof signal.reason === 'string' ? signal.reason : 'user-abort', session, traceId };
+        yield* end({ type: 'aborted', reason: abortReason(signal), session, traceId });
         return;
       } else {
-        yield { type: 'error', error: String(e) + (('cause' in e && e.cause) ? ' ('+String(e.cause)+')' : '' ), traceId };
+        // A failed provider call still commits the rounds that succeeded. Nothing is written mid-turn, so
+        // returning without one discarded the whole turn — and the multi-round case is exactly the
+        // tool-using one, so a provider 500 or a dropped connection on round 3 threw away two completed
+        // rounds of assistant messages and tool results the frontend had already drawn, and which the
+        // next turn (which re-reads from the store) would then be missing.
+        //
+        // Nothing partial is appended here, unlike the abort branch above: `textAcc` and `assistantParts`
+        // belong to the call that failed, and the model never finished the thought. The `error` event
+        // carries no session (a failure is not a transcript), so this yields the terminal itself rather
+        // than the session — but it commits first, exactly like every other exit.
+        yield* end({ type: 'error', error: String(e) + (('cause' in e && e.cause) ? ' ('+String(e.cause)+')' : '' ), traceId });
         return;
       }
     }
@@ -329,8 +355,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
 
     // Pre-commit poll: the verdict may have settled exactly as the stream ended. Discard and re-run
     // rather than commit-then-retract, keeping the correction on the cheaper in-situ path.
-    const late = pollDeferred();
-    if (late) { const dur = applyCorrection(late); if (dur.length > 0) yield { type: 'robo-user', content: dur, traceId }; continue; }
+    if (yield* claimVerdicts()) continue;
 
     // Build and store assistant message
     if (textAcc)           assistantParts.push({ type: 'text', text: textAcc });
@@ -427,10 +452,10 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
         tool,
       });
       if (decision.abort) {
-        // Commit the turn before leaving. This was the one terminal path that returned without a
-        // persist, and nothing is written mid-turn (see the store.set sites) — so a hook aborting on a
-        // late round discarded the whole turn: every earlier round's assistant message and tool
-        // results, plus this round's response, all of which the frontend had already drawn.
+        // Commit the turn before leaving (`end`, above — nothing is written mid-turn, so an exit that
+        // skips it discards the whole turn: every earlier round's assistant message and tool results,
+        // plus this round's response, all of which the frontend had already drawn). This path is where
+        // that was first found and fixed.
         //
         // Committing requires closing the tool_use/tool_result pairing first: the assistant message
         // above carries a `tool-call` block per pending call, and a `tool_use` left unpaired is
@@ -449,8 +474,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
           session = appendMessage(session, createMessage({ role: 'marker', content: toolMarkers, traceId }));
           yield { type: 'marker', content: toolMarkers, traceId };
         }
-        await store.set(session.id, session);
-        yield { type: 'aborted', reason: decision.abort, session, traceId };
+        yield* end({ type: 'aborted', reason: decision.abort, session, traceId });
         return;
       }
       if (decision.rejectTool) {
@@ -472,8 +496,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
         callId: tc.id, session, signal, vault,
         provider:     config.provider,
         prompt:       promptFn,
-        loadPlugin:   (specifier: string, refresh?: boolean) => opts.loadPlugin(specifier, promptFn, refresh),
-        unloadPlugin: opts.unloadPlugin,
+        ...bindPluginOps(opts, promptFn),
         ...(opts.workdir     !== undefined ? { workdir:     opts.workdir     } : {}),
         ...(opts.configPath  !== undefined ? { configPath:  opts.configPath  } : {}),
         ...(opts.files       !== undefined ? { files:       opts.files       } : {}),
@@ -547,7 +570,5 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<PipelineE
   // ── 4. Persist and finish ──────────────────────────────────────────────────
   // `react` fires post-commit, in pump (the queue owner) — not here.
 
-  await store.set(session.id, session);
-
-  yield { type: 'done', session, traceId };
+  yield* end({ type: 'done', session, traceId });
 }

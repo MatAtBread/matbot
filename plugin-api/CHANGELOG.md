@@ -1,5 +1,47 @@
 # @matatbread/matbot-plugin-api
 
+## 0.4.0
+
+### Minor Changes
+
+- API surface reduction ahead of a stable line: the root now answers one question — what does a plugin need
+  in order to be a plugin?
+
+  **Breaking**
+
+  - Host boot assembly moved to the `@matatbread/matbot-plugin-api/host` subpath: `installPrincipalCarrier`,
+    `enterPrincipal`, `createConstantPrincipalCarrier`, `installUsageCarrier`, `createSerialUsageCarrier`,
+    `recordUsage`, `currentUsageSink`, `withUsageScope`, `contextSwitch`, `onContextQuiesce`,
+    `flushIfQuiescent`, `unifyServices`, `forwardingProxy`, `makeSwappable`, `createMountTable`,
+    `singleTurnRequest`, `HookRegistry`, `createBroadcaster`, `subscribable`, `createNotifier`,
+    `scopedNotifier`, and the types `SwapFn`, `MountTable`, `PrincipalCarrier`, `UsageCarrier`,
+    `Subscribable`, `Broadcaster`, `Routed`, `RoutedFilter`. No plugin in the matbot repo imported any of
+    them. `@matatbread/matbot-core` re-exports the whole subpath, so a host depending on core is unaffected.
+    Three subsystems keep their author-facing half at the root: `runAs`/`currentPrincipal`/
+    `tryCurrentPrincipal`, the `Notifier` type with `notifyingStore` and the two kinds, and
+    `Mounted`/`MountConsumeOptions`/`MountedMachine`.
+  - `MatbotRuntime.hooks` is typed `HookRegistrar` (`register` + `removeByPlugin`) rather than the
+    `HookRegistry` class, which also carried the host's dispatch surface.
+  - `Session.contexts` removed — required, written in three places, read nowhere. Old data keeps it as an
+    excess property.
+  - `CompletionRequest.parameters` / `SingleTurnRequest.parameters` removed. Both were `@deprecated`; no
+    caller set them.
+  - `PLUGIN_API_VERSION` is `'0.4'`, and now means this package's `major.minor`. The gate is unchanged
+    (major must match; a newer declared minor warns), so a plugin declaring `'0.1'` still loads.
+
+  **Other**
+
+  - `PipelineEvent` splits into `TurnEvent | SessionEvent`, making `idle`'s absent `traceId` a fact of the
+    types rather than a comment. Both remain reachable through `PipelineEvent`.
+  - New session helpers `foldOntoUserTurn` / `lastUserIndex`, and `bindPluginOps` for a `ToolContext`'s
+    plugin ops.
+  - `services.mounted.observe`'s `signal` is now optional-as-convenience: the host binds every
+    plugin-scoped interest to that plugin's load extent, so an interest cannot outlive its owner.
+  - `ToolContract`'s phantom fields use non-exported `unique symbol` keys, making the type uninhabitable.
+  - `unifyServices` no longer traps `has`; `'Foo' in services` is structural.
+  - `types.ts` is a barrel over `types/` (one file per domain). Every exported name and declaration is
+    unchanged.
+
 ## 0.3.10
 
 ### Patch Changes

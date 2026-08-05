@@ -161,7 +161,8 @@ A single Node step, no bundler — every module stays a module, wired by an impo
 2. **[loader.js](../apps/web-bundle/src/loader.js)** runs first in the browser: rewrites relative
    imports to `mbmod:` ids, blob-ifies each module, and publishes one import map mapping **every
    package name and every synthetic id** to its blob. Bare `@matatbread/*` imports are left untouched
-   so host and plugins share one module instance (the `instanceof` singleton boundary).
+   so host and plugins share one module instance (the singleton boundary the principal carrier,
+   registry state and module augmentation depend on — *not* error identity, which is branded).
 3. **[bootstrap.ts](../apps/web-bundle/src/bootstrap.ts)** is just another inlined module: it builds
    `MatbotServices`, installs the constant principal carrier, and runs the real `loadPlugins` /
    resolver / `SessionRunner` unchanged.

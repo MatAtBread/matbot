@@ -31,23 +31,39 @@ Secrets and configuration go through the `Vault` (`${NAME}` placeholders) or plu
 plugin-api/        — @matatbread/matbot-plugin-api: MatbotPlugin, MatbotServices/MatbotRuntime/
                      MatbotMachine, shared types, principal carrier, errors. The singleton contract;
                      every plugin peer-depends on it. Its own package (never folded into core).
+                       ./host — boot assembly for an EMBEDDER, not a plugin: carrier installers,
+                                swap proxies, the mount table's producer half, HookRegistry,
+                                createNotifier, the broadcaster. See "The /host boundary" below.
 core/              — @matatbread/matbot-core: agentic loop, hook dispatch, plugin loader, config
                      (YAML + .env), security (VaultImpl, Principal origin), knowledge
                      (LookupKnowledgeIndex). Author-facing subpath exports — link against without
                      pulling the runtime:
                        ./providers-base — SSE parser, HTTP helpers (write a provider)
                        ./storage-base   — filter/sort engine, StoreQuery (write a storage backend)
-plugins/
+plugins/            — one directory per package, flat but for the frontend/providers/storage groups
     tool-plugin/   — built-in provider/plugin management tools (node)
-    rumsfeld/      — contextual_search tool; knowledge fault handler
+    rumsfeld/      — contextual_search + find_fact tools; knowledge fault handler
     persist-ki-bge/— persistent KnowledgeIndex + BGE reranker
     triggers/      — data-driven hooks (condition → tool invocation)
     skills/        — skill CRUD + catalogue (cross-runtime)
     skills-node/   — node specialization: .md import/watch
+    skills_compiler/— compiles a procedural skill into a TS tool plugin
+    function-tools/— tool_function: TS lambdas/named tools composing registered tools
+    tool-types/    — ToolTypeIndex: derives the tool dts + hosts the codegen checker (node)
+    tool-router/   — ToolPresenter: bounded per-turn tool window + tool_search
+    tool-store/    — store_action: named persistent stores with generated CRUD tools
     edit-session/  — session_edit tool (cut/fork/split/compact)
+    sessions/      — session_action: list/get/rename/hide
+    cognition/     — inner voice, remembered facts, dream_time consolidation
+    provenance/    — determine_provenance: trace a claim to its evidence
+    json-validation/— toolcall hook validating inputs against inputSchema
     files/         — file codec and producer registry
     hook-logger/   — diagnostic: logs every hook channel
-    browser/       — OPFS store, WebCrypto vault
+    browser/       — IndexedDB store, OPFS files, WebCrypto vault (browser)
+    web-principal-user/— WebPrincipalResolver bound to the host OS user
+    bash/, docker-bash/, http/, workspace/, background/, ask-user/, whoami/
+                   — the standalone tool plugins (no `tools/` grouping directory)
+    mcp-http/      — HTTP/SSE MCP servers (cross-runtime); mcp/ adds stdio (node)
     frontend/
       web/         — HTTP+SSE server (node) + in-process (browser)
       dom/         — minimal in-process browser chat
@@ -56,18 +72,32 @@ plugins/
       anthropic/   — Anthropic Messages API adapter
       openai-compat/— OpenAI-compatible adapter (+ opt-in `gemini` mode)
       google/      — Google Gemini adapter (native generateContent; OpenAI-compat fallback by endpoint path)
-    tools/
-      bash/, docker-bash/, http/, background/, workspace/, ask-user/, whoami/
+      customer-services/, chatjimmy/ — keyless demo/comparison endpoints
     storage/
       filesystem/    — FilesystemStore (Node, CAS-safe); CLI boot default
       sqlite/        — SQLite StorageBackend (WAL)
       google-drive/  — Drive-backed StorageBackend (browser)
+      profiles/      — per-principal partitioning over filesystem (node); profile_action, share
 apps/
   cli/             — interactive REPL + single-turn
   web-bundle/      — browser-only matbot.html
 ```
 
 **Dependency direction:** `apps` → `plugins/*-node` → `plugins/*` → `core` → `plugin-api`. Nothing in `plugin-api/`, `core/`, or `plugins/` may depend on `apps/`.
+
+### The `/host` boundary
+
+`plugin-api`'s root answers exactly one question: **what does a plugin need in order to be a plugin?** Anything whose audience is an *embedder standing a machine up* lives behind `@matatbread/matbot-plugin-api/host` — carrier installers (`installPrincipalCarrier`, `installUsageCarrier` and the platform carrier factories), the capture-safe swap proxies (`forwardingProxy`, `makeSwappable`), the mount table's producer half (`createMountTable`, `MountTable`), the quiescent-edge machinery (`contextSwitch`, `onContextQuiesce`, `flushIfQuiescent`), `unifyServices`, `singleTurnRequest`, `HookRegistry`, `createNotifier`/`scopedNotifier`, and the `Broadcaster` primitive. `core` re-exports all of it, so an app depending on core needs no direct `/host` import — and no plugin in this repo imports any of it.
+
+**It is a file boundary, not an export list**, so it cannot quietly erode: host assembly lives in `host-machine.ts`, and `index.ts` uses `export type *` plus a named value list for the two files that are deliberately split down the middle. Three subsystems are split rather than moved whole, because each has a real author-facing half:
+
+| Subsystem | Root (plugin) | `/host` (embedder) |
+|---|---|---|
+| principal  | `runAs`, `currentPrincipal`, `tryCurrentPrincipal` | `installPrincipalCarrier`, `enterPrincipal`, `createConstantPrincipalCarrier` |
+| notifications | `Notifier` type, `notifyingStore`, `ItemChangeKind`/`RegistryChangeKind` | `createNotifier`, `scopedNotifier`, `Broadcaster` |
+| mount table | `Mounted`, `MountConsumeOptions`, `MountedMachine` (the contract of `services.mounted`) | `MountTable`, `createMountTable` (driven by register + the quiescent edge) |
+
+Fan-out is the one place the split implies a rule rather than just a location: a plugin that wants to publish an event uses the **`Notifier`**, which is why the raw broadcaster is host-side.
 
 ### Package naming
 - `@matatbread/matbot-foo` — single implementation
@@ -118,6 +148,29 @@ All runtime state under `.data/` **next to `matbot.yaml`**, never in source:
 
 ---
 
+## Open-registry augmentation
+
+**Five extension points, one technique** — the most distinctive thing about matbot's API, and previously explained five times in five places. Each is an empty (or near-empty) interface in `plugin-api` that a package adds a key to via `declare module`; declaration merging accumulates every loaded plugin's contribution, so `plugin-api` never changes and never learns that the package exists. Helper types derive the real shapes from the merged registry.
+
+| Registry | Key | Value | Home |
+|---|---|---|---|
+| `MatbotServices` | interface name | `Foo?: Foo` | `plugin.ts` |
+| `ToolContracts` | tool name | `ToolContract<Result, Params>` arms | `types/tools.ts` |
+| `Notifications` | `<package-name>#<InterfaceName>` | the notification shape | `notify.ts` |
+| `MarkerData` | marker creator | the `data` shape | `types/messages.ts` |
+| `ProviderMeta` | the package's namespace | its round-trip state | `types/provider.ts` |
+
+Four consequences follow from the technique, and account for most of the per-registry rules stated elsewhere in this document:
+
+1. **The key is the type's identity** — there is no runtime type information at these boundaries, so the string *is* the erasure-time stand-in. Name it after the thing, never a role. `Notifications` qualifies with a package name because a `kind` is globally scoped and an importer cannot rename it out of a collision.
+2. **Open at runtime** — a plugin this build never compiled against, or a bridged remote, can contribute a key. Always `default` a `switch`; exhaustiveness checking over these is unsound.
+3. **Absence is a type** — `?:` is the whole mechanism by which "may not be loaded" reaches a call site. Degrade; never fall back to loading it (*Discovery vs. direct dependency*).
+4. **Unregistered ⇒ loose, not broken** — an unknown tool name yields `unknown`, an unregistered marker creator `data: unknown`. Base types stay permissive so the unions still work.
+
+The author-facing version is `docs/DEVELOPING.md` *Open-registry augmentation*; each of the five declarations points at it rather than restating it.
+
+---
+
 ## Service registry
 
 `MatbotMachine` is the runtime environment passed to every plugin's `setup()` — the intersection `MatbotServices & MatbotRuntime`. **`MatbotRuntime`** is the fixed plumbing (hooks, tools, complete, settings, sessions, createStore, and the registry API itself): always present, never registerable. **`MatbotServices`** is the registry bucket — the swappable, registerable services keyed by interface name (`StorageBackend?`, `Vault`, `KnowledgeIndex`, plus whatever plugins augment in). It alone is the `keyof` domain of `register`/`get` and the surface third-party plugins augment, so `register('hooks', …)` is a *type error*. Optional services are advertised with `register` and consumed as **members** — one access surface:
@@ -147,7 +200,7 @@ type SessionStore = Store<Session>;
 type ScratchStore = Store<Session>;
 ```
 
-**Swappable core members** (`StorageBackend`, `KnowledgeIndex`, `Vault`) use `register` to swap live impls behind capture-safe forwarding proxies. A captured reference keeps resolving to the current impl. On `unregister` (i.e. when the providing plugin is unloaded) a swap-member **reverts to the host's captured boot default** rather than dangling on the gone impl — the app decides its own base services (the CLI: filesystem or in-memory; the browser: OPFS), and the registry only remembers and restores them. The host's boot default is captured **before** any storage-plugin pre-scan, so a config-supplied backend never poses as the base; a pre-scanned backend is recorded as plugin-owned, so unloading its plugin reverts to that base.
+**Swappable core members** (`StorageBackend`, `KnowledgeIndex`, `Vault`, `Notifier`) use `register` to swap live impls behind capture-safe forwarding proxies. A captured reference keeps resolving to the current impl. On `unregister` (i.e. when the providing plugin is unloaded) a swap-member **reverts to the host's captured boot default** rather than dangling on the gone impl — the app decides its own base services (the CLI: filesystem or in-memory; the browser: OPFS), and the registry only remembers and restores them. The host's boot default is captured **before** any storage-plugin pre-scan, so a config-supplied backend never poses as the base; a pre-scanned backend is recorded as plugin-owned, so unloading its plugin reverts to that base.
 
 ### Context switch & the deferred StorageBackend swap
 
@@ -164,13 +217,15 @@ A plugin reacts to a registry service (re)mounting or being unloaded through **`
 ```ts
 // cache the backend's documents; rebuild on every swap (initial load was in setup(), so no replay)
 await manager.load();
-services.mounted.observe({ key: 'StorageBackend', signal: manager.signal }, () => void manager.load());
+services.mounted.observe({ key: 'StorageBackend' }, () => void manager.load());
 
 // depend on a peer service that may arrive later; seed now if present (replay) and on each remount
-services.mounted.observe({ key: 'SkillManager', replay: true, signal }, m => seed(m));   // m.SkillManager narrowed present
+services.mounted.observe({ key: 'SkillManager', replay: true }, m => seed(m));   // m.SkillManager narrowed present
 ```
 
 `replay` fires the handler on the next microtask against the current machine if the key is present (the deferred-dependency latch); handlers must be idempotent (a remount re-fires). A cacher that reads straight through a store proxy on each call (e.g. `persist-ki-bge`) needs no subscription — the proxy already follows the swap.
+
+**An interest cannot outlive its owner.** The host binds every plugin-scoped `observe()` to that plugin's load extent, so `unloadPlugin` drops its interests with its tools and hooks. `signal` is therefore a *narrowing* option — "end this subscription earlier than my unload" (a per-session cache, a one-shot latch) — not the cleanup path. It was the cleanup path, and optional, which meant an author who omitted it left a live handler firing into a torn-down closure, one per reload generation, silently (the table logs and swallows a handler throw). Lifetime the host can know is the host's to enforce.
 
 ### Discovery vs. direct dependency
 

@@ -1,11 +1,11 @@
 import type { Tool, ToolRegistry, Hook, PromptFn, FormField, FrontendInfo, ProviderAdapter, ProviderConfig } from './types.js';
-import { scopedNotifier, RegistryChangeKind } from '@matatbread/matbot-plugin-api';
+import { RegistryChangeKind } from '@matatbread/matbot-plugin-api';
+import { scopedNotifier } from '@matatbread/matbot-plugin-api/host';
 import type {
   MatbotPlugin, MatbotMachine, MatbotRuntime, Mounted,
   ProviderAdapterFactory, StoreFactory,
 } from './plugin.js';
 import { PLUGIN_API_VERSION, unifyServices } from './plugin.js';
-import { HookRegistry } from './hooks.js';
 import { makePluginSettings } from './settings.js';
 import type { SettingsDoc } from './settings.js';
 
@@ -30,6 +30,7 @@ const state = {
   serviceKeys:     new Map<string, string[]>(),  // pluginName → MatbotMachine keys it registered
   hookPlugins:        new Set<string>(),         // plugins that registered at least one hook
   systemContextPlugins: new Set<string>(),       // plugins that registered a system-context contributor
+  lifecycles:      new Map<string, AbortController>(),  // pluginName → "this plugin is loaded" signal, aborted on unload
   failedPlugins:   [] as FailedPlugin[],         // plugins the loader skipped, keyed by specifier (last failure wins)
   overwriteAllTools: undefined as boolean | undefined,  // persisted "overwrite on collision, this install" choice, loaded lazily
 };
@@ -285,16 +286,43 @@ export function getSpecifierForPlugin(pluginName: string): string | undefined {
 export async function setupPlugin(plugin: MatbotPlugin, services: MatbotMachine, prompt?: PromptFn): Promise<void> {
   state.toolRegistry ??= services.tools;
 
+  // This plugin's load extent. The mount table's only cleanup path is an aborted signal, and the
+  // option is optional — so an author who omits it left an interest that outlives the unload and
+  // keeps firing into a torn-down closure (once per reload generation). Ownership is the host's to
+  // know, not the author's to remember: every scoped observe() is bound to this signal, so `signal`
+  // in the options is a narrowing convenience ("stop earlier than my unload"), never load-bearing.
+  const previous = state.lifecycles.get(plugin.name);
+  previous?.abort();                                  // a reload that skipped unloadPlugin
+  const lifecycle = new AbortController();
+  state.lifecycles.set(plugin.name, lifecycle);
+
   // Single choke point for every plugin tool registration (static `plugin.tools` and in-setup
   // `services.tools.register`). Stamps ownership and resolves name collisions. The no-collision
   // path runs synchronously (an async fn yields nothing before its first await), so fire-and-forget
-  // callers that don't await still get the tool registered in the same tick.
+  // callers that don't await still get the tool registered in the same tick — which is the whole
+  // reason `ToolRegistry.register` returns `void`, and every one of its ~34 call sites relies on it.
+  //
+  // That makes the collision branch the one place with an await and no caller to own its outcome, so
+  // it owns its own: a throw from the settings read/write or the prompt (a non-interactive `PromptFn`
+  // rejects with PromptCancelledError) would otherwise be an unhandled rejection — process exit under
+  // Node's default — reached by the ordinary act of two plugins claiming one tool name. Keep-existing
+  // is the safe resolution, so a failure resolves to it. The abort check closes the other end: setup()
+  // has already returned by the time a slow collision resolves, so an unload (or a setup() throw and
+  // its rollback) can land first, and re-inserting the tool would revive one owned by a gone plugin.
   const registerTool = async (tool: Tool): Promise<void> => {
     const stamped: Tool = { ...tool, pluginName: plugin.name };
     const existing = services.tools.resolve(stamped.name);
     if (existing !== null && existing.pluginName !== plugin.name) {
-      const overwrite = await resolveToolCollision(services, stamped.name, existing.pluginName, plugin.name, prompt);
+      const overwrite = await resolveToolCollision(services, stamped.name, existing.pluginName, plugin.name, prompt)
+        .catch((e: unknown) => {
+          console.error(
+            `[matbot] Could not resolve the "${stamped.name}" tool collision for plugin "${plugin.name}" ` +
+            `— keeping the existing tool:`, e instanceof Error ? e.message : e,
+          );
+          return false;
+        });
       if (!overwrite) return;
+      if (lifecycle.signal.aborted) return;
     }
     services.tools.register(stamped);
   };
@@ -312,9 +340,11 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotMachine,
     observe(options, handler) {
       // Forward to the host mount table but deliver *this plugin's* scoped machine — it reads through
       // the same proxies/registry, so scoped[key] is the host's live service. onUnmount is scoped too.
-      const forwarded = options.onUnmount !== undefined
-        ? { ...options, onUnmount: () => options.onUnmount!(scoped) }
-        : options;
+      const forwarded = {
+        ...options,
+        signal: options.signal !== undefined ? AbortSignal.any([lifecycle.signal, options.signal]) : lifecycle.signal,
+        ...(options.onUnmount !== undefined ? { onUnmount: () => options.onUnmount!(scoped) } : {}),
+      };
       services.mounted.observe(forwarded, () => handler(scoped as never));
     },
   };
@@ -345,7 +375,7 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotMachine,
         services.hooks.register({ ...hook, pluginName: plugin.name } as Hook);
       },
       removeByPlugin: (name: string) => services.hooks.removeByPlugin(name),
-    } as unknown as HookRegistry,
+    },
     systemContext: {
       register(contributor) {
         state.systemContextPlugins.add(plugin.name);
@@ -382,6 +412,10 @@ export async function unloadPlugin(pluginName: string, services: MatbotMachine):
   services.tools.removeByPlugin(pluginName);
   services.hooks.removeByPlugin(pluginName);
   services.systemContext.removeByPlugin(pluginName);
+  // Drops this plugin's mount interests. Before teardown(), with the other synchronous removals: a
+  // mount handler firing between here and teardown would run against half-removed state.
+  state.lifecycles.get(pluginName)?.abort();
+  state.lifecycles.delete(pluginName);
 
   for (const key of state.serviceKeys.get(pluginName) ?? []) {
     services.unregister(key);
@@ -406,10 +440,13 @@ export async function unloadPlugin(pluginName: string, services: MatbotMachine):
 
 /** Run each plugin's teardown() in reverse-registration order. Errors are logged, not thrown. */
 export async function teardownPlugins(): Promise<void> {
-  const results = await Promise.allSettled([...state.plugins].reverse().map(plugin => plugin.teardown?.()));
+  // Reverse once and keep it: indexing the *unreversed* array to name a result reported the wrong
+  // plugin for every failure but the middle one.
+  const ordered = [...state.plugins].reverse();
+  const results = await Promise.allSettled(ordered.map(plugin => plugin.teardown?.()));
   results.forEach((result, i) => {
     if (result.status === 'rejected') {
-      console.error(`[matbot] teardown error in plugin "${state.plugins[i]?.name}":`, result.reason);
+      console.error(`[matbot] teardown error in plugin "${ordered[i]?.name}":`, result.reason);
     }
   });
 }

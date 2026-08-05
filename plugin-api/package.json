@@ -4,7 +4,7 @@
     "node",
     "browser"
   ],
-  "version": "0.3.10",
+  "version": "0.4.0",
   "engines": {
     "node": ">=24.0.0"
   },
@@ -22,7 +22,8 @@
   "license": "Apache-2.0",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./host": "./src/host.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"

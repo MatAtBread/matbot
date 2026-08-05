@@ -8,7 +8,8 @@ import type { MatbotPlugin } from './plugin.js';
 import type { HookRegistry } from './hooks.js';
 import type { ToolTypeIndex, ToolPresenter } from '@matatbread/matbot-plugin-api';
 import { appendMessage, createMessage } from './session.js';
-import { contextSwitch, withUsageScope, isReadOnlyError } from '@matatbread/matbot-plugin-api';
+import { isReadOnlyError, foldOntoUserTurn, lastUserIndex } from '@matatbread/matbot-plugin-api';
+import { contextSwitch, withUsageScope } from '@matatbread/matbot-plugin-api/host';
 import { runSession } from './runner.js';
 
 export interface SessionRunnerDeps {
@@ -389,14 +390,18 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
               // head, delivering the trigger tool's output as ephemeral context. Unshifted last so it
               // sits at the very head (runs next) even if a resubmit was also queued above.
               if (followup.retract) {
-                const lastUserIdx = committed.messages.findLastIndex(m => m.role === 'user');
+                const lastUserIdx = lastUserIndex(committed);
                 const popped = lastUserIdx >= 0 ? committed.messages.slice(lastUserIdx + 1) : [];
                 // `durable` correction (a contextual fire that landed post-commit) folds onto the user
                 // message we keep — persisted, so the redo AND every later turn see it in history, the
                 // exact durability the clean in-situ path gives. `context` stays ephemeral (redo only).
+                // The fold runs on the *truncated* session, whose last user message is the one we keep,
+                // so it goes through the same helper as the screen and raced-verdict folds.
                 const durable = followup.retract.durable ?? [];
-                const kept = (lastUserIdx >= 0 ? committed.messages.slice(0, lastUserIdx + 1) : committed.messages)
-                  .map((m, i) => (durable.length > 0 && i === lastUserIdx ? { ...m, content: [...m.content, ...durable] } : m));
+                const truncated = lastUserIdx >= 0
+                  ? { ...committed, messages: committed.messages.slice(0, lastUserIdx + 1) }
+                  : committed;
+                const kept = foldOntoUserTurn(truncated, durable).messages;
                 const retractionMsg: Message = {
                   id:        crypto.randomUUID(),
                   role:      'marker',

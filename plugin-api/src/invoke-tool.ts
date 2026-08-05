@@ -1,5 +1,28 @@
-import type { MatbotMachine } from './plugin.js';
+import type { MatbotMachine, MatbotPlugin } from './plugin.js';
 import type { ToolContext, ToolEvent, ToolResultFor, ToolProxy, PromptFn, FormField } from './types.js';
+
+/** The host's plugin hot-load ops, as both the runner and {@link invokeTool} hold them. */
+export interface PluginOps {
+  loadPlugin(specifier: string, prompt?: PromptFn, refresh?: boolean): Promise<MatbotPlugin>;
+  unloadPlugin(specifier: string): Promise<boolean>;
+}
+
+/**
+ * Bind the plugin hot-load ops for a {@link ToolContext}, closing over the turn's `prompt`.
+ *
+ * That closure is the whole point of `ToolContext.loadPlugin` existing alongside
+ * `MatbotRuntime.loadPlugin`: a tool cannot forget to pass the prompt, so an interactive load cannot
+ * silently become non-interactive at one call site out of six — the same reasoning that makes the
+ * principal ambient rather than threaded. What it should not be is written out twice, once in the runner
+ * and once here, since the injected middle argument is exactly the shape a signature change breaks
+ * quietly.
+ */
+export function bindPluginOps(host: PluginOps, prompt: PromptFn): Pick<ToolContext, 'loadPlugin' | 'unloadPlugin'> {
+  return {
+    loadPlugin:   (specifier, refresh) => host.loadPlugin(specifier, prompt, refresh),
+    unloadPlugin: (specifier)          => host.unloadPlugin(specifier),
+  };
+}
 
 /**
  * Inputs to {@link invokeTool} that a one-shot caller can't derive from the machine. A tool
@@ -41,8 +64,7 @@ export function invokeTool<K extends string, const P>(
     signal:       opts.signal,
     vault:        machine.Vault,
     prompt,
-    loadPlugin:   (specifier, refresh) => machine.loadPlugin(specifier, prompt, refresh),
-    unloadPlugin: (specifier) => machine.unloadPlugin(specifier),
+    ...bindPluginOps(machine, prompt),
     ...(opts.provider      !== undefined ? { provider:   opts.provider      } : {}),
     ...(machine.workdir    !== undefined ? { workdir:    machine.workdir    } : {}),
     ...(machine.configPath !== undefined ? { configPath: machine.configPath } : {}),

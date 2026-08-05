@@ -33,7 +33,7 @@
     <text x="125" y="25" text-anchor="middle" class="boxTitle">runner</text>
     <text x="125" y="47" text-anchor="middle" class="boxText">SessionRunner queue + pump</text>
     <text x="125" y="64" text-anchor="middle" class="boxText">runSession provider/tool loop</text>
-    <text x="125" y="81" text-anchor="middle" class="boxText">ToolRegistry · HookRegistry</text>
+    <text x="125" y="81" text-anchor="middle" class="boxText">ToolRegistry · HookRegistrar</text>
     <text x="125" y="99" text-anchor="middle" class="pkg">@matatbread/matbot-core</text>
   </g>
   <g transform="translate(475,190)">
@@ -42,7 +42,7 @@
     <text x="125" y="47" text-anchor="middle" class="boxText">MatbotPluginSpec + services</text>
     <text x="125" y="64" text-anchor="middle" class="boxText">Message, Session, Tool, Hook</text>
     <text x="125" y="81" text-anchor="middle" class="boxText">ProviderAdapter, Store, Vault</text>
-    <text x="125" y="99" text-anchor="middle" class="pkg">PLUGIN_API_VERSION 0.1</text>
+    <text x="125" y="99" text-anchor="middle" class="pkg">PLUGIN_API_VERSION 0.4</text>
   </g>
   <g transform="translate(765,190)">
     <rect width="250" height="112" rx="12" fill="#be185d" stroke="#f9a8d4"/>

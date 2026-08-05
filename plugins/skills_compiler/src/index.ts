@@ -359,7 +359,6 @@ ${toolContractsDts}
               id: scratchId,
               version: crypto.randomUUID(),
               status: 'active',
-              contexts: [],
               messages: [],
               createdAt: nowIso,
               updatedAt: nowIso,
