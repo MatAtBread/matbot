@@ -356,18 +356,27 @@ inner-voice critique:
 
 ```ts
 interface CompletionRequest {
-  provider: string;
-  messages: Message[];
-  system?:  string;
-  signal?:  AbortSignal;
+  provider:    string;
+  messages:    Message[];
+  system?:     string;
+  parameters?: Partial<ModelParameters>;   // shallow-merged over the profile's own; request wins
+  signal?:     AbortSignal;
 }
 ```
 
-There is deliberately **no per-call `parameters` override**: model parameters belong on the named
-provider profile, where they stay user-editable. A plugin that needs different settings asks for a
-provider configured that way (`provider: 'classifier'`) rather than overriding one behind the user's
-back. `singleTurn({ provider, prompt, system?, signal? })` is the same call for a one-shot prompt,
-without the `Message` fields (`id`/`traceId`/`createdAt`) an out-of-band call has no use for.
+`parameters` is for **transient** model behaviour — a lower `temperature` to classify, `thinking` off
+for a cheap sub-call, a tighter `maxTokens` on output you parse rather than show. The host merges it
+over the named profile's own `parameters` before the adapter sees the config, so you override only the
+keys you name.
+
+Durable properties of a model still belong in the provider profile, where they stay user-editable. The
+line is *whose concern it is*: a profile describes the model, `parameters` describes one call. If the
+same override appears at every call site of a provider, it was a profile all along — and if a provider
+profile would differ from its sibling in exactly one field for one caller, it was `parameters` all along.
+
+`singleTurn({ provider, prompt, system?, parameters?, signal? })` is the same call for a one-shot
+prompt, without the `Message` fields (`id`/`traceId`/`createdAt`) an out-of-band call has no use for;
+it forwards `parameters` verbatim.
 
 ---
 

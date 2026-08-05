@@ -1,5 +1,5 @@
 import type {
-  FileStore, Principal, Vault, Message,
+  FileStore, Principal, Vault, Message, ModelParameters,
   ProviderAdapter, ProviderConfig, ProviderRegistry, Tool, ToolRegistry, FrontendInfo,
   Store, Session, SystemContextRegistry, KnowledgeIndex, PromptFn, SessionRunner, Usage, HookRegistrar,
   TypeScriptStripper, ToolTypeIndex, ToolPresenter, SteeringPolicy,
@@ -28,6 +28,21 @@ export interface CompletionRequest {
   provider:    string;
   messages:    Message[];
   system?:     string;
+  /**
+   * Per-call parameter overrides, shallow-merged over the named provider's own `parameters` (request
+   * wins). For *transient* model behaviour — a lower `temperature` to classify, `thinking` off for a
+   * cheap sub-call, a tighter `maxTokens` on a call whose output is parsed rather than shown.
+   *
+   * The alternative is a near-duplicate provider profile per behaviour, identical to its sibling but
+   * for one field, which pushes a caller's transient concern into global, user-editable config and
+   * multiplies the profiles a user has to understand. So: **durable properties of a model belong in
+   * the provider profile; a single call's behaviour belongs here.** If the same override appears at
+   * every call site of a provider, that is the signal it was a profile all along.
+   *
+   * Honoured by both hosts (CLI + web-bundle), which resolve the merge before handing the config to
+   * the adapter; an unrecognised key is the adapter's business, exactly as in a profile.
+   */
+  parameters?: Partial<ModelParameters>;
   signal?:     AbortSignal;
 }
 
@@ -40,6 +55,8 @@ export interface SingleTurnRequest {
   provider: string;
   prompt:   string;
   system?:  string;
+  /** Forwarded verbatim to {@link CompletionRequest.parameters} — same merge, same guidance. */
+  parameters?: Partial<ModelParameters>;
   signal?:  AbortSignal;
 }
 

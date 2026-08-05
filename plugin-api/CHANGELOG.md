@@ -1,6 +1,14 @@
 # @matatbread/matbot-plugin-api
 
-## 0.4.0
+## 0.4.1
+
+### Patch Changes
+
+- `CompletionRequest.parameters` and `SingleTurnRequest.parameters` are restored, and no longer
+  `@deprecated`. The 0.4.0 removal argued that model parameters belong in the provider profile; that is
+  right for durable model properties and wrong for transient per-call behaviour, where the alternative is a
+  near-duplicate profile in global config for one differing field. Behaviour is unchanged from 0.3.x:
+  shallow-merged over the profile's own `parameters` (request wins), forwarded verbatim by `singleTurn`.
 
 ### Minor Changes
 
@@ -25,7 +33,7 @@
   - `Session.contexts` removed — required, written in three places, read nowhere. Old data keeps it as an
     excess property.
   - `CompletionRequest.parameters` / `SingleTurnRequest.parameters` removed. Both were `@deprecated`; no
-    caller set them.
+    caller set them. **Reverted in 0.4.1 — do not act on this.**
   - `PLUGIN_API_VERSION` is `'0.4'`, and now means this package's `major.minor`. The gate is unchanged
     (major must match; a newer declared minor warns), so a plugin declaring `'0.1'` still loads.
 

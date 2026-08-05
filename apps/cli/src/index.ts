@@ -1020,6 +1020,8 @@ async function main(): Promise<void> {
       }
       const resolved: ProviderConfig = {
         ...rawCfg,
+        // Per-call overrides shallow-merged over the config's own parameters (request wins).
+        ...(req.parameters     !== undefined ? { parameters: { ...rawCfg.parameters, ...req.parameters } } : {}),
         ...(rawCfg.credentials !== undefined ? { credentials: await resolveCredentials(rawCfg.credentials, vault) } : {}),
         ...(rawCfg.endpoint    !== undefined ? { endpoint: await vault.resolve(rawCfg.endpoint) } : {}),
       };

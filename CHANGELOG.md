@@ -9,6 +9,24 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## 0.4.1
+
+### API gaps filled
+
+- **`CompletionRequest.parameters` and `SingleTurnRequest.parameters` are back, and no longer deprecated.**
+  0.4.0 removed them on the grounds that a per-call override belongs in the provider profile; that reasoning
+  held for *durable* model properties and not for transient ones, and the removal broke a downstream
+  consumer. Without them, poking a single call's behaviour — a lower `temperature` to classify, `thinking`
+  off for a cheap sub-call, a tighter `maxTokens` on output that gets parsed rather than shown — costs a
+  whole new provider profile in global, user-editable config, identical to its sibling but for one field.
+  That is a worse trade than the affordance it was meant to prevent.
+
+  Behaviour is exactly as it was before 0.4.0: shallow-merged over the named profile's own `parameters`
+  (request wins), resolved by the host before the adapter sees the config, and forwarded verbatim by
+  `singleTurn`. **Upgrading 0.3.x → 0.4.1 needs no change here**; only a consumer who already adapted to
+  the 0.4.0 removal can now revert that adaptation. The guidance, now documented rather than enforced by
+  absence: a profile describes the model, `parameters` describes one call.
+
 ## 0.4.0
 
 ### Breaking changes
@@ -51,6 +69,9 @@ churn and less likely to affect a consumer who doesn't use them.
   control away from the provider config, where parameters belong and stay user-editable — prefer a
   dedicated provider profile). Both hosts honoured them and *no caller in the repo set them*. Shipping a
   deprecated field into a stable line means carrying it to the next major, so it goes now.
+
+  **Reverted in 0.4.1** (see above) — "no caller in the repo" was not the same as no caller, and the
+  argument did not hold for transient per-call behaviour. Do not act on this entry.
 
 - **`MatbotRuntime.hooks` is typed `HookRegistrar`, not the `HookRegistry` class.** A plugin may only
   `register` and `removeByPlugin`; the class also carries the host's dispatch surface (`runScreen`,
