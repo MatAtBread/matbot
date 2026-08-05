@@ -29,7 +29,7 @@
     <rect width="350" height="105" rx="20" fill="#1e293b" stroke="#64748b" filter="url(#shadow)"/>
     <text x="175" y="32" text-anchor="middle" class="whiteTitle">SessionRunner</text>
     <text x="175" y="55" text-anchor="middle" class="whiteText">open / submit / observe / abort</text>
-    <text x="175" y="73" text-anchor="middle" class="whiteText">FIFO queue; concat batching; runAs(principal)</text>
+    <text x="175" y="73" text-anchor="middle" class="whiteText">FIFO queue; concat batching; contextSwitch()</text>
     <text x="175" y="91" text-anchor="middle" class="tiny">persists user message only when its turn begins</text>
   </g>
   <g transform="translate(955,125)">

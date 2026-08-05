@@ -134,6 +134,7 @@ All the plugins are optional - install and try out as you please. You can use th
 | **Hooks** | `json-validation` | Validate tool inputs against schema (a `toolcall` hook); LLM self-corrects on mismatch |
 | | `triggers` | Data-driven hooks: fire a tool or skill when an LLM classifier judges a stored condition matched |
 | | `hook-logger` | Diagnostic: log every hook-channel firing |
+| | `provenance` | Trace a claim back to the tool result or message it came from (`determine_provenance`) |
 | **Knowledge** | `rumsfeld` | Look up the knowledge index when the LLM encounters an unknown term |
 | | `persist-ki-bge` | Persistent knowledge index with optional BGE reranker |
 | | `skills` | Named markdown playbooks, injected on demand by a classifier |
@@ -152,6 +153,7 @@ All the plugins are optional - install and try out as you please. You can use th
 | **Storage** | `storage/filesystem` | Filesystem backend (Node; the CLI's default store) |
 | | `storage/sqlite` | SQLite backend (Node) |
 | | `storage/google-drive` | Google Drive backend (browser) |
+| | `storage/profiles` | Per-principal partitioning over the filesystem backend — a profile per user (`profile_action`, `share`) |
 | | `browser` | Browser-native storage: IndexedDB store, OPFS files, WebCrypto vault (+ the browser `plugin`/`provider` tools) |
 | | `files` | Node filesystem `FileStore` for MIME-typed blobs served by the web frontend |
 | **Background** | `background` | Detached background jobs and cron-style scheduling |

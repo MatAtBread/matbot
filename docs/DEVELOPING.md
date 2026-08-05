@@ -48,7 +48,7 @@ full rule.
 | `provider` | `ProviderAdapterFactory` | A single LLM adapter factory (`(config) => ProviderAdapter`) |
 | `storage` | `Record<string, StoreFactory>` | Named store factories |
 | `storageBackend` | `{ open(dotData: string): Promise<StorageBackend> }` | Storage backend; `open()` runs before any `setup()` |
-| `setup` | `(services: MatbotServices) => Promise<void>` | Called once after all plugins are registered |
+| `setup` | `(services: MatbotMachine) => Promise<void>` | Called once after all plugins are registered. The argument is the whole machine — registry services *and* the fixed runtime; see *Services available in `setup()`* |
 | `teardown` | `() => Promise<void>` | Called on graceful shutdown |
 | `installationMessage` | `() => Promise<string>` | Optional message shown to the user on install |
 
@@ -63,8 +63,8 @@ full rule.
   "exports": { ".": "./src/index.ts" },
   // host-provided singleton — a peer (never bundle your own copy), mirrored in devDependencies so it
   // typechecks and runs standalone. See "Dependencies" below.
-  "peerDependencies": { "@matatbread/matbot-plugin-api": "^0.1.0" },
-  "devDependencies":  { "@matatbread/matbot-plugin-api": "^0.1.0" }
+  "peerDependencies": { "@matatbread/matbot-plugin-api": "^0.4.0" },
+  "devDependencies":  { "@matatbread/matbot-plugin-api": "^0.4.0" }
 }
 ```
 
@@ -261,7 +261,7 @@ interface MatbotRuntime {
   readonly run?:            SessionRunner;            // per-session turn serialiser
   readonly self?:           PluginSelf;               // the calling plugin's loader-stamped identity
   readonly files?:          FileStore;
-  readonly hooks:           HookRegistry;
+  readonly hooks:           HookRegistrar;       // register / removeByPlugin — not the host's dispatch surface
   readonly tools:           ToolRegistry;
   readonly systemContext:   SystemContextRegistry;
   readonly workdir?:        string;
@@ -270,11 +270,14 @@ interface MatbotRuntime {
 
 // MatbotServices — the registry bucket (registerable / swappable keys):
 interface MatbotServices {
-  readonly StorageBackend?: StorageBackend | undefined;
-  readonly KnowledgeIndex:  KnowledgeIndex;
-  readonly Vault:           Vault;
-  readonly ToolTypeIndex?:  ToolTypeIndex | undefined;   // node-only; provided by the tool-types plugin
-  readonly ToolPresenter?:  ToolPresenter | undefined;   // per-turn tool-visibility policy (tool-router)
+  readonly StorageBackend?:  StorageBackend | undefined;
+  readonly KnowledgeIndex:   KnowledgeIndex;
+  readonly Vault:            Vault;
+  readonly Notifier:         Notifier;                    // the one change-notification bus; always present
+  readonly ToolTypeIndex?:   ToolTypeIndex | undefined;    // node-only; provided by the tool-types plugin
+  readonly ToolPresenter?:   ToolPresenter | undefined;    // per-turn tool-visibility policy (tool-router)
+  readonly WatchVisibility?: WatchVisibility | undefined;  // per-connection file-watch visibility (a partitioning backend)
+  readonly SteeringPolicy?:  SteeringPolicy | undefined;   // how a mid-turn submission is disposed (queue vs interrupt)
 }
 ```
 
@@ -300,6 +303,8 @@ A few members worth calling out:
   skills/triggers caching the `StorageBackend`'s documents, cognition seeding from the `SkillManager`);
   a pure map that resolves its dependency per-invocation through the member/proxy subscribes to
   nothing. See CLAUDE.md's *mount table* for the full contract.
+- **`Notifier`** — the one fan-out for every "something changed" fact. Always present; see
+  [Notifications](#notifications) below.
 
 ### Plugin-to-plugin services
 
@@ -328,8 +333,9 @@ The registry is for **loose negotiation between independent parties** — the co
 knows nor cares who (if anyone) provides the capability, and degrades gracefully when it is
 absent. When one plugin is a *specialization* of another (it depends on it by construction),
 import and construct it directly with a hard `package.json` dependency instead. See CLAUDE.md
-for the full distinction and for the two always-present, swap-aware keys (`StorageBackend`,
-`KnowledgeIndex`).
+for the full distinction and for the four swap-aware keys (`StorageBackend`, `KnowledgeIndex`,
+`Vault`, `Notifier`) — each carries a host boot default and reverts to it when the plugin that
+registered one is unloaded.
 
 ### Plugin settings
 
@@ -350,13 +356,18 @@ inner-voice critique:
 
 ```ts
 interface CompletionRequest {
-  provider:    string;
-  messages:    Message[];
-  system?:     string;
-  parameters?: Partial<ModelParameters>;
-  signal?:     AbortSignal;
+  provider: string;
+  messages: Message[];
+  system?:  string;
+  signal?:  AbortSignal;
 }
 ```
+
+There is deliberately **no per-call `parameters` override**: model parameters belong on the named
+provider profile, where they stay user-editable. A plugin that needs different settings asks for a
+provider configured that way (`provider: 'classifier'`) rather than overriding one behind the user's
+back. `singleTurn({ provider, prompt, system?, signal? })` is the same call for a one-shot prompt,
+without the `Message` fields (`id`/`traceId`/`createdAt`) an out-of-band call has no use for.
 
 ---
 
@@ -435,10 +446,15 @@ const mcpAction: Tool = {
 | `progress` | `pct: number`, `message?: string` | Progress (0–100) |
 | `result` | `value: unknown` | Final result (JSON-serialisable) |
 | `file` | `handle: FileHandle` | Output file reference |
+| `model-content` | `content: ModelContent[]` | Media for the *model* to read — see [Media](#media) |
 | `marker` | `creator: string`, `data: unknown` | Emit a durable marker (see [Markers](#markers)) |
 | `error` | `message: string`, `code?: number`, `stdout?: string`, `stderr?: string` | Expected tool error |
 
 Throw only for unexpected failures; yield `{ type: 'error' }` for expected ones.
+
+`result`, `model-content` and `marker` are independent: a tool may yield a result and no markers, a
+marker and no result (a silent side-effect), or show the model an image whose `result` is a one-line
+summary. The durable record of what a tool did is its `result`.
 
 ### Typed results (`ToolContracts`)
 
@@ -507,7 +523,7 @@ interface ToolContext {
   configPath?: string;
   files?:      FileStore;
   prompt:      PromptFn;     // (question, default?) | (field: FormField) => Promise<string>
-  loadPlugin(specifier: string):   Promise<MatbotPlugin>;
+  loadPlugin(specifier: string, refresh?: boolean): Promise<MatbotPlugin>;  // refresh: re-download a remote
   unloadPlugin(specifier: string): Promise<boolean>;
 }
 ```
@@ -553,7 +569,7 @@ A provider is selected by name in `matbot.yaml` (each named block sets `module`,
 | Event | Key fields |
 |---|---|
 | `text-delta` | `delta: string` |
-| `tool-call` | `id, name, input` |
+| `tool-call` | `id, name, input`, `meta?: ProviderMeta`, `truncated?: { bytes, stopReason? }` |
 | `tool-result` | `id, result` |
 | `thinking` | `delta: string` |
 | `thinking-block` | `thinking, signature` |
@@ -561,8 +577,44 @@ A provider is selected by name in `matbot.yaml` (each named block sets `module`,
 | `reasoning-block` | `reasoning: string` |
 | `refusal` | `text: string` |
 | `unknown-block` | `blockType: string, raw: unknown` |
+| `truncated` | `reason: 'max-tokens' \| 'stream-end'`, `raw?: string` |
 | `usage` | `inputTokens, outputTokens, costUsd?, cacheReadTokens?, cacheCreationTokens?` |
 | `done` | — |
+
+**`truncated` — the response was cut short, and the model did not choose to stop.** `max-tokens` is
+the provider saying so outright (`stop_reason: "max_tokens"` / `finish_reason: "length"` /
+`finishReason: "MAX_TOKENS"`); `stream-end` is the stream ending with no finish reason at all, e.g.
+a dropped connection. Emit it whether or not a tool call was caught in the cut — the commoner case
+is prose stopping mid-sentence. The runner records it as a durable `matbot-truncation` marker
+(LLM-invisible, so the reader and the audit see it without the model narrating its own cut-off);
+acting on it is a `followup` hook's business, not the harness's.
+
+The `truncated` field on a **`tool-call`** is the narrower case: the call's arguments were severed
+mid-stream and never parsed, so `input` is `{}` and the runner does *not* execute the call — it
+pairs it with an error result and the model self-corrects next round. Only adapters that accumulate
+arguments as a streamed JSON string can detect this (Anthropic's `input_json_delta`, OpenAI's
+`function.arguments` fragments); Gemini delivers each `functionCall` complete, so there is nothing
+to sever.
+
+### Provider round-trip metadata (`ProviderMeta`)
+
+Some providers hand back an opaque token that must be echoed **verbatim** when a tool call is
+replayed in history — Gemini 3 "thought signatures" are mandatory on every historical
+`functionCall` or the request 400s. That rides on a tool call's `meta?: ProviderMeta`, on both
+`CompletionEvent` and `MessageContent`, so core stores and replays it without understanding it.
+
+`ProviderMeta` is one of the five open-registry augmentation points: declare your own namespaced
+slice from your own module and `plugin-api` never changes when you add round-trip state.
+
+```ts
+declare module '@matatbread/matbot-plugin-api' {
+  interface ProviderMeta { myprovider?: { thoughtSignature?: string } }
+}
+```
+
+Replay a token **only when the message that produced it came from your provider** — one session
+interleaves tool calls from several. A foreign token is elided or degraded, never posted into a
+slot it doesn't belong in.
 
 ---
 
@@ -635,7 +687,7 @@ turns through the runner.
 ```ts
 export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,
-  async setup(services: MatbotServices) {
+  async setup(services: MatbotMachine) {   // the machine, not just MatbotServices
     services.registerFrontend({ name: 'frontend-example' });
     // start your own I/O loop: HTTP server, bot client, readline, …
   },
@@ -668,11 +720,25 @@ type Hook =
 
 | Hook | When it fires | What it can do |
 |---|---|---|
-| `screen` | Once per turn, before the first provider call | Mutate the session durably, inject ephemeral context (this turn only) or durable context (folded onto the user turn, persisted + visible, carried live as `robo-user`), abort the turn |
+| `screen` | Once per turn, before the first provider call | Replace the `session`; inject `ephemeral` context (this turn only) or `durable` context (folded onto the user turn, persisted + visible, carried live as `robo-user`); append durable `markers`; `abort` the turn; or hand back a `deferred` verdict (below) |
 | `contribute` | Before every provider call | Transform the outgoing messages (ephemeral, never persisted) |
 | `toolcall` | Before each tool runs | Reject or abort the tool call |
 | `toolresult` | After each tool runs | Redact or transform the result; observe for audit |
-| `followup` | After the turn commits | Resubmit a robo turn (head-enqueued, runs next) |
+| `followup` | After the turn commits | `resubmit` a robo turn (head-enqueued, runs next), `retractAndRerun` the turn just committed, and/or append durable `markers` |
+
+**`screen`'s `deferred` verdict** lets a hook race expensive work — a classifier — against
+generation instead of gating on it: return immediately, hand back a `DeferredScreen`, and the runner
+restarts the turn in-situ if the verdict fires before commit. A hook that would rather block until
+the verdict just returns `ephemeral` as usual.
+
+**`followup`'s `retractAndRerun`** is the inverse of `resubmit`: rather than appending a robo turn
+after the response, it *supersedes* it. The pump pops the committed turn back to (and excluding) the
+last user message, stashes the popped content in a durable retraction marker (LLM-elided, so a
+frontend can render it struck-through and a post-mortem can audit it), then re-runs that same user
+turn with `context` folded in ephemerally — or `durable` blocks folded onto the re-run's user
+message, for a correction that should outlive the redo. It is self-terminating by design: a
+well-formed trigger fires on a *curable* defect that the injected context dissolves on the redo, and
+`resubmitDepth` caps an ill-formed one.
 
 Example — redact secrets from tool results:
 
@@ -718,6 +784,114 @@ function markerMessage(data: MarkerData['my-plugin']): Message {
 }
 ```
 
+A tool emits one inline with `yield { type: 'marker', creator, data }` rather than building the
+message itself.
+
+---
+
+## Media
+
+**The model pulls media; nothing pushes it.** A tool yields `model-content` — the inline arms of
+`MessageContent` (`image` / `document` / `audio`), bytes plus a mime type — and the runner pins them
+directly after the tool message they answer, splicing them into the **outgoing copy** for the rest of
+the turn.
+
+```ts
+executor: {
+  async *execute(input, ctx) {
+    const png = await renderChart(input);
+    yield { type: 'model-content', content: [{ type: 'image', mimeType: 'image/png', data: png }] };
+    yield { type: 'result', value: { rendered: true, points: 240 } };
+  },
+}
+```
+
+Media is the exact mirror of a marker: a marker is persisted and invisible to the model; media is
+visible to the model and **never persisted**. The transcript records what a tool *returned*, not the
+bytes it *showed* — so a session cannot accumulate base64 and no exit path has to remember to strip
+it. A later turn that needs the bytes calls the tool again, which is the same pull the model already
+performed.
+
+Two consequences worth designing around:
+
+- **Rest-of-turn, not next-call-only.** Withdrawing content the model has already seen breaks the
+  prompt cache from that point and leaves it referring to something no longer there. The cost
+  corollary is real: a large document is re-sent on every subsequent round of the turn, so hand over
+  the smallest thing that answers the question (a page range, a thumbnail) — and the provider's
+  `maxRounds` bounds how often it is paid for.
+- **No `FileStore` dependency.** `files` is optional on both `RunSessionOpts` and `ToolContext`, so
+  routing media through it would make multimodal impossible without one. Core never asks where you
+  got the bytes — a `FileStore`, an HTTP fetch, a chart rendered in memory. Storage reads are your
+  concern; the loop's concern is the wire.
+
+A tool that also wants the *user* to see something has `file` and `marker`. Media is deliberately not
+a `PipelineEvent`: nothing durable backs it, so a frontend drawing it live would show something that
+vanishes on reload.
+
+---
+
+## Notifications
+
+`services.Notifier` is the one fan-out for every "something changed" fact — always present, and the
+sanctioned way a plugin publishes an event. Do not build a private `watch()` stream over your own
+broadcaster; matbot owns the envelope and the registration surface, and a registered distributed
+`Notifier` can then forward everything off-box at once.
+
+```ts
+services.Notifier.notify({
+  kind: ItemChangeKind, source: 'skill', operation: 'saved',
+  namespace: 'skills', id, principal: currentPrincipal(),
+});
+
+services.Notifier.consume(n => { /* re-read through the store */ }, signal,
+                          n => n.kind === ItemChangeKind);
+```
+
+`consume(handler, signal?, filter?)` is the fire-and-forget loop: it awaits each handler before
+pulling the next, isolates a throwing one, and ends when `signal` aborts. `subscribe(signal?,
+filter?)` is the same stream as a plain `AsyncIterable<Notification>` when you want to drive the
+`for await` yourself. Both discriminants are filterable — `kind` selects the payload shape,
+`instance`/`plugin`/`source` are attribution.
+
+**Which kind do I publish?** `ItemChange` whenever the fact is "the thing addressed by
+`(namespace, id)` is stale — re-read it", *whatever holds it*: a `Store` (wrap it in `notifyingStore`
+and it is automatic), a `FileStore`, a directory you watch. It is deliberately not named
+`StoreChange` — the medium is an implementation concern. Define a kind of your own only when you
+carry something a consumer **cannot** get by re-reading: progress, a measurement, an external event.
+That is a new shape, not a new source; `detail` is not the place to smuggle one.
+
+```ts
+export interface JobProgress extends NotificationBase { done: number; total: number }
+export const JobProgressKind = '@fnarr/jobs#JobProgress' satisfies keyof Notifications;
+
+declare module '@matatbread/matbot-plugin-api' {
+  interface Notifications { '@fnarr/jobs#JobProgress': JobProgress }
+}
+```
+
+**`kind` is `<package-name>#<InterfaceName>`, and nothing declares it twice** — the `Notifications`
+key *is* the tag, so an arm never declares a `kind` field. It is qualified because, unlike a type
+name, a `kind` is globally scoped and an importer *cannot* rename it out of a collision: two plugins
+picking the same bare word is an unfixable declaration-merge conflict in a file neither owns. The
+prefix names the package that **defines** the shape, never the one emitting it — `plugin` is the
+emitter, and it is stamped for you from your plugin's scope. Don't use the emitter/kind pair as a
+compound discriminant: relaying rewrites `plugin`.
+
+Four rules follow from how the bus is built:
+
+- **Identity, never value.** Events are queued per subscriber and are stale the moment a concurrent
+  writer lands, so a consumer re-reads through the store. `detail` is advisory at most.
+- **Re-query on attach.** A sink attaching mid-flight has missed what preceded it; the bus refuses to
+  replay, so never put current state on it.
+- **Emit where the change happens**, not where a tool call happens — a detached child's completion
+  and an HTTP-created session are both real changes with no tool executor in scope.
+- **Always `default` a `switch` over `kind`.** A foreign plugin or a bridged remote can publish one
+  this build has never seen (see *Open-registry augmentation*).
+
+`namespace` is an **address space, not a plugin** — `files` is emitted by workspace, by background,
+and by the profiles backend; `sessions` has no plugin at all. `principal` is **ownership** (whose
+data changed), not attribution — never conflate it with `plugin`/`source`.
+
 ---
 
 ## Knowledge index
@@ -730,10 +904,15 @@ swap drains the old index's entries into the new one.
 ```ts
 interface KnowledgeIndex {
   index(entry: KnowledgeEntry): Promise<void>;
+  remove(id: string): Promise<void>;                 // idempotent; id is the sole primary key
   search(terms: Array<{ term: string; context?: string }>, signal: AbortSignal): Promise<KnowledgeEntry[]>;
-  entries?(): Iterable<KnowledgeEntry>;
+  entries?(): Iterable<KnowledgeEntry>;               // when present, a swap drains these into the new index
 }
 ```
+
+`index` replaces by `id`, so retraction is by `id` alone — the index never inspects an entry's
+opaque `source`. Whoever indexed an entry owns retracting it (the skill manager retracts a hidden or
+deleted skill), rather than the index policing its tenants.
 
 The `@matatbread/matbot-rumsfeld` plugin registers a `contextual_search` tool that
 queries the knowledge index when the model encounters an unknown term.
@@ -766,6 +945,7 @@ Store-backed index with optional Cloudflare BGE reranker.
 | `@matatbread/matbot-tool-router` | `ToolPresenter` (`tool_search`) | Serves a bounded per-turn tool window from a large library — pins + BM25-ranked tools + a `tool_search` entry point |
 | `@matatbread/matbot-tool-store` | `store_action` (+ `defineStore`) | Define and expose named persistent stores with generated CRUD tools |
 | `@matatbread/matbot-rumsfeld` | `contextual_search`, `find_fact` | Resolve unknown terms via the knowledge index (`contextual_search` returns a document; `find_fact` returns a precise answer) |
+| `@matatbread/matbot-provenance` | `determine_provenance`, `provenance_config` | Trace a claim back to the tool result or user message it came from — or establish that nothing in the session accounts for it |
 | `@matatbread/matbot-persist-ki-bge` | knowledge backend | Persistent KnowledgeIndex with optional BGE reranker |
 | `@matatbread/matbot-cognition` | `ask_inner_voice`, `remember_fact`, `dream_time`, `cognition_config` + `remembered_facts_action` | Seeds the Inner Voice skill and a remembered-facts store; inner-voice critique, fact memory, background Dream Time consolidation |
 | `@matatbread/matbot-tool-whoami` | `whoami` | Reports the current Principal |
@@ -783,6 +963,7 @@ Store-backed index with optional Cloudflare BGE reranker.
 | `@matatbread/matbot-storage-filesystem` | storage backend | Filesystem-backed Store + FileStore (Node; content-addressed, CAS-safe; the CLI's default) |
 | `@matatbread/matbot-storage-sqlite` | storage backend | SQLite-backed Store + FileStore (Node) |
 | `@matatbread/matbot-storage-google-drive` | storage backend | Google Drive-backed Store + FileStore (browser; Google Identity Services auth) |
+| `@matatbread/matbot-storage-profiles` | storage backend + `profile_action`, `share` | Partitions selected namespaces per web principal over the filesystem backend, so each profile gets its own slice (Node; list it first in `matbot.yaml`) |
 | `@matatbread/matbot-browser` | storage + `plugin`/`provider` tools | Browser-native backends: IndexedDB Store, OPFS FileStore, WebCrypto vault, and browser plugin/provider management tools |
 | `@matatbread/matbot-files-node` | `FileStore` | Node filesystem-backed FileStore for MIME-typed blobs, served by the frontend |
 

@@ -40,17 +40,30 @@ core/              — @matatbread/matbot-core: agentic loop, hook dispatch, plu
                      pulling the runtime:
                        ./providers-base — SSE parser, HTTP helpers (write a provider)
                        ./storage-base   — filter/sort engine, StoreQuery (write a storage backend)
-plugins/
+plugins/            — one directory per package, flat but for the frontend/providers/storage groups
     tool-plugin/   — built-in provider/plugin management tools (node)
-    rumsfeld/      — contextual_search tool; knowledge fault handler
+    rumsfeld/      — contextual_search + find_fact tools; knowledge fault handler
     persist-ki-bge/— persistent KnowledgeIndex + BGE reranker
     triggers/      — data-driven hooks (condition → tool invocation)
     skills/        — skill CRUD + catalogue (cross-runtime)
     skills-node/   — node specialization: .md import/watch
+    skills_compiler/— compiles a procedural skill into a TS tool plugin
+    function-tools/— tool_function: TS lambdas/named tools composing registered tools
+    tool-types/    — ToolTypeIndex: derives the tool dts + hosts the codegen checker (node)
+    tool-router/   — ToolPresenter: bounded per-turn tool window + tool_search
+    tool-store/    — store_action: named persistent stores with generated CRUD tools
     edit-session/  — session_edit tool (cut/fork/split/compact)
+    sessions/      — session_action: list/get/rename/hide
+    cognition/     — inner voice, remembered facts, dream_time consolidation
+    provenance/    — determine_provenance: trace a claim to its evidence
+    json-validation/— toolcall hook validating inputs against inputSchema
     files/         — file codec and producer registry
     hook-logger/   — diagnostic: logs every hook channel
-    browser/       — OPFS store, WebCrypto vault
+    browser/       — IndexedDB store, OPFS files, WebCrypto vault (browser)
+    web-principal-user/— WebPrincipalResolver bound to the host OS user
+    bash/, docker-bash/, http/, workspace/, background/, ask-user/, whoami/
+                   — the standalone tool plugins (no `tools/` grouping directory)
+    mcp-http/      — HTTP/SSE MCP servers (cross-runtime); mcp/ adds stdio (node)
     frontend/
       web/         — HTTP+SSE server (node) + in-process (browser)
       dom/         — minimal in-process browser chat
@@ -59,12 +72,12 @@ plugins/
       anthropic/   — Anthropic Messages API adapter
       openai-compat/— OpenAI-compatible adapter (+ opt-in `gemini` mode)
       google/      — Google Gemini adapter (native generateContent; OpenAI-compat fallback by endpoint path)
-    tools/
-      bash/, docker-bash/, http/, background/, workspace/, ask-user/, whoami/
+      customer-services/, chatjimmy/ — keyless demo/comparison endpoints
     storage/
       filesystem/    — FilesystemStore (Node, CAS-safe); CLI boot default
       sqlite/        — SQLite StorageBackend (WAL)
       google-drive/  — Drive-backed StorageBackend (browser)
+      profiles/      — per-principal partitioning over filesystem (node); profile_action, share
 apps/
   cli/             — interactive REPL + single-turn
   web-bundle/      — browser-only matbot.html
@@ -187,7 +200,7 @@ type SessionStore = Store<Session>;
 type ScratchStore = Store<Session>;
 ```
 
-**Swappable core members** (`StorageBackend`, `KnowledgeIndex`, `Vault`) use `register` to swap live impls behind capture-safe forwarding proxies. A captured reference keeps resolving to the current impl. On `unregister` (i.e. when the providing plugin is unloaded) a swap-member **reverts to the host's captured boot default** rather than dangling on the gone impl — the app decides its own base services (the CLI: filesystem or in-memory; the browser: OPFS), and the registry only remembers and restores them. The host's boot default is captured **before** any storage-plugin pre-scan, so a config-supplied backend never poses as the base; a pre-scanned backend is recorded as plugin-owned, so unloading its plugin reverts to that base.
+**Swappable core members** (`StorageBackend`, `KnowledgeIndex`, `Vault`, `Notifier`) use `register` to swap live impls behind capture-safe forwarding proxies. A captured reference keeps resolving to the current impl. On `unregister` (i.e. when the providing plugin is unloaded) a swap-member **reverts to the host's captured boot default** rather than dangling on the gone impl — the app decides its own base services (the CLI: filesystem or in-memory; the browser: OPFS), and the registry only remembers and restores them. The host's boot default is captured **before** any storage-plugin pre-scan, so a config-supplied backend never poses as the base; a pre-scanned backend is recorded as plugin-owned, so unloading its plugin reverts to that base.
 
 ### Context switch & the deferred StorageBackend swap
 

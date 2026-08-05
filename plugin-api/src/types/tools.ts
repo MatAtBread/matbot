@@ -39,12 +39,15 @@ export type ToolEvent<Result = unknown> =
   | { type: 'error';    message: string; code?: number; stdout?: string; stderr?: string };
 
 /**
- * Per-tool result-type registry: maps a tool's `name` to the type of the `value` it yields in its
- * `result` event. Augment it exactly like {@link MarkerData} / `MatbotServices`, so a caller gets the
- * concrete result type back from {@link invokeTool} + `toolResult` instead of `unknown`:
+ * Per-tool call-contract registry: maps a tool's `name` to a {@link ToolContract} arm (or a union of
+ * them) pairing the `value` it yields in its `result` event with the params that produce it. Augment it
+ * exactly like {@link MarkerData} / `MatbotServices`, so a caller gets the concrete result type back
+ * from {@link invokeTool} + `toolResult` instead of `unknown`:
  *
  *   declare module '@matatbread/matbot-plugin-api' {
- *     interface ToolContracts { find_fact: string[] | null }
+ *     interface ToolContracts {
+ *       find_fact: ToolContract<string[] | null, { question: string; terms: { term: string }[] }>;
+ *     }
  *   }
  *
  * The tool name is the discriminator: `invokeTool(machine, 'find_fact', …)` is typed
@@ -52,6 +55,11 @@ export type ToolEvent<Result = unknown> =
  * name with no registered entry resolves to `unknown` (the caller must narrow). This is a pure
  * type-level construct — no runtime validation; it pins, at the call site, the contract a tool's
  * executor already produces. Keep the entry in sync with what the executor actually yields.
+ *
+ * Even a single-action tool declares an **arm**, never a bare `name: Result`. The bare form still
+ * type-checks — `ToolResultOf`/`ToolResultFor` keep a plain-entry path so an unregistered or foreign
+ * tool stays loose — but it carries no params, so {@link ToolProxy} derives no call signature from it
+ * and `await tool.find_fact(…)` is uncallable.
  *
  * **Multi-action tools** are a weird form of overloaded function: the same tool returns different
  * shapes depending on its params. Register such a tool as a union of {@link ToolContract} *arms*, each

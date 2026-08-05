@@ -46,10 +46,13 @@ together by an import map at runtime. The mechanism is the browser mirror of the
    does **no** compiling at boot: it rewrites each module's **relative** imports to synthetic
    `mbmod:<id>` specifiers, turns each into a `blob:` URL, and publishes one **import map** mapping
    every package name and synthetic id to its blob. Bare `@matatbread/*` imports are left untouched
-   so the host and every plugin resolve to the **same module instance** — the singleton boundary
-   that `instanceof` (e.g. `MissingSecretError`) depends on, exactly as `ts-hooks.js` protects in
-   node. (Sucrase is lazy-loaded from a CDN only for *runtime* remote `.ts` plugin loading — see the
-   caveat below — never for the baseline boot.)
+   so the host and every plugin resolve to the **same module instance** — the singleton boundary that
+   the ambient principal carrier, the shared registry state and `declare module` augmentation all
+   depend on, exactly as `ts-hooks.js` protects in node. (Error identity deliberately does *not*
+   depend on it: plugin-api's errors are branded, not classes, so they survive a split tree — see
+   [duplicate-singletons.md](../../docs/duplicate-singletons.md).) (Sucrase is lazy-loaded from a CDN
+   only for *runtime* remote `.ts` plugin loading — see the caveat below — never for the baseline
+   boot.)
 3. **`src/bootstrap.ts`** is just another inlined module. It builds `MatbotServices` (the browser
    analogue of `apps/cli/src/index.ts`), installs the constant principal carrier, and runs the real
    `loadPlugins` / resolver / `SessionRunner` unchanged. The whole architecture runs as-is.

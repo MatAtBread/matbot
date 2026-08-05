@@ -104,8 +104,9 @@ export interface PluginSelf {
  * The registry bucket: the swappable, registerable services, keyed by interface name. This is the
  * `keyof` domain of {@link MatbotRuntime.register}/`get`, and the surface third-party plugins augment
  * (`declare module '@matatbread/matbot-plugin-api' { interface MatbotServices { Foo?: Foo } }`). The
- * core three carry a host boot default and revert to it when unregistered; an augmented service is
- * optional and simply drops. Read each as a member (`services.KnowledgeIndex`); swap with register().
+ * four swap-members (`StorageBackend`, `KnowledgeIndex`, `Vault`, `Notifier`) carry a host boot default
+ * and revert to it when unregistered; an augmented service is optional and simply drops. Read each as
+ * a member (`services.KnowledgeIndex`); swap with register().
  */
 export interface MatbotServices {
   readonly StorageBackend?: StorageBackend | undefined;

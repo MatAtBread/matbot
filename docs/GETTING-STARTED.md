@@ -125,7 +125,7 @@ providers:
       apiKey: ${DEEPSEEK_API_KEY}
     parameters:
       maxTokens: 16384
-    fallback: claude                 # used on 429 / 5xx
+    maxRounds: 12                    # ceiling on agentic rounds per turn against this provider
 
 plugins:
   - @matatbread/matbot-tool-bash
@@ -156,14 +156,29 @@ providers:
     model:      <model-id>
     credentials:
       apiKey:   ${SECRET_NAME} | literal          # ${NAME} resolved by the Vault
-    parameters:                                   # optional; passed to the API
+    parameters:                                   # optional; forwarded to the API unmodified
       maxTokens:      4096
       temperature:    0.7
       thinking:                                   # Anthropic extended thinking
         type:         enabled
         budgetTokens: 2000
-    fallback:   <other-provider-name>             # used on 429 / 5xx
+    maxRounds:  12                                # optional; agentic rounds per turn (see below)
 ```
+
+`maxRounds` caps the agentic rounds one turn may take against this provider — a round being one
+provider call plus the tool batch it asked for. Reaching it ends the turn (`aborted`, reason
+`round-limit`) rather than starting another round; absent means unbounded. It sits per provider
+rather than as one global because that is the unit spend is denominated in: a local model can
+afford to grind where a frontier model at 100× the rate cannot, and one deployment runs both. It
+is deliberately *not* in `parameters` — those are forwarded to the endpoint untouched, and this
+never leaves matbot.
+
+**There is no automatic failover between providers**, and no `fallback:` key — a `fallback:` in an
+older config is ignored, silently, as it always was. It is deliberately unimplemented rather than
+merely missing: failover has to decide how two providers billed for one turn are accounted, and what
+happens to a tool call's round-trip `ProviderMeta` token (a Gemini thought signature, say) when the
+turn continues on a provider that never issued it. A stub answering neither would be worse than
+nothing. Until those are settled, retry across profiles belongs to whoever is submitting turns.
 
 ### Secret resolution
 
@@ -221,6 +236,7 @@ explicit `plugins:` entry.
 | `--config <path>` | Config file path (default: `./matbot.yaml`; `-` reads YAML from stdin) |
 | `--prompt-file <path>` | Read the prompt from a file; runs a single turn and exits |
 | `--principal <id\|json>` | Boot identity: a bare id (type `user`) or JSON `{"id","type"}`. Overrides `MATBOT_PRINCIPAL` and the config `principal:` |
+| `--dump-tools [path]` | Serialize the live tool registry — wire descriptions with folded TS contracts, plus `inputSchema` — to a JSON file and exit (default `tools-dump.json`) |
 | `--help` | Show help and exit |
 | `--version`, `-v` | Print the version banner and exit |
 

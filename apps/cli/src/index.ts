@@ -394,6 +394,7 @@ matbot — AI CLI
 
 Usage:
   matbot [options] [prompt]
+  matbot start [options]      Headless server mode: load plugins and wait for a frontend
 
 Options:
   --provider    <name>      Provider key from matbot.yaml (default: first in file)
