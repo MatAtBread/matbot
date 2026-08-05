@@ -17,7 +17,8 @@ export interface DispatchOutcome {
  * model wakes: a tool that yields a `result` is producing model-facing content (`hadResult` → the
  * caller injects it); a tool that yields none is a silent side-effect (the model never wakes). Any
  * `marker` events the tool emits are collected for the caller to persist, and a tool that errors or
- * throws — or names an absent tool — is recorded as an error marker rather than vanishing into a log.
+ * throws — or names an absent tool — is recorded as an error marker rather than vanishing into a log;
+ * one cut off by an abort is recorded as interrupted, not as a failure.
  */
 export async function dispatchTrigger(
   services: MatbotMachine,
@@ -25,8 +26,16 @@ export async function dispatchTrigger(
   ctx:      { session: Session; signal: AbortSignal; provider: string; prompt?: PromptFn },
 ): Promise<DispatchOutcome> {
   const markers: MessageContent[] = [];
+  // An aborted signal (a mid-turn steer, a user cancel) means the tool was cut off, not that it faulted:
+  // the raw abort reason is an internal token ("steer") that reads as a real failure in a durable marker.
+  // The runner reframes this for the tools it runs itself (INTERRUPTED_TOOL_RESULT); a trigger's tool runs
+  // outside that loop, so the same reframing has to happen here. The trace is still recorded — a trigger
+  // that was interrupted did nothing, and a post-mortem wants to know that — just not as an error.
   const fail = (error: string): void => {
-    markers.push({ type: 'marker', creator: 'triggers', data: { triggerId: trigger.id, tool: trigger.invoke.tool, error } });
+    const data = ctx.signal.aborted
+      ? { triggerId: trigger.id, tool: trigger.invoke.tool, interrupted: true }
+      : { triggerId: trigger.id, tool: trigger.invoke.tool, error };
+    markers.push({ type: 'marker', creator: 'triggers', data });
   };
 
   let result: unknown;
@@ -56,12 +65,12 @@ export async function dispatchTrigger(
       if      (ev.type === 'result') { result = ev.value; hadResult = true; }
       else if (ev.type === 'marker') { markers.push({ type: 'marker', creator: ev.creator, data: ev.data }); }
       else if (ev.type === 'error')  {
-        console.warn(`[triggers] trigger ${trigger.id} tool "${trigger.invoke.tool}" errored: ${ev.message}`);
+        if (!ctx.signal.aborted) console.warn(`[triggers] trigger ${trigger.id} tool "${trigger.invoke.tool}" errored: ${ev.message}`);
         fail(ev.message);
       }
     }
   } catch (e) {
-    console.warn(`[triggers] trigger ${trigger.id} tool "${trigger.invoke.tool}" threw:`, e);
+    if (!ctx.signal.aborted) console.warn(`[triggers] trigger ${trigger.id} tool "${trigger.invoke.tool}" threw:`, e);
     fail(e instanceof Error ? e.message : String(e));
   }
 
