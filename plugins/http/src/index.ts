@@ -67,7 +67,10 @@ export const httpTool: Tool = {
     required:   ['url'],
     properties: {
       url:          { type: 'string', description: 'The URL to request.' },
-      method:       { type: 'string', enum: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'], default: 'GET' },
+      // The executor hands `method` straight to `fetch`, which takes any verb; this enum is the model's
+      // guardrail, not the tool's limit, so it lists the ones worth offering rather than the ones that work.
+      // It was five, which made `json-validation` reject the HEAD and OPTIONS requests the tool supports.
+      method:       { type: 'string', enum: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'], default: 'GET' },
       headers:      { type: 'object', additionalProperties: { type: 'string' } },
       body:         { type: 'string', description: 'Request body for POST/PUT/PATCH.' },
       responseType: { type: 'string', enum: ['text', 'json'], default: 'text' },

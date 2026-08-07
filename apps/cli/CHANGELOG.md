@@ -4,6 +4,10 @@
 
 ### Patch Changes
 
+- `--dump-tools` also emits the unfolded wire contract.
+
+  Each entry gains `wireContract: { params, result }` alongside the description it was already folded into, so a consumer comparing a tool's two authored descriptions of its inputs need not regex the contract back out of the prose. Additive; existing consumers are unaffected.
+
 - Updated dependencies
   - @matatbread/matbot-core@0.4.2
   - @matatbread/matbot-tool-plugin@0.4.2

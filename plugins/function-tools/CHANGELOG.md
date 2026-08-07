@@ -4,6 +4,12 @@
 
 ### Patch Changes
 
+- A defined function's `inputSchema` now carries the structure its signature declared.
+
+  Its params are projected twice from one parse — verbatim into the `toolContract` (TS to TS, lossless) and into the `inputSchema` — and the second projection string-matched the whole annotation, so every structural shape collapsed: `'a' | 'b'` → `{}`, `string[]` → `{ type: 'array' }`, `{ sql: string; limit?: number }` → a bare `{ type: 'object' }`. Since the `inputSchema` is what the provider is given and what `json-validation` enforces, the model was shown a contract in the tool description stronger than the schema backing it.
+
+  Literal unions now yield `enum`, arrays `items`, inline object types `properties`/`required`, `Record`/index signatures `additionalProperties`, and primitive unions a `type` array. The conversion stays deliberately partial — a named or imported type, a union with a structural arm, and a tuple's element types degrade to the permissive form rather than to a guessed constraint. A defined tool now rejects calls it previously accepted, which is the point of it.
+
 - Updated dependencies
   - @matatbread/matbot-plugin-api@0.4.2
 

@@ -141,8 +141,10 @@ function findBodyOpen(s: string, from: number): number {
   return -1;
 }
 
-/** Split a parameter list on top-level commas, respecting nested brackets/generics/strings/comments and `=>`. */
-function splitTopLevel(s: string): string[] {
+/** Split on any of `seps` at bracket depth 0, respecting nested brackets/generics/strings/comments and
+ *  `=>`. Defaults to a parameter list's commas; type text is split on `|` (union arms) and `;,`
+ *  (object members). A separator inside a string-literal type (`'a|b'`) is inert, so it can't split. */
+function splitTopLevel(s: string, seps = ','): string[] {
   const parts: string[] = [];
   let depth = 0;
   let start = 0;
@@ -153,7 +155,7 @@ function splitTopLevel(s: string): string[] {
     if (c === '=' && s[i + 1] === '>') { i++; continue; }
     if (c === '(' || c === '[' || c === '{' || c === '<') depth++;
     else if (c === ')' || c === ']' || c === '}' || c === '>') { if (depth > 0) depth--; }
-    else if (c === ',' && depth === 0) { parts.push(s.slice(start, i)); start = i + 1; }
+    else if (depth === 0 && c !== undefined && seps.includes(c)) { parts.push(s.slice(start, i)); start = i + 1; }
   }
   parts.push(s.slice(start));
   return parts;
@@ -205,13 +207,131 @@ export function parseSignature(source: string): ParsedSignature {
   };
 }
 
-function tsTypeToSchema(type: string | undefined): JSONSchema {
-  const t = type?.trim();
-  if (t === 'string') return { type: 'string' };
-  if (t === 'number' || t === 'bigint') return { type: 'number' };
-  if (t === 'boolean') return { type: 'boolean' };
-  if (t !== undefined && (/\[\]$/.test(t) || /^(readonly\s+)?(Array|ReadonlyArray)\s*</.test(t) || /^readonly\s*\[/.test(t))) return { type: 'array' };
-  if (t !== undefined && (t.startsWith('{') || /^(Record|Map)\s*</.test(t))) return { type: 'object' };
+const PRIMITIVE_SCHEMA_TYPE: Record<string, string> = {
+  string: 'string', number: 'number', bigint: 'number', boolean: 'boolean', null: 'null',
+};
+
+/** Peel redundant parens and a `readonly` modifier, so `(string | number)[]` and `readonly string[]`
+ *  reach the shape tests as the forms they actually are. An arrow type's leading `(` is not redundant
+ *  (its `)` isn't the last character), so it is left alone. */
+function bareType(t: string): string {
+  let s = t.trim();
+  for (;;) {
+    if (s.startsWith('(') && matchParen(s, 0) === s.length - 1) { s = s.slice(1, -1).trim(); continue; }
+    const ro = s.match(/^readonly\s+([\s\S]+)$/);
+    if (ro === null) return s;
+    s = (ro[1] ?? '').trim();
+  }
+}
+
+/** The JSON value and schema type of a literal type (`'json'`, `42`, `true`); undefined if `t` isn't one. */
+function literalType(t: string): { type: string; value: string | number | boolean } | undefined {
+  const q = t[0];
+  if ((q === "'" || q === '"' || q === '`') && inertEnd(t, 0) === t.length - 1) {
+    const inner = t.slice(1, -1);
+    if (q === '`' && inner.includes('${')) return undefined;   // a template pattern matches many values
+    return { type: 'string', value: inner.replace(/\\(.)/g, '$1') };
+  }
+  if (/^-?(?:\d+\.?\d*|\.\d+)$/.test(t)) return { type: 'number', value: Number(t) };
+  if (t === 'true' || t === 'false')      return { type: 'boolean', value: t === 'true' };
+  return undefined;
+}
+
+interface ScalarArm { type: string; literal: boolean; value?: string | number | boolean }
+
+function scalarArm(t: string): ScalarArm | undefined {
+  const lit = literalType(t);
+  if (lit !== undefined) return { type: lit.type, literal: true, value: lit.value };
+  const prim = PRIMITIVE_SCHEMA_TYPE[t];
+  return prim !== undefined ? { type: prim, literal: false } : undefined;
+}
+
+function unionSchema(arms: string[]): JSONSchema {
+  const scalars: ScalarArm[] = [];
+  for (const a of arms) {
+    const s = scalarArm(a);
+    // One structural arm (an object, an array, a named type) and the union stops being expressible as a
+    // type/enum pair. `anyOf` is the faithful encoding, but json-validation doesn't enforce it and
+    // reports it as unvalidated, so the honest result is the permissive one.
+    if (s === undefined) return {};
+    scalars.push(s);
+  }
+  const types = [...new Set(scalars.map(s => s.type))];
+  const typed: JSONSchema = types.length === 1 ? { type: types[0] } : { type: types };
+  // `'a' | string` widens — an enum built from the literal arms alone would reject the open one.
+  return scalars.every(s => s.literal) ? { ...typed, enum: scalars.map(s => s.value) } : typed;
+}
+
+function objectSchema(body: string, depth: number): JSONSchema {
+  const properties: Record<string, JSONSchema> = {};
+  const required: string[] = [];
+  let additional: JSONSchema | undefined;
+  for (const member of splitTopLevel(body, ';,')) {
+    const bits = splitTopLevel(withoutComments(member).trim(), ':');
+    if (bits.length < 2) continue;
+    const key   = (bits[0] ?? '').trim();
+    const value = bits.slice(1).join(':').trim();
+    if (key.startsWith('[')) { additional = tsTypeToSchema(value, depth + 1); continue; }   // index signature
+    const optional = key.endsWith('?');
+    const raw      = bareType(optional ? key.slice(0, -1) : key);
+    const name     = raw.replace(/^(['"])([\s\S]*)\1$/, '$2');
+    if (name === raw && !/^[A-Za-z_$][\w$]*$/.test(raw)) continue;   // a method/call signature, not a property
+    properties[name] = tsTypeToSchema(value, depth + 1);
+    if (!optional) required.push(name);
+  }
+  return {
+    type: 'object',
+    ...(Object.keys(properties).length > 0 ? { properties } : {}),
+    ...(required.length > 0 ? { required } : {}),
+    ...(additional !== undefined ? { additionalProperties: additional } : {}),
+  };
+}
+
+/**
+ * TypeScript type text → JSON Schema, covering the shapes a defined function's parameters actually take:
+ * primitives, literal unions, arrays, inline object types, `Record`. Deliberately partial and total —
+ * anything unrecognised (a named or imported type, a union with a structural arm, a tuple's element
+ * types) degrades to the permissive `{}` / bare `{ type: … }` it produced before, never to a constraint
+ * that could reject a valid call.
+ *
+ * It parses text because text is all `parseSignature` produces — `ParsedParam.type` is source. The other
+ * half of the same parse, `paramsTypeText`, is a pass-through (TS to TS) while this half is a real
+ * conversion, so the two were never going to reach parity; the goal here is coverage of the shapes that
+ * occur, not symmetry with it.
+ *
+ * The output is on the wire: it is the defined tool's `inputSchema`, so it is what the provider is given
+ * and what `json-validation` enforces. Recovering structure therefore rejects calls that used to pass —
+ * a missing member of an object param, a value outside a literal union — which is the point of it.
+ */
+function tsTypeToSchema(type: string | undefined, depth = 0): JSONSchema {
+  const t = bareType(type ?? '');
+  if (t === '' || depth > 6) return {};
+
+  // Union first: a suffix test would otherwise read `string | number[]` as an array. An `undefined` arm
+  // carries no JSON value — optionality belongs to the parameter and is recorded in `required`.
+  const arms = splitTopLevel(t, '|').map(bareType).filter(a => a !== '' && a !== 'undefined');
+  if (arms.length === 0) return {};
+  if (arms.length > 1)   return unionSchema(arms);
+  const one = arms[0] ?? '';
+  if (one !== t) return tsTypeToSchema(one, depth);
+
+  const prim = PRIMITIVE_SCHEMA_TYPE[one];
+  if (prim !== undefined) return { type: prim };
+  const lit = literalType(one);
+  if (lit !== undefined) return { type: lit.type, enum: [lit.value] };
+
+  if (one.endsWith('[]')) return { type: 'array', items: tsTypeToSchema(one.slice(0, -2), depth + 1) };
+  const arr = one.match(/^(?:Readonly)?Array\s*<([\s\S]*)>$/);
+  if (arr !== null) return { type: 'array', items: tsTypeToSchema(arr[1], depth + 1) };
+  if (one.startsWith('[')) return { type: 'array' };   // tuple: per-position schemas aren't expressible here
+
+  const rec = one.match(/^Record\s*<([\s\S]*)>$/);
+  if (rec !== null) {
+    const args = splitTopLevel(rec[1] ?? '', ',');
+    return { type: 'object', ...(args.length === 2 ? { additionalProperties: tsTypeToSchema(args[1], depth + 1) } : {}) };
+  }
+  if (one.startsWith('{') && matchBrace(one, 0) === one.length - 1) return objectSchema(one.slice(1, -1), depth);
+  if (one === 'object' || /^Map\s*</.test(one)) return { type: 'object' };
   return {};
 }
 

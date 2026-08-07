@@ -1212,6 +1212,10 @@ async function main(): Promise<void> {
         name:        t.name,
         description: wireDescription(t.description, wc),
         inputSchema: t.inputSchema,
+        // Also unfolded, because the two artefacts on this object are what `check-tool-contracts.mjs`
+        // compares — and recovering the contract by regexing it back out of the prose it was just
+        // folded into would break on any description that happens to contain the same fence.
+        ...(wc !== undefined ? { wireContract: wc } : {}),
         ...(t.toolContract !== undefined ? { toolContract: t.toolContract } : {}),
       };
     });

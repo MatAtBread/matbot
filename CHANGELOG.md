@@ -62,6 +62,9 @@ churn and less likely to affect a consumer who doesn't use them.
   `Trigger`, `StoreDef`, `DreamRun`).
 - **`plugin list` declares `resolvedUrl`**, which its node executor already returned. Conditional spreads
   bypass excess-property checking, so the executor's binding never caught the omission.
+- **`--dump-tools` also emits the unfolded wire contract.** Each entry gains `wireContract:
+  { params, result }` alongside the description it was already folded into. Additive; existing
+  consumers are unaffected.
 
 ### Optional
 
@@ -76,6 +79,47 @@ churn and less likely to affect a consumer who doesn't use them.
   duplicate declaration — benign only because the full one happened to win — and being loose at runtime
   never required disagreeing about the type. Consumption is unchanged (`services.SkillManager?.`, still
   degrading when skills isn't loaded) and there is no runtime dependency.
+- **function-tools:** a defined function's `inputSchema` now carries the structure its signature declared.
+  Its params are projected twice from one parse — verbatim into the `toolContract` (TS to TS, lossless)
+  and into the `inputSchema` — and the second projection string-matched the whole annotation, so every
+  structural shape collapsed: `'a' | 'b'` → `{}`, `string[]` → `{ type: 'array' }`, `{ sql: string;
+  limit?: number }` → a bare `{ type: 'object' }`. Since the `inputSchema` is what the provider is given
+  and what `json-validation` enforces, the model was shown a contract in the tool description stronger
+  than the schema backing it, and validation had almost nothing to check. Literal unions now yield
+  `enum`, arrays `items`, inline object types `properties`/`required`, `Record`/index signatures
+  `additionalProperties`, and primitive unions a `type` array.
+
+  The conversion stays deliberately partial: a named or imported type, a union with a structural arm, and
+  a tuple's element types still degrade to the permissive form rather than to a guessed constraint. **A
+  defined tool now rejects calls it previously accepted** — a missing member of an object parameter, a
+  value outside a literal union — which is the point of it. One incidental effect: the Gemini adapter's
+  `items` injection (a loose `{ type: 'array' }` is rejected by that API) no longer has to fire for these
+  tools.
+
+- **New `pnpm run check:contracts`.** A tool with scannable source authors its parameters twice — as
+  `ToolContracts` arms and as an `inputSchema` — with nothing relating the two. They are deliberately
+  not identical (the arms are what a composer typechecks against; the schema is the loose gate the
+  provider is given and `json-validation` enforces), so neither can be derived from the other without
+  deleting what the other carries. The check therefore looks only for *contradictions*: a property in
+  one and not the other, a schema `required` no arm accepts, or two different value sets for the same
+  property. A schema looser than the contract is never reported — that is the documented multi-action
+  design. It reads the `--dump-tools` output, because the two artefacts only meet on the registered
+  `Tool` at runtime. Deliberate divergences go in the script's `ACCEPTED` map with a reason.
+
+  It found two divergences in the tree, both now resolved (below), so it currently passes.
+
+- **session_action: `immutable` is no longer part of the `query` contract.** The arm intersected the whole
+  of `StoreQuery`, which published `immutable` — a caller-to-store optimisation hint, not a query
+  parameter — as a tool input. The executor never read it: it hardcodes `immutable: true`, which is always
+  correct there, since every row is copied into a fresh summary and never written back. So the knob could
+  be passed by a composer and did nothing. Now `Omit<StoreQuery, 'immutable'>`. No behaviour change.
+
+- **http: `method` accepts `HEAD` and `OPTIONS`.** The schema enumerated five verbs while the executor
+  hands `method` straight to `fetch`, and `json-validation` enforces the enum — so two verbs the tool
+  fully supports were unreachable by the model. The TypeScript type stays the wider `string` on purpose,
+  recorded in the checker's `ACCEPTED`: `json-validation` runs on the `toolcall` hook, which only the
+  model-driven turn loop dispatches, so the enum guards what the *model* sends while a composition
+  (through `invokeTool`, which bypasses hooks) may legitimately use any verb.
 
 ## 0.4.1
 

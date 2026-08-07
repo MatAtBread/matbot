@@ -4,6 +4,10 @@
 
 ### Patch Changes
 
+- `method` accepts `HEAD` and `OPTIONS`.
+
+  The schema enumerated five verbs while the executor hands `method` straight to `fetch`, and `json-validation` enforces the enum — so two verbs the tool fully supports were unreachable by the model. The TypeScript type stays the wider `string` on purpose: `json-validation` runs on the `toolcall` hook, which only the model-driven turn loop dispatches, so the enum guards what the model sends while a composition (through `invokeTool`, which bypasses hooks) may use any verb.
+
 - Updated dependencies
   - @matatbread/matbot-plugin-api@0.4.2
 
