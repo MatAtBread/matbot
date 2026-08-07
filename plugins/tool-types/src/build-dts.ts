@@ -27,10 +27,31 @@ import type TS from 'typescript';
 // Acceptable once-per-compile; the planned coverage work (drive off the live loaded-plugin set, build
 // lazily + dirty on plugin load) also removes that cost. Coverage today is the monorepo `plugins/` tree.
 
+/**
+ * A registry key declared more than once, with DIFFERENT types, across the scanned files. Declaration
+ * merging requires the declarations to be identical (TS2717 otherwise) — but this scan reads the
+ * checker and never the Program's diagnostics, so the error is invisible here: one declaration wins on
+ * Program file order and the emitted contract asserts its shape for the tool.
+ *
+ * That is worse than the untyped fallback. An unregistered tool resolves to `unknown` and forces a
+ * generator to narrow; a wrong-but-concrete shape typechecks, so the check loop rejects the correct
+ * field and accepts one that reads `undefined` at runtime. Reported, never resolved — picking a winner
+ * here would just relocate the arbitrariness.
+ */
+export interface ContractConflict {
+  registry: 'ToolContracts' | 'MatbotServices';
+  key:      string;
+  /** `file:line` of the declaration that won the merge — the shape actually emitted. */
+  winner:   string;
+  /** `file:line` of each declaration that lost, in declaration order. */
+  losers:   string[];
+}
+
 export interface MatbotToolsDts {
   dts:      string;
   tools:    { emitted: string[]; unknown: string[] };
   services: { emitted: string[]; unknown: string[] };
+  conflicts: ContractConflict[];
   // Per source-scanned tool: its wire contract — the flattened `params`/`result` union text, extracted
   // from the `ToolContracts` arms. The single authored contract (the arms) is thus also the source of the
   // wire description, so a source tool's `ToolContracts` augmentation is its single contract.
@@ -276,6 +297,46 @@ export async function buildMatbotToolsDts(projectRoot: string, pluginEntryUrls?:
   const tools    = emitInterface('ToolContracts',    false);
   const services = emitInterface('MatbotServices', true);
 
+  // Clash census. Derived from the symbol table already walked above rather than from
+  // `getPreEmitDiagnostics`, which costs ~4x this whole build (measured: +750ms on a 40-root scan) and
+  // says less: a raw TS2717 filter reports only the losing site, whereas the merged symbol's
+  // declaration list names the winner too — and it can't distinguish a real clash from the legal
+  // identical re-declaration TypeScript never complains about (`bash`, `mcp_action` and
+  // `url_for_resource` are each declared twice here, identically, and are not conflicts).
+  const relPath = (f: string): string => f.startsWith(projectRoot) ? f.slice(projectRoot.length + 1) : f;
+  const siteOf  = (d: TS.Node): string =>
+    `${relPath(d.getSourceFile().fileName)}:${d.getSourceFile().getLineAndCharacterOfPosition(d.getStart()).line + 1}`;
+
+  const collectConflicts = (interfaceName: 'ToolContracts' | 'MatbotServices'): ContractConflict[] => {
+    const sym = findCanonicalSymbol(interfaceName);
+    if (!sym) return [];
+    const out: ContractConflict[] = [];
+    for (const prop of checker.getPropertiesOfType(checker.getDeclaredTypeOfSymbol(sym))) {
+      // Declaration order is merge order: `emitInterface` reads the first property signature, so that
+      // one is the winner by the same rule that produced the emitted text.
+      const sites = (prop.declarations ?? []).flatMap(d =>
+        ts.isPropertySignature(d) && d.type !== undefined ? [{ node: d, type: d.type }] : []);
+      if (sites.length < 2) continue;
+      const distinct = new Set(sites.map(s =>
+        checker.typeToString(checker.getTypeFromTypeNode(s.type), undefined, ts.TypeFormatFlags.NoTruncation)));
+      if (distinct.size < 2) continue;
+      out.push({
+        registry: interfaceName,
+        key:      prop.name,
+        winner:   siteOf(sites[0]!.node),
+        losers:   sites.slice(1).map(s => siteOf(s.node)),
+      });
+    }
+    return out;
+  };
+  const conflicts = [...collectConflicts('ToolContracts'), ...collectConflicts('MatbotServices')];
+  // Warned here rather than by the caller because both callers (ToolTypeIndex and skills_compiler) need
+  // it and neither can act on it — the fix is always in the clashing source, not at the call site.
+  for (const c of conflicts) {
+    console.warn(`[matbot] ${c.registry}.${c.key} is declared ${c.losers.length + 1}× with different types — `
+      + `"${c.winner}" wins, ignoring ${c.losers.join(', ')}. The emitted contract may not match what the tool returns.`);
+  }
+
   // Per-tool wire contract: flatten each `ToolContracts` arm to its `params`/`result` union source text.
   // Only pure `ToolContract<R, P>`-arm entries yield one (a bare/plain entry is skipped — it keeps whatever
   // the tool authored). This is the flat params/result union the wire description needs, from the arms.
@@ -314,6 +375,7 @@ ${block('ToolContracts', tools.lines)}${block('MatbotServices', services.lines)}
     dts,
     tools:    { emitted: tools.emitted,    unknown: tools.unknown },
     services: { emitted: services.emitted, unknown: services.unknown },
+    conflicts,
     contracts,
     apiExports: [...apiTypeNames],
   };
