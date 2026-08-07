@@ -71,6 +71,11 @@ churn and less likely to affect a consumer who doesn't use them.
   runtime; it can now follow a named arm-union (`collectContractAliases`).
 - **google-drive:** its `plugin` override augments `LoadedPluginSummary` with `managedBy` instead of
   casting the result to a wider shape.
+- **skills_compiler:** imports `SkillManager`'s type from `@matatbread/matbot-skills` (type-only, a
+  devDependency) instead of restating a two-method slice of the key. The slice was the last remaining
+  duplicate declaration — benign only because the full one happened to win — and being loose at runtime
+  never required disagreeing about the type. Consumption is unchanged (`services.SkillManager?.`, still
+  degrading when skills isn't loaded) and there is no runtime dependency.
 
 ## 0.4.1
 

@@ -107,11 +107,7 @@ export async function buildMatbotToolsDts(projectRoot: string, pluginEntryUrls?:
   // plugin with a resolvedUrl — notably the app-embedded `plugin`/`provider` builtins in `plugins/tool-plugin/`,
   // which the host constructs directly. The glob catches those. In a real deployment there is no `plugins/`
   // tree, so this no-ops and the scan is purely resolvedUrl-driven. Dedup is by path (a Set of roots).
-  // Generated `matbot-tools.d.ts` files are skipped (don't feed prior output back in). `skills_compiler` IS
-  // scanned — it declares its own `skill_compiler` ToolContracts arm, which must be seen; its loose
-  // `MatbotServices.SkillManager` slice is a harmless duplicate of the real one (the skills package is
-  // walked first, so its full declaration wins the emit; and `services.SkillManager` isn't referenced by
-  // generated/compiled plugin code anyway).
+  // Generated `matbot-tools.d.ts` files are skipped (don't feed prior output back in).
   if (existsSync(join(projectRoot, 'plugins'))) {
     const SKIP = new Set(['node_modules', 'dist', '.git', 'compiled-plugins']);
     const walk = (dir: string): void => {

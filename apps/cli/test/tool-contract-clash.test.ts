@@ -20,15 +20,13 @@ test('no ToolContracts/MatbotServices key is declared twice with different types
   const built = await buildMatbotToolsDts(root);
   assert.ok(built, 'expected the monorepo scan to produce a dts');
 
-  // `SkillManager` is the one long-standing, deliberate duplicate: skills_compiler declares a loose
-  // two-method slice so it needn't depend on the skills package. It is benign (the full declaration wins,
-  // and generated code never reads `services.SkillManager`), but it is a real clash, so it is named here
-  // rather than filtered out — if it is ever fixed this test should be tightened, and until then a NEW
-  // clash still fails.
-  const unexpected = built.conflicts.filter(c => c.key !== 'SkillManager');
+  // No exceptions: a key declared twice with different types is always a bug, because "which one wins"
+  // is Program file order. Two implementations of one tool share a named contract from plugin-api; a
+  // consumer of another package's service imports that package's type rather than restating a slice of
+  // it. Both leave exactly one declaration, so this list stays empty.
   assert.deepEqual(
-    unexpected, [],
-    `unexpected duplicate contract declaration(s):\n${unexpected
+    built.conflicts, [],
+    `duplicate contract declaration(s):\n${built.conflicts
       .map(c => `  ${c.registry}.${c.key}: "${c.winner}" wins over ${c.losers.join(', ')}`)
       .join('\n')}`,
   );
