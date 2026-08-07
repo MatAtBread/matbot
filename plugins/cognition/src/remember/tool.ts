@@ -91,6 +91,10 @@ export function createRememberFactTool(services: MatbotMachine): Tool {
         const parsed = m ? JSON.parse(m[0]) : [];
         facts = Array.isArray(parsed) ? parsed.filter((f): f is string => typeof f === 'string' && f.trim() !== '') : [];
       } catch (e) {
+        // Extraction is a second provider round-trip on the turn's signal, so it is the likeliest thing
+        // in flight when a steer or cancel lands. That is an interruption, not a failed extraction:
+        // report nothing rather than an error naming the abort reason.
+        if (ctx.signal.aborted) return;
         const msg = e instanceof Error ? e.message : String(e);
         console.warn('[remember_fact] extraction failed:', msg);
         yield { type: 'error', message: `remember_fact extraction failed: ${msg}` };
