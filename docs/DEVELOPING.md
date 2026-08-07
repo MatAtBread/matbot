@@ -227,6 +227,35 @@ Four properties follow from the technique, and explain most of the per-registry 
 
 Each of the five declarations carries its own specifics. This is the shared shape underneath.
 
+### The same technique, one level down: result shapes
+
+A registry key is registered by *merging*, so it can only ever be declared once. That has a
+consequence worth knowing before you try to override a builtin tool: you **cannot** replace an
+existing `ToolContracts` arm. Declaring your own is `TS2717: Subsequent property declarations must
+have the same type`, and declaring nothing leaves you advertising a shape you do not return — worse
+than saying nothing, because an unregistered tool at least resolves to `unknown` and forces the caller
+to narrow.
+
+So a builtin tool's result is a **named, exported interface**, and you extend the shape rather than
+the registry:
+
+```ts
+declare module '@matatbread/matbot-plugin-api' {
+  interface LoadedPluginSummary { managedBy?: 'personal' | 'shipped' }
+}
+```
+
+`ToolContracts['plugin']` now carries your field everywhere it is read — `toolResult`, the `tool`
+proxy a generator calls, and the wire description the model sees — while an *undeclared* field is
+still rejected. It is an extension point, not a widening hole. `@matatbread/matbot-storage-google-drive`
+does exactly this to mark each plugin as Drive-synced or local.
+
+The same constraint is why a tool with **two implementations** (`plugin` and `provider` each have a
+node and a browser one) declares a single shared arm-union from `plugin-api` rather than one
+declaration apiece: two declarations of one key differ the moment the implementations do, and the
+surviving one is whichever the compiler happened to see first. `buildMatbotToolsDts` reports any such
+clash it finds rather than silently picking a winner.
+
 ---
 
 ## Services available in `setup()`

@@ -126,8 +126,10 @@ class ToolTypeIndexImpl implements ToolTypeIndex {
       const root   = this.machine.configPath !== undefined ? dirname(this.machine.configPath) : '.';
       // Scan the source each loaded plugin was actually loaded from (its resolvedUrl) — builtin, compiled
       // (compiled-plugins/), or installed (.plugins/) alike — so every registered tool's real augmentation
-      // is read. build-dts globs the monorepo `plugins/` tree ONLY as a fallback, when no resolvedUrl
-      // resolves to on-disk source (a host that constructed its plugins by hand).
+      // is read. build-dts UNIONs a glob of the monorepo `plugins/` tree onto these roots (not a fallback:
+      // it catches host-constructed builtins that have no resolvedUrl), so wherever that tree exists — this
+      // repo, or an embedder that vendors it — plugins for OTHER runtimes are scanned too and can clash
+      // with the ones actually loaded. `conflicts` is what makes such a clash audible.
       const urls   = getRegisteredPlugins().map(p => p.resolvedUrl).filter((u): u is string => u !== undefined);
       const built  = await buildMatbotToolsDts(root, urls);
       this.cache      = built?.dts ?? '';

@@ -1,19 +1,16 @@
 import { PLUGIN_API_VERSION, currentPrincipal, invokeTool, toolResult, toolText } from '@matatbread/matbot-plugin-api';
 import type { MatbotPluginSpec, MatbotMachine, ToolExecutor, ToolEvent, ToolContext, ToolContract, ToolResultOf, Session, Message } from '@matatbread/matbot-plugin-api';
 import { buildMatbotToolsDts, checkProjectDir } from '@matatbread/matbot-tool-types';
+// Type-only, for the skills plugin's `MatbotServices.SkillManager` declaration. Erased, and a
+// devDependency, so there is no runtime dependency on the package: consumption stays
+// `services.SkillManager?.` and degrades when skills isn't loaded. This file used to declare its own
+// two-method slice of the key to avoid even the type edge, but a registry key is registered by
+// declaration MERGING — two declarations of one key with different types is a TS2717, and the survivor
+// was whichever the compiler saw first. Loose at runtime is the goal; disagreeing about the type was
+// never part of it.
+import type {} from '@matatbread/matbot-skills';
 
-// Loose discovery of the skills plugin's SkillManager — optional, so no hard dependency on the
-// package. Only the slice this tool consumes is declared.
 declare module '@matatbread/matbot-plugin-api' {
-  interface MatbotServices {
-    SkillManager?: {
-      get(name: string): Promise<{
-        content: string;
-        knowledge?: { classification: { procedural: number; informational: number } };
-      } | undefined>;
-      setHidden(name: string, hidden: boolean): Promise<unknown>;
-    };
-  }
   // The `skill_compiler` tool's own call contract — a source tool, so its contract is a ToolContracts
   // union (the single source): the executor binds off it (ToolResultOf) and the wire text derives from
   // it. Two actions: `compile` (build/iterate + install) and `inspect` (read the current version).

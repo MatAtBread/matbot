@@ -1,5 +1,21 @@
 # @matatbread/matbot-tool-types
 
+## 0.4.2
+
+### Patch Changes
+
+- One shared contract for the `plugin` and `provider` tools, and named result shapes that can be augmented.
+
+  Both tools have a node and a browser implementation, and each declared its own `ToolContracts` arm. A registry key is registered by declaration merging, so two declarations are legal only while identical — these were not, and `buildMatbotToolsDts` never read the Program's diagnostics, so one won on file order and its shape was emitted as the contract. In any tree containing `plugins/`, the browser shapes won, and node's generated code was graded against them: the check loop rejected `providers[].hasCredentials` (what node returns) and accepted `providers[].hasKey` (`undefined` at runtime).
+
+  Both now declare `PluginToolContract` / `ProviderToolContract` from plugin-api. Node's names win, so the browser tool renames `hasKey` → `hasCredentials`, `adapter` → `module`, `ProviderRow` → `ProviderSummary`, and takes `ModelParameters` for `parameters`. `FailedPlugin` moves from core to plugin-api (still re-exported from core). Result shapes are named, exported interfaces, so a host overriding a builtin tool can augment them instead of being unable to describe its own return.
+
+  Duplicate registry declarations are now reported rather than silently resolved.
+
+- Updated dependencies
+  - @matatbread/matbot-plugin-api@0.4.2
+  - @matatbread/matbot-core@0.4.2
+
 ## 0.3.10
 
 ### Patch Changes

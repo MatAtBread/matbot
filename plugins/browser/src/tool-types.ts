@@ -53,6 +53,41 @@ function splitContract(contract: string): { params: string; result: string } {
   return parseContractArms(contract) ?? { result: 'unknown', params: 'unknown' };
 }
 
+// Scan from `start` to the `;` that closes a statement at bracket depth 0, so an object-literal member
+// separator (`{ a: string; b: number }`) doesn't truncate the type it sits inside.
+function readToStatementEnd(s: string, start: number): { text: string; end: number } {
+  let depth = 0, i = start;
+  for (; i < s.length; i++) {
+    const c = s[i];
+    if (c === '<' || c === '{' || c === '(' || c === '[') depth++;
+    else if (c === '>' || c === '}' || c === ')' || c === ']') depth--;
+    else if (c === ';' && depth === 0) break;
+  }
+  return { text: s.slice(start, i), end: i };
+}
+
+/**
+ * Named arm-unions (`type PluginToolContract = ToolContract<…> | …`) declared in RAW source, keyed by
+ * name. The two builtin tools with both a node and a browser implementation share ONE contract declared
+ * in plugin-api, because a `ToolContracts` key is registered by declaration merging and cannot be
+ * declared twice with different types; the arms therefore live behind a name, and a compiler-free
+ * scanner has to be able to follow it or those two tools silently lose their wire contract.
+ *
+ * Collected separately from {@link extractToolContracts} because the alias and its use are in different
+ * files: the caller collects across every source it has, then extracts.
+ */
+export function collectContractAliases(src: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  const clean = src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ');
+  const RE = /\btype\s+([A-Za-z_$][\w$]*)\s*=\s*/g;
+  for (let m = RE.exec(clean); m !== null; m = RE.exec(clean)) {
+    const { text, end } = readToStatementEnd(clean, RE.lastIndex);
+    if (text.includes('ToolContract<')) out[m[1]!] = text.trim();
+    RE.lastIndex = end;
+  }
+  return out;
+}
+
 // Extract per-tool wire contracts from RAW .ts source, compiler-free: find each `interface ToolContracts
 // { … }` augmentation block and read each arm's `ToolContract<Result, Params>` type-argument TEXT. This is
 // exactly what the node compiler path does (it merges the augmentation declarations via the checker, then
@@ -61,9 +96,15 @@ function splitContract(contract: string): { params: string; result: string } {
 // runtime over http-fetched plugin source, so a remotely-loaded plugin's tools carry real TS too. Best-effort
 // (shares splitTopLevel's `>`-as-close-bracket limitation, so an arrow type inside a contract arg can confuse
 // depth); an unparseable arm simply yields no contract for that tool, which degrades to its base description.
-export function extractToolContracts(src: string): Record<string, { params: string; result: string }> {
+export function extractToolContracts(
+  src: string,
+  aliases: Readonly<Record<string, string>> = {},
+): Record<string, { params: string; result: string }> {
   const out: Record<string, { params: string; result: string }> = {};
   const clean = src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ');   // drop comments
+  // A member may name its arm union instead of spelling it out; resolve through the caller's map, plus
+  // any alias this same file declares.
+  const known = { ...collectContractAliases(src), ...aliases };
   const RE = /interface\s+ToolContracts\s*\{/g;
   for (let m = RE.exec(clean); m !== null; m = RE.exec(clean)) {
     let depth = 1, i = RE.lastIndex;
@@ -74,13 +115,15 @@ export function extractToolContracts(src: string): Record<string, { params: stri
     const body = clean.slice(RE.lastIndex, i - 1);
     for (const member of splitTopLevel(body, ';')) {
       const text = member.trim();
-      if (!text.includes('ToolContract')) continue;
       const q = text.match(/^(['"])(.*?)\1\s*:\s*([\s\S]*)$/);          // quoted key
       const b = q ? null : text.match(/^([A-Za-z_$][\w$]*)\s*:\s*([\s\S]*)$/);   // bare key
       const key  = q?.[2] ?? b?.[1];
       const type = q?.[3] ?? b?.[2];
       if (key === undefined || type === undefined) continue;
-      const c = parseContractArms(type.trim());
+      const trimmed = type.trim();
+      const arms = known[trimmed] ?? trimmed;
+      if (!arms.includes('ToolContract')) continue;                     // not a contract member
+      const c = parseContractArms(arms);
       if (c) out[key] = c;
     }
     RE.lastIndex = i;

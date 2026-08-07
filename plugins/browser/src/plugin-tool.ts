@@ -1,4 +1,5 @@
-import type { Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext, MatbotPlugin, FormField, Runtime } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolResultOf, ToolContext, MatbotPlugin, FormField, Runtime,
+              PluginToolContract, DiscoveredPlugin } from '@matatbread/matbot-plugin-api';
 import { CONFIRM_YES, CONFIRM_NO } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins, getRegisteredTools, getRegisteredFrontendPlugins,
          getRegisteredServiceKeys, getHookPlugins, getSystemContextPlugins,
@@ -25,33 +26,17 @@ type PluginInput =
   | { action: 'store-key'; key: string };
 
 // Baked-but-idle plugins the assembler inlined (config.availablePlugins): present in the artifact +
-// import map but not auto-loaded. The browser analogue of node's on-disk `plugins` scan.
-interface AvailablePlugin { name: string; specifier: string; matbotRuntime?: string[]; description?: string }
+// import map but not auto-loaded. The browser analogue of node's on-disk `plugins` scan. This is the
+// assembler's own bake shape, read straight off a global — `discover_local` maps it to the shared
+// `DiscoveredPlugin` rather than returning it, so the bake format stays free to change.
+interface AvailablePlugin { name: string; specifier: string; matbotRuntime?: readonly Runtime[]; description?: string }
 
-interface ToolSummary { name: string; description: string }
-
+// The contract is shared with the node implementation of this same tool name (a `ToolContracts` key is
+// registered by declaration merging, so two implementations cannot each describe themselves — see
+// plugin-api/src/types/builtin-tools.ts).
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
-    plugin:
-      | ToolContract<{
-          loaded: Array<{
-            name:           string;
-            apiVersion:     string;
-            types:          string[];
-            tools:          ToolSummary[];
-            specifier:      string;
-            description?:   string;
-            matbotRuntime?: readonly Runtime[];
-          }>;
-          configured:   string[];
-          failed?:      Array<{ specifier: string; name?: string; error: string }> | undefined;
-          builtinTools?: ToolSummary[] | undefined;
-        }, { action: 'list' }>
-      | ToolContract<AvailablePlugin[], { action: 'discover_local' }>
-      | ToolContract<{ message: string; installationMessage?: string }, { action: 'add'; specifier: string }>
-      | ToolContract<{ message: string; installationMessage?: string }, { action: 'remove'; specifier: string }>
-      | ToolContract<{ message: string; installationMessage?: string }, { action: 'reload'; specifier: string }>
-      | ToolContract<{ message: string; installationMessage?: string }, { action: 'store-key'; key: string }>;
+    plugin: PluginToolContract;
   }
 }
 
@@ -113,6 +98,7 @@ export function createBrowserPluginTool(extras: ExtraPlugins): Tool<ToolResultOf
           types:      pluginTypes(p, pluginToolNames),
           tools:      toolsByPlugin.get(p.name) ?? [],
           specifier:  p.specifier,
+          ...(p.version !== undefined ? { version: p.version } : {}),
           ...(p.manifest?.description ? { description: p.manifest.description } : {}),
           ...(p.matbotRuntime !== undefined ? { matbotRuntime: p.matbotRuntime } : {}),
         }));
@@ -132,9 +118,20 @@ export function createBrowserPluginTool(extras: ExtraPlugins): Tool<ToolResultOf
       if (action === 'discover_local') {
         // Baked-but-idle plugins that aren't already loaded — offered for on-demand activation. Their
         // specifier is the package name, which resolves through the import map to the baked blob (no
-        // network) and persists across reloads. Mirrors the node tool's discover_local result shape.
+        // network) and persists across reloads. `source` is omitted rather than invented: a baked
+        // plugin was inlined into the artifact, so there is no location to name. `configuredVia` is
+        // null by construction — anything already configured is loaded, hence filtered out above.
         const loadedNames = new Set(getRegisteredPlugins().map(p => p.name));
-        yield { type: 'result', value: bakedAvailablePlugins().filter(p => !loadedNames.has(p.name)) };
+        const found: DiscoveredPlugin[] = bakedAvailablePlugins()
+          .filter(p => !loadedNames.has(p.name))
+          .map(p => ({
+            specifier:     p.specifier,
+            name:          p.name,
+            description:   p.description ?? '',
+            configuredVia: null,
+            ...(p.matbotRuntime !== undefined ? { matbotRuntime: p.matbotRuntime } : {}),
+          }));
+        yield { type: 'result', value: found };
         return;
       }
 

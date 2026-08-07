@@ -1,15 +1,7 @@
-import type { Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolResultOf, ToolContext, ModelParameters,
+              ProviderToolContract, ProviderSummary, AvailableProvider } from '@matatbread/matbot-plugin-api';
 
-/** An adapter type the provider tool / startup wizard can offer (baked from the build's providerModules). */
-export interface AvailableProvider {
-  label:         string;
-  module:        string;   // importable specifier of the adapter plugin
-  endpointHint?: string;
-  modelHint?:    string;
-  /** A provider that needs no endpoint/model/API key (e.g. a self-contained local adapter). The
-   *  wizard hides those fields and submits with just a name; `modelHint` (if any) is used as model. */
-  selfContained?: boolean;
-}
+export type { AvailableProvider, ProviderSummary };
 
 /** Everything the user supplies for one provider — the browser equivalent of the CLI setup wizard. */
 export interface ProviderDraft {
@@ -20,25 +12,17 @@ export interface ProviderDraft {
   apiKey:   string;
   /** Generation parameters (maxTokens, temperature, thinking, …) — the wizard never sets this; the
    *  `provider` tool's `add` action does, mirroring the node tool's `parameters` input. */
-  parameters?: Record<string, unknown>;
+  parameters?: ModelParameters;
 }
 
+// Shared with the node implementation of this same tool name — see plugin-api/src/types/builtin-tools.ts.
+// The two used to declare different types for this one key, and node's names won: `hasCredentials` (not
+// `hasKey`) and `module` (not `adapter`) are what matbot.yaml calls these, and this tool's own
+// `ProviderSummary` already said `module` on the way out while demanding `adapter` on the way in.
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
-    provider:
-      | ToolContract<{ providers: ProviderRow[]; adapters: AvailableProvider[] }, { action: 'list' }>
-      | ToolContract<{ message: string }, { action: 'add'; name: string; adapter: string; endpoint?: string; model?: string; parameters?: Record<string, unknown> }>
-      | ToolContract<{ message: string }, { action: 'remove'; name: string }>;
+    provider: ProviderToolContract;
   }
-}
-
-export interface ProviderRow {
-  name:        string;
-  module:      string;
-  model:       string;
-  endpoint?:   string;
-  parameters?: Record<string, unknown>;
-  hasKey:      boolean;
 }
 
 /**
@@ -50,14 +34,14 @@ export interface ProviderRow {
  */
 export interface ProviderAdmin {
   available: AvailableProvider[];
-  list(): ProviderRow[];
+  list(): ProviderSummary[];
   add(draft: ProviderDraft): Promise<string>;   // persist + load adapter + register
   remove(name: string): Promise<boolean>;
 }
 
 type ProviderInput =
   | { action: 'list' }
-  | { action: 'add'; name: string; adapter: string; endpoint?: string; model?: string; parameters?: Record<string, unknown> }
+  | { action: 'add'; name: string; module: string; endpoint?: string; model?: string; parameters?: ModelParameters }
   | { action: 'remove'; name: string };
 
 /**
@@ -79,19 +63,19 @@ export function createBrowserProviderTool(admin: ProviderAdmin): Tool<ToolResult
       }
 
       if (act.action === 'add') {
-        const { name, adapter, endpoint, model, parameters } = act;
-        if (!name || !adapter) {
-          yield { type: 'error', message: 'add requires: name, adapter.' };
+        const { name, module: mod, endpoint, model, parameters } = act;
+        if (!name || !mod) {
+          yield { type: 'error', message: 'add requires: name, module.' };
           return;
         }
-        // Resolve adapter by module spec, exact/substring label, or numeric index.
-        const idx = /^\d+$/.test(adapter) ? Number(adapter) : -1;
+        // Resolve the adapter by module spec, exact/substring label, or numeric index.
+        const idx = /^\d+$/.test(mod) ? Number(mod) : -1;
         const found =
           admin.available[idx] ??
-          admin.available.find(a => a.module === adapter || a.label === adapter) ??
-          admin.available.find(a => a.label.toLowerCase().includes(adapter.toLowerCase()));
+          admin.available.find(a => a.module === mod || a.label === mod) ??
+          admin.available.find(a => a.label.toLowerCase().includes(mod.toLowerCase()));
         if (found === undefined) {
-          yield { type: 'error', message: `Unknown adapter "${adapter}". Available:\n${adapterList()}` };
+          yield { type: 'error', message: `Unknown adapter "${mod}". Available:\n${adapterList()}` };
           return;
         }
 
@@ -168,7 +152,7 @@ export function createBrowserProviderTool(admin: ProviderAdmin): Tool<ToolResult
       'process env vars to reference).\n\n' +
       'The API key is never passed here — `add` requests it out-of-band so it stays out of the ' +
       'conversation, and a blank answer just means "no credentials needed" (it does not abort the ' +
-      'add). `adapter` is one of the available adapter types (by label, module, or index; call `list` ' +
+      'add). `module` names one of the available adapter types (by label, module, or index; call `list` ' +
       'to see them — each carries `endpointHint`/`modelHint` and whether it is `selfContained`). A ' +
       '`selfContained` adapter (e.g. a local demo LLM) needs no endpoint, model, or key at all — omit ' +
       'them and the tool will not prompt for a key either. `remove` refuses to delete the only ' +
@@ -186,7 +170,7 @@ export function createBrowserProviderTool(admin: ProviderAdmin): Tool<ToolResult
       properties: {
         action:   { type: 'string', enum: ['list', 'add', 'remove'] },
         name:     { type: 'string', description: 'Profile name (add/remove).' },
-        adapter:  { type: 'string', description: 'Adapter type — label, module, or index from `list` (add).' },
+        module:   { type: 'string', description: 'Adapter type — label, module, or index from `list` (add).' },
         endpoint: { type: 'string', description: 'Endpoint URL (add; omit for a selfContained adapter).' },
         model:    { type: 'string', description: 'Model name (add; omit for a selfContained adapter — its modelHint/label is used).' },
         parameters: {

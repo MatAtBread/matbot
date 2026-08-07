@@ -17,6 +17,7 @@ export * from './types/storage.js';
 export * from './types/knowledge.js';
 export * from './types/typescript.js';
 export * from './types/tools.js';
+export * from './types/builtin-tools.js';
 export * from './types/files.js';
 export * from './types/frontend.js';
 export * from './types/vault.js';

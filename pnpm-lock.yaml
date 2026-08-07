@@ -457,6 +457,9 @@ importers:
       '@matatbread/matbot-plugin-api':
         specifier: workspace:^
         version: link:../../plugin-api
+      '@matatbread/matbot-skills':
+        specifier: workspace:^
+        version: link:../skills
       '@types/node':
         specifier: 'catalog:'
         version: 22.19.19
