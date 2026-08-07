@@ -1,4 +1,5 @@
-import type { Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext, MatbotPlugin, FormField, Runtime, PluginSource } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolResultOf, ToolContext, MatbotPlugin, FormField, Runtime, PluginSource,
+              PluginToolContract, DiscoveredPlugin } from '@matatbread/matbot-plugin-api';
 import { CONFIRM_YES, CONFIRM_NO, isIncompatibleRuntimeError, isNotAPluginError } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins, getRegisteredTools, getRegisteredFrontendPlugins,
          getRegisteredServiceKeys, getHookPlugins, getSystemContextPlugins,
@@ -88,42 +89,15 @@ function resolveExportsMain(exports: unknown): string | undefined {
   return undefined;
 }
 
-interface DiscoveredPlugin {
-  specifier: string;
-  name:      string;
-  description: string;
-  version?:  string;
-  // `type` categorises the origin; `uri` is the concrete source location as a scheme-qualified URI —
-  // `file://…` on disk for a local plugin, the `https://…` it was fetched from for a cached one.
-  source:    { type: PluginSource; uri: string };
-  matbotRuntime?: Runtime[];
-}
+// What `discoverLocalPlugins` builds, before the caller stamps `configuredVia` from the config it read.
+type DiscoveryEntry = Omit<DiscoveredPlugin, 'configuredVia'>;
 
-interface ToolSummary { name: string; description: string }
-
+// The contract is shared with the browser implementation of this same tool name (a `ToolContracts` key
+// is registered by declaration merging, so two implementations cannot each describe themselves — see
+// plugin-api/src/types/builtin-tools.ts).
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
-    plugin:
-      | ToolContract<{
-          loaded: Array<{
-            name:           string;
-            apiVersion:     string;
-            version?:       string;
-            types:          string[];
-            tools:          ToolSummary[];
-            specifier:      string;
-            description?:   string;
-            matbotRuntime?: readonly Runtime[];
-          }>;
-          configured:   string[];
-          failed?:      Array<{ specifier: string; name?: string; error: string }> | undefined;
-          builtinTools?: ToolSummary[] | undefined;
-        }, { action: 'list' }>
-      | ToolContract<Array<DiscoveredPlugin & { configuredVia: 'plugins' | 'providers' | null }>, { action: 'discover_local' }>
-      | ToolContract<{ message: string; installationMessage?: string }, { action: 'add';       specifier: string }>
-      | ToolContract<{ message: string; installationMessage?: string }, { action: 'remove';    specifier: string }>
-      | ToolContract<{ message: string; installationMessage?: string }, { action: 'reload';    specifier: string; refresh?: boolean }>
-      | ToolContract<{ message: string; installationMessage?: string }, { action: 'store-key'; key: string }>;
+    plugin: PluginToolContract;
   }
 }
 
@@ -133,7 +107,7 @@ declare module '@matatbread/matbot-plugin-api' {
 // no plugin); making the import load-bearing is what stops such a library from being offered here and
 // then failing at install. Returns the discovery entry (with the caller-supplied specifier + source),
 // or null.
-async function inspectPluginDir(sub: string, specifier: string, source: { type: PluginSource; uri: string }): Promise<DiscoveredPlugin | null> {
+async function inspectPluginDir(sub: string, specifier: string, source: { type: PluginSource; uri: string }): Promise<DiscoveryEntry | null> {
   let pkg: { name?: string; version?: string; description?: string; dependencies?: Record<string, string>; peerDependencies?: Record<string, string>; exports?: unknown; matbotRuntime?: unknown };
   try {
     pkg = JSON.parse(await readFile(path.join(sub, 'package.json'), 'utf8')) as typeof pkg;
@@ -178,8 +152,8 @@ async function inspectPluginDir(sub: string, specifier: string, source: { type: 
 // Two roots are scanned: the monorepo's `plugins` (source: local) and, if present, the
 // `.plugins/` remote-plugin cache (source: github for raw.githubusercontent.com, else cdn) — so a
 // previously-fetched remote plugin is rediscoverable and re-installable by its original URL.
-async function discoverLocalPlugins(projectDir: string): Promise<DiscoveredPlugin[]> {
-  const results: DiscoveredPlugin[] = [];
+async function discoverLocalPlugins(projectDir: string): Promise<DiscoveryEntry[]> {
+  const results: DiscoveryEntry[] = [];
 
   const scanLocal = async (dir: string, depth: number): Promise<void> => {
     let entries;
@@ -205,7 +179,7 @@ async function discoverLocalPlugins(projectDir: string): Promise<DiscoveredPlugi
 // specifier. Descent stops at the first package.json found on a branch (that is the package — its
 // sources live below and are not separately installable); the symlink farm at `.plugins/node_modules`
 // is skipped (those are host packages, not cached plugins).
-async function scanCacheDir(dotPlugins: string, results: DiscoveredPlugin[]): Promise<void> {
+async function scanCacheDir(dotPlugins: string, results: DiscoveryEntry[]): Promise<void> {
   try { await access(dotPlugins); } catch { return; }
 
   const walk = async (dir: string): Promise<void> => {

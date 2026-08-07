@@ -125,7 +125,13 @@ export async function buildMatbotToolsDts(projectRoot: string, pluginEntryUrls?:
         if (isDir) { walk(p); continue; }
         if (!name.endsWith('.ts') || name.endsWith('matbot-tools.d.ts')) continue;
         const src = readFileSync(p, 'utf8');
-        if (/declare\s+module\s+['"]@matatbread\/matbot-plugin-api['"]/.test(src) && /\binterface\s+(?:ToolContracts|MatbotServices)\b/.test(src)) roots.add(p);
+        // Any augmentation of plugin-api, not just one naming `ToolContracts`/`MatbotServices`. Those two
+        // are the interfaces EMITTED, but they are not the only ones that change what they mean: a tool
+        // result is now a named interface (`LoadedPluginSummary`), so a file adding a field to one — the
+        // google-drive `plugin` override does exactly that — alters `ToolContracts['plugin']` without
+        // ever mentioning `ToolContracts`. Filtering on the emitted names left such a file unrooted and
+        // its field invisible to the very generators the augmentation exists to inform.
+        if (/declare\s+module\s+['"]@matatbread\/matbot-plugin-api['"]/.test(src)) roots.add(p);
       }
     };
     walk(join(projectRoot, 'plugins'));
@@ -297,6 +303,38 @@ export async function buildMatbotToolsDts(projectRoot: string, pluginEntryUrls?:
   const tools    = emitInterface('ToolContracts',    false);
   const services = emitInterface('MatbotServices', true);
 
+  // Re-emit plugin-side augmentations of plugin-api interfaces. A contract that references a plugin-api
+  // type is emitted as that NAME plus an import, so the generated compilation resolves it against the
+  // real package — which carries none of the `declare module` additions a plugin made. That is precisely
+  // where a named result shape earns its keep (google-drive's `plugin` override adds `managedBy` to
+  // `LoadedPluginSummary`), so the field has to travel with the dts or it is invisible exactly where it
+  // is meant to be used. Members go through `emitNode`, so a reference to a plugin-local type is bundled
+  // or `unknown`-substituted like any other — an augmentation cannot leave a dangling name behind and
+  // collapse the whole check. `ToolContracts`/`MatbotServices` are excluded: they are computed above from
+  // the merged symbol, and re-emitting them here would declare their members twice.
+  const COMPUTED_INTERFACES = new Set(['ToolContracts', 'MatbotServices']);
+  const augmentations: string[] = [];
+  const seenAugments = new Set<string>();
+  for (const sf of program.getSourceFiles()) {
+    if (sf.fileName.includes('/plugin-api/') || sf.fileName.includes('/node_modules/')) continue;
+    ts.forEachChild(sf, n => {
+      if (!ts.isModuleDeclaration(n) || !ts.isStringLiteral(n.name)
+          || n.name.text !== '@matatbread/matbot-plugin-api'
+          || n.body === undefined || !ts.isModuleBlock(n.body)) return;
+      for (const m of n.body.statements) {
+        if (!ts.isInterfaceDeclaration(m) || COMPUTED_INTERFACES.has(m.name.text)) continue;
+        const key = declKey(m);
+        if (seenAugments.has(key)) continue;
+        seenAugments.add(key);
+        const ctx: Ctx = { imports: new Set(), seen: new Set(), heritageBail: null };
+        const text = emitNode(m, ctx);
+        if (ctx.heritageBail) continue;
+        ctx.imports.forEach(i => importNames.add(i));
+        augmentations.push(`  ${stripModifiers(text)}`);
+      }
+    });
+  }
+
   // Clash census. Derived from the symbol table already walked above rather than from
   // `getPreEmitDiagnostics`, which costs ~4x this whole build (measured: +750ms on a 40-root scan) and
   // says less: a raw TS2717 filter reports only the losing site, whereas the merged symbol's
@@ -340,13 +378,116 @@ export async function buildMatbotToolsDts(projectRoot: string, pluginEntryUrls?:
   // Per-tool wire contract: flatten each `ToolContracts` arm to its `params`/`result` union source text.
   // Only pure `ToolContract<R, P>`-arm entries yield one (a bare/plain entry is skipped — it keeps whatever
   // the tool authored). This is the flat params/result union the wire description needs, from the arms.
+  // Follow a bare reference to a type alias through to the alias's own type node, so a tool that NAMES
+  // its arm union (`plugin: PluginToolContract`) flattens exactly like one spelled out inline. Naming
+  // the union is what lets two implementations of one tool name share ONE declaration rather than two
+  // that merge only while they stay textually identical.
+  const resolveAlias = (node: TS.TypeNode): TS.TypeNode => {
+    if (!ts.isTypeReferenceNode(node) || node.typeArguments !== undefined) return node;
+    const sym = checker.getSymbolAtLocation(node.typeName);
+    if (!sym) return node;
+    const target = (sym.flags & ts.SymbolFlags.Alias) !== 0 ? checker.getAliasedSymbol(sym) : sym;
+    const decl = (target.declarations ?? []).find(ts.isTypeAliasDeclaration);
+    return decl?.type ?? node;
+  };
+
+  // Expand named shapes to their structure for the WIRE text only. The dts bundles a referenced
+  // declaration alongside the reference, so a name resolves there; a tool description carries nothing
+  // but this string, so `result: PluginListResult` would tell the model nothing about the fields. Naming
+  // a result type is an API-side decision — it is what makes the shape augmentable — and it must not
+  // cost the model the shape. Only workspace/plugin-api interfaces and aliases expand: a lib or
+  // node_modules name stays as written (`Date`, `AbortSignal` mean more as names than as members), and
+  // so does anything past the depth cap or already on the path, which is what terminates a recursive
+  // shape rather than diverging.
+  //
+  // The cap is 2 because that is PARITY, not a tuning choice: it reproduces what an inline object
+  // literal used to render — the arm's own shape, and the shape of what its members hold, with anything
+  // deeper left as a name (`tools: ToolSummary[]` read exactly so before these types were named, and
+  // reads so now). Every level costs tokens in every tool description of every turn: unbounded
+  // expansion doubled the total wire text across the 38 source tools, mostly by inlining `Session` and
+  // `StoreQuery` into `session_action`.
+  const WIRE_DEPTH = 2;
+  const expandNamed = (node: TS.TypeNode, path: ReadonlySet<string>, depth: number): string => {
+    const base = node.getStart();
+    const repls: Array<{ s: number; e: number; t: string }> = [];
+
+    const expansionOf = (ref: TS.TypeReferenceNode): string | undefined => {
+      if (ref.typeArguments !== undefined || depth >= WIRE_DEPTH) return undefined;
+      const raw = checker.getSymbolAtLocation(ref.typeName);
+      if (!raw) return undefined;
+      const sym   = (raw.flags & ts.SymbolFlags.Alias) !== 0 ? checker.getAliasedSymbol(raw) : raw;
+      const decls = sym.declarations ?? [];
+      if (decls.length === 0) return undefined;
+      const files = decls.map(d => d.getSourceFile());
+      if (files.some(f => program.isSourceFileDefaultLibrary(f) || f.fileName.includes('/node_modules/'))) return undefined;
+
+      const key = declKey(decls[0]!);
+      if (path.has(key)) return undefined;
+      const nextPath = new Set([...path, key]);
+
+      // A union or intersection substituted into a reference position needs its own parentheses:
+      // `readonly Runtime[]` with `Runtime = 'node' | 'browser'` would otherwise render as
+      // `readonly 'node' | 'browser'[]`, which parses as a union whose second arm is an array.
+      const parenthesised = (t: string): string => {
+        let d = 0;
+        for (let i = 0; i < t.length; i++) {
+          const c = t[i];
+          if (c === '<' || c === '{' || c === '(' || c === '[') d++;
+          else if (c === '>' || c === '}' || c === ')' || c === ']') d--;
+          else if (d === 0 && (c === '|' || c === '&')) return `(${t})`;
+        }
+        return t;
+      };
+
+      const alias = decls.find(ts.isTypeAliasDeclaration);
+      if (alias) return parenthesised(expandNamed(alias.type, nextPath, depth + 1));
+      if (!decls.some(ts.isInterfaceDeclaration)) return undefined;
+
+      // Read members off the MERGED symbol, not one declaration: an interface that a plugin augmented
+      // (the whole point of naming these) carries its added members on the merged type only, and
+      // inherited members come through the same call.
+      const declared = checker.getDeclaredTypeOfSymbol(sym);
+      const members: string[] = [];
+      // Index signatures are not properties, and dropping one inverts its meaning: `ModelParameters`
+      // would read as a closed set of four generation knobs when the whole point of its
+      // `[key: string]: unknown` is that a provider takes arbitrary ones.
+      for (const info of checker.getIndexInfosOfType(declared)) {
+        members.push(`[key: ${checker.typeToString(info.keyType)}]: ${checker.typeToString(info.type)}`);
+      }
+      for (const prop of checker.getPropertiesOfType(declared)) {
+        const sig = (prop.declarations ?? []).find(ts.isPropertySignature);
+        if (!sig?.type) return undefined;                       // a member we can't render ⇒ keep the name
+        const opt = (prop.flags & ts.SymbolFlags.Optional) !== 0 ? '?' : '';
+        members.push(`${prop.name}${opt}: ${expandNamed(sig.type, nextPath, depth + 1)}`);
+      }
+      return members.length ? `{ ${members.join('; ')} }` : undefined;
+    };
+
+    const visit = (n: TS.Node): void => {
+      if (ts.isTypeReferenceNode(n)) {
+        const text = expansionOf(n);
+        if (text !== undefined) { repls.push({ s: n.getStart() - base, e: n.getEnd() - base, t: text }); return; }
+        n.typeArguments?.forEach(visit);
+        return;
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(node);
+
+    let text = node.getText();
+    for (const r of repls.sort((a, b) => b.s - a.s)) text = text.slice(0, r.s) + r.t + text.slice(r.e);
+    return text;
+  };
+
   const extractArms = (ann: TS.TypeNode): { params: string; result: string } | undefined => {
-    const arms = ts.isUnionTypeNode(ann) ? [...ann.types] : [ann];
+    const resolved = resolveAlias(ann);
+    const arms = ts.isUnionTypeNode(resolved) ? [...resolved.types] : [resolved];
     const params: string[] = [], results: string[] = [];
-    for (const a of arms) {
+    for (const raw of arms) {
+      const a = resolveAlias(raw);
       if (!ts.isTypeReferenceNode(a) || a.typeName.getText() !== 'ToolContract' || a.typeArguments?.length !== 2) return undefined;
-      results.push(a.typeArguments[0]!.getText());
-      params.push(a.typeArguments[1]!.getText());
+      results.push(expandNamed(a.typeArguments[0]!, new Set(), 0));
+      params.push(expandNamed(a.typeArguments[1]!, new Set(), 0));
     }
     return { result: results.join(' | '), params: params.join(' | ') };
   };
@@ -369,7 +510,7 @@ export async function buildMatbotToolsDts(projectRoot: string, pluginEntryUrls?:
   const bundleBlock = bundledDecls.size ? `${[...bundledDecls.values()].join('\n\n')}\n\n` : '';
   const dts = `import '@matatbread/matbot-plugin-api';
 ${importLine}${bundleBlock}declare module '@matatbread/matbot-plugin-api' {
-${block('ToolContracts', tools.lines)}${block('MatbotServices', services.lines)}}
+${block('ToolContracts', tools.lines)}${block('MatbotServices', services.lines)}${augmentations.length ? `${augmentations.join('\n')}\n` : ''}}
 `;
   return {
     dts,

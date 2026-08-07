@@ -1,4 +1,4 @@
-import type { Tool, ToolRegistry, Hook, PromptFn, FormField, FrontendInfo, ProviderAdapter, ProviderConfig } from './types.js';
+import type { Tool, ToolRegistry, Hook, PromptFn, FormField, FrontendInfo, ProviderAdapter, ProviderConfig, FailedPlugin } from './types.js';
 import { RegistryChangeKind } from '@matatbread/matbot-plugin-api';
 import { scopedNotifier } from '@matatbread/matbot-plugin-api/host';
 import type {
@@ -11,14 +11,8 @@ import type { SettingsDoc } from './settings.js';
 
 // ── Internal state ────────────────────────────────────────────────────────────
 
-/**
- * A plugin the loader could not bring up — an incompatible runtime, an import that rejected, a
- * module that is not plugin-shaped, or a setup() throw. Recorded (not discarded) so the failure is
- * *graceful but not silent*: the `plugin` tool and web UI can show which configured plugins failed
- * and why, instead of the failure vanishing into a boot-time console line. `error` is pre-stringified
- * (sidesteps the `unknown` catch-var); `name` is present only when known before the failure.
- */
-export type FailedPlugin = { specifier: string; name?: string; error: string };
+// `FailedPlugin` now lives in plugin-api: `plugin list` reports it, so it is part of that tool's
+// contract, and the contract has to be declarable from a package this one can reach.
 
 // Mutable arrays/maps held in a single object to make _resetRegistry() simple.
 const state = {

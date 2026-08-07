@@ -278,17 +278,36 @@ async function main() {
   // The web-bundle's own package version → reported by about_matbot as the harness version.
   const harnessVersion = JSON.parse(await readFile(path.join(here, 'package.json'), 'utf8')).version;
 
-  // Per-tool wire contracts ({ params, result }) extracted from the RAW (pre-strip) source of the baked
-  // plugin graph — compiler-free, the SAME scanner the browser runs over http-fetched plugins at runtime
-  // (see extractToolContracts). A ToolContracts augmentation is type-only, so it vanishes once stripped —
-  // hence bake it here so the browser ToolTypeIndex can fold the real params+result TS into built-in tools'
-  // wire descriptions, exactly as node does. Scanning rawSources (not a whole-tree glob) means each tool's
-  // BROWSER-variant augmentation wins — matching what actually loads in the bundle.
+  // Per-tool wire contracts ({ params, result }) baked in, because a ToolContracts augmentation is
+  // type-only and vanishes once stripped — the browser ToolTypeIndex folds these into built-in tools'
+  // wire descriptions exactly as node does.
+  //
+  // WHICH tools comes from the RAW source of the baked graph (the compiler-free scanner the browser also
+  // runs over http-fetched plugins at runtime), so the set matches what actually loads in this bundle.
+  // The TEXT comes from the node compiler, which is available here at build time and is what node itself
+  // uses — the regex scanner cannot expand a named shape (`ProviderListResult`) to its fields, and a
+  // browser that showed the model a bare name where node shows the structure would be the very
+  // node/browser divergence this bake exists to remove. Regex text is the fallback for anything the
+  // compiler pass didn't produce.
   let toolContracts = {};
   try {
-    const { extractToolContracts } = await import('../../plugins/browser/src/tool-types.ts');
-    for (const src of Object.values(rawSources)) Object.assign(toolContracts, extractToolContracts(src));
-    console.log(`[assemble] baked ${Object.keys(toolContracts).length} tool contracts`);
+    const { extractToolContracts, collectContractAliases } = await import('../../plugins/browser/src/tool-types.ts');
+    // Two passes: a tool whose contract is shared between the node and browser implementations names an
+    // arm-union declared in plugin-api (see plugin-api/src/types/builtin-tools.ts), so the alias must be
+    // in hand before the file that uses it is scanned — and import order does not guarantee that.
+    const aliases = {};
+    for (const src of Object.values(rawSources)) Object.assign(aliases, collectContractAliases(src));
+    for (const src of Object.values(rawSources)) Object.assign(toolContracts, extractToolContracts(src, aliases));
+
+    const { buildMatbotToolsDts } = await import('../../plugins/tool-types/src/build-dts.ts');
+    const compiled = (await buildMatbotToolsDts(repoRoot))?.contracts ?? {};
+    let upgraded = 0;
+    for (const name of Object.keys(toolContracts)) {
+      if (compiled[name] === undefined) continue;
+      toolContracts[name] = compiled[name];
+      upgraded++;
+    }
+    console.log(`[assemble] baked ${Object.keys(toolContracts).length} tool contracts (${upgraded} from the compiler)`);
   } catch (e) {
     console.warn(`[assemble] could not extract tool contracts (${e?.message ?? e}) — browser TS contracts limited to toolContract-string tools.`);
   }

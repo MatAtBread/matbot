@@ -9,6 +9,69 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## Unreleased
+
+### Breaking changes
+
+- **The `plugin` and `provider` tools' contracts are now named, shared types in `plugin-api`, and the
+  browser implementations adopt node's field names.** Both tools have a node and a browser
+  implementation, and each declared its own `ToolContracts` arm. A registry key is registered by
+  declaration *merging*, so two declarations of one key are only legal while they are identical — these
+  were not, which made every program containing both a `TS2717`. `buildMatbotToolsDts` never read the
+  Program's diagnostics, so the error was invisible: one declaration won on file order and its shape was
+  emitted as the contract. In any tree containing `plugins/` — this repo, or an embedder vendoring it —
+  the **browser** shapes won, and a node deployment's generated code was typechecked against them. The
+  check loop therefore *rejected* `providers[].hasCredentials`, which node returns, and *accepted*
+  `providers[].hasKey`, which is `undefined` at runtime.
+
+  Both tools now declare `PluginToolContract` / `ProviderToolContract` from `plugin-api`, so there is one
+  declaration and it cannot drift. Renamed in the **browser** tool to match node and `matbot.yaml`:
+  `provider list` → `hasCredentials` (was `hasKey`), `provider add` → `module` (was `adapter`); its
+  `parameters` is `ModelParameters` rather than `Record<string, unknown>`. `ProviderRow` is now
+  `ProviderSummary`. Where the two runtimes genuinely differ the shared shape carries the superset and the
+  divergent member is optional (`DiscoveredPlugin.source`, `ProviderListResult.adapters`); each
+  implementation's `inputSchema` is unchanged and still the enforcement point.
+
+- **`FailedPlugin` moved from `core` to `plugin-api`.** It is part of `plugin list`'s result, so the
+  contract has to be declarable from a package the tools can reach. Still re-exported from `core`.
+
+### API gaps filled
+
+- **Builtin tool result shapes are named, exported interfaces, so they can be augmented.** They were
+  inline object literals, which closed the one extension point the rest of the API leans on: a host that
+  overrode a builtin tool and returned a superset could not say so — declaring its own arm is a merge
+  error, declaring nothing inherits a shape it does not return. `LoadedPluginSummary`, `DiscoveredPlugin`,
+  `PluginListResult`, `ToolSummary`, `ProviderSummary`, `AvailableProvider` and friends now take a
+  `declare module` augmentation like any other open registry, and it flows through to `toolResult`, the
+  `tool` proxy and the wire description. An undeclared field is still rejected.
+
+### Bug fixes
+
+- **`buildMatbotToolsDts` reports duplicate registry declarations instead of silently picking a winner.**
+  Detected from the merged symbol's declaration list, which also names which declaration won and
+  distinguishes a real clash from the legal identical re-declaration TypeScript never complains about.
+- **The dts scan roots any file that augments `plugin-api`, not only ones naming `ToolContracts` /
+  `MatbotServices`.** A file adding a field to a named result shape changes what a contract means without
+  mentioning either interface, so it was left unrooted and its field invisible to generators.
+- **Plugin-side augmentations of `plugin-api` interfaces are re-emitted into the generated dts.** The dts
+  references plugin-api types by name, so an augmentation lived in a file the generated compilation never
+  saw and the field vanished exactly where it was meant to be used.
+- **Named shapes are expanded in the wire description.** A tool description ships no declarations, so
+  `result: PluginListResult` would have told the model nothing. Expanded to the depth an inline literal
+  used to render, which also gives structure to tools that already referenced names (`Principal`,
+  `Trigger`, `StoreDef`, `DreamRun`).
+- **`plugin list` declares `resolvedUrl`**, which its node executor already returned. Conditional spreads
+  bypass excess-property checking, so the executor's binding never caught the omission.
+
+### Optional
+
+- **web-bundle:** the baked per-tool wire contracts now come from the node compiler at build time rather
+  than the regex scanner, so the browser shows the model the same expanded shapes as node. The
+  compiler-free scanner still selects *which* tools are baked, and still handles http-fetched plugins at
+  runtime; it can now follow a named arm-union (`collectContractAliases`).
+- **google-drive:** its `plugin` override augments `LoadedPluginSummary` with `managedBy` instead of
+  casting the result to a wider shape.
+
 ## 0.4.1
 
 ### API gaps filled
