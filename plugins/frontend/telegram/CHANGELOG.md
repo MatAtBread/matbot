@@ -1,5 +1,13 @@
 # @matatbread/matbot-frontend-telegram
 
+## 0.4.2
+
+### Patch Changes
+
+- Updated dependencies
+  - @matatbread/matbot-plugin-api@0.4.2
+  - @matatbread/matbot-core@0.4.2
+
 ## 0.3.10
 
 ### Patch Changes
