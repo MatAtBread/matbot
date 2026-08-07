@@ -6,11 +6,15 @@ declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
     // One arm per action: a caller of `invokeTool(machine, 'session_action', { action: '…' })` gets the
     // matching result narrowed by the `action` it passed (see ToolContract / the multi-action note on ToolContracts).
+    // `immutable` is omitted from the query arm: it is a caller-to-store optimisation hint, not a query
+    // parameter, and this executor decides it for itself (it hardcodes `immutable: true`, which is always
+    // right here — every row is copied into a fresh summary and never written back). Intersecting the whole
+    // of StoreQuery published a knob no caller could actually turn.
     session_action:
       | ToolContract<Array<{ id: string; title: string | undefined; preview: string; updatedAt: string }>, { action: 'list'; includeArchived?: boolean }>
       | ToolContract<
           { items: Array<{ id: string; title: string | undefined; preview: string; updatedAt: string }>; cursor?: string; total?: number },
-          { action: 'query' } & StoreQuery
+          { action: 'query' } & Omit<StoreQuery, 'immutable'>
         >
       | ToolContract<Session,                          { action: 'get'; sessionId: string }>
       | ToolContract<{ id: string; title: string },    { action: 'rename'; sessionId: string; title: string }>
@@ -77,7 +81,7 @@ export function makeSessionTools(store: Store<Session>): readonly Tool[] {
 // discriminated union — which LLMs read accurately — as the source of truth. The executor enforces it.
 type SessionInput =
   | { action: 'list';   includeArchived?: boolean }
-  | ({ action: 'query' } & StoreQuery)
+  | ({ action: 'query' } & Omit<StoreQuery, 'immutable'>)
   | { action: 'get';    sessionId: string }
   | { action: 'rename'; sessionId: string; title: string }
   | { action: 'hide';   sessionId: string }

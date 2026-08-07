@@ -1,5 +1,5 @@
 import type { Store, MatbotMachine, ProviderConfig } from '@matatbread/matbot-plugin-api';
-import type { ProviderDraft, ProviderRow, ProviderAdmin, AvailableProvider } from '@matatbread/matbot-browser';
+import type { ProviderDraft, ProviderSummary, ProviderAdmin, AvailableProvider } from '@matatbread/matbot-browser';
 
 const DOC_ID = 'manifest';
 
@@ -47,14 +47,14 @@ function credentialVar(name: string): string {
   return `MATBOT_API_KEY_${name.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}`;
 }
 
-function toRow(p: ProviderConfig): ProviderRow {
+function toRow(p: ProviderConfig): ProviderSummary {
   return {
     name:   p.name,
     module: p.module,
     model:  p.model,
     ...(p.endpoint   !== undefined ? { endpoint:   p.endpoint   } : {}),
     ...(p.parameters !== undefined ? { parameters: p.parameters } : {}),
-    hasKey: p.credentials?.['apiKey'] !== undefined,
+    hasCredentials: p.credentials?.['apiKey'] !== undefined,
   };
 }
 

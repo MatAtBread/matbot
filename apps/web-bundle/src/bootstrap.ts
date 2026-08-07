@@ -18,7 +18,7 @@ import type { SwapFn } from '@matatbread/matbot-core';
 import { LookupKnowledgeIndex } from '@matatbread/matbot-core';
 import { BrowserStorageBackend, LocalStorageVault } from '@matatbread/matbot-browser';
 import { runProviderSetup, type AvailableProvider, type ProviderDraft } from './setup.js';
-import { createBrowserProviderTool, createBrowserToolTypeIndex, extractToolContracts } from '@matatbread/matbot-browser';
+import { createBrowserProviderTool, createBrowserToolTypeIndex, extractToolContracts, collectContractAliases } from '@matatbread/matbot-browser';
 import type { BrowserToolTypeIndexHandle } from '@matatbread/matbot-browser';
 
 // Browser TypeScript type-stripper (the TypeScriptStripper the realm provides). The bundle deliberately
@@ -406,7 +406,12 @@ export async function boot(env: BootEnv): Promise<void> {
         specNames[specifier] = remote.name;   // identify()/unload resolve by the source URL (= spec)
         // Scan the remote's RAW source for `ToolContracts` augmentations (type-only — stripped from the
         // executable blob) so its tools get real params+result TS in their wire descriptions, like built-ins.
-        for (const s of remote.sources ?? []) toolTypeIndex.addContracts(extractToolContracts(s));
+        // Collect the remote's own arm-union aliases across all its files first: a contract member and the
+        // `type X = ToolContract<…> | …` it names need not be in the same file, or in scan order.
+        const remoteSources = remote.sources ?? [];
+        const remoteAliases: Record<string, string> = {};
+        for (const s of remoteSources) Object.assign(remoteAliases, collectContractAliases(s));
+        for (const s of remoteSources) toolTypeIndex.addContracts(extractToolContracts(s, remoteAliases));
         // Carry the declared matbotRuntime so the loader can gate a node-only remote before import and
         // stamp plugin.matbotRuntime (which `list` reports — a blob: importSpec can't be re-read later).
         req = { spec: specifier, importSpec: remote.spec, ...(remote.runtimes !== undefined ? { runtimes: remote.runtimes } : {}) };
@@ -511,7 +516,7 @@ export async function boot(env: BootEnv): Promise<void> {
       name: p.name, module: p.module, model: p.model,
       ...(p.endpoint   !== undefined ? { endpoint:   p.endpoint   } : {}),
       ...(p.parameters !== undefined ? { parameters: p.parameters } : {}),
-      hasKey: p.credentials?.['apiKey'] !== undefined,
+      hasCredentials: p.credentials?.['apiKey'] !== undefined,
     })),
     add:    applyDraft,
     remove: removeProvider,

@@ -1,5 +1,17 @@
 # @matatbread/matbot-sessions
 
+## 0.4.2
+
+### Patch Changes
+
+- `session_action`: `immutable` is no longer part of the `query` contract.
+
+  The arm intersected the whole of `StoreQuery`, which published `immutable` — a caller-to-store optimisation hint, not a query parameter — as a tool input. The executor never read it: it hardcodes `immutable: true`, which is always correct there, since every row is copied into a fresh summary and never written back. Now `Omit<StoreQuery, 'immutable'>`. No behaviour change.
+
+- Updated dependencies
+  - @matatbread/matbot-plugin-api@0.4.2
+  - @matatbread/matbot-core@0.4.2
+
 ## 0.3.10
 
 ### Patch Changes

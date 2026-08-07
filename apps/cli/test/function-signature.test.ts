@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { stripTypeScriptTypes } from 'node:module';
-import { parseSignature, buildAsyncFn, runFunction } from '@matatbread/matbot-function-tools';
+import { parseSignature, paramsSchema, buildAsyncFn, runFunction } from '@matatbread/matbot-function-tools';
 import type { MatbotMachine, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
 
 // Regression guard for comment-blind signature parsing. The scanners that locate a definition's
@@ -136,4 +136,46 @@ test('division is not read as a regex literal', () => {
     { name: 'a', optional: false, type: 'number' },
     { name: 'b', optional: false, type: 'number' },
   ]);
+});
+
+// A defined function's params are projected twice from one parse: verbatim into its `toolContract` (TS
+// to TS, so lossless) and into its `inputSchema` — which is what the provider is given and what
+// json-validation enforces. That second projection used to string-match the whole annotation, so every
+// structural shape collapsed: `'a' | 'b'` → {}, `string[]` → { type: 'array' }, an inline object → a
+// bare { type: 'object' }. The model was shown a contract stronger than the schema backing it.
+test('structural parameter types reach the inputSchema', () => {
+  const schemaFor = (params: string): Record<string, unknown> => {
+    const props = paramsSchema(parseSignature(`f(${params}): void { }`).params);
+    return (props as { properties: Record<string, Record<string, unknown>> }).properties;
+  };
+
+  assert.deepEqual(schemaFor(`opts: { sql: string; limit?: number }`).opts, {
+    type: 'object', properties: { sql: { type: 'string' }, limit: { type: 'number' } }, required: ['sql'],
+  });
+  assert.deepEqual(schemaFor(`mode: 'a' | 'b'`).mode,   { type: 'string', enum: ['a', 'b'] });
+  assert.deepEqual(schemaFor(`names: string[]`).names,  { type: 'array', items: { type: 'string' } });
+  assert.deepEqual(schemaFor(`n: 1 | 2`).n,             { type: 'number', enum: [1, 2] });
+  assert.deepEqual(schemaFor(`u: string | number`).u,   { type: ['string', 'number'] });
+  assert.deepEqual(schemaFor(`m: Record<string, number>`).m, { type: 'object', additionalProperties: { type: 'number' } });
+  assert.deepEqual(schemaFor(`t: readonly string[]`).t, { type: 'array', items: { type: 'string' } });
+  assert.deepEqual(schemaFor(`p: (string | number)[]`).p, { type: 'array', items: { type: ['string', 'number'] } });
+  assert.deepEqual(schemaFor(`i: { [k: string]: number }`).i, { type: 'object', additionalProperties: { type: 'number' } });
+});
+
+// The conversion is partial by design: what it cannot express must stay permissive, because this schema
+// is a gate. A constraint guessed from a shape it doesn't understand would reject a valid call.
+test('unrecognised parameter types degrade permissively, never to a constraint', () => {
+  const schemaFor = (params: string): Record<string, unknown> => {
+    const props = paramsSchema(parseSignature(`f(${params}): void { }`).params);
+    return (props as { properties: Record<string, Record<string, unknown>> }).properties;
+  };
+
+  assert.deepEqual(schemaFor(`x: SomeImportedType`).x,   {});   // no local structure to project
+  assert.deepEqual(schemaFor(`x: { a: string } | string`).x, {});   // anyOf: json-validation can't enforce it
+  assert.deepEqual(schemaFor(`x: 'a' | string`).x, { type: 'string' });   // widened — the enum would reject the open arm
+  assert.deepEqual(schemaFor(`x: [string, number]`).x, { type: 'array' });   // per-position schemas aren't expressible
+  // A `|` inside a string-literal type is not a union separator.
+  assert.deepEqual(schemaFor(`x: 'a|b' | 'c'`).x, { type: 'string', enum: ['a|b', 'c'] });
+  // `undefined` carries no JSON value; optionality is the parameter's, and lives in `required`.
+  assert.deepEqual(schemaFor(`x: 'text' | 'json' | undefined`).x, { type: 'string', enum: ['text', 'json'] });
 });

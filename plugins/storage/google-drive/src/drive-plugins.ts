@@ -4,6 +4,18 @@ import { createBrowserPluginTool } from '@matatbread/matbot-browser';
 
 const DOC_ID = 'manifest';
 
+// `list` returns the browser plugin tool's own result, one field richer. Declaring that field here —
+// rather than casting the result to a wider shape — is the whole point of `LoadedPluginSummary` being a
+// named interface: a tool override can extend a builtin's result without touching `ToolContracts`,
+// which it could not do anyway (a second arm for one key is a merge error, not an override).
+declare module '@matatbread/matbot-plugin-api' {
+  interface LoadedPluginSummary {
+    /** Only set by this override: whether the plugin's specifier is in the Drive-synced set (so it
+     *  follows the user across browsers) or local to this browser. */
+    managedBy?: string;
+  }
+}
+
 interface ManifestDoc {
   id:         string;
   version:    string;
@@ -84,9 +96,11 @@ export function createSyncedPluginTool(driveSet: DrivePluginSet, original: Tool 
           const synced = (name: string, spec: string) => drive.includes(spec) || drive.includes(name);
           for await (const ev of driveTool.executor.execute(input, ctx)) {
             if (ev.type === 'result' && ev.value !== null && typeof ev.value === 'object' && 'loaded' in ev.value) {
-              const v = ev.value as Record<string, unknown> & { loaded: { name: string; specifier: string }[] };
-              const loaded = v.loaded.map(p => ({ ...p, managedBy: synced(p.name, p.specifier) ? 'google-drive (synced across browsers)' : 'local (this browser only)' }));
-              yield { type: 'result', value: { ...v, loaded } };
+              const loaded = ev.value.loaded.map(p => ({
+                ...p,
+                managedBy: synced(p.name, p.specifier) ? 'google-drive (synced across browsers)' : 'local (this browser only)',
+              }));
+              yield { type: 'result', value: { ...ev.value, loaded } };
             } else {
               yield ev;
             }

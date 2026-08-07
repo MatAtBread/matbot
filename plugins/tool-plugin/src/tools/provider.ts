@@ -1,19 +1,10 @@
-import type { Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext, ProviderRegistry, MatbotPlugin, ModelParameters } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolResultOf, ToolContext, ProviderRegistry, MatbotPlugin,
+              ProviderToolContract } from '@matatbread/matbot-plugin-api';
 
+// Shared with the browser implementation of this same tool name — see plugin-api/src/types/builtin-tools.ts.
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
-    provider:
-      | ToolContract<{ providers: Array<{
-            name:           string;
-            module:         string;
-            model:          string;
-            hasCredentials: boolean;
-            endpoint?:      string;
-            parameters?:    ModelParameters;
-            maxRounds?:     number;
-          }> }, { action: 'list'   }>
-      | ToolContract<{ message: string }, { action: 'add'; name: string; module: string; model: string; endpoint?: string; credentialKey?: string; credentialEnvVar?: string; parameters?: Record<string, unknown>; maxRounds?: number }>
-      | ToolContract<{ message: string }, { action: 'remove'; name: string }>;
+    provider: ProviderToolContract;
   }
 }
 import { getRegisteredPlugins, getSpecifierForPlugin }       from '@matatbread/matbot-core';
