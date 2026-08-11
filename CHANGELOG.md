@@ -9,6 +9,58 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## Unreleased
+
+### Optional
+
+- **tool-types:** the generated dts declares the **live tool registry**, not every plugin on disk. The scan
+  roots at each loaded plugin's `resolvedUrl` and then unions a glob of the monorepo `plugins/` tree onto it
+  (to catch host-constructed builtins like `plugin` and `provider`, which have no `resolvedUrl`), and every
+  `ToolContracts` key on the merged symbol was emitted — so the dts declared tools from plugins nobody had
+  loaded. In this repo that was six of them (`telegram_send`, `telegram_provider`, `telegram_open_door`,
+  `profile_action`, `share`, `bash_config`), fully typed and indistinguishable from the real ones.
+
+  They reached the model through `tool_function { action: 'types' }` and every skills_compiler codegen
+  prompt — which asserts "a tool not declared here does not exist" — and `ToolTypeIndex.check()` graded the
+  generated code against the same text. `await tool.telegram_send({ text })` therefore typechecked clean and
+  threw `Tool "telegram_send" is not registered` at runtime: the failure the check gate exists to prevent,
+  and one the repair loop cannot repair, because the code is correct against the types it was shown.
+
+  `buildMatbotToolsDts` now takes the live tool names and emits only those keys (the wire contracts and the
+  clash census are filtered with it); `ToolTypeIndex` and `skills_compiler` pass `tools.list()`. A scanned
+  root may supply a tool's *contract*; only the registry says a tool *exists*. The glob is unchanged, and
+  host-constructed builtins keep their scanned types. Omitting the argument keeps the whole-tree behaviour
+  the clash-census test wants. Node now behaves as the browser `ToolTypeIndex` already did. The per-turn
+  wire descriptions are unaffected — they were always keyed by the live registry.
+
+  What this does *not* fix: two roots declaring the same **live** name (`bash`, by `plugins/bash` and
+  `plugins/docker-bash`) still merge by Program file order, so an unloaded plugin's declaration can win and
+  describe the loaded tool. That is what `conflicts` reports; it is silent today only because the two are
+  identical.
+
+- **skills_compiler:** the typecheck-repair passes now carry the **specification**. Pass 1 opened with "THE
+  SPECIFICATION … it is authoritative" and handed over the skill, the distilled method and any operator
+  feedback; passes 2..4 saw only the environment block, the broken source and the diagnostics. `singleTurn`
+  is stateless and was called without a `system`, so nothing carried over — the spec was simply absent from
+  every repair, leaving "keep the behaviour identical" pointing at the broken code as its only stand-in.
+
+  A repair with no spec to fix *towards* can satisfy the compiler by deleting the behaviour that raised the
+  error: yielding a placeholder where a computed value belongs, dropping the offending field from the result,
+  or rewriting the `ToolContracts` arm to match whatever the implementation happens to produce — all of which
+  typecheck, and the last of which silently rewrites the contract other tools compose against. Over four
+  passes of "fix this" there was also nothing pulling successive attempts back towards the original intent.
+
+  The spec is now extracted once per path (`specBlock`) and used twice: in pass 1's prompt, byte-identical to
+  before, and as a standing `system` prompt for every repair pass, alongside a repair-specific discipline —
+  the source is a previous attempt, not a second source of truth; never resolve an error by removing what the
+  spec requires; restore anything an earlier pass dropped. Because it is `system` and identical across passes
+  2..N it is a stable cacheable prefix rather than context that grows with the attempt count, and the repair
+  prompt is now only what changes: the current source and the latest diagnostics.
+
+  Not covered: nothing grades whether the code that finally compiles *meets* the spec, so a pass-1
+  mis-implementation that typechecks still installs clean. The reasoning against a general "does this meet
+  the spec?" pass — and the structural form it would need instead — is recorded at the repair loop.
+
 ## 0.4.2
 
 ### Breaking changes

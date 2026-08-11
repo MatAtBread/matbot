@@ -307,7 +307,11 @@ export function createSkillCompilerPlugin(): MatbotPluginSpec {
                 .filter(u => !u.includes(`${COMPILED_PLUGINS_DIR}/${pluginDir}/`));
               alreadyInstalled = (list.configured ?? []).includes(specifier) || (list.loaded ?? []).some(p => p.name === pluginPkgName);
             } catch { /* `plugin` tool absent → buildMatbotToolsDts falls back to the monorepo glob */ }
-            const generated = await buildMatbotToolsDts(projectRoot, pluginUrls);
+            // Live tool names, because the prompt below says "A tool not declared here does not exist" and
+            // tsc grades the generated source against the same text: a contract scanned off an unloaded
+            // plugin's source would make that sentence false in the one direction the model can't recover
+            // from — it composes a call that compiles and then throws at runtime.
+            const generated = await buildMatbotToolsDts(projectRoot, pluginUrls, services.tools.list().map(t => t.name));
             if (generated) {
               toolContractsDts = generated.dts;
               yield { type: 'progress', pct: 8, message: `Typed ${generated.tools.emitted.length} tool result(s) and ${generated.services.emitted.length} service(s).` };
@@ -336,6 +340,9 @@ ${toolContractsDts}
           let excluded: string[] = [];
           let indexSource = '';
           let pass1Prompt: string;
+          // The authoritative statement of what the tool must do, built once per path and used TWICE: in
+          // pass 1's prompt, and as the standing system prompt for every repair pass (see repairSystem).
+          let specBlock: string;
 
           if (!iterate) {
             yield { type: 'progress', pct: 10, message: `Executing "${skill}"...` };
@@ -452,9 +459,7 @@ ${toolContractsDts}
               : `{ ${toolParams.map(p => `${p.name}${p.required ? '' : '?'}: ${p.type}`).join('; ')} }`;
             const resultTypeText = typeof design.resultType === 'string' && design.resultType.trim() ? design.resultType.trim() : 'unknown';
 
-            pass1Prompt = `Generate TypeScript for a matbot plugin that implements the following skill as a deterministic tool.
-
-THE SPECIFICATION — this is what the tool must achieve. It is authoritative:
+            specBlock = `THE SPECIFICATION — this is what the tool must achieve. It is authoritative:
 --- SKILL "${skill}" ---
 ${skillContent}
 --- END SKILL ---
@@ -468,7 +473,11 @@ ${feedback ? `
 --- OPERATOR FEEDBACK (authoritative — apply this in addition to the spec) ---
 ${feedback}
 --- END FEEDBACK ---
-` : ''}
+` : ''}`;
+
+            pass1Prompt = `Generate TypeScript for a matbot plugin that implements the following skill as a deterministic tool.
+
+${specBlock}
 ${envBlock}
 
 Template (fill IMPLEMENTATION):
@@ -515,6 +524,19 @@ Rules: implement the SPEC, using the worked example's exact URLs/queries/field n
             // the current source so a first-pass typecheck failure still repairs against it.
             indexSource = priorSource!;
             method = feedback!;
+            // Iterate's spec is the operator's change, read against the original skill as context — NOT the
+            // prior source, which the repair pass is already looking at (and which is exactly what the
+            // change is meant to alter).
+            specBlock = `THE SPECIFICATION — the tool must do what it did before, WITH the operator's change below applied. The change is authoritative:
+--- OPERATOR FEEDBACK (the change to make) ---
+${feedback}
+--- END FEEDBACK ---
+${skillContent ? `
+--- ORIGINAL SKILL SPEC "${skill}" (context — the source implements this; the change above amends it) ---
+${skillContent}
+--- END SKILL ---
+` : ''}`;
+
             pass1Prompt = `You are modifying an existing, installed matbot plugin — apply the operator's requested change to its source and return the complete corrected src/index.ts.
 
 ${envBlock}
@@ -533,6 +555,31 @@ ${feedback}
 
 Apply exactly the operator's change and nothing more. Keep everything else identical — the tool name, its \`declare module … interface ToolContracts { ${toolName}: ToolContract<…> }\` block, and the register call's \`name\` and \`inputSchema\` — unless the feedback explicitly requires changing it. Pass ctx.signal through every fetch (\`tool.*\` calls inherit it automatically); call other tools via \`await tool.<name>(params)\` (it inherits this call's context, and an unregistered tool name will not compile; use \`toolInContext({ provider })\` to override). Never extract a value from another tool's natural-language output with a regex — use its typed tool.<name>() result, or find_fact for a single stored fact. Do NOT cast a toolResult value with 'as unknown as X' or re-assert a shape onto it; validate only genuinely external values (e.g. await resp.json()). ${STRICT_TS} Output ONLY the complete corrected src/index.ts in a single \`\`\`typescript fence — the whole file, not a diff.`;
           }
+
+          // The repair passes' standing system prompt. Pass 1 states the spec; every pass after it used to
+          // see only the broken source and the diagnostics, which left the source as the spec's only
+          // stand-in — three rounds of "fix this" with nothing authoritative to fix TOWARDS, inviting a
+          // compiler-satisfying deletion of the very behaviour that raised the error, and (over 4 passes)
+          // letting each attempt drift from the last with nothing pulling it back. Carried as `system`
+          // rather than re-stated in each prompt for two reasons: it is byte-identical across passes 2..N,
+          // so the anthropic adapter's system-block cache breakpoint means it is paid for once, not per
+          // attempt (the context stops growing with the attempt count); and instructions the model must not
+          // trade away sit above the pasted source and error text rather than competing with it.
+          // NOTE it deliberately differs from pass 1's framing: generation needs "build this", repair needs
+          // "you are 3 edits deep into someone else's attempt at this" — the failure modes are not the same,
+          // so the discipline below is repair-specific and would be noise during generation. That costs one
+          // cache miss at pass 2 (toAnthropicSystem flattens system to a single block with one trailing
+          // breakpoint, so any change to the tail misses the whole block); passes 3..N hit.
+          const repairSystem = `You are repairing the TypeScript of a matbot plugin that implements a specification. The specification is below and remains in force for every repair you make.
+
+${specBlock}
+${envBlock}
+
+Your job is to make the code COMPILE while it still implements that specification. The source you are given is a PREVIOUS ATTEMPT at the specification, not a second source of truth: where the two disagree, the specification wins. Fix every reported error with the smallest change that fixes it — do not refactor, rename or restructure anything the errors do not name.
+
+NEVER resolve an error by removing something the specification requires. Concretely: do not drop a field from the result value, do not yield a placeholder or stub where a computed value belongs, do not delete a branch, a tool call or an error path, and do not weaken the \`ToolContracts\` arm or the \`inputSchema\` so that they match what the code currently happens to produce. A mismatch between the declared contract and the implementation means the IMPLEMENTATION is wrong — the contract is derived from the specification, so change the code to produce the declared shape. Deleting the offending code silences the compiler and ships a tool that does not do what it claims, which is worse than the error you were asked to fix.
+
+This may be the third or fourth attempt at this file, so it may already have drifted: if an earlier pass has dropped or stubbed something the specification requires, restore it as part of your fix — that is not scope creep. Keep the tool name, the \`declare module … interface ToolContracts { ${toolName}: ToolContract<…> }\` block and the register call's \`name\` and \`inputSchema\` exactly as they are. ${STRICT_TS}`;
 
           // ── shared build ─────────────────────────────────────────────────────────
           // Write the plugin straight to disk with node:fs — NOT via workspace_action. The workspace is
@@ -600,14 +647,9 @@ Apply exactly the operator's change and nothing more. Keep everything else ident
           // stays live, and with NO fallback: the inputs are fully determined (our own scaffold, our own
           // tsconfig, the resolved typescript module), so a checker failure is a bug in our plumbing and
           // must surface as this compile's error, not be absorbed by a quieter path.
-          // PARKED (potential safety enhancement): add a structural gate alongside this typecheck that
-          // rejects re-assertion of a shape onto a `toolResult(...)`-derived value — `as unknown as X`, or
-          // `as Record<string, unknown>` then `[k] as X` — and feeds it back into the repair loop like a tsc
-          // error. `tsc` PASSES those casts (they are valid TS), so today only the codegen prompt rule
-          // discourages them, and prompt-tuning has shown diminishing returns. Deterministic enforcement
-          // beats prose if the guarantee is wanted. See memory `skills-compiler-cast-structural-guarantee`.
-          // 4: the cast gate's structural findings legitimately consume repair budget alongside type
-          // errors, and the small-model tier was exhausting 3 passes on exactly that combination.
+          // 4 rather than 3: the cast gate's structural findings legitimately consume repair budget
+          // alongside type errors, and the small-model tier was exhausting 3 passes on exactly that
+          // combination.
           const MAX_PASSES = 4;
           const extractSource = (text: string): string => {
             const m = text.match(/```(?:typescript|ts)\s*\n([\s\S]*?)```/) || text.match(/```\s*\n([\s\S]*?)```/);
@@ -625,12 +667,27 @@ Apply exactly the operator's change and nothing more. Keep everything else ident
           for (pass = 1; pass <= MAX_PASSES && !typecheckOk; pass++) {
             yield { type: 'progress', pct: 70 + pass * 6, message: pass === 1 ? (iterate ? 'Applying feedback...' : 'Generating code...') : `Typecheck failed — repairing (pass ${pass}/${MAX_PASSES})...` };
 
+            // WHAT REMAINS OPEN, now that repairSystem carries the spec: the loop can no longer resolve an
+            // error by deleting behaviour it has no reason to keep, but nothing here grades whether the code
+            // that finally compiles actually MEETS the spec. A pass-1 mis-implementation that typechecks — a
+            // branch the spec describes but the demonstration never exercised, an example value frozen as a
+            // constant — still installs clean, and no repair pass ever runs to notice it.
+            // Deliberately NOT solved with a final "does this meet the spec?" LLM pass, for two reasons that
+            // are about the shape of the answer rather than its cost. Asked generally it returns a hedge
+            // ("this will fail if the endpoint ever returns …") — unfalsifiable, and true of all code. And a
+            // negative verdict has nowhere to go: reporting it defers to the operator to tighten the spec
+            // (fine, but that is advice, not a gate), while feeding it back into codegen re-enters this loop
+            // and makes MAX_PASSES meaningless, since a conformance objection can always be raised again.
+            // If it is ever built it wants a STRUCTURAL question with a checkable answer — "list every branch
+            // the spec describes and the line implementing it, or MISSING" — not a verdict; the same move the
+            // cast gate made when it replaced prompt prose with a deterministic finding.
+            // The repair prompt carries ONLY what changes between passes — the current source and the latest
+            // diagnostics. Everything standing (spec, environment, repair discipline, strict-TS) is in
+            // repairSystem, so the prompt does not accumulate and the errors are the last thing read.
             const prompt = pass === 1 ? pass1Prompt :
-`The TypeScript you generated for this plugin does not compile. Return a corrected version.
+`The TypeScript below does not compile. Return a corrected version.
 
-${envBlock}
-
---- CURRENT src/index.ts ---
+--- CURRENT src/index.ts (attempt ${pass - 1} of ${MAX_PASSES}) ---
 ${indexSource}
 --- END CURRENT ---
 
@@ -638,9 +695,14 @@ ${indexSource}
 ${typecheckOutput}
 --- END ERRORS ---
 
-Fix every reported error. Change only what each error requires; keep the tool name, inputs and behaviour identical. ${STRICT_TS} Output ONLY the complete corrected src/index.ts in a single \`\`\`typescript fence — the whole file, not a diff.`;
+Fix every reported error, keeping the specification satisfied. Output ONLY the complete corrected src/index.ts in a single \`\`\`typescript fence — the whole file, not a diff.`;
 
-            const codeResult = await services.singleTurn({ provider: codeProvider, prompt, signal: ctx.signal });
+            const codeResult = await services.singleTurn({
+              provider: codeProvider,
+              prompt,
+              ...(pass === 1 ? {} : { system: repairSystem }),
+              signal: ctx.signal,
+            });
             const src = extractSource(codeResult.text);
             if (!src.includes('MatbotPluginSpec')) {
               typecheckOutput = 'Your reply did not contain a valid plugin (no MatbotPluginSpec found). Output ONLY the complete src/index.ts in a single ```typescript``` fence.';
