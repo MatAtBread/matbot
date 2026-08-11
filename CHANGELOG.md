@@ -9,7 +9,7 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
-## Unreleased
+## 0.4.3
 
 ### Optional
 

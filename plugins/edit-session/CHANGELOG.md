@@ -1,5 +1,11 @@
 # @matatbread/matbot-edit-session
 
+## 0.4.3
+
+### Patch Changes
+
+- @matatbread/matbot-plugin-api@0.4.3
+
 ## 0.4.2
 
 ### Patch Changes
