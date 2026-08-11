@@ -127,11 +127,15 @@ class ToolTypeIndexImpl implements ToolTypeIndex {
       // Scan the source each loaded plugin was actually loaded from (its resolvedUrl) — builtin, compiled
       // (compiled-plugins/), or installed (.plugins/) alike — so every registered tool's real augmentation
       // is read. build-dts UNIONs a glob of the monorepo `plugins/` tree onto these roots (not a fallback:
-      // it catches host-constructed builtins that have no resolvedUrl), so wherever that tree exists — this
-      // repo, or an embedder that vendors it — plugins for OTHER runtimes are scanned too and can clash
-      // with the ones actually loaded. `conflicts` is what makes such a clash audible.
+      // it catches host-constructed builtins that have no resolvedUrl), so the scanned set is a SUPERSET of
+      // the loaded one — wherever that tree exists, plugins for other runtimes and plugins nobody loaded are
+      // read too. Hence the live tool names: a scanned root may supply a tool's contract, never the fact that
+      // the tool exists. Otherwise the dts declares uncallable tools (`telegram_send` from an unloaded
+      // telegram frontend), which `check()` then grades generated code against — clean typecheck, "not
+      // registered" at runtime. What the scan CAN'T settle is two roots declaring one live name; that stays
+      // Program-order and audible via `conflicts`.
       const urls   = getRegisteredPlugins().map(p => p.resolvedUrl).filter((u): u is string => u !== undefined);
-      const built  = await buildMatbotToolsDts(root, urls);
+      const built  = await buildMatbotToolsDts(root, urls, this.machine.tools.list().map(t => t.name));
       this.cache      = built?.dts ?? '';
       this.covered    = new Set([...(built?.tools.emitted ?? []), ...(built?.tools.unknown ?? [])]);
       this.contracts  = built?.contracts ?? {};

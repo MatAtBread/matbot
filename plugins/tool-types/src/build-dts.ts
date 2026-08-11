@@ -52,9 +52,10 @@ export interface MatbotToolsDts {
   tools:    { emitted: string[]; unknown: string[] };
   services: { emitted: string[]; unknown: string[] };
   conflicts: ContractConflict[];
-  // Per source-scanned tool: its wire contract — the flattened `params`/`result` union text, extracted
-  // from the `ToolContracts` arms. The single authored contract (the arms) is thus also the source of the
-  // wire description, so a source tool's `ToolContracts` augmentation is its single contract.
+  // Per source-scanned tool (live ones only, as with the dts): its wire contract — the flattened
+  // `params`/`result` union text, extracted from the `ToolContracts` arms. The single authored contract
+  // (the arms) is thus also the source of the wire description, so a source tool's `ToolContracts`
+  // augmentation is its single contract.
   contracts: Record<string, { params: string; result: string }>;
   // The names of every plugin-api type export. A source-less tool's `toolContract` string may name one
   // (e.g. `StoreQuery`); the consumer (ToolTypeIndex) uses this to import the ones it references so those
@@ -74,7 +75,17 @@ type Classification =
 // augmenting files transitively, so coverage follows the actual loaded set (npm / `.plugins/` / local),
 // not just the monorepo tree. When none resolve to on-disk source, falls back to globbing the monorepo
 // `plugins/` tree. Returns null when neither yields anything (the caller then uses its static DTS).
-export async function buildMatbotToolsDts(projectRoot: string, pluginEntryUrls?: readonly string[]): Promise<MatbotToolsDts | null> {
+//
+// `liveToolNames` is the live tool registry (`machine.tools.list()`), and it is what makes the emitted
+// `ToolContracts` a description of what a generator can actually CALL rather than of what happens to be on
+// disk: the roots are a superset of the loaded set by construction (see the glob below), so a name absent
+// from the registry is declared, typed, and uncallable — `tool.telegram_send(…)` typechecks clean and
+// throws "not registered" at runtime, which is the one failure the check gate exists to prevent. Omit it
+// only when the caller genuinely wants the whole scanned tree (the clash census test); the registry is not
+// optional information for anything that shows the dts to a model.
+export async function buildMatbotToolsDts(
+  projectRoot: string, pluginEntryUrls?: readonly string[], liveToolNames?: readonly string[],
+): Promise<MatbotToolsDts | null> {
   const ts = (await import('typescript')).default as typeof TS;
   const { readFileSync, readdirSync, statSync, existsSync } = await import('node:fs');
   const { join } = await import('node:path');
@@ -107,6 +118,14 @@ export async function buildMatbotToolsDts(projectRoot: string, pluginEntryUrls?:
   // plugin with a resolvedUrl — notably the app-embedded `plugin`/`provider` builtins in `plugins/tool-plugin/`,
   // which the host constructs directly. The glob catches those. In a real deployment there is no `plugins/`
   // tree, so this no-ops and the scan is purely resolvedUrl-driven. Dedup is by path (a Set of roots).
+  //
+  // So the roots deliberately over-reach: wherever that tree exists — this repo, or an embedder that vendors
+  // it — plugins for OTHER runtimes and plugins nobody loaded are scanned too. Two consequences, and they
+  // need different answers. A key declared by an unloaded plugin is filtered out by `liveToolNames` at emit
+  // (a scanned root may contribute a contract, never the FACT of a tool). A key declared by both — `bash` by
+  // `plugins/bash` and `plugins/docker-bash` — still merges by Program file order, so the unloaded one can
+  // win and describe the loaded one; that is what `conflicts` makes audible, and it cannot be filtered away
+  // because the name IS live.
   // Generated `matbot-tools.d.ts` files are skipped (don't feed prior output back in).
   if (existsSync(join(projectRoot, 'plugins'))) {
     const SKIP = new Set(['node_modules', 'dist', '.git', 'compiled-plugins']);
@@ -263,14 +282,19 @@ export async function buildMatbotToolsDts(projectRoot: string, pluginEntryUrls?:
   };
 
   // Emit one augmentable interface's plugin-contributed members. `onlyAugmented` skips base members
-  // already visible via plugin-api (no-op for ToolContracts).
-  const emitInterface = (interfaceName: string, onlyAugmented: boolean): { lines: string[]; emitted: string[]; unknown: string[] } => {
+  // already visible via plugin-api (no-op for ToolContracts). `only`, when given, keeps just those keys —
+  // for `ToolContracts` that is the live registry, so a scanned-but-unloaded plugin's arm is dropped before
+  // `emitNode` runs and its referenced types are never bundled or imported either.
+  const emitInterface = (
+    interfaceName: string, onlyAugmented: boolean, only?: ReadonlySet<string>,
+  ): { lines: string[]; emitted: string[]; unknown: string[] } => {
     const sym = findCanonicalSymbol(interfaceName);
     const lines: string[] = [], emitted: string[] = [], unknownNames: string[] = [];
     if (!sym) return { lines, emitted, unknown: unknownNames };
     const props = [...checker.getPropertiesOfType(checker.getDeclaredTypeOfSymbol(sym))].sort((a, b) => a.name.localeCompare(b.name));
     for (const prop of props) {
       if (onlyAugmented && inPluginApi(prop)) continue;
+      if (only !== undefined && !only.has(prop.name)) continue;
       const optional = (prop.flags & ts.SymbolFlags.Optional) !== 0 ? '?' : '';
       const decl = (prop.declarations ?? []).find(d => ts.isPropertySignature(d));
       const ann  = decl && ts.isPropertySignature(decl) ? decl.type : undefined;
@@ -296,7 +320,11 @@ export async function buildMatbotToolsDts(projectRoot: string, pluginEntryUrls?:
     return { lines, emitted, unknown: unknownNames };
   };
 
-  const tools    = emitInterface('ToolContracts',    false);
+  // A tool the registry doesn't hold isn't a tool. `MatbotServices` takes no such filter: a member there is
+  // consumed as `services.X?.` and its absence is already a type (the `?:` IS the "may not be loaded"
+  // signal), whereas a `ToolContracts` key carries no such qualifier — declared means callable.
+  const live     = liveToolNames !== undefined ? new Set(liveToolNames) : undefined;
+  const tools    = emitInterface('ToolContracts', false, live);
   const services = emitInterface('MatbotServices', true);
 
   // Re-emit plugin-side augmentations of plugin-api interfaces. A contract that references a plugin-api
@@ -346,6 +374,9 @@ export async function buildMatbotToolsDts(projectRoot: string, pluginEntryUrls?:
     if (!sym) return [];
     const out: ContractConflict[] = [];
     for (const prop of checker.getPropertiesOfType(checker.getDeclaredTypeOfSymbol(sym))) {
+      // Don't warn about a clash between two tools that aren't there: nothing is emitted for them, so
+      // there is no wrong shape to act on, and the warning would point at a fix nobody needs to make.
+      if (interfaceName === 'ToolContracts' && live !== undefined && !live.has(prop.name)) continue;
       // Declaration order is merge order: `emitInterface` reads the first property signature, so that
       // one is the winner by the same rule that produced the emitted text.
       const sites = (prop.declarations ?? []).flatMap(d =>
@@ -491,6 +522,7 @@ export async function buildMatbotToolsDts(projectRoot: string, pluginEntryUrls?:
   const toolContractsSym = findCanonicalSymbol('ToolContracts');
   if (toolContractsSym) {
     for (const prop of checker.getPropertiesOfType(checker.getDeclaredTypeOfSymbol(toolContractsSym))) {
+      if (live !== undefined && !live.has(prop.name)) continue;      // same live-registry filter as the dts
       const decl = (prop.declarations ?? []).find(d => ts.isPropertySignature(d));
       const ann  = decl && ts.isPropertySignature(decl) ? decl.type : undefined;
       if (!ann) continue;
