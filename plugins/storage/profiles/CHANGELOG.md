@@ -4,6 +4,11 @@
 
 ### Patch Changes
 
+- `visible` takes a `VisibilityQuery` object (`{ viewer, kind, namespace?, id?, origin? }`) and is now
+  consulted for **every** notification kind, not just an `ItemChange` carrying a principal. Partition
+  routing is this backend's only policy and is meaningful only for an item-addressed change with an owner,
+  so it returns `true` when `namespace`, `id` or `origin` is absent — exactly what the caller's kind gate
+  used to do. The filtered set and every answer are identical.
 - @matatbread/matbot-core@0.4.3
 - @matatbread/matbot-plugin-api@0.4.3
 - @matatbread/matbot-storage-filesystem@0.4.3

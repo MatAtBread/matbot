@@ -2,6 +2,47 @@
 
 ## 0.4.3
 
+### Patch Changes
+
+- **Breaking (optional service).** `WatchVisibility.visible` takes a `VisibilityQuery` object and is
+  consulted for **every** notification kind.
+
+  The predicate could not see the `kind` it was deciding about, so a consumer could not express a per-kind
+  delivery policy — the thing a partitioned deployment actually needs, since routing a namespace and
+  addressing a fact to a recipient are different policies over the same stream. It could not see `kind`
+  because the caller had already gated on it: `frontend-web`'s firehose consulted the predicate only for an
+  `ItemChange` carrying a principal, which left every plugin-defined kind fanned out to every connection
+  with no hook capable of stopping it. Harmless on the in-process bus, where one process is one user; wrong
+  the moment a distributed `Notifier` bridges an addressed fact in from another instance, which these docs
+  explicitly invite.
+
+  So the gate is gone and the judgement moved behind the interface. A frontend hands over everything it
+  knows and takes no position on policy; an implementation decides which kinds it filters and **fails
+  open** on anything it cannot route.
+
+  ```ts
+  interface VisibilityQuery {
+    viewer:     Principal;              // the connection asking
+    kind:       keyof Notifications;    // NEW — selects which policy applies; open at runtime
+    namespace?: string;                 // now optional: a kind may address no item
+    id?:        string;
+    origin?:    Principal;              // was the 4th positional param
+  }
+
+  visible(q: VisibilityQuery): boolean;
+  ```
+
+  An object rather than a fifth positional parameter because `kind`/`namespace`/`id` are three adjacent
+  strings around two `Principal`s — an ordering an implementation could get wrong silently.
+
+  No behaviour change. The profiles backend has exactly one policy, partition routing, which is meaningful
+  only for an item-addressed change with an owner; it returns `true` when `namespace`, `id` or `origin` is
+  absent, which is precisely what the caller's kind gate used to do. The filtered set and every answer are
+  identical.
+
+  Migration: a `WatchVisibility` implementation destructures the query instead of reading four positionals,
+  and must fail open on kinds it has no policy for — it will now be asked about all of them.
+
 ## 0.4.2
 
 ### Patch Changes

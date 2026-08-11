@@ -4,7 +4,7 @@ import type {
   Store, Session, SystemContextRegistry, KnowledgeIndex, PromptFn, SessionRunner, Usage, HookRegistrar,
   TypeScriptStripper, ToolTypeIndex, ToolPresenter, SteeringPolicy,
 } from './types.js';
-import type { Notifier } from './notify.js';
+import type { Notifications, Notifier } from './notify.js';
 
 /**
  * The plugin API contract version: this package's `major.minor`, and nothing else. It sat at `'0.1'`
@@ -361,26 +361,61 @@ export interface StorageBackend {
 }
 
 /**
+ * What a {@link WatchVisibility} predicate decides on. A named object rather than positional parameters
+ * because `kind`/`namespace`/`id` are three adjacent strings around two `Principal`s — an ordering an
+ * implementation could get wrong silently.
+ *
+ * Populated by whoever consults the predicate; a frontend firehose fills it from the notification it is
+ * about to fan out.
+ */
+export interface VisibilityQuery {
+  /** The principal asking — the owner of the connection this fan-out would reach. */
+  viewer:     Principal;
+  /** The notification's `kind`. Present so an implementation can apply a policy PER KIND: some kinds are
+   *  global, some are checked against the recipient (`viewer`), some against the sender (`origin`). Typed
+   *  as the registry key for narrowing, but **open at runtime** like every `kind` — a plugin outside this
+   *  build, or a bridged remote, can supply one, so `default` your switch and never assume exhaustiveness. */
+  kind:       keyof Notifications;
+  /** Routing namespace of the changed item — the axis a profile isolates. Absent when the kind addresses
+   *  no item (a `RegistryChange`, or a plugin kind carrying a measurement or an external event). */
+  namespace?: string;
+  /** Store id of the changed item; drives the shared-in check. Absent with `namespace`. */
+  id?:        string;
+  /** Whose data the fact is about — `NotificationBase.principal`, the ownership axis, NOT attribution.
+   *  Absent ⇒ a global fact. */
+  origin?:    Principal;
+}
+
+/**
  * The per-connection visibility layer, registered by a storage backend that partitions per principal (the
  * profiles backend). Consumed by a frontend firehose to decide, per SSE connection, whether a given
  * notification is visible to that connection's principal. Absent ⇒ no partitioning, and every connection
- * sees everything. Generic across kinds: it answers on (`namespace`, `id`, `origin`), so files, skills and
- * stores all route through the one predicate.
+ * sees everything.
+ *
+ * **The predicate is consulted for EVERY kind, and decides for itself which it filters.** It used to be
+ * reached only for an `ItemChange` carrying a principal, because the caller gated on that — which left
+ * every plugin-defined kind fanned out unfiltered with no hook capable of stopping it, and made `kind` a
+ * constant not worth passing. Moving that judgement here is the point: routing a partitioned namespace and
+ * addressing a notification to a recipient are two different policies, and only the implementation knows
+ * which of its kinds want which. An implementation that has nothing to say about a kind returns `true`.
  */
 export interface WatchVisibility {
   /**
    * The per-connection visibility predicate for ANY partitioned event stream (files, skills, …): would a
-   * connection owned by `viewer` see the change to (`namespace`, `id`) produced by `origin`? True iff the
-   * viewer routes that namespace to the same partition as `origin` — `route(viewer, namespace) ===
-   * route(origin, namespace)` — OR the item is shared INTO the viewer's partition (the owner edits a
-   * shared-in item: origin=owner ≠ the viewer's route, yet the viewer holds a live link to it). This yields
-   * the intended behavior uniformly: global/base events for namespaces the viewer has NOT isolated,
-   * own-partition events for those it has, plus live updates to items shared in from another partition.
-   * `origin` may be a partition principal (files, tagged by the merge) or the acting principal (skills,
-   * stamped at write) — routing both sides makes either correct. `undefined` origin ⇒ base. `id` is the
-   * store id of the changed item; it drives the shared-in check.
+   * connection owned by `q.viewer` see this change? For a partitioning backend, true iff the viewer routes
+   * `q.namespace` to the same partition as `q.origin` — `route(viewer, ns) === route(origin, ns)` — OR the
+   * item is shared INTO the viewer's partition (the owner edits a shared-in item: origin=owner ≠ the
+   * viewer's route, yet the viewer holds a live link to it). That yields the intended behavior uniformly:
+   * global/base events for namespaces the viewer has NOT isolated, own-partition events for those it has,
+   * plus live updates to items shared in from another partition. `q.origin` may be a partition principal
+   * (files, tagged by the merge) or the acting principal (skills, stamped at write) — routing both sides
+   * makes either correct.
+   *
+   * Fail OPEN on anything you do not recognise: a kind you have no policy for, or a query with no
+   * `namespace`/`origin` to route on. A predicate that guesses `false` silently drops another party's
+   * events; one that returns `true` leaves them exactly as unfiltered as they were before it registered.
    */
-  visible(viewer: Principal, namespace: string, id: string, origin: Principal | undefined): boolean;
+  visible(q: VisibilityQuery): boolean;
 }
 
 // ── Plugin interface ──────────────────────────────────────────────────────────

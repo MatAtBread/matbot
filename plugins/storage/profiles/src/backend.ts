@@ -1,6 +1,6 @@
 import { promises as fs, type Dirent } from 'node:fs';
 import { dirname, join, sep } from 'node:path';
-import type { Store, FileStore, StorageBackend, Principal, Notifier } from '@matatbread/matbot-plugin-api';
+import type { Store, FileStore, StorageBackend, Principal, Notifier, VisibilityQuery } from '@matatbread/matbot-plugin-api';
 import { readOnlyError, ItemChangeKind } from '@matatbread/matbot-plugin-api';
 import { tryCurrentPrincipal } from '@matatbread/matbot-core';
 import { FilesystemStorageBackend } from '@matatbread/matbot-storage-filesystem';
@@ -55,7 +55,7 @@ export interface ProfileDirectory {
   copy(namespace: string, id: string, target: string): Promise<void>;
   // The `WatchVisibility` service surface, exposed here so the plugin can register it: the generic
   // per-connection predicate for any partitioned kind (files, skills, …), keyed on the event's namespace.
-  visible(viewer: Principal, namespace: string, id: string, origin: Principal | undefined): boolean;
+  visible(q: VisibilityQuery): boolean;
   // Hand the backend the notification bus. Share/unshare/copy change what a partition can see without
   // touching a Store, so they announce themselves — but the backend is opened by the
   // boot pre-scan, before a machine exists, so the bus is attached from setup() rather than injected.
@@ -583,10 +583,17 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
   //   2. The item is shared INTO the viewer's partition — the owner edits a shared-in item, so origin=owner
   //      routes elsewhere, yet the viewer holds a live link to it and must see the update. Answered from the
   //      eagerly-built sharedIn cache, so no fs stat on this hot per-(conn × event) path.
-  // `undefined` origin ⇒ base.
-  visible(viewer: Principal, namespace: string, id: string, origin: Principal | undefined): boolean {
+  //
+  // Partition routing is the ONLY policy this backend has, and it is meaningful only for an item-addressed
+  // change with an owner. Every other kind — a RegistryChange, a plugin kind carrying progress or an
+  // addressed message — has no namespace to route and no owner to route it against, so it is not this
+  // backend's call: fail open. These two guards are what the caller's kind gate used to do, and they keep
+  // the filtered set identical now that the predicate is consulted for every kind.
+  visible(q: VisibilityQuery): boolean {
+    const { viewer, namespace, id, origin } = q;
+    if (namespace === undefined || id === undefined || origin === undefined) return true;
     const viewerPart = this.routeFor(viewer.id, namespace);
-    if (viewerPart === this.routeFor(origin?.id, namespace)) return true;
+    if (viewerPart === this.routeFor(origin.id, namespace)) return true;
     return this.sharedIn.get(this.sharedInKey(viewerPart, namespace))?.has(id) ?? false;
   }
 

@@ -66,7 +66,7 @@ export const plugin: MatbotPluginSpec = {
     // connection by its principal. Delegates live to the active backend (swap-safe), fail-open if the
     // facet has gone.
     await services.register('WatchVisibility', {
-      visible: (viewer, ns, id, origin) => dir()?.visible(viewer, ns, id, origin) ?? true,
+      visible: q => dir()?.visible(q) ?? true,
     });
     watchRegistered = true;
   },

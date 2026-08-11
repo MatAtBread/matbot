@@ -315,7 +315,7 @@ interface MatbotServices {
   readonly Notifier:         Notifier;                    // the one change-notification bus; always present
   readonly ToolTypeIndex?:   ToolTypeIndex | undefined;    // node-only; provided by the tool-types plugin
   readonly ToolPresenter?:   ToolPresenter | undefined;    // per-turn tool-visibility policy (tool-router)
-  readonly WatchVisibility?: WatchVisibility | undefined;  // per-connection file-watch visibility (a partitioning backend)
+  readonly WatchVisibility?: WatchVisibility | undefined;  // per-connection notification visibility (a partitioning backend)
   readonly SteeringPolicy?:  SteeringPolicy | undefined;   // how a mid-turn submission is disposed (queue vs interrupt)
 }
 ```

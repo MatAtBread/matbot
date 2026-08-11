@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type {
   MatbotPlugin, Principal, Session, Store, Tool, ToolRegistry, FileStore, Vault,
-  FormField, PromptFn, SessionRunner, WatchVisibility, SteeringMode,
+  FormField, PromptFn, SessionRunner, WatchVisibility, VisibilityQuery, SteeringMode,
   Notifier, Notification,
 } from '@matatbread/matbot-core';
 import { createSession, promptCancelledError, runAs, tryCurrentPrincipal, ItemChangeKind, RegistryChangeKind } from '@matatbread/matbot-core';
@@ -200,10 +200,13 @@ export function createWebServer(deps: WebServerDeps) {
   // HTTP, a share landing in another profile); this frontend is purely a sink, with exactly one path
   // from "something changed" to a connected browser.
   //
-  // Filtering is per (connection × notification) against the same visibility predicate as before: a
-  // ItemChange carrying a principal is shown only to connections whose principal routes that
-  // (namespace, id) to the same partition, or has it shared in. A notification with no principal is a
-  // global fact (registry changes) and reaches everyone.
+  // Filtering is per (connection × notification), and the registered predicate decides EVERY kind — this
+  // used to gate on `kind === ItemChangeKind && principal !== undefined` and consult the predicate only
+  // then, which meant every plugin-defined kind was fanned out to every browser with no hook able to stop
+  // it. Harmless for the in-process bus (one process, one user); wrong the moment a distributed Notifier
+  // bridges an addressed fact in from another instance. So the gate is gone and the judgement moved behind
+  // the interface: this frontend hands over everything it knows and takes no position on policy. A
+  // partitioning backend's predicate fails open on what it cannot route, so the filtered set is unchanged.
   let firehoseStarted = false;
   function startFirehose(): void {
     if (firehoseStarted) return;
@@ -212,10 +215,17 @@ export function createWebServer(deps: WebServerDeps) {
     // WatchVisibility *after* frontend-web sets up, and snapshotting undefined would silently
     // downgrade every connection to unfiltered.
     const wv = deps.watchVisibility?.();
-    const visibleTo = (n: Notification): ((principal: Principal) => boolean) | undefined =>
-      wv !== undefined && n.kind === ItemChangeKind && n.principal !== undefined
-        ? principal => wv.visible(principal, n.namespace, n.id, n.principal)
-        : undefined;
+    const visibleTo = (n: Notification): ((principal: Principal) => boolean) | undefined => {
+      if (wv === undefined) return undefined;
+      // Built once per notification, not per connection: `broadcast` iterates every listener, and only
+      // `viewer` varies across them. `namespace`/`id` exist on an ItemChange and nowhere else.
+      const q: Omit<VisibilityQuery, 'viewer'> = {
+        kind: n.kind,
+        ...(n.kind === ItemChangeKind    ? { namespace: n.namespace, id: n.id } : {}),
+        ...(n.principal !== undefined    ? { origin: n.principal }              : {}),
+      };
+      return viewer => wv.visible({ viewer, ...q });
+    };
 
     deps.notifier.consume(n => broadcast(sseEvent('notification', n), visibleTo(n)), watchAc.signal);
   }

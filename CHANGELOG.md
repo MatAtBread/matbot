@@ -11,6 +11,28 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ## 0.4.3
 
+### Breaking changes
+
+- **`WatchVisibility.visible` takes a `VisibilityQuery` and is consulted for every notification kind.** The
+  predicate could not see the `kind` it was deciding about, so a consumer could not express a per-kind
+  delivery policy — routing a partitioned namespace and addressing a fact to a recipient are different
+  policies over the same stream, and only an implementation knows which of its kinds wants which. It could
+  not see `kind` because the caller had already gated on it: `frontend-web`'s firehose consulted the
+  predicate only for an `ItemChange` carrying a principal, so every plugin-defined kind was fanned out to
+  every connection with no hook capable of stopping it. Harmless on the in-process bus (one process, one
+  user); wrong the moment a distributed `Notifier` bridges an addressed fact in from another instance —
+  which these docs explicitly invite. The gate is gone and the judgement moved behind the interface: the
+  frontend hands over everything it knows and takes no position on policy.
+
+  `visible(q)` where `q` is `{ viewer, kind, namespace?, id?, origin? }` — an object rather than a fifth
+  positional because `kind`/`namespace`/`id` are three adjacent strings around two `Principal`s.
+  `namespace`/`id` are optional because a kind may address no item; `origin` was the 4th parameter. An
+  implementation must **fail open** on kinds it has no policy for, since it is now asked about all of them.
+
+  No behaviour change: the profiles backend's one policy is partition routing, meaningful only for an
+  item-addressed change with an owner, so it returns `true` when `namespace`/`id`/`origin` is absent —
+  exactly what the caller's kind gate used to do. The filtered set and every answer are identical.
+
 ### Optional
 
 - **tool-types:** the generated dts declares the **live tool registry**, not every plugin on disk. The scan
