@@ -150,6 +150,9 @@ export interface MatbotServices {
    *  registered by a partitioning storage backend. Absent ⇒ frontends use the plain `fileStore.watch()`.
    *  See {@link WatchVisibility}. */
   readonly WatchVisibility?: WatchVisibility | undefined;
+  /** Optional file-partition addressing, registered by the same partitioning storage backend as
+   *  {@link WatchVisibility}. Absent ⇒ one undivided file area. See {@link FilePartition}. */
+  readonly FilePartition?: FilePartition | undefined;
   /** Optional steering policy: decides how a mid-turn submission under `mode: 'auto'` is disposed
    *  (queue vs interrupt) and supplies the nudge folded onto an interrupt's continuation. Absent ⇒ the
    *  runner uses its own defaults. A plain registered service, consumed by the runner as a member.
@@ -416,6 +419,35 @@ export interface WatchVisibility {
    * events; one that returns `true` leaves them exactly as unfiltered as they were before it registered.
    */
   visible(q: VisibilityQuery): boolean;
+}
+
+/**
+ * Addressing for the file area, registered by a storage backend that partitions it per principal (the
+ * profiles backend). It exists so a caller that must name a file area OUT OF BAND — in a URL a plain
+ * browser GET will replay, with no ambient principal and no header to carry one — can do so without
+ * reimplementing the backend's routing.
+ *
+ * **The token is a partition, never a principal.** The two are not interchangeable: one principal may
+ * hold several profiles, and a profile may alias a namespace onto a third profile's partition, so the
+ * partition serving a principal's files is not derivable from the principal id. Minting the token from
+ * the identity in force — the bug this replaces — attached an addressable partition to files that were
+ * in the shared base area, and would have pointed at an empty partition the moment one was created
+ * under that name.
+ *
+ * `current` and `enter` are one round trip and must stay each other's inverse: whatever `current`
+ * returns, `enter` puts a reader back into the area those bytes were written to. Both live here rather
+ * than on the consumer because only the backend knows how a token resolves — a frontend that
+ * synthesised a principal from the token would be guessing at the routing again, one layer up.
+ */
+export interface FilePartition {
+  /** The partition the CURRENT principal's file area resolves to, as an opaque token — or `undefined`
+   *  for the shared base area, which needs no addressing (a bare path already reaches it). Never
+   *  interpret the token: it is the backend's, and only `enter` gives it meaning. */
+  current(): string | undefined;
+  /** Run `fn` reading the file area named by `token` — the inverse of `current`. An unknown token
+   *  resolves to whatever that backend serves for one; it is an address, not a capability, so it grants
+   *  no access the caller's own gating (a file's `allowed` flag) does not already permit. */
+  enter<T>(token: string, fn: () => Promise<T>): Promise<T>;
 }
 
 // ── Plugin interface ──────────────────────────────────────────────────────────
