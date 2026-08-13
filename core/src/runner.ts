@@ -338,9 +338,9 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
           case 'usage':
             turnUsage = addUsage(turnUsage, ev);
             yield { type: 'usage', inputTokens: ev.inputTokens, outputTokens: ev.outputTokens, traceId,
-              ...(ev.costUsd              !== undefined ? { costUsd:              ev.costUsd              } : {}),
               ...(ev.cacheReadTokens     !== undefined ? { cacheReadTokens:     ev.cacheReadTokens     } : {}),
-              ...(ev.cacheCreationTokens !== undefined ? { cacheCreationTokens: ev.cacheCreationTokens } : {}) };
+              ...(ev.cacheCreationTokens !== undefined ? { cacheCreationTokens: ev.cacheCreationTokens } : {}),
+              ...(ev.reported            !== undefined ? { reported:            ev.reported            } : {}) };
             break;
           case 'done':
             break;

@@ -1658,12 +1658,11 @@ function usageByProvider(messages, traceId) {
     if (traceId && e.traceId !== traceId) continue;
     const u = e.usage;
     if (!e.provider || !u) continue;
-    const cur = map.get(e.provider) || { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, costUsd: 0 };
+    const cur = map.get(e.provider) || { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
     cur.inputTokens         += u.inputTokens         || 0;
     cur.outputTokens        += u.outputTokens        || 0;
     cur.cacheReadTokens     += u.cacheReadTokens     || 0;
     cur.cacheCreationTokens += u.cacheCreationTokens || 0;
-    cur.costUsd             += u.costUsd             || 0;
     map.set(e.provider, cur);
   }
   return [...map].map(([provider, usage]) => ({ provider, usage }));
@@ -1728,7 +1727,6 @@ function makeTurnFooter(perProvider, at) {
     }
     if (usage.outputTokens > 0)        row.appendChild(s('\u2193 ' + usage.outputTokens.toLocaleString() + ' out'));
     if (usage.cacheCreationTokens > 0) row.appendChild(s('\u2601 ' + usage.cacheCreationTokens.toLocaleString() + ' written'));
-    if (usage.costUsd > 0)             row.appendChild(s('\u2248 $' + usage.costUsd.toFixed(4)));
     body.appendChild(row);
   }
   det.appendChild(body);

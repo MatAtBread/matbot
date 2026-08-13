@@ -13,6 +13,25 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Breaking changes
 
+- **`Usage.reported` retains what the endpoint actually said; `Usage.costUsd` is deleted.** Adapters now
+  pass their `usage` object through verbatim alongside the normalised counters, and guard on **presence
+  rather than truthiness** — an endpoint reporting `cache_read_input_tokens: 0` is saying there was no
+  cache activity, which is not the same fact as not reporting it at all, and all three adapters
+  collapsed the two. `addUsage` sums `reported` numerics key-wise (within one provider only, since
+  `prompt_tokens` includes cache hits where `input_tokens` does not) and leaves non-numeric values —
+  `service_tier`, latency objects — alone.
+
+  This is what makes the existing normalisation non-destructive rather than replacing it: the adapter is
+  the right party to map its own protocol, and it stays so. openai-compat still reports `inputTokens`
+  net of the cache hit so a mixed-provider turn can be totalled — but `prompt_tokens` now rides
+  alongside, so the subtraction can be checked, reversed, or reconciled against a vendor's dashboard,
+  and google's `thoughtsTokenCount` survives being folded into `outputTokens`.
+
+  `costUsd` had no producer and never has: a rate table cannot be keyed on counters that have discarded
+  the tier, the modality and the reasoning split. With the raw retained, a consumer computes cost from
+  `reported` and holds the answer itself, so the slot has no consumer either. Removed rather than left
+  as dead surface (the CLI and web footers stop rendering it).
+
 - **The usage carrier carries a `UsageScope`, not a bare sink, and scopes nest.** `UsageCarrier.run`/
   `tryCurrent` now deal in `{ entries, site?, parent? }`, and `withUsageScope(fn)` hands the scope to
   `fn` so a caller can read what accrued. A scope opened inside another rolls its entries up into the

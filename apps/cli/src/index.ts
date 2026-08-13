@@ -76,7 +76,6 @@ function formatUsageParts(u: Usage): string[] {
   if (u.outputTokens        > 0) parts.push(`↓${u.outputTokens}`);
   if ((u.cacheReadTokens     ?? 0) > 0) parts.push(`${u.cacheReadTokens} cached`);
   if ((u.cacheCreationTokens ?? 0) > 0) parts.push(`+${u.cacheCreationTokens} written`);
-  if ((u.costUsd             ?? 0) > 0) parts.push(`≈$${u.costUsd!.toFixed(4)}`);
   return parts;
 }
 

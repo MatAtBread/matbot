@@ -1,6 +1,13 @@
 import type { Message, Usage, UsageRecord } from './types.js';
 
-/** Fold one usage tally into a running total; optional fields are summed only when either side has them. */
+/**
+ * Fold one usage tally into a running total; optional fields are summed only when either side has them.
+ *
+ * `reported` sums **numeric values key-wise** and drops the rest: a total `service_tier` is meaningless
+ * and a summed `latency_checkpoint` is nonsense, so non-numeric retained values stay per-call facts that
+ * a consumer reads off the entries. Callers must fold only within ONE provider — `usageByProvider` does,
+ * by grouping first — since the same key means different things under different protocols.
+ */
 export function addUsage(acc: Usage | undefined, next: Usage): Usage {
   const a = acc ?? { inputTokens: 0, outputTokens: 0 };
   const add = (x: number | undefined, y: number | undefined): number | undefined =>
@@ -8,10 +15,24 @@ export function addUsage(acc: Usage | undefined, next: Usage): Usage {
   return {
     inputTokens:  a.inputTokens  + next.inputTokens,
     outputTokens: a.outputTokens + next.outputTokens,
-    ...(((c) => c !== undefined ? { costUsd:             c } : {}))(add(a.costUsd,             next.costUsd)),
     ...(((c) => c !== undefined ? { cacheReadTokens:     c } : {}))(add(a.cacheReadTokens,     next.cacheReadTokens)),
     ...(((c) => c !== undefined ? { cacheCreationTokens: c } : {}))(add(a.cacheCreationTokens, next.cacheCreationTokens)),
+    ...(((r) => r !== undefined ? { reported: r } : {}))(addReported(a.reported, next.reported)),
   };
+}
+
+function addReported(
+  a: Record<string, unknown> | undefined,
+  b: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (a === undefined) return b;
+  if (b === undefined) return a;
+  const out: Record<string, unknown> = { ...a };
+  for (const [k, v] of Object.entries(b)) {
+    const prev = out[k];
+    out[k] = typeof v === 'number' && typeof prev === 'number' ? prev + v : v;
+  }
+  return out;
 }
 
 /**

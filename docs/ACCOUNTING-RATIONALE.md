@@ -283,7 +283,7 @@ attributed record — which is the only thing core promises.
 1. **Attribution coordinate + nesting.** *(landed)* Fixes the misfiling race; stands alone.
 2. **Entries carry their cause and anchor on the turn head**, flushed at pump idle. *(landed)*
 3. **Open the target**: `reported` alongside the normalised counters, adapters retaining what they
-   currently discard and synthesising nothing. No new plugin — three adapter changes.
+   discard and synthesising nothing. No new plugin — three adapter changes. *(landed)*
 4. **Brackets**: tool and round spans as entry fields.
 5. **`meta` registry + mapper interface**, once there is something to map.
 

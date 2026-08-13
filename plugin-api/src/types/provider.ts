@@ -44,9 +44,29 @@ export interface ProviderConfig {
 export interface Usage {
   inputTokens:          number;
   outputTokens:         number;
-  costUsd?:             number;
   cacheReadTokens?:     number;
   cacheCreationTokens?: number;
+  /**
+   * What the endpoint actually reported, under its own field names, verbatim — the adapter's `usage`
+   * object passed through rather than interpreted. Present only for fields the endpoint sent: an
+   * explicit `0` and an absent key are different facts, and collapsing them is not the adapter's call
+   * to make (a host that strips a capability and a call with genuinely no cache activity look identical
+   * once you do).
+   *
+   * The normalised counters above are still the comparable ones — every protocol has input and output
+   * tokens unambiguously, and something must be common or a turn spanning three providers cannot be
+   * totalled at all. This is what makes that normalisation non-destructive: `inputTokens` may be a real
+   * interpretation (openai-compat reports it net of cache hits, so it means what anthropic's
+   * `input_tokens` means), and keeping the components alongside means a consumer can check it, reverse
+   * it, or reconcile against a vendor's own dashboard.
+   *
+   * Not all values are counters — `service_tier` is a string that prices the call, `latency_checkpoint`
+   * a nested object — so this is deliberately not a `Record<string, number>`. Aggregation sums numeric
+   * values key-wise and leaves the rest alone; and only ever within one provider, since the same key
+   * means different things under different protocols (`prompt_tokens` includes cache hits,
+   * `input_tokens` does not). See docs/ACCOUNTING-RATIONALE.md.
+   */
+  reported?:            Record<string, unknown>;
 }
 
 /**
