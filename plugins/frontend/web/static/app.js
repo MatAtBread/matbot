@@ -1703,30 +1703,41 @@ function formatTurnTime(at) {
 // summary. `perProvider` is the output of usageByProvider; with no usage the footer degrades to the
 // bare time, so a turn whose provider reported nothing still gets one. Both empty ⇒ null (caller skips).
 function makeTurnFooter(perProvider, at) {
-  const timeEl = at ? (() => {
-    const el = document.createElement('span');
-    el.className = 'turn-time';
-    el.textContent = formatTurnTime(at);
-    el.title = new Date(at).toLocaleString();
-    return el;
-  })() : null;
-
-  if (!perProvider.length) {
-    if (!timeEl) return null;
-    const solo = document.createElement('div');
-    solo.className = 'token-stats turn-time-solo';
-    solo.appendChild(timeEl);
-    return solo;
-  }
-
+  if (!perProvider.length && !at) return null;
   const det = document.createElement('details');
   det.className = 'token-stats';
   const sum = document.createElement('summary');
   sum.appendChild(document.createTextNode('tokens'));
-  if (timeEl) sum.appendChild(timeEl);
+  const timeEl = document.createElement('span');
+  timeEl.className = 'turn-time';
+  sum.appendChild(timeEl);
   det.appendChild(sum);
   const body = document.createElement('div');
   body.className = 'token-stats-body';
+  det.appendChild(body);
+  fillTurnFooter(det, perProvider, at);
+  return det;
+}
+
+// Fill an existing footer in place. Separate from building it because a turn's numbers arrive AFTER the
+// footer is drawn \u2014 accounting is flushed when the queue drains, which is later than `done` \u2014 and the
+// footer must not visibly change shape when they land. Swapping the element (or, as this did before,
+// swapping a bare-time `div` for a `details`) moves the timestamp and restyles it, so the turn twitches
+// a second after it finishes. Only the rows and the time text change here; the shell, its classes and
+// its open state are untouched.
+function fillTurnFooter(det, perProvider, at) {
+  const timeEl = det.querySelector(':scope > summary > .turn-time');
+  if (timeEl) {
+    timeEl.textContent = at ? formatTurnTime(at) : '';
+    if (at) timeEl.title = new Date(at).toLocaleString();
+  }
+  // A footer with nothing in it yet still occupies its final shape; the class is a styling hook only,
+  // and must not be used to change the layout, or filling it would move things again.
+  det.classList.toggle('is-empty', !perProvider.length);
+
+  const body = det.querySelector(':scope > .token-stats-body');
+  if (!body) return;
+  body.textContent = '';
   const s = (t, cls) => { const el = document.createElement('span'); if (cls) el.className = cls; el.textContent = t; return el; };
   for (const { provider, usage } of perProvider) {
     const row = document.createElement('div');
@@ -1741,8 +1752,6 @@ function makeTurnFooter(perProvider, at) {
     if (usage.cacheCreationTokens > 0) row.appendChild(s('\u2601 ' + usage.cacheCreationTokens.toLocaleString() + ' written'));
     body.appendChild(row);
   }
-  det.appendChild(body);
-  return det;
 }
 
 // Attach the footer to each turn already rendered into the DOM, exactly as the live `done` path does —
@@ -1780,8 +1789,8 @@ function applyTurnUsageBlocks(messages, replace) {
     const entries = (msgs[i].activity || []).length
       ? usageByProvider([msgs[i]])
       : usageByProvider(span, msgs[i].traceId);        // sessions written before the move
-    const footer = makeTurnFooter(entries, turnTimestamp(span, undefined));
-    if (!footer) continue;
+    const at = turnTimestamp(span, undefined);
+    if (!entries.length && !at) continue;
 
     // Any wrap belonging to any trace in the span — the answer may carry the redo's traceId.
     const traces = [...new Set(span.map(m => m.traceId).filter(Boolean))];
@@ -1794,14 +1803,13 @@ function applyTurnUsageBlocks(messages, replace) {
     // first, which shows up as a turn with two timestamps.
     const existing = wraps.map(w => w.querySelector(':scope > .token-stats')).find(Boolean);
     if (existing) {
-      if (!replace) continue;
-      // Keep an opened breakdown open across the rebuild — collapsing it under the reader would be
-      // worse than showing nothing.
-      if (existing.open) footer.open = true;
-      existing.replaceWith(footer);
+      // Fill in place — never swap the element. The open state survives for free, and nothing moves.
+      if (replace) fillTurnFooter(existing, entries, at);
       continue;
     }
     if (replace) continue;                       // an unfinished turn: leave it to `done` to draw
+    const footer = makeTurnFooter(entries, at);
+    if (!footer) continue;
     // Last in DOM order, which `traces` order does not guarantee.
     wraps.sort((a, b) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) ? -1 : 1);
     wraps[wraps.length - 1].appendChild(footer);
