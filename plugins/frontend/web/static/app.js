@@ -1742,8 +1742,13 @@ function makeTurnFooter(perProvider, at) {
 
 // Attach the footer to each turn already rendered into the DOM, exactly as the live `done` path does —
 // appended to the turn's last assistant wrap (the turn's bottom). Used on reload, so historical turns show
-// the same accounting as if they had just streamed. Idempotent: skips a turn whose wrap already carries one.
-function applyTurnUsageBlocks(messages) {
+// the same accounting as if they had just streamed.
+//
+// `replace` REBUILDS a footer that is already there, rather than skipping it. That is not a refinement:
+// accounting is flushed when the pump's queue drains, which is *after* the `done` that drew the footer,
+// so the live footer is necessarily built before the numbers exist. Without a rebuild a live turn would
+// show a bare timestamp while a reload of the same turn showed the tokens.
+function applyTurnUsageBlocks(messages, replace) {
   const seen = new Set();
   for (const m of (messages || [])) {
     if (!m.traceId || seen.has(m.traceId)) continue;
@@ -1752,7 +1757,16 @@ function applyTurnUsageBlocks(messages) {
     if (!footer) continue;
     const wraps = messagesEl.querySelectorAll('.message.assistant[data-trace="' + m.traceId + '"]');
     const lastWrap = wraps[wraps.length - 1];
-    if (!lastWrap || lastWrap.querySelector(':scope > .token-stats')) continue;
+    if (!lastWrap) continue;
+    const existing = lastWrap.querySelector(':scope > .token-stats');
+    if (existing) {
+      if (!replace) continue;
+      // Keep an opened breakdown open across the rebuild — the flush lands a second or so after the
+      // turn ends, and collapsing it under the reader would be worse than showing nothing.
+      if (existing.open) footer.open = true;
+      existing.replaceWith(footer);
+      continue;
+    }
     lastWrap.appendChild(footer);
   }
 }
@@ -3188,6 +3202,26 @@ async function init() {
     const refreshSkills   = debounced(loadSkills);
     const refreshPlugins  = debounced(loadPlugins);
     const refreshFiles    = debounced(loadFiles);
+    // Re-read the open session and rebuild its turn footers — nothing else, so scroll position, open
+    // thinking blocks and streamed DOM all survive. This is how accounting reaches a LIVE turn at all:
+    // it is flushed when the pump's queue drains, necessarily after the `done` that drew the footer,
+    // because a turn's spend is not final at its own end (a followup hook runs post-commit, a detached
+    // classifier settles whenever it settles).
+    //
+    // Not debounced: every write should produce exactly one refresh, and a timer would only make the
+    // real hazard rarer rather than absent. That hazard is ordering — two reads in flight can settle
+    // out of order and paint an older session over a newer one. `seq` makes the last read issued the
+    // only one allowed to paint, which is deterministic where a delay is merely likely.
+    let footerSeq = 0;
+    const refreshTurnFooters = async () => {
+      const id  = currentSessionId;
+      if (!id) return;
+      const seq = ++footerSeq;
+      const session = await apiGetSession(id);
+      if (seq !== footerSeq) return;                       // a later read already landed
+      if (!session || session.id !== currentSessionId) return;  // or the reader moved on
+      applyTurnUsageBlocks(session.messages, true);
+    };
     // A session appearing or vanishing — a second browser on this profile creating one, a fork, a
     // session shared in from another profile. Not debounced here: it shares the module-level
     // `refreshSessions`, so a change this browser just made coalesces with the refresh its own click
@@ -3202,7 +3236,10 @@ async function init() {
           switch (n.namespace) {
             case 'files':    onFileChanged(n, refreshFiles); break;
             case 'skills':   refreshSkills();                break;
-            case 'sessions': refreshSessions();              break;
+            case 'sessions':
+              refreshSessions();
+              if (n.id === currentSessionId) void refreshTurnFooters();
+              break;
             default: break;                                  // a namespace no panel shows
           }
           break;
