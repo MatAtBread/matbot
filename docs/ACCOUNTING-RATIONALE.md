@@ -281,7 +281,7 @@ attributed record — which is the only thing core promises.
 ## Implementation order
 
 1. **Attribution coordinate + nesting.** *(landed)* Fixes the misfiling race; stands alone.
-2. **Turn bag exposed on the turn's result**, as entries rather than a fold.
+2. **Entries carry their cause and anchor on the turn head**, flushed at pump idle. *(landed)*
 3. **Open the target**: `reported` alongside the normalised counters, adapters retaining what they
    currently discard and synthesising nothing. No new plugin — three adapter changes.
 4. **Brackets**: tool and round spans as entry fields.

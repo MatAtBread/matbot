@@ -5,7 +5,7 @@ import type {
 } from './types.js';
 import type { MatbotPlugin } from './plugin.js';
 import type { ToolPresenter } from '@matatbread/matbot-plugin-api';
-import { currentUsageSink, withUsageSite } from '@matatbread/matbot-plugin-api/host';
+import { recordUsage, withUsageSite } from '@matatbread/matbot-plugin-api/host';
 import { HookRegistry } from './hooks.js';
 import { appendMessage, createMessage } from './session.js';
 import { foldOntoUserTurn, bindPluginOps } from '@matatbread/matbot-plugin-api';
@@ -256,6 +256,16 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
     const assistantParts: MessageContent[] = [];
     let textAcc = '';
     let turnUsage: Usage | undefined;
+    // Book the round's own spend as an entry the moment the stream settles — including when the response
+    // is then thrown away (an in-situ restart) or the call died part-way. The tokens were billed either
+    // way; tying the record to whether the *answer* survived is what made a restarted round free. Clears
+    // as it books, so no exit path can double-count it.
+    const bookRound = (): void => {
+      const u = turnUsage;
+      if (u === undefined) return;
+      turnUsage = undefined;
+      withUsageSite({ kind: 'round', round }, () => recordUsage(config.provider, u));
+    };
     let truncation: { reason: 'max-tokens' | 'stream-end'; raw?: string } | undefined;
     // Set if a raced verdict fires mid-generation: discard this response and re-run the loop (below).
     let restart = false;
@@ -342,12 +352,12 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
       if (restart || (callAc.signal.aborted && !signal.aborted)) {
         restart = true;
       } else if (signal.aborted) {
+        bookRound();
         // Save whatever the LLM streamed before the abort hit.
         if (textAcc) assistantParts.push({ type: 'text', text: textAcc });
         if (assistantParts.length > 0) {
           session = appendMessage(session, createMessage({
             role: 'assistant', content: assistantParts, traceId, providerName: config.provider,
-            ...(turnUsage !== undefined ? { usage: turnUsage } : {}),
           }));
         }
         yield* end({ type: 'aborted', reason: abortReason(signal), session, traceId });
@@ -363,10 +373,12 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
         // belong to the call that failed, and the model never finished the thought. The `error` event
         // carries no session (a failure is not a transcript), so this yields the terminal itself rather
         // than the session — but it commits first, exactly like every other exit.
+        bookRound();
         yield* end({ type: 'error', error: String(e) + (('cause' in e && e.cause) ? ' ('+String(e.cause)+')' : '' ), traceId });
         return;
       }
     }
+    bookRound();
 
     // In-situ restart: discard this iteration's (uncommitted) response and re-run the loop with the
     // raced correction now folded into `ephemeral`. No store write, no retraction marker — the clean
@@ -390,7 +402,6 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
         content:      assistantParts,
         traceId,
         providerName: config.provider,
-        ...(turnUsage !== undefined ? { usage: turnUsage } : {}),
       });
       session = appendMessage(session, assistantMsg);
     }
@@ -507,10 +518,9 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
       let result: unknown;
       let isError = false;
       // Token accounting for completions this tool runs (via singleTurn/complete) accrues into the
-      // ambient turn scope, stamped with the site established below. Attribution is by that stamp, never
-      // by when a record lands: work started elsewhere and resolving mid-call (the triggers classifier
-      // is kicked off detached in `screen`) carries its own site and is not swept up here.
-      const usageSink = currentUsageSink();
+      // ambient turn scope, stamped with the site established below — never attached to this message.
+      // A tool message is popped wholesale by a retract-and-rerun, which would take its accounting
+      // somewhere no reduction over the session can reach; the entry lives on the turn head instead.
       const site: UsageSite = { kind: 'tool', callId: tc.id, tool: tc.name };
       const startedAt = Date.now();
 
@@ -562,9 +572,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
         tool, result, isError, durationMs: Date.now() - startedAt,
       });
 
-      const callUsage = usageSink?.filter(u => u.site?.kind === 'tool' && u.site.callId === tc.id) ?? [];
-      toolResults.push({ type: 'tool-result', id: tc.id, result, isError,
-        ...(callUsage.length > 0 ? { usage: callUsage } : {}) });
+      toolResults.push({ type: 'tool-result', id: tc.id, result, isError });
       yield { type: 'tool:end', callId: tc.id, result, isError, traceId };
     }
 

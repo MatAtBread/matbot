@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   createSessionRunner, createSession, installPrincipalCarrier, installUsageCarrier, HookRegistry,
-  recordUsage, withUsageScope,
+  recordUsage, withUsageScope, usageEntries,
 } from '@matatbread/matbot-core';
 import type {
   Session, Store, Tool, ToolRegistry, ProviderAdapter, ProviderConfig, CompletionEvent,
@@ -70,6 +70,22 @@ function callsToolOnce(): ProviderAdapter {
       return (async function* () {
         if (first) yield { type: 'tool-call', id: 'call-1', name: 'slow', input: {} };
         else       yield { type: 'text-delta', delta: 'done' };
+        yield { type: 'usage', inputTokens: 20, outputTokens: 5 };
+        yield { type: 'done' };
+      })();
+    },
+  };
+}
+
+// No tool calls — the turn ends on round 1.
+function answersPlainly(): ProviderAdapter {
+  return {
+    name: 'fake',
+    async health() { return { ok: true } as never; },
+    complete(): AsyncIterable<CompletionEvent> {
+      return (async function* () {
+        yield { type: 'text-delta', delta: 'ok' };
+        yield { type: 'usage', inputTokens: 10, outputTokens: 4 };
         yield { type: 'done' };
       })();
     },
@@ -113,17 +129,84 @@ test('a detached hook completion is not credited to whichever tool was running',
   for await (const ev of view.events) { events.push(ev); if (ev.type === 'idle') break; }
   await classified;
 
-  const saved  = await store.get(session.id);
-  const result = saved!.messages
-    .flatMap(m => m.content)
-    .find(c => c.type === 'tool-result' && c.id === 'call-1');
-  assert.ok(result && result.type === 'tool-result', 'the tool ran');
+  const saved   = await store.get(session.id);
+  const entries = usageEntries(saved!.messages);
 
-  const usage: UsageRecord[] = result.usage ?? [];
-  assert.deepEqual(usage.map(u => u.provider), ['tool-provider'],
-    'only the tool\'s own completion — the classifier resolved mid-call but belongs to the screen hook');
-  assert.deepEqual(usage[0]!.site, { kind: 'tool', callId: 'call-1', tool: 'slow' },
-    'the record carries the site that produced it');
+  const tool = entries.filter(e => e.site?.kind === 'tool');
+  assert.deepEqual(tool.map(e => e.provider), ['tool-provider']);
+  assert.deepEqual(tool[0]!.site, { kind: 'tool', callId: 'call-1', tool: 'slow' });
+
+  const hook = entries.filter(e => e.site?.kind === 'hook');
+  assert.deepEqual(hook.map(e => e.provider), ['classifier'],
+    'the classifier resolved mid-tool-call but belongs to the screen hook that started it');
+  assert.deepEqual(hook[0]!.site, { kind: 'hook', channel: 'screen', plugin: 'triggers-like' });
+
+  // The main line is booked the same way — one entry per round, not a field on the assistant message,
+  // so a retract-and-rerun cannot carry it off into a marker payload.
+  assert.deepEqual(entries.filter(e => e.site?.kind === 'round').map(e => e.provider), ['fake', 'fake']);
+
+  // Anchored on the turn head, and every entry names the turn that caused it.
+  const heads = saved!.messages.filter(m => m.role === 'user' && (m.usage?.length ?? 0) > 0);
+  assert.equal(heads.length, 1, 'all of it on one turn head');
+  assert.ok(entries.every(e => e.traceId === heads[0]!.traceId), 'self-describing: each entry names its turn');
+});
+
+test('a completion that settles after the turn is flushed on the next idle', { timeout: 15000 }, async () => {
+  const session = createSession();
+  const store   = memStore(session);
+
+  // Settles well after the turn it belongs to has committed and the pump has gone idle — the case a
+  // per-turn total struck at the boundary cannot see, because the bag is still being written to.
+  let late: Promise<void> | undefined;
+  let armed = true;
+  const hooks = new HookRegistry();
+  hooks.register({
+    on: 'screen',
+    pluginName: 'slow-classifier',
+    handler: () => {
+      if (!armed) return undefined;
+      armed = false;
+      late = wait(300).then(() => { recordUsage('classifier', { inputTokens: 5, outputTokens: 2 }); });
+      return undefined;
+    },
+  });
+
+  const config: ProviderConfig = { name: 'fake', module: 'fake', model: 'fake' };
+  const runner = createSessionRunner({
+    store,
+    resolveProvider: async () => ({ adapter: answersPlainly(), config }),
+    tools: toolRegistry(slowTool),
+    loadPlugin: async () => { throw new Error('loadPlugin unused'); },
+    unloadPlugin: async () => false,
+    hooks,
+  });
+
+  // Hold a subscriber for the duration. Session state — and with it the pending accounting — is
+  // disposed once a session goes quiet AND unsubscribed, so a live session is what makes a late
+  // arrival recoverable at all. That is the real supported boundary, so the test sits inside it.
+  const watcher = await runner.open({ sessionId: session.id, signal: new AbortController().signal });
+  void (async () => { for await (const _ of watcher.events) { /* keep the subscription alive */ } })();
+
+  const turn = async (text_: string): Promise<void> => {
+    const view = await runner.open({
+      sessionId: session.id, signal: new AbortController().signal,
+      content: text(text_), provider: 'fake', principal,
+    });
+    for await (const ev of view.events) if (ev.type === 'idle') break;
+  };
+
+  await turn('first');
+  const firstTraceId = (await store.get(session.id))!.messages.find(m => m.role === 'user')!.traceId;
+  assert.equal(usageEntries((await store.get(session.id))!.messages).filter(e => e.site?.kind === 'hook').length,
+    0, 'not yet — it has not settled');
+
+  await late;                 // settles between turns, appending to the scope the pump still holds
+  await turn('second');
+
+  const entries = usageEntries((await store.get(session.id))!.messages).filter(e => e.site?.kind === 'hook');
+  assert.equal(entries.length, 1, 'flushed on the next idle rather than lost');
+  assert.equal(entries[0]!.traceId, firstTraceId,
+    'and attributed to the turn that caused it, not the one it was written during');
 });
 
 test('a nested usage scope rolls up into its parent', async () => {

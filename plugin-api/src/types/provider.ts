@@ -84,6 +84,15 @@ export interface UsageRecord {
    * makes that race unrepresentable.
    */
   site?:    UsageSite;
+  /**
+   * The turn that *caused* this call, which is not the same question as where the record ends up.
+   * Two ordinary behaviours separate the two: a completion can be recorded after its turn commits (a
+   * detached trigger classifier, a `followup` hook), and a retract-and-rerun moves messages around
+   * underneath it. Carrying the cause on the entry makes an entry self-describing, so grouping by turn
+   * is a *query* rather than something inferred from adjacency — and so are grouping by tool, by user
+   * and by session. See docs/ACCOUNTING-RATIONALE.md.
+   */
+  traceId?: string;
 }
 
 /**

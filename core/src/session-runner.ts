@@ -2,7 +2,7 @@ import type {
   Session, Message, MessageContent, Principal, PromptFn, PipelineEvent,
   Store, ToolRegistry, SystemContextRegistry, Vault, FileStore, Tool,
   ProviderAdapter, ProviderConfig, SessionRunner, SessionView, OpenOpts, SubmitOpenOpts,
-  SteeringPolicy, SteeringDecision,
+  SteeringPolicy, SteeringDecision, UsageRecord,
 } from './types.js';
 import type { MatbotPlugin } from './plugin.js';
 import type { HookRegistry } from './hooks.js';
@@ -103,6 +103,11 @@ interface SessionState {
   // Events of the *current* turn, replayed to a subscriber that joins mid-turn. Cleared at each
   // turn boundary — committed history comes from the store, not from here.
   replay:      PipelineEvent[];
+  // Accounting entries awaiting a flush, held BY REFERENCE to each turn's usage scope. A completion
+  // can be recorded after its turn commits — a detached trigger classifier, a `followup` hook — and it
+  // appends to the very array captured here, so a late arrival needs no coordination: whatever is in
+  // these arrays at the flush is what gets written, and each entry says which turn caused it.
+  pendingUsage: UsageRecord[][];
 }
 
 interface Sink {
@@ -163,7 +168,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
   const stateFor = (id: string): SessionState => {
     let s = states.get(id);
     if (s === undefined) {
-      s = { queue: [], running: false, runningTraceId: undefined, ac: undefined, subscribers: new Set(), replay: [] };
+      s = { queue: [], running: false, runningTraceId: undefined, ac: undefined, subscribers: new Set(), replay: [], pendingUsage: [] };
       states.set(id, s);
     }
     return s;
@@ -189,6 +194,56 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
 
   // How many submissions sit ahead of the item at queue index `i` (the running turn counts as one).
   const aheadOf = (s: SessionState, i: number): number => (s.running ? 1 : 0) + i;
+
+  /**
+   * Write whatever accounting has accrued onto the turn heads that caused it, then clear it.
+   *
+   * Entries are drained by SPLICING each pending array, so an entry appended after this point (a
+   * classifier still in flight) accumulates afresh and lands on the next flush rather than being
+   * written twice. That is the whole concurrency story: no marks, no coordination, and eventual
+   * delivery — which is all a log needs, since each entry names the turn that caused it.
+   *
+   * Anchored on the turn's head (its user message) because that is the message a retract-and-rerun
+   * keeps; assistant and tool messages are popped into a retraction marker where no reduction over
+   * `session.messages` would find them again. An entry whose turn head has since gone (a session
+   * edit, a compaction) is dropped rather than orphaned onto an unrelated message.
+   */
+  const flushUsage = async (id: string, s: SessionState): Promise<void> => {
+    // Splice each array in place and KEEP the references. Dropping a drained array is the obvious
+    // tidy-up and it silently loses exactly the case this exists for: a classifier that settles after
+    // the flush appends to the array its scope captured, so if the pump has stopped holding it, the
+    // write goes nowhere observable. They are left registered for the life of the session state, at a
+    // cost of one empty array per turn.
+    //
+    // The limit of that: `maybeCleanup` disposes the state once the session is quiet and unsubscribed,
+    // so a completion still in flight at THAT point is lost. This is the carrier's stated best-effort
+    // contract rather than a hole to plug — nothing can know what is still pending — and it is bounded
+    // in practice, since the two channels that settle late (a `followup` hook, a user-phase classifier
+    // the runner polls) are both awaited inside the pump iteration this scope wraps.
+    const drained = s.pendingUsage.flatMap(entries => entries.splice(0));
+    if (drained.length === 0) return;
+
+    const session = await deps.store.get(id);
+    if (!session) return;
+
+    const byTrace = new Map<string, UsageRecord[]>();
+    for (const e of drained) {
+      if (e.traceId === undefined) continue;
+      const list = byTrace.get(e.traceId);
+      if (list) list.push(e); else byTrace.set(e.traceId, [e]);
+    }
+
+    let changed = false;
+    const messages = session.messages.map(m => {
+      const add = m.role === 'user' ? byTrace.get(m.traceId) : undefined;
+      if (add === undefined) return m;
+      byTrace.delete(m.traceId);
+      changed = true;
+      return { ...m, usage: [...(m.usage ?? []), ...add] };
+    });
+    if (!changed) return;
+    await deps.store.set(id, { ...session, messages });
+  };
 
   const pump = async (id: string, s: SessionState): Promise<void> => {
     if (s.running) return;
@@ -298,7 +353,14 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
           // budget. Tracked here rather than inferred from `ac.signal`, which only knows about the two
           // signal-driven aborts and not the policy ones.
           let terminal: PipelineEvent['type'] | undefined;
-          await contextSwitch(head.principal, () => withUsageScope(async _usage => {
+          // One usage scope per pump ITERATION rather than per turn. `followup` is post-commit by
+          // definition and a detached classifier settles whenever it settles, so a scope that ended at
+          // the turn's commit would drop precisely the spend that is hardest to account for otherwise.
+          // The entries array is registered for flush before any work starts, so a late arrival lands
+          // in something already tracked and needs no coordination of its own.
+          await withUsageScope(async usage => {
+          s.pendingUsage.push(usage.entries);
+          await contextSwitch(head.principal, async () => {
             for await (const ev of runSession({
               session,
               config:         { provider: head.provider, traceId: head.traceId },
@@ -323,7 +385,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
               if (ev.type === 'done' || ev.type === 'aborted' || ev.type === 'error') terminal = ev.type;
               emit(s, ev);
             }
-          }));
+          });
 
           // followup — post-commit, in the queue owner. A hook reads the just-committed turn and may
           // head-enqueue a robo follow-up (its own real turn, running next). Runs only for a turn that
@@ -439,6 +501,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
               }
             }
           }
+          }, head.traceId);
         } catch (e) {
           emit(s, { type: 'error', error: String(e), traceId: head.traceId });
         } finally {
@@ -449,6 +512,11 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
       s.running = false;
       s.runningTraceId = undefined;
       s.replay  = [];
+      // Accounting is flushed HERE — at the drained queue, not at a turn boundary. "The end of a turn"
+      // is not a well-defined moment to total anything at: steers terminate and resume, a retract
+      // re-enqueues the turn it just popped, followup enqueues resubmissions, and a detached classifier
+      // settles whenever it settles. The queue draining is unambiguous, and it is after all of them.
+      await flushUsage(id, s);
       // Deterministic busy→idle signal: running is now false, so any subscriber draining the stream
       // (a frontend's status tracker) reads an authoritative idle the moment it sees this — no racing
       // the microtask on which `running` flipped. Not in `replay` (transient lifecycle, not history).

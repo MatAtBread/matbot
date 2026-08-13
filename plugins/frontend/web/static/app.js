@@ -1633,30 +1633,38 @@ function makeToolResultBlock(result, isError) {
   return wrap;
 }
 
-// Aggregate the token accounting persisted on a turn's messages, keyed by the provider billed: an
-// assistant message's own `usage` (billed to its `providerName`) plus every tool-result block's `usage`
-// records (each provider-tagged \u2014 a tool may run completions against several). `traceId` scopes it to
-// one turn. Mirrors core's usageByProvider; the static client can't import core, so it reduces inline.
+// Aggregate the token accounting persisted on a session's messages, keyed by the provider billed.
+// Accounting entries are anchored on turn heads and are self-describing (each names the turn that
+// caused it and the site that produced it), so this filters on the ENTRY's traceId rather than the
+// message's: a completion recorded after its turn committed \u2014 a detached trigger classifier, a
+// followup hook \u2014 is flushed later and can land on a message belonging to a different turn.
+// Mirrors core's usageEntries/usageByProvider; the static client can't import core, so it reduces
+// inline. Tolerates sessions written before accounting moved onto the turn head.
+function usageEntries(messages) {
+  const out = [];
+  for (const m of (messages || [])) {
+    if (Array.isArray(m.usage)) out.push(...m.usage);
+    else if (m.usage && m.providerName) out.push({ provider: m.providerName, usage: m.usage, traceId: m.traceId });
+    for (const c of (m.content || [])) {
+      if (c && c.type === 'tool-result' && Array.isArray(c.usage)) out.push(...c.usage);
+    }
+  }
+  return out;
+}
+
 function usageByProvider(messages, traceId) {
   const map = new Map();
-  const add = (provider, u) => {
-    if (!provider || !u) return;
-    const cur = map.get(provider) || { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, costUsd: 0 };
+  for (const e of usageEntries(messages)) {
+    if (traceId && e.traceId !== traceId) continue;
+    const u = e.usage;
+    if (!e.provider || !u) continue;
+    const cur = map.get(e.provider) || { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, costUsd: 0 };
     cur.inputTokens         += u.inputTokens         || 0;
     cur.outputTokens        += u.outputTokens        || 0;
     cur.cacheReadTokens     += u.cacheReadTokens     || 0;
     cur.cacheCreationTokens += u.cacheCreationTokens || 0;
     cur.costUsd             += u.costUsd             || 0;
-    map.set(provider, cur);
-  };
-  for (const m of (messages || [])) {
-    if (traceId && m.traceId !== traceId) continue;
-    if (m.usage && m.providerName) add(m.providerName, m.usage);
-    for (const c of (m.content || [])) {
-      if (c && c.type === 'tool-result' && Array.isArray(c.usage)) {
-        for (const r of c.usage) add(r.provider, r.usage);
-      }
-    }
+    map.set(e.provider, cur);
   }
   return [...map].map(([provider, usage]) => ({ provider, usage }));
 }

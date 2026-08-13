@@ -7,9 +7,11 @@ import type { Usage, UsageRecord, UsageSite } from './types.js';
  * would bake in one grouping and destroy the others. See docs/ACCOUNTING-RATIONALE.md.
  */
 export interface UsageScope {
-  entries: UsageRecord[];
-  site?:   UsageSite;
-  parent?: UsageScope;
+  entries:  UsageRecord[];
+  site?:    UsageSite;
+  /** The turn this scope accounts for; stamped onto every entry recorded within it. */
+  traceId?: string;
+  parent?:  UsageScope;
 }
 
 /**
@@ -75,7 +77,11 @@ export function currentUsageSite(): UsageSite | undefined {
 export function recordUsage(provider: string, usage: Usage): void {
   const scope = currentUsageScope();
   if (scope === undefined) return;
-  scope.entries.push({ provider, usage, ...(scope.site !== undefined ? { site: scope.site } : {}) });
+  scope.entries.push({
+    provider, usage,
+    ...(scope.site    !== undefined ? { site:    scope.site    } : {}),
+    ...(scope.traceId !== undefined ? { traceId: scope.traceId } : {}),
+  });
 }
 
 /**
@@ -86,11 +92,16 @@ export function recordUsage(provider: string, usage: Usage): void {
  * the parent when `fn` settles — so a sub-turn can be asked what it cost without its spend vanishing
  * from the turn containing it. Roll-up happens on rejection too: the tokens were spent either way.
  */
-export function withUsageScope<T>(fn: (scope: UsageScope) => T): T {
+export function withUsageScope<T>(fn: (scope: UsageScope) => T, traceId?: string): T {
   const carrier = (globalThis as CarrierGlobal)[CARRIER_KEY];
-  if (carrier === undefined) return fn({ entries: [] });
+  if (carrier === undefined) return fn({ entries: [], ...(traceId !== undefined ? { traceId } : {}) });
   const parent = carrier.tryCurrent();
-  const scope: UsageScope = { entries: [], ...(parent !== undefined ? { parent } : {}) };
+  const trace  = traceId ?? parent?.traceId;
+  const scope: UsageScope = {
+    entries: [],
+    ...(trace  !== undefined ? { traceId: trace } : {}),
+    ...(parent !== undefined ? { parent } : {}),
+  };
   const rollUp = (): void => { if (parent !== undefined) parent.entries.push(...scope.entries); };
   return carrier.run(scope, () => {
     const r = fn(scope);

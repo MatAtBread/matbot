@@ -22,7 +22,28 @@ churn and less likely to affect a consumer who doesn't use them.
   only because nothing ever opened a second. Hosts implementing a carrier need the type change only;
   `createSerialUsageCarrier` and the CLI's ALS carrier are updated.
 
+- **Accounting moved off the message that produced it and onto the turn head.** `Message.usage` is now
+  `UsageRecord[]` (was a single `Usage`), and `tool-result` blocks no longer carry `usage` at all — every
+  provider call caused by a turn is an entry anchored on that turn's user message, self-describing via
+  its `site` and causal `traceId`. `createMessage` no longer takes `usage`. Reading is unaffected for
+  anyone using `usageByProvider`, which tolerates both shapes; a consumer reaching into `m.usage` or
+  `tool-result.usage` directly should use the new `usageEntries(messages)` instead.
+
+  The move is what makes a retried turn account correctly: a retract-and-rerun pops the assistant and
+  tool messages into a retraction marker's payload, where no reduction over `session.messages` will ever
+  find them, so a retry silently under-reported by the attempt it discarded. The turn head is the one
+  message the pop keeps. Locality is not lost — `site` already names the round or tool call.
+
 ### API gaps filled
+
+- **`usageEntries(messages)`** — every accounting entry carried by a set of messages, in message order,
+  with no correlation to do. Filter it by `traceId` for a turn, by `site` for a tool call, or pass a
+  whole session for its total. `usageByProvider` is now a fold over it.
+
+- **`UsageRecord.traceId` names the turn that caused a call**, which is not the same question as where
+  the record ends up. A completion can be recorded after its turn commits (a detached trigger
+  classifier, a `followup` hook), and a retract moves messages underneath it. Carrying the cause makes
+  grouping by turn a query rather than an inference from adjacency.
 
 - **`UsageRecord.site` records where a completion happened** — `{ kind: 'round' }`, `{ kind: 'tool' }`
   or `{ kind: 'hook' }`. This is the one accounting fact no adapter and no plugin can recover after the
@@ -40,6 +61,19 @@ churn and less likely to affect a consumer who doesn't use them.
   inside a `screen` hook and settles at an arbitrary later moment, so whose spend it became was decided
   by a race. Attribution is now by the producer's own declared `site`, which the ambient carrier
   captures where the work *starts*, so the race is unrepresentable rather than merely unlikely.
+
+- **Spend that was previously invisible now appears in the totals**, so figures will rise for anyone
+  running triggers or cognition. A `followup` hook ran outside any usage scope, making the triggers
+  agent-phase classifier free of charge on every completed turn; a round discarded by an in-situ restart
+  dropped its tally with the response, though the tokens were billed; and a retried turn lost the
+  attempt it discarded. These were under-reports, not a new cost.
+
+- **Accounting is flushed when the queue drains, not at a turn boundary.** "The end of a turn" is not a
+  well-defined moment to total anything at — steers terminate and resume, a retract re-enqueues the turn
+  it just popped, followup enqueues resubmissions, and a detached classifier settles whenever it
+  settles. A completion still in flight at one idle lands on the next, attributed by its own `traceId`.
+  Capture remains best-effort: state is disposed once a session is quiet and unsubscribed, and anything
+  still pending then is lost.
 
 ## 0.4.3
 
