@@ -1,15 +1,32 @@
 import type {
-  Session, Message, MessageContent, ModelContent, Usage, ProviderMeta, TruncatedToolResult,
+  Session, Message, MessageContent, ModelContent, Usage, UsageSite, ProviderMeta, TruncatedToolResult,
   TurnEvent, RunConfig, ProviderAdapter, ProviderConfig,
   Tool, ToolRegistry, ToolContext, Store, FileStore, SystemContextRegistry, Vault, PromptFn, FormField,
 } from './types.js';
 import type { MatbotPlugin } from './plugin.js';
 import type { ToolPresenter } from '@matatbread/matbot-plugin-api';
-import { currentUsageSink } from '@matatbread/matbot-plugin-api/host';
+import { currentUsageSink, withUsageSite } from '@matatbread/matbot-plugin-api/host';
 import { HookRegistry } from './hooks.js';
 import { appendMessage, createMessage } from './session.js';
 import { foldOntoUserTurn, bindPluginOps } from '@matatbread/matbot-plugin-api';
 import { addUsage } from './usage.js';
+
+// Establish a usage call site across an async iteration. Wrapping the *loop* would not work: this
+// runner is itself an async generator, so it suspends at every `yield` and resumes under the consumer's
+// context, losing any scope entered around the loop body. Scoping each `next()` instead means the
+// tool's body — and anything it kicks off while running — always resumes under its own site.
+function siteScoped<T>(site: UsageSite, src: AsyncIterable<T>): AsyncIterable<T> {
+  return {
+    [Symbol.asyncIterator]: () => {
+      const it = src[Symbol.asyncIterator]();
+      return {
+        next:  ()  => withUsageSite(site, () => it.next()),
+        ...(it.return ? { return: (v?: never) => withUsageSite(site, () => it.return!(v)) } : {}),
+        ...(it.throw  ? { throw:  (e?: unknown) => withUsageSite(site, () => it.throw!(e))  } : {}),
+      };
+    },
+  };
+}
 
 // Substituted for an errored tool result when the turn was aborted (e.g. a mid-turn steer interrupt):
 // the tool was cut off, not genuinely faulty, and the raw abort reason ("Error: steer") is a leaked
@@ -264,8 +281,11 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
     // Tools advertised for THIS call. A presenter (optional) may present a subset of the snapshot and
     // grow it across iterations as the model discovers tools; absent ⇒ the whole snapshot. Withheld
     // tools stay callable — execution resolves against the live registry (opts.toolRegistry), not this.
+    // Scoped to the round: a presenter may itself run completions (deriving a tool's search terms), and
+    // that spend belongs to the round that asked for it — it is neither a tool call nor a hook.
     const advertised = opts.toolPresenter
-      ? await opts.toolPresenter.present([...tools.values()], { session, provider: config.provider })
+      ? await withUsageSite({ kind: 'round', round },
+          () => opts.toolPresenter!.present([...tools.values()], { session, provider: config.provider }))
       : [...tools.values()];
     // Per-call signal linked to the turn signal: an in-situ restart aborts THIS provider call (callAc)
     // to cancel the in-flight request and stop backend generation, without aborting the whole turn.
@@ -487,9 +507,11 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
       let result: unknown;
       let isError = false;
       // Token accounting for completions this tool runs (via singleTurn/complete) accrues into the
-      // ambient turn sink; slice off whatever it appends during *this* call to attribute it here.
+      // ambient turn scope, stamped with the site established below. Attribution is by that stamp, never
+      // by when a record lands: work started elsewhere and resolving mid-call (the triggers classifier
+      // is kicked off detached in `screen`) carries its own site and is not swept up here.
       const usageSink = currentUsageSink();
-      const usageMark = usageSink?.length ?? 0;
+      const site: UsageSite = { kind: 'tool', callId: tc.id, tool: tc.name };
       const startedAt = Date.now();
 
       const toolCtx: ToolContext = {
@@ -503,7 +525,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
       };
 
       try {
-        for await (const toolEv of tool.executor.execute(tc.input, toolCtx)) {
+        for await (const toolEv of siteScoped(site, tool.executor.execute(tc.input, toolCtx))) {
           switch (toolEv.type) {
             case 'stdout':   yield { type: 'tool:stdout', callId: tc.id, chunk: toolEv.chunk, traceId }; break;
             case 'stderr':   yield { type: 'tool:stderr', callId: tc.id, chunk: toolEv.chunk, traceId }; break;
@@ -540,7 +562,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
         tool, result, isError, durationMs: Date.now() - startedAt,
       });
 
-      const callUsage = usageSink ? usageSink.slice(usageMark) : [];
+      const callUsage = usageSink?.filter(u => u.site?.kind === 'tool' && u.site.callId === tc.id) ?? [];
       toolResults.push({ type: 'tool-result', id: tc.id, result, isError,
         ...(callUsage.length > 0 ? { usage: callUsage } : {}) });
       yield { type: 'tool:end', callId: tc.id, result, isError, traceId };

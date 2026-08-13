@@ -9,6 +9,38 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## Unreleased
+
+### Breaking changes
+
+- **The usage carrier carries a `UsageScope`, not a bare sink, and scopes nest.** `UsageCarrier.run`/
+  `tryCurrent` now deal in `{ entries, site?, parent? }`, and `withUsageScope(fn)` hands the scope to
+  `fn` so a caller can read what accrued. A scope opened inside another rolls its entries up into the
+  parent when it settles (including on rejection — the tokens were spent either way), so a sub-turn can
+  be asked what it alone cost without its spend disappearing from the turn containing it. Previously
+  `withUsageScope` established a fresh, empty sink and *shadowed* any enclosing one; that was invisible
+  only because nothing ever opened a second. Hosts implementing a carrier need the type change only;
+  `createSerialUsageCarrier` and the CLI's ALS carrier are updated.
+
+### API gaps filled
+
+- **`UsageRecord.site` records where a completion happened** — `{ kind: 'round' }`, `{ kind: 'tool' }`
+  or `{ kind: 'hook' }`. This is the one accounting fact no adapter and no plugin can recover after the
+  fact, and it is what makes per-tool, per-user and per-task cost derivable by a plugin from a single
+  log without core knowing any of those groupings. Stamped by `recordUsage` from the site in force,
+  established by the runner around its own round and each tool executor, and by `HookRegistry` around
+  each handler (which already knew the channel and owning plugin). See `docs/ACCOUNTING-RATIONALE.md`.
+
+### Bug fixes
+
+- **A completion run from a hook is no longer credited to whichever tool happened to be running.** The
+  runner attributed a tool's spend by slicing the turn's usage sink by index — mark the length before
+  the call, take everything appended after it — so any completion that merely *resolved* during a tool
+  call was booked against it. The triggers classifier does exactly that: it is kicked off detached
+  inside a `screen` hook and settles at an arbitrary later moment, so whose spend it became was decided
+  by a race. Attribution is now by the producer's own declared `site`, which the ambient carrier
+  captures where the work *starts*, so the race is unrepresentable rather than merely unlikely.
+
 ## 0.4.3
 
 ### Breaking changes

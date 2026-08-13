@@ -1,4 +1,5 @@
 import type { HealthStatus } from './health.js';
+import type { HookPoint } from './hooks.js';
 import type { Message } from './messages.js';
 import type { Tool } from './tools.js';
 
@@ -48,12 +49,41 @@ export interface Usage {
   cacheCreationTokens?: number;
 }
 
+/**
+ * Where in matbot's own control flow a completion happened — the one accounting fact no adapter and no
+ * plugin can recover after the fact, and therefore the one matbot must record. Everything derived from
+ * it (what a tool costs, what a user costs, what a "task" costs) is a *grouping* of these coordinates
+ * plus a rate table: policy, and a plugin's to own. See docs/ACCOUNTING-RATIONALE.md.
+ *
+ * Closed by construction: inside a turn there are exactly three places a completion can originate.
+ * Outside a turn there is no scope at all, and accounting is the documented no-op.
+ */
+export type UsageSite =
+  /** The runner's own provider call for one agentic round (1-based, as counted against `maxRounds`). */
+  | { kind: 'round'; round: number }
+  /** A completion run by a tool executor — `single_turn`, a ranker, a merger. */
+  | { kind: 'tool';  callId: string; tool: string }
+  /** A completion run by a hook handler — a trigger classifier, a router, an auto-compaction. */
+  | { kind: 'hook';  channel: HookPoint; plugin?: string };
+
 /** One provider call's usage, tagged with the provider billed — the unit a tool accrues (a tool may
  *  run completions against any provider, each with its own rates) and the element persisted on a
  *  `tool-result`'s `usage` addendum. See the ambient usage carrier (`recordUsage`/`currentUsageSink`). */
 export interface UsageRecord {
   provider: string;
   usage:    Usage;
+  /**
+   * The call site in force when this was recorded, stamped by the producer rather than inferred by the
+   * consumer. Absent only when a completion ran with no site established (a plugin reaching `complete`
+   * outside any turn).
+   *
+   * Attribution is *declared*, not derived from timing, and that is the whole point: the triggers
+   * classifier is kicked off detached inside a `screen` hook and resolves at an arbitrary later moment,
+   * so any scheme that infers ownership from when a record lands (as slicing the sink by index did)
+   * credits it to whichever tool happened to be running. Capturing the site where the work *starts*
+   * makes that race unrepresentable.
+   */
+  site?:    UsageSite;
 }
 
 /**

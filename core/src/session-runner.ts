@@ -298,7 +298,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
           // budget. Tracked here rather than inferred from `ac.signal`, which only knows about the two
           // signal-driven aborts and not the policy ones.
           let terminal: PipelineEvent['type'] | undefined;
-          await contextSwitch(head.principal, () => withUsageScope(async () => {
+          await contextSwitch(head.principal, () => withUsageScope(async _usage => {
             for await (const ev of runSession({
               session,
               config:         { provider: head.provider, traceId: head.traceId },
