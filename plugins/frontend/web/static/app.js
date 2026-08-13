@@ -1744,10 +1744,20 @@ function makeTurnFooter(perProvider, at) {
 // appended to the turn's last assistant wrap (the turn's bottom). Used on reload, so historical turns show
 // the same accounting as if they had just streamed.
 //
-// `replace` REBUILDS a footer that is already there, rather than skipping it. That is not a refinement:
-// accounting is flushed when the pump's queue drains, which is *after* the `done` that drew the footer,
-// so the live footer is necessarily built before the numbers exist. Without a rebuild a live turn would
-// show a bare timestamp while a reload of the same turn showed the tokens.
+// `replace` REBUILDS a footer that is already there, rather than skipping it, and creates none. That is
+// not a refinement, and the asymmetry is the point:
+//
+//   - rebuilding is required because accounting is flushed when the pump's queue drains, which is after
+//     the `done` that drew the footer, so the live footer is necessarily built before the numbers exist;
+//   - creating nothing is what makes the refresh safe to run on ANY session write. A turn writes the
+//     session several times before it ends (persist-at-turn-start, the end-of-turn commit), and an
+//     in-flight turn has no footer yet — so it is left alone, rather than having one painted into a wrap
+//     that is still streaming, which lands the tokens above text the turn has yet to render.
+//
+// The presence of a footer therefore *is* the "this turn has finished" signal, already maintained by the
+// two paths that draw it. No timing assumption is needed, and none would be sound: the runner clears its
+// busy flag before awaiting the flush, so an observer can be told a session is idle while the write is
+// still in flight.
 function applyTurnUsageBlocks(messages, replace) {
   const seen = new Set();
   for (const m of (messages || [])) {
@@ -1755,20 +1765,50 @@ function applyTurnUsageBlocks(messages, replace) {
     seen.add(m.traceId);
     const footer = makeTurnFooter(usageByProvider(messages, m.traceId), turnTimestamp(messages, m.traceId));
     if (!footer) continue;
-    const wraps = messagesEl.querySelectorAll('.message.assistant[data-trace="' + m.traceId + '"]');
-    const lastWrap = wraps[wraps.length - 1];
-    if (!lastWrap) continue;
-    const existing = lastWrap.querySelector(':scope > .token-stats');
+    const wraps = [...messagesEl.querySelectorAll('.message.assistant[data-trace="' + m.traceId + '"]')];
+    if (wraps.length === 0) continue;
+    // Look for an existing footer across ALL of the turn's wraps, not just the last one: the live path
+    // appends to the wrap that was current at `done`, and a turn can acquire further wraps afterwards
+    // (a marker, a robo message). Matching only the last one appends a second footer instead of
+    // replacing the first, which shows up as a turn with two timestamps.
+    const existing = wraps.map(w => w.querySelector(':scope > .token-stats')).find(Boolean);
     if (existing) {
       if (!replace) continue;
-      // Keep an opened breakdown open across the rebuild — the flush lands a second or so after the
-      // turn ends, and collapsing it under the reader would be worse than showing nothing.
+      // Keep an opened breakdown open across the rebuild — collapsing it under the reader would be
+      // worse than showing nothing.
       if (existing.open) footer.open = true;
       existing.replaceWith(footer);
       continue;
     }
-    lastWrap.appendChild(footer);
+    if (replace) continue;                       // an unfinished turn: leave it to `done` to draw
+    wraps[wraps.length - 1].appendChild(footer);
   }
+}
+
+// Re-read the open session and rebuild its turn footers — nothing else, so scroll position, open
+// thinking blocks and streamed DOM all survive.
+//
+// This is how accounting reaches a live turn at all: it is flushed when the pump's queue drains, which
+// is necessarily after the `done` that drew the footer, because a turn's spend is not final at its own
+// end (a followup hook runs post-commit, a detached classifier settles whenever it settles).
+//
+// Driven by the session write itself, which needs no timing assumption because this only ever REPLACES
+// an existing footer (see `applyTurnUsageBlocks`): an in-flight turn has none, so a mid-turn write
+// leaves it alone, and the flush's own write is what fills in the numbers. Deliberately not keyed on the
+// busy→idle transition — the runner clears its busy flag before awaiting the flush, so idle can be
+// broadcast while the write is still in flight, and there would be no second transition to recover on.
+//
+// `seq` guards ordering rather than a timer: two reads in flight can settle out of order and paint an
+// older session over a newer one, and only the last read issued is allowed to paint.
+let footerSeq = 0;
+async function refreshTurnFooters() {
+  const id = currentSessionId;
+  if (!id) return;
+  const seq = ++footerSeq;
+  const session = await apiGetSession(id);
+  if (seq !== footerSeq) return;                            // a later read already landed
+  if (!session || session.id !== currentSessionId) return;  // or the reader moved on
+  applyTurnUsageBlocks(session.messages, true);
 }
 
 // ── Rendering ─────────────────────────────────────────────────────────────────
@@ -3202,26 +3242,6 @@ async function init() {
     const refreshSkills   = debounced(loadSkills);
     const refreshPlugins  = debounced(loadPlugins);
     const refreshFiles    = debounced(loadFiles);
-    // Re-read the open session and rebuild its turn footers — nothing else, so scroll position, open
-    // thinking blocks and streamed DOM all survive. This is how accounting reaches a LIVE turn at all:
-    // it is flushed when the pump's queue drains, necessarily after the `done` that drew the footer,
-    // because a turn's spend is not final at its own end (a followup hook runs post-commit, a detached
-    // classifier settles whenever it settles).
-    //
-    // Not debounced: every write should produce exactly one refresh, and a timer would only make the
-    // real hazard rarer rather than absent. That hazard is ordering — two reads in flight can settle
-    // out of order and paint an older session over a newer one. `seq` makes the last read issued the
-    // only one allowed to paint, which is deterministic where a delay is merely likely.
-    let footerSeq = 0;
-    const refreshTurnFooters = async () => {
-      const id  = currentSessionId;
-      if (!id) return;
-      const seq = ++footerSeq;
-      const session = await apiGetSession(id);
-      if (seq !== footerSeq) return;                       // a later read already landed
-      if (!session || session.id !== currentSessionId) return;  // or the reader moved on
-      applyTurnUsageBlocks(session.messages, true);
-    };
     // A session appearing or vanishing — a second browser on this profile creating one, a fork, a
     // session shared in from another profile. Not debounced here: it shares the module-level
     // `refreshSessions`, so a change this browser just made coalesces with the refresh its own click
