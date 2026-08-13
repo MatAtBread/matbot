@@ -56,10 +56,10 @@ test('a mixed-provider turn totals on the normalised counters, never across repo
   // name for different quantities, so they must never meet in one sum.
   const messages: Message[] = [{
     id: 'm1', role: 'user', content: [], createdAt: new Date(0).toISOString(), traceId: 't1',
-    usage: [
-      { provider: 'deepseek', traceId: 't1', usage: { inputTokens: 64, outputTokens: 11,
+    activity: [
+      { kind: 'call', provider: 'deepseek', traceId: 't1', usage: { inputTokens: 64, outputTokens: 11,
         reported: { prompt_tokens: 89 } } },
-      { provider: 'claude',   traceId: 't1', usage: { inputTokens: 89, outputTokens: 13,
+      { kind: 'call', provider: 'claude',   traceId: 't1', usage: { inputTokens: 89, outputTokens: 13,
         reported: { input_tokens: 89 } } },
     ],
   }];

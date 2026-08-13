@@ -1,6 +1,6 @@
 import type { HookPoint } from './hooks.js';
 import type { ISODate, MimeType } from './primitives.js';
-import type { ProviderMeta, UsageRecord } from './provider.js';
+import type { ProviderMeta, TurnEntry, UsageRecord } from './provider.js';
 
 // ── Messages & Session ────────────────────────────────────────────────────────
 
@@ -126,9 +126,10 @@ export interface Message {
   traceId:       string;
   providerName?: string;
   /**
-   * Accounting entries anchored here — every provider call caused by this turn, whatever ran it (a
-   * round, a tool, a hook), each self-describing via its `site` and causal `traceId`. Accounting only:
-   * elided from provider submission, and a `flatMap` away from any total a consumer wants.
+   * The turn's activity log, anchored here — every provider call it caused, whatever ran it (a round, a
+   * tool, a hook), plus every bracket matbot held open that was not a call of its own (a tool span).
+   * Each entry is self-describing via its `site` and causal `traceId`. Bookkeeping only: elided from
+   * provider submission, and a `flatMap` away from any total or waterfall a consumer wants.
    *
    * Anchored on the turn's **head** (its user message) rather than on the message whose call produced
    * it, because that is the one message a retract-and-rerun keeps: the pop stashes assistant and tool
@@ -137,7 +138,7 @@ export interface Message {
    * lost — `site` already names the round or tool call, and physical adjacency carried nothing the
    * coordinate does not. See docs/ACCOUNTING-RATIONALE.md.
    */
-  usage?:        UsageRecord[];
+  activity?:     TurnEntry[];
   metadata?:     Record<string, unknown>;
 }
 

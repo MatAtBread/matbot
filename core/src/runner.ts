@@ -5,7 +5,7 @@ import type {
 } from './types.js';
 import type { MatbotPlugin } from './plugin.js';
 import type { ToolPresenter } from '@matatbread/matbot-plugin-api';
-import { recordUsage, withUsageSite } from '@matatbread/matbot-plugin-api/host';
+import { recordSpan, recordUsage, withUsageSite } from '@matatbread/matbot-plugin-api/host';
 import { HookRegistry } from './hooks.js';
 import { appendMessage, createMessage } from './session.js';
 import { foldOntoUserTurn, bindPluginOps } from '@matatbread/matbot-plugin-api';
@@ -256,6 +256,9 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
     const assistantParts: MessageContent[] = [];
     let textAcc = '';
     let turnUsage: Usage | undefined;
+    // The round's bracket — set where the provider call is actually issued, below, so it measures the
+    // call rather than the screen/contribute work that precedes it.
+    let roundStartedAt = Date.now();
     // Book the round's own spend as an entry the moment the stream settles — including when the response
     // is then thrown away (an in-situ restart) or the call died part-way. The tokens were billed either
     // way; tying the record to whether the *answer* survived is what made a restarted round free. Clears
@@ -264,7 +267,10 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
       const u = turnUsage;
       if (u === undefined) return;
       turnUsage = undefined;
-      withUsageSite({ kind: 'round', round }, () => recordUsage(config.provider, u));
+      withUsageSite({ kind: 'round', round }, () => recordUsage(config.provider, u, {
+        startedAt:  new Date(roundStartedAt).toISOString(),
+        durationMs: Date.now() - roundStartedAt,
+      }));
     };
     let truncation: { reason: 'max-tokens' | 'stream-end'; raw?: string } | undefined;
     // Set if a raced verdict fires mid-generation: discard this response and re-run the loop (below).
@@ -302,6 +308,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
     const callAc = new AbortController();
     const callSignal = AbortSignal.any([signal, callAc.signal]);
     try {
+      roundStartedAt = Date.now();
       for await (const ev of provider.complete(outgoing, providerConfig, advertised, callSignal)) {
         // A raced verdict firing mid-generation changes the premise: discard this doomed response and
         // restart the loop with the correction folded in. Polled BEFORE the event is emitted, so a
@@ -566,14 +573,23 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
 
       // toolresult — last chance to transform the result before it's recorded/yielded (hard redaction),
       // or to observe it (auditing: args + result + timing). Owns the LLM-facing + persisted surfaces.
+      const durationMs = Date.now() - startedAt;
+
+      // The bracket, recorded for EVERY tool call — not just the ones that spent tokens. Most tools
+      // (bash, http, workspace) run no completion at all, so hanging duration off an accounting record
+      // would capture it precisely for the tools that happen to call an LLM and lose it for the rest.
+      // Previously this number was computed, handed to the `toolresult` hook, and then discarded, so a
+      // consumer had to re-derive it — less accurately — from event arrival times.
+      recordSpan(site, new Date(startedAt).toISOString(), durationMs);
+
       result = await hookReg.runToolResult({
         session, config, signal,
         toolCall: { id: tc.id, name: tc.name, input: tc.input },
-        tool, result, isError, durationMs: Date.now() - startedAt,
+        tool, result, isError, durationMs,
       });
 
       toolResults.push({ type: 'tool-result', id: tc.id, result, isError });
-      yield { type: 'tool:end', callId: tc.id, result, isError, traceId };
+      yield { type: 'tool:end', callId: tc.id, result, isError, durationMs, traceId };
     }
 
     // Add tool results message, then loop for the next provider call.

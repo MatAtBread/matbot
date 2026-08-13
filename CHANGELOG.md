@@ -41,12 +41,12 @@ churn and less likely to affect a consumer who doesn't use them.
   only because nothing ever opened a second. Hosts implementing a carrier need the type change only;
   `createSerialUsageCarrier` and the CLI's ALS carrier are updated.
 
-- **Accounting moved off the message that produced it and onto the turn head.** `Message.usage` is now
-  `UsageRecord[]` (was a single `Usage`), and `tool-result` blocks no longer carry `usage` at all — every
-  provider call caused by a turn is an entry anchored on that turn's user message, self-describing via
-  its `site` and causal `traceId`. `createMessage` no longer takes `usage`. Reading is unaffected for
-  anyone using `usageByProvider`, which tolerates both shapes; a consumer reaching into `m.usage` or
-  `tool-result.usage` directly should use the new `usageEntries(messages)` instead.
+- **Accounting moved off the message that produced it and onto the turn head.** `Message.usage` is
+  replaced by `Message.activity: TurnEntry[]`, and `tool-result` blocks no longer carry `usage` at all —
+  everything a turn caused is an entry anchored on that turn's user message, self-describing via its
+  `site` and causal `traceId`. `createMessage` no longer takes `usage`. Reading is unaffected for anyone
+  using `usageByProvider`, which tolerates the old shapes; a consumer reaching into `m.usage` or
+  `tool-result.usage` directly should use `turnActivity(messages)` or `usageEntries(messages)`.
 
   The move is what makes a retried turn account correctly: a retract-and-rerun pops the assistant and
   tool messages into a retraction marker's payload, where no reduction over `session.messages` will ever
@@ -55,9 +55,22 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### API gaps filled
 
-- **`usageEntries(messages)`** — every accounting entry carried by a set of messages, in message order,
-  with no correlation to do. Filter it by `traceId` for a turn, by `site` for a tool call, or pass a
-  whole session for its total. `usageByProvider` is now a fold over it.
+- **Every tool call is timed, and the number is kept.** The runner measured a tool's duration, handed it
+  to the `toolresult` hook and then discarded it, so a consumer had to re-derive it — less accurately —
+  from event arrival times. It is now persisted as a `{ kind: 'span' }` entry and carried live on
+  `tool:end`. A span is its own arm rather than a field on an accounting record because most tool calls
+  spend no tokens at all (`bash`, `http`, `workspace`): hanging duration off a `UsageRecord` would
+  capture it precisely for the tools that happen to call an LLM and lose it for every other one.
+
+  Provider calls carry their own bracket too (`startedAt` / `durationMs` on the call entry) — matbot's
+  scope around the call, distinct from any server-side latency an endpoint reports, which arrives in
+  `usage.reported` like any other provider-named field.
+
+- **`turnActivity(messages)` / `usageEntries(messages)`** — everything a set of messages records about
+  what happened, in message order, with no correlation to do. Filter by `traceId` for a turn, by `site`
+  for a tool call, or pass a whole session for its total; `usageEntries` is the calls without the spans,
+  and `usageByProvider` is a fold over that. One fact set answers "what did this tool cost", "what did
+  this user cost" and "how long did that take".
 
 - **`UsageRecord.traceId` names the turn that caused a call**, which is not the same question as where
   the record ends up. A completion can be recorded after its turn commits (a detached trigger

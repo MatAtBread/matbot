@@ -1,6 +1,7 @@
 import type { HealthStatus } from './health.js';
 import type { HookPoint } from './hooks.js';
 import type { Message } from './messages.js';
+import type { ISODate } from './primitives.js';
 import type { Tool } from './tools.js';
 
 // ── Provider ──────────────────────────────────────────────────────────────────
@@ -104,6 +105,11 @@ export interface UsageRecord {
    * makes that race unrepresentable.
    */
   site?:    UsageSite;
+  /** When the provider call started, and how long matbot's own scope around it was open. The *bracket*,
+   *  not the endpoint's view: server-side latency, when an endpoint reports it, arrives in
+   *  `usage.reported` like any other provider-named field. Neither substitutes for the other. */
+  startedAt?:  ISODate;
+  durationMs?: number;
   /**
    * The turn that *caused* this call, which is not the same question as where the record ends up.
    * Two ordinary behaviours separate the two: a completion can be recorded after its turn commits (a
@@ -114,6 +120,33 @@ export interface UsageRecord {
    */
   traceId?: string;
 }
+
+/**
+ * A bracket matbot held open that was not itself a provider call — today, a tool call. Only matbot can
+ * measure one: it is the interval between handing control to an executor and getting it back, which no
+ * adapter and no plugin can see from where it sits.
+ *
+ * Separate from `UsageRecord` because most tool calls spend no tokens at all — `bash`, `http`,
+ * `workspace` — so hanging duration off an accounting record would record it for exactly the tools that
+ * happen to call an LLM and lose it for the rest, which is backwards. A tool call that *does* run
+ * completions produces both: this span, and one `UsageRecord` per call it made, sharing its `site`.
+ */
+export interface SpanRecord {
+  site:       UsageSite;
+  traceId?:   string;
+  startedAt:  ISODate;
+  durationMs: number;
+}
+
+/**
+ * One thing that happened during a turn, at a place only matbot can name — the element of the turn's
+ * activity log. A discriminated union rather than one loose shape with everything optional: a span has
+ * no provider and no tokens, and pretending otherwise would mean writing zeros that a consumer cannot
+ * tell from measured ones.
+ */
+export type TurnEntry =
+  | ({ kind: 'call' } & UsageRecord)
+  | ({ kind: 'span' } & SpanRecord);
 
 /**
  * Opaque, provider-specific round-trip metadata attached to a tool-call — captured from a completion,

@@ -1640,16 +1640,23 @@ function makeToolResultBlock(result, isError) {
 // followup hook \u2014 is flushed later and can land on a message belonging to a different turn.
 // Mirrors core's usageEntries/usageByProvider; the static client can't import core, so it reduces
 // inline. Tolerates sessions written before accounting moved onto the turn head.
-function usageEntries(messages) {
+function turnActivity(messages) {
   const out = [];
   for (const m of (messages || [])) {
-    if (Array.isArray(m.usage)) out.push(...m.usage);
-    else if (m.usage && m.providerName) out.push({ provider: m.providerName, usage: m.usage, traceId: m.traceId });
+    if (Array.isArray(m.activity)) out.push(...m.activity);
+    // Sessions written before accounting moved onto the turn head.
+    else if (m.usage && m.providerName) out.push({ kind: 'call', provider: m.providerName, usage: m.usage, traceId: m.traceId });
     for (const c of (m.content || [])) {
-      if (c && c.type === 'tool-result' && Array.isArray(c.usage)) out.push(...c.usage);
+      if (c && c.type === 'tool-result' && Array.isArray(c.usage)) {
+        for (const r of c.usage) out.push({ kind: 'call', ...r });
+      }
     }
   }
   return out;
+}
+
+function usageEntries(messages) {
+  return turnActivity(messages).filter(e => e.kind === 'call');
 }
 
 function usageByProvider(messages, traceId) {

@@ -2,7 +2,7 @@ import type {
   Session, Message, MessageContent, Principal, PromptFn, PipelineEvent,
   Store, ToolRegistry, SystemContextRegistry, Vault, FileStore, Tool,
   ProviderAdapter, ProviderConfig, SessionRunner, SessionView, OpenOpts, SubmitOpenOpts,
-  SteeringPolicy, SteeringDecision, UsageRecord,
+  SteeringPolicy, SteeringDecision, TurnEntry,
 } from './types.js';
 import type { MatbotPlugin } from './plugin.js';
 import type { HookRegistry } from './hooks.js';
@@ -107,7 +107,7 @@ interface SessionState {
   // can be recorded after its turn commits — a detached trigger classifier, a `followup` hook — and it
   // appends to the very array captured here, so a late arrival needs no coordination: whatever is in
   // these arrays at the flush is what gets written, and each entry says which turn caused it.
-  pendingUsage: UsageRecord[][];
+  pendingUsage: TurnEntry[][];
 }
 
 interface Sink {
@@ -226,7 +226,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
     const session = await deps.store.get(id);
     if (!session) return;
 
-    const byTrace = new Map<string, UsageRecord[]>();
+    const byTrace = new Map<string, TurnEntry[]>();
     for (const e of drained) {
       if (e.traceId === undefined) continue;
       const list = byTrace.get(e.traceId);
@@ -239,7 +239,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
       if (add === undefined) return m;
       byTrace.delete(m.traceId);
       changed = true;
-      return { ...m, usage: [...(m.usage ?? []), ...add] };
+      return { ...m, activity: [...(m.activity ?? []), ...add] };
     });
     if (!changed) return;
     await deps.store.set(id, { ...session, messages });

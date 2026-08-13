@@ -1,4 +1,4 @@
-import type { Message, Usage, UsageRecord } from './types.js';
+import type { Message, TurnEntry, Usage, UsageRecord } from './types.js';
 
 /**
  * Fold one usage tally into a running total; optional fields are summed only when either side has them.
@@ -36,30 +36,36 @@ function addReported(
 }
 
 /**
- * Every accounting entry carried by these messages, in message order.
+ * Everything a set of messages records about what happened — provider calls and the brackets around
+ * them — in message order.
  *
  * Entries are anchored on turn heads and are self-describing (`site`, `traceId`), so this is a flat
- * read with no correlation to do — filter it for whatever question is being asked: one turn
- * (`traceId`), one tool call (`site`), one session (pass the lot).
- *
- * Tolerates sessions written before accounting moved onto the turn head: an assistant message's own
- * `usage` object and a `tool-result`'s `usage` array are both read as entries, so an existing session
- * still totals correctly. Neither shape is written any more.
+ * read with no correlation to do: filter it for whatever question is being asked — one turn
+ * (`traceId`), one tool call (`site`), one session (pass the lot) — and the same one fact set answers
+ * "what did this tool cost", "what did this user cost" and "how long did that take".
  */
-export function usageEntries(messages: Iterable<Message>): UsageRecord[] {
-  const out: UsageRecord[] = [];
+export function turnActivity(messages: Iterable<Message>): TurnEntry[] {
+  const out: TurnEntry[] = [];
   for (const m of messages) {
-    if (Array.isArray(m.usage)) {
-      out.push(...m.usage);
-    } else if (m.usage !== undefined && m.providerName !== undefined) {
-      out.push({ provider: m.providerName, usage: m.usage, traceId: m.traceId });
+    if (m.activity !== undefined) out.push(...m.activity);
+
+    // Sessions written before accounting moved onto the turn head: an assistant message's own `usage`
+    // object, and a `tool-result`'s `usage` array. Neither shape is written any more.
+    const legacyOwn = (m as { usage?: Usage }).usage;
+    if (legacyOwn !== undefined && m.providerName !== undefined) {
+      out.push({ kind: 'call', provider: m.providerName, usage: legacyOwn, traceId: m.traceId });
     }
     for (const c of m.content) {
       const legacy = c.type === 'tool-result' ? (c as { usage?: UsageRecord[] }).usage : undefined;
-      if (legacy !== undefined) out.push(...legacy);
+      if (legacy !== undefined) out.push(...legacy.map((r): TurnEntry => ({ kind: 'call', ...r })));
     }
   }
   return out;
+}
+
+/** The provider calls in a set of messages — `turnActivity` less the spans. */
+export function usageEntries(messages: Iterable<Message>): UsageRecord[] {
+  return turnActivity(messages).filter((e): e is { kind: 'call' } & UsageRecord => e.kind === 'call');
 }
 
 /**

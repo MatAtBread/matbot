@@ -1,4 +1,4 @@
-import type { Usage, UsageRecord, UsageSite } from './types.js';
+import type { ISODate, TurnEntry, Usage, UsageSite } from './types.js';
 
 /**
  * The accounting bag for one turn (or one sub-turn): the entries recorded within it, the call site in
@@ -7,7 +7,7 @@ import type { Usage, UsageRecord, UsageSite } from './types.js';
  * would bake in one grouping and destroy the others. See docs/ACCOUNTING-RATIONALE.md.
  */
 export interface UsageScope {
-  entries:  UsageRecord[];
+  entries:  TurnEntry[];
   site?:    UsageSite;
   /** The turn this scope accounts for; stamped onto every entry recorded within it. */
   traceId?: string;
@@ -61,7 +61,7 @@ export function currentUsageScope(): UsageScope | undefined {
 }
 
 /** The entries of the scope in force. `undefined` outside any scope. */
-export function currentUsageSink(): UsageRecord[] | undefined {
+export function currentUsageSink(): TurnEntry[] | undefined {
   return currentUsageScope()?.entries;
 }
 
@@ -74,12 +74,27 @@ export function currentUsageSite(): UsageSite | undefined {
  * Append one provider call's usage to the scope in force, stamped with the call site in force. No-op
  * outside any scope (best-effort accounting).
  */
-export function recordUsage(provider: string, usage: Usage): void {
+export function recordUsage(provider: string, usage: Usage, span?: { startedAt: ISODate; durationMs: number }): void {
   const scope = currentUsageScope();
   if (scope === undefined) return;
   scope.entries.push({
-    provider, usage,
+    kind: 'call', provider, usage,
     ...(scope.site    !== undefined ? { site:    scope.site    } : {}),
+    ...(scope.traceId !== undefined ? { traceId: scope.traceId } : {}),
+    ...(span          !== undefined ? span : {}),
+  });
+}
+
+/**
+ * Record a bracket matbot held open that was not a provider call — a tool call. Takes the site
+ * explicitly rather than reading the ambient one, because the caller records this *after* the scope it
+ * measured has closed.
+ */
+export function recordSpan(site: UsageSite, startedAt: ISODate, durationMs: number): void {
+  const scope = currentUsageScope();
+  if (scope === undefined) return;
+  scope.entries.push({
+    kind: 'span', site, startedAt, durationMs,
     ...(scope.traceId !== undefined ? { traceId: scope.traceId } : {}),
   });
 }

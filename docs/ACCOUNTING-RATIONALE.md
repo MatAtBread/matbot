@@ -284,7 +284,8 @@ attributed record — which is the only thing core promises.
 2. **Entries carry their cause and anchor on the turn head**, flushed at pump idle. *(landed)*
 3. **Open the target**: `reported` alongside the normalised counters, adapters retaining what they
    discard and synthesising nothing. No new plugin — three adapter changes. *(landed)*
-4. **Brackets**: tool and round spans as entry fields.
-5. **`meta` registry + mapper interface**, once there is something to map.
-
-(1) and (2) are bug fixes and are worth landing regardless of what happens to the rest.
+4. **Brackets**: round timing on the call entry, tool calls as their own `span` arm. *(landed)*
+5. **A mapper interface** — deliberately NOT built. With `reported` retained a consumer computes cost
+   outside matbot and holds the answer itself, so there is nothing for core to host. Build it only if a
+   second consumer needs the *same* derived value persisted, which is a fact about matbot's users rather
+   than about matbot.
