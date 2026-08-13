@@ -119,6 +119,14 @@ export interface UsageRecord {
    * and by session. See docs/ACCOUNTING-RATIONALE.md.
    */
   traceId?: string;
+  /**
+   * The originating human turn, carried down a resubmission chain (a human submit is its own root). Not
+   * redundant with `traceId`: a retract-and-rerun re-runs an *existing* user turn under a fresh traceId
+   * and introduces no user message of its own, so its entries have no head of their own to sit on. The
+   * root is what gives them one — and it is the honest answer anyway, since the retry's cost belongs to
+   * the turn being retried.
+   */
+  rootTraceId?: string;
 }
 
 /**
@@ -132,10 +140,12 @@ export interface UsageRecord {
  * completions produces both: this span, and one `UsageRecord` per call it made, sharing its `site`.
  */
 export interface SpanRecord {
-  site:       UsageSite;
-  traceId?:   string;
-  startedAt:  ISODate;
-  durationMs: number;
+  site:         UsageSite;
+  traceId?:     string;
+  /** See `UsageRecord.rootTraceId` — a span needs the same anchor for the same reason. */
+  rootTraceId?: string;
+  startedAt:    ISODate;
+  durationMs:   number;
 }
 
 /**

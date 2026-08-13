@@ -1678,9 +1678,14 @@ function usageByProvider(messages, traceId) {
 // The turn's wall-clock time: the createdAt of its last message. Messages only acquire a timestamp when
 // the pump commits them, so this reads the persisted session (the `done` event's copy, or the reload) —
 // never the live delta, which carries none.
+// `traceId` undefined ⇒ the last timestamp in the list given, whatever its trace. A visible turn can
+// span two traceIds (a retract-and-rerun answers under a fresh one), so the caller slices the span and
+// asks for its end rather than naming a trace.
 function turnTimestamp(messages, traceId) {
   let at;
-  for (const m of (messages || [])) if (m.traceId === traceId && m.createdAt) at = m.createdAt;
+  for (const m of (messages || [])) {
+    if ((traceId === undefined || m.traceId === traceId) && m.createdAt) at = m.createdAt;
+  }
   return at;
 }
 
@@ -1758,19 +1763,35 @@ function makeTurnFooter(perProvider, at) {
 // two paths that draw it. No timing assumption is needed, and none would be sound: the runner clears its
 // busy flag before awaiting the flush, so an observer can be told a session is idle while the write is
 // still in flight.
+// Footers are drawn per VISIBLE turn — a user message and everything up to the next one — not per
+// traceId. The two are usually the same and diverge exactly where it matters: a retract-and-rerun
+// answers a user turn under a *fresh* traceId, so the turn the reader sees spans two of them, with the
+// accounting on the first and the surviving answer on the second. Keying on traceId drew a footer for a
+// turn with no answer left (nowhere to put it) and a second, empty one under the answer.
 function applyTurnUsageBlocks(messages, replace) {
-  const seen = new Set();
-  for (const m of (messages || [])) {
-    if (!m.traceId || seen.has(m.traceId)) continue;
-    seen.add(m.traceId);
-    const footer = makeTurnFooter(usageByProvider(messages, m.traceId), turnTimestamp(messages, m.traceId));
+  const msgs = messages || [];
+  for (let i = 0; i < msgs.length; i++) {
+    if (msgs[i].role !== 'user') continue;
+    let end = i + 1;
+    while (end < msgs.length && msgs[end].role !== 'user') end++;
+    const span = msgs.slice(i, end);
+
+    // Everything anchored on this head, whichever traceId within the span produced it.
+    const entries = (msgs[i].activity || []).length
+      ? usageByProvider([msgs[i]])
+      : usageByProvider(span, msgs[i].traceId);        // sessions written before the move
+    const footer = makeTurnFooter(entries, turnTimestamp(span, undefined));
     if (!footer) continue;
-    const wraps = [...messagesEl.querySelectorAll('.message.assistant[data-trace="' + m.traceId + '"]')];
+
+    // Any wrap belonging to any trace in the span — the answer may carry the redo's traceId.
+    const traces = [...new Set(span.map(m => m.traceId).filter(Boolean))];
+    const wraps  = traces.flatMap(t =>
+      [...messagesEl.querySelectorAll('.message.assistant[data-trace="' + t + '"]')]);
     if (wraps.length === 0) continue;
-    // Look for an existing footer across ALL of the turn's wraps, not just the last one: the live path
-    // appends to the wrap that was current at `done`, and a turn can acquire further wraps afterwards
-    // (a marker, a robo message). Matching only the last one appends a second footer instead of
-    // replacing the first, which shows up as a turn with two timestamps.
+    // Search ALL of the span's wraps for an existing footer, not just the last: the live path appends
+    // to whichever wrap was current at `done`, and a turn can acquire further wraps afterwards (a
+    // marker, a robo message). Matching only the last appends a second footer instead of replacing the
+    // first, which shows up as a turn with two timestamps.
     const existing = wraps.map(w => w.querySelector(':scope > .token-stats')).find(Boolean);
     if (existing) {
       if (!replace) continue;
@@ -1781,6 +1802,8 @@ function applyTurnUsageBlocks(messages, replace) {
       continue;
     }
     if (replace) continue;                       // an unfinished turn: leave it to `done` to draw
+    // Last in DOM order, which `traces` order does not guarantee.
+    wraps.sort((a, b) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) ? -1 : 1);
     wraps[wraps.length - 1].appendChild(footer);
   }
 }

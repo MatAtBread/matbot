@@ -9,8 +9,10 @@ import type { ISODate, TurnEntry, Usage, UsageSite } from './types.js';
 export interface UsageScope {
   entries:  TurnEntry[];
   site?:    UsageSite;
-  /** The turn this scope accounts for; stamped onto every entry recorded within it. */
-  traceId?: string;
+  /** The turn this scope accounts for, and the human turn that ultimately caused it; both stamped
+   *  onto every entry recorded within it. */
+  traceId?:     string;
+  rootTraceId?: string;
   parent?:  UsageScope;
 }
 
@@ -79,9 +81,10 @@ export function recordUsage(provider: string, usage: Usage, span?: { startedAt: 
   if (scope === undefined) return;
   scope.entries.push({
     kind: 'call', provider, usage,
-    ...(scope.site    !== undefined ? { site:    scope.site    } : {}),
-    ...(scope.traceId !== undefined ? { traceId: scope.traceId } : {}),
-    ...(span          !== undefined ? span : {}),
+    ...(scope.site        !== undefined ? { site:        scope.site        } : {}),
+    ...(scope.traceId     !== undefined ? { traceId:     scope.traceId     } : {}),
+    ...(scope.rootTraceId !== undefined ? { rootTraceId: scope.rootTraceId } : {}),
+    ...(span              !== undefined ? span : {}),
   });
 }
 
@@ -95,7 +98,8 @@ export function recordSpan(site: UsageSite, startedAt: ISODate, durationMs: numb
   if (scope === undefined) return;
   scope.entries.push({
     kind: 'span', site, startedAt, durationMs,
-    ...(scope.traceId !== undefined ? { traceId: scope.traceId } : {}),
+    ...(scope.traceId     !== undefined ? { traceId:     scope.traceId     } : {}),
+    ...(scope.rootTraceId !== undefined ? { rootTraceId: scope.rootTraceId } : {}),
   });
 }
 
@@ -107,14 +111,19 @@ export function recordSpan(site: UsageSite, startedAt: ISODate, durationMs: numb
  * the parent when `fn` settles — so a sub-turn can be asked what it cost without its spend vanishing
  * from the turn containing it. Roll-up happens on rejection too: the tokens were spent either way.
  */
-export function withUsageScope<T>(fn: (scope: UsageScope) => T, traceId?: string): T {
+export function withUsageScope<T>(
+  fn:  (scope: UsageScope) => T,
+  ids?: { traceId?: string; rootTraceId?: string },
+): T {
   const carrier = (globalThis as CarrierGlobal)[CARRIER_KEY];
-  if (carrier === undefined) return fn({ entries: [], ...(traceId !== undefined ? { traceId } : {}) });
+  if (carrier === undefined) return fn({ entries: [], ...ids });
   const parent = carrier.tryCurrent();
-  const trace  = traceId ?? parent?.traceId;
+  const trace  = ids?.traceId     ?? parent?.traceId;
+  const root   = ids?.rootTraceId ?? parent?.rootTraceId;
   const scope: UsageScope = {
     entries: [],
-    ...(trace  !== undefined ? { traceId: trace } : {}),
+    ...(trace  !== undefined ? { traceId:     trace } : {}),
+    ...(root   !== undefined ? { rootTraceId: root  } : {}),
     ...(parent !== undefined ? { parent } : {}),
   };
   const rollUp = (): void => { if (parent !== undefined) parent.entries.push(...scope.entries); };

@@ -226,11 +226,18 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
     const session = await deps.store.get(id);
     if (!session) return;
 
+    // Anchor on the entry's own turn head when it has one, and on its ROOT's otherwise. A
+    // retract-and-rerun re-runs an existing user turn under a fresh traceId and introduces no user
+    // message, so its entries have no head of their own — and the root is the honest home anyway, since
+    // a retry's cost belongs to the turn being retried. Without this the redo's spend was dropped
+    // outright, which is the very under-report anchoring on the turn head exists to prevent.
+    const heads = new Set(session.messages.filter(m => m.role === 'user').map(m => m.traceId));
     const byTrace = new Map<string, TurnEntry[]>();
     for (const e of drained) {
-      if (e.traceId === undefined) continue;
-      const list = byTrace.get(e.traceId);
-      if (list) list.push(e); else byTrace.set(e.traceId, [e]);
+      const anchor = e.traceId !== undefined && heads.has(e.traceId) ? e.traceId : e.rootTraceId;
+      if (anchor === undefined || !heads.has(anchor)) continue;
+      const list = byTrace.get(anchor);
+      if (list) list.push(e); else byTrace.set(anchor, [e]);
     }
 
     let changed = false;
@@ -501,7 +508,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
               }
             }
           }
-          }, head.traceId);
+          }, { traceId: head.traceId, rootTraceId: head.rootTraceId });
         } catch (e) {
           emit(s, { type: 'error', error: String(e), traceId: head.traceId });
         } finally {
