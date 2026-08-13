@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type {
   MatbotPlugin, Principal, Session, Store, Tool, ToolRegistry, FileStore, Vault,
-  FormField, PromptFn, SessionRunner, WatchVisibility, VisibilityQuery, SteeringMode,
+  FormField, PromptFn, SessionRunner, WatchVisibility, VisibilityQuery, FilePartition, SteeringMode,
   Notifier, Notification,
 } from '@matatbread/matbot-core';
 import { createSession, promptCancelledError, runAs, tryCurrentPrincipal, ItemChangeKind, RegistryChangeKind } from '@matatbread/matbot-core';
@@ -27,6 +27,10 @@ export interface WebServerDeps {
    *  observes file events across every partition (origin-stamped) and filters each SSE connection by its
    *  principal; absent ⇒ the plain single-stream `files.watch()` with no filter (the non-partitioned default). */
   watchVisibility?: () => WatchVisibility | undefined;
+  /** Optional file-area addressing, from the same partitioning backend and lazily for the same reason:
+   *  resolves the `~<partition>` segment of a `GET /files/` URL back to the area those bytes were written
+   *  to. Absent ⇒ one undivided file area, and the segment (if any) is moot. */
+  filePartition?: () => FilePartition | undefined;
   /** The notification bus this frontend both publishes to (a session created over HTTP) and subscribes
    *  to (the firehose). */
   notifier:       Notifier;
@@ -755,16 +759,18 @@ export function createWebServer(deps: WebServerDeps) {
       return;
     }
 
-    // --- GET /files/[~<principal>/]<namespace>/<name> --- (read-only static access; only files marked `allowed`)
-    // A browser GET (img/anchor/download) can't send the x-matbot-principal header, so a profiled file's
-    // owning partition rides in the path as an optional leading `~<principal>` segment (minted by
-    // url_for_resource). `~` is excluded from principal ids and namespaces, so the segment is unambiguous.
+    // --- GET /files/[~<partition>/]<namespace>/<name> --- (read-only static access; only files marked `allowed`)
+    // A browser GET (img/anchor/download) can't send the x-matbot-principal header, so a partitioned file's
+    // owning file area rides in the path as an optional leading `~<partition>` segment (minted by
+    // url_for_resource). `~` is excluded from partition ids and namespaces, so the segment is unambiguous.
+    // The token is opaque here and resolved by the backend that minted it (`FilePartition.enter`) — this
+    // route used to re-enter it as a principal, which is a guess at the routing the backend owns.
     // Bare paths are served from the request principal (base in a default deployment) — unchanged.
     const fileMatch = /^\/files\/(?:~([^/]+)\/)?([^/]+)\/(.+)$/.exec(url);
     if (method === 'GET' && fileMatch && deps.files) {
-      let filePrincipal: string | undefined, namespace: string, name: string;
+      let partition: string | undefined, namespace: string, name: string;
       try {
-        filePrincipal = fileMatch[1] !== undefined ? decodeURIComponent(fileMatch[1]) : undefined;
+        partition = fileMatch[1] !== undefined ? decodeURIComponent(fileMatch[1]) : undefined;
         namespace = decodeURIComponent(fileMatch[2]!); name = decodeURIComponent(fileMatch[3]!);
       }
       catch { json(res, 400, { error: 'Invalid path encoding' }); return; }
@@ -772,8 +778,10 @@ export function createWebServer(deps: WebServerDeps) {
       // One read serves and gates: the handle we need to stream also carries `allowed`. A file that
       // isn't servable is reported as missing, not forbidden — don't reveal that the path exists.
       const read = () => deps.files!.getByName(name, namespace);
-      const handle = filePrincipal !== undefined
-        ? await runAs({ id: filePrincipal, type: 'user' }, read)
+      // No service ⇒ nothing partitions the file area, so there is only one area a token could name.
+      const filePartition = deps.filePartition?.();
+      const handle = partition !== undefined && filePartition
+        ? await filePartition.enter(partition, read)
         : await read();
       if (!handle) { json(res, 404, { error: 'Not found' }); return; }
       if (!handle.allowed) { json(res, 403, { error: 'Not allowed' }); return; }

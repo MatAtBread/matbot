@@ -57,6 +57,7 @@
     "@types/node": "catalog:",
     "typescript": "catalog:",
     "@matatbread/matbot-function-tools": "workspace:^",
-    "@matatbread/matbot-tool-types": "workspace:^"
+    "@matatbread/matbot-tool-types": "workspace:^",
+    "@matatbread/matbot-storage-profiles": "workspace:^"
   }
 }

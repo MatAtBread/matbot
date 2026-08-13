@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { promises as fs, type Dirent } from 'node:fs';
 import { dirname, join, sep } from 'node:path';
 import type { Store, FileStore, StorageBackend, Principal, Notifier, VisibilityQuery } from '@matatbread/matbot-plugin-api';
@@ -56,6 +57,11 @@ export interface ProfileDirectory {
   // The `WatchVisibility` service surface, exposed here so the plugin can register it: the generic
   // per-connection predicate for any partitioned kind (files, skills, …), keyed on the event's namespace.
   visible(q: VisibilityQuery): boolean;
+  // The `FilePartition` service surface, likewise. The router is the only thing that can answer which
+  // area a write landed in, so anything minting an out-of-band address for a file (a URL) asks here
+  // instead of inferring it from the principal — which is not the same question (see FilePartition).
+  filePartition(): string | undefined;
+  enterFilePartition<T>(token: string, fn: () => Promise<T>): Promise<T>;
   // Hand the backend the notification bus. Share/unshare/copy change what a partition can see without
   // touching a Store, so they announce themselves — but the backend is opened by the
   // boot pre-scan, before a machine exists, so the bus is attached from setup() rather than injected.
@@ -77,6 +83,8 @@ export function asProfileDirectory(backend: unknown): ProfileDirectory | undefin
     && typeof b.sharedInOwners      === 'function'
     && typeof b.copy                === 'function'
     && typeof b.visible             === 'function'
+    && typeof b.filePartition       === 'function'
+    && typeof b.enterFilePartition  === 'function'
     ? (b as ProfileDirectory)
     : undefined;
 }
@@ -141,6 +149,9 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
   // sharee's firehose connection without an fs.lstat per event (visible runs sync, per conn × event). Built
   // eagerly at open() by scanning each partition for symlinks, then maintained on every share/unshare.
   private readonly sharedIn                    = new Map<string, Set<string>>();
+  // The file area pinned by enterFilePartition(), overriding the ambient route for `files` only. Async
+  // context rather than a field: reads served under a pin interleave with ordinary turns.
+  private readonly pinnedFiles                 = new AsyncLocalStorage<string>();
   // Set by the plugin's setup() — open() runs during the boot pre-scan, before any machine exists, so
   // the bus arrives later. Absent (pre-setup, or a host with no notifier) ⇒ share/copy stay silent.
   private notifier: Notifier | undefined;
@@ -597,6 +608,24 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
     return this.sharedIn.get(this.sharedInKey(viewerPart, namespace))?.has(id) ?? false;
   }
 
+  // ── FilePartition ────────────────────────────────────────────────────────────────
+
+  // The area the current principal's files resolve to, as an address something outside a principal scope
+  // can replay (a URL). Base reads back as `undefined`: a bare path already reaches it, and stamping the
+  // base with a token would make an ordinary file look partitioned — the bug this pair exists to end.
+  filePartition(): string | undefined {
+    const part = this.route(FILES_NS);
+    return part === BASE ? undefined : part;
+  }
+
+  // The inverse, pinned rather than re-routed: entering the token's principal would run the token back
+  // through routeFor, and one alias hop later (`sharedFrom`) that can land in a DIFFERENT area than the
+  // one the token named. An address must resolve to what it addressed, so the pin short-circuits routing
+  // — for `files` alone, leaving every document store in the scope routed as usual.
+  enterFilePartition<T>(token: string, fn: () => Promise<T>): Promise<T> {
+    return this.pinnedFiles.run(token, fn);
+  }
+
   // ── Shared-in cache (feeds visible()'s OR-clause) ─────────────────────────────────
 
   private sharedInKey(partId: string, namespace: string): string {
@@ -708,6 +737,10 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
 
   // The partition id ('' == base) that should serve (currentPrincipal, namespace).
   private route(namespace: string): string {
+    if (namespace === FILES_NS) {
+      const pinned = this.pinnedFiles.getStore();
+      if (pinned !== undefined) return pinned;
+    }
     return this.routeFor(tryCurrentPrincipal()?.id, namespace);
   }
 

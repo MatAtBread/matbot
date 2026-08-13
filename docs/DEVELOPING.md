@@ -316,6 +316,7 @@ interface MatbotServices {
   readonly ToolTypeIndex?:   ToolTypeIndex | undefined;    // node-only; provided by the tool-types plugin
   readonly ToolPresenter?:   ToolPresenter | undefined;    // per-turn tool-visibility policy (tool-router)
   readonly WatchVisibility?: WatchVisibility | undefined;  // per-connection notification visibility (a partitioning backend)
+  readonly FilePartition?:   FilePartition | undefined;    // addresses the file area out of band, e.g. in a URL (same backend)
   readonly SteeringPolicy?:  SteeringPolicy | undefined;   // how a mid-turn submission is disposed (queue vs interrupt)
 }
 ```

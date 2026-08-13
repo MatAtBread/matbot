@@ -14,6 +14,7 @@ let openedByPreScan = false;
 let toolRegistry: ToolRegistry | undefined;
 let machine: MatbotMachine | undefined;
 let watchRegistered = false;
+let filePartitionRegistered = false;
 
 export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,
@@ -69,6 +70,16 @@ export const plugin: MatbotPluginSpec = {
       visible: q => dir()?.visible(q) ?? true,
     });
     watchRegistered = true;
+
+    // Addressing for the file area, so a frontend minting an out-of-band file URL asks the router which
+    // partition the bytes went to instead of inferring one from the principal (they are different
+    // questions — see FilePartition). Same live `dir()` resolution, and fails to "base" if the facet has
+    // gone, which is the only answer a non-partitioning deployment could give anyway.
+    await services.register('FilePartition', {
+      current: ()          => dir()?.filePartition(),
+      enter:   (token, fn) => dir()?.enterFilePartition(token, fn) ?? fn(),
+    });
+    filePartitionRegistered = true;
   },
 
   async teardown() {
@@ -76,6 +87,7 @@ export const plugin: MatbotPluginSpec = {
     toolRegistry?.remove('share');
     toolRegistry = undefined;
     if (watchRegistered && machine) { machine.unregister('WatchVisibility'); watchRegistered = false; }
+    if (filePartitionRegistered && machine) { machine.unregister('FilePartition'); filePartitionRegistered = false; }
     machine = undefined;
   },
 };
