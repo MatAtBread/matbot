@@ -76,7 +76,6 @@ function formatUsageParts(u: Usage): string[] {
   if (u.outputTokens        > 0) parts.push(`↓${u.outputTokens}`);
   if ((u.cacheReadTokens     ?? 0) > 0) parts.push(`${u.cacheReadTokens} cached`);
   if ((u.cacheCreationTokens ?? 0) > 0) parts.push(`+${u.cacheCreationTokens} written`);
-  if ((u.costUsd             ?? 0) > 0) parts.push(`≈$${u.costUsd!.toFixed(4)}`);
   return parts;
 }
 
@@ -1044,13 +1043,17 @@ async function main(): Promise<void> {
       // `message_delta`. Taking the last event instead of folding therefore reported inputTokens 0 and
       // no cache figures for every out-of-band completion against it.
       let usage: Usage = { inputTokens: 0, outputTokens: 0 };
+      const startedAt = Date.now();
       for await (const ev of adpt.complete(msgs, resolved, [], signal)) {
         if (ev.type === 'text-delta') text += ev.delta;
         if (ev.type === 'usage')      usage = addUsage(usage, ev);
       }
       // Report into the ambient usage sink: a tool running this completion (singleTurn/complete) has
-      // its spend attributed to the tool call by the runner. No-op outside any tool scope.
-      recordUsage(req.provider, usage);
+      // its spend attributed to whatever site is in force. No-op outside any scope. The bracket is
+      // measured here because this is where the call is actually issued.
+      recordUsage(req.provider, usage, {
+        startedAt: new Date(startedAt).toISOString(), durationMs: Date.now() - startedAt,
+      });
       return { text, usage };
     },
     async singleTurn(req) {

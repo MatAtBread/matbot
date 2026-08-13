@@ -1,6 +1,6 @@
 import type { HookPoint } from './hooks.js';
 import type { ISODate, MimeType } from './primitives.js';
-import type { ProviderMeta, Usage, UsageRecord } from './provider.js';
+import type { ProviderMeta, TurnEntry, UsageRecord } from './provider.js';
 
 // ── Messages & Session ────────────────────────────────────────────────────────
 
@@ -29,14 +29,11 @@ export type MessageContent = (
       /** Provider-specific round-trip metadata, persisted and re-sent verbatim on replay — see
        *  `ProviderMeta` and the `tool-call` `CompletionEvent`. */
       meta?: ProviderMeta }
-  | { type: 'tool-result';       id: string; result: unknown; isError?: boolean;
-      /**
-       * Accounting addendum: completions the tool itself ran (e.g. `single_turn`, `dream_time`'s ranker/
-       * merger), captured ambiently via the usage carrier and recorded for cost reckoning. Elided from
-       * provider submission — adapters serialise only `id`/`result`/`isError`. One entry per provider
-       * call, each tagged with the provider billed; never summed at write time, as rates differ.
-       */
-      usage?: UsageRecord[] }
+  // A tool's own completions (`single_turn`, `dream_time`'s ranker/merger) are no longer recorded here:
+  // they are entries on the turn head, tagged `site: { kind: 'tool', callId }`. A tool message is popped
+  // wholesale by a retract-and-rerun, which took its accounting out of reach of any reduction over
+  // `session.messages` — see `Message.usage`.
+  | { type: 'tool-result';       id: string; result: unknown; isError?: boolean }
 
   // ── frontend-facing: rendered to a person, never sent to the model ──
   | { type: 'form';              fields: FormField[]; submitLabel?: string }
@@ -128,9 +125,20 @@ export interface Message {
   createdAt:     ISODate;
   traceId:       string;
   providerName?: string;
-  /** Token/cost accounting for the provider call that produced this message (assistant turns). The
-   *  billed provider is this message's `providerName`. Accounting only — elided from provider submission. */
-  usage?:        Usage;
+  /**
+   * The turn's activity log, anchored here — every provider call it caused, whatever ran it (a round, a
+   * tool, a hook), plus every bracket matbot held open that was not a call of its own (a tool span).
+   * Each entry is self-describing via its `site` and causal `traceId`. Bookkeeping only: elided from
+   * provider submission, and a `flatMap` away from any total or waterfall a consumer wants.
+   *
+   * Anchored on the turn's **head** (its user message) rather than on the message whose call produced
+   * it, because that is the one message a retract-and-rerun keeps: the pop stashes assistant and tool
+   * messages inside a retraction marker, where no reduction over `session.messages` will ever find them
+   * again, so a retried turn would silently under-report by the attempt it discarded. Locality is not
+   * lost — `site` already names the round or tool call, and physical adjacency carried nothing the
+   * coordinate does not. See docs/ACCOUNTING-RATIONALE.md.
+   */
+  activity?:     TurnEntry[];
   metadata?:     Record<string, unknown>;
 }
 

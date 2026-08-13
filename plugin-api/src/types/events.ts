@@ -23,7 +23,10 @@ export type TurnEvent =
   | { type: 'tool:stdout';    callId: string; chunk: string;  traceId: string }
   | { type: 'tool:stderr';    callId: string; chunk: string;  traceId: string }
   | { type: 'tool:progress';  callId: string; pct: number; message?: string; traceId: string }
-  | { type: 'tool:end';       callId: string; result: unknown; isError: boolean; traceId: string }
+  // `durationMs` is the runner's own bracket around the executor — the same number persisted as the
+  // call's `span` entry, carried live so a frontend can draw it without waiting for the idle flush.
+  // Absent for a call that never ran (a rejected or severed one), which is not the same as 0ms.
+  | { type: 'tool:end';       callId: string; result: unknown; isError: boolean; durationMs?: number; traceId: string }
 
   // ── live delivery of state that is ALREADY persisted; never the source of truth ──
   | { type: 'file';           handle: FileHandle;     traceId: string }

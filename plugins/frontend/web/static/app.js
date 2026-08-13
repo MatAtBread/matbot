@@ -1633,30 +1633,44 @@ function makeToolResultBlock(result, isError) {
   return wrap;
 }
 
-// Aggregate the token accounting persisted on a turn's messages, keyed by the provider billed: an
-// assistant message's own `usage` (billed to its `providerName`) plus every tool-result block's `usage`
-// records (each provider-tagged \u2014 a tool may run completions against several). `traceId` scopes it to
-// one turn. Mirrors core's usageByProvider; the static client can't import core, so it reduces inline.
+// Aggregate the token accounting persisted on a session's messages, keyed by the provider billed.
+// Accounting entries are anchored on turn heads and are self-describing (each names the turn that
+// caused it and the site that produced it), so this filters on the ENTRY's traceId rather than the
+// message's: a completion recorded after its turn committed \u2014 a detached trigger classifier, a
+// followup hook \u2014 is flushed later and can land on a message belonging to a different turn.
+// Mirrors core's usageEntries/usageByProvider; the static client can't import core, so it reduces
+// inline. Tolerates sessions written before accounting moved onto the turn head.
+function turnActivity(messages) {
+  const out = [];
+  for (const m of (messages || [])) {
+    if (Array.isArray(m.activity)) out.push(...m.activity);
+    // Sessions written before accounting moved onto the turn head.
+    else if (m.usage && m.providerName) out.push({ kind: 'call', provider: m.providerName, usage: m.usage, traceId: m.traceId });
+    for (const c of (m.content || [])) {
+      if (c && c.type === 'tool-result' && Array.isArray(c.usage)) {
+        for (const r of c.usage) out.push({ kind: 'call', ...r });
+      }
+    }
+  }
+  return out;
+}
+
+function usageEntries(messages) {
+  return turnActivity(messages).filter(e => e.kind === 'call');
+}
+
 function usageByProvider(messages, traceId) {
   const map = new Map();
-  const add = (provider, u) => {
-    if (!provider || !u) return;
-    const cur = map.get(provider) || { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, costUsd: 0 };
+  for (const e of usageEntries(messages)) {
+    if (traceId && e.traceId !== traceId) continue;
+    const u = e.usage;
+    if (!e.provider || !u) continue;
+    const cur = map.get(e.provider) || { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
     cur.inputTokens         += u.inputTokens         || 0;
     cur.outputTokens        += u.outputTokens        || 0;
     cur.cacheReadTokens     += u.cacheReadTokens     || 0;
     cur.cacheCreationTokens += u.cacheCreationTokens || 0;
-    cur.costUsd             += u.costUsd             || 0;
-    map.set(provider, cur);
-  };
-  for (const m of (messages || [])) {
-    if (traceId && m.traceId !== traceId) continue;
-    if (m.usage && m.providerName) add(m.providerName, m.usage);
-    for (const c of (m.content || [])) {
-      if (c && c.type === 'tool-result' && Array.isArray(c.usage)) {
-        for (const r of c.usage) add(r.provider, r.usage);
-      }
-    }
+    map.set(e.provider, cur);
   }
   return [...map].map(([provider, usage]) => ({ provider, usage }));
 }
@@ -1664,9 +1678,14 @@ function usageByProvider(messages, traceId) {
 // The turn's wall-clock time: the createdAt of its last message. Messages only acquire a timestamp when
 // the pump commits them, so this reads the persisted session (the `done` event's copy, or the reload) —
 // never the live delta, which carries none.
+// `traceId` undefined ⇒ the last timestamp in the list given, whatever its trace. A visible turn can
+// span two traceIds (a retract-and-rerun answers under a fresh one), so the caller slices the span and
+// asks for its end rather than naming a trace.
 function turnTimestamp(messages, traceId) {
   let at;
-  for (const m of (messages || [])) if (m.traceId === traceId && m.createdAt) at = m.createdAt;
+  for (const m of (messages || [])) {
+    if ((traceId === undefined || m.traceId === traceId) && m.createdAt) at = m.createdAt;
+  }
   return at;
 }
 
@@ -1684,30 +1703,41 @@ function formatTurnTime(at) {
 // summary. `perProvider` is the output of usageByProvider; with no usage the footer degrades to the
 // bare time, so a turn whose provider reported nothing still gets one. Both empty ⇒ null (caller skips).
 function makeTurnFooter(perProvider, at) {
-  const timeEl = at ? (() => {
-    const el = document.createElement('span');
-    el.className = 'turn-time';
-    el.textContent = formatTurnTime(at);
-    el.title = new Date(at).toLocaleString();
-    return el;
-  })() : null;
-
-  if (!perProvider.length) {
-    if (!timeEl) return null;
-    const solo = document.createElement('div');
-    solo.className = 'token-stats turn-time-solo';
-    solo.appendChild(timeEl);
-    return solo;
-  }
-
+  if (!perProvider.length && !at) return null;
   const det = document.createElement('details');
   det.className = 'token-stats';
   const sum = document.createElement('summary');
   sum.appendChild(document.createTextNode('tokens'));
-  if (timeEl) sum.appendChild(timeEl);
+  const timeEl = document.createElement('span');
+  timeEl.className = 'turn-time';
+  sum.appendChild(timeEl);
   det.appendChild(sum);
   const body = document.createElement('div');
   body.className = 'token-stats-body';
+  det.appendChild(body);
+  fillTurnFooter(det, perProvider, at);
+  return det;
+}
+
+// Fill an existing footer in place. Separate from building it because a turn's numbers arrive AFTER the
+// footer is drawn \u2014 accounting is flushed when the queue drains, which is later than `done` \u2014 and the
+// footer must not visibly change shape when they land. Swapping the element (or, as this did before,
+// swapping a bare-time `div` for a `details`) moves the timestamp and restyles it, so the turn twitches
+// a second after it finishes. Only the rows and the time text change here; the shell, its classes and
+// its open state are untouched.
+function fillTurnFooter(det, perProvider, at) {
+  const timeEl = det.querySelector(':scope > summary > .turn-time');
+  if (timeEl) {
+    timeEl.textContent = at ? formatTurnTime(at) : '';
+    if (at) timeEl.title = new Date(at).toLocaleString();
+  }
+  // A footer with nothing in it yet still occupies its final shape; the class is a styling hook only,
+  // and must not be used to change the layout, or filling it would move things again.
+  det.classList.toggle('is-empty', !perProvider.length);
+
+  const body = det.querySelector(':scope > .token-stats-body');
+  if (!body) return;
+  body.textContent = '';
   const s = (t, cls) => { const el = document.createElement('span'); if (cls) el.className = cls; el.textContent = t; return el; };
   for (const { provider, usage } of perProvider) {
     const row = document.createElement('div');
@@ -1720,28 +1750,96 @@ function makeTurnFooter(perProvider, at) {
     }
     if (usage.outputTokens > 0)        row.appendChild(s('\u2193 ' + usage.outputTokens.toLocaleString() + ' out'));
     if (usage.cacheCreationTokens > 0) row.appendChild(s('\u2601 ' + usage.cacheCreationTokens.toLocaleString() + ' written'));
-    if (usage.costUsd > 0)             row.appendChild(s('\u2248 $' + usage.costUsd.toFixed(4)));
     body.appendChild(row);
   }
-  det.appendChild(body);
-  return det;
 }
 
 // Attach the footer to each turn already rendered into the DOM, exactly as the live `done` path does —
 // appended to the turn's last assistant wrap (the turn's bottom). Used on reload, so historical turns show
-// the same accounting as if they had just streamed. Idempotent: skips a turn whose wrap already carries one.
-function applyTurnUsageBlocks(messages) {
-  const seen = new Set();
-  for (const m of (messages || [])) {
-    if (!m.traceId || seen.has(m.traceId)) continue;
-    seen.add(m.traceId);
-    const footer = makeTurnFooter(usageByProvider(messages, m.traceId), turnTimestamp(messages, m.traceId));
+// the same accounting as if they had just streamed.
+//
+// `replace` REBUILDS a footer that is already there, rather than skipping it, and creates none. That is
+// not a refinement, and the asymmetry is the point:
+//
+//   - rebuilding is required because accounting is flushed when the pump's queue drains, which is after
+//     the `done` that drew the footer, so the live footer is necessarily built before the numbers exist;
+//   - creating nothing is what makes the refresh safe to run on ANY session write. A turn writes the
+//     session several times before it ends (persist-at-turn-start, the end-of-turn commit), and an
+//     in-flight turn has no footer yet — so it is left alone, rather than having one painted into a wrap
+//     that is still streaming, which lands the tokens above text the turn has yet to render.
+//
+// The presence of a footer therefore *is* the "this turn has finished" signal, already maintained by the
+// two paths that draw it. No timing assumption is needed, and none would be sound: the runner clears its
+// busy flag before awaiting the flush, so an observer can be told a session is idle while the write is
+// still in flight.
+// Footers are drawn per VISIBLE turn — a user message and everything up to the next one — not per
+// traceId. The two are usually the same and diverge exactly where it matters: a retract-and-rerun
+// answers a user turn under a *fresh* traceId, so the turn the reader sees spans two of them, with the
+// accounting on the first and the surviving answer on the second. Keying on traceId drew a footer for a
+// turn with no answer left (nowhere to put it) and a second, empty one under the answer.
+function applyTurnUsageBlocks(messages, replace) {
+  const msgs = messages || [];
+  for (let i = 0; i < msgs.length; i++) {
+    if (msgs[i].role !== 'user') continue;
+    let end = i + 1;
+    while (end < msgs.length && msgs[end].role !== 'user') end++;
+    const span = msgs.slice(i, end);
+
+    // Everything anchored on this head, whichever traceId within the span produced it.
+    const entries = (msgs[i].activity || []).length
+      ? usageByProvider([msgs[i]])
+      : usageByProvider(span, msgs[i].traceId);        // sessions written before the move
+    const at = turnTimestamp(span, undefined);
+    if (!entries.length && !at) continue;
+
+    // Any wrap belonging to any trace in the span — the answer may carry the redo's traceId.
+    const traces = [...new Set(span.map(m => m.traceId).filter(Boolean))];
+    const wraps  = traces.flatMap(t =>
+      [...messagesEl.querySelectorAll('.message.assistant[data-trace="' + t + '"]')]);
+    if (wraps.length === 0) continue;
+    // Search ALL of the span's wraps for an existing footer, not just the last: the live path appends
+    // to whichever wrap was current at `done`, and a turn can acquire further wraps afterwards (a
+    // marker, a robo message). Matching only the last appends a second footer instead of replacing the
+    // first, which shows up as a turn with two timestamps.
+    const existing = wraps.map(w => w.querySelector(':scope > .token-stats')).find(Boolean);
+    if (existing) {
+      // Fill in place — never swap the element. The open state survives for free, and nothing moves.
+      if (replace) fillTurnFooter(existing, entries, at);
+      continue;
+    }
+    if (replace) continue;                       // an unfinished turn: leave it to `done` to draw
+    const footer = makeTurnFooter(entries, at);
     if (!footer) continue;
-    const wraps = messagesEl.querySelectorAll('.message.assistant[data-trace="' + m.traceId + '"]');
-    const lastWrap = wraps[wraps.length - 1];
-    if (!lastWrap || lastWrap.querySelector(':scope > .token-stats')) continue;
-    lastWrap.appendChild(footer);
+    // Last in DOM order, which `traces` order does not guarantee.
+    wraps.sort((a, b) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) ? -1 : 1);
+    wraps[wraps.length - 1].appendChild(footer);
   }
+}
+
+// Re-read the open session and rebuild its turn footers — nothing else, so scroll position, open
+// thinking blocks and streamed DOM all survive.
+//
+// This is how accounting reaches a live turn at all: it is flushed when the pump's queue drains, which
+// is necessarily after the `done` that drew the footer, because a turn's spend is not final at its own
+// end (a followup hook runs post-commit, a detached classifier settles whenever it settles).
+//
+// Driven by the session write itself, which needs no timing assumption because this only ever REPLACES
+// an existing footer (see `applyTurnUsageBlocks`): an in-flight turn has none, so a mid-turn write
+// leaves it alone, and the flush's own write is what fills in the numbers. Deliberately not keyed on the
+// busy→idle transition — the runner clears its busy flag before awaiting the flush, so idle can be
+// broadcast while the write is still in flight, and there would be no second transition to recover on.
+//
+// `seq` guards ordering rather than a timer: two reads in flight can settle out of order and paint an
+// older session over a newer one, and only the last read issued is allowed to paint.
+let footerSeq = 0;
+async function refreshTurnFooters() {
+  const id = currentSessionId;
+  if (!id) return;
+  const seq = ++footerSeq;
+  const session = await apiGetSession(id);
+  if (seq !== footerSeq) return;                            // a later read already landed
+  if (!session || session.id !== currentSessionId) return;  // or the reader moved on
+  applyTurnUsageBlocks(session.messages, true);
 }
 
 // ── Rendering ─────────────────────────────────────────────────────────────────
@@ -3189,7 +3287,10 @@ async function init() {
           switch (n.namespace) {
             case 'files':    onFileChanged(n, refreshFiles); break;
             case 'skills':   refreshSkills();                break;
-            case 'sessions': refreshSessions();              break;
+            case 'sessions':
+              refreshSessions();
+              if (n.id === currentSessionId) void refreshTurnFooters();
+              break;
             default: break;                                  // a namespace no panel shows
           }
           break;

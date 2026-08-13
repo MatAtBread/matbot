@@ -439,6 +439,39 @@ carry, so the frontend keeps it as its own SSE event.
 **Distributed is left open, not built.** A registered `Notifier` may forward off-box; it stamps
 `instance` on ingress and must not re-forward a foreign `instance` — that is the loop break.
 
+## Accounting
+
+matbot guarantees **fidelity and attribution**; semantics are a consumer's. Full reasoning in
+`docs/ACCOUNTING-RATIONALE.md`.
+
+A turn's activity is a **log of self-describing entries** (`TurnEntry`), anchored on the turn's **head**
+(its user message) as `Message.activity` and read back with `turnActivity()` / `usageEntries()`:
+
+- `{ kind: 'call' }` — one provider call: `provider`, `usage`, and its bracket.
+- `{ kind: 'span' }` — a bracket matbot held open that was not a call of its own (a tool call). Separate
+  because most tools spend no tokens, so timing hung off an accounting record would exist only for the
+  tools that happen to call an LLM.
+
+Every entry carries **`site`** (`round` / `tool` / `hook`) and the **causal `traceId`**. Those two are
+the intrinsic part — facts about matbot's own control flow that no adapter and no plugin can recover
+afterwards. Everything derived from them (cost, per-tool/per-user/per-task totals, what a "task" is) is
+a *query plus a rate table*, and stays outside.
+
+**Attribution is declared, never inferred from timing.** The site is captured where work *starts*, so a
+classifier kicked off detached in `screen` stays attributed to that hook however late it settles.
+
+**A turn is a coordinate, not a container.** Its end is not a well-defined moment to total anything at
+— steers terminate and resume, a retract re-enqueues the turn it just popped, `followup` runs
+post-commit — so entries flush **when the pump's queue drains**, and one still in flight lands on the
+next idle. Anchoring on the turn head is what survives a retract-and-rerun: the pop stashes assistant
+and tool messages inside a marker payload, out of reach of any reduction over `session.messages`.
+
+**Adapters normalise for comparability and retain for fidelity.** `Usage` carries the normalised
+counters *plus* `reported` — the endpoint's own `usage` object verbatim. The protocol determines shape,
+and an adapter already owns a protocol, so there is no second normalising layer. Guard on **presence,
+not truthiness**: a reported `0` and an absent key are different facts. Never synthesise a value the
+endpoint did not send.
+
 ## Markers
 
 Opaque, durable annotations in the message stream — `{ type: 'marker', creator: string, data: unknown }`. Stored as marker-role messages, **elided from LLM submission**, **persisted unchanged**, **preserved by compaction**. A tool emits one via `marker` `ToolEvent`; the triggers dispatcher collects and persists them for silent-side-effect trace. For type safety, augment `MarkerData` registry (same pattern as `MatbotServices`).

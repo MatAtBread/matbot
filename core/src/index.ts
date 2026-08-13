@@ -29,10 +29,12 @@ export {
   createBroadcaster, subscribable, createNotifier, scopedNotifier,
   installPrincipalCarrier, enterPrincipal, createConstantPrincipalCarrier,
   contextSwitch, onContextQuiesce, flushIfQuiescent,
-  installUsageCarrier, createSerialUsageCarrier, recordUsage, currentUsageSink, withUsageScope,
+  installUsageCarrier, createSerialUsageCarrier, recordUsage, recordSpan, currentUsageSink,
+  currentUsageScope, currentUsageSite, withUsageScope, withUsageSite,
 } from '@matatbread/matbot-plugin-api/host';
 export type {
   Subscribable, Broadcaster, Routed, RoutedFilter, SwapFn, MountTable, PrincipalCarrier, UsageCarrier,
+  UsageScope,
 } from '@matatbread/matbot-plugin-api/host';
 export * from './session.js';
 export * from './usage.js';

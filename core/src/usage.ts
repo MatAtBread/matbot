@@ -1,6 +1,13 @@
-import type { Message, Usage } from './types.js';
+import type { Message, TurnEntry, Usage, UsageRecord } from './types.js';
 
-/** Fold one usage tally into a running total; optional fields are summed only when either side has them. */
+/**
+ * Fold one usage tally into a running total; optional fields are summed only when either side has them.
+ *
+ * `reported` sums **numeric values key-wise** and drops the rest: a total `service_tier` is meaningless
+ * and a summed `latency_checkpoint` is nonsense, so non-numeric retained values stay per-call facts that
+ * a consumer reads off the entries. Callers must fold only within ONE provider — `usageByProvider` does,
+ * by grouping first — since the same key means different things under different protocols.
+ */
 export function addUsage(acc: Usage | undefined, next: Usage): Usage {
   const a = acc ?? { inputTokens: 0, outputTokens: 0 };
   const add = (x: number | undefined, y: number | undefined): number | undefined =>
@@ -8,29 +15,71 @@ export function addUsage(acc: Usage | undefined, next: Usage): Usage {
   return {
     inputTokens:  a.inputTokens  + next.inputTokens,
     outputTokens: a.outputTokens + next.outputTokens,
-    ...(((c) => c !== undefined ? { costUsd:             c } : {}))(add(a.costUsd,             next.costUsd)),
     ...(((c) => c !== undefined ? { cacheReadTokens:     c } : {}))(add(a.cacheReadTokens,     next.cacheReadTokens)),
     ...(((c) => c !== undefined ? { cacheCreationTokens: c } : {}))(add(a.cacheCreationTokens, next.cacheCreationTokens)),
+    ...(((r) => r !== undefined ? { reported: r } : {}))(addReported(a.reported, next.reported)),
   };
 }
 
+function addReported(
+  a: Record<string, unknown> | undefined,
+  b: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (a === undefined) return b;
+  if (b === undefined) return a;
+  const out: Record<string, unknown> = { ...a };
+  for (const [k, v] of Object.entries(b)) {
+    const prev = out[k];
+    out[k] = typeof v === 'number' && typeof prev === 'number' ? prev + v : v;
+  }
+  return out;
+}
+
 /**
- * Aggregate the token accounting recorded on a set of messages, keyed by the provider billed: an
- * assistant turn's own `Message.usage` (billed to its `providerName`) plus every `tool-result` block's
- * `usage` records (each provider-tagged — a tool may run completions against several). Pass a single
+ * Everything a set of messages records about what happened — provider calls and the brackets around
+ * them — in message order.
+ *
+ * Entries are anchored on turn heads and are self-describing (`site`, `traceId`), so this is a flat
+ * read with no correlation to do: filter it for whatever question is being asked — one turn
+ * (`traceId`), one tool call (`site`), one session (pass the lot) — and the same one fact set answers
+ * "what did this tool cost", "what did this user cost" and "how long did that take".
+ */
+export function turnActivity(messages: Iterable<Message>): TurnEntry[] {
+  const out: TurnEntry[] = [];
+  for (const m of messages) {
+    if (m.activity !== undefined) out.push(...m.activity);
+
+    // Sessions written before accounting moved onto the turn head: an assistant message's own `usage`
+    // object, and a `tool-result`'s `usage` array. Neither shape is written any more.
+    const legacyOwn = (m as { usage?: Usage }).usage;
+    if (legacyOwn !== undefined && m.providerName !== undefined) {
+      out.push({ kind: 'call', provider: m.providerName, usage: legacyOwn, traceId: m.traceId });
+    }
+    for (const c of m.content) {
+      const legacy = c.type === 'tool-result' ? (c as { usage?: UsageRecord[] }).usage : undefined;
+      if (legacy !== undefined) out.push(...legacy.map((r): TurnEntry => ({ kind: 'call', ...r })));
+    }
+  }
+  return out;
+}
+
+/** The provider calls in a set of messages — `turnActivity` less the spans. */
+export function usageEntries(messages: Iterable<Message>): UsageRecord[] {
+  return turnActivity(messages).filter((e): e is { kind: 'call' } & UsageRecord => e.kind === 'call');
+}
+
+/**
+ * Aggregate the token accounting on a set of messages, keyed by the provider billed. Pass a single
  * turn's messages (filtered by `traceId`) for a per-turn breakdown, or a whole session for its total.
+ *
+ * Note what this deliberately does NOT do: sum a provider's `reported` fields across providers. The
+ * same key means different things under different protocols (`prompt_tokens` includes cache hits,
+ * `input_tokens` does not), so only the normalised counters are comparable across a mixed turn.
  */
 export function usageByProvider(messages: Iterable<Message>): Map<string, Usage> {
   const out = new Map<string, Usage>();
-  for (const m of messages) {
-    if (m.usage !== undefined && m.providerName !== undefined) {
-      out.set(m.providerName, addUsage(out.get(m.providerName), m.usage));
-    }
-    for (const c of m.content) {
-      if (c.type === 'tool-result' && c.usage !== undefined) {
-        for (const r of c.usage) out.set(r.provider, addUsage(out.get(r.provider), r.usage));
-      }
-    }
+  for (const r of usageEntries(messages)) {
+    out.set(r.provider, addUsage(out.get(r.provider), r.usage));
   }
   return out;
 }

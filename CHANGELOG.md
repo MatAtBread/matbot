@@ -9,6 +9,104 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## Unreleased
+
+### Breaking changes
+
+- **`Usage.reported` retains what the endpoint actually said; `Usage.costUsd` is deleted.** Adapters now
+  pass their `usage` object through verbatim alongside the normalised counters, and guard on **presence
+  rather than truthiness** — an endpoint reporting `cache_read_input_tokens: 0` is saying there was no
+  cache activity, which is not the same fact as not reporting it at all, and all three adapters
+  collapsed the two. `addUsage` sums `reported` numerics key-wise (within one provider only, since
+  `prompt_tokens` includes cache hits where `input_tokens` does not) and leaves non-numeric values —
+  `service_tier`, latency objects — alone.
+
+  This is what makes the existing normalisation non-destructive rather than replacing it: the adapter is
+  the right party to map its own protocol, and it stays so. openai-compat still reports `inputTokens`
+  net of the cache hit so a mixed-provider turn can be totalled — but `prompt_tokens` now rides
+  alongside, so the subtraction can be checked, reversed, or reconciled against a vendor's dashboard,
+  and google's `thoughtsTokenCount` survives being folded into `outputTokens`.
+
+  `costUsd` had no producer and never has: a rate table cannot be keyed on counters that have discarded
+  the tier, the modality and the reasoning split. With the raw retained, a consumer computes cost from
+  `reported` and holds the answer itself, so the slot has no consumer either. Removed rather than left
+  as dead surface (the CLI and web footers stop rendering it).
+
+- **The usage carrier carries a `UsageScope`, not a bare sink, and scopes nest.** `UsageCarrier.run`/
+  `tryCurrent` now deal in `{ entries, site?, parent? }`, and `withUsageScope(fn)` hands the scope to
+  `fn` so a caller can read what accrued. A scope opened inside another rolls its entries up into the
+  parent when it settles (including on rejection — the tokens were spent either way), so a sub-turn can
+  be asked what it alone cost without its spend disappearing from the turn containing it. Previously
+  `withUsageScope` established a fresh, empty sink and *shadowed* any enclosing one; that was invisible
+  only because nothing ever opened a second. Hosts implementing a carrier need the type change only;
+  `createSerialUsageCarrier` and the CLI's ALS carrier are updated.
+
+- **Accounting moved off the message that produced it and onto the turn head.** `Message.usage` is
+  replaced by `Message.activity: TurnEntry[]`, and `tool-result` blocks no longer carry `usage` at all —
+  everything a turn caused is an entry anchored on that turn's user message, self-describing via its
+  `site` and causal `traceId`. `createMessage` no longer takes `usage`. Reading is unaffected for anyone
+  using `usageByProvider`, which tolerates the old shapes; a consumer reaching into `m.usage` or
+  `tool-result.usage` directly should use `turnActivity(messages)` or `usageEntries(messages)`.
+
+  The move is what makes a retried turn account correctly: a retract-and-rerun pops the assistant and
+  tool messages into a retraction marker's payload, where no reduction over `session.messages` will ever
+  find them, so a retry silently under-reported by the attempt it discarded. The turn head is the one
+  message the pop keeps. Locality is not lost — `site` already names the round or tool call.
+
+### API gaps filled
+
+- **Every tool call is timed, and the number is kept.** The runner measured a tool's duration, handed it
+  to the `toolresult` hook and then discarded it, so a consumer had to re-derive it — less accurately —
+  from event arrival times. It is now persisted as a `{ kind: 'span' }` entry and carried live on
+  `tool:end`. A span is its own arm rather than a field on an accounting record because most tool calls
+  spend no tokens at all (`bash`, `http`, `workspace`): hanging duration off a `UsageRecord` would
+  capture it precisely for the tools that happen to call an LLM and lose it for every other one.
+
+  Provider calls carry their own bracket too (`startedAt` / `durationMs` on the call entry) — matbot's
+  scope around the call, distinct from any server-side latency an endpoint reports, which arrives in
+  `usage.reported` like any other provider-named field.
+
+- **`turnActivity(messages)` / `usageEntries(messages)`** — everything a set of messages records about
+  what happened, in message order, with no correlation to do. Filter by `traceId` for a turn, by `site`
+  for a tool call, or pass a whole session for its total; `usageEntries` is the calls without the spans,
+  and `usageByProvider` is a fold over that. One fact set answers "what did this tool cost", "what did
+  this user cost" and "how long did that take".
+
+- **`UsageRecord.traceId` names the turn that caused a call**, which is not the same question as where
+  the record ends up. A completion can be recorded after its turn commits (a detached trigger
+  classifier, a `followup` hook), and a retract moves messages underneath it. Carrying the cause makes
+  grouping by turn a query rather than an inference from adjacency.
+
+- **`UsageRecord.site` records where a completion happened** — `{ kind: 'round' }`, `{ kind: 'tool' }`
+  or `{ kind: 'hook' }`. This is the one accounting fact no adapter and no plugin can recover after the
+  fact, and it is what makes per-tool, per-user and per-task cost derivable by a plugin from a single
+  log without core knowing any of those groupings. Stamped by `recordUsage` from the site in force,
+  established by the runner around its own round and each tool executor, and by `HookRegistry` around
+  each handler (which already knew the channel and owning plugin). See `docs/ACCOUNTING-RATIONALE.md`.
+
+### Bug fixes
+
+- **A completion run from a hook is no longer credited to whichever tool happened to be running.** The
+  runner attributed a tool's spend by slicing the turn's usage sink by index — mark the length before
+  the call, take everything appended after it — so any completion that merely *resolved* during a tool
+  call was booked against it. The triggers classifier does exactly that: it is kicked off detached
+  inside a `screen` hook and settles at an arbitrary later moment, so whose spend it became was decided
+  by a race. Attribution is now by the producer's own declared `site`, which the ambient carrier
+  captures where the work *starts*, so the race is unrepresentable rather than merely unlikely.
+
+- **Spend that was previously invisible now appears in the totals**, so figures will rise for anyone
+  running triggers or cognition. A `followup` hook ran outside any usage scope, making the triggers
+  agent-phase classifier free of charge on every completed turn; a round discarded by an in-situ restart
+  dropped its tally with the response, though the tokens were billed; and a retried turn lost the
+  attempt it discarded. These were under-reports, not a new cost.
+
+- **Accounting is flushed when the queue drains, not at a turn boundary.** "The end of a turn" is not a
+  well-defined moment to total anything at — steers terminate and resume, a retract re-enqueues the turn
+  it just popped, followup enqueues resubmissions, and a detached classifier settles whenever it
+  settles. A completion still in flight at one idle lands on the next, attributed by its own `traceId`.
+  Capture remains best-effort: state is disposed once a session is quiet and unsubscribed, and anything
+  still pending then is lost.
+
 ## 0.4.3
 
 ### Breaking changes

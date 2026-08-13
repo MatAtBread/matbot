@@ -3,6 +3,7 @@ import type {
   ScreenContext, ContributeContext, ToolCallContext, ToolCallResult, ToolResultContext, FollowupContext,
 } from './types.js';
 import { foldOntoUserTurn } from './session.js';
+import { withUsageSite } from './usage-context.js';
 
 const HOOK_ERROR_CREATOR = 'matbot-hooks';
 
@@ -43,9 +44,18 @@ export class HookRegistry implements HookRegistrar {
 
   // Run one handler, isolating a throw: log it, record it for a one-time marker, and return undefined
   // — which every run* method already treats as "no contribution from this hook".
+  //
+  // Also the accounting push site for the `hook` call site: a handler that runs a completion (a trigger
+  // classifier, a router) records against the channel and plugin that owns it. Established here rather
+  // than per-channel because it is the one place every handler invocation passes through — and because
+  // the site must be in force when the handler *starts*, so work it kicks off detached stays attributed
+  // to it however late it settles.
   private async invoke<R>(hook: Hook, run: () => R | Promise<R>): Promise<R | undefined> {
     try {
-      return await run();
+      return await withUsageSite(
+        { kind: 'hook', channel: hook.on, ...(hook.pluginName !== undefined ? { plugin: hook.pluginName } : {}) },
+        run,
+      );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const owner = hook.pluginName !== undefined ? ` from "${hook.pluginName}"` : '';

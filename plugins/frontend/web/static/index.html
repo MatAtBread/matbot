@@ -1362,12 +1362,12 @@
       font-variant-numeric: tabular-nums;
     }
     .turn-time::before { content: '·'; margin-right: 4px; opacity: 0.7; }
-    /* No usage to report — the time stands alone, aligned with where the summary would have been. */
-    .turn-time-solo {
-      font-size: 0.79em;
-      padding-left: 2px;
-    }
-    .turn-time-solo > .turn-time::before { content: none; }
+    /* Nothing to report yet, or ever. The footer keeps its full shape either way — a turn's numbers
+       arrive after it is drawn, and anything that changed size or colour on arrival would make the
+       turn twitch a second after it finished. Only the disclosure arrow is muted, so an empty
+       breakdown does not invite a click. */
+    .token-stats.is-empty > summary { cursor: default; }
+    .token-stats.is-empty > summary::before { opacity: 0.2; }
 
     /* ── Sessions banner ───────────────────────────────────────── */
 

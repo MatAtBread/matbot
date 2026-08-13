@@ -1,0 +1,276 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  createSessionRunner, createSession, installPrincipalCarrier, installUsageCarrier, HookRegistry,
+  recordUsage, withUsageScope, usageEntries, turnActivity,
+} from '@matatbread/matbot-core';
+import type {
+  Session, Store, Tool, ToolRegistry, ProviderAdapter, ProviderConfig, CompletionEvent,
+  PipelineEvent, Principal, MessageContent, UsageRecord,
+} from '@matatbread/matbot-core';
+import { createAlsPrincipalCarrier } from '../src/principal-als.js';
+import { createAlsUsageCarrier } from '../src/usage-als.js';
+
+installPrincipalCarrier(createAlsPrincipalCarrier());
+installUsageCarrier(createAlsUsageCarrier());
+
+// Usage attribution is DECLARED by the producer, never inferred from when a record lands. The runner
+// used to slice the turn's sink by index — mark the length before a tool, take everything appended
+// after it — which credits a tool with any completion that merely *resolved* while it ran. The triggers
+// plugin does exactly that: its classifier is kicked off detached inside a `screen` hook and settles at
+// an arbitrary later moment, so whose spend it became was decided by a race.
+
+const principal: Principal = { id: 'tester', type: 'user' };
+
+function memStore(seed: Session): Store<Session> {
+  const m = new Map<string, Session>([[seed.id, seed]]);
+  return {
+    get: async id => m.get(id) ?? null,
+    set: async (id, v) => { m.set(id, v); },
+    cas: async () => { throw new Error('cas unused'); },
+    delete: async () => { throw new Error('delete unused'); },
+    query: async () => { throw new Error('query unused'); },
+  };
+}
+
+function toolRegistry(tool: Tool): ToolRegistry {
+  return {
+    register: () => { throw new Error('register unused'); },
+    unregister: () => { throw new Error('unregister unused'); },
+    resolve: name => (name === tool.name ? tool : null),
+    list: () => [tool],
+    has: name => name === tool.name,
+  } as unknown as ToolRegistry;
+}
+
+const wait = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms));
+
+// Runs long enough that the detached hook completion lands mid-execution, and books its own spend.
+const slowTool: Tool = {
+  name: 'slow',
+  description: 'takes a while and runs a completion of its own',
+  inputSchema: { type: 'object', properties: {} },
+  executor: {
+    async *execute() {
+      await wait(120);
+      recordUsage('tool-provider', { inputTokens: 100, outputTokens: 50 });
+      yield { type: 'result', value: 'ok' };
+    },
+  },
+};
+
+// One tool call, then a plain answer on the next round.
+function callsToolOnce(): ProviderAdapter {
+  let n = 0;
+  return {
+    name: 'fake',
+    async health() { return { ok: true } as never; },
+    complete(): AsyncIterable<CompletionEvent> {
+      const first = n++ === 0;
+      return (async function* () {
+        if (first) yield { type: 'tool-call', id: 'call-1', name: 'slow', input: {} };
+        else       yield { type: 'text-delta', delta: 'done' };
+        yield { type: 'usage', inputTokens: 20, outputTokens: 5 };
+        yield { type: 'done' };
+      })();
+    },
+  };
+}
+
+// No tool calls — the turn ends on round 1.
+function answersPlainly(): ProviderAdapter {
+  return {
+    name: 'fake',
+    async health() { return { ok: true } as never; },
+    complete(): AsyncIterable<CompletionEvent> {
+      return (async function* () {
+        yield { type: 'text-delta', delta: 'ok' };
+        yield { type: 'usage', inputTokens: 10, outputTokens: 4 };
+        yield { type: 'done' };
+      })();
+    },
+  };
+}
+
+const text = (t: string): MessageContent[] => [{ type: 'text', text: t }];
+
+test('a detached hook completion is not credited to whichever tool was running', { timeout: 15000 }, async () => {
+  const session = createSession();
+  const store   = memStore(session);
+
+  // Mirrors the triggers classifier: started inside the screen hook, deliberately NOT awaited, and
+  // settling ~120ms before the tool it overlaps finishes.
+  let classified: Promise<void> | undefined;
+  const hooks = new HookRegistry();
+  hooks.register({
+    on: 'screen',
+    pluginName: 'triggers-like',
+    handler: () => {
+      classified = wait(20).then(() => { recordUsage('classifier', { inputTokens: 7, outputTokens: 3 }); });
+      return undefined;
+    },
+  });
+
+  const config: ProviderConfig = { name: 'fake', module: 'fake', model: 'fake' };
+  const runner = createSessionRunner({
+    store,
+    resolveProvider: async () => ({ adapter: callsToolOnce(), config }),
+    tools: toolRegistry(slowTool),
+    loadPlugin: async () => { throw new Error('loadPlugin unused'); },
+    unloadPlugin: async () => false,
+    hooks,
+  });
+
+  const view = await runner.open({
+    sessionId: session.id, signal: new AbortController().signal,
+    content: text('go'), provider: 'fake', principal,
+  });
+  const events: PipelineEvent[] = [];
+  for await (const ev of view.events) { events.push(ev); if (ev.type === 'idle') break; }
+  await classified;
+
+  const saved   = await store.get(session.id);
+  const entries = usageEntries(saved!.messages);
+
+  const tool = entries.filter(e => e.site?.kind === 'tool');
+  assert.deepEqual(tool.map(e => e.provider), ['tool-provider']);
+  assert.deepEqual(tool[0]!.site, { kind: 'tool', callId: 'call-1', tool: 'slow' });
+
+  const hook = entries.filter(e => e.site?.kind === 'hook');
+  assert.deepEqual(hook.map(e => e.provider), ['classifier'],
+    'the classifier resolved mid-tool-call but belongs to the screen hook that started it');
+  assert.deepEqual(hook[0]!.site, { kind: 'hook', channel: 'screen', plugin: 'triggers-like' });
+
+  // The main line is booked the same way — one entry per round, not a field on the assistant message,
+  // so a retract-and-rerun cannot carry it off into a marker payload.
+  assert.deepEqual(entries.filter(e => e.site?.kind === 'round').map(e => e.provider), ['fake', 'fake']);
+
+  // Anchored on the turn head, and every entry names the turn that caused it.
+  const heads = saved!.messages.filter(m => m.role === 'user' && (m.activity?.length ?? 0) > 0);
+  assert.equal(heads.length, 1, 'all of it on one turn head');
+  assert.ok(entries.every(e => e.traceId === heads[0]!.traceId), 'self-describing: each entry names its turn');
+});
+
+test('a completion that settles after the turn is flushed on the next idle', { timeout: 15000 }, async () => {
+  const session = createSession();
+  const store   = memStore(session);
+
+  // Settles well after the turn it belongs to has committed and the pump has gone idle — the case a
+  // per-turn total struck at the boundary cannot see, because the bag is still being written to.
+  let late: Promise<void> | undefined;
+  let armed = true;
+  const hooks = new HookRegistry();
+  hooks.register({
+    on: 'screen',
+    pluginName: 'slow-classifier',
+    handler: () => {
+      if (!armed) return undefined;
+      armed = false;
+      late = wait(300).then(() => { recordUsage('classifier', { inputTokens: 5, outputTokens: 2 }); });
+      return undefined;
+    },
+  });
+
+  const config: ProviderConfig = { name: 'fake', module: 'fake', model: 'fake' };
+  const runner = createSessionRunner({
+    store,
+    resolveProvider: async () => ({ adapter: answersPlainly(), config }),
+    tools: toolRegistry(slowTool),
+    loadPlugin: async () => { throw new Error('loadPlugin unused'); },
+    unloadPlugin: async () => false,
+    hooks,
+  });
+
+  // Hold a subscriber for the duration. Session state — and with it the pending accounting — is
+  // disposed once a session goes quiet AND unsubscribed, so a live session is what makes a late
+  // arrival recoverable at all. That is the real supported boundary, so the test sits inside it.
+  const watcher = await runner.open({ sessionId: session.id, signal: new AbortController().signal });
+  void (async () => { for await (const _ of watcher.events) { /* keep the subscription alive */ } })();
+
+  const turn = async (text_: string): Promise<void> => {
+    const view = await runner.open({
+      sessionId: session.id, signal: new AbortController().signal,
+      content: text(text_), provider: 'fake', principal,
+    });
+    for await (const ev of view.events) if (ev.type === 'idle') break;
+  };
+
+  await turn('first');
+  const firstTraceId = (await store.get(session.id))!.messages.find(m => m.role === 'user')!.traceId;
+  assert.equal(usageEntries((await store.get(session.id))!.messages).filter(e => e.site?.kind === 'hook').length,
+    0, 'not yet — it has not settled');
+
+  await late;                 // settles between turns, appending to the scope the pump still holds
+  await turn('second');
+
+  const entries = usageEntries((await store.get(session.id))!.messages).filter(e => e.site?.kind === 'hook');
+  assert.equal(entries.length, 1, 'flushed on the next idle rather than lost');
+  assert.equal(entries[0]!.traceId, firstTraceId,
+    'and attributed to the turn that caused it, not the one it was written during');
+});
+
+test('every tool call is timed, including one that spends no tokens', { timeout: 15000 }, async () => {
+  const session = createSession();
+  const store   = memStore(session);
+
+  // The common case, and the one an accounting-record-only model would lose: a tool that never touches
+  // an LLM. `bash`, `http` and `workspace` all look like this.
+  const freeTool: Tool = {
+    name: 'slow',
+    description: 'spends time, not tokens',
+    inputSchema: { type: 'object', properties: {} },
+    executor: { async *execute() { await wait(60); yield { type: 'result', value: 'ok' }; } },
+  };
+
+  const config: ProviderConfig = { name: 'fake', module: 'fake', model: 'fake' };
+  const runner = createSessionRunner({
+    store,
+    resolveProvider: async () => ({ adapter: callsToolOnce(), config }),
+    tools: toolRegistry(freeTool),
+    loadPlugin: async () => { throw new Error('loadPlugin unused'); },
+    unloadPlugin: async () => false,
+  });
+
+  const view = await runner.open({
+    sessionId: session.id, signal: new AbortController().signal,
+    content: text('go'), provider: 'fake', principal,
+  });
+  const events: PipelineEvent[] = [];
+  for await (const ev of view.events) { events.push(ev); if (ev.type === 'idle') break; }
+
+  const activity = turnActivity((await store.get(session.id))!.messages);
+
+  const spans = activity.filter(e => e.kind === 'span');
+  assert.equal(spans.length, 1, 'the tool call is recorded even though it ran no completion');
+  assert.deepEqual(spans[0]!.site, { kind: 'tool', callId: 'call-1', tool: 'slow' });
+  assert.ok(spans[0]!.durationMs >= 55, `measured the bracket, got ${spans[0]!.durationMs}ms`);
+  assert.equal(usageEntries((await store.get(session.id))!.messages).filter(e => e.site?.kind === 'tool').length,
+    0, 'and no accounting record, because nothing was billed');
+
+  // The same number live, so a frontend can draw it without waiting for the idle flush.
+  const end = events.find(e => e.type === 'tool:end') as { durationMs?: number } | undefined;
+  assert.equal(end?.durationMs, spans[0]!.durationMs);
+
+  // Rounds carry their own bracket — the provider call, not the tool time that follows it.
+  const rounds = activity.filter(e => e.kind === 'call' && e.site?.kind === 'round');
+  assert.equal(rounds.length, 2);
+  assert.ok(rounds.every(r => r.kind === 'call' && typeof r.durationMs === 'number' && r.durationMs < 55),
+    'a round is timed around its own call, not the tool batch it asked for');
+});
+
+test('a nested usage scope rolls up into its parent', async () => {
+  let inner: UsageRecord[] = [];
+  const outer = await withUsageScope(async parent => {
+    recordUsage('outer-provider', { inputTokens: 1, outputTokens: 1 });
+    await withUsageScope(async child => {
+      recordUsage('inner-provider', { inputTokens: 2, outputTokens: 2 });
+      inner = child.entries;
+    });
+    return parent.entries;
+  });
+
+  assert.deepEqual(inner.map(u => u.provider), ['inner-provider'],
+    'a sub-turn can be asked what it alone cost');
+  assert.deepEqual(outer.map(u => u.provider), ['outer-provider', 'inner-provider'],
+    'and its spend does not vanish from the turn containing it');
+});

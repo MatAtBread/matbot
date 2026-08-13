@@ -108,13 +108,20 @@ export class AnthropicAdapter implements ProviderAdapter {
 
       switch (ev['type']) {
         case 'message_start': {
-          const usage = (ev['message'] as { usage?: { input_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } } | undefined)?.usage;
-          if (usage?.input_tokens) {
-            inputTokens = usage.input_tokens;
+          // Guards are on PRESENCE, not truthiness: an endpoint reporting `cache_read_input_tokens: 0`
+          // is telling us there was no cache activity, which is not the same fact as not telling us at
+          // all (a host that strips the capability looks identical once collapsed). `reported` carries
+          // the object verbatim, so nothing here has to decide which it was.
+          const usage = (ev['message'] as { usage?: Record<string, unknown> } | undefined)?.usage;
+          const num = (k: string): number | undefined =>
+            typeof usage?.[k] === 'number' ? usage[k] as number : undefined;
+          if (usage !== undefined && num('input_tokens') !== undefined) {
+            inputTokens = num('input_tokens')!;
             yield {
               type: 'usage', inputTokens, outputTokens: 0,
-              ...(usage.cache_read_input_tokens     ? { cacheReadTokens:     usage.cache_read_input_tokens     } : {}),
-              ...(usage.cache_creation_input_tokens ? { cacheCreationTokens: usage.cache_creation_input_tokens } : {}),
+              ...(num('cache_read_input_tokens')     !== undefined ? { cacheReadTokens:     num('cache_read_input_tokens')!     } : {}),
+              ...(num('cache_creation_input_tokens') !== undefined ? { cacheCreationTokens: num('cache_creation_input_tokens')! } : {}),
+              reported: { ...usage },
             };
           }
           break;
@@ -188,9 +195,9 @@ export class AnthropicAdapter implements ProviderAdapter {
         case 'message_delta': {
           const stop = (ev['delta'] as { stop_reason?: string } | undefined)?.stop_reason;
           if (stop) stopReason = stop;
-          const usage = (ev['usage'] as { output_tokens?: number } | undefined);
-          if (usage?.output_tokens) {
-            yield { type: 'usage', inputTokens: 0, outputTokens: usage.output_tokens };
+          const usage = ev['usage'] as Record<string, unknown> | undefined;
+          if (usage !== undefined && typeof usage['output_tokens'] === 'number') {
+            yield { type: 'usage', inputTokens: 0, outputTokens: usage['output_tokens'], reported: { ...usage } };
           }
           break;
         }

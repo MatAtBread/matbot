@@ -1,15 +1,32 @@
 import type {
-  Session, Message, MessageContent, ModelContent, Usage, ProviderMeta, TruncatedToolResult,
+  Session, Message, MessageContent, ModelContent, Usage, UsageSite, ProviderMeta, TruncatedToolResult,
   TurnEvent, RunConfig, ProviderAdapter, ProviderConfig,
   Tool, ToolRegistry, ToolContext, Store, FileStore, SystemContextRegistry, Vault, PromptFn, FormField,
 } from './types.js';
 import type { MatbotPlugin } from './plugin.js';
 import type { ToolPresenter } from '@matatbread/matbot-plugin-api';
-import { currentUsageSink } from '@matatbread/matbot-plugin-api/host';
+import { recordSpan, recordUsage, withUsageSite } from '@matatbread/matbot-plugin-api/host';
 import { HookRegistry } from './hooks.js';
 import { appendMessage, createMessage } from './session.js';
 import { foldOntoUserTurn, bindPluginOps } from '@matatbread/matbot-plugin-api';
 import { addUsage } from './usage.js';
+
+// Establish a usage call site across an async iteration. Wrapping the *loop* would not work: this
+// runner is itself an async generator, so it suspends at every `yield` and resumes under the consumer's
+// context, losing any scope entered around the loop body. Scoping each `next()` instead means the
+// tool's body — and anything it kicks off while running — always resumes under its own site.
+function siteScoped<T>(site: UsageSite, src: AsyncIterable<T>): AsyncIterable<T> {
+  return {
+    [Symbol.asyncIterator]: () => {
+      const it = src[Symbol.asyncIterator]();
+      return {
+        next:  ()  => withUsageSite(site, () => it.next()),
+        ...(it.return ? { return: (v?: never) => withUsageSite(site, () => it.return!(v)) } : {}),
+        ...(it.throw  ? { throw:  (e?: unknown) => withUsageSite(site, () => it.throw!(e))  } : {}),
+      };
+    },
+  };
+}
 
 // Substituted for an errored tool result when the turn was aborted (e.g. a mid-turn steer interrupt):
 // the tool was cut off, not genuinely faulty, and the raw abort reason ("Error: steer") is a leaked
@@ -239,6 +256,22 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
     const assistantParts: MessageContent[] = [];
     let textAcc = '';
     let turnUsage: Usage | undefined;
+    // The round's bracket — set where the provider call is actually issued, below, so it measures the
+    // call rather than the screen/contribute work that precedes it.
+    let roundStartedAt = Date.now();
+    // Book the round's own spend as an entry the moment the stream settles — including when the response
+    // is then thrown away (an in-situ restart) or the call died part-way. The tokens were billed either
+    // way; tying the record to whether the *answer* survived is what made a restarted round free. Clears
+    // as it books, so no exit path can double-count it.
+    const bookRound = (): void => {
+      const u = turnUsage;
+      if (u === undefined) return;
+      turnUsage = undefined;
+      withUsageSite({ kind: 'round', round }, () => recordUsage(config.provider, u, {
+        startedAt:  new Date(roundStartedAt).toISOString(),
+        durationMs: Date.now() - roundStartedAt,
+      }));
+    };
     let truncation: { reason: 'max-tokens' | 'stream-end'; raw?: string } | undefined;
     // Set if a raced verdict fires mid-generation: discard this response and re-run the loop (below).
     let restart = false;
@@ -264,14 +297,18 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
     // Tools advertised for THIS call. A presenter (optional) may present a subset of the snapshot and
     // grow it across iterations as the model discovers tools; absent ⇒ the whole snapshot. Withheld
     // tools stay callable — execution resolves against the live registry (opts.toolRegistry), not this.
+    // Scoped to the round: a presenter may itself run completions (deriving a tool's search terms), and
+    // that spend belongs to the round that asked for it — it is neither a tool call nor a hook.
     const advertised = opts.toolPresenter
-      ? await opts.toolPresenter.present([...tools.values()], { session, provider: config.provider })
+      ? await withUsageSite({ kind: 'round', round },
+          () => opts.toolPresenter!.present([...tools.values()], { session, provider: config.provider }))
       : [...tools.values()];
     // Per-call signal linked to the turn signal: an in-situ restart aborts THIS provider call (callAc)
     // to cancel the in-flight request and stop backend generation, without aborting the whole turn.
     const callAc = new AbortController();
     const callSignal = AbortSignal.any([signal, callAc.signal]);
     try {
+      roundStartedAt = Date.now();
       for await (const ev of provider.complete(outgoing, providerConfig, advertised, callSignal)) {
         // A raced verdict firing mid-generation changes the premise: discard this doomed response and
         // restart the loop with the correction folded in. Polled BEFORE the event is emitted, so a
@@ -308,9 +345,9 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
           case 'usage':
             turnUsage = addUsage(turnUsage, ev);
             yield { type: 'usage', inputTokens: ev.inputTokens, outputTokens: ev.outputTokens, traceId,
-              ...(ev.costUsd              !== undefined ? { costUsd:              ev.costUsd              } : {}),
               ...(ev.cacheReadTokens     !== undefined ? { cacheReadTokens:     ev.cacheReadTokens     } : {}),
-              ...(ev.cacheCreationTokens !== undefined ? { cacheCreationTokens: ev.cacheCreationTokens } : {}) };
+              ...(ev.cacheCreationTokens !== undefined ? { cacheCreationTokens: ev.cacheCreationTokens } : {}),
+              ...(ev.reported            !== undefined ? { reported:            ev.reported            } : {}) };
             break;
           case 'done':
             break;
@@ -322,12 +359,12 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
       if (restart || (callAc.signal.aborted && !signal.aborted)) {
         restart = true;
       } else if (signal.aborted) {
+        bookRound();
         // Save whatever the LLM streamed before the abort hit.
         if (textAcc) assistantParts.push({ type: 'text', text: textAcc });
         if (assistantParts.length > 0) {
           session = appendMessage(session, createMessage({
             role: 'assistant', content: assistantParts, traceId, providerName: config.provider,
-            ...(turnUsage !== undefined ? { usage: turnUsage } : {}),
           }));
         }
         yield* end({ type: 'aborted', reason: abortReason(signal), session, traceId });
@@ -343,10 +380,12 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
         // belong to the call that failed, and the model never finished the thought. The `error` event
         // carries no session (a failure is not a transcript), so this yields the terminal itself rather
         // than the session — but it commits first, exactly like every other exit.
+        bookRound();
         yield* end({ type: 'error', error: String(e) + (('cause' in e && e.cause) ? ' ('+String(e.cause)+')' : '' ), traceId });
         return;
       }
     }
+    bookRound();
 
     // In-situ restart: discard this iteration's (uncommitted) response and re-run the loop with the
     // raced correction now folded into `ephemeral`. No store write, no retraction marker — the clean
@@ -370,7 +409,6 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
         content:      assistantParts,
         traceId,
         providerName: config.provider,
-        ...(turnUsage !== undefined ? { usage: turnUsage } : {}),
       });
       session = appendMessage(session, assistantMsg);
     }
@@ -487,9 +525,10 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
       let result: unknown;
       let isError = false;
       // Token accounting for completions this tool runs (via singleTurn/complete) accrues into the
-      // ambient turn sink; slice off whatever it appends during *this* call to attribute it here.
-      const usageSink = currentUsageSink();
-      const usageMark = usageSink?.length ?? 0;
+      // ambient turn scope, stamped with the site established below — never attached to this message.
+      // A tool message is popped wholesale by a retract-and-rerun, which would take its accounting
+      // somewhere no reduction over the session can reach; the entry lives on the turn head instead.
+      const site: UsageSite = { kind: 'tool', callId: tc.id, tool: tc.name };
       const startedAt = Date.now();
 
       const toolCtx: ToolContext = {
@@ -503,7 +542,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
       };
 
       try {
-        for await (const toolEv of tool.executor.execute(tc.input, toolCtx)) {
+        for await (const toolEv of siteScoped(site, tool.executor.execute(tc.input, toolCtx))) {
           switch (toolEv.type) {
             case 'stdout':   yield { type: 'tool:stdout', callId: tc.id, chunk: toolEv.chunk, traceId }; break;
             case 'stderr':   yield { type: 'tool:stderr', callId: tc.id, chunk: toolEv.chunk, traceId }; break;
@@ -534,16 +573,23 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
 
       // toolresult — last chance to transform the result before it's recorded/yielded (hard redaction),
       // or to observe it (auditing: args + result + timing). Owns the LLM-facing + persisted surfaces.
+      const durationMs = Date.now() - startedAt;
+
+      // The bracket, recorded for EVERY tool call — not just the ones that spent tokens. Most tools
+      // (bash, http, workspace) run no completion at all, so hanging duration off an accounting record
+      // would capture it precisely for the tools that happen to call an LLM and lose it for the rest.
+      // Previously this number was computed, handed to the `toolresult` hook, and then discarded, so a
+      // consumer had to re-derive it — less accurately — from event arrival times.
+      recordSpan(site, new Date(startedAt).toISOString(), durationMs);
+
       result = await hookReg.runToolResult({
         session, config, signal,
         toolCall: { id: tc.id, name: tc.name, input: tc.input },
-        tool, result, isError, durationMs: Date.now() - startedAt,
+        tool, result, isError, durationMs,
       });
 
-      const callUsage = usageSink ? usageSink.slice(usageMark) : [];
-      toolResults.push({ type: 'tool-result', id: tc.id, result, isError,
-        ...(callUsage.length > 0 ? { usage: callUsage } : {}) });
-      yield { type: 'tool:end', callId: tc.id, result, isError, traceId };
+      toolResults.push({ type: 'tool-result', id: tc.id, result, isError });
+      yield { type: 'tool:end', callId: tc.id, result, isError, durationMs, traceId };
     }
 
     // Add tool results message, then loop for the next provider call.

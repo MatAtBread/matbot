@@ -26,11 +26,15 @@ function buildUrl(endpoint: string, model: string): string {
 
 interface GeminiChunk {
   candidates?: Array<{ content?: { role?: string; parts?: GeminiPart[] }; finishReason?: string }>;
+  // Named fields are the ones normalised below; the rest (`totalTokenCount`, the per-modality
+  // `promptTokensDetails` breakdown, `toolUsePromptTokenCount`) arrive too and are passed through
+  // verbatim as `reported` rather than narrowed away.
   usageMetadata?: {
     promptTokenCount?:        number;
     candidatesTokenCount?:    number;
     cachedContentTokenCount?: number;
     thoughtsTokenCount?:      number;
+    [key: string]:            unknown;
   };
   error?: { message?: string; status?: string };
 }
@@ -136,8 +140,13 @@ export class GoogleAdapter implements ProviderAdapter {
       yield {
         type:         'usage',
         inputTokens:  Math.max(0, prompt - cached),
+        // Thinking tokens are billed as output, so they belong in the comparable figure — but folding
+        // them in is destructive on its own, since they are a distinct billing category at a distinct
+        // rate. `reported` keeps `thoughtsTokenCount` separate, so the split survives the fold.
         outputTokens: (lastUsage.candidatesTokenCount ?? 0) + (lastUsage.thoughtsTokenCount ?? 0),
-        ...(cached > 0 ? { cacheReadTokens: cached } : {}),
+        // Presence, not truthiness — a reported 0 says "no cached content", an absent key says nothing.
+        ...(lastUsage.cachedContentTokenCount !== undefined ? { cacheReadTokens: lastUsage.cachedContentTokenCount } : {}),
+        reported: { ...lastUsage },
       };
     }
 

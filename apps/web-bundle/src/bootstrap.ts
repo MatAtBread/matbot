@@ -380,13 +380,17 @@ export async function boot(env: BootEnv): Promise<void> {
       // Folded, not last-wins — see the same loop in the node app: anthropic reports one call's usage
       // across two events (input + cache on message_start, output on message_delta).
       let usage: Usage = { inputTokens: 0, outputTokens: 0 };
+      const startedAt = Date.now();
       for await (const ev of adpt.complete(msgs, resolved, [], req.signal ?? NEVER_ABORT)) {
         if (ev.type === 'text-delta') text += ev.delta;
         if (ev.type === 'usage')      usage = addUsage(usage, ev);
       }
       // Report into the ambient usage sink: a tool running this completion has its spend attributed to
-      // the tool call by the runner. No-op outside any tool scope.
-      recordUsage(req.provider, usage);
+      // whatever site is in force. No-op outside any scope. The bracket is measured here because this
+      // is where the call is actually issued.
+      recordUsage(req.provider, usage, {
+        startedAt: new Date(startedAt).toISOString(), durationMs: Date.now() - startedAt,
+      });
       return { text, usage };
     },
 

@@ -1,5 +1,7 @@
 import type { HealthStatus } from './health.js';
+import type { HookPoint } from './hooks.js';
 import type { Message } from './messages.js';
+import type { ISODate } from './primitives.js';
 import type { Tool } from './tools.js';
 
 // ── Provider ──────────────────────────────────────────────────────────────────
@@ -43,10 +45,47 @@ export interface ProviderConfig {
 export interface Usage {
   inputTokens:          number;
   outputTokens:         number;
-  costUsd?:             number;
   cacheReadTokens?:     number;
   cacheCreationTokens?: number;
+  /**
+   * What the endpoint actually reported, under its own field names, verbatim — the adapter's `usage`
+   * object passed through rather than interpreted. Present only for fields the endpoint sent: an
+   * explicit `0` and an absent key are different facts, and collapsing them is not the adapter's call
+   * to make (a host that strips a capability and a call with genuinely no cache activity look identical
+   * once you do).
+   *
+   * The normalised counters above are still the comparable ones — every protocol has input and output
+   * tokens unambiguously, and something must be common or a turn spanning three providers cannot be
+   * totalled at all. This is what makes that normalisation non-destructive: `inputTokens` may be a real
+   * interpretation (openai-compat reports it net of cache hits, so it means what anthropic's
+   * `input_tokens` means), and keeping the components alongside means a consumer can check it, reverse
+   * it, or reconcile against a vendor's own dashboard.
+   *
+   * Not all values are counters — `service_tier` is a string that prices the call, `latency_checkpoint`
+   * a nested object — so this is deliberately not a `Record<string, number>`. Aggregation sums numeric
+   * values key-wise and leaves the rest alone; and only ever within one provider, since the same key
+   * means different things under different protocols (`prompt_tokens` includes cache hits,
+   * `input_tokens` does not). See docs/ACCOUNTING-RATIONALE.md.
+   */
+  reported?:            Record<string, unknown>;
 }
+
+/**
+ * Where in matbot's own control flow a completion happened — the one accounting fact no adapter and no
+ * plugin can recover after the fact, and therefore the one matbot must record. Everything derived from
+ * it (what a tool costs, what a user costs, what a "task" costs) is a *grouping* of these coordinates
+ * plus a rate table: policy, and a plugin's to own. See docs/ACCOUNTING-RATIONALE.md.
+ *
+ * Closed by construction: inside a turn there are exactly three places a completion can originate.
+ * Outside a turn there is no scope at all, and accounting is the documented no-op.
+ */
+export type UsageSite =
+  /** The runner's own provider call for one agentic round (1-based, as counted against `maxRounds`). */
+  | { kind: 'round'; round: number }
+  /** A completion run by a tool executor — `single_turn`, a ranker, a merger. */
+  | { kind: 'tool';  callId: string; tool: string }
+  /** A completion run by a hook handler — a trigger classifier, a router, an auto-compaction. */
+  | { kind: 'hook';  channel: HookPoint; plugin?: string };
 
 /** One provider call's usage, tagged with the provider billed — the unit a tool accrues (a tool may
  *  run completions against any provider, each with its own rates) and the element persisted on a
@@ -54,7 +93,70 @@ export interface Usage {
 export interface UsageRecord {
   provider: string;
   usage:    Usage;
+  /**
+   * The call site in force when this was recorded, stamped by the producer rather than inferred by the
+   * consumer. Absent only when a completion ran with no site established (a plugin reaching `complete`
+   * outside any turn).
+   *
+   * Attribution is *declared*, not derived from timing, and that is the whole point: the triggers
+   * classifier is kicked off detached inside a `screen` hook and resolves at an arbitrary later moment,
+   * so any scheme that infers ownership from when a record lands (as slicing the sink by index did)
+   * credits it to whichever tool happened to be running. Capturing the site where the work *starts*
+   * makes that race unrepresentable.
+   */
+  site?:    UsageSite;
+  /** When the provider call started, and how long matbot's own scope around it was open. The *bracket*,
+   *  not the endpoint's view: server-side latency, when an endpoint reports it, arrives in
+   *  `usage.reported` like any other provider-named field. Neither substitutes for the other. */
+  startedAt?:  ISODate;
+  durationMs?: number;
+  /**
+   * The turn that *caused* this call, which is not the same question as where the record ends up.
+   * Two ordinary behaviours separate the two: a completion can be recorded after its turn commits (a
+   * detached trigger classifier, a `followup` hook), and a retract-and-rerun moves messages around
+   * underneath it. Carrying the cause on the entry makes an entry self-describing, so grouping by turn
+   * is a *query* rather than something inferred from adjacency — and so are grouping by tool, by user
+   * and by session. See docs/ACCOUNTING-RATIONALE.md.
+   */
+  traceId?: string;
+  /**
+   * The originating human turn, carried down a resubmission chain (a human submit is its own root). Not
+   * redundant with `traceId`: a retract-and-rerun re-runs an *existing* user turn under a fresh traceId
+   * and introduces no user message of its own, so its entries have no head of their own to sit on. The
+   * root is what gives them one — and it is the honest answer anyway, since the retry's cost belongs to
+   * the turn being retried.
+   */
+  rootTraceId?: string;
 }
+
+/**
+ * A bracket matbot held open that was not itself a provider call — today, a tool call. Only matbot can
+ * measure one: it is the interval between handing control to an executor and getting it back, which no
+ * adapter and no plugin can see from where it sits.
+ *
+ * Separate from `UsageRecord` because most tool calls spend no tokens at all — `bash`, `http`,
+ * `workspace` — so hanging duration off an accounting record would record it for exactly the tools that
+ * happen to call an LLM and lose it for the rest, which is backwards. A tool call that *does* run
+ * completions produces both: this span, and one `UsageRecord` per call it made, sharing its `site`.
+ */
+export interface SpanRecord {
+  site:         UsageSite;
+  traceId?:     string;
+  /** See `UsageRecord.rootTraceId` — a span needs the same anchor for the same reason. */
+  rootTraceId?: string;
+  startedAt:    ISODate;
+  durationMs:   number;
+}
+
+/**
+ * One thing that happened during a turn, at a place only matbot can name — the element of the turn's
+ * activity log. A discriminated union rather than one loose shape with everything optional: a span has
+ * no provider and no tokens, and pretending otherwise would mean writing zeros that a consumer cannot
+ * tell from measured ones.
+ */
+export type TurnEntry =
+  | ({ kind: 'call' } & UsageRecord)
+  | ({ kind: 'span' } & SpanRecord);
 
 /**
  * Opaque, provider-specific round-trip metadata attached to a tool-call — captured from a completion,

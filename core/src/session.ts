@@ -1,4 +1,4 @@
-import type { Session, Message, MessageContent, MessageRole, Usage } from './types.js';
+import type { Session, Message, MessageContent, MessageRole } from './types.js';
 
 export interface CreateSessionOpts {
   title?:                string;
@@ -37,7 +37,6 @@ export function createMessage(opts: {
   content:        MessageContent[];
   traceId:        string;
   providerName?:  string;
-  usage?:         Usage;
   metadata?:      Record<string, unknown>;
 }): Message {
   return {
@@ -47,7 +46,6 @@ export function createMessage(opts: {
     createdAt: new Date().toISOString(),
     traceId:   opts.traceId,
     ...(opts.providerName !== undefined ? { providerName: opts.providerName } : {}),
-    ...(opts.usage        !== undefined ? { usage:        opts.usage        } : {}),
     ...(opts.metadata     !== undefined ? { metadata:     opts.metadata     } : {}),
   };
 }

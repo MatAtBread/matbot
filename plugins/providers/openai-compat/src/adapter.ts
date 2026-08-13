@@ -36,7 +36,13 @@ interface OAIDelta {
 
 interface OAIChunk {
   choices?: Array<{ delta?: OAIDelta; finish_reason?: string | null }>;
-  usage?:   { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } };
+  // Only the fields this adapter normalises are named. The index signature is not decoration: an
+  // endpoint sends more than this (reasoning splits, `prompt_cache_hit_tokens`/`_miss_tokens`,
+  // `service_tier`, `total_tokens`), it varies by model and host, and all of it is passed through
+  // verbatim as `reported` rather than being narrowed away here.
+  usage?:   { prompt_tokens?: number; completion_tokens?: number;
+              prompt_tokens_details?: { cached_tokens?: number };
+              [key: string]: unknown };
 }
 
 export class OpenAICompatAdapter implements ProviderAdapter {
@@ -142,13 +148,21 @@ export class OpenAICompatAdapter implements ProviderAdapter {
       // DeepSeek, and Anthropic-via-OpenRouter all report it). Split them so inputTokens is the fresh
       // (full-price) part and cacheReadTokens the discounted part — matching the anthropic adapter.
       if (chunk.usage) {
-        const cached = chunk.usage.prompt_tokens_details?.cached_tokens ?? 0;
+        const reportedCache = chunk.usage.prompt_tokens_details?.cached_tokens;
+        const cached = reportedCache ?? 0;
         const prompt = chunk.usage.prompt_tokens ?? 0;
         yield {
           type:         'usage',
           inputTokens:  Math.max(0, prompt - cached),
           outputTokens: chunk.usage.completion_tokens ?? 0,
-          ...(cached > 0 ? { cacheReadTokens: cached } : {}),
+          // Presence, not truthiness — a reported 0 says "no cache hit", an absent key says nothing.
+          ...(reportedCache !== undefined ? { cacheReadTokens: reportedCache } : {}),
+          // The endpoint's own figures, verbatim and unsubtracted. `inputTokens` above is net of the
+          // cache hit so it means what anthropic's `input_tokens` means and a mixed-provider turn can
+          // be totalled; keeping `prompt_tokens` here is what stops that being destructive — the
+          // subtraction can be checked, reversed, or reconciled against the vendor's own dashboard.
+          // Reasoning splits, cache hit/miss and service tier ride along the same way.
+          reported: { ...chunk.usage },
         };
       }
 
