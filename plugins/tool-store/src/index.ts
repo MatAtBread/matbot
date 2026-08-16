@@ -63,6 +63,40 @@ export async function defineStore(
   return def;
 }
 
+// A namespace is LLM-supplied here, and this is the boundary it enters through — so it is checked
+// here rather than defended against in every backend. It is not an opaque key: the filesystem backend
+// makes it a directory name verbatim (document *ids* are percent-encoded, namespaces never were), so a
+// `/` or `..` would write outside `.data` entirely, and SQLite makes it a table name. Restricting the
+// character set at the one place untrusted names arrive is what lets each backend keep using it
+// directly. The set admits every namespace matbot itself uses, punctuation included
+// (`profile-registry`, `plugin-manifest`, `remembered_facts`).
+const NAMESPACE_RE  = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+const NAMESPACE_MAX = 64;
+
+function namespaceError(namespace: string): string | undefined {
+  if (namespace.length > NAMESPACE_MAX)
+    return `"${namespace}" is too long — a namespace is at most ${NAMESPACE_MAX} characters.`;
+  if (!NAMESPACE_RE.test(namespace))
+    return `"${namespace}" is not a valid namespace. Use letters, digits, "_" and "-", starting with a letter or digit (e.g. "meeting_notes").`;
+  return undefined;
+}
+
+/**
+ * An existing namespace this one would collide with, compared case-INSENSITIVELY: a namespace becomes
+ * a directory on the filesystem backend, and `Sessions` and `sessions` are one directory on macOS and
+ * Windows. Asks the backend what it holds rather than probing this one name, which is the only way to
+ * see a namespace some plugin owns — `sessions` itself is the case worth stopping, and the meta store
+ * cannot know about it because no `store_action` created it.
+ *
+ * Backends that cannot enumerate simply contribute nothing, and a namespace holding no documents is
+ * not reported, so this is one check among several rather than an oracle.
+ */
+async function collidingNamespace(services: MatbotMachine, namespace: string): Promise<string | undefined> {
+  const existing = await services.StorageBackend?.namespaces?.() ?? [];
+  const wanted   = namespace.toLowerCase();
+  return existing.find(ns => ns.toLowerCase() === wanted);
+}
+
 // A namespace "exists" if we already govern it, or it already holds documents (a store created by
 // other means). createStore is lazy, so an untouched namespace queries empty.
 async function storeHasData(services: MatbotMachine, namespace: string): Promise<boolean> {
@@ -285,9 +319,21 @@ function makeStoreActionTool(services: MatbotMachine, meta: Store<StoreDef>): To
         switch (input.action) {
           case 'create': {
             if (!input.namespace) { yield { type: 'error', message: 'create requires "namespace".' }; return; }
+            const invalid = namespaceError(input.namespace);
+            if (invalid !== undefined) { yield { type: 'error', message: invalid }; return; }
             if (input.namespace === META_NAMESPACE) { yield { type: 'error', message: `"${META_NAMESPACE}" is reserved.` }; return; }
             if (await meta.get(input.namespace) || await storeHasData(services, input.namespace)) {
               yield { type: 'error', message: `Store "${input.namespace}" already exists. Use action "expose".` };
+              return;
+            }
+            // A namespace already in the backend that no store_action created — a plugin's own store
+            // (`sessions`), or one differing only by case, which is the SAME directory on a
+            // case-insensitive filesystem. Creating over either would quietly share its storage.
+            const clash = await collidingNamespace(services, input.namespace);
+            if (clash !== undefined) {
+              yield { type: 'error', message: clash === input.namespace
+                ? `"${input.namespace}" already exists in storage (it belongs to a plugin, not to this tool). Use action "expose" to manage it, or pick another name.`
+                : `"${input.namespace}" collides with the existing namespace "${clash}" — namespaces differing only by case share one store on macOS and Windows. Pick a distinct name.` };
               return;
             }
             yield await define(input);
@@ -296,6 +342,8 @@ function makeStoreActionTool(services: MatbotMachine, meta: Store<StoreDef>): To
 
           case 'expose': {
             if (!input.namespace) { yield { type: 'error', message: 'expose requires "namespace".' }; return; }
+            const badExpose = namespaceError(input.namespace);
+            if (badExpose !== undefined) { yield { type: 'error', message: badExpose }; return; }
             if (input.namespace === META_NAMESPACE) { yield { type: 'error', message: `"${META_NAMESPACE}" is reserved.` }; return; }
             if (!(await meta.get(input.namespace)) && !(await storeHasData(services, input.namespace))) {
               yield { type: 'error', message: `No store "${input.namespace}" found. Use action "create" to make a new one.` };

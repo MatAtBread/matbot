@@ -86,33 +86,51 @@ test('filesystem: a directory that holds no documents is not a namespace', async
   });
 });
 
-// A namespace's characters do not survive the derivation of a SQLite table name, so the table alone
-// cannot answer — `a-b` and `a_b` both yield `a_b_store`.
-test('sqlite: a namespace with punctuation round-trips through the registry', async () => {
+// A table is its namespace verbatim, quoted — so punctuation survives and the mapping inverts exactly.
+test('sqlite: a namespace with punctuation is stored under its own name', async () => {
   await withTemp(async dir => {
     const backend = await SQLiteStorageBackend.open(dir);
     try {
       await backend.createStore('my-odd.ns').set('one', { id: 'one', version: 'v1' });
-      assert.deepEqual(await backend.namespaces(), ['my-odd.ns'], 'the namespace, not the table name');
+      assert.deepEqual(await backend.namespaces(), ['my-odd.ns'], 'the namespace, not a mangled table name');
     } finally { await backend.close?.(); }
   });
 });
 
-test('sqlite: tables predating the registry are still enumerated', async () => {
+// The old derivation replaced every non-alphanumeric with `_`, so these two shared ONE table and
+// silently merged. They must now be separate stores.
+test('sqlite: namespaces differing only by punctuation no longer share a table', async () => {
   await withTemp(async dir => {
-    const first = await SQLiteStorageBackend.open(dir);
-    await first.createStore('sessions').set('one', { id: 'one', version: 'v1' });
-    await first.close?.();
+    const backend = await SQLiteStorageBackend.open(dir);
+    try {
+      await backend.createStore('A-B').set('a', { id: 'a', version: 'v1' });
+      await backend.createStore('A_B').set('b', { id: 'b', version: 'v1' });
 
-    // Drop the registry to reproduce a database written before it existed.
+      assert.deepEqual(await backend.namespaces(), ['A-B', 'A_B']);
+      assert.equal(await backend.createStore('A-B').get('b'), null, 'A_B’s document must not be visible in A-B');
+      assert.notEqual(await backend.createStore('A-B').get('a'), null);
+      assert.notEqual(await backend.createStore('A_B').get('b'), null);
+    } finally { await backend.close?.(); }
+  });
+});
+
+// A database written under the old naming keeps its data: the table is renamed the first time the
+// namespace is opened, which is the only moment the namespace and its mangled table are both known.
+test('sqlite: a legacy mangled table is adopted, with its documents', async () => {
+  await withTemp(async dir => {
     const { DatabaseSync } = await import('node:sqlite');
     const raw = new DatabaseSync(join(dir, 'matbot.db'));
-    raw.exec('DROP TABLE namespace_registry');
+    raw.exec(`CREATE TABLE "profile_registry_store" (id TEXT PRIMARY KEY NOT NULL, version TEXT NOT NULL, doc TEXT NOT NULL)`);
+    raw.prepare(`INSERT INTO "profile_registry_store" VALUES (?, ?, ?)`)
+      .run('Matt', 'v1', JSON.stringify({ id: 'Matt', version: 'v1' }));
     raw.close();
 
-    const reopened = await SQLiteStorageBackend.open(dir);
-    try { assert.deepEqual(await reopened.namespaces(), ['sessions'], 'backfilled from the table name'); }
-    finally { await reopened.close?.(); }
+    const backend = await SQLiteStorageBackend.open(dir);
+    try {
+      const doc = await backend.createStore('profile-registry').get('Matt');
+      assert.notEqual(doc, null, 'the legacy table must be adopted, not abandoned');
+      assert.deepEqual(await backend.namespaces(), ['profile-registry']);
+    } finally { await backend.close?.(); }
   });
 });
 

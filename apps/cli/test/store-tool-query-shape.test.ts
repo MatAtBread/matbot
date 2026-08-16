@@ -104,3 +104,57 @@ test('a query with no grammar keys at all still matches everything', async () =>
   const { result } = await call(await storeTool(), { action: 'query' });
   assert.deepEqual((result as { items: unknown[] }).items.length, 2, 'an omitted query still means match-all');
 });
+
+// ── store_action create: the namespace is LLM-supplied, and it is not an opaque key ───────────────
+//
+// The filesystem backend makes it a directory name verbatim (document ids are percent-encoded,
+// namespaces never were), so it is checked where untrusted names arrive rather than defended against
+// in every backend.
+
+async function storeActionTool(existing: Record<string, Doc[]> = {}): Promise<Tool> {
+  const { tools, services } = machine(existing);
+  // Give the machine a backend that can enumerate, so the create guard has something to ask.
+  (services as unknown as { StorageBackend: unknown }).StorageBackend = {
+    createStore: (ns: string) => (services as unknown as { createStore(n: string): unknown }).createStore(ns),
+    fileStore:   {},
+    namespaces:  async () => Object.keys(existing).filter(ns => (existing[ns] ?? []).length > 0).sort(),
+  };
+  const { plugin } = await import('../../../plugins/tool-store/src/index.ts');
+  await plugin.setup!(services as never);
+  const tool = tools.find(t => t.name === 'store_action');
+  assert.ok(tool !== undefined, 'the plugin must register store_action');
+  return tool;
+}
+
+const created = { description: 'notes', shape: 'interface N { text: string }' };
+
+test('a namespace that would escape the data directory is rejected', async () => {
+  const tool = await storeActionTool();
+  for (const namespace of ['../evil', 'a/b', '.', '..', 'a\\b']) {
+    const { error, result } = await call(tool, { action: 'create', namespace, ...created });
+    assert.equal(result, undefined, `${namespace} must not create a store`);
+    assert.match(String(error), /not a valid namespace/, `${namespace} must be rejected`);
+  }
+});
+
+test('a namespace matbot itself uses is still accepted', async () => {
+  const tool = await storeActionTool();
+  for (const namespace of ['remembered_facts', 'profile-registry', 'a1']) {
+    const { error } = await call(tool, { action: 'create', namespace, ...created });
+    assert.equal(error, undefined, `${namespace} must remain valid`);
+  }
+});
+
+test("creating over a plugin's own namespace is refused", async () => {
+  const tool = await storeActionTool({ sessions: [{ id: 's1', version: 'v1' }] });
+  const { error, result } = await call(tool, { action: 'create', namespace: 'sessions', ...created });
+  assert.equal(result, undefined);
+  assert.match(String(error), /already exists/);
+});
+
+test('a namespace differing only by case is refused', async () => {
+  const tool = await storeActionTool({ sessions: [{ id: 's1', version: 'v1' }] });
+  const { error, result } = await call(tool, { action: 'create', namespace: 'Sessions', ...created });
+  assert.equal(result, undefined, 'one directory on macOS and Windows');
+  assert.match(String(error), /collides with the existing namespace "sessions"/);
+});
