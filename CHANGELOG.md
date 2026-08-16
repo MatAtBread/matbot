@@ -41,6 +41,17 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Optional
 
+#### function-tools
+
+- **`tool_function { action: 'check' }` re-type-checks functions you already defined.** A defined
+  function is type-checked once, at `define`, against the tool types as they stood then — and on every
+  later reload it is only *compiled*, never re-checked. So a tool that changes its contract silently
+  invalidates every stored function composing it: the function keeps registering, keeps being offered
+  to the model, and fails when it is next called. `check` closes that window by re-running the same
+  snippet through the same `ToolTypeIndex.check` that `define` and `lambda` use — no third notion of
+  what "checks out" means — and reports a row per function. Pass `name` for one, omit it to sweep all
+  of them. Nothing is run, registered or persisted.
+
 #### tool-store
 
 - **A query grammar key passed beside `action` is no longer silently discarded.**

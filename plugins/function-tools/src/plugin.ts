@@ -12,6 +12,8 @@ const NAMESPACE   = 'functions';
 
 interface FunctionRecord { name: string; definition: string; description?: string }
 
+interface CheckResult { name: string; ok: boolean; diagnostics: string[] }
+
 /** A stored function. Its `id` IS its name — names are already unique (they are tool-registry keys),
  *  so there is no second identity to keep in step, and a rename is a delete plus an add. */
 interface FunctionDoc { id: string; version: string; definition: string; description?: string }
@@ -54,6 +56,7 @@ declare module '@matatbread/matbot-plugin-api' {
     tool_function:
       | ToolContract<{ message: string; tool: string; parameters: ParsedParam[] }, { action: 'define'; definition: string; description?: string; noTypeCheck?: boolean }>
       | ToolContract<unknown,                                                      { action: 'lambda'; definition: string; params?: object; noTypeCheck?: boolean }>
+      | ToolContract<{ ok: boolean; results: CheckResult[] },                      { action: 'check';  name?: string }>
       | ToolContract<{ functions: FunctionRecord[] },                             { action: 'list'   }>
       | ToolContract<{ available: boolean; dts: string },                         { action: 'types'  }>
       | ToolContract<{ message: string },                                         { action: 'remove'; name: string }>;
@@ -63,6 +66,7 @@ declare module '@matatbread/matbot-plugin-api' {
 type ToolFunctionAction =
   | { action: 'define'; definition: string; description?: string; noTypeCheck?: boolean }
   | { action: 'lambda'; definition: string; params?: unknown; noTypeCheck?: boolean }
+  | { action: 'check'; name?: string }
   | { action: 'list' }
   | { action: 'types' }
   | { action: 'remove'; name: string };
@@ -136,6 +140,36 @@ class FunctionStore {
     await this.store.set(doc.id, doc);
     this.registered.add(doc.id);
     return { name: sig.name, parameters: sig.params };
+  }
+
+  /** Re-run define's type-check over already-stored source, registering and persisting nothing: the same
+   *  snippet through the same index, so a pass here means exactly what a pass at define time meant. What
+   *  makes it worth re-running is that the tool types are LIVE — a tool that changes its contract can
+   *  invalidate a function that was sound when it was defined, and nothing else would notice, because a
+   *  defined function is only compiled (never re-checked) on reload. */
+  async check(name?: string): Promise<CheckResult[]> {
+    const index = this.machine.ToolTypeIndex;
+    if (index === undefined) throw new Error('No type-checker is available here (e.g. the browser), so nothing can be checked.');
+
+    let docs: FunctionDoc[];
+    if (name === undefined) {
+      ({ items: docs } = await this.store.query({ sort: [{ field: 'id', dir: 'asc' }], immutable: true }));
+    } else {
+      const doc = await this.store.get(name);
+      if (doc === null) throw new Error(`No function named "${name}" was defined here.`);
+      docs = [doc];
+    }
+
+    const results: CheckResult[] = [];
+    for (const doc of docs) {
+      let diagnostics: string[];
+      // An unparseable head is this function's own failure, not the run's — report it as its row so a
+      // sweep over every function still reports on the rest.
+      try { diagnostics = await index.check(checkSnippet(parseSignature(doc.definition))); }
+      catch (e) { diagnostics = [e instanceof Error ? e.message : String(e)]; }
+      results.push({ name: doc.id, ok: diagnostics.length === 0, diagnostics });
+    }
+    return results;
   }
 
   async remove(name: string): Promise<boolean> {
@@ -224,6 +258,12 @@ ACTIONS
   lambda — Compile and run an ANONYMOUS one-argument function once, now, against \`params\`. Nothing is
            persisted or registered. Type-checked against the live tool types before running (like define),
            so a bad composition is caught before it runs; pass \`noTypeCheck: true\` to bypass.
+  check  — Re-run define's type-check over a function you already defined, without running or re-registering
+           it. Pass \`name\` for one, or omit it to check every defined function. Use this after anything that
+           could move a contract a function was written against — a tool changing its parameters or result,
+           a plugin loading or unloading — since a defined function is compiled but NOT re-checked on
+           reload, so it keeps working until the moment it doesn't. Returns a row per function with its
+           diagnostics; fix a failure by re-defining that function.
   list   — Show the functions you've defined, with their source.
   types  — Return TypeScript declarations (a .d.ts) of what the available tools' calls resolve to, so you
            can compose against real return types. Node only; \`available: false\` with an empty dts where
@@ -255,12 +295,12 @@ const INPUT_SCHEMA: JSONSchema = {
   type: 'object',
   required: ['action'],
   properties: {
-    action:     { type: 'string', enum: ['define', 'lambda', 'list', 'types', 'remove'], description: 'define: persist a named function as a tool. lambda: run an anonymous function once. types: get TypeScript declarations of tool return types. list / remove: manage defined functions.' },
+    action:     { type: 'string', enum: ['define', 'lambda', 'check', 'list', 'types', 'remove'], description: 'define: persist a named function as a tool. lambda: run an anonymous function once. check: re-type-check already-defined functions against the current tool types. types: get TypeScript declarations of tool return types. list / remove: manage defined functions.' },
     definition:  { type: 'string', description: 'define/lambda: the function source (method-shorthand TypeScript, no arrow).' },
     description: { type: 'string', description: 'define only (optional): Describe the intent of the function from the context used to create it. Include a clause describing the use-cases for the function tool. Becomes the defined tool\'s description, and therefore it is important to make the description both specific in terms of intent and use-cases. Do not describe the mechanism or execution as this is already clear from the code.' },
     params:      { type: 'object', description: 'lambda only: the single argument object passed to the function.' },
     noTypeCheck: { type: 'boolean', description: 'define/lambda (optional, default false): skip the TypeScript type-check of the body against the live tool types. The check is a strong signal the composition is sound before it is registered/run — leave it on unless you must bypass a spurious error (e.g. composing a tool whose result type is `unknown`). No effect where no type-checker is available (e.g. the browser).' },
-    name:       { type: 'string', description: 'remove only: the defined function/tool name to delete.' },
+    name:       { type: 'string', description: 'remove: the defined function/tool name to delete. check (optional): the one function to check — omit it to check every defined function.' },
   },
 };
 
@@ -313,6 +353,17 @@ function functionTool(machine: MatbotMachine, store: FunctionStore): Tool<ToolRe
             yield* runFunction(machine, ctx, fn, [act.params ?? {}]);
             return;
           }
+          case 'check': {
+            if (act.name !== undefined && (typeof act.name !== 'string' || act.name === '')) {
+              yield errorEvent('check: "name" must be the name of a defined function — omit it to check every one.');
+              return;
+            }
+            try {
+              const results = await store.check(act.name);
+              yield { type: 'result', value: { ok: results.every(r => r.ok), results } };
+            } catch (e) { yield errorEvent(e instanceof Error ? e.message : String(e)); }
+            return;
+          }
           case 'list':
             yield { type: 'result', value: { functions: await store.list() } };
             return;
@@ -344,7 +395,7 @@ export function createFunctionToolsPlugin(): MatbotPluginSpec {
   let lifecycle: AbortController | undefined;
   return {
     apiVersion: PLUGIN_API_VERSION,
-    manifest: { description: 'Author and run TypeScript functions that compose registered tools (`tool_function`: define/lambda/list/remove).' },
+    manifest: { description: 'Author and run TypeScript functions that compose registered tools (`tool_function`: define/lambda/check/list/remove).' },
 
     async setup(services) {
       lifecycle = new AbortController();
