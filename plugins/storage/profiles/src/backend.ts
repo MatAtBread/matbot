@@ -35,8 +35,20 @@ export interface ProfileDirectory {
   createProfile(name: string, isolated?: string[]): Promise<Profile>;
   deleteProfile(id: string): Promise<boolean>;
   setIsolated(id: string, isolated: string[]): Promise<Profile>;
-  // The namespaces observed so far (a lower bound — a namespace appears only once its owning plugin has
-  // called createStore this session), minus those that can never be isolated. Drives the UI's picker.
+  // Which axes CAN be isolated — not an inventory of which namespaces exist. Drives the UI's picker.
+  //
+  // The distinction is the whole meaning of the method, and getting it backwards makes two correct
+  // behaviours look like bugs: `files` belongs in the list even though no document store uses it (it is
+  // an isolatable axis, which is the question being asked), and a namespace holding nothing belongs too
+  // (isolatability is a property of the axis, not of whether anyone has written to it — on a fresh
+  // install everything is empty, which is exactly when the picker is needed).
+  //
+  // So do NOT back this with `StorageBackend.namespaces()`, which was added for traversal and answers
+  // "what holds documents". It is a different question, and substituting it would drop `files` and every
+  // not-yet-written namespace — including one a profile is ACTIVELY isolating — while adding orphaned
+  // data from uninstalled plugins as though it were isolatable. `observed` grows as plugins call
+  // createStore, which is a lower bound on the axes but the right KIND of answer; a complete one would
+  // need plugins to declare their namespaces, which no API does today.
   availableNamespaces(): string[];
   // Item-grain sharing. `share` exposes one item the current principal owns in `target`'s partition
   // (this backend links it — a live single source, never a copy); `unshare` reverses that. `ownerOf`
@@ -140,9 +152,12 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
   // Cached per (partition, namespace) so a namespace's FilesystemStore — and its per-key CAS lock map —
   // is reused across operations rather than rebuilt each call (a fresh store per op would lose the lock).
   private readonly subStores                   = new Map<string, Store<{ id: string; version: string }>>();
-  // Every namespace seen through createStore this session, plus each profile's isolated set seeded at open.
-  // A lower bound (lazily-created namespaces appear only once touched) — good for UI suggestions, not for
-  // hard validation. ALWAYS_BASE members are filtered out at read time in availableNamespaces().
+  // Every namespace seen through createStore this session, plus each profile's isolated set seeded at open
+  // and the `files` axis. The candidate ISOLATABLE axes, not an inventory of what exists — see
+  // availableNamespaces(), which reads it and explains why an inventory is the wrong source. A lower bound
+  // (a lazily-created namespace appears only once touched), so it is not a validation oracle:
+  // cleanIsolated() accepts an unobserved namespace rather than rejecting it. ALWAYS_BASE members are
+  // filtered out at read time.
   private readonly observed                    = new Set<string>();
   // Per (partition, namespace) set of item ids symlinked IN from another partition — i.e. the items shared
   // into that profile. visible()'s OR-clause reads it so an owner's edit to a shared-in item reaches the
