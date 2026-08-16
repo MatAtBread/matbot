@@ -60,6 +60,9 @@ importers:
       '@matatbread/matbot-function-tools':
         specifier: workspace:^
         version: link:../../plugins/function-tools
+      '@matatbread/matbot-sessions':
+        specifier: workspace:^
+        version: link:../../plugins/sessions
       '@matatbread/matbot-storage-profiles':
         specifier: workspace:^
         version: link:../../plugins/storage/profiles

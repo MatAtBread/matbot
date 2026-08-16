@@ -105,7 +105,8 @@ function makeSessionActionTool(store: Store<Session>): Tool<ToolResultOf<'sessio
       'a clause on each field. The stored fields "status", "title", "createdAt" and "updatedAt" are also ' +
       'queryable (eq/neq/in/lt/lte/gt/gte/exists), combinable with and/or/not. Optional "sort" (stored ' +
       'fields only, e.g. [{ field: "updatedAt", dir: "desc" }]), "limit" (the search early-exits once this ' +
-      'many match), and "cursor" (from a previous result) paginate.',
+      'many match), and "cursor" (from a previous result) paginate. To COUNT matching sessions rather than ' +
+      'read them, query with "limit": 0 — the result is just { total } with no items.',
     inputSchema: {
       type:       'object',
       required:   ['action'],
@@ -116,7 +117,7 @@ function makeSessionActionTool(store: Store<Session>): Tool<ToolResultOf<'sessio
         includeArchived: { type: 'boolean', description: 'list only: include archived sessions. Default false.' },
         where:           { type: 'object', description: 'query only: a store-query Filter over "user"/"assistant" (session text) and stored fields. See description.' },
         sort:            { type: 'array',  description: 'query only: SortSpec[] over stored fields, e.g. [{ "field": "updatedAt", "dir": "desc" }].' },
-        limit:           { type: 'number', description: 'query only: max results — the search early-exits once this many match.' },
+        limit:           { type: 'number', description: 'query only: max results — the search early-exits once this many match. 0 counts instead: no items, just "total" (it cannot early-exit, so it reads every session).' },
         cursor:          { type: 'string', description: 'query only: opaque cursor from a previous query result, for the next page.' },
       },
     },
@@ -177,23 +178,29 @@ function makeSessionActionTool(store: Store<Session>): Tool<ToolResultOf<'sessio
             const ordered   = applySort(items, page.sort);   // stored-field ordering, before any text synthesis
             const match     = page.where !== undefined ? compileFilter(page.where) : () => true;
 
+            // `limit: 0` is the count form, and it is the one query that cannot early-exit: an exact
+            // total means every session is synthesized and tested. That is the expensive query here,
+            // deliberately — the alternative is a page the caller only measures, which costs the model
+            // far more to read than it costs us to scan.
+            const counting = page.limit === 0;
+
             // The for-loop with the early break: synthesize + test one session at a time and stop the
             // moment the page is full, so a low `limit` over hundreds of sessions never searches the tail.
             const rows: SessionSummary[] = [];
             let matched = 0;
             for (const s of ordered) {
-              if (page.limit !== undefined && rows.length >= page.limit) break;
+              if (!counting && page.limit !== undefined && rows.length >= page.limit) break;
               if (!match({ ...s, ...synthRoles(s) })) continue;
-              if (matched++ >= page.offset) rows.push(toSummary(s));
+              if (matched++ >= page.offset && !counting) rows.push(toSummary(s));
             }
 
             // Optimistic cursor: emitted whenever the page filled, so the next page may be empty — the
             // price of early-exit (we don't scan on to confirm a further match exists). `total` is omitted
-            // for the same reason: we never counted the tail.
-            const nextPage = (page.limit !== undefined && rows.length >= page.limit)
+            // for the same reason: we never counted the tail — except when counting, where it is the answer.
+            const nextPage = (!counting && page.limit !== undefined && rows.length >= page.limit)
               ? { cursor: encodeCursor({ ...page, offset: page.offset + page.limit }) }
               : {};
-            yield { type: 'result', value: { items: rows, ...nextPage } };
+            yield { type: 'result', value: { items: rows, ...(counting ? { total: matched } : {}), ...nextPage } };
             return;
           }
 

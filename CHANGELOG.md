@@ -9,7 +9,7 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
-## Unreleased
+## 0.4.3
 
 ### Breaking changes
 
@@ -53,7 +53,38 @@ churn and less likely to affect a consumer who doesn't use them.
   find them, so a retry silently under-reported by the attempt it discarded. The turn head is the one
   message the pop keeps. Locality is not lost — `site` already names the round or tool call.
 
+- **`WatchVisibility.visible` takes a `VisibilityQuery` and is consulted for every notification kind.** The
+  predicate could not see the `kind` it was deciding about, so a consumer could not express a per-kind
+  delivery policy — routing a partitioned namespace and addressing a fact to a recipient are different
+  policies over the same stream, and only an implementation knows which of its kinds wants which. It could
+  not see `kind` because the caller had already gated on it: `frontend-web`'s firehose consulted the
+  predicate only for an `ItemChange` carrying a principal, so every plugin-defined kind was fanned out to
+  every connection with no hook capable of stopping it. Harmless on the in-process bus (one process, one
+  user); wrong the moment a distributed `Notifier` bridges an addressed fact in from another instance —
+  which these docs explicitly invite. The gate is gone and the judgement moved behind the interface: the
+  frontend hands over everything it knows and takes no position on policy.
+
+  `visible(q)` where `q` is `{ viewer, kind, namespace?, id?, origin? }` — an object rather than a fifth
+  positional because `kind`/`namespace`/`id` are three adjacent strings around two `Principal`s.
+  `namespace`/`id` are optional because a kind may address no item; `origin` was the 4th parameter. An
+  implementation must **fail open** on kinds it has no policy for, since it is now asked about all of them.
+
+  No behaviour change: the profiles backend's one policy is partition routing, meaningful only for an
+  item-addressed change with an owner, so it returns `true` when `namespace`/`id`/`origin` is absent —
+  exactly what the caller's kind gate used to do. The filtered set and every answer are identical.
+
 ### API gaps filled
+
+- **`limit: 0` is the count form of a store query.** The filter runs, `QueryResult.total` answers, and no
+  document is materialised or cursor issued — so "how many sessions mention invoices?" no longer means
+  fetching every one of them and measuring the array, which was the only way to ask and cost the model
+  the whole result to read a single number. It is a page size of zero rather than a new `count` action or
+  a new grammar key because that is already what the word means, in the AST and in a backend's native
+  query alike: fetch no rows, report how many there were. One consequence is that every store-backed
+  `query` action gains it at once, including tools that do not exist yet, and it composes with `where`
+  rather than restating it. Every backend delegates paging to `executeQuery`, so all of them (filesystem,
+  sqlite, google-drive, IndexedDB, the caching decorator, the profiles delegator) answer it from the one
+  implementation; a pushdown backend compiles it to `SELECT COUNT(*)`.
 
 - **Every tool call is timed, and the number is kept.** The runner measured a tool's duration, handed it
   to the `toolresult` hook and then discarded it, so a consumer had to re-derive it — less accurately —
@@ -84,6 +115,21 @@ churn and less likely to affect a consumer who doesn't use them.
   established by the runner around its own round and each tool executor, and by `HookRegistry` around
   each handler (which already knew the channel and owning plugin). See `docs/ACCOUNTING-RATIONALE.md`.
 
+- **`FilePartition`** — a new optional `MatbotServices` member, registered by a backend that partitions the
+  file area (the profiles backend) and consumed by `frontend-web`:
+
+  ```ts
+  interface FilePartition {
+    current(): string | undefined;                              // the current file area, as an opaque token
+    enter<T>(token: string, fn: () => Promise<T>): Promise<T>;  // its inverse
+  }
+  ```
+
+  A file's address now comes from the router that placed the bytes rather than from a guess at the identity
+  in force, and the two halves are one round trip: `GET /files/~<token>/…` resolves through `enter` instead
+  of re-entering the token as a principal, which was the same guess one layer up. Base answers `undefined`,
+  so an unpartitioned deployment's URLs are byte-identical to before.
+
 ### Bug fixes
 
 - **A completion run from a hook is no longer credited to whichever tool happened to be running.** The
@@ -107,31 +153,54 @@ churn and less likely to affect a consumer who doesn't use them.
   Capture remains best-effort: state is disposed once a session is quiet and unsubscribed, and anything
   still pending then is lost.
 
-## 0.4.3
-
-### Breaking changes
-
-- **`WatchVisibility.visible` takes a `VisibilityQuery` and is consulted for every notification kind.** The
-  predicate could not see the `kind` it was deciding about, so a consumer could not express a per-kind
-  delivery policy — routing a partitioned namespace and addressing a fact to a recipient are different
-  policies over the same stream, and only an implementation knows which of its kinds wants which. It could
-  not see `kind` because the caller had already gated on it: `frontend-web`'s firehose consulted the
-  predicate only for an `ItemChange` carrying a principal, so every plugin-defined kind was fanned out to
-  every connection with no hook capable of stopping it. Harmless on the in-process bus (one process, one
-  user); wrong the moment a distributed `Notifier` bridges an addressed fact in from another instance —
-  which these docs explicitly invite. The gate is gone and the judgement moved behind the interface: the
-  frontend hands over everything it knows and takes no position on policy.
-
-  `visible(q)` where `q` is `{ viewer, kind, namespace?, id?, origin? }` — an object rather than a fifth
-  positional because `kind`/`namespace`/`id` are three adjacent strings around two `Principal`s.
-  `namespace`/`id` are optional because a kind may address no item; `origin` was the 4th parameter. An
-  implementation must **fail open** on kinds it has no policy for, since it is now asked about all of them.
-
-  No behaviour change: the profiles backend's one policy is partition routing, meaningful only for an
-  item-addressed change with an owner, so it returns `true` when `namespace`/`id`/`origin` is absent —
-  exactly what the caller's kind gate used to do. The filtered set and every answer are identical.
+- **A zero-length page no longer issues a cursor that pages forever.** `executeQuery` emitted one
+  whenever unread documents remained, including at `limit: 0`, where the next page starts at the same
+  offset and returns the same empty slice — a caller following the cursor never advanced and never
+  finished.
 
 ### Optional
+
+- **sessions** — `session_action query` answers `{ total }` for `limit: 0`. It is the one query here that
+  cannot early-exit: the text columns it filters on are synthesized per session, so an exact count reads
+  every one of them, where a bounded page stops as soon as it is full. That is the expensive query on
+  this tool, deliberately — the scan is bounded by what is already on disk, while the array it replaces
+  is not bounded by anything the model can afford to read.
+
+- **tool-store** — the generated `<namespace>_action` tools document the count form in their `query`
+  grammar; they already forwarded `total`.
+
+- **frontend/web + storage/profiles:** `url_for_resource` no longer stamps a partition segment onto files
+  that live in the shared base area. It minted the `~<id>` prefix from the identity in force, gated on the
+  presence of the `profile_action` tool — i.e. on "profiles are loaded", not on "these bytes went somewhere
+  addressable". A principal with no profile routes to the base area, so an ordinary file came back as
+  `/files/~matt/workspace/report.md`: a link that reads as partitioned, leaks the principal id into a URL
+  whose whole purpose is to be shared, and 404s the moment a profile of that name is created. The inference
+  was unsound in the other direction too — a principal may hold several profiles, and a profile may alias
+  its files onto another's area, so the identity does not name the area at all. The address now comes from
+  the backend that placed the bytes, through the new `FilePartition` member above.
+
+- **cognition:** `remember_fact`'s first trigger condition no longer treats specificity as durability. It
+  matched on "any specific name, number, date, location, relationship, or domain detail", which fires on
+  every sensor reading by construction — a battery voltage is the most specific thing in a session. Those
+  landed in `remembered_facts`, were merged into skills as if permanent, and then contradicted the next
+  reading of the same quantity (3990 vs 4023 mV, stuck vs un-stuck) — never a disagreement about the
+  world, just two timestamps of a changing one. The condition now requires the detail to still be true
+  tomorrow and excludes current status explicitly. Seeded with `importIfAbsent`, so it reaches new
+  installs only; an existing trigger must be updated in place.
+
+- **cognition:** dream-time merges stopped failing on legitimate deduplication. The merger prompt told the
+  model to fold a near-duplicate into the existing passage *and* that "the output's length must be >= the
+  input's" — two incompatible orders — and a `content.length < input.length - 20` guard then rejected the
+  merge when it obeyed the first, quarantining the fact permanently. Observed production failures were all
+  in-place dedup, shrinking a 15.5k skill by 34-274 chars.
+
+  The length instruction is gone (a stated length floor invites padding, which is exactly what a size check
+  cannot see), and the guard is now a shrink allowance of `max(100 chars, 3%)` — clearing observed dedup by
+  several multiples while still catching the loss of a subsection, with the floor because skills run small
+  enough that a bare ratio is tighter than whitespace jitter. A heading-presence check sits alongside it,
+  catching the trailing section dropped and made up for elsewhere. Both are tripwires for gross loss, not
+  proof of integrity. A structural trip now re-rolls once before quarantining: the same merge usually passes
+  on a second sample, and quarantine is terminal.
 
 - **tool-types:** the generated dts declares the **live tool registry**, not every plugin on disk. The scan
   roots at each loaded plugin's `resolvedUrl` and then unions a glob of the monorepo `plugins/` tree onto it

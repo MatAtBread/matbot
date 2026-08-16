@@ -481,9 +481,9 @@ export async function* runOnce(
           skillMergedIds.push(f.id);
         } catch (e) {
           calls.push({ role: 'merge', inputSize: 1, ms: Date.now() - mergeStart });
-          // Durable failure on THIS fact (unparseable response, truncation, length-guard) — a
-          // property of this (fact, skill, provider) combination, not a transient blip. Quarantine
-          // the culprit so it stops blocking the queue (needs a config fix, not an auto-retry),
+          // Durable failure on THIS fact (unparseable response, or a structural guard tripped on
+          // both attempts — the merger already re-rolls once, so a blip has been ruled out here).
+          // Quarantine the culprit so it stops blocking the queue (needs a config fix by now),
           // stop this skill's cluster, but commit the merges that already succeeded (below) and
           // move on to the next skill rather than aborting the whole pass.
           try { await patchFact(facts, f.id, { dreamSkill: DREAM_SKILL_ERROR }); } catch { /* raced edit */ }

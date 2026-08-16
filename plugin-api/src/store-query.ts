@@ -37,6 +37,12 @@ export interface SortSpec {
 export interface StoreQuery {
   where?:  Filter;
   sort?:   SortSpec[];
+  /**
+   * Page size. `0` is the count form — the filter runs and `total` answers, but no document is
+   * materialised and no cursor is issued. It is a page size of zero rather than a `count` flag
+   * because that is already what the word means, in the grammar and in a pushdown backend's native
+   * query alike: fetch no rows, report how many there were.
+   */
   limit?:  number;
   cursor?: string | undefined;
   /**
