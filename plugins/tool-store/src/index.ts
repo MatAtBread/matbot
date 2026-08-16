@@ -22,6 +22,10 @@ function actionToolName(namespace: string): string { return `${namespace}_action
 
 // ── meta store: the plugin's own record of every store it manages ───────────────
 
+// The StoreQuery keys, which belong under the `query` parameter and nowhere else. Kept as the
+// rejection list for a caller that flattens them onto the action's own params.
+const GRAMMAR_KEYS = ['where', 'sort', 'limit', 'cursor', 'immutable'];
+
 async function listDefs(meta: Store<StoreDef>): Promise<StoreDef[]> {
   const res = await meta.query({});
   return res.items;
@@ -106,7 +110,11 @@ function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Sto
       '```ts\n' + def.shape + '\n```\n\n' +
       'Actions map onto the matbot `Store<' + typeGuess + '>` interface (get/set/cas/delete/query), with ' +
       '`set` doubling as upsert (omit `id` to create) and `query` matching all when omitted.\n\n' +
-      'The `query` grammar:\n' +
+      'The `query` action takes the entire grammar in ONE `query` parameter. Every key below nests ' +
+      'inside it and never sits beside `action`:\n' +
+      '```json\n' +
+      '{ "action": "query", "query": { "where": …, "sort": …, "limit": 20 } }\n' +
+      '```\n' +
       '```ts\n' +
       "type FieldPath = string | string[];  // a bare string is ONE key (never split on '.'); use an array for a nested path\n" +
       'type StoreQuery = {\n' +
@@ -126,8 +134,9 @@ function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Sto
       "  | { op: 'not';                       clause: Filter };\n" +
       '```\n' +
       'Comparisons are type-strict (5 ≠ "5"); null/absent match nothing except `{op:\'exists\',value:false}` — never compare to null. ' +
-      '`query` returns `{ items, cursor?, total? }`. To COUNT matches without fetching them, pass ' +
-      '`limit: 0` — the filter still runs and `total` is the answer, but no document is returned.\n\n' +
+      '`query` returns `{ items, cursor?, total? }`. To COUNT matches without fetching them, use a ' +
+      'limit of 0 — the filter still runs and `total` is the answer, but no document is returned: ' +
+      '`{ "action": "query", "query": { "limit": 0 } }`.\n\n' +
       '`version` is managed for you (a fresh one is minted on every set/cas) — never set it yourself; ' +
       'pass the value you last read as `expected` to cas/delete for safe concurrent updates.',
     inputSchema: {
@@ -188,6 +197,18 @@ function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Sto
             return;
           }
           case 'query': {
+            // A grammar key passed alongside `action` instead of inside `query`. `input.query` would
+            // be undefined, the query would degrade to match-everything, and the caller would get a
+            // plausible answer with no signal it was malformed — the exact silent miss `validateQuery`
+            // rejects unknown top-level keys to prevent, one level up, where `inputSchema` is loose by
+            // design. `limit: 0` is the case that bites hardest: the count form comes back as every
+            // document in the store plus a total, which reads like it worked.
+            const misplaced = GRAMMAR_KEYS.filter(k => k in (input as unknown as Record<string, unknown>));
+            if (misplaced.length > 0) {
+              const list = misplaced.map(k => `"${k}"`).join(', ');
+              yield { type: 'error', message: `${list} ${misplaced.length === 1 ? 'belongs' : 'belong'} inside "query", not beside "action" — call { "action": "query", "query": { ${misplaced.map(k => `"${k}": …`).join(', ')} } }. See the \`query\` grammar in this tool's description.` };
+              return;
+            }
             let res;
             try {
               res = await store.query(input.query ?? {});
