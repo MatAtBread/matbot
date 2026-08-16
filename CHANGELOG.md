@@ -11,6 +11,34 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ## 0.4.4
 
+### Breaking changes
+
+- **`workspace_action` speaks of names, not paths.** `path` becomes `name` on read, write and
+  delete and in every result; `list` takes `prefix`; `recursive` is gone. A workspace file is an entry
+  in a `FileStore` namespace, addressed by one flat string — the `/` in `charts/data.csv` is an
+  ordinary character, not a level, and there is no directory anywhere in the medium to create, change
+  into or walk. Calling the parameter `path` invited the whole hierarchical model in, and the calls it
+  produced failed in the ways that model predicts and this one cannot honour: `list { path: "." }`
+  matched nothing (the executor appended a `/`, and no name begins `./`), and `write { path: "./notes.md" }`
+  created a *second* file distinct from `notes.md`, addressable only by repeating the `./`, because
+  names are stored verbatim. Normalisation now drops `.` segments everywhere, so those two converge,
+  and a `..` in a `list` prefix is an error rather than a silently empty listing, as it already was
+  elsewhere.
+
+  **`recursive` is removed, and `list` now always returns every matching file.** It never recursed:
+  the executor enumerates the whole namespace on every call and `recursive: false` only discarded names
+  with a further `/` in them, so the default suppressed results already in hand and bought nothing —
+  a depth default borrowed from filesystems, where a deep walk is expensive, applied to a store where
+  both branches cost the same. Its failure was quieter than the `path` one, too: `list {}` returned a
+  short list that reads exactly like a complete answer to "what is in my workspace". Narrowing is
+  `prefix`'s job; if listing size ever needs a control, that control is a limit, not a depth.
+
+  Listed here rather than under **Optional** with the plugin's other changes: the tool ships by default
+  and every parameter of it changed at once, so a stored `function-tools` lambda, compiled skill or
+  trigger `invoke` naming the old shape breaks — and breaks *quietly*, since `inputSchema` is loose by
+  design and an unknown key is ignored rather than rejected. A stale `list` call now lists the whole
+  workspace instead of erroring; a stale `read` or `write` fails on the missing `name`.
+
 ### Optional
 
 #### tool-store
