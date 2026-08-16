@@ -40,6 +40,23 @@ export class GoogleDriveStorageBackend implements StorageBackend {
     return store as Store<T>;
   }
 
+  /**
+   * The layout mirrors the filesystem backend, so a namespace is a folder directly under the root and
+   * enumerating them is one folder listing. The blob area (`__files`) is excluded: files are their own
+   * axis with their own enumeration, not a namespace.
+   *
+   * Unlike the filesystem backend this does not verify each folder holds a document — that would be
+   * one Drive round-trip per namespace, and an empty folder here means a store was opened rather than
+   * a directory of unrelated state, since nothing but `createStore` creates one.
+   */
+  async namespaces(): Promise<string[]> {
+    const folders = await this.drive.list(await this.rootId, { foldersOnly: true });
+    return folders
+      .map(f => f.name)
+      .filter(n => n !== FILES_FOLDER)
+      .sort();
+  }
+
   async close(): Promise<void> {}
 
   /**

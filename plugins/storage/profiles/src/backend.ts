@@ -219,6 +219,36 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
     };
   }
 
+  /**
+   * The namespaces the CURRENT principal would actually read — this backend routes per namespace, so
+   * there is no single directory to list. Candidates are gathered from every partition this principal
+   * can reach (base, its own, and any it aliases into), then each is kept only if its own `route`
+   * sends it to a partition that really holds it. Listing the union unfiltered would report another
+   * profile's isolated namespace as present here, which is the thing partitioning exists to prevent.
+   *
+   * Degrades with the layer below: if the base backend cannot enumerate, neither can this, and a
+   * partition that cannot is treated as unfiltered rather than empty.
+   */
+  async namespaces(): Promise<string[]> {
+    const principalId = tryCurrentPrincipal()?.id;
+    const profile     = principalId !== undefined ? this.profiles.get(principalId) : undefined;
+
+    const candidates = new Set<string>(await this.base.namespaces?.() ?? []);
+    for (const part of [profile?.id, ...Object.values(profile?.sharedFrom ?? {})]) {
+      if (part === undefined || part === BASE) continue;
+      for (const ns of await this.partitionFor(part).namespaces?.() ?? []) candidates.add(ns);
+    }
+
+    const out: string[] = [];
+    for (const ns of candidates) {
+      const part    = this.routeFor(principalId, ns);
+      const backend = part === BASE ? this.base : this.partitionFor(part);
+      const held    = await backend.namespaces?.();
+      if (held === undefined || held.includes(ns)) out.push(ns);
+    }
+    return out.sort();
+  }
+
   // Read-only sharing (v1): a set/cas onto an item shared IN from another partition would clobber the
   // symlink with a real file in this partition (writeAtomic's rename), silently forking the owner's data.
   // Refuse it. Only profile partitions ever hold shared-in links (share() rejects a base target), so a

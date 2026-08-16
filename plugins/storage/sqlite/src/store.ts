@@ -3,6 +3,19 @@ import type { Store, StoreQuery, QueryResult, CASResult } from '@matatbread/matb
 import { validateQuery, encodeCursor, decodeCursor, type PageState } from '@matatbread/matbot-core/storage-base';
 import { compileFilter, compileOrderBy, type SqlParam } from './query-sql.js';
 
+// Maps a table back to the namespace that created it. The table name is derived by replacing every
+// character outside [A-Za-z0-9] with `_`, which is not invertible — `a-b` and `a_b` both yield
+// `a_b_store` — so `sqlite_master` alone cannot answer `namespaces()`. (That same collision means two
+// such namespaces would share one table; pre-existing behaviour, and now at least visible here.)
+export const NAMESPACE_REGISTRY = 'namespace_registry';
+
+export function ensureNamespaceRegistry(db: DatabaseSync): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS "${NAMESPACE_REGISTRY}" (
+    tbl       TEXT PRIMARY KEY NOT NULL,
+    namespace TEXT NOT NULL
+  )`);
+}
+
 export class SQLiteStore<T extends { id: string; version: string }> implements Store<T> {
   private readonly db:    DatabaseSync;
   private readonly table: string;
@@ -15,6 +28,9 @@ export class SQLiteStore<T extends { id: string; version: string }> implements S
       version TEXT NOT NULL,
       doc     TEXT NOT NULL
     )`);
+    ensureNamespaceRegistry(db);
+    db.prepare(`INSERT OR REPLACE INTO "${NAMESPACE_REGISTRY}" (tbl, namespace) VALUES (?, ?)`)
+      .run(this.table, namespace);
   }
 
   async get(id: string): Promise<T | null> {
