@@ -245,6 +245,29 @@ When one plugin **specializes** another ("B *is* A, but broader"), that's an `ex
 
 `Store<T extends { id: string; version: string }>` — universal interface. All writes use compare-and-swap (`store.cas(id, expectedVersion, next)`). Never write without version check when concurrent updates are possible.
 
+`createStore` is addressed BY name, so **`StorageBackend.namespaces?()`** is the other half: what a backend
+currently holds, without which nothing can traverse one (copy, audit, report). Optional because absence
+is a type — a medium with no listing operation must degrade, not guess. Never implement it as "the
+namespaces `createStore` was called with this session": that is a lower bound wearing an answer's
+clothes. Files are a separate axis (`FileStore.list`), never a namespace.
+
+**Exactly one backend is active.** The boot pre-scan opens the first configured plugin offering a
+`storageBackend` and stops; a plugin registering one later displaces it at the quiescent edge. Nothing
+is migrated between them, so a discarded backend has typically already created its file — the host
+warns once, naming the plugin, because the failure is otherwise silent and reads as "my backend is
+configured and does nothing".
+
+**Partitioning/ownership is a backend CAPABILITY, not a layer over backends.** How data is divided by
+owner is medium-specific — nested directories, a table prefix, a partition column, row-level policies —
+so there is no general wrapper that could impose one composition on every backend. `ProfileDirectory` is
+the shared surface, and consumers reach it by duck-typing the *active* backend
+(`asProfileDirectory(services.StorageBackend)`, method presence, never `instanceof`, so it survives hot
+reload and follows swaps). The check takes `unknown` and is purely structural: **any** backend exposing
+that shape is picked up, with no import and no plugin-api change — which is why the contract does not
+need hoisting out of the plugin that currently implements it. `storage/profiles` is one implementation,
+the filesystem one; it composes `FilesystemStorageBackend` directly rather than wrapping the active
+service, and therefore does not combine with SQLite or any other backend.
+
 ---
 
 ## Security principal
