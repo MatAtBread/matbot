@@ -2,6 +2,8 @@ import type { MatbotPluginSpec, MatbotMachine } from '@matatbread/matbot-plugin-
 import { PLUGIN_API_VERSION }               from '@matatbread/matbot-plugin-api';
 import { makeSessionTools }                 from './tools.js';
 
+export { makeSessionTools } from './tools.js';
+
 export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,
 

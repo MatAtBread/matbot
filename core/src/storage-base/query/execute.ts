@@ -47,9 +47,12 @@ export function executeQuery<T extends { id: string; version: string }>(docs: T[
   const slice = ordered.slice(page.offset, end);
   const next  = page.offset + slice.length;
 
+  // `limit: 0` is the count form: the filter runs, `total` answers, no document is materialised. It
+  // gets no cursor — a zero-length page never advances `offset`, so one would page forever on the
+  // same empty slice.
   return {
     items: slice,
     total,
-    ...(next < total ? { cursor: encodeCursor({ ...page, offset: next }) } : {}),
+    ...(page.limit !== 0 && next < total ? { cursor: encodeCursor({ ...page, offset: next }) } : {}),
   };
 }

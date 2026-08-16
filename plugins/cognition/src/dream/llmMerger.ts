@@ -12,10 +12,15 @@
  * test-doubling, not because a swap is planned.
  *
  * On parse failure or model error this implementation THROWS. That choice differs from the ranker
- * (which degrades to zero scores) because a failed merge means the cluster CAN'T proceed — the
- * pipeline catches the throw and records the run as `error` with no skill writes. A silent
- * fall-through here would risk a partial cluster being committed, which is exactly the kind of
- * inconsistency the deterministic spine is meant to prevent.
+ * (which degrades to zero scores) because a failed merge means this fact CAN'T be spliced in —
+ * the pipeline catches the throw, quarantines the fact and stops that skill's cluster (merges
+ * already committed for the skill still stand). A silent fall-through here would return the
+ * unmerged input as if it were merged, which is exactly the kind of inconsistency the
+ * deterministic spine is meant to prevent.
+ *
+ * Structural failures are retried ONCE before throwing. They are sampling variance, not a property
+ * of the (fact, skill, provider) triple: the same merge that trips a guard usually passes on a
+ * re-roll, and quarantine is terminal, so one cheap retry is worth far more than the call it costs.
  */
 
 import type { MatbotMachine } from '@matatbread/matbot-plugin-api';
@@ -34,7 +39,7 @@ Return ONLY a JSON object on the last line of your reply, in this shape:
 
 Rules:
 
-* PRESERVE all existing content. Never delete or overwrite material. The output's length must be >= the input's.
+* PRESERVE all existing material. Never drop a heading, a section, or a fact. The one exception is the deduplication rule below: folding a near-duplicate into an existing passage means rewriting that passage, which can leave the skill shorter than it started. Do not pad to make up the difference.
 
 * FIRST, decide where the fact belongs: 
   1. GOOD FIT — the fact is about the skill's domain and fits under an existing heading. Add it as a new subsection under that heading. Add a new heading if needed, in a natural place — do not just append to the bottom unless that genuinely fits the skill's structure. 
@@ -42,7 +47,7 @@ Rules:
 
 * Keep the existing heading style, prose voice, and formatting conventions.
 
-* If the new fact is a duplicate or near-duplicate of an existing fact, do not add it again. Instead, update the existing content to reflect the new fact's information.
+* If the new fact is a duplicate or near-duplicate of an existing fact, do not add it again. Instead, update the existing content in place to reflect the new fact's information — replacing a vague statement with a precise one is the point, and a net-shorter skill is the correct outcome, not a loss.
 
 * If the new fact CONTRADICTS existing content, insert an inline marker at the contradiction site using this EXACT format (the literal "(!) Note:" prefix matters; a later tool scans for it):
 
@@ -85,6 +90,40 @@ function parseMergeResult(raw: string): MergeResult | undefined {
   return { content: obj.content, contradictions };
 }
 
+// Shrink allowance: a ratio, floored. Observed legitimate in-place dedup costs ~0.2-1.8% of a
+// 15k skill, so 3% clears it comfortably while still catching the loss of a whole subsection. The
+// floor exists because skills run from ~3k down to a few hundred chars, where a bare ratio is
+// tighter than the whitespace jitter it was meant to absorb.
+const SHRINK_RATIO      = 0.03;
+const SHRINK_FLOOR      = 100;
+
+const HEADING_LINE = /^#{1,6} .*$/gm;
+function headings(md: string): string[] {
+  return (md.match(HEADING_LINE) ?? []).map(h => h.trim());
+}
+
+/**
+ * Structural checks on the returned markdown. Neither proves the merge preserved meaning — a model
+ * can keep every heading and still drop a rule inside one — they are tripwires for gross loss.
+ *
+ * The heading check earns its place because it catches what a size check cannot: a trailing section
+ * dropped and the length made up elsewhere. It relies on the prompt permitting the model to ADD a
+ * heading and to MOVE a fact into "## Anomalies", but never to remove a heading — if that rule ever
+ * relaxes, this check has to relax with it.
+ */
+function structuralFailure(input: string, output: string): string | undefined {
+  const allowance = Math.max(SHRINK_FLOOR, Math.floor(input.length * SHRINK_RATIO));
+  if (output.length < input.length - allowance) {
+    return `returned ${output.length} chars against an input of ${input.length} — beyond the ` +
+           `${allowance}-char shrink allowance`;
+  }
+  const missing = headings(input).filter(h => !output.includes(h));
+  if (missing.length > 0) {
+    return `dropped ${missing.length} heading(s) present in the input, starting with "${missing[0]}"`;
+  }
+  return undefined;
+}
+
 /** Construct an LLM-backed merger bound to a configured provider name. */
 export function createLlmMerger(services: MatbotMachine, provider: string): Merger {
   return {
@@ -101,30 +140,28 @@ export function createLlmMerger(services: MatbotMachine, provider: string): Merg
         `${fact.fact}\n\n` +
         `Return the complete updated markdown.`;
 
-      const res = await services.singleTurn({
-        provider, signal, system: MERGER_SYSTEM, prompt,
-      });
+      // Two attempts. An abort or provider error propagates from singleTurn on the first attempt
+      // and is never retried; only an unparseable or structurally-suspect BODY gets the re-roll.
+      let lastFailure = '';
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const res = await services.singleTurn({
+          provider, signal, system: MERGER_SYSTEM, prompt,
+        });
 
-      const parsed = parseMergeResult(res.text);
-      if (parsed === undefined) {
-        throw new Error(
-          `dream-time merger returned an unparseable response for fact ${fact.id}; ` +
-          `first 200 chars: ${res.text.slice(0, 200)}`,
-        );
+        const parsed = parseMergeResult(res.text);
+        if (parsed === undefined) {
+          lastFailure = `unparseable response; first 200 chars: ${res.text.slice(0, 200)}`;
+          continue;
+        }
+
+        const failure = structuralFailure(skillContent, parsed.content);
+        if (failure === undefined) return parsed;
+        lastFailure = failure;
       }
 
-      // Defensive structural check: the prompt told the model never to shrink the content. If it
-      // did anyway, refuse the merge rather than silently overwriting good material with a
-      // truncated version. The pipeline catches this and records the run as `error`.
-      // The -20 buffer is because trailing line white space is often modifed by the LLM
-      if (parsed.content.length < (skillContent.length - 20)) {
-        throw new Error(
-          `dream-time merger returned shorter content (${parsed.content.length} chars) than the ` +
-          `input (${skillContent.length} chars) for fact ${fact.id}; refusing to overwrite`,
-        );
-      }
-
-      return parsed;
+      throw new Error(
+        `dream-time merger failed twice on fact ${fact.id}; refusing to overwrite. ${lastFailure}`,
+      );
     },
   };
 }

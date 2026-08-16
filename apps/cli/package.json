@@ -58,6 +58,7 @@
     "typescript": "catalog:",
     "@matatbread/matbot-function-tools": "workspace:^",
     "@matatbread/matbot-tool-types": "workspace:^",
-    "@matatbread/matbot-storage-profiles": "workspace:^"
+    "@matatbread/matbot-storage-profiles": "workspace:^",
+    "@matatbread/matbot-sessions": "workspace:^"
   }
 }

@@ -717,7 +717,12 @@ embedded engine: a closed `Filter` AST (a union discriminated by `op` — `eq/ne
 page size, and position, so a caller pages by sending only a previous result's `cursor` back; this
 is what makes consecutive pages a disjoint cover (each page re-applies the same sort, so the total
 order never shifts under you). A present `cursor` means more pages follow; an absent one means done.
-Comparisons are type-strict; null and absent are a single
+**`limit: 0` is the count form** and every backend must honour it: run the filter, report `total`,
+materialise no document and issue no cursor (a zero-length page never advances the offset, so a
+cursor would page forever on the same empty slice). It is a page size of zero rather than a separate
+`count` flag because that is already what the word means in a native query too — fetch no rows,
+report how many there were — so a pushdown backend compiles it to `SELECT COUNT(*)` and an
+in-memory one gets it for free from `executeQuery`. Comparisons are type-strict; null and absent are a single
 "missing" state queried only via `exists`. The in-memory reference evaluator (`executeQuery` in
 `@matatbread/matbot-core/storage-base`) compiles the AST to a composed-closure predicate; a backend may
 instead compile the same AST to its native query. Full-text and vector search are **not** part of

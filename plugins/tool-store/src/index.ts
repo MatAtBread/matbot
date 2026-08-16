@@ -112,7 +112,7 @@ function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Sto
       'type StoreQuery = {\n' +
       '  where?:  Filter;\n' +
       "  sort?:   { field: FieldPath; dir: 'asc' | 'desc' }[];\n" +
-      '  limit?:  number;\n' +
+      '  limit?:  number;  // 0 = count only: no items, just `total`\n' +
       '  cursor?: string;  // opaque & self-contained — to page, send back ONLY a previous result’s `cursor` (it already carries where/sort/limit/position); anything passed alongside it is ignored\n' +
       '};\n' +
       'type Filter =\n' +
@@ -126,7 +126,8 @@ function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Sto
       "  | { op: 'not';                       clause: Filter };\n" +
       '```\n' +
       'Comparisons are type-strict (5 ≠ "5"); null/absent match nothing except `{op:\'exists\',value:false}` — never compare to null. ' +
-      '`query` returns `{ items, cursor?, total? }`.\n\n' +
+      '`query` returns `{ items, cursor?, total? }`. To COUNT matches without fetching them, pass ' +
+      '`limit: 0` — the filter still runs and `total` is the answer, but no document is returned.\n\n' +
       '`version` is managed for you (a fresh one is minted on every set/cas) — never set it yourself; ' +
       'pass the value you last read as `expected` to cas/delete for safe concurrent updates.',
     inputSchema: {
