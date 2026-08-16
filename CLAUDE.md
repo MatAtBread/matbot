@@ -75,7 +75,7 @@ plugins/            — one directory per package, flat but for the frontend/pro
       customer-services/, chatjimmy/ — keyless demo/comparison endpoints
     storage/
       filesystem/    — FilesystemStore (Node, CAS-safe); CLI boot default
-      sqlite/        — SQLite StorageBackend (WAL)
+      sqlite/        — SQLite StorageBackend (WAL); compiles StoreQuery to SQL (the pushdown example)
       google-drive/  — Drive-backed StorageBackend (browser)
       profiles/      — per-principal partitioning over filesystem (node); profile_action, share
 apps/
