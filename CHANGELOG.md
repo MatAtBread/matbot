@@ -153,6 +153,14 @@ churn and less likely to affect a consumer who doesn't use them.
   Capture remains best-effort: state is disposed once a session is quiet and unsubscribed, and anything
   still pending then is lost.
 
+- **A retract-and-rerun no longer loses its cost.** A redo re-runs an existing user turn under a FRESH
+  `traceId` and introduces no user message of its own, so the redo's entries had no turn head to anchor on
+  and the flush dropped them outright — the exact under-report that anchoring on the turn head was
+  introduced to prevent, reappearing one level up. A `TurnEntry` now carries `rootTraceId` and anchors on
+  the root's head when it has none of its own, which is the honest home anyway: a retry's cost belongs to
+  the turn being retried. Found by inspecting a live session — one turn held five entries and no assistant
+  message while its answer sat under another trace with none.
+
 - **A zero-length page no longer issues a cursor that pages forever.** `executeQuery` emitted one
   whenever unread documents remained, including at `limit: 0`, where the next page starts at the same
   offset and returns the same empty slice — a caller following the cursor never advanced and never
@@ -168,6 +176,28 @@ churn and less likely to affect a consumer who doesn't use them.
 
 - **tool-store** — the generated `<namespace>_action` tools document the count form in their `query`
   grammar; they already forwarded `total`.
+
+- **frontend/web:** turn footers show a turn's spend, and stopped twitching to do it. Three defects, all
+  from the same mismatch — accounting is final when the pump's queue drains, which is later than the `done`
+  that draws the footer. A live turn showed a bare timestamp where a reload of the same turn showed the
+  tokens (the refresh skipped any turn that already had a footer, which is exactly the turn needing the
+  rebuild); the numbers then arriving swapped a bare `div` for a `details`, so the timestamp changed
+  container and gained a disclosure arrow a second after the turn finished; and footers drawn per `traceId`
+  put two under a retried turn — one with no answer left and an empty one under the answer — since a retry
+  is one VISIBLE turn spanning two traces.
+
+  The footer is now built once in its final shape and filled in place (an open breakdown survives), the
+  refresh only ever REPLACES an existing footer so an in-flight turn is left alone, and footers are drawn
+  per visible turn: a user message and everything up to the next one, across every trace in that span. The
+  refresh is ordered by a sequence token rather than debounced — two reads in flight can settle out of
+  order and paint an older session over a newer one, which a delay makes rarer rather than absent.
+
+- **triggers + cognition:** an interrupted trigger is recorded as interrupted, not failed. A trigger's tool
+  runs outside the runner's tool loop, so it never got the `INTERRUPTED_TOOL_RESULT` reframing: a mid-turn
+  steer aborted the signal and the raw abort reason landed in a durable marker as "remember_fact extraction
+  failed: steer", which reads as a real fault in a trace the user keeps. `dispatchTrigger` now records
+  `interrupted: true` and suppresses the warning, and `remember_fact` returns silently when its own
+  extraction round-trip is cut off.
 
 - **frontend/web + storage/profiles:** `url_for_resource` no longer stamps a partition segment onto files
   that live in the shared base area. It minted the `~<id>` prefix from the identity in force, gated on the
