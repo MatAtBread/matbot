@@ -1,11 +1,18 @@
 # @matatbread/matbot-frontend-web
 
+## 0.4.4
+
+### Patch Changes
+
+- @matatbread/matbot-core@0.4.4
+- @matatbread/matbot-plugin-api@0.4.4
+
 ## 0.4.3
 
 ### Patch Changes
 
 - The firehose no longer gates the `WatchVisibility` predicate on `kind === ItemChangeKind && principal
-  !== undefined`. That gate meant every plugin-defined notification kind was fanned out to every SSE
+!== undefined`. That gate meant every plugin-defined notification kind was fanned out to every SSE
   connection with no hook capable of stopping it — harmless for the in-process bus (one process, one user),
   wrong the moment a distributed `Notifier` bridges an addressed fact in from another instance. The
   predicate is now consulted for every notification and receives a `VisibilityQuery` carrying the `kind`,

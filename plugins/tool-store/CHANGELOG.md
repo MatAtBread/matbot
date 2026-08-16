@@ -1,5 +1,27 @@
 # @matatbread/matbot-tool-store
 
+## 0.4.4
+
+### Patch Changes
+
+- A generated store tool no longer silently discards a query grammar key passed beside `action`.
+
+  `{ "action": "query", "limit": 0 }` — the grammar flattened one level up, instead of nested under the
+  `query` parameter — reached `store.query(input.query ?? {})` as `{}`. The limit was dropped, the query
+  degraded to match-everything, and the **count form came back as every document in the store plus a
+  `total`**, which reads exactly like a working answer. This is the silent miss `validateQuery` rejects
+  unknown top-level keys to prevent, reappearing at the tool boundary, where `validateQuery` cannot see
+  it: the misplaced key never becomes part of a `StoreQuery` at all.
+
+  The cause was the tool's own description. It documented the `StoreQuery` _type_ but never the _call
+  envelope_, leaving the nesting to be inferred — so the description now leads with the shape of the
+  call (`{ "action": "query", "query": { … } }`), states that every grammar key sits inside it, and
+  gives the count form as a complete call rather than the fragment "pass `limit: 0`", which read as an
+  instruction to pass it at the top level. Misplacing `where`/`sort`/`limit`/`cursor`/`immutable` is now
+  also rejected with an error naming the keys and the correct call, rather than answered.
+
+  - @matatbread/matbot-plugin-api@0.4.4
+
 ## 0.4.3
 
 ### Patch Changes

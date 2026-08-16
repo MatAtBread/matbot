@@ -1,5 +1,12 @@
 # @matatbread/matbot-browser
 
+## 0.4.4
+
+### Patch Changes
+
+- @matatbread/matbot-core@0.4.4
+- @matatbread/matbot-plugin-api@0.4.4
+
 ## 0.4.3
 
 ### Patch Changes

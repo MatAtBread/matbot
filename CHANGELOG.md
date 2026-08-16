@@ -9,6 +9,63 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## 0.4.4
+
+### Optional
+
+#### tool-store
+
+- **A query grammar key passed beside `action` is no longer silently discarded.**
+  `{ "action": "query", "limit": 0 }` — the grammar flattened one level up instead of nested under the
+  `query` parameter — reached `store.query(input.query ?? {})` as `{}`: the limit was dropped, the
+  query degraded to match-everything, and the count form came back as every document in the store plus
+  a `total`, which reads exactly like a working answer. It is the silent miss `validateQuery` rejects
+  unknown top-level keys to prevent, reappearing where `validateQuery` cannot see it, because the
+  misplaced key never becomes part of a `StoreQuery` at all.
+
+  The cause was the tool's own description: it documented the `StoreQuery` *type* but never the *call
+  envelope*, so the nesting had to be inferred, and the count form appeared as the fragment "pass
+  `limit: 0`" — which reads as an instruction to pass it at the top level. The description now leads
+  with the shape of the call and gives the count form complete. Misplaced keys are also rejected with
+  an error naming them and the correct call, rather than answered.
+
+#### storage-sqlite
+
+- **`StoreQuery` is compiled to SQL rather than interpreted.** The grammar is specified as a
+  translation target — a closed AST meant to become a `WHERE` clause, an Elasticsearch `bool`, a
+  Mongo `find` — but every backend in the repo delegated to the in-memory reference evaluator, so the
+  claim rested on the shape of the AST and nothing else. The SQLite backend now compiles the filter
+  to `WHERE`, the sort to `ORDER BY`, and the page to `LIMIT`/`OFFSET`, with `limit: 0` becoming
+  `SELECT COUNT(*)`. A filtered query no longer reads, parses and sorts the whole namespace to answer,
+  and a count materialises nothing at all.
+
+  Documents are JSON text, so a field is `json_extract(doc, <path>)` and its type
+  `json_type(doc, <path>)`. That pair carries the whole translation: `json_type` returns NULL for an
+  absent path and `'null'` for a stored JSON null — precisely the grammar's single "missing" state —
+  and it separates `'true'`/`'false'` from `'integer'`, without which type-strictness could not be
+  expressed at all, since a value accessor erases a JSON boolean to the same 0/1 a number produces.
+  Field paths are **bound**, never interpolated, so the compiler has no injection surface.
+
+  What the exercise actually establishes is where a native query language disagrees with the grammar
+  by default — four points, each of which returns plausible rows instead of failing, and each now a
+  named guard: SQL's three-valued logic (`NOT NULL` is NULL, so a row *missing* the field is dropped
+  from a negated predicate the grammar says it matches); boolean/number erasure, including inside
+  `arrayContains`; missing-value ordering (the grammar's missing-last is a property of the value, so
+  it reverses to missing-*first* under `desc`, where SQL's NULL ordering is a property of the
+  direction); and the `id` tiebreaker that makes the order total enough for a cursor to point at a
+  stable boundary.
+
+  Equivalence is enforced rather than asserted: one conformance corpus of ~70 queries runs through
+  both the pushdown and the in-memory reference and must return the same documents in the same order,
+  with cursor paging a disjoint cover and identical located `StoreQueryError`s for invalid input. The
+  corpus is built around the four traps — documents holding a number where another holds a boolean, a
+  JSON null beside an absent field, keys containing `.` and `"`, and ties on every sorted field
+  inserted out of id order so a missing tiebreaker cannot pass by coincidence.
+
+  One divergence remains, for a field holding **mixed types across documents** only: SQLite orders
+  every number before every string, where the reference stringifies and compares `"10" < "9"`. Within
+  a type — a sort on a real field — the two agree exactly.
+
 ## 0.4.3
 
 ### Breaking changes
