@@ -41,6 +41,34 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Optional
 
+#### frontend-web
+
+- **The browser UI is type-checked against the live tool contracts, and `pnpm web-build` fails if it
+  isn't clean.** The UI is plain browser JS served verbatim, so nothing connected its `callTool` calls to
+  the `ToolContracts` the tools declare — `workspace_action`'s rename of `path` to `name` blanked the
+  file panel, and the way it failed is the point: reading a field that no longer exists yields
+  `undefined`, which renders as an empty row rather than an error, so it looked like "no files" and not
+  like a bug, in the one part of the system nobody compiles.
+
+  `static/matbot-ui.ts` imports the packages whose augmentations declare the tools the UI calls and
+  derives the transport's `callTool` signature from them, so params are checked against the tool's arms
+  and the result narrows to the arm they match. Consumers annotate their params from the same source
+  (`ToolResult<'workspace_action', { action: 'list' }>`) rather than restating a shape. `pnpm web-build`
+  runs the check before baking `app.js` into `matbot.html`, since a bundle is the last place a broken
+  UI file can still be caught.
+
+  The gate is about DATA, not the DOM: element narrowing is deliberately widened away, because the ~80
+  casts it would take are noise against the bug class worth catching, and a gate that expensive gets
+  turned off. Its reach ends where a value enters an unannotated function, so a new panel needs its
+  consumer annotated to be covered — and it cannot see field names inside strings (a `[data-name]`
+  selector, a template).
+
+  Three real defects fell out of turning it on: `workspace_action` `delete` and upload still passed
+  `path`; `share`/`owner` was read as `.owners` (bulk) or `.owner` (single) without narrowing, though
+  the contract returns a union of the two and only the runtime id decides which; and the in-process
+  browser transport passed `ownerPrincipal` to `createSession`, which copies three fields and has never
+  been one of them, so session ownership there was silently discarded rather than recorded.
+
 #### function-tools
 
 - **`tool_function { action: 'check' }` re-type-checks functions you already defined.** A defined

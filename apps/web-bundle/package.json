@@ -30,9 +30,10 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "assemble": "node assemble.mjs",
-    "assemble:demo": "node assemble.mjs matbot.web-demo.json",
-    "serve": "node serve.mjs"
+    "assemble": "npm run check:ui && node assemble.mjs",
+    "assemble:demo": "npm run check:ui && node assemble.mjs matbot.web-demo.json",
+    "serve": "node serve.mjs",
+    "check:ui": "node ../../plugins/frontend/web/scripts/check-ui.mjs"
   },
   "repository": {
     "type": "git",

@@ -243,12 +243,30 @@ importers:
       '@matatbread/matbot-core':
         specifier: workspace:^
         version: link:../../../core
+      '@matatbread/matbot-edit-session':
+        specifier: workspace:^
+        version: link:../../edit-session
       '@matatbread/matbot-plugin-api':
         specifier: workspace:^
         version: link:../../../plugin-api
+      '@matatbread/matbot-sessions':
+        specifier: workspace:^
+        version: link:../../sessions
       '@matatbread/matbot-skills':
         specifier: workspace:^
         version: link:../../skills
+      '@matatbread/matbot-storage-profiles':
+        specifier: workspace:^
+        version: link:../../storage/profiles
+      '@matatbread/matbot-tool-plugin':
+        specifier: workspace:^
+        version: link:../../tool-plugin
+      '@matatbread/matbot-tool-workspace':
+        specifier: workspace:^
+        version: link:../../workspace
+      '@matatbread/matbot-triggers':
+        specifier: workspace:^
+        version: link:../../triggers
       '@types/node':
         specifier: 'catalog:'
         version: 22.19.19

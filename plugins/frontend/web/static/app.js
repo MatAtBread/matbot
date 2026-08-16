@@ -308,8 +308,10 @@ async function apiListSessions() {
     // shared-in owners in one call, exactly as loadFiles() does, so every render can gate on it.
     sessionOwners = {};
     if (profilesActive) {
-      try { sessionOwners = (await callTool('share', { action: 'owner', namespace: 'sessions', id: '*' })).owners || {}; }
-      catch { sessionOwners = {}; }
+      try {
+        const r = await callTool('share', { action: 'owner', namespace: 'sessions', id: '*' });
+        sessionOwners = 'owners' in r ? r.owners : {};
+      } catch { sessionOwners = {}; }
     }
     return sessions;
   } catch (e) {
@@ -362,9 +364,14 @@ async function refreshProviderSelect() {
 
 // ── Tool API ──────────────────────────────────────────────────────────────────
 
-async function callTool(toolName, input) {
-  return T.callTool(toolName, input);
-}
+// Typed against the live `ToolContracts` (see matbot-ui.ts): params are checked against the tool's arms
+// and the result narrows to the arm they match, so a panel reading a field the tool no longer returns
+// is a compile error here rather than a silently blank row in the browser. Declared as a const bound to
+// the transport's own signature rather than re-declared with `@template`: re-instantiating those
+// generics per call site asks TS to build the union of every tool's params at once, which it refuses
+// (TS2590, "union type too complex"). Borrowing the type instantiates nothing.
+/** @type {MatbotTransport['callTool']} */
+const callTool = T.callTool.bind(T);
 
 // Join an in-progress server run for sessionId. renderedCount is the number of
 // non-system messages already in the DOM so incremental appends start from there.
@@ -422,6 +429,7 @@ function formatSize(bytes) {
   return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
 }
 
+/** @param {ToolResult<'workspace_action', { action: 'list' }>} files */
 function renderFiles(files) {
   const el = document.getElementById('file-list');
   if (!el) return;
@@ -435,21 +443,21 @@ function renderFiles(files) {
   }
   for (const f of files) {
     // `owner` is '' for the shared base/global partition, a profile id otherwise; absent ⇒ owned here.
-    const owner = fileOwners[f.path];
+    const owner = fileOwners[f.name];
     const sharedBy = owner ? 'shared by "' + owner + '"' : 'shared globally';
     const div = document.createElement('div');
-    div.className = 'file-item' + (updatedFiles.has(f.path) ? ' updated' : '') + (owner != null ? ' shared-in' : '');
-    div.dataset.path = f.path;
-    div.title = f.path + (f.size !== undefined ? ' (' + formatSize(f.size) + ')' : '')
+    div.className = 'file-item' + (updatedFiles.has(f.name) ? ' updated' : '') + (owner != null ? ' shared-in' : '');
+    div.dataset.name = f.name;
+    div.title = f.name + (f.size !== undefined ? ' (' + formatSize(f.size) + ')' : '')
       + (owner != null ? ' — ' + sharedBy + ', read-only here' : '');
     div.onclick = () => {
-      updatedFiles.delete(f.path);
+      updatedFiles.delete(f.name);
       div.classList.remove('updated');
-      T.openFile('workspace', f.path);
+      T.openFile('workspace', f.name);
     };
     const nameEl = document.createElement('span');
     nameEl.className = 'file-name';
-    nameEl.textContent = f.path;
+    nameEl.textContent = f.name;
     div.appendChild(nameEl);
     if (f.size !== undefined) {
       const sizeEl = document.createElement('span');
@@ -485,7 +493,7 @@ function renderFiles(files) {
       shareFileBtn.className = 'file-action-btn file-share-btn';
       shareFileBtn.title = 'Share with another profile';
       shareFileBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4"/></svg>';
-      shareFileBtn.onclick = (e) => { e.stopPropagation(); openFileShareMenu(shareFileBtn, f.path); };
+      shareFileBtn.onclick = (e) => { e.stopPropagation(); openFileShareMenu(shareFileBtn, f.name); };
       actions.appendChild(shareFileBtn);
     }
     const delBtn = document.createElement('button');
@@ -495,7 +503,7 @@ function renderFiles(files) {
     delBtn.onclick = async (e) => {
       e.stopPropagation();
       try {
-        await callTool('workspace_action', { action: 'delete', path: f.path });
+        await callTool('workspace_action', { action: 'delete', name: f.name });
         loadFiles();
       } catch (err) {
         alert('Delete failed: ' + err.message);
@@ -509,15 +517,16 @@ function renderFiles(files) {
 
 async function loadFiles() {
   try {
-    const data = await callTool('workspace_action', { action: 'list' });
-    const files = Array.isArray(data) ? data : (data?.files ?? []);
+    const files = await callTool('workspace_action', { action: 'list' });
     // The workspace tool is profile-agnostic — it lists whatever the routed file store returns (shared-in
     // files included, via symlinks) with no ownership. Ownership is a profiles concern, so ask the `share`
     // tool once for the whole `files` namespace's shared-in owners and gate the per-file UI on it.
     fileOwners = {};
     if (profilesActive) {
-      try { fileOwners = (await callTool('share', { action: 'owner', namespace: 'files', id: '*' })).owners || {}; }
-      catch { fileOwners = {}; }
+      try {
+        const r = await callTool('share', { action: 'owner', namespace: 'files', id: '*' });
+        fileOwners = 'owners' in r ? r.owners : {};
+      } catch { fileOwners = {}; }
     }
     renderFiles(files);
   } catch (e) {
@@ -548,7 +557,7 @@ async function loadFiles() {
 // by the file's path (its id). Reuses the shared `#share-menu` element (only one menu is open at a time)
 // and its outside-click close, registered once in setupShare; the anchoring button's own click stops
 // propagation so opening doesn't immediately re-close. Targets are profiles that isolate `files`.
-async function openFileShareMenu(anchor, path) {
+async function openFileShareMenu(anchor, name) {
   const menu = document.getElementById('share-menu');
   if (!menu) return;
   menu.innerHTML = '';
@@ -588,7 +597,7 @@ async function openFileShareMenu(anchor, path) {
         e.stopPropagation();
         status.textContent = '…'; item.title = '';
         try {
-          await callTool('share', { namespace: 'files', id: path, target: p.name });
+          await callTool('share', { namespace: 'files', id: name, target: p.name });
           status.textContent = '✓';
         } catch (err) {
           status.textContent = '✗'; item.title = String(err && err.message || err);
@@ -845,6 +854,7 @@ async function loadSkills() {
   renderSkills(Array.isArray(result.skills) ? result.skills : []);
 }
 
+/** @param {ToolResult<'skill_action', { action: 'list' }>['skills']} skills */
 function renderSkills(skills) {
   const el = document.getElementById('skill-list');
   if (!el) return;
@@ -1572,7 +1582,7 @@ async function uploadFiles(fileList) {
       const CHUNK = 0x8000;
       let bin = '';
       for (let i = 0; i < bytes.length; i += CHUNK) bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
-      await callTool('workspace_action', { action: 'write', path: file.name, content: btoa(bin), encoding: 'base64' });
+      await callTool('workspace_action', { action: 'write', name: file.name, content: btoa(bin), encoding: 'base64' });
     } catch (err) {
       alert('Upload failed for ' + file.name + ': ' + err.message);
     }
@@ -1852,6 +1862,7 @@ function showEmpty() {
     '</div>';
 }
 
+/** @param {ToolResult<'session_action', { action: 'list' }>} sessions */
 function renderSessions(sessions) {
   sessionListEl.innerHTML = '';
   for (const s of sessions) {
@@ -1976,13 +1987,13 @@ function createMsgDivider(msgIdx) {
 
   const menu = document.createElement('div');
   menu.className = 'msg-divider-menu';
-  for (const [icon, label, action, danger] of [
+  for (const [icon, label, action, danger] of /** @type {[string, string, string, boolean][]} */ ([
     ['🔗', 'Copy link', 'copy-link', false],
     ['✂',  'Cut',             'cut',       true],
     ['⎇',  'Fork',            'fork',      false],
     ['🗜', 'Compact',   'compact',   true],
     ['⇉',  'Split',          'split',      false],
-  ]) {
+  ])) {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'msg-divider-btn' + (danger ? ' danger' : '');
@@ -2627,14 +2638,18 @@ function showSubmitError(content, msg) {
 // dots are created lazily on first activity. A turn we merely joined (the in-progress run, replayed
 // on connect) gets no 'queued' — its user message is already in committed/stored history.
 async function renderTurn(sid, traceId) {
+  /** @type {Element} */
   let userBubble = null;   // set by the 'queued' event when this turn is a fresh submission
   let userBubbleText = ''; // raw markdown of the bubble; grows as concat'd submissions fold in
+  /** @type {Element} */
   let turnWrap   = null;   // assistant wrap, created lazily
+  /** @type {Element} */
   let loadingEl  = null;
   let started    = false;
   // The turn's outstanding interactive prompt, if any: `{ dismiss }`. The dialog is drawn in every
   // browser attached to the session but answered in only one, so the others are retired by the
   // server's `prompt-resolved`. Cleared as soon as it settles here, so our own answer's echo is a no-op.
+  /** @type {{ dismiss: () => void }} */
   let livePrompt = null;
 
   // First visible activity for this turn: drop the queued egg-timer and create the assistant wrap
@@ -2655,6 +2670,7 @@ async function renderTurn(sid, traceId) {
   function removeLoading() { markStarted(); if (loadingEl) { loadingEl.remove(); loadingEl = null; } }
 
   // Per-turn streaming state
+  /** @type {Element} */
   let textEl          = null;
   let textAccum       = '';
   let textElFinalised = false;
@@ -3179,7 +3195,7 @@ async function init() {
       const cur = parseFloat(getComputedStyle(document.body).fontSize);
       const next = Math.min(MAX, Math.max(MIN, Math.round(cur) + delta));
       document.documentElement.style.setProperty('--fs', next + 'px');
-      localStorage.setItem(LS_FONT_SIZE, next);
+      localStorage.setItem(LS_FONT_SIZE, String(next));
     }
     document.getElementById('fs-down').addEventListener('click', () => adjust(-1));
     document.getElementById('fs-up').addEventListener('click',   () => adjust(+1));
@@ -3313,7 +3329,7 @@ async function init() {
     const meta = n.detail || {};
     if (meta.namespace !== 'workspace') return;
     const { name } = meta;
-    const item = document.getElementById('file-list')?.querySelector('[data-path="' + CSS.escape(name) + '"]');
+    const item = document.getElementById('file-list')?.querySelector('[data-name="' + CSS.escape(name) + '"]');
     updatedFiles.add(name);
     if (!item) { refreshFiles(); return; }
     item.classList.add('updated');
@@ -3651,8 +3667,10 @@ async function refreshShareState(sessionId) {
   updateShareBtn();
   if (!profilesActive || !sessionId) return;
   let owner = null;
-  try { owner = (await callTool('share', { action: 'owner', namespace: 'sessions', id: sessionId })).owner; }
-  catch { return; }
+  try {
+    const r = await callTool('share', { action: 'owner', namespace: 'sessions', id: sessionId });
+    owner = 'owner' in r ? r.owner : null;
+  } catch { return; }
   if (sessionId !== currentSessionId) return;
   if (owner != null) {                                 // '' = owned by global/base; null = owned by me
     if (shareBtn) shareBtn.hidden = true;
