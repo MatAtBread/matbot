@@ -19,6 +19,7 @@ import { makeWebEnvTool } from '../src/web-env.js';
 
 // ── In-process transport ──────────────────────────────────────────────────────
 
+/** @returns {MatbotTransport} */
 function makeInProcessTransport(services) {
   const run = services.run;
 
@@ -96,7 +97,7 @@ function makeInProcessTransport(services) {
   }
 
   async function createSessionFn() {
-    const session = createSession({ ownerPrincipal: currentPrincipal() });
+    const session = createSession();
     await services.sessions.set(session.id, session);
     return { id: session.id };
   }

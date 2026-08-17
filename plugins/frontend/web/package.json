@@ -4,7 +4,7 @@
     "node",
     "browser"
   ],
-  "version": "0.4.3",
+  "version": "0.4.4",
   "engines": {
     "node": ">=24.0.0"
   },
@@ -35,7 +35,8 @@
     }
   },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit && node scripts/check-ui.mjs",
+    "check:ui": "node scripts/check-ui.mjs"
   },
   "repository": {
     "type": "git",
@@ -54,6 +55,12 @@
     "typescript": "catalog:",
     "@matatbread/matbot-plugin-api": "workspace:^",
     "@matatbread/matbot-core": "workspace:^",
-    "@matatbread/matbot-skills": "workspace:^"
+    "@matatbread/matbot-skills": "workspace:^",
+    "@matatbread/matbot-sessions": "workspace:^",
+    "@matatbread/matbot-edit-session": "workspace:^",
+    "@matatbread/matbot-triggers": "workspace:^",
+    "@matatbread/matbot-tool-plugin": "workspace:^",
+    "@matatbread/matbot-tool-workspace": "workspace:^",
+    "@matatbread/matbot-storage-profiles": "workspace:^"
   }
 }

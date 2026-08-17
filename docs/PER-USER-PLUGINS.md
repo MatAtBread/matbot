@@ -36,11 +36,11 @@ which tools a user can *see* (see *the tool-visibility ceiling* below).
 > **Mental model:** you do not make plugins user-aware; you make their **surfaces** user-aware.
 > `setup()` is global and runs once at the boot principal, but tools, hooks, system-context
 > contributors and stores all run inside the per-turn principal scope, opened by the pump's
-> `contextSwitch(head.principal, …)` ([session-runner.ts](../core/src/session-runner.ts)), so each
-> reads `currentPrincipal()` and branches per user. (The pump uses `contextSwitch` rather than bare
-> `runAs` because a turn is the transactional unit — it also pages in pending machine state at the
-> quiescent edge. For establishing identity, the two are equivalent: `contextSwitch` layers the
-> machine half on top of `runAs`. A frontend scoping an inbound request or message uses `runAs`.)
+> `runAs(head.principal, …)` ([session-runner.ts](../core/src/session-runner.ts)), so each reads
+> `currentPrincipal()` and branches per user. (Identity is per turn because each queued item carries
+> its own submitter. Holding the machine — the other half of a context switch, which pages in pending
+> machine state at the quiescent edge — is separate and spans the whole queue. A frontend scoping an
+> inbound request or message uses `runAs` too, and does not hold the machine.)
 
 ### Step 0 (foundational) — establish per-user identity
 
@@ -189,7 +189,7 @@ principal.
 
 The toolset the model sees is built by `deps.tools.list()` in the pump
 ([session-runner.ts](../core/src/session-runner.ts)) — **before**
-`contextSwitch(head.principal, …)` opens the principal scope further down the same function. So
+`runAs(head.principal, …)` opens the principal scope further down the same function. So
 `currentPrincipal()` is **not even established** when the menu is assembled. This is why
 re-implementing `ToolRegistry` the way you'd re-implement `Store` cannot rescue per-user
 *visibility*: `list()` has no principal to branch on.

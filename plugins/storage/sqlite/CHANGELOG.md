@@ -1,5 +1,53 @@
 # @matatbread/matbot-storage-sqlite
 
+## 0.4.4
+
+### Patch Changes
+
+- The SQLite backend compiles `StoreQuery` to SQL instead of loading the namespace into memory.
+
+  `StoreQuery` is specified as a translation target rather than an engine, and until now nothing in the
+  repo demonstrated the translation: every backend delegated to the in-memory reference, so the claim
+  that the grammar "maps to a real query language" rested on the shape of the AST alone. `query()` now
+  compiles the filter to a `WHERE` clause, the sort to `ORDER BY`, and the page to `LIMIT`/`OFFSET`,
+  with `limit: 0` becoming `SELECT COUNT(*)` — so a large namespace is no longer read, parsed and
+  sorted in full to answer a filtered query, and a count materialises nothing at all.
+
+  Documents are stored as JSON text, so a field becomes `json_extract(doc, <path>)` and its type
+  `json_type(doc, <path>)`. That pair carries the translation: `json_type` returns NULL for an absent
+  path and `'null'` for a stored JSON null — exactly the grammar's single "missing" state — and
+  distinguishes `'true'`/`'false'` from `'integer'`, without which type-strictness would be
+  unrepresentable, since a value accessor erases a JSON boolean to the 0/1 a number also yields. Field
+  paths are **bound parameters**, never interpolated, so the compiler has no injection surface.
+
+  The four places a native query language disagrees with the grammar by default, all of which return
+  plausible rows rather than failing:
+
+  - **SQL's three-valued logic.** `json_type(doc, ?) = 'text'` is NULL, not false, for a missing field,
+    and `NOT NULL` is NULL — so `{ op: 'not', clause: … }` would drop exactly the rows the grammar
+    keeps. Every leaf is forced to 0/1 at the source.
+  - **Type-strictness**, per the erasure above: a stored `1` must not match `eq: true`, and a stored
+    `true` must not match `eq: 1` — including inside `arrayContains`, where `json_each` reports a
+    JSON `true` as value 1.
+  - **Ordering of missing values.** The grammar's missing-last is a property of the value, so it
+    reverses to missing-_first_ under `desc`; SQL's NULL ordering is a property of the direction. Each
+    sort spec compiles to two keys rather than relying on `NULLS LAST`.
+  - **Totality.** `id` is appended as the final tiebreaker, without which a cursor cannot point at a
+    stable boundary.
+
+  Equivalence is enforced by a conformance corpus — ~70 queries run through both the pushdown and the
+  in-memory reference, asserting the same documents in the same order, plus cursor paging as a disjoint
+  cover and identical located `StoreQueryError`s for invalid queries. The corpus is built around the
+  four traps above (documents that hold a number where another holds a boolean, a JSON null next to an
+  absent field, keys containing `.` and `"`, and ties on every sorted field, inserted out of id order).
+
+  One divergence remains, and only for a field holding **mixed types across documents**: SQLite orders
+  every number before every string, where the reference stringifies and compares `"10" < "9"`. Within a
+  type the two agree exactly.
+
+  - @matatbread/matbot-core@0.4.4
+  - @matatbread/matbot-plugin-api@0.4.4
+
 ## 0.4.3
 
 ### Patch Changes

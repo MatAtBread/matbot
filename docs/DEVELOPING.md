@@ -725,7 +725,18 @@ report how many there were — so a pushdown backend compiles it to `SELECT COUN
 in-memory one gets it for free from `executeQuery`. Comparisons are type-strict; null and absent are a single
 "missing" state queried only via `exists`. The in-memory reference evaluator (`executeQuery` in
 `@matatbread/matbot-core/storage-base`) compiles the AST to a composed-closure predicate; a backend may
-instead compile the same AST to its native query. Full-text and vector search are **not** part of
+instead compile the same AST to its native query. **`@matatbread/matbot-storage-sqlite` is the worked
+example** (`plugins/storage/sqlite/src/query-sql.ts`): one `WHERE` fragment per `op`, `json_extract`
+for the field and `json_type` for its type, the field path *bound* rather than interpolated, and
+`limit: 0` compiled to `SELECT COUNT(*)`. Write that compiler against a conformance corpus — the same
+queries run through both backends, asserting the same documents in the same order
+(`apps/cli/test/query-sql-conformance.test.ts`) — because a native query language will disagree with
+the grammar by default at four points, each of which silently returns plausible rows: SQL's
+three-valued logic (`NOT NULL` is NULL, so a row *missing* the field is dropped from a negated
+predicate the grammar says it matches), the erasure of a JSON boolean to 0/1 by a value accessor
+(defeating type-strictness), NULL ordering being a property of the sort *direction* where the
+grammar's missing-last is a property of the *value*, and the `id` tiebreaker that makes the order
+total. Full-text and vector search are **not** part of
 `Store` — they live on `KnowledgeIndex`. See `Filter`, `StoreQuery`, and `StoreQueryError` in the
 API types (`plugin-api/src/store-query.ts`).
 

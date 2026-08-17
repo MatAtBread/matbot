@@ -12,10 +12,10 @@ declare module '@matatbread/matbot-plugin-api' {
     // One arm per action: a caller of `invokeTool(machine, 'workspace_action', { action: '…' })` gets the
     // matching result narrowed by the `action` it passed (see ToolContract / the multi-action note on ToolContracts).
     workspace_action:
-      | ToolContract<string,                                { action: 'read';   path: string; encoding?: 'utf8' | 'base64' }>              // file contents (utf8 or base64)
-      | ToolContract<{ path: string; bytes: number },       { action: 'write';  path: string; content: string; encoding?: 'utf8' | 'base64' }>  // stored path and byte count
-      | ToolContract<Array<{ path: string; size: number }>, { action: 'list';   path?: string; recursive?: boolean }>                     // matching files
-      | ToolContract<{ path: string },                      { action: 'delete'; path: string }>;                                          // the removed path
+      | ToolContract<string,                                { action: 'read';   name: string; encoding?: 'utf8' | 'base64' }>              // file contents (utf8 or base64)
+      | ToolContract<{ name: string; bytes: number },       { action: 'write';  name: string; content: string; encoding?: 'utf8' | 'base64' }>  // stored name and byte count
+      | ToolContract<Array<{ name: string; size: number }>, { action: 'list';   prefix?: string }>                                         // matching files
+      | ToolContract<{ name: string },                      { action: 'delete'; name: string }>;                                          // the removed name
   }
 }
 
@@ -41,11 +41,18 @@ const MIME_MAP: Record<string, string> = {
   '.sh':   'application/x-sh',
 };
 
-// Returns a normalised relative path if safe, null if it contains traversal.
-function safePath(input: string): string | null {
-  const parts = input.replace(/\\/g, '/').split('/').filter(Boolean);
+// Normalises to a flat store name. "." and empty segments drop out, so "./notes.md" and "notes.md"
+// address the same file rather than two — names are stored verbatim, so leaving "." in forks the
+// namespace on write. Returns null if a ".." segment would escape the workspace, "" for the root.
+function normalise(input: string): string | null {
+  const parts = input.replace(/\\/g, '/').split('/').filter(p => p && p !== '.');
   if (parts.some(p => p === '..')) return null;
   return parts.join('/');
+}
+
+// A single file must resolve to a non-empty name; the root addresses no file.
+function safeName(input: string): string | null {
+  return normalise(input) || null;
 }
 
 function mimeFromName(name: string): string {
@@ -82,10 +89,10 @@ async function collectStream(stream: AsyncIterable<Uint8Array>): Promise<Uint8Ar
 // description below carries this TypeScript discriminated union — which LLMs read accurately — as
 // the source of truth. The executor enforces it.
 type WorkspaceInput =
-  | { action: 'read';   path: string; encoding?: 'utf8' | 'base64' }
-  | { action: 'write';  path: string; content: string; encoding?: 'utf8' | 'base64' }
-  | { action: 'list';   path?: string; recursive?: boolean }
-  | { action: 'delete'; path: string };
+  | { action: 'read';   name: string; encoding?: 'utf8' | 'base64' }
+  | { action: 'write';  name: string; content: string; encoding?: 'utf8' | 'base64' }
+  | { action: 'list';   prefix?: string }
+  | { action: 'delete'; name: string };
 
 const workspaceExecutor: ToolExecutor<ToolResultOf<'workspace_action'>> = {
   async *execute(input: unknown, ctx: ToolContext) {
@@ -94,10 +101,10 @@ const workspaceExecutor: ToolExecutor<ToolResultOf<'workspace_action'>> = {
 
     switch (args.action) {
       case 'read': {
-        const { path: inputPath, encoding = 'utf8' } = args as Extract<WorkspaceInput, { action: 'read' }>;
-        if (!inputPath) { yield { type: 'error', message: 'action "read" requires "path".' }; return; }
-        const safe = safePath(inputPath);
-        if (!safe) { yield { type: 'error', message: 'Path escapes the workspace directory.' }; return; }
+        const { name: inputName, encoding = 'utf8' } = args as Extract<WorkspaceInput, { action: 'read' }>;
+        if (!inputName) { yield { type: 'error', message: 'action "read" requires "name".' }; return; }
+        const safe = safeName(inputName);
+        if (!safe) { yield { type: 'error', message: `Invalid name "${inputName}": it must name a file inside the workspace.` }; return; }
 
         const handle = await ctx.files.getByName(safe, WORKSPACE_NS);
         if (!handle) { yield { type: 'error', message: `File not found: "${safe}"` }; return; }
@@ -118,11 +125,11 @@ const workspaceExecutor: ToolExecutor<ToolResultOf<'workspace_action'>> = {
       }
 
       case 'write': {
-        const { path: inputPath, content, encoding = 'utf8' } = args as Extract<WorkspaceInput, { action: 'write' }>;
-        if (!inputPath) { yield { type: 'error', message: 'action "write" requires "path".' }; return; }
+        const { name: inputName, content, encoding = 'utf8' } = args as Extract<WorkspaceInput, { action: 'write' }>;
+        if (!inputName) { yield { type: 'error', message: 'action "write" requires "name".' }; return; }
         if (content === undefined) { yield { type: 'error', message: 'action "write" requires "content".' }; return; }
-        const safe = safePath(inputPath);
-        if (!safe) { yield { type: 'error', message: 'Path escapes the workspace directory.' }; return; }
+        const safe = safeName(inputName);
+        if (!safe) { yield { type: 'error', message: `Invalid name "${inputName}": it must name a file inside the workspace.` }; return; }
 
         const bytes = encoding === 'base64'
           ? base64ToUint8(content)
@@ -139,22 +146,22 @@ const workspaceExecutor: ToolExecutor<ToolResultOf<'workspace_action'>> = {
         }
 
         announceFile(handle.id, 'saved', safe);
-        yield { type: 'result', value: { path: safe, bytes: handle.size } };
+        yield { type: 'result', value: { name: safe, bytes: handle.size } };
         return;
       }
 
       case 'list': {
-        const { path: inputPath, recursive = false } = args as Extract<WorkspaceInput, { action: 'list' }>;
-        const prefix = inputPath ? `${safePath(inputPath) ?? ''}/` : '';
+        const { prefix: inputPrefix } = args as Extract<WorkspaceInput, { action: 'list' }>;
+        const dir = inputPrefix === undefined ? '' : normalise(inputPrefix);
+        if (dir === null) { yield { type: 'error', message: `Invalid prefix "${inputPrefix}": it must not escape the workspace.` }; return; }
+        const prefix = dir ? `${dir}/` : '';
 
-        const files: Array<{ path: string; size: number }> = [];
+        const files: Array<{ name: string; size: number }> = [];
         try {
           for await (const handle of ctx.files.list({ namespace: WORKSPACE_NS })) {
             const name = handle.name;
             if (prefix && !name.startsWith(prefix)) continue;
-            const rel = prefix ? name.slice(prefix.length) : name;
-            if (!recursive && rel.includes('/')) continue;
-            files.push({ path: name, size: handle.size });
+            files.push({ name, size: handle.size });
           }
         } catch (e) {
           yield { type: 'error', message: String(e) };
@@ -166,17 +173,17 @@ const workspaceExecutor: ToolExecutor<ToolResultOf<'workspace_action'>> = {
       }
 
       case 'delete': {
-        const { path: inputPath } = args as Extract<WorkspaceInput, { action: 'delete' }>;
-        if (!inputPath) { yield { type: 'error', message: 'action "delete" requires "path".' }; return; }
-        const safe = safePath(inputPath);
-        if (!safe) { yield { type: 'error', message: 'Path escapes the workspace directory.' }; return; }
+        const { name: inputName } = args as Extract<WorkspaceInput, { action: 'delete' }>;
+        if (!inputName) { yield { type: 'error', message: 'action "delete" requires "name".' }; return; }
+        const safe = safeName(inputName);
+        if (!safe) { yield { type: 'error', message: `Invalid name "${inputName}": it must name a file inside the workspace.` }; return; }
 
         const handle = await ctx.files.getByName(safe, WORKSPACE_NS);
         if (!handle) { yield { type: 'error', message: `File not found: "${safe}"` }; return; }
 
         await ctx.files.delete(handle.id);
         announceFile(handle.id, 'deleted', safe);
-        yield { type: 'result', value: { path: safe } };
+        yield { type: 'result', value: { name: safe } };
         return;
       }
 
@@ -198,18 +205,23 @@ const workspaceTool: Tool<ToolResultOf<'workspace_action'>> = {
     'transfer area, NOT a code workspace: files here are not executable. These files are publicly viewable; ' +
     'if a tool is available to mint a shareable link for a stored file, prefer it over guessing a URL. To ' +
     'share one of these files with another storage profile, use the share tool with namespace "files" and id ' +
-    'set to the file\'s path.\n\n' +
-    'For `list`, `path` is a filename prefix, not a directory — "." and "/" match nothing.\n' +
+    'set to the file\'s name.\n\n' +
+    'A file is addressed by `name`, and a name is one flat string — there are no directories here, so ' +
+    'there is nothing to create, change into or walk. A "/" inside a name is an ordinary character that ' +
+    'names happen to share ("charts/data.csv"), which is why `list` always returns every matching file ' +
+    'and its `prefix` selects by whole segments: "charts" matches "charts/data.csv", "char" matches ' +
+    'nothing, and omitting it lists the whole workspace. Listed names are complete names, ready to pass ' +
+    'straight back as `name`.\n' +
     "Use encoding 'base64' for binary files (images, PDFs, zips); 'utf8' (the default) for text.",
   inputSchema: {
     type:       'object',
     required:   ['action'],
     properties: {
       action:    { type: 'string', enum: ['read', 'write', 'list', 'delete'], description: 'The operation to perform.' },
-      path:      { type: 'string', description: 'File path relative to the workspace root (e.g. "report.md", "charts/data.csv"). Required for read/write/delete; optional subdirectory filter for list.' },
+      name:      { type: 'string', description: 'read/write/delete only: the whole name of one file (e.g. "report.md", "charts/data.csv").' },
+      prefix:    { type: 'string', description: 'list only: restrict the listing to names beginning with these segments (e.g. "charts"). Omit it to list the whole workspace.' },
       content:   { type: 'string', description: 'File contents — required for action "write".' },
       encoding:  { type: 'string', enum: ['utf8', 'base64'], default: 'utf8', description: "Used by read/write. 'base64' for binary files, 'utf8' (default) for text." },
-      recursive: { type: 'boolean', default: false, description: 'list only: include files in subdirectories.' },
     },
   },
   executor: workspaceExecutor,

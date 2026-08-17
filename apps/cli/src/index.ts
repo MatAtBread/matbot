@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { loadConfig, loadConfigFromText, loadDotEnv } from './config.js';
 import { installPlugin }                    from './install.js';
-import { executeQuery }                     from '@matatbread/matbot-core/storage-base';
+import { executeQuery, mediumGuard }        from '@matatbread/matbot-core/storage-base';
 import { loadPluginsWithDescriptions, readPluginMeta, type PluginLoadRequest } from './plugin-description.js';
 import { nodePluginResolver }               from './plugin-resolver.js';
 import type { Principal, ProviderAdapter,
@@ -855,12 +855,16 @@ async function main(): Promise<void> {
   // The config entry of the plugin whose storageBackend the pre-scan opened, if any. Recorded against
   // its plugin name once the loader has resolved names, so its unload reverts storage like a register().
   let storageBootSpec: string | undefined;
+  // The instance the pre-scan opened, kept so a later register() can report having displaced it. The
+  // host's own boot default (`bootBackend`) is captured BEFORE the pre-scan and is a different thing.
+  let preScanBackend: StorageBackend | undefined;
   for (const { spec, importSpec } of allSpecifiers) {
     try {
       const mod  = await import(/* @vite-ignore */ importSpec) as Record<string, unknown>;
       const plug = (mod['plugin'] ?? (mod['default'] as Record<string, unknown> | undefined)?.['plugin']) as MatbotPlugin | undefined;
       if (plug?.storageBackend !== undefined) {
         activeStorageBackend = await plug.storageBackend.open(dotData);
+        preScanBackend  = activeStorageBackend;
         storageBootSpec = spec;
         break;
       }
@@ -887,13 +891,27 @@ async function main(): Promise<void> {
     activeStorageBackend?.createStore(namespace) ??
     new FilesystemStore(namespace === 'sessions' ? dataDir : path.join(dotData, namespace));
 
+  // Bumped by every swap, and read by the medium guard below. A document handed out under one
+  // generation cannot be written back under another: nothing is migrated between backends, so that
+  // write would move it, silently, into a backend that never issued it.
+  let storageGeneration = 0;
+
+  const guarded = new Map<string, AnyStore>();
+
   const createStore = <T extends { id: string; version: string }>(namespace: string): Store<T> => {
     let entry = storeProxies.get(namespace);
     if (entry === undefined) {
       entry = makeSwappable<AnyStore>(makeStoreForNamespace(namespace));
       storeProxies.set(namespace, entry);
     }
-    return entry[0] as Store<T>;
+    // Guard OUTSIDE the swap proxy: one stable object per namespace across every swap, so a captured
+    // store reference keeps working and the guard sees each call whichever backend is current.
+    let store = guarded.get(namespace);
+    if (store === undefined) {
+      store = mediumGuard<{ id: string; version: string }>(entry[0], () => storageGeneration, namespace);
+      guarded.set(namespace, store);
+    }
+    return store as Store<T>;
   };
 
   // sessions and fileStore are stable proxy references — safe to capture anywhere. Sessions are wrapped
@@ -923,7 +941,24 @@ async function main(): Promise<void> {
   const swapStorage = (next: StorageBackend | undefined): boolean => {
     const removed = activeStorageBackend;
     if (removed === next) return false;
+
+    // Only ONE storage backend is ever active, and a plugin registering one displaces whatever the
+    // boot pre-scan opened — silently, because the swap is a supported operation and the loser left no
+    // trace but an opened, orphaned file. Configure two storage plugins (say sqlite and profiles, which
+    // composes the filesystem primitive directly and so cannot layer over sqlite) and the discarded one
+    // still creates its database before being abandoned, which reads as "sqlite is configured and does
+    // nothing". Said once, naming the plugin, at the moment it stops being true.
+    if (removed !== undefined && removed === preScanBackend && next !== undefined) {
+      preScanBackend = undefined;                            // one warning per boot, not per swap
+      console.warn(
+        `[matbot] storage: the backend opened at startup by "${storageBootSpec}" has been replaced by another ` +
+        `plugin's storage backend. Only one is ever active and nothing is migrated between them, so anything ` +
+        `it already wrote is no longer read. Configure just one storage plugin to remove this ambiguity.`,
+      );
+    }
+
     activeStorageBackend = next;
+    storageGeneration++;
     for (const [ns, [, swap]] of storeProxies) swap(makeStoreForNamespace(ns));
     swapFiles(next?.fileStore ?? bootFileStore);
     void Promise.resolve(removed?.close?.()).catch(e => console.error('[matbot] closing displaced StorageBackend:', e));

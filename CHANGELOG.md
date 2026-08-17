@@ -9,6 +9,245 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## Unreleased
+
+### Breaking changes
+
+- **The quiescent edge is the drained queue, not the end of a turn.** A deferred machine mutation — the
+  `StorageBackend` swap, the mount table's batched notifications — landed whenever no *turn* was in
+  flight, and the pump does a great deal of store work outside a turn: it re-reads the committed
+  document for `followup`, appends markers to it, rewrites it for a retract, and persists the next
+  queued turn's user message before that turn opens. All of it was quiescent, so a backend could be
+  swapped in the middle of it: the turn's write-back landing in one backend and the followup marker
+  appended to it in another. A two-turn queue reached the "idle" edge six times mid-flight; it now
+  reaches it once, after the queue drains — the same boundary accounting already flushes at, for the
+  same stated reason that the end of a turn is not a moment anything can be totalled or swapped at.
+
+  The hold is a new `/host` primitive, `machineBusy(fn)` — "hold the machine for this operation" —
+  which is the half of a context switch that is not about identity. `contextSwitch(principal, fn)`
+  keeps its meaning and its signature, and is now literally `machineBusy` + `runAs`; the pump holds
+  once around its whole queue and `runAs`es per item, each item carrying its own submitter. It is a
+  wrapper rather than a `begin`/`end` pair on purpose: the hold is released on every exit including a
+  synchronous throw and a rejected promise, because a stranded counter is unrecoverable — every later
+  flush no-ops forever and the only symptom is a deferred mutation that never happens.
+
+  **A flusher may now be asynchronous** — `onContextQuiesce` takes `() => void | Promise<void>` — and
+  returning a promise makes the edge wait rather than merely start the work. `quiesced()` is the other
+  half: an operation that must not overlap deferred work awaits it before holding the machine, which
+  the pump does, so an edit deferred out of one turn has landed before the next turn takes its copy of
+  the session. Without it the deferral only moved the race: the edit began after the turn committed,
+  and a submission arriving meanwhile could read the document before the CAS and put the pre-edit
+  version back with its own write-back.
+
+  Flushers are invoked in registration order and then settle together, the synchronous prefix still
+  running inline — so staging a mutation and landing it with a bare `flushIfQuiescent()` is in effect
+  before the call returns, as before. The edge does not give exclusivity against the rest of the
+  machine and could not: once any flusher awaits, an HTTP endpoint can accept a request and run a tool
+  call to completion inside that window, so serialising flushers against each other would remove one
+  source of concurrent mutation while leaving every other in place, at the price of every flusher
+  waiting on the slowest. Contention over a service is the service's to resolve — a `Store` answers it
+  with compare-and-swap — and the sweep's job is to make contention rare, not to pretend the machine
+  stops. A backend swap is staged, never applied, while a flush is
+  settling, which narrows one further window — compare-and-swap answers "did this document change?",
+  not "did the medium change?", so a read from one backend and a write to another compares a version
+  against a backend that never issued it. That exposure is not new and is not the flushers': an HTTP
+  tool call has always been able to straddle a swap the same way. The fix belongs where the consequence
+  lands, in a `cas` that checks it is writing to the backend it read from — noted here as a known gap.
+
+  Listed as breaking because the *timing* an embedder or plugin observes changes: a `register()` from
+  inside a turn now takes effect when the session's queue drains rather than at that turn's end, which
+  for a session running back-to-back turns (a `followup` resubmission, a retract-and-rerun) is later
+  than before. The mount contract already promised only eventual, ordered delivery and explicitly not
+  timing, so nothing that honoured it needs changing. Frontend entry points are unaffected: a web
+  request or telegram message still uses `runAs` and deliberately does not hold the machine, its scope
+  spanning a long-lived stream.
+
+### Bug fixes
+
+- **A store write can no longer cross a `StorageBackend` swap.** Exactly one backend is active and
+  nothing is migrated between them, so a caller that read a document before a swap and wrote it after
+  was addressing two media with one read-modify-write — and nothing could see it: compare-and-swap asks
+  "did this document change?", which the incoming backend answers about a document it never issued,
+  usually "there is nothing here". An unconditional `set` then recreated the previous backend's
+  document inside its replacement, and a session had silently migrated. Reachable wherever a read and a
+  write straddle the swap: an HTTP tool call has always been able to, and deferred quiescent-edge work
+  now can too.
+
+  `mediumGuard` (`@matatbread/matbot-core/storage-base`, wrapped around each store proxy by both hosts)
+  puts the check where the consequence lands rather than asking every caller to know something only
+  storage knows. The version is the only token tying a read to its write, so it carries the medium:
+  stamped on the way out, checked and stripped on the way in — stripped because most write-backs reuse
+  the version they read (`store.set(id, { ...doc, title })`), and a persisted stamp would be stamped
+  again on the next read. An unstamped version is always accepted, being a document the caller minted
+  rather than read. A stale `cas` returns `{ ok: false }` — the loss every caller already handles, with
+  the medium in the role of the other writer — and a stale `set` throws, having no other channel.
+
+### Optional
+
+**edit-session**
+
+- **`session_edit` defers an edit of the running turn's own session instead of refusing it.** `cut`,
+  `split` and `compact` on `ctx.session.id` used to return an error, because the runner holds one
+  in-memory copy of the document and writes it back unconditionally at turn end — an edit landing
+  mid-turn is silently overwritten. The edit is now queued on a one-shot `onContextQuiesce` flusher and
+  applied at the next quiescent edge, by which point the turn's write-back has happened and the edit
+  reads the committed document. The result reports `{ deferred: true, sessionId, message }` rather than
+  the usual counts: the edge is by construction unreachable until the calling turn has ended, so
+  awaiting the real outcome from inside that turn would deadlock. A negative `msgIndex` is resolved to
+  an absolute one at call time, before the turn's own tail lands. Deferred edits are serialised against
+  each other; a failure is logged, having no caller left to tell. `fork` is unaffected — it only writes
+  a new document — and every edit of *another* session stays immediate.
+
+- **`compact_sessions` compacts the session it was called from, deferred, instead of skipping it.** It
+  reported the calling session as `skipped: 'current session'` — declining to compact the one session
+  whose history is re-sent on every round, for the same reason `session_edit` used to refuse it. It now
+  queues that one on the same quiescent edge and reports it under a new `deferred` array, which carries
+  no tier and no count: both are decided when it is applied. The whole per-session policy (tier
+  decision included) moved behind one re-read so the deferred pass decides against the document the
+  turn actually committed, not the one the scan saw — and because the tiers address messages from the
+  end (`-1`, `-10`), "keep the last 10" still means the last 10 once the turn's own tail has landed.
+
+  The guard remains `ctx.session.id`, which protects the *calling* turn and no other: invoked over
+  HTTP, where the tool context carries a stub session, nothing matches and a session another turn is
+  running in is compacted inline — where that turn's unconditional write-back at turn end silently
+  reverts it. That is the quiescent edge's granularity, addressed separately.
+
+- **Compaction removes a message it empties, instead of leaving an empty shell.** Both `session_edit`'s
+  `compact` action and `compact_sessions` dropped every block of a message that held only tool calls,
+  tool results or thinking, and kept the message itself — a stored husk no provider ever saw (the
+  Anthropic converter skips empty content and folds the adjacent same-role messages either side) but
+  which a frontend reading the stored array draws as an empty bubble. Both sides of a tool exchange are
+  stripped in the same pass, so they disappear together and no call is left without its result. Shells
+  left by earlier compactions are collected too, so an already-compacted session is cleaned by its next
+  compaction. Message positions before the cutoff therefore shift, which nothing addresses across a
+  reload — provenance (`remember_fact`, `dream_time` enrichment) is by message id, and the one index
+  that is baked, this plugin's cross-session `targetMsg`, is documented best-effort and was already
+  fragile to `cut` and `split`.
+
+## 0.4.4
+
+### Breaking changes
+
+- **`workspace_action` speaks of names, not paths.** `path` becomes `name` on read, write and
+  delete and in every result; `list` takes `prefix`; `recursive` is gone. A workspace file is an entry
+  in a `FileStore` namespace, addressed by one flat string — the `/` in `charts/data.csv` is an
+  ordinary character, not a level, and there is no directory anywhere in the medium to create, change
+  into or walk. Calling the parameter `path` invited the whole hierarchical model in, and the calls it
+  produced failed in the ways that model predicts and this one cannot honour: `list { path: "." }`
+  matched nothing (the executor appended a `/`, and no name begins `./`), and `write { path: "./notes.md" }`
+  created a *second* file distinct from `notes.md`, addressable only by repeating the `./`, because
+  names are stored verbatim. Normalisation now drops `.` segments everywhere, so those two converge,
+  and a `..` in a `list` prefix is an error rather than a silently empty listing, as it already was
+  elsewhere.
+
+  **`recursive` is removed, and `list` now always returns every matching file.** It never recursed:
+  the executor enumerates the whole namespace on every call and `recursive: false` only discarded names
+  with a further `/` in them, so the default suppressed results already in hand and bought nothing —
+  a depth default borrowed from filesystems, where a deep walk is expensive, applied to a store where
+  both branches cost the same. Its failure was quieter than the `path` one, too: `list {}` returned a
+  short list that reads exactly like a complete answer to "what is in my workspace". Narrowing is
+  `prefix`'s job; if listing size ever needs a control, that control is a limit, not a depth.
+
+  Listed here rather than under **Optional** with the plugin's other changes: the tool ships by default
+  and every parameter of it changed at once, so a stored `function-tools` lambda, compiled skill or
+  trigger `invoke` naming the old shape breaks — and breaks *quietly*, since `inputSchema` is loose by
+  design and an unknown key is ignored rather than rejected. A stale `list` call now lists the whole
+  workspace instead of erroring; a stale `read` or `write` fails on the missing `name`.
+
+### Optional
+
+#### frontend-web
+
+- **The browser UI is type-checked against the live tool contracts, and `pnpm web-build` fails if it
+  isn't clean.** The UI is plain browser JS served verbatim, so nothing connected its `callTool` calls to
+  the `ToolContracts` the tools declare — `workspace_action`'s rename of `path` to `name` blanked the
+  file panel, and the way it failed is the point: reading a field that no longer exists yields
+  `undefined`, which renders as an empty row rather than an error, so it looked like "no files" and not
+  like a bug, in the one part of the system nobody compiles.
+
+  `static/matbot-ui.ts` imports the packages whose augmentations declare the tools the UI calls and
+  derives the transport's `callTool` signature from them, so params are checked against the tool's arms
+  and the result narrows to the arm they match. Consumers annotate their params from the same source
+  (`ToolResult<'workspace_action', { action: 'list' }>`) rather than restating a shape. `pnpm web-build`
+  runs the check before baking `app.js` into `matbot.html`, since a bundle is the last place a broken
+  UI file can still be caught.
+
+  The gate is about DATA, not the DOM: element narrowing is deliberately widened away, because the ~80
+  casts it would take are noise against the bug class worth catching, and a gate that expensive gets
+  turned off. Its reach ends where a value enters an unannotated function, so a new panel needs its
+  consumer annotated to be covered — and it cannot see field names inside strings (a `[data-name]`
+  selector, a template).
+
+  Three real defects fell out of turning it on: `workspace_action` `delete` and upload still passed
+  `path`; `share`/`owner` was read as `.owners` (bulk) or `.owner` (single) without narrowing, though
+  the contract returns a union of the two and only the runtime id decides which; and the in-process
+  browser transport passed `ownerPrincipal` to `createSession`, which copies three fields and has never
+  been one of them, so session ownership there was silently discarded rather than recorded.
+
+#### function-tools
+
+- **`tool_function { action: 'check' }` re-type-checks functions you already defined.** A defined
+  function is type-checked once, at `define`, against the tool types as they stood then — and on every
+  later reload it is only *compiled*, never re-checked. So a tool that changes its contract silently
+  invalidates every stored function composing it: the function keeps registering, keeps being offered
+  to the model, and fails when it is next called. `check` closes that window by re-running the same
+  snippet through the same `ToolTypeIndex.check` that `define` and `lambda` use — no third notion of
+  what "checks out" means — and reports a row per function. Pass `name` for one, omit it to sweep all
+  of them. Nothing is run, registered or persisted.
+
+#### tool-store
+
+- **A query grammar key passed beside `action` is no longer silently discarded.**
+  `{ "action": "query", "limit": 0 }` — the grammar flattened one level up instead of nested under the
+  `query` parameter — reached `store.query(input.query ?? {})` as `{}`: the limit was dropped, the
+  query degraded to match-everything, and the count form came back as every document in the store plus
+  a `total`, which reads exactly like a working answer. It is the silent miss `validateQuery` rejects
+  unknown top-level keys to prevent, reappearing where `validateQuery` cannot see it, because the
+  misplaced key never becomes part of a `StoreQuery` at all.
+
+  The cause was the tool's own description: it documented the `StoreQuery` *type* but never the *call
+  envelope*, so the nesting had to be inferred, and the count form appeared as the fragment "pass
+  `limit: 0`" — which reads as an instruction to pass it at the top level. The description now leads
+  with the shape of the call and gives the count form complete. Misplaced keys are also rejected with
+  an error naming them and the correct call, rather than answered.
+
+#### storage-sqlite
+
+- **`StoreQuery` is compiled to SQL rather than interpreted.** The grammar is specified as a
+  translation target — a closed AST meant to become a `WHERE` clause, an Elasticsearch `bool`, a
+  Mongo `find` — but every backend in the repo delegated to the in-memory reference evaluator, so the
+  claim rested on the shape of the AST and nothing else. The SQLite backend now compiles the filter
+  to `WHERE`, the sort to `ORDER BY`, and the page to `LIMIT`/`OFFSET`, with `limit: 0` becoming
+  `SELECT COUNT(*)`. A filtered query no longer reads, parses and sorts the whole namespace to answer,
+  and a count materialises nothing at all.
+
+  Documents are JSON text, so a field is `json_extract(doc, <path>)` and its type
+  `json_type(doc, <path>)`. That pair carries the whole translation: `json_type` returns NULL for an
+  absent path and `'null'` for a stored JSON null — precisely the grammar's single "missing" state —
+  and it separates `'true'`/`'false'` from `'integer'`, without which type-strictness could not be
+  expressed at all, since a value accessor erases a JSON boolean to the same 0/1 a number produces.
+  Field paths are **bound**, never interpolated, so the compiler has no injection surface.
+
+  What the exercise actually establishes is where a native query language disagrees with the grammar
+  by default — four points, each of which returns plausible rows instead of failing, and each now a
+  named guard: SQL's three-valued logic (`NOT NULL` is NULL, so a row *missing* the field is dropped
+  from a negated predicate the grammar says it matches); boolean/number erasure, including inside
+  `arrayContains`; missing-value ordering (the grammar's missing-last is a property of the value, so
+  it reverses to missing-*first* under `desc`, where SQL's NULL ordering is a property of the
+  direction); and the `id` tiebreaker that makes the order total enough for a cursor to point at a
+  stable boundary.
+
+  Equivalence is enforced rather than asserted: one conformance corpus of ~70 queries runs through
+  both the pushdown and the in-memory reference and must return the same documents in the same order,
+  with cursor paging a disjoint cover and identical located `StoreQueryError`s for invalid input. The
+  corpus is built around the four traps — documents holding a number where another holds a boolean, a
+  JSON null beside an absent field, keys containing `.` and `"`, and ties on every sorted field
+  inserted out of id order so a missing tiebreaker cannot pass by coincidence.
+
+  One divergence remains, for a field holding **mixed types across documents** only: SQLite orders
+  every number before every string, where the reference stringifies and compares `"10" < "9"`. Within
+  a type — a sort on a real field — the two agree exactly.
+
 ## 0.4.3
 
 ### Breaking changes

@@ -22,6 +22,9 @@ export function assertBrowserRealm(): void {
   }
 }
 
+// One IndexedDB database per namespace; the prefix is what makes them enumerable as matbot's.
+const DB_PREFIX = 'matbot-';
+
 /**
  * Browser `StorageBackend`: document stores in IndexedDB, files in OPFS — the browser analogue of
  * the node filesystem backend. Each namespace gets its own IndexedDB database (`matbot-<ns>`) with a
@@ -39,10 +42,31 @@ export class BrowserStorageBackend implements StorageBackend {
   createStore<T extends { id: string; version: string }>(namespace: string): Store<T> {
     let store = this.stores.get(namespace);
     if (store === undefined) {
-      store = new IDBStore<{ id: string; version: string }>(`matbot-${namespace}`, 'docs');
+      store = new IDBStore<{ id: string; version: string }>(`${DB_PREFIX}${namespace}`, 'docs');
       this.stores.set(namespace, store);
     }
     return store as Store<T>;
+  }
+
+  /**
+   * Every namespace is its own IndexedDB database named `matbot-<ns>`, so enumerating databases IS
+   * enumerating namespaces — no separate registry to keep in step.
+   *
+   * `indexedDB.databases()` is not universal (older Firefox has no implementation). Where it is
+   * missing this **throws** rather than falling back to the namespaces created in this session: that
+   * fallback is a lower bound — it omits every namespace no plugin has touched yet — and a caller
+   * copying or auditing on the strength of it would silently miss data while reporting success.
+   */
+  async namespaces(): Promise<string[]> {
+    const list = (indexedDB as { databases?: () => Promise<Array<{ name?: string }>> }).databases;
+    if (typeof list !== 'function') {
+      throw new Error('this browser cannot enumerate IndexedDB databases (indexedDB.databases is unavailable), so the stored namespaces cannot be listed');
+    }
+    return (await list.call(indexedDB))
+      .map(d => d.name)
+      .filter((n): n is string => n !== undefined && n.startsWith(DB_PREFIX))
+      .map(n => n.slice(DB_PREFIX.length))
+      .sort();
   }
 
   // IndexedDB connections close with the realm; nothing to flush. OPFS writes are durable on close.

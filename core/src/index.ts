@@ -28,13 +28,13 @@ export {
   unifyServices, forwardingProxy, makeSwappable, singleTurnRequest, createMountTable,
   createBroadcaster, subscribable, createNotifier, scopedNotifier,
   installPrincipalCarrier, enterPrincipal, createConstantPrincipalCarrier,
-  contextSwitch, onContextQuiesce, flushIfQuiescent,
+  contextSwitch, machineBusy, quiesced, onContextQuiesce, flushIfQuiescent,
   installUsageCarrier, createSerialUsageCarrier, recordUsage, recordSpan, currentUsageSink,
   currentUsageScope, currentUsageSite, withUsageScope, withUsageSite,
 } from '@matatbread/matbot-plugin-api/host';
 export type {
   Subscribable, Broadcaster, Routed, RoutedFilter, SwapFn, MountTable, PrincipalCarrier, UsageCarrier,
-  UsageScope,
+  UsageScope, Quiescer,
 } from '@matatbread/matbot-plugin-api/host';
 export * from './session.js';
 export * from './usage.js';

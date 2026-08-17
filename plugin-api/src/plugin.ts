@@ -361,6 +361,27 @@ export interface StorageBackend {
   createStore<T extends { id: string; version: string }>(namespace: string): Store<T>;
   readonly fileStore: FileStore;
   close?(): Promise<void>;
+  /**
+   * The namespaces this backend currently holds documents for — the `createStore` arguments that
+   * would reach real data. `createStore` is addressed BY name, so without this a caller can only read
+   * a namespace it already knows about; enumerating is what makes a backend traversable (copying one
+   * backend into another, auditing what is stored, reporting on a `.data` directory).
+   *
+   * **Optional because absence is a type.** A backend addressing a medium with no listing operation
+   * cannot answer, and must not guess: a caller that needs a complete list degrades to being told the
+   * namespaces explicitly rather than silently working from a partial one. Do not implement this by
+   * returning "the namespaces `createStore` happened to be called with this session" — that is a lower
+   * bound masquerading as an answer, and a traversal built on it silently skips whatever no plugin
+   * touched. If the medium cannot be listed, leave it off, or throw with a reason.
+   *
+   * Excludes the file store: files are a separate axis with their own enumeration
+   * ({@link FileStore.list}), not a namespace among the document stores.
+   *
+   * A namespace holding no documents may be omitted — "empty" and "absent" are not usefully different
+   * to a caller that is about to read it. Implementations return the list sorted, so a diff of two
+   * backends is stable.
+   */
+  namespaces?(): Promise<string[]>;
 }
 
 /**

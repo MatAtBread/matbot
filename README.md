@@ -202,7 +202,7 @@ that, and leans hard on dynamically-generated TypeScript types to keep them hone
 
 **The type surface is live.** The [`tool-types`](docs/DEVELOPING.md#first-party-plugins-reference)
 plugin derives a `.d.ts` of every *currently-loaded* tool from its declared contract — inputs **and**
-results. Multi-action tools become overload sets, so `await tool.workspace_action({ action: 'read', path })`
+results. Multi-action tools become overload sets, so `await tool.workspace_action({ action: 'read', name })`
 narrows to the exact result type for that action. The model isn't guessing what a call returns; it's
 reading it off the types.
 

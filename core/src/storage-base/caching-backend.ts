@@ -138,9 +138,22 @@ export class CachingStorageBackend implements StorageBackend {
   private readonly ttlMs:  number | undefined;
   private readonly stores = new Map<string, CachingStore<{ id: string; version: string }>>();
 
+  /**
+   * Forwarded only when the wrapped backend has it. `namespaces` is optional, and its ABSENCE is the
+   * signal a caller reads ("this backend cannot be enumerated") — so a decorator that always declared
+   * the method would answer for backends that cannot, turning a degradable capability into a runtime
+   * failure. Assigned per instance rather than declared as a method so `'namespaces' in backend` stays
+   * truthful through the wrapper.
+   *
+   * Not cached: the cache is per-namespace and populated by reads, so it knows only what has been
+   * asked for — never the set of namespaces that exist.
+   */
+  readonly namespaces?: () => Promise<string[]>;
+
   constructor(inner: StorageBackend, options: CachingOptions = {}) {
     this.inner = inner;
     this.ttlMs = options.ttlMs;
+    if (inner.namespaces !== undefined) this.namespaces = () => inner.namespaces!();
   }
 
   createStore<T extends { id: string; version: string }>(namespace: string): Store<T> {

@@ -21,7 +21,7 @@ piece of module-level state in the two singletons is one of two shapes:
 
 | Shape | Example | Fix |
 |---|---|---|
-| **State-shaped** — a Set/Map/counter the copies should share | principal carrier, context-switch quiescers/depth | Anchor on `globalThis` under a `Symbol.for` key → every copy reads one shared object |
+| **State-shaped** — a Set/Map/counter the copies should share | principal carrier, context-switch quiescers/hold count | Anchor on `globalThis` under a `Symbol.for` key → every copy reads one shared object |
 | **Identity-shaped** — relies on object identity across the boundary | `instanceof` of a plugin-api error class | Replace identity with a **brand** (a string field) → identity-independent, works across copies |
 
 Both convert "must be one copy" into "duplication is benign". With them in place, **detection

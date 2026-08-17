@@ -26,6 +26,29 @@ edge (immediately when the machine is idle, at the end of the current turn when 
 the `WatchVisibility` watch layer resolve the backend live per call, so they start working the moment the
 swap lands. Existing data is untouched (the profiles base layout is byte-identical to the plain filesystem).
 
+## Why this is a backend, not a wrapper
+
+It **composes `FilesystemStorageBackend` directly** — one instance rooted at the base layout, one per
+profile rooted at `profiles/<id>/` — rather than wrapping whatever `StorageBackend` is active. That is
+deliberate, and it is the answer to "why can't I use profiles with SQLite?"
+
+How data is divided by owner is medium-specific. The filesystem expresses it as nested directories; a SQL
+backend might use a table prefix, a partition column, or row-level policies; Drive could use folders or
+real Drive permissions. There is no general wrapper that could impose one of those compositions on every
+backend, so partitioning is a **capability a backend implements**, not a layer over backends.
+
+The shared surface is `ProfileDirectory`, and consumers reach it by duck-typing the *active* backend —
+`asProfileDirectory(services.StorageBackend)`, method presence, never `instanceof`, so it survives hot
+reload and follows swaps. The check takes `unknown` and is purely structural, so **any** backend exposing
+that shape is picked up by the existing `profile_action`/`share` tools and the `WatchVisibility` layer,
+with no import from this package and no change to `plugin-api`. A partitioning SQLite backend is therefore
+a thing someone can write; it just isn't this plugin.
+
+**Consequence: this plugin does not combine with another storage backend.** Only one backend is ever
+active. Configure this alongside (say) `matbot-storage-sqlite` and whichever loses still opens its
+database before being discarded, so you get an orphaned `matbot.db` and every write on the filesystem.
+The host warns once, naming the displaced plugin — but configure exactly one storage plugin.
+
 ## Granularity
 
 The unit of isolation is one whole `createStore(namespace)` bucket. A profile's `private` list is a subset

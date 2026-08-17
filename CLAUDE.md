@@ -75,7 +75,7 @@ plugins/            — one directory per package, flat but for the frontend/pro
       customer-services/, chatjimmy/ — keyless demo/comparison endpoints
     storage/
       filesystem/    — FilesystemStore (Node, CAS-safe); CLI boot default
-      sqlite/        — SQLite StorageBackend (WAL)
+      sqlite/        — SQLite StorageBackend (WAL); compiles StoreQuery to SQL (the pushdown example)
       google-drive/  — Drive-backed StorageBackend (browser)
       profiles/      — per-principal partitioning over filesystem (node); profile_action, share
 apps/
@@ -87,7 +87,7 @@ apps/
 
 ### The `/host` boundary
 
-`plugin-api`'s root answers exactly one question: **what does a plugin need in order to be a plugin?** Anything whose audience is an *embedder standing a machine up* lives behind `@matatbread/matbot-plugin-api/host` — carrier installers (`installPrincipalCarrier`, `installUsageCarrier` and the platform carrier factories), the capture-safe swap proxies (`forwardingProxy`, `makeSwappable`), the mount table's producer half (`createMountTable`, `MountTable`), the quiescent-edge machinery (`contextSwitch`, `onContextQuiesce`, `flushIfQuiescent`), `unifyServices`, `singleTurnRequest`, `HookRegistry`, `createNotifier`/`scopedNotifier`, and the `Broadcaster` primitive. `core` re-exports all of it, so an app depending on core needs no direct `/host` import — and no plugin in this repo imports any of it.
+`plugin-api`'s root answers exactly one question: **what does a plugin need in order to be a plugin?** Anything whose audience is an *embedder standing a machine up* lives behind `@matatbread/matbot-plugin-api/host` — carrier installers (`installPrincipalCarrier`, `installUsageCarrier` and the platform carrier factories), the capture-safe swap proxies (`forwardingProxy`, `makeSwappable`), the mount table's producer half (`createMountTable`, `MountTable`), the quiescent-edge machinery (`machineBusy`, `contextSwitch`, `onContextQuiesce`, `flushIfQuiescent`), `unifyServices`, `singleTurnRequest`, `HookRegistry`, `createNotifier`/`scopedNotifier`, and the `Broadcaster` primitive. `core` re-exports all of it, so an app depending on core needs no direct `/host` import — and no plugin in this repo imports any of it.
 
 **It is a file boundary, not an export list**, so it cannot quietly erode: host assembly lives in `host-machine.ts`, and `index.ts` uses `export type *` plus a named value list for the two files that are deliberately split down the middle. Three subsystems are split rather than moved whole, because each has a real author-facing half:
 
@@ -204,9 +204,13 @@ type ScratchStore = Store<Session>;
 
 ### Context switch & the deferred StorageBackend swap
 
-`StorageBackend` is the system of record: swapping it under a running turn would split a compare-and-swap across two backends. So `register('StorageBackend', …)` (and its `unregister` revert) is **deferred**, not immediate — it stages a last-write-wins pending slot and applies it at the next **quiescent edge** (no turn/request/message in flight). The other swap-members (`KnowledgeIndex`, `Vault`) repoint immediately.
+`StorageBackend` is the system of record: swapping it under a running turn would split a compare-and-swap across two backends. So `register('StorageBackend', …)` (and its `unregister` revert) is **deferred**, not immediate — it stages a last-write-wins pending slot and applies it at the next **quiescent edge** (nothing holding the machine — in practice, the pump's queue drained). The other swap-members (`KnowledgeIndex`, `Vault`) repoint immediately.
 
-A **context switch** is the machine analogue of an OS one — "page in pending machine state, then set the owner." `runAs(principal, fn)` is the bare *set-the-owner* primitive (the principal carrier stays a pure identity primitive); `contextSwitch(principal, fn)` layers the machine half on top, running host-registered flushers (`onContextQuiesce`) at depth-0 edges. The principal scope counter *is* the quiescence signal — the two concerns share call sites, not code. **The pump turn** (the CAS transactional unit) switches context; web/telegram entry points stay `runAs` (their request/message scope spans a long-lived SSE stream, so they must not count as a busy edge).
+A **context switch** is the machine analogue of an OS one — "page in pending machine state, then set the owner." Two primitives, one per half: `runAs(principal, fn)` sets the owner (the principal carrier stays a pure identity primitive), and `machineBusy(fn)` holds the machine, running host-registered flushers (`onContextQuiesce`) at the release edge. `contextSwitch(principal, fn)` is simply both, for an operation that is both. The hold is a *wrapper*, never a `begin`/`end` pair: it releases on every exit including a throw, and a stranded counter is unrecoverable — every later flush would no-op forever, with no symptom but a deferred mutation that never happens.
+
+**A flusher may suspend the edge.** `onContextQuiesce` takes `() => void | Promise<void>`; returning a promise makes the edge *wait*, and an operation that must not overlap deferred work calls `quiesced()` before holding the machine (the pump does, so a `session_edit` deferred out of the last turn lands before the next turn takes its copy). Flushers are invoked in registration order and then settle together; the synchronous prefix runs inline, so the host can still stage a mutation and land it with a bare `flushIfQuiescent()`. What the edge cannot give is exclusivity: once any flusher awaits, an HTTP endpoint can accept a request and run a whole tool call inside that window, so serialising flushers against *each other* would remove one source of concurrent mutation and leave every other. Contention over a service is the service's to resolve — a `Store` answers with CAS — and the sweep's job is only to make it rare. The exception it does own, because no service can see it, is a change of *medium*: a backend swap is staged, never applied, while a flush is settling.
+
+**What holds the machine is the operation, not the turn.** The pump holds it across its **whole queue** and `runAs`es per item, because the pump's own store work does not stop at a turn's end: it reads the committed document back for `followup`, appends markers to it, rewrites it for a retract, and persists the next turn's user message before that turn opens. A per-turn hold declared all of that idle — six edges fell inside one two-turn queue — so a mutation could land in precisely the gap the deferral exists to close. The queue draining is the real boundary, and it is the one accounting already flushes at, for the same stated reason: "the end of a turn" is not a moment anything can be totalled or swapped at. Entry points that *receive* work without performing it — a web request holding an SSE stream open, a telegram message — stay `runAs` and are deliberately not busy; counting them would mean the machine never reaches an edge at all.
 
 ### The mount table (`services.mounted`)
 
@@ -244,6 +248,41 @@ When one plugin **specializes** another ("B *is* A, but broader"), that's an `ex
 ## Storage
 
 `Store<T extends { id: string; version: string }>` — universal interface. All writes use compare-and-swap (`store.cas(id, expectedVersion, next)`). Never write without version check when concurrent updates are possible.
+
+`createStore` is addressed BY name, so **`StorageBackend.namespaces?()`** is the other half: what a backend
+currently holds, without which nothing can traverse one (copy, audit, report). Optional because absence
+is a type — a medium with no listing operation must degrade, not guess. Never implement it as "the
+namespaces `createStore` was called with this session": that is a lower bound wearing an answer's
+clothes. Files are a separate axis (`FileStore.list`), never a namespace.
+
+**Exactly one backend is active.** The boot pre-scan opens the first configured plugin offering a
+`storageBackend` and stops; a plugin registering one later displaces it at the quiescent edge. Nothing
+is migrated between them, so a discarded backend has typically already created its file — the host
+warns once, naming the plugin, because the failure is otherwise silent and reads as "my backend is
+configured and does nothing".
+
+**A write may not cross a swap** (`mediumGuard`, in `core/storage-base`, wrapped around each store
+proxy by the host). Since nothing is migrated, a caller that read a document before a swap and writes
+it after is addressing two media with one read-modify-write, and neither end can tell: `cas` asks "did
+this document change?", which the new backend answers about a document it never issued — usually
+"there is nothing here", whereupon an unconditional `set` recreates the old backend's document inside
+its replacement and the session has silently migrated. The version is the only token tying a read to
+its write, so it carries the medium: stamped on the way out, checked and stripped on the way in (a
+stamp must never persist — most write-backs reuse the version they read). An unstamped version is
+always accepted; that is a document the caller minted, and a create has no earlier medium to
+contradict. A stale `cas` reports the loss callers already handle, a stale `set` throws, having no
+other channel.
+
+**Partitioning/ownership is a backend CAPABILITY, not a layer over backends.** How data is divided by
+owner is medium-specific — nested directories, a table prefix, a partition column, row-level policies —
+so there is no general wrapper that could impose one composition on every backend. `ProfileDirectory` is
+the shared surface, and consumers reach it by duck-typing the *active* backend
+(`asProfileDirectory(services.StorageBackend)`, method presence, never `instanceof`, so it survives hot
+reload and follows swaps). The check takes `unknown` and is purely structural: **any** backend exposing
+that shape is picked up, with no import and no plugin-api change — which is why the contract does not
+need hoisting out of the plugin that currently implements it. `storage/profiles` is one implementation,
+the filesystem one; it composes `FilesystemStorageBackend` directly rather than wrapping the active
+service, and therefore does not combine with SQLite or any other backend.
 
 ---
 
