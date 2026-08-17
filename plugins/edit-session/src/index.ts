@@ -2,9 +2,10 @@ import type {
   MatbotPluginSpec, MatbotMachine, Principal, Tool, ToolContract, ToolContext, ToolResultOf, Session, Store, Message, Marker,
 } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION, lastActivityAt, currentPrincipal, runAs } from '@matatbread/matbot-plugin-api';
-import { onContextQuiesce } from '@matatbread/matbot-plugin-api/host';
 
 import { makeCompactSessionsTool } from './compact-sessions.js'
+import { compactBefore } from './compaction.js'
+import { defer } from './defer.js'
 
 /** An edit of the session the calling turn is running in: applied at the quiescent edge, after the
  *  turn writes its own document back. The tool cannot report its outcome — awaiting the edge from
@@ -83,27 +84,6 @@ function generateSplitTitle(title: string): string {
   }
   // Otherwise append " pt 2"
   return `${title || 'Untitled'} pt 2`;
-}
-
-const KEEP_TYPES = new Set(['text', 'refusal', 'marker']);
-
-// ── deferral ──────────────────────────────────────────────────────────────────
-
-// Serialises deferred edits: two of them in one turn would otherwise CAS the same document
-// concurrently, and applying an index-based edit to already-shifted history is nonsense.
-let tail: Promise<void> = Promise.resolve();
-
-// An edit of the running turn's own session can only be applied once the turn has committed its
-// document — i.e. at the quiescent edge, which is by construction unreachable until the tool call
-// (and the turn) has returned. A one-shot quiescer, unregistering itself as it fires: the flusher
-// contract asks for idempotence, and running exactly once is how this one gets it. Detached, because
-// a quiescer is synchronous and nothing is waiting on the result — including the tool call, which
-// would deadlock on the very edge it is holding open.
-function defer(job: () => Promise<void>): void {
-  const un = onContextQuiesce(() => {
-    un();
-    tail = tail.then(job).catch(e => console.error('[session_edit] deferred edit failed:', e instanceof Error ? e.message : e));
-  });
 }
 
 // ── tool ──────────────────────────────────────────────────────────────────────
@@ -208,25 +188,11 @@ async function applyEdit(store: Store<Session>, action: SessionEditInput['action
 
     case 'compact': {
       if (idx === 0) return { ok: false, message: `msgIndex ${msgIndex} out of range or nothing to compact.` };
-      let stripped = 0;
-      const messages = session.messages.flatMap((m, i) => {
-        if (i >= idx) return [m];
-        const compact = m.content.filter(c => KEEP_TYPES.has(c.type));
-        // Empty first: a shell left by an earlier compaction has both lengths at zero, so it would
-        // read as "nothing to strip" and survive the cleanup that is the point of testing at all.
-        if (compact.length === 0) { stripped++; return []; }
-        if (compact.length === m.content.length) return [m];
-        stripped++;
-        return [{ ...m, content: compact }];
-      });
+      const { messages, stripped } = compactBefore(session.messages, idx);
       // Compaction never touches the tail (it stops at idx), so updatedAt holds and the session keeps
       // its place in a recency-sorted list — even though the messages it does touch may disappear.
-      // A message left with nothing is dropped rather than kept as an empty shell: no provider ever
-      // saw it (the Anthropic converter skips empty content and folds the adjacent same-role messages
-      // either side of the gap), and a frontend rendering the stored array draws it as an empty
-      // bubble. Its counterpart goes with it — an assistant tool-call and its tool result are always
-      // stripped in the same pass. Nothing addresses a message by position across a reload; the sole
-      // exception is this plugin's own cross-session `targetMsg`, already best-effort.
+      // Nothing addresses a message by position across a reload; the sole exception is this plugin's
+      // own cross-session `targetMsg`, already best-effort.
       const compacted: Session = { ...session, messages };
       const next: Session = bumpVersion({ ...compacted, updatedAt: lastActivityAt(compacted) });
       const res = await store.cas(sessionId, session.version, next);

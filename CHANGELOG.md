@@ -27,6 +27,20 @@ churn and less likely to affect a consumer who doesn't use them.
   each other; a failure is logged, having no caller left to tell. `fork` is unaffected — it only writes
   a new document — and every edit of *another* session stays immediate.
 
+- **`compact_sessions` compacts the session it was called from, deferred, instead of skipping it.** It
+  reported the calling session as `skipped: 'current session'` — declining to compact the one session
+  whose history is re-sent on every round, for the same reason `session_edit` used to refuse it. It now
+  queues that one on the same quiescent edge and reports it under a new `deferred` array, which carries
+  no tier and no count: both are decided when it is applied. The whole per-session policy (tier
+  decision included) moved behind one re-read so the deferred pass decides against the document the
+  turn actually committed, not the one the scan saw — and because the tiers address messages from the
+  end (`-1`, `-10`), "keep the last 10" still means the last 10 once the turn's own tail has landed.
+
+  The guard remains `ctx.session.id`, which protects the *calling* turn and no other: invoked over
+  HTTP, where the tool context carries a stub session, nothing matches and a session another turn is
+  running in is compacted inline — where that turn's unconditional write-back at turn end silently
+  reverts it. That is the quiescent edge's granularity, addressed separately.
+
 - **Compaction removes a message it empties, instead of leaving an empty shell.** Both `session_edit`'s
   `compact` action and `compact_sessions` dropped every block of a message that held only tool calls,
   tool results or thinking, and kept the message itself — a stored husk no provider ever saw (the

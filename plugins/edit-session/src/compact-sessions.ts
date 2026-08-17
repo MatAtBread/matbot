@@ -12,15 +12,23 @@
  *     Any session with >20 messages that did NOT qualify for Tier 1.
  *     Strips tool calls / tool results / thinking blocks from all messages EXCEPT the last 10.
  *
- * Safety: the current session (ctx.session.id) is never touched. Each edit is individually wrapped
- * so one failure does not abort the rest. Idempotent: a session whose content has already been
- * stripped yields 0 messagesStripped and no error.
+ * What compaction *means* — which blocks survive, and that a message left with none is removed — is
+ * `compactBefore` in ./compaction.ts, shared with the `session_edit` `compact` action. This file owns
+ * only the policy: which sessions, and where each one's cutoff falls.
+ *
+ * The current session (ctx.session.id) is deferred to the quiescent edge rather than compacted in
+ * place: the running turn owns that document until it commits. Each edit is individually wrapped so
+ * one failure does not abort the rest. Idempotent: a session whose content has already been stripped
+ * yields 0 messagesStripped and no error.
  *
  * Invoke via background tool or call directly as a tool.
  */
 
 import type { Tool, ToolExecutor, ToolContract, ToolContext, ToolResultOf, Session, Store } from '@matatbread/matbot-plugin-api';
-import { lastActivityAt } from '@matatbread/matbot-plugin-api';
+import { lastActivityAt, currentPrincipal, runAs } from '@matatbread/matbot-plugin-api';
+
+import { compactBefore } from './compaction.js'
+import { defer } from './defer.js'
 
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
@@ -30,45 +38,54 @@ declare module '@matatbread/matbot-plugin-api' {
         pages:     number;
         compacted: Array<{ sessionId: string; title: string; tier: 'full' | 'partial'; messagesStripped: number }>;
         skipped:   Array<{ sessionId: string; title: string; reason: string }>;
+        /** The calling turn's own session, whose compaction was queued for after this turn commits.
+         *  No tier and no count: both are decided when it is applied, and reporting them would mean
+         *  waiting for an edge this turn has to end to reach. */
+        deferred:  Array<{ sessionId: string; title: string }>;
       },
       { inactiveDays?: number; activeMessages?: number }
     >;
   }
 }
 
-/** Content types preserved through compaction (everything else — tool-call, tool-result, thinking,
- *  thinking-redacted, reasoning, image, document, audio — is stripped). Must match the set used by
- *  the `session_edit` tool's `compact` action so behaviour is identical regardless of which code
- *  path performs the compaction. */
-const KEEP_TYPES = new Set(['text', 'refusal', 'marker']);
-
 interface CompactSessionsParams {
-  inactiveDays?: number; // Threshold for full compact. Default 28
-  activeMessages?: number; // Number of messages at the head of the session to NOT compact. Default 10
+  inactiveDays?: number;   // Threshold for full compact. Default 28
+  activeMessages?: number; // Number of messages at the end of the session to NOT compact. Default 10
 }
 
-// ── helpers ───────────────────────────────────────────────────────────────────
+type CompactOutcome =
+  | { done: true;  tier: 'full' | 'partial'; stripped: number }
+  | { done: false; reason: string };
 
-function compactMessages(messages: Session['messages'], msgIndex: number): { messages: Session['messages']; stripped: number } {
-  // msgIndex < 0 is an offset from the end (like JS Array.slice)
-  const idx = msgIndex < 0 ? messages.length + msgIndex : msgIndex;
-  if (idx <= 0) return { messages, stripped: 0 };
+// The whole per-session policy — tier decision included — behind one re-read, so it is equally
+// correct run inline during the scan or later from the quiescent edge (the current session's deferred
+// compaction). The deferred path MUST decide against the document as it will then be, not as the scan
+// saw it: by the edge the session has grown by the turn that called this tool.
+async function compactOne(
+  store:      Store<Session>,
+  sessionId:  string,
+  opts:       Required<CompactSessionsParams>,
+  inactiveMs: number,
+): Promise<CompactOutcome> {
+  // Re-read via get() so the CAS below uses a fresh version — a query result may be stale
+  const current = await store.get(sessionId);
+  if (!current) return { done: false, reason: 'deleted before compaction' };
 
-  let stripped = 0;
-  const compacted = messages.flatMap((m, i) => {
-    if (i >= idx) return [m];                           // past the cutoff — untouched
-    const filtered = m.content.filter(c => KEEP_TYPES.has(c.type));
-    // Nothing left to say: drop the message rather than leave an empty shell (see the `compact`
-    // action in ./index.ts). Tested before "nothing to strip" so it also collects the shells an
-    // earlier compaction left behind — for which the two lengths are equal, both zero. Counted as
-    // stripped, so the caller's "changed nothing" check sees the cleanup; idempotent all the same,
-    // since the run after it finds no shells left.
-    if (filtered.length === 0) { stripped++; return []; }
-    if (filtered.length === m.content.length) return [m]; // nothing to strip
-    stripped++;
-    return [{ ...m, content: filtered }];
-  });
-  return { messages: compacted, stripped };
+  const tier: 'full' | 'partial' | undefined =
+    current.status === 'archived' || Date.now() - new Date(current.updatedAt).getTime() >= inactiveMs ? 'full'
+    : current.messages.length > opts.activeMessages * 2                                               ? 'partial'
+    : undefined;
+  if (tier === undefined) return { done: false, reason: 'below thresholds' };
+
+  // A negative msgIndex ("keep the last N") is what makes the deferred path self-correcting: it is
+  // resolved against the document at apply time, so the turn's own tail is among the messages kept.
+  const { messages, stripped } = compactBefore(current.messages, tier === 'full' ? -1 : -opts.activeMessages);
+  if (stripped === 0) return { done: false, reason: 'nothing to strip' };
+
+  const next: Session = { ...current, messages, updatedAt: lastActivityAt({ ...current, messages }) };
+  const res = await store.cas(current.id, current.version, { ...next, version: crypto.randomUUID() });
+  if (!res.ok) return { done: false, reason: 'concurrent modification' };
+  return { done: true, tier, stripped };
 }
 
 // ── tool factory ──────────────────────────────────────────────────────────────
@@ -80,6 +97,7 @@ export function makeCompactSessionsTool(store: Store<Session>): Tool<ToolResultO
       const currentSessionId = ctx.session.id;
       const compacted: Array<{ sessionId: string; title: string; tier: 'full' | 'partial'; messagesStripped: number }> = [];
       const skipped: Array<{ sessionId: string; title: string; reason: string }> = [];
+      const deferred: Array<{ sessionId: string; title: string }> = [];
       let cursor: string | undefined;
       let totalExamined = 0;
       let pagesLoaded = 0;
@@ -92,12 +110,12 @@ export function makeCompactSessionsTool(store: Store<Session>): Tool<ToolResultO
           input.activeMessages = compactSessionDefaults.activeMessages;
       }
 
-      const inactiveTimestamp = input.inactiveDays! * 24 * 60 * 60 * 1000;
-
-      function isInactiveSession(updatedAt: string): boolean {
-        const then = new Date(updatedAt).getTime();
-        return Date.now() - then >= inactiveTimestamp;
-      }
+      const inactiveMs = input.inactiveDays! * 24 * 60 * 60 * 1000;
+      const opts: Required<CompactSessionsParams> = { inactiveDays: input.inactiveDays!, activeMessages: input.activeMessages! };
+      // The edge runs outside every principal scope, so the deferred compaction below has to carry
+      // this one in: its store reads and writes are the same ownership-checked operations the inline
+      // path performs.
+      const principal = currentPrincipal();
 
       do {
         const page = await store.query({ cursor, limit: 100 });
@@ -107,60 +125,30 @@ export function makeCompactSessionsTool(store: Store<Session>): Tool<ToolResultO
         for (const session of page.items) {
           totalExamined++;
 
-          // Never compact the session this tool is being called from
+          // The session this tool is being called from is deferred, not skipped. The turn owns its
+          // document until it commits, so compacting it inline would be undone by the turn's own
+          // write-back seconds later — but it is also the session whose history is being re-sent every
+          // round, which makes "never touch it" the wrong answer. Applied at the quiescent edge, by
+          // which point the turn has committed and the policy re-decides against what it committed.
           if (session.id === currentSessionId) {
-            skipped.push({ sessionId: session.id, title: session.title ?? '', reason: 'current session' });
+            deferred.push({ sessionId: session.id, title: session.title ?? '' });
+            defer(async () => {
+              const outcome = await runAs(principal, () => compactOne(store, session.id, opts, inactiveMs));
+              // Nothing left to report to: the caller's turn ended to reach this edge.
+              if (!outcome.done) console.warn(`[compact_sessions] deferred compaction of the calling session skipped: ${outcome.reason}`);
+            });
             continue;
           }
 
-          // Re-read via get() so the CAS below uses a fresh version — the query result may be stale
-          const current = await store.get(session.id);
-          if (!current) {
-            skipped.push({ sessionId: session.id, title: session.title ?? '', reason: 'deleted before compaction' });
-            continue;
-          }
-
-          // ── Tier 1 — full compact ──
-          if (current.status === 'archived' || isInactiveSession(current.updatedAt)) {
-            const { messages, stripped } = compactMessages(current.messages, -1);
-            if (stripped === 0) {
-              skipped.push({ sessionId: current.id, title: current.title ?? '', reason: 'nothing to strip' });
-              continue;
-            }
-            const next: Session = { ...current, messages, updatedAt: lastActivityAt({ ...current, messages }) };
-            const res = await store.cas(current.id, current.version, { ...next, version: crypto.randomUUID() });
-            if (!res.ok) {
-              skipped.push({ sessionId: current.id, title: current.title ?? '', reason: 'concurrent modification' });
-              continue;
-            }
-            compacted.push({ sessionId: current.id, title: current.title ?? '', tier: 'full', messagesStripped: stripped });
-            continue;
-          }
-
-          // ── Tier 2 — partial compact ──
-          if (current.messages.length > input.activeMessages! * 2) {
-            const { messages, stripped } = compactMessages(current.messages, -input.activeMessages!);
-            if (stripped === 0) {
-              skipped.push({ sessionId: current.id, title: current.title ?? '', reason: 'nothing to strip' });
-              continue;
-            }
-            const next: Session = { ...current, messages, updatedAt: lastActivityAt({ ...current, messages }) };
-            const res = await store.cas(current.id, current.version, { ...next, version: crypto.randomUUID() });
-            if (!res.ok) {
-              skipped.push({ sessionId: current.id, title: current.title ?? '', reason: 'concurrent modification' });
-              continue;
-            }
-            compacted.push({ sessionId: current.id, title: current.title ?? '', tier: 'partial', messagesStripped: stripped });
-            continue;
-          }
-
-          skipped.push({ sessionId: current.id, title: current.title ?? '', reason: 'below thresholds' });
+          const outcome = await compactOne(store, session.id, opts, inactiveMs);
+          if (outcome.done) compacted.push({ sessionId: session.id, title: session.title ?? '', tier: outcome.tier, messagesStripped: outcome.stripped });
+          else              skipped.push({ sessionId: session.id, title: session.title ?? '', reason: outcome.reason });
         }
 
         yield { type: 'progress', pct: cursor ? Math.round((totalExamined / (page.total ?? 1)) * 100) : 100, message: `Examined ${totalExamined} sessions, compacted ${compacted.length}` };
       } while (cursor);
 
-      yield { type: 'result', value: { examined: totalExamined, pages: pagesLoaded, compacted, skipped } };
+      yield { type: 'result', value: { examined: totalExamined, pages: pagesLoaded, compacted, skipped, deferred } };
     },
   };
 
@@ -175,13 +163,16 @@ Two tiers:
     Strips all tool calls, tool results, and thinking blocks from every message.
   Tier 2 — Partial compact: active sessions with >20 messages, keeping the last 10 intact.
     Strips tool calls / tool results / thinking from all earlier messages.
-The current session is never touched. Idempotent — safe to run on a schedule.
-Returns a summary of what was compacted and skipped.`,
+A message left with no content is removed rather than kept empty, so message positions shift.
+The session you are called from is compacted too, but only once the current turn commits — it is
+reported under \`deferred\`, without a tier or a count, and this turn goes on seeing its full history.
+Idempotent — safe to run on a schedule.
+Returns a summary of what was compacted, deferred and skipped.`,
     inputSchema: {
       type: 'object',
       properties: {
         inactiveDays:  { type: 'number', description: 'Optional threshold for full compact of old sessions. Default 28' },
-        activeMessages:  { type: 'number', description: 'Optional number of messages at the head of the session to NOT compact for recent sessions. Default 10' },
+        activeMessages:  { type: 'number', description: 'Optional number of the most recent messages to leave uncompacted, for recent sessions. Default 10' },
       },
       additionalProperties: false,
     },
