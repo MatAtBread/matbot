@@ -2069,7 +2069,9 @@ async function handleDividerAction(divider, action) {
     } else if (action === 'split') {
       if (!confirm('Split session at this point? Messages before will be moved to a new session.')) return;
       const result = await callTool('session_edit', { action: 'split', sessionId: currentSessionId, msgIndex: msgIdx });
-      if (result?.newSessionId) {
+      // `deferred` is the running turn's own session; this endpoint runs outside any turn (a stub
+      // ctx.session), so the edit is always applied inline here and the ids are present.
+      if (result && 'newSessionId' in result) {
         // Navigate to the current (trimmed) session
         await openSession(result.currentSessionId);
         refreshSessions();

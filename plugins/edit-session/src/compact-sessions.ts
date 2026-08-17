@@ -55,12 +55,18 @@ function compactMessages(messages: Session['messages'], msgIndex: number): { mes
   if (idx <= 0) return { messages, stripped: 0 };
 
   let stripped = 0;
-  const compacted = messages.map((m, i) => {
-    if (i >= idx) return m;                           // past the cutoff — untouched
+  const compacted = messages.flatMap((m, i) => {
+    if (i >= idx) return [m];                           // past the cutoff — untouched
     const filtered = m.content.filter(c => KEEP_TYPES.has(c.type));
-    if (filtered.length === m.content.length) return m; // nothing to strip
+    // Nothing left to say: drop the message rather than leave an empty shell (see the `compact`
+    // action in ./index.ts). Tested before "nothing to strip" so it also collects the shells an
+    // earlier compaction left behind — for which the two lengths are equal, both zero. Counted as
+    // stripped, so the caller's "changed nothing" check sees the cleanup; idempotent all the same,
+    // since the run after it finds no shells left.
+    if (filtered.length === 0) { stripped++; return []; }
+    if (filtered.length === m.content.length) return [m]; // nothing to strip
     stripped++;
-    return { ...m, content: filtered };
+    return [{ ...m, content: filtered }];
   });
   return { messages: compacted, stripped };
 }

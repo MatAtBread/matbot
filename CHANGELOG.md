@@ -9,6 +9,36 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## Unreleased
+
+### Optional
+
+**edit-session**
+
+- **`session_edit` defers an edit of the running turn's own session instead of refusing it.** `cut`,
+  `split` and `compact` on `ctx.session.id` used to return an error, because the runner holds one
+  in-memory copy of the document and writes it back unconditionally at turn end — an edit landing
+  mid-turn is silently overwritten. The edit is now queued on a one-shot `onContextQuiesce` flusher and
+  applied at the next quiescent edge, by which point the turn's write-back has happened and the edit
+  reads the committed document. The result reports `{ deferred: true, sessionId, message }` rather than
+  the usual counts: the edge is by construction unreachable until the calling turn has ended, so
+  awaiting the real outcome from inside that turn would deadlock. A negative `msgIndex` is resolved to
+  an absolute one at call time, before the turn's own tail lands. Deferred edits are serialised against
+  each other; a failure is logged, having no caller left to tell. `fork` is unaffected — it only writes
+  a new document — and every edit of *another* session stays immediate.
+
+- **Compaction removes a message it empties, instead of leaving an empty shell.** Both `session_edit`'s
+  `compact` action and `compact_sessions` dropped every block of a message that held only tool calls,
+  tool results or thinking, and kept the message itself — a stored husk no provider ever saw (the
+  Anthropic converter skips empty content and folds the adjacent same-role messages either side) but
+  which a frontend reading the stored array draws as an empty bubble. Both sides of a tool exchange are
+  stripped in the same pass, so they disappear together and no call is left without its result. Shells
+  left by earlier compactions are collected too, so an already-compacted session is cleaned by its next
+  compaction. Message positions before the cutoff therefore shift, which nothing addresses across a
+  reload — provenance (`remember_fact`, `dream_time` enrichment) is by message id, and the one index
+  that is baked, this plugin's cross-session `targetMsg`, is documented best-effort and was already
+  fragile to `cut` and `split`.
+
 ## 0.4.4
 
 ### Breaking changes
