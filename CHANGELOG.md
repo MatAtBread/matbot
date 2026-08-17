@@ -11,6 +11,34 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ## Unreleased
 
+### Breaking changes
+
+- **The quiescent edge is the drained queue, not the end of a turn.** A deferred machine mutation — the
+  `StorageBackend` swap, the mount table's batched notifications — landed whenever no *turn* was in
+  flight, and the pump does a great deal of store work outside a turn: it re-reads the committed
+  document for `followup`, appends markers to it, rewrites it for a retract, and persists the next
+  queued turn's user message before that turn opens. All of it was quiescent, so a backend could be
+  swapped in the middle of it: the turn's write-back landing in one backend and the followup marker
+  appended to it in another. A two-turn queue reached the "idle" edge six times mid-flight; it now
+  reaches it once, after the queue drains — the same boundary accounting already flushes at, for the
+  same stated reason that the end of a turn is not a moment anything can be totalled or swapped at.
+
+  The hold is a new `/host` primitive, `machineBusy(fn)` — "hold the machine for this operation" —
+  which is the half of a context switch that is not about identity. `contextSwitch(principal, fn)`
+  keeps its meaning and its signature, and is now literally `machineBusy` + `runAs`; the pump holds
+  once around its whole queue and `runAs`es per item, each item carrying its own submitter. It is a
+  wrapper rather than a `begin`/`end` pair on purpose: the hold is released on every exit including a
+  synchronous throw and a rejected promise, because a stranded counter is unrecoverable — every later
+  flush no-ops forever and the only symptom is a deferred mutation that never happens.
+
+  Listed as breaking because the *timing* an embedder or plugin observes changes: a `register()` from
+  inside a turn now takes effect when the session's queue drains rather than at that turn's end, which
+  for a session running back-to-back turns (a `followup` resubmission, a retract-and-rerun) is later
+  than before. The mount contract already promised only eventual, ordered delivery and explicitly not
+  timing, so nothing that honoured it needs changing. Frontend entry points are unaffected: a web
+  request or telegram message still uses `runAs` and deliberately does not hold the machine, its scope
+  spanning a long-lived stream.
+
 ### Optional
 
 **edit-session**

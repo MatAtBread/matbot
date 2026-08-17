@@ -8,8 +8,8 @@ import type { MatbotPlugin } from './plugin.js';
 import type { HookRegistry } from './hooks.js';
 import type { ToolTypeIndex, ToolPresenter } from '@matatbread/matbot-plugin-api';
 import { appendMessage, createMessage } from './session.js';
-import { isReadOnlyError, foldOntoUserTurn, lastUserIndex } from '@matatbread/matbot-plugin-api';
-import { contextSwitch, withUsageScope } from '@matatbread/matbot-plugin-api/host';
+import { isReadOnlyError, foldOntoUserTurn, lastUserIndex, runAs } from '@matatbread/matbot-plugin-api';
+import { machineBusy, withUsageScope } from '@matatbread/matbot-plugin-api/host';
 import { runSession } from './runner.js';
 
 export interface SessionRunnerDeps {
@@ -255,6 +255,15 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
   const pump = async (id: string, s: SessionState): Promise<void> => {
     if (s.running) return;
     s.running = true;
+    // Hold the machine for the WHOLE queue, not per turn. A deferred machine mutation (the
+    // StorageBackend swap, a plugin's deferred edit of this very session) may only land where no
+    // operation spans it — and the pump's own store work does not stop at a turn's end: it reads the
+    // committed document back for followup, appends markers to it, rewrites it for a retract, and
+    // persists the next turn's user message before that turn opens. All of that sits between turns,
+    // and a per-turn hold declared it idle. The queue draining is the real boundary — the same one
+    // usage flushes at, for the same reason. `machineBusy` releases on every exit including a throw,
+    // so no early return out of the loop below can leave the machine held.
+    return machineBusy(async () => {
     try {
       while (s.queue.length > 0) {
         // Per-submission concat: the head always runs; if the head is a concat submission it absorbs
@@ -350,8 +359,8 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
           // turn's async root. Everything downstream (hooks, tools, and any Store/FileStore/Vault
           // access they trigger) reads it via currentPrincipal(). The consumption MUST happen inside
           // the callback: an async iterator returned out of the scope would lose it before it pulls.
-          // contextSwitch (not bare runAs): a turn is the transactional unit, so a StorageBackend swap
-          // deferred during it lands at this scope's quiescent edge — never mid-CAS.
+          // runAs, not a context switch of its own: the pump holds the machine across the whole queue
+          // (see above), so a turn declares only its owner. Each item carries its own submitter.
           // The terminal event this turn ended on. `followup` is post-COMMIT, and only `done` is a
           // commit: an `aborted` turn was cut short (a steer, a user cancel, a screen/toolcall hook
           // refusing it, a provider round ceiling) and an `error` turn produced no response at all, so
@@ -367,7 +376,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
           // in something already tracked and needs no coordination of its own.
           await withUsageScope(async usage => {
           s.pendingUsage.push(usage.entries);
-          await contextSwitch(head.principal, async () => {
+          await runAs(head.principal, async () => {
             for await (const ev of runSession({
               session,
               config:         { provider: head.provider, traceId: head.traceId },
@@ -403,7 +412,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
             const committed = await deps.store.get(id);
             if (committed && head.resubmitDepth < MAX_RESUBMIT_DEPTH) {
               let followup: { resubmits: MessageContent[][]; markers: MessageContent[]; retract?: { context: MessageContent[]; durable: MessageContent[] } } = { resubmits: [], markers: [] };
-              await contextSwitch(head.principal, async () => {
+              await runAs(head.principal, async () => {
                 followup = await hooks.runFollowup({
                   session:       committed,
                   resubmitDepth: head.resubmitDepth,
@@ -530,6 +539,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
       notify(s, { type: 'idle', sessionId: id });
       maybeCleanup(id, s);
     }
+    });
   };
 
   return {
