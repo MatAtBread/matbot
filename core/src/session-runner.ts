@@ -9,7 +9,7 @@ import type { HookRegistry } from './hooks.js';
 import type { ToolTypeIndex, ToolPresenter } from '@matatbread/matbot-plugin-api';
 import { appendMessage, createMessage } from './session.js';
 import { isReadOnlyError, foldOntoUserTurn, lastUserIndex, runAs } from '@matatbread/matbot-plugin-api';
-import { machineBusy, withUsageScope } from '@matatbread/matbot-plugin-api/host';
+import { machineBusy, quiesced, withUsageScope } from '@matatbread/matbot-plugin-api/host';
 import { runSession } from './runner.js';
 
 export interface SessionRunnerDeps {
@@ -263,7 +263,13 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
     // and a per-turn hold declared it idle. The queue draining is the real boundary — the same one
     // usage flushes at, for the same reason. `machineBusy` releases on every exit including a throw,
     // so no early return out of the loop below can leave the machine held.
-    return machineBusy(async () => {
+    //
+    // Wait out any deferred work still settling BEFORE holding: a flusher that rewrites this very
+    // session (a `session_edit` deferred out of the last turn) must finish before this turn reads its
+    // copy, or the read would take the pre-edit document and the write-back below would put it back.
+    // The edge is only reachable while nothing holds the machine, so the wait comes first and the
+    // hold second — the reverse would deadlock on an edge this pump is itself preventing.
+    return quiesced().then(() => machineBusy(async () => {
     try {
       while (s.queue.length > 0) {
         // Per-submission concat: the head always runs; if the head is a concat submission it absorbs
@@ -539,7 +545,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
       notify(s, { type: 'idle', sessionId: id });
       maybeCleanup(id, s);
     }
-    });
+    }));
   };
 
   return {

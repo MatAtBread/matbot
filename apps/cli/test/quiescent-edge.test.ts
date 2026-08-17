@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   createSessionRunner, createSession, installPrincipalCarrier, installUsageCarrier, HookRegistry,
-  onContextQuiesce, flushIfQuiescent, machineBusy,
+  onContextQuiesce, flushIfQuiescent, machineBusy, quiesced,
 } from '@matatbread/matbot-core';
 import type {
   Session, Store, ToolRegistry, ProviderAdapter, ProviderConfig, CompletionEvent,
@@ -105,7 +105,100 @@ test('no quiescent edge falls between two turns of one queue', { timeout: 15000 
   }
 });
 
+test('an async flusher suspends the next turn until its work has landed', { timeout: 15000 }, async () => {
+  const adapter: ProviderAdapter = {
+    name: 'fake',
+    async health() { return { ok: true } as never; },
+    complete(): AsyncIterable<CompletionEvent> {
+      return (async function* () {
+        yield { type: 'text-delta', delta: 'answer' };
+        yield { type: 'done' };
+      })();
+    },
+  };
+
+  const session = createSession();
+  const store   = memStore(session);
+  const runner  = createSessionRunner({
+    store,
+    resolveProvider: async () => ({ adapter, config: { name: 'fake', module: 'fake', model: 'fake' } as ProviderConfig }),
+    tools:           emptyTools,
+    loadPlugin:      async () => { throw new Error('loadPlugin unused'); },
+    unloadPlugin:    async () => false,
+    hooks:           new HookRegistry(),
+  });
+
+  const submit = async (): Promise<void> => {
+    const view = await runner.open({
+      sessionId: session.id, signal: new AbortController().signal,
+      content: text('go'), provider: 'fake', principal,
+    });
+    for await (const ev of view.events) if (ev.type === 'idle') break;
+  };
+
+  await submit();
+
+  // The deferred-edit shape: at the edge, take the committed document, work on it slowly, write it
+  // back. Detached, the next turn would read the session before this landed and its own write-back
+  // would put the pre-edit version back; returned to the edge, the turn waits.
+  let landed = false;
+  const un = onContextQuiesce(async () => {
+    if (landed) return;                      // idempotent: the edge is reached after every operation
+    const current = (await store.get(session.id))!;
+    await new Promise(r => setTimeout(r, 25));
+    await store.set(session.id, { ...current, title: 'edited at the edge' });
+    landed = true;
+  });
+
+  try {
+    await submit();
+    assert.ok(landed, 'the flusher ran');
+    const saved = await store.get(session.id);
+    assert.equal(saved!.title, 'edited at the edge', 'the second turn did not write over the edit');
+  } finally {
+    un();
+  }
+});
+
+test('the synchronous prefix lands within the call, and one slow flusher does not hold the others', async () => {
+  await quiesced();
+
+  const log: string[] = [];
+  const slow = (name: string, ms: number) => async (): Promise<void> => {
+    log.push(`${name}:start`);
+    await new Promise(r => setTimeout(r, ms));
+    log.push(`${name}:end`);
+  };
+
+  let landedSynchronously = false;
+  const uns = [
+    // Registered first and synchronous — the host's staged-mutation flusher has this shape, and
+    // depends on being in effect by the time flushIfQuiescent() returns.
+    onContextQuiesce(() => { landedSynchronously = true; log.push('sync'); }),
+    onContextQuiesce(slow('a', 40)),
+    onContextQuiesce(slow('b', 5)),
+  ];
+
+  try {
+    const settling = flushIfQuiescent();
+    assert.ok(landedSynchronously, 'the synchronous prefix ran inline, before the call returned');
+    assert.ok(settling, 'an async flusher makes the edge waitable');
+    await settling;
+
+    // Started in registration order, then left to settle together: sequencing them would remove one
+    // source of concurrent mutation while leaving every other one (an HTTP request runs inside any
+    // await regardless), at the price of every flusher waiting on the slowest.
+    assert.deepEqual(log, ['sync', 'a:start', 'b:start', 'b:end', 'a:end']);
+  } finally {
+    for (const un of uns) un();
+  }
+});
+
 test('a hold is released on every exit, so nothing can strand the machine', async () => {
+  // The edge is process-global: settle anything an earlier test left in flight, or the first
+  // observation here would be of a flush still gating on someone else's work.
+  await quiesced();
+
   let fired = 0;
   const un = onContextQuiesce(() => { fired++; });
 

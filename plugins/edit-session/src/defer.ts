@@ -15,11 +15,17 @@ import { onContextQuiesce } from '@matatbread/matbot-plugin-api/host';
 let tail: Promise<void> = Promise.resolve();
 
 // A one-shot quiescer, unregistering itself as it fires: the flusher contract asks for idempotence,
-// and running exactly once is how this one gets it. The work is detached because a quiescer is
-// synchronous and nothing awaits its result.
+// and running exactly once is how this one gets it.
+//
+// The promise is RETURNED to the edge, not detached. That is what makes the deferral whole: the edge
+// suspends the next operation that asked to be quiesced — the pump, before it takes its copy of the
+// session — until this edit has landed. Detached, the edit would merely *start* after the turn
+// committed, and a submission arriving in the meantime could read the document before the CAS and put
+// the pre-edit version back with its own write-back.
 export function defer(job: () => Promise<void>): void {
   const un = onContextQuiesce(() => {
     un();
     tail = tail.then(job).catch(e => console.error('[edit-session] deferred edit failed:', e instanceof Error ? e.message : e));
+    return tail;
   });
 }

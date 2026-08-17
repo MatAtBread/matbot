@@ -31,6 +31,29 @@ churn and less likely to affect a consumer who doesn't use them.
   synchronous throw and a rejected promise, because a stranded counter is unrecoverable — every later
   flush no-ops forever and the only symptom is a deferred mutation that never happens.
 
+  **A flusher may now be asynchronous** — `onContextQuiesce` takes `() => void | Promise<void>` — and
+  returning a promise makes the edge wait rather than merely start the work. `quiesced()` is the other
+  half: an operation that must not overlap deferred work awaits it before holding the machine, which
+  the pump does, so an edit deferred out of one turn has landed before the next turn takes its copy of
+  the session. Without it the deferral only moved the race: the edit began after the turn committed,
+  and a submission arriving meanwhile could read the document before the CAS and put the pre-edit
+  version back with its own write-back.
+
+  Flushers are invoked in registration order and then settle together, the synchronous prefix still
+  running inline — so staging a mutation and landing it with a bare `flushIfQuiescent()` is in effect
+  before the call returns, as before. The edge does not give exclusivity against the rest of the
+  machine and could not: once any flusher awaits, an HTTP endpoint can accept a request and run a tool
+  call to completion inside that window, so serialising flushers against each other would remove one
+  source of concurrent mutation while leaving every other in place, at the price of every flusher
+  waiting on the slowest. Contention over a service is the service's to resolve — a `Store` answers it
+  with compare-and-swap — and the sweep's job is to make contention rare, not to pretend the machine
+  stops. A backend swap is staged, never applied, while a flush is
+  settling, which narrows one further window — compare-and-swap answers "did this document change?",
+  not "did the medium change?", so a read from one backend and a write to another compares a version
+  against a backend that never issued it. That exposure is not new and is not the flushers': an HTTP
+  tool call has always been able to straddle a swap the same way. The fix belongs where the consequence
+  lands, in a `cas` that checks it is writing to the backend it read from — noted here as a known gap.
+
   Listed as breaking because the *timing* an embedder or plugin observes changes: a `register()` from
   inside a turn now takes effect when the session's queue drains rather than at that turn's end, which
   for a session running back-to-back turns (a `followup` resubmission, a retract-and-rerun) is later

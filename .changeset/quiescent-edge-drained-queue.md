@@ -23,6 +23,24 @@ It is a wrapper rather than a `begin`/`end` pair on purpose: the hold is release
 including a synchronous throw and a rejected promise. A stranded counter would be unrecoverable —
 every later flush no-ops forever, and the only symptom is a deferred mutation that never happens.
 
+**A flusher may now be asynchronous.** `onContextQuiesce` takes `() => void | Promise<void>`, and
+returning a promise makes the edge wait rather than merely start the work; `quiesced()` is the other
+half, awaited by an operation that must not overlap deferred work. The pump awaits it before taking
+its copy of the session, so an edit deferred out of one turn has landed before the next turn reads it.
+Flushers are invoked in registration order and then settle together; the synchronous prefix still runs
+inline, so a mutation staged and landed with a bare `flushIfQuiescent()` is in effect before the call
+returns.
+
+The edge does not give exclusivity against the rest of the machine, and cannot: once any flusher
+awaits, an HTTP endpoint can accept a request and run a tool call inside that window — so serialising
+flushers against each other would remove one source of concurrent mutation and leave every other one.
+Contention over a service is the service's to resolve — a `Store` answers it with compare-and-swap —
+and the sweep's job is to make contention rare. A backend swap is staged, never applied, while a flush is
+settling, which narrows one further window: compare-and-swap answers "did this document change?", not
+"did the medium change?". That exposure is not new and is not the flushers' — an HTTP tool call has
+always been able to straddle a swap the same way — and the fix belongs in a `cas` that checks it is
+writing to the backend it read from.
+
 What an embedder observes is the timing: a `register()` from inside a turn now takes effect when the
 session's queue drains rather than at that turn's end, which for back-to-back turns (a `followup`
 resubmission, a retract-and-rerun) is later than before. The mount contract already promised only
