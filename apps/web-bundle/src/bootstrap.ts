@@ -16,6 +16,7 @@ import type {
 // Boot assembly, so from plugin-api's `/host` half — via core, which re-exports it for exactly this.
 import type { SwapFn } from '@matatbread/matbot-core';
 import { LookupKnowledgeIndex } from '@matatbread/matbot-core';
+import { mediumGuard } from '@matatbread/matbot-core/storage-base';
 import { BrowserStorageBackend, LocalStorageVault } from '@matatbread/matbot-browser';
 import { runProviderSetup, type AvailableProvider, type ProviderDraft } from './setup.js';
 import { createBrowserProviderTool, createBrowserToolTypeIndex, extractToolContracts, collectContractAliases } from '@matatbread/matbot-browser';
@@ -233,13 +234,25 @@ export async function boot(env: BootEnv): Promise<void> {
   type AnyStore = Store<{ id: string; version: string }>;
   // forwardingProxy/makeSwappable are shared with the CLI (capture-safe service swap).
   const storeProxies = new Map<string, [AnyStore, SwapFn<AnyStore>]>();
+  // Bumped by every swap, and read by the medium guard below: a document handed out under one
+  // generation cannot be written back under another, since nothing is migrated between backends and
+  // that write would move it into one that never issued it.
+  let storageGeneration = 0;
+  const guarded = new Map<string, AnyStore>();
   const createStore = <T extends { id: string; version: string }>(namespace: string): Store<T> => {
     let entry = storeProxies.get(namespace);
     if (entry === undefined) {
       entry = makeSwappable<AnyStore>(activeStorageBackend!.createStore(namespace));
       storeProxies.set(namespace, entry);
     }
-    return entry[0] as Store<T>;
+    // Guard OUTSIDE the swap proxy: one stable object per namespace across every swap, so a captured
+    // store reference keeps working and the guard sees each call whichever backend is current.
+    let store = guarded.get(namespace);
+    if (store === undefined) {
+      store = mediumGuard<{ id: string; version: string }>(entry[0], () => storageGeneration, namespace);
+      guarded.set(namespace, store);
+    }
+    return store as Store<T>;
   };
   const [fileStore, swapFiles] = makeSwappable<FileStore>(activeStorageBackend.fileStore);
 
@@ -278,6 +291,7 @@ export async function boot(env: BootEnv): Promise<void> {
     const removed = activeStorageBackend;
     if (removed === next) return false;
     activeStorageBackend = next;
+    storageGeneration++;
     for (const [ns, [, swap]] of storeProxies) swap(next.createStore(ns));
     swapFiles(next.fileStore);
     void Promise.resolve(removed?.close?.()).catch(e => console.error('[matbot] closing displaced StorageBackend:', e));

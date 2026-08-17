@@ -261,6 +261,18 @@ is migrated between them, so a discarded backend has typically already created i
 warns once, naming the plugin, because the failure is otherwise silent and reads as "my backend is
 configured and does nothing".
 
+**A write may not cross a swap** (`mediumGuard`, in `core/storage-base`, wrapped around each store
+proxy by the host). Since nothing is migrated, a caller that read a document before a swap and writes
+it after is addressing two media with one read-modify-write, and neither end can tell: `cas` asks "did
+this document change?", which the new backend answers about a document it never issued — usually
+"there is nothing here", whereupon an unconditional `set` recreates the old backend's document inside
+its replacement and the session has silently migrated. The version is the only token tying a read to
+its write, so it carries the medium: stamped on the way out, checked and stripped on the way in (a
+stamp must never persist — most write-backs reuse the version they read). An unstamped version is
+always accepted; that is a document the caller minted, and a create has no earlier medium to
+contradict. A stale `cas` reports the loss callers already handle, a stale `set` throws, having no
+other channel.
+
 **Partitioning/ownership is a backend CAPABILITY, not a layer over backends.** How data is divided by
 owner is medium-specific — nested directories, a table prefix, a partition column, row-level policies —
 so there is no general wrapper that could impose one composition on every backend. `ProfileDirectory` is

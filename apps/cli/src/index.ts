@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { loadConfig, loadConfigFromText, loadDotEnv } from './config.js';
 import { installPlugin }                    from './install.js';
-import { executeQuery }                     from '@matatbread/matbot-core/storage-base';
+import { executeQuery, mediumGuard }        from '@matatbread/matbot-core/storage-base';
 import { loadPluginsWithDescriptions, readPluginMeta, type PluginLoadRequest } from './plugin-description.js';
 import { nodePluginResolver }               from './plugin-resolver.js';
 import type { Principal, ProviderAdapter,
@@ -891,13 +891,27 @@ async function main(): Promise<void> {
     activeStorageBackend?.createStore(namespace) ??
     new FilesystemStore(namespace === 'sessions' ? dataDir : path.join(dotData, namespace));
 
+  // Bumped by every swap, and read by the medium guard below. A document handed out under one
+  // generation cannot be written back under another: nothing is migrated between backends, so that
+  // write would move it, silently, into a backend that never issued it.
+  let storageGeneration = 0;
+
+  const guarded = new Map<string, AnyStore>();
+
   const createStore = <T extends { id: string; version: string }>(namespace: string): Store<T> => {
     let entry = storeProxies.get(namespace);
     if (entry === undefined) {
       entry = makeSwappable<AnyStore>(makeStoreForNamespace(namespace));
       storeProxies.set(namespace, entry);
     }
-    return entry[0] as Store<T>;
+    // Guard OUTSIDE the swap proxy: one stable object per namespace across every swap, so a captured
+    // store reference keeps working and the guard sees each call whichever backend is current.
+    let store = guarded.get(namespace);
+    if (store === undefined) {
+      store = mediumGuard<{ id: string; version: string }>(entry[0], () => storageGeneration, namespace);
+      guarded.set(namespace, store);
+    }
+    return store as Store<T>;
   };
 
   // sessions and fileStore are stable proxy references — safe to capture anywhere. Sessions are wrapped
@@ -944,6 +958,7 @@ async function main(): Promise<void> {
     }
 
     activeStorageBackend = next;
+    storageGeneration++;
     for (const [ns, [, swap]] of storeProxies) swap(makeStoreForNamespace(ns));
     swapFiles(next?.fileStore ?? bootFileStore);
     void Promise.resolve(removed?.close?.()).catch(e => console.error('[matbot] closing displaced StorageBackend:', e));
