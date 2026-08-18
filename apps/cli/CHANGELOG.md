@@ -4,6 +4,16 @@
 
 ### Patch Changes
 
+- The first-run setup wizard stores its API key through the `Vault` instead of writing `.env` itself.
+
+  Answering the "API key" prompt with the name of a key the `.env` already held appended a synthetic
+  `MATBOT_API_KEY_<PROVIDER>` whose value was that key's name, and the typed string was handed to the
+  provider verbatim for that first run. Nothing at the prompt can tell a secret from the name of one,
+  which is what `createSecret` is for — naming an existing key now references it, a value already
+  stored under another name dedups to that name, and only a new secret mints
+  `MATBOT_API_KEY_<PROVIDER>`. A blank answer writes no `credentials:` block rather than an empty
+  `.env` line, since an empty value is the vault's removal signal.
+
 - Updated dependencies [99152f3]
 - Updated dependencies [20d87fe]
 - Updated dependencies [e65e2a3]

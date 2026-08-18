@@ -9,6 +9,33 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## 0.4.5
+
+### Optional
+
+#### cli
+
+- **The first-run setup wizard stores its API key through the `Vault`, instead of writing `.env`
+  itself.** Answering the "API key" prompt with the *name* of a key the `.env` already held — the
+  natural thing to do when pointing a second config at credentials you have already set up — appended
+  a synthetic `MATBOT_API_KEY_<PROVIDER>` whose value was that key's name, and wrote a config
+  referencing the new entry. The typed string was also handed to the provider verbatim as the live
+  credential for that first run, so the reference itself was posted to the endpoint as if it were the
+  secret; a restart then read the reference from the config and resolved it to the same wrong value.
+
+  Nothing at the prompt can distinguish a secret from the name of one, which is what `Vault`'s
+  `createSecret` is for, and it has resolved this everywhere else since the vault-backed credential
+  model landed — `provider add`, the web bundle's bootstrap, the Drive vault. The wizard predated it
+  and hand-rolled its own `.env` writer, which is the whole of the bug: naming an existing key now
+  references it, a value already stored under another name dedups to that name, and only a genuinely
+  new secret mints `MATBOT_API_KEY_<PROVIDER>`. The written config and the running process reference
+  the same key, since the wizard hands back the placeholder rather than what was typed.
+
+  A blank answer now writes no `credentials:` block at all rather than an empty `.env` line, which is
+  what a keyless endpoint (`chatjimmy`, `customer-services`) wants: an empty value is the vault's
+  removal signal, so persisting one would leave the config naming a key that does not exist, and boot
+  prompts for a missing secret and rejects a blank answer.
+
 ## 0.4.4
 
 ### Breaking changes

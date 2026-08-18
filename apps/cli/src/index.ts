@@ -651,18 +651,22 @@ async function runSetupWizard(configPath: string): Promise<import('./config.js')
         }
       }
     }
-    const configDir  = path.dirname(configPath);
-    const envPath    = path.join(configDir, '.env');
-    const envVarName = `MATBOT_API_KEY_${providerName.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
+    const configDir = path.dirname(configPath);
+    const varName   = `MATBOT_API_KEY_${providerName.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
 
-    let envContent = '';
-    try { envContent = await readFile(envPath, 'utf8'); } catch { /* no existing .env */ }
-    const envLines = envContent
-      ? envContent.split('\n').filter(l => !l.startsWith(`${envVarName}=`) && l !== '')
-      : [];
-    envLines.push(`${envVarName}=${apiKey}`);
-    await writeFile(envPath, envLines.join('\n') + '\n', 'utf8');
-    process.env[envVarName] = apiKey;
+    // What was typed at the API key prompt may be the NAME of a key the .env already holds rather
+    // than a secret, and nothing here can tell the two apart — which is what createSecret is for.
+    // Writing .env by hand bypassed it, so naming an existing key minted a synthetic
+    // MATBOT_API_KEY_* whose value was that key's name.
+    const wizardVault = new EnvFileVault(
+      path.join(configDir, '.env'),
+      process.env as Record<string, string | undefined>,
+    );
+    const keyName = apiKey ? await wizardVault.createSecret(varName, apiKey) : undefined;
+    // The boot vault is built from process.env, so carry the secret across. Resolve rather than
+    // reuse `apiKey`: where that was a reference, the string is a key name, and assigning it
+    // would overwrite the very key being referenced.
+    if (keyName !== undefined) process.env[keyName] = await wizardVault.resolve(`\${${keyName}}`);
 
     // Reference the provider by package name — the location-independent form. It resolves via
     // node_modules when matbot is installed, and in a source checkout via resolvePluginSpecifiers'
@@ -676,8 +680,7 @@ async function runSetupWizard(configPath: string): Promise<import('./config.js')
       `    module: ${moduleSpec}`,
       `    endpoint: ${endpoint}`,
       `    model: ${model}`,
-      `    credentials:`,
-      `      apiKey: \${${envVarName}}`,
+      ...(keyName !== undefined ? ['    credentials:', `      apiKey: \${${keyName}}`] : []),
     ].join('\n') + '\n';
 
     await mkdir(configDir, { recursive: true });
@@ -690,7 +693,9 @@ async function runSetupWizard(configPath: string): Promise<import('./config.js')
         name:        providerName,
         module:      moduleSpec,
         model,
-        credentials: { apiKey },
+        // The placeholder, not the typed string: this run must resolve the same key the written
+        // config names, or a reference would be posted to the endpoint as if it were the secret.
+        ...(keyName !== undefined ? { credentials: { apiKey: `\${${keyName}}` } } : {}),
         endpoint,
       }]]),
     };
