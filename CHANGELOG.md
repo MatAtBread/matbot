@@ -183,6 +183,16 @@ plugin-api is now a build error instead of a link that fails the typecheck on li
   replaced rather than trusted. `paths` is gone with it, so the link is the single mechanism both tsc and
   Node resolve through — two meant a typecheck could pass while the import failed.
 
+#### sessions
+
+- **`session_action query` rejects an unknown top-level key instead of matching everything.** The store
+  tools got this in 0.4.3; `session_action` kept the pre-fix behaviour for one reason — it takes the same
+  grammar *flat* beside `action`, and destructured `{ where, sort, limit, cursor }` out of its arguments
+  before validating. So a key like `filter` (the SQL-ism the 0.4.3 entry describes) was dropped before
+  `validateQuery` could see it: the query degraded to match-everything and the caller got every session
+  back with no error and no total. The caller's envelope — every key beside `action` — is now validated
+  first, so the error names the bad key and the valid set, exactly as the store tools do.
+
 #### tool-plugin
 
 - **A second copy of a host singleton is named, at boot and in `plugin list`.** Nothing is re-linked:
