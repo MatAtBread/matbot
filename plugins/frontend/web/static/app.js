@@ -770,8 +770,11 @@ function renderPlugins(loaded, local, failed, triggerCounts) {
       removeBtn.onclick = (e) => {
         e.stopPropagation();
         closeSidebar();
+        // The canonical name is the unambiguous handle for a LOADED plugin — the tool maps it back to
+        // whatever matbot.yaml says, so this works whether the entry is a name, a path or a URL. (A
+        // FAILED plugin is not registered, so those rows keep addressing the config entry itself.)
         // Direct submit so it queues during a turn instead of being blocked by the input.
-        submit(`Remove the plugin '${p.specifier}'`);
+        submit(`Remove the plugin '${p.name || p.specifier}'`);
       };
       actions.appendChild(removeBtn);
       sum.appendChild(actions);
@@ -823,8 +826,12 @@ function renderPlugins(loaded, local, failed, triggerCounts) {
       addBtn.onclick = (e) => {
         e.stopPropagation();
         closeSidebar();
+        // Name a LOCAL discovery by its package name, not the path it was found at: the name resolves
+        // here and in an installed deployment, and it is what the tool records either way. A cached
+        // remote keeps its URL — that URL *is* how it resolves.
+        const spec = p.source?.type === 'local' && p.name ? p.name : p.specifier;
         // Direct submit so it queues during a turn instead of being blocked by the input.
-        submit(`Add the plugin '${p.specifier}'`);
+        submit(`Add the plugin '${spec}'`);
       };
       actions.appendChild(addBtn);
       row.appendChild(actions);

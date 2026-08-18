@@ -30,7 +30,8 @@ import { createAlsUsageCarrier }           from './usage-als.js';
 import { EnvFileVault }                     from './env-vault.js';
 import { FilesystemStore }                 from '@matatbread/matbot-storage-filesystem';
 import { FilesystemFileStore }             from '@matatbread/matbot-files-node';
-import { createBuiltinTools, createProviderTool, classifySpecifier, materializeRemote } from '@matatbread/matbot-tool-plugin';
+import { createBuiltinTools, createProviderTool, classifySpecifier, materializeRemote, remoteDependencyNotes,
+         findDuplicateSingletons, describeDuplicateSingleton, type MaterializedRemote } from '@matatbread/matbot-tool-plugin';
 import { LookupKnowledgeIndex }               from '@matatbread/matbot-core';
 import { access, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { readFileSync }                     from 'node:fs';
@@ -127,17 +128,32 @@ async function resolvePluginSpecifiers(specifiers: readonly string[], configDir:
   const req = createRequire(path.join(configDir, '_'));
   const dotPlugins = path.join(configDir, '.plugins');
   const results: PluginLoadRequest[] = [];
+  // Deferred to after the loop: a remote plugin's dependency may be another remote plugin configured
+  // LATER, whose files (and name link) do not exist while this one is being fetched.
+  const materialized: { spec: string; m: MaterializedRemote }[] = [];
+  const adviceBySpec = new Map<string, string>();
 
   for (const spec of specifiers) {
     const classified = await classifySpecifier(spec, configDir);
     let importSpec: string;
 
-    if (classified.kind === 'remote') {
+    if (classified.kind === 'http') {
+      // A specifier that still works but should be rewritten: said once at boot, and carried as a note so
+      // it is also attached to the failure if this plugin turns out not to load.
+      if (classified.advice !== undefined) {
+        console.warn(`[matbot] ${classified.advice}`);
+        adviceBySpec.set(spec, classified.advice);
+      }
       try {
-        importSpec = pathToFileURL(await materializeRemote(spec, dotPlugins, configDir, forceRefresh)).href;
+        const m = await materializeRemote(spec, dotPlugins, configDir, forceRefresh);
+        importSpec = pathToFileURL(m.entry).href;
+        materialized.push({ spec, m });
       } catch (e) {
-        console.warn(`[matbot] Could not fetch remote plugin "${spec}": ${e instanceof Error ? e.message : String(e)}`);
-        results.push({ spec, importSpec: spec });  // unresolved — let loadPlugins surface the failure
+        const reason = e instanceof Error ? e.message : String(e);
+        console.warn(`[matbot] Could not fetch remote plugin "${spec}": ${reason}`);
+        // Unresolved: loadPlugins reports the failure, but importing an http URL fails on the scheme
+        // and says nothing about the fetch — so hand it the reason we already have.
+        results.push({ spec, importSpec: spec, notes: [`could not be fetched: ${reason}`] });
         continue;
       }
     } else if (classified.kind === 'local' || classified.kind === 'missing-path') {
@@ -165,8 +181,22 @@ async function resolvePluginSpecifiers(specifiers: readonly string[], configDir:
       spec,
       importSpec,
       ...(meta.name     !== undefined ? { name:     meta.name }     : {}),
+      ...(meta.version  !== undefined ? { version:  meta.version }  : {}),
       ...(meta.runtimes !== undefined ? { runtimes: meta.runtimes } : {}),
     });
+  }
+
+  // Every remote is now on disk, so an unsatisfied dependency really is unsatisfied. Warned here
+  // because the plugin may well load anyway (an unused declaration, an import the regex over-collected);
+  // carried as `notes` so that IF it does fail, the recorded failure says why rather than naming a file.
+  for (const { spec, m } of materialized) {
+    const notes = await remoteDependencyNotes(m);
+    for (const note of notes) console.warn(`[matbot] Plugin "${spec}" ${note}`);
+    const advice = adviceBySpec.get(spec);
+    const all = advice !== undefined ? [...notes, advice] : notes;
+    if (all.length === 0) continue;
+    const entry = results.find(r => r.spec === spec);
+    if (entry !== undefined) entry.notes = all;
   }
 
   return results;
@@ -1203,6 +1233,15 @@ async function main(): Promise<void> {
   recordOrigPaths(providerModules);
 
   await loadPluginsWithDescriptions(resolvedPluginMods, services, path.dirname(configPath));
+
+  // Said once, now that the installed set is known and before anything uses it. A second copy of a host
+  // singleton is survivable by design — which is precisely why nothing else would ever mention it — and
+  // it is not repaired here: replacing a package-manager-installed directory with a symlink invites the
+  // next `install` to undo it. `plugin list` reports the same thing on demand.
+  for (const dup of await findDuplicateSingletons({
+    configDir: path.dirname(configPath),
+    plugins:   getRegisteredPlugins(),
+  })) console.warn(`[matbot] ${describeDuplicateSingleton(dup)}`);
 
   // The pre-scan opened a manifest storageBackend directly, before the loader knew the plugin's name,
   // so the scoped register() that records a service key never ran. Attribute it now that names exist,

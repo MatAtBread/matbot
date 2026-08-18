@@ -77,6 +77,29 @@ export interface PluginListResult {
   failed?:       FailedPlugin[] | undefined;
   /** Tools registered by the host rather than by any plugin. */
   builtinTools?: ToolSummary[] | undefined;
+  /** Second copies of a host singleton that something would resolve to. Absent ⇒ none, or a host that
+   *  cannot tell (the browser resolves every specifier through one import map, so it cannot have two). */
+  duplicateSingletons?: DuplicateSingleton[] | undefined;
+}
+
+/**
+ * A second physical copy of `plugin-api` or `core`, found where something would actually resolve it.
+ *
+ * Reported rather than repaired: duplication is survivable by design (singleton state lives on
+ * `globalThis`, errors are brand-checked rather than `instanceof`'d — see docs/duplicate-singletons.md),
+ * and replacing a package-manager-installed directory with a symlink invites the next `install` to undo it.
+ */
+export interface DuplicateSingleton {
+  /** The singleton's package name. */
+  package:     string;
+  /** The version this host is running. */
+  hostVersion: string;
+  /** The version the other copy declares. */
+  version:     string;
+  /** The other copy's real directory — symlinks resolved, which is how a link to the host is excluded. */
+  dir:         string;
+  /** What resolves to it: plugin names, and/or the config directory. */
+  reachedFrom: string[];
 }
 
 /** One installable plugin found by `plugin discover_local`. */

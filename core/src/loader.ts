@@ -62,8 +62,17 @@ let freshSeq = 0;
  *   - `name` — the canonical plugin name, when the host has already derived it (e.g. by
  *     reading the resolved package.json). Bypasses `resolver.identify(spec)` — necessary
  *     because `spec` (a remote URL, a versioned npm range) may not itself identify the name.
+ *   - `version` — the package.json `version`, when the host has already read it. Same reason as
+ *     `name`: `resolver.version(spec)` starts from `spec`, which for a bare name, a URL or a
+ *     version range locates no manifest at all.
  *   - `runtimes` — the package.json `matbotRuntime`, when the host has already read it; used
  *     for the pre-import gate in place of `resolver.runtimes(spec)`.
+ *   - `notes` — what the host noticed while resolving that would explain a failure but does not
+ *     itself cause one: a dependency it could not satisfy, an import shape it cannot fetch, a fetch
+ *     that failed before the import was even attempted. Appended to any failure recorded for this
+ *     spec, because the failure that surfaces is downstream of the cause (a missing dependency
+ *     arrives as ERR_MODULE_NOT_FOUND naming a file) — and dropped entirely if the plugin loads,
+ *     since a host cannot tell an unused declaration from a fatal one.
  *
  * @param bustCache When true, the URL imported for each specifier gets a unique
  *   `${FRESH_PARAM}` query stamp appended before importing — either a host-pre-resolved
@@ -91,13 +100,22 @@ let freshSeq = 0;
  *   only as a confusing empty-result error downstream — fail loudly with the reason instead.
  */
 export async function loadPlugins(
-  specifiers: readonly (string | { spec: string; importSpec?: string; name?: string; runtimes?: readonly Runtime[] })[],
+  specifiers: readonly (string | { spec: string; importSpec?: string; name?: string; version?: string; runtimes?: readonly Runtime[]; notes?: readonly string[] })[],
   services:   MatbotMachine,
   bustCache = false,
   prompt?:    PromptFn,
   onLoadError: 'skip' | 'throw' = 'skip',
 ): Promise<MatbotPlugin[]> {
-  const reqs = specifiers.map(s => (typeof s === 'string' ? { spec: s } : s) as { spec: string; importSpec?: string; name?: string; runtimes?: readonly Runtime[] });
+  const reqs = specifiers.map(s => (typeof s === 'string' ? { spec: s } : s) as { spec: string; importSpec?: string; name?: string; version?: string; runtimes?: readonly Runtime[]; notes?: readonly string[] });
+
+  // A reason reaching a user, decorated with what the host noticed while resolving this spec. The
+  // failure a load reports is usually downstream of its cause, and the host is the only layer that
+  // saw the cause.
+  const notesBySpec = new Map(reqs.filter(r => r.notes !== undefined && r.notes.length > 0).map(r => [r.spec, r.notes!]));
+  const withNotes = (spec: string, reason: string): string => {
+    const notes = notesBySpec.get(spec);
+    return notes === undefined ? reason : `${reason}\nNoted while resolving it:\n${notes.map(n => `  - ${n}`).join('\n')}`;
+  };
   if (bustCache) {
     console.debug(
       `[matbot] cache-bust requested for ${specifiers.length} plugin(s); the entry is re-evaluated, ` +
@@ -118,9 +136,9 @@ export async function loadPlugins(
     ),
   );
 
-  const toLoad: { spec: string; importSpec: string; resolvedUrl: string; name?: string; runtimes?: readonly Runtime[] }[] = [];
+  const toLoad: { spec: string; importSpec: string; resolvedUrl: string; name?: string; version?: string; runtimes?: readonly Runtime[] }[] = [];
   for (let i = 0; i < reqs.length; i++) {
-    const { spec, importSpec, name } = reqs[i]!;
+    const { spec, importSpec, name, version } = reqs[i]!;
     const runtimes = declared[i];
     if (runtimes !== undefined && runtimes.length > 0 && !runtimes.includes(CURRENT_RUNTIME)) {
       if (onLoadError === 'throw') {
@@ -139,6 +157,7 @@ export async function loadPlugins(
       // live plugin set). Falls back to the bare spec when the host pre-resolved nothing.
       resolvedUrl: importSpec ?? spec,
       ...(name     !== undefined ? { name }     : {}),
+      ...(version  !== undefined ? { version }  : {}),
       ...(runtimes !== undefined ? { runtimes } : {}),
     });
   }
@@ -157,7 +176,8 @@ export async function loadPlugins(
   // from a `'load'` failure (import rejection — a bad path, a syntax error). Only the former is
   // permanently-not-a-plugin: it throws NotAPluginError so the `add` flow can roll back the config
   // write, where an import failure may be a fixable typo and is left in config.
-  const failLoad = (spec: string, reason: string, kind: 'load' | 'shape' = 'load'): void => {
+  const failLoad = (spec: string, rawReason: string, kind: 'load' | 'shape' = 'load'): void => {
+    const reason = withNotes(spec, rawReason);
     if (onLoadError === 'throw') throw kind === 'shape' ? notAPluginError(spec, reason) : new Error(reason);
     console.warn(`[matbot] Skipping plugin "${spec}": ${reason}`);
     recordFailedPlugin({ specifier: spec, error: reason });
@@ -216,7 +236,11 @@ export async function loadPlugins(
     const name     = toLoad[i]!.name ?? (services.resolver !== undefined ? await services.resolver.identify(spec) : defaultIdentify(spec));
     const source   = sourceOf(spec);
     const runtimes = toLoad[i]!.runtimes;
-    const version  = services.resolver?.version !== undefined ? await services.resolver.version(spec) : undefined;
+    // Like `name`: the host's own reading wins, because it read the package.json it actually
+    // imported. `resolver.version(spec)` cannot — `spec` may be a bare name, a URL or a version
+    // range, none of which locate a manifest, so a plugin configured by name reported no version.
+    const version  = toLoad[i]!.version
+      ?? (services.resolver?.version !== undefined ? await services.resolver.version(spec) : undefined);
     const plugin: MatbotPlugin = {
       ...spec_obj,
       name,
@@ -248,7 +272,7 @@ export async function loadPlugins(
       // Graceful but not silent: record the setup failure (skip mode — the boot batch) so the `plugin`
       // tool and web UI can show it. Explicit single loads (`onLoadError: 'throw'`) surface the error to
       // the caller directly, so they are not added to the persistent failed list.
-      if (onLoadError === 'skip') recordFailedPlugin({ specifier: spec, name: plugin.name, error: reason });
+      if (onLoadError === 'skip') recordFailedPlugin({ specifier: spec, name: plugin.name, error: withNotes(spec, reason) });
       // Roll back partial registration so a failed load leaves no ghost state. setupPlugin
       // can throw after the plugin is already in the registry with some of its tools / hooks /
       // services / provider / storage wired (a wrong-platform plugin touching a missing

@@ -41,7 +41,8 @@ core/              — @matatbread/matbot-core: agentic loop, hook dispatch, plu
                        ./providers-base — SSE parser, HTTP helpers (write a provider)
                        ./storage-base   — filter/sort engine, StoreQuery (write a storage backend)
 plugins/            — one directory per package, flat but for the frontend/providers/storage groups
-    tool-plugin/   — built-in provider/plugin management tools (node)
+    tool-plugin/   — ALL of node's plugin support (node): the acquisition library the host drives,
+                     plus the `plugin`/`provider` tools over it. See "Acquisition vs. management" below
     rumsfeld/      — contextual_search + find_fact tools; knowledge fault handler
     persist-ki-bge/— persistent KnowledgeIndex + BGE reranker
     triggers/      — data-driven hooks (condition → tool invocation)
@@ -84,6 +85,30 @@ apps/
 ```
 
 **Dependency direction:** `apps` → `plugins/*-node` → `plugins/*` → `core` → `plugin-api`. Nothing in `plugin-api/`, `core/`, or `plugins/` may depend on `apps/`.
+
+### Acquisition vs. management
+
+Plugin **management is core's** — `loadPlugins` plus the registry own the whole lifecycle: the pre-import
+runtime gate, the import, shape verification, identity stamping, register + setup, rollback, the failed
+list, name↔specifier mapping. Nothing about that is in a plugin, and core depends on nothing but
+`plugin-api`.
+
+Plugin **acquisition is `tool-plugin`'s**: turning a config string into something importable —
+`classifySpecifier` (local / npm / http), materialising an http plugin into `.plugins/`, provisioning a
+local one's dependencies with npm, reporting a duplicated singleton. It cannot live in core, because every
+line of it is `node:fs`, `node:child_process`, `createRequire` and symlinks, and **core must run in the
+browser**. The browser's own acquisition is `apps/web-bundle`'s bootstrap (fetch → type-strip → `blob:`),
+and both hosts hand the neutral loader the same pre-resolved `{ spec, importSpec }`.
+
+So `tool-plugin` deliberately holds two things with two audiences: **the acquisition library, whose main
+consumer is `apps/cli`'s boot and not the tools at all**, and the LLM-facing `plugin`/`provider` tools.
+That is not drift awaiting a split — one half without the other has no use, and a package per concern would
+buy a name at the cost of a package. Expect to find ~800 lines in here that no tool calls.
+
+The seam a future split would use already exists and is deliberately short of acquisition:
+`PluginResolver` (`plugin-api/src/plugin.ts`) is the host-injected `identify`/`version`/`runtimes`, for
+exactly the reason above — host-specific, so injected rather than in the neutral core. Extending it with
+`acquire()` is the shape to reach for IF a second node host ever needs acquisition without the tools.
 
 ### The `/host` boundary
 
