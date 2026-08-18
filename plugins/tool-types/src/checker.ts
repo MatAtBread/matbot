@@ -116,10 +116,22 @@ async function runWorker(data: Record<string, unknown>): Promise<DiagnosticRecor
   return result.ok ? null : (result.diagnostics ?? []);
 }
 
-/** Typecheck a compiled plugin's build dir against its own tsconfig. `output` is the full annotated
- *  report (anchored frames, related locations, hints, cascade-capped). */
-export async function checkProjectDir(buildDir: string): Promise<CheckResult> {
-  const diags = await runWorker({ mode: 'project', buildDir });
+/**
+ * Typecheck a compiled plugin's build dir against its own tsconfig. `output` is the full annotated
+ * report (anchored frames, related locations, hints, cascade-capped).
+ *
+ * `ownContracts` names the tools this compilation is entitled to declare a `ToolContracts` arm for — its
+ * own. Any other arm in the checked source is rejected like a cast: the dts is an input to generation,
+ * derived from the live registry, so an arm authored here asserts a shape nothing can contradict. Omit
+ * the option and the rule does not run (there is then no way to tell a self-declaration from an invention).
+ */
+export async function checkProjectDir(
+  buildDir: string, opts?: { ownContracts?: readonly string[] },
+): Promise<CheckResult> {
+  const diags = await runWorker({
+    mode: 'project', buildDir,
+    ...(opts?.ownContracts !== undefined ? { ownContracts: [...opts.ownContracts] } : {}),
+  });
   if (diags === null) return { ok: true, output: '' };
   const parts: string[] = [];
   if (diags.length > 1) parts.push(`${diags.length} errors. Fix the FIRST error first — later errors often cascade from it.\n`);
@@ -237,6 +249,35 @@ try {
     return { file: sf, start: node.getStart(sf), length: node.getWidth(sf), code: code,
              category: ts.DiagnosticCategory.Error, messageText: msg, __syn: true };
   };
+  // ── contract gate: a generated tool declares its OWN ToolContracts arm and nobody else's ──
+  // The dts is an INPUT to code generation, derived from the live registry. A generated file that adds an
+  // arm for another tool is not describing anything — it is asserting a shape tsc then has no way to
+  // contradict, so a wrong guess compiles and fails at runtime. Measured, when the derived dts was
+  // unavailable and the model wanted \`whoami\`: it declared \`ToolContract<{ id: string; type: string }, {}>\`
+  // for it, which compiled clean and only resembled the real \`Principal\`. The cast gate cannot see this —
+  // nothing is cast. Only enforced when the caller says which names are the compilation's own; absent that
+  // list the rule cannot tell an invention from a legitimate self-declaration, so it does not run.
+  const own = Array.isArray(workerData.ownContracts) ? workerData.ownContracts : null;
+  const contractVisit = function (node, sf) {
+    if (own && ts.isModuleDeclaration(node) && ts.isStringLiteral(node.name)
+        && node.name.text === '@matatbread/matbot-plugin-api' && node.body && node.getStart(sf) >= minStart) {
+      node.body.forEachChild(function (decl) {
+        if (!ts.isInterfaceDeclaration(decl) || decl.name.text !== 'ToolContracts') return;
+        for (const member of decl.members) {
+          const name = member.name && member.name.getText ? member.name.getText(sf) : '';
+          if (name === '' || own.indexOf(name) !== -1) continue;
+          synth.push(mk(sf, member, 90004,
+            "the contract for '" + name + "' is not yours to declare — tool contracts come from the ambient " +
+            "tool dts, which is derived from the live registry. Declaring one here asserts a shape nothing " +
+            "can check, so a wrong guess compiles and fails at runtime. Delete this member: call the tool as " +
+            "'await tool." + name + "(...)' and use the value it returns, whose type is already precise. If '" +
+            name + "' is absent from the ambient dts then no such tool is loaded and it cannot be called at all."));
+        }
+      });
+    }
+    ts.forEachChild(node, function (c) { contractVisit(c, sf); });
+  };
+
   const skip = new Set();
   const visit = function (node, sf) {
     const isAssertion = ts.isAsExpression(node) || (ts.isTypeAssertionExpression && ts.isTypeAssertionExpression(node));
@@ -261,7 +302,7 @@ try {
     }
     ts.forEachChild(node, function (c) { visit(c, sf); });
   };
-  for (const gf of gateFiles) visit(gf, gf);
+  for (const gf of gateFiles) { visit(gf, gf); contractVisit(gf, gf); }
 
   const errors = targets.filter(function (d) { return d.category === ts.DiagnosticCategory.Error; }).concat(synth);
   errors.sort(function (a, b) {

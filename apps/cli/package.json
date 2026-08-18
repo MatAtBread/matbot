@@ -59,6 +59,7 @@
     "@matatbread/matbot-function-tools": "workspace:^",
     "@matatbread/matbot-tool-types": "workspace:^",
     "@matatbread/matbot-storage-profiles": "workspace:^",
-    "@matatbread/matbot-sessions": "workspace:^"
+    "@matatbread/matbot-sessions": "workspace:^",
+    "@matatbread/matbot-tool-skill-compiler": "workspace:^"
   }
 }

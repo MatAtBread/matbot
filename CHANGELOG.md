@@ -11,6 +11,96 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ## 0.4.5
 
+### Breaking changes
+
+The plugin-loading rework changes how an existing install resolves what it already has configured. None of
+it is a migration you have to perform, but each item can make a working install behave differently, so all
+of them are listed — including the ones that only bite in a source checkout.
+
+**A configured plugin that appeared to load may now fail loudly.** The http route used to lex each module
+with regexes and *silently skip* anything it could not classify — an import that resolved nowhere was simply
+never fetched, and the plugin either worked by luck or failed later with a message about a file. Node now
+resolves the graph, so an unresolvable import fails at load, naming the specifier and the importer. Nothing
+resolves *less* than before (dynamic, root-relative and absolute-URL imports resolve for the first time);
+what changes is that a latent failure is now reported instead of deferred. If a fetched plugin stops loading
+after this upgrade, the error names the missing dependency, and the fix is one of: install it beside matbot,
+add it to `plugins:` if it is itself a plugin, or import it by URL.
+
+**A bare name in `plugins:` now prefers a local package that declares it.** Previously a name was matched
+against the filesystem only as a *path*, so `@scope/name` came from the registry or `node_modules`. Now a
+package under `<configDir>/plugins` (two deep) declaring that name wins. Only installs that keep a `plugins/`
+directory next to `matbot.yaml` are affected — for them, a name that used to load an installed copy may now
+load local source instead. A `@<range>` suffix, or `npm:`, still always means the registry.
+
+**`github:owner/repo#path:sub` resolves differently.** The legacy pnpm fragment used to switch the specifier
+to a package-manager install; it is now folded into the URL path and fetched over https like any other
+subdirectory, and warns once naming the modern form (`github:owner/repo/sub#ref`). The old behaviour was not
+meaningfully working — npm ignores `#path:` and installs the *entire monorepo* under the repo's name while
+reporting success, and pnpm extracts the right package but leaves `workspace:` peers unmet — so an install
+that relied on the whole-monorepo side effect will see a different tree.
+
+**`plugin add` on a local path may now run npm in that plugin's directory** — but only for a plugin that
+declares plain registry ranges. A manifest carrying **any** `workspace:`/`catalog:`/`link:`/`file:`/URL range
+returns before npm is invoked at all (not "npm runs and finds nothing"), and says so in one line. That covers
+every plugin bundled with this repo, whose dependencies are all `workspace:` or `catalog:`, so **a source
+checkout sees no change** — and it is all-or-nothing by design: a mixed manifest is left entirely alone
+rather than partly provisioned. Where it does apply — the vendor-wrapping case the feature exists for — it
+resolves the dependencies first and lists the resolved set, transitives included, in the approval you are
+already being asked for; the directory then gains `node_modules` and `package-lock.json`, and because the
+install phase is `npm ci`, **an existing `node_modules` there is deleted first**, so anything hand-placed in
+it is lost.
+
+**`plugin add` records the canonical package name, not the path you gave it.** New entries only; existing
+`matbot.yaml` entries are untouched. Anything that greps the config for `./plugins/...` should expect a name.
+
+**`.plugins/` gains `node_modules/@matatbread/{matbot-plugin-api,matbot-core}` symlinks** pointing at the
+host's own copies — this is what lets a fetched plugin import them. A real directory sitting at either of
+those paths is replaced. The cache is matbot-owned, so this should be invisible; it is listed because the
+directory is also mounted read-only into docker-bash.
+
+**A second copy of `plugin-api` or `core` now warns at boot.** Nothing breaks — the duplication was already
+there and is survivable by design — but an install that has one (commonly: a plugin installed from npm whose
+peer dependency was auto-installed rather than deduped) will see a new warning naming the directory and both
+versions.
+
+**Two boot diagnostics are gone.** The source-scanned "unsatisfied import" warnings predicted failures from a
+regex scan; the resolver now reports the real thing. The manifest-derived one (a declared dependency nothing
+satisfies) stays. Anything parsing boot output for the old wording will not find it.
+
+**For anyone importing `@matatbread/matbot-tool-plugin` directly** (no first-party consumer does), three
+exported signatures changed: `Classified` loses its `'remote'` and `'pnpm-url'` arms and gains `'http'`
+(carrying `url` and an optional `advice`); `materializeRemote` returns `{ entry, pkgRoot, unsatisfied }`
+instead of the entry path; and `fetchRemoteManifest(spec)` now takes `(spec, dotPlugins, live?)`.
+
+**A recompiled plugin's scaffold is rewritten.** `skill_compiler` now states its compiler options inline
+instead of extending `<configDir>/tsconfig.base.json`, writes `peerDependencies: { …plugin-api: "*" }` rather
+than `workspace:^`, and adds a `description`. On the next compile or iterate of an existing compiled plugin,
+its `package.json` and `tsconfig.json` are overwritten accordingly, so hand edits to either are lost. A
+plugin-api link left dangling by an earlier build is replaced rather than trusted, and an unresolvable
+plugin-api is now a build error instead of a link that fails the typecheck on line 1.
+
+### API gaps filled
+
+- **`PluginListResult` gains `duplicateSingletons`: a second copy of `plugin-api` or `core`.** Reported
+  beside `failed` because it is the same kind of fact — something about the installed set worth knowing
+  that nothing else would surface. A second copy is a different module object (separate state,
+  `instanceof` false across the seam), and matbot is hardened against exactly that, so the design that
+  makes duplication survivable also makes it silent.
+
+- **A plugin load request accepts `version`: the package.json version the host already read.** It travels
+  beside `name` and for the same reason — `resolver.version(spec)` starts from the *config* specifier, and
+  a bare name, a URL or a version range locates no manifest, so a plugin configured portably reported no
+  version while the identical plugin configured as `./plugins/foo` reported one. The host reads the
+  package.json it is about to import; it had no channel to say so. Its reading wins, and nothing is
+  invented when neither side knows.
+
+- **A plugin load request accepts `notes`: what the host noticed while resolving.** The failure a load
+  reports is usually downstream of its cause — a dependency the host could not satisfy arrives as
+  `ERR_MODULE_NOT_FOUND` naming a file — and the host is the only layer that saw the cause. `notes` are
+  folded into any failure `loadPlugins` records for that specifier, so the `plugin` tool and web UI show
+  the reason rather than the symptom, and dropped entirely if the plugin loads anyway: a host cannot
+  distinguish an unused declaration from a fatal one.
+
 ### Optional
 
 #### cli
@@ -35,6 +125,177 @@ churn and less likely to affect a consumer who doesn't use them.
   what a keyless endpoint (`chatjimmy`, `customer-services`) wants: an empty value is the vault's
   removal signal, so persisting one would leave the config naming a key that does not exist, and boot
   prompts for a missing secret and rejects a blank answer.
+
+#### tool-types
+
+- **The tool dts is anchored on plugin-api from this module too, not the project root alone.** The anchor was
+  `<projectRoot>/plugin-api/src/index.ts`, else a require from the project dir; a deployment where matbot is
+  not resolvable there (installed globally, or a config dir outside the project) got `null` — and the
+  *silence* was the damage. `skills_compiler` then falls back to a three-arm hardcoded stub while still
+  telling the model "a tool not declared here does not exist", so generated code is graded against a registry
+  view that omits most live tools. Measured: asked to call `whoami`, the model declared a `ToolContracts` arm
+  for it *itself*, inventing `{ id: string; type: string }` — which compiled clean and merely resembled the
+  real `Principal`. A wrong guess would have compiled too, and the cast gate cannot see it: nothing was cast,
+  a contract was asserted. `tool-types` peer-depends on plugin-api, so its own resolution always works; this
+  is the same fix, and the same reasoning, as the compiled-plugin scaffold's link.
+
+#### skill-compiler
+
+- **The hardcoded three-arm `ToolContracts` fallback is gone; a compile that cannot derive contracts fails.**
+  The dts is an *input* to code generation, derived from the live registry — it is not something the model
+  authors. A stub is not a smaller truth but a false one: the codegen prompt asserts "a tool not declared here
+  does not exist", so under three arms that sentence is wrong about most of the registry, and the model closes
+  the gap by declaring contracts itself. An empty *derived* set is fine and is not this case ("we know of no
+  tools" is true); an undeclarable one now yields no plugin rather than a guessed one.
+
+- **A generated tool may declare its own `ToolContracts` arm and no other.** Enforced structurally, like the
+  cast gate and for the same reason: tsc accepts an arm the model authors, so a hallucinated contract compiles
+  and fails at runtime, and no amount of prompt prose closes that. `checkProjectDir` takes `ownContracts` and
+  rejects any other arm with a diagnostic that says what to do instead — call the tool and use the type it
+  already has — so the repair loop fixes it rather than the compile shipping it. Measured before this existed:
+  a compile needing `whoami` declared `ToolContract<{ id: string; type: string }, {}>` for it, which typechecked
+  clean and merely resembled the real `Principal`.
+
+- **A cancelled install is no longer reported as success — on either path.** The verification (is the compiled
+  tool actually resolvable?) was skipped whenever the plugin was already configured, which assumed a reload
+  always has an old version still loaded. When it does not — a build dir deleted under a config that still
+  lists it, so the boot load failed — a cancelled reload reported `installed` *and went on to hide the source
+  skill*, leaving neither a tool nor a visible skill. What remains genuinely undetectable is a cancelled reload
+  masked by a still-resolvable older version.
+
+- **A compiled plugin describes itself.** The generated plugin now carries `manifest.description` — the
+  tool's own one-line description — so `plugin list` no longer shows a blank beside every
+  `@local/compiled-*` package. It never had one: the template declared `apiVersion` and `setup` only, and a
+  loaded plugin's description is read from its manifest alone.
+
+- **A compiled plugin's build dir no longer assumes `matbot.yaml` sits at a source checkout's root.** The
+  generated tsconfig extended `<configDir>/tsconfig.base.json` and the `node_modules` link pointed at
+  `<configDir>/plugin-api`; an installed deployment has neither, and both failures were silent.
+  `symlink()` succeeds against a nonexistent target, so the link dangled and the plugin failed its own
+  typecheck with `TS2307: Cannot find module '@matatbread/matbot-plugin-api'` on line 1 — an error
+  attributed to the model's code that the repair loop cannot fix and burns all four passes on, beside a
+  HINT saying that module is the only importable one. An unreadable `extends` is not an error either, so
+  `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes` and `erasableSyntaxOnly` quietly stopped
+  applying — and the last of those is what keeps a plugin loadable, so an `enum` passed the gate and then
+  died at import as "not supported in strip-only mode". The scaffold now states its compiler options
+  instead of inheriting them (the same ones, so a checkout is unchanged) and resolves plugin-api the way
+  the remote-plugin bridge does; unresolvable is an error, and a dangling link from an earlier build is
+  replaced rather than trusted. `paths` is gone with it, so the link is the single mechanism both tsc and
+  Node resolve through — two meant a typecheck could pass while the import failed.
+
+#### tool-plugin
+
+- **A second copy of a host singleton is named, at boot and in `plugin list`.** Nothing is re-linked:
+  replacing a package-manager-installed directory with a symlink invites the next `install` to undo it, and
+  the failure averted is one the design already survives. The test is `realpath`, not path existence, and
+  that is the whole feature — the symlink farm under `.plugins/node_modules`, a compiled plugin's scaffold
+  link and a provisioned plugin's `node_modules` all hold an entry named `@matatbread/matbot-plugin-api`
+  pointing *at* the host's copy, so all three collapse to the host's realpath and stay quiet. Resolution is
+  probed from where each loaded plugin actually lives and from the config dir, since "what would this plugin
+  get?" is a question a resolver answers and a directory listing only guesses at — while the host's own copy
+  is resolved from the host, never from the config dir, or a copy installed beside `matbot.yaml` is mistaken
+  for the host's own.
+
+- **Node resolves a fetched plugin's module graph; the regex crawler is gone.** `materializeRemote` used to
+  lex every module with three regexes and fetch the whole graph ahead of Node. A lexer guessing at a module
+  graph got three things wrong, silently: `import(variable)` was invisible so a computed dynamic import was
+  never fetched; a root-relative specifier has no package name, so `/ms@2.1.3/es2022/ms.mjs` — what esm.sh
+  rewrites every dependency import to — was filed as a package called `''`, whose symlink path collapsed to
+  the farm's own directory and therefore "resolved"; and an absolute URL import was dropped from both
+  buckets and failed at load. Fetching now happens where resolution does: a module hook maps a file under
+  `.plugins/<host>/…` back to its origin URL and fetches what is missing, so all three work. Only the
+  manifest and the entry are fetched up front — the manifest first, so the `matbotRuntime` gate still runs
+  before any of the plugin's code is on disk. Identity stays `file:`, so `import.meta.url`,
+  `createRequire`, `discover_local`'s walk and docker-bash's read-only mount all keep working; a `.origin`
+  file per host records the scheme the mirrored path cannot carry. Warm boots still make zero requests and
+  still work offline. What it can no longer do is skip silently: an unresolvable import fails naming the
+  specifier *and* the importer, so the two source-scanned diagnostics are retired — they predicted failures
+  now either fixed or reported accurately. The crawler's `linkHostPackages` goes too; bare imports resolve
+  through Node, which finds a sibling plugin's self-link and the host singletons linked in beside it.
+
+- **The host singletons are linked into `.plugins/node_modules`, so a fetched plugin can import them.**
+  Resolving them in the module hook instead cannot work, and briefly did not: the only anchor a hook has is
+  its own file, and `apps/cli` depends on `core`, not on `plugin-api`, so the retry could never reach the
+  package it existed for. Walking up from the cache does not save it either — in an installed deployment
+  `.plugins/` sits under a project whose flat `node_modules/@matatbread/…` lies above it and the walk
+  succeeds by luck of layout, while a pnpm workspace keeps its links inside each package, so a source
+  checkout's root holds no `@matatbread` at all. A link is the disk's version of the browser bundle's import
+  map and every resolver honours it — the ESM resolver, `createRequire`, tsc — instead of ESM alone. It
+  points at the host's own directory, so the duplicate-singleton report resolves it to the same realpath and
+  stays quiet; a link that no longer leads there is replaced rather than trusted.
+
+- **An unresolvable bare import names the file that imported it.** `nextResolve` merges the context it is
+  handed into the shared context object, so the hook's retry (which sets `parentURL` to its own file to ask
+  the host) overwrote the field the error message then read: every such failure was reported as
+  `imported by …/apps/cli/ts-hooks.js`, pointing the reader at the hook rather than the plugin.
+
+- **Five acquisition kinds collapse to three routes: `local` | `npm` | `http`.** Two of the five were the
+  same route reached by punctuation — a `.tgz` was `pnpm-url` while a directory URL was `remote`, and
+  `github:o/r#path:sub` switched mechanism on the strength of a `#`. `github:` is now plain http, and the
+  legacy `#path:` fragment folds into the URL path while advising the modern form, which resolves
+  identically; it never worked as a package-manager install (npm ignores `#path:` and installs the whole
+  monorepo, reporting success; pnpm leaves `workspace:^` peers unmet). A scoped `@scope/name` is checked on
+  disk before the registry like any other bare name, and `npm:` is the one explicit override. A specifier
+  that still works but should be rewritten says what to replace it with — once at boot, and again attached
+  to the failure if that plugin does not load.
+
+- **`plugin add` records the canonical package name, not the path it was given.** A path is right only for
+  one working copy, while the name resolves in a checkout and in an installed deployment alike and is the
+  handle `remove`/`reload` address a plugin by — the rule the `provider` tool and the setup wizard have
+  always followed for provider modules. Only when the name resolves *back* to the directory just approved,
+  so a compiled plugin under `compiled-plugins/`, a sibling checkout reached by `../`, or a directory
+  declaring a name that belongs to a different package all keep their path. The web UI's add/remove buttons
+  name a local plugin the same way (a cached remote keeps its URL, which is how it resolves).
+
+- **A bare name is local if anything here *declares* it, not if a path of that shape exists.** The local
+  test was a path test, and a package's path has nothing to do with its name: `@matatbread/matbot-edit-session`
+  is `plugins/edit-session`. So in a full checkout the portable form of every first-party plugin fell through
+  to the registry — `plugin add` would install a published copy of code already on disk (a second package,
+  free to skew in version, shadowing the source being worked on), and a `plugins:` entry naming one failed
+  outright with `Cannot find package`; only the few the CLI itself depends on resolved, by accident of its
+  own node_modules. The disk is now asked what it can answer — "does a package under `plugins/` call itself
+  this?" — over the same two-deep root `discover_local` scans, so a name that tool reports is a name that
+  resolves. A `@<range>` suffix stays a registry question whatever is local, since a constraint is exactly
+  what a filesystem cannot solve, and `.plugins/` is not consulted: a fetched plugin's identity is its URL.
+
+- **A local plugin's own dependencies are installed when it is added**, so wrapping a third-party module
+  in a tool works locally. The local route resolved nothing: a local plugin's bare imports were whatever
+  happened to be installed around it — always true in a workspace checkout, rarely anywhere else — so the
+  identical plugin loaded over http and failed as `./mine` with `Cannot find package 'debug'`.
+  `plugin add` now resolves the declared dependencies with npm's `--package-lock-only` *before* asking,
+  folds the resolved set (transitives included) into the approval it was already asking for, and then
+  `npm ci` installs exactly that. Always npm, because `pnpm install` inside a workspace walks up, reports
+  "Already up to date" and installs nothing. `--ignore-scripts` on both phases. `--omit=peer` is
+  load-bearing rather than hygiene: without it npm fetches a second `@matatbread/matbot-plugin-api` from
+  the registry at whatever version is published (measured: 0.4.4 beside a host running 0.4.5), so host
+  singletons are linked to the host's copy afterwards instead — after, because `npm ci` deletes
+  node_modules first. A manifest carrying `workspace:`, `catalog:`, `link:`, `file:` or a URL range is
+  left entirely alone and says so once; those mean "something already resolves me", which is every
+  in-repo plugin including the sqlite example.
+
+- **A remote (`github:`/`https://`) plugin's mirrored tree is now actually the cache.** `.plugins/` was
+  a write-only mirror: the crawl needs each module's content to find the next import, so it asked the
+  network for every file on every boot — and then discarded what came back, because `writeCached`
+  refuses to overwrite a mirrored file. Four HTTP requests per *warm* boot of a single plugin, all of
+  them redundant or self-defeating, and with the tree fully populated and the server unreachable the
+  `fetch` threw and the plugin was dropped from the boot. Every read is now tried against the tree
+  first, so a warm materialise makes **no requests at all** — which is the whole of the offline story,
+  since there is nothing left to ask for. Every candidate of the `.js`→`.ts` probe is tried on disk
+  before any is tried live, because the `.js` name is the preferred URL while the `.ts` name is what
+  gets mirrored. The trade is deliberate: a boot never picks up changed upstream source, and
+  `reload --refresh` — which evicts the subtree, and re-reads the manifest live so a moved entry is
+  noticed — is the one path that does. `fetchDeclaredFiles` is offline-tolerant for a related reason:
+  an asset that never cached is retried every boot, so a network error there took the whole boot down
+  for a file the plugin may never read.
+
+- **What this route cannot resolve is reported instead of skipped.** It fetches one package and
+  installs no dependency graph, which was silent in three ways: a bare import resolving nowhere the
+  host could see was skipped; a root-relative specifier (what esm.sh rewrites imports to) was filed as
+  a package named `''`, which "resolved" to the symlink farm's own directory and counted as success;
+  and a declared dependency on another matbot plugin — the one place such a dependency is named — was
+  never read. All three now surface, naming the package to install or the plugin to add to `plugins:`.
+  The check is deferred until every remote is materialised, so a plugin depending on a sibling
+  configured after it is not accused of missing it.
 
 ## 0.4.4
 
