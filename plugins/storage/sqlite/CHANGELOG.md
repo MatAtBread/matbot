@@ -4,6 +4,16 @@
 
 ### Patch Changes
 
+- Updated dependencies [99152f3]
+- Updated dependencies [20d87fe]
+- Updated dependencies [e65e2a3]
+  - @matatbread/matbot-plugin-api@0.4.5
+  - @matatbread/matbot-core@0.4.5
+
+## 0.4.4
+
+### Patch Changes
+
 - b62a000: A namespace is now stored under its own name, and validated where untrusted ones arrive.
 
   **SQLite no longer mangles table names.** A namespace became a table by replacing every character
@@ -77,16 +87,6 @@
   - **CachingStorageBackend** — forwards only when the wrapped backend has it, assigned per instance so
     `'namespaces' in backend` stays truthful. A decorator that always declared the method would answer
     for backends that cannot, turning a degradable capability into a runtime failure.
-
-- Updated dependencies [99152f3]
-- Updated dependencies [20d87fe]
-- Updated dependencies [e65e2a3]
-  - @matatbread/matbot-plugin-api@0.4.5
-  - @matatbread/matbot-core@0.4.5
-
-## 0.4.4
-
-### Patch Changes
 
 - The SQLite backend compiles `StoreQuery` to SQL instead of loading the namespace into memory.
 

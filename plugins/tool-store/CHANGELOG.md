@@ -4,6 +4,14 @@
 
 ### Patch Changes
 
+- Updated dependencies [99152f3]
+- Updated dependencies [20d87fe]
+  - @matatbread/matbot-plugin-api@0.4.5
+
+## 0.4.4
+
+### Patch Changes
+
 - b62a000: A namespace is now stored under its own name, and validated where untrusted ones arrive.
 
   **SQLite no longer mangles table names.** A namespace became a table by replacing every character
@@ -38,14 +46,6 @@
   and `Sessions` and `sessions` are one directory on macOS and Windows. Backends that cannot enumerate
   contribute nothing and an empty namespace is not reported, so it is one check among several rather
   than an oracle.
-
-- Updated dependencies [99152f3]
-- Updated dependencies [20d87fe]
-  - @matatbread/matbot-plugin-api@0.4.5
-
-## 0.4.4
-
-### Patch Changes
 
 - A generated store tool no longer silently discards a query grammar key passed beside `action`.
 

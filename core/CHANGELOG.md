@@ -4,6 +4,14 @@
 
 ### Patch Changes
 
+- Updated dependencies [99152f3]
+- Updated dependencies [20d87fe]
+  - @matatbread/matbot-plugin-api@0.4.5
+
+## 0.4.4
+
+### Patch Changes
+
 - 99152f3: The quiescent edge is the drained queue, not the end of a turn.
 
   A deferred machine mutation — the `StorageBackend` swap, the mount table's batched notifications —
@@ -106,14 +114,6 @@
   again on the next read. An unstamped version is always accepted, being a document the caller minted
   rather than read. A stale `cas` returns `{ ok: false }`, the loss every caller already handles; a stale
   `set` throws, having no other channel.
-
-- Updated dependencies [99152f3]
-- Updated dependencies [20d87fe]
-  - @matatbread/matbot-plugin-api@0.4.5
-
-## 0.4.4
-
-### Patch Changes
 
 - @matatbread/matbot-plugin-api@0.4.4
 

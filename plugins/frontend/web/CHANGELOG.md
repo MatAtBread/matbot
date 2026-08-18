@@ -4,6 +4,16 @@
 
 ### Patch Changes
 
+- Updated dependencies [99152f3]
+- Updated dependencies [20d87fe]
+- Updated dependencies [e65e2a3]
+  - @matatbread/matbot-plugin-api@0.4.5
+  - @matatbread/matbot-core@0.4.5
+
+## 0.4.4
+
+### Patch Changes
+
 - cf42a5a: Editing the session a turn is running in is deferred rather than refused, and compaction no longer
   leaves empty messages behind.
 
@@ -36,16 +46,6 @@
 
   The web frontend narrows `split`'s result before reading `newSessionId`, the deferred arm being
   unreachable there (the tool endpoint carries a stub session).
-
-- Updated dependencies [99152f3]
-- Updated dependencies [20d87fe]
-- Updated dependencies [e65e2a3]
-  - @matatbread/matbot-plugin-api@0.4.5
-  - @matatbread/matbot-core@0.4.5
-
-## 0.4.4
-
-### Patch Changes
 
 - @matatbread/matbot-core@0.4.4
 - @matatbread/matbot-plugin-api@0.4.4

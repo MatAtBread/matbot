@@ -3,6 +3,11 @@
 ## 0.4.5
 
 ### Patch Changes
+## 0.4.4
+
+## 0.4.3
+
+### Patch Changes
 
 - 99152f3: The quiescent edge is the drained queue, not the end of a turn.
 
@@ -87,12 +92,6 @@
   - **CachingStorageBackend** — forwards only when the wrapped backend has it, assigned per instance so
     `'namespaces' in backend` stays truthful. A decorator that always declared the method would answer
     for backends that cannot, turning a degradable capability into a runtime failure.
-
-## 0.4.4
-
-## 0.4.3
-
-### Patch Changes
 
 - **Breaking (optional service).** `WatchVisibility.visible` takes a `VisibilityQuery` object and is
   consulted for **every** notification kind.

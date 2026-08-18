@@ -4,6 +4,24 @@
 
 ### Patch Changes
 
+- Updated dependencies [99152f3]
+- Updated dependencies [20d87fe]
+- Updated dependencies [e65e2a3]
+  - @matatbread/matbot-core@0.4.5
+  - @matatbread/matbot-storage-filesystem@0.4.5
+  - @matatbread/matbot-files-node@0.4.5
+  - @matatbread/matbot-provenance@0.4.5
+  - @matatbread/matbot-provider-anthropic@0.4.5
+  - @matatbread/matbot-provider-chatjimmy@0.4.5
+  - @matatbread/matbot-provider-customer-services@0.4.5
+  - @matatbread/matbot-provider-google@0.4.5
+  - @matatbread/matbot-provider-openai-compat@0.4.5
+  - @matatbread/matbot-tool-plugin@0.4.5
+
+## 0.4.4
+
+### Patch Changes
+
 - 6fb2706: Warn once when a configured storage backend is discarded by another plugin's.
 
   Exactly one `StorageBackend` is ever active: the boot pre-scan opens the first configured plugin that
@@ -22,24 +40,6 @@
   `ProfileDirectory` surface does not need hoisting into `plugin-api`: consumers duck-type the _active_
   backend on method presence, so any backend exposing that shape is already picked up by the existing
   tools with no import and no API change.
-
-- Updated dependencies [99152f3]
-- Updated dependencies [20d87fe]
-- Updated dependencies [e65e2a3]
-  - @matatbread/matbot-core@0.4.5
-  - @matatbread/matbot-storage-filesystem@0.4.5
-  - @matatbread/matbot-files-node@0.4.5
-  - @matatbread/matbot-provenance@0.4.5
-  - @matatbread/matbot-provider-anthropic@0.4.5
-  - @matatbread/matbot-provider-chatjimmy@0.4.5
-  - @matatbread/matbot-provider-customer-services@0.4.5
-  - @matatbread/matbot-provider-google@0.4.5
-  - @matatbread/matbot-provider-openai-compat@0.4.5
-  - @matatbread/matbot-tool-plugin@0.4.5
-
-## 0.4.4
-
-### Patch Changes
 
 - @matatbread/matbot-core@0.4.4
 - @matatbread/matbot-files-node@0.4.4

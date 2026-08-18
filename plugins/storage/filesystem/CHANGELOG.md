@@ -4,6 +4,17 @@
 
 ### Patch Changes
 
+- Updated dependencies [99152f3]
+- Updated dependencies [20d87fe]
+- Updated dependencies [e65e2a3]
+  - @matatbread/matbot-plugin-api@0.4.5
+  - @matatbread/matbot-core@0.4.5
+  - @matatbread/matbot-files-node@0.4.5
+
+## 0.4.4
+
+### Patch Changes
+
 - 20d87fe: `StorageBackend.namespaces?(): Promise<string[]>` — a backend can now be enumerated, not only addressed.
 
   `createStore` is addressed BY name, so a caller could only ever read a namespace it already knew
@@ -42,17 +53,6 @@
   - **CachingStorageBackend** — forwards only when the wrapped backend has it, assigned per instance so
     `'namespaces' in backend` stays truthful. A decorator that always declared the method would answer
     for backends that cannot, turning a degradable capability into a runtime failure.
-
-- Updated dependencies [99152f3]
-- Updated dependencies [20d87fe]
-- Updated dependencies [e65e2a3]
-  - @matatbread/matbot-plugin-api@0.4.5
-  - @matatbread/matbot-core@0.4.5
-  - @matatbread/matbot-files-node@0.4.5
-
-## 0.4.4
-
-### Patch Changes
 
 - @matatbread/matbot-core@0.4.4
 - @matatbread/matbot-plugin-api@0.4.4
