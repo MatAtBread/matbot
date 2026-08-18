@@ -1,5 +1,93 @@
 # @matatbread/matbot-plugin-api
 
+## 0.4.5
+
+### Patch Changes
+
+- 99152f3: The quiescent edge is the drained queue, not the end of a turn.
+
+  A deferred machine mutation — the `StorageBackend` swap, the mount table's batched notifications —
+  landed whenever no _turn_ was in flight. But the pump does a great deal of store work outside a turn:
+  it re-reads the committed document for `followup`, appends markers to it, rewrites it for a retract,
+  and persists the next queued turn's user message before that turn opens. All of that was quiescent, so
+  a mutation could land in the middle of it — the turn's write-back going to one backend and the
+  followup marker appended to it in another, which is precisely the split the deferral exists to
+  prevent. A two-turn queue reached the "idle" edge six times mid-flight.
+
+  `machineBusy(fn)` is the new `/host` primitive: the half of a context switch that is not about
+  identity. `contextSwitch(principal, fn)` keeps its meaning and signature and is now literally
+  `machineBusy` + `runAs`. The pump holds the machine once around its whole queue and `runAs`es per
+  item, each carrying its own submitter — the same boundary accounting already flushes at, for the same
+  stated reason that the end of a turn is not a moment anything can be totalled or swapped at.
+
+  It is a wrapper rather than a `begin`/`end` pair on purpose: the hold is released on every exit,
+  including a synchronous throw and a rejected promise. A stranded counter would be unrecoverable —
+  every later flush no-ops forever, and the only symptom is a deferred mutation that never happens.
+
+  **A flusher may now be asynchronous.** `onContextQuiesce` takes `() => void | Promise<void>`, and
+  returning a promise makes the edge wait rather than merely start the work; `quiesced()` is the other
+  half, awaited by an operation that must not overlap deferred work. The pump awaits it before taking
+  its copy of the session, so an edit deferred out of one turn has landed before the next turn reads it.
+  Flushers are invoked in registration order and then settle together; the synchronous prefix still runs
+  inline, so a mutation staged and landed with a bare `flushIfQuiescent()` is in effect before the call
+  returns.
+
+  The edge does not give exclusivity against the rest of the machine, and cannot: once any flusher
+  awaits, an HTTP endpoint can accept a request and run a tool call inside that window — so serialising
+  flushers against each other would remove one source of concurrent mutation and leave every other one.
+  Contention over a service is the service's to resolve — a `Store` answers it with compare-and-swap —
+  and the sweep's job is to make contention rare. A backend swap is staged, never applied, while a flush is
+  settling, which narrows one further window: compare-and-swap answers "did this document change?", not
+  "did the medium change?". That exposure is not new and is not the flushers' — an HTTP tool call has
+  always been able to straddle a swap the same way — and the fix belongs in a `cas` that checks it is
+  writing to the backend it read from.
+
+  What an embedder observes is the timing: a `register()` from inside a turn now takes effect when the
+  session's queue drains rather than at that turn's end, which for back-to-back turns (a `followup`
+  resubmission, a retract-and-rerun) is later than before. The mount contract already promised only
+  eventual, ordered delivery and explicitly not timing. Frontend entry points are unchanged: a web
+  request or telegram message still uses `runAs` and deliberately does not hold the machine, its scope
+  spanning a long-lived stream.
+
+- 20d87fe: `StorageBackend.namespaces?(): Promise<string[]>` — a backend can now be enumerated, not only addressed.
+
+  `createStore` is addressed BY name, so a caller could only ever read a namespace it already knew
+  about. Nothing could traverse a backend: copy one into another, audit what is stored, or report on a
+  `.data` directory. `namespaces()` supplies the missing half.
+
+  **Optional, because absence is a type.** A backend over a medium with no listing operation cannot
+  answer and must not guess — a caller that needs a complete list degrades to being told the namespaces
+  explicitly. It is specifically NOT implemented as "the namespaces `createStore` happened to be called
+  with this session": that is a lower bound wearing an answer's clothes, and a traversal built on it
+  silently skips whatever no plugin has touched. Files are excluded — they are their own axis with
+  their own enumeration (`FileStore.list`), not a namespace among the document stores. A namespace
+  holding no documents may be omitted, and results are sorted so a diff of two backends is stable.
+
+  Implemented by every backend, each of which reaches it differently:
+
+  - **filesystem** — a directory is a namespace when it _directly_ holds at least one document. A
+    content test, not a name test: `.data` is a shared root and anything may put a directory there, so
+    naming exclusions would mean this backend carrying a list of other packages' directories. Falling
+    out of "directly": a plugin's working state and a nested partition root are both excluded because
+    neither holds documents of its own, which is true regardless of who created them.
+  - **sqlite** — via a new `namespace_registry` table. The table name is derived by replacing every
+    character outside `[A-Za-z0-9]` with `_`, which is not invertible (`a-b` and `a_b` both give
+    `a_b_store`), so `sqlite_master` alone cannot answer. Databases written before the registry existed
+    are backfilled on read by stripping the suffix — exact for any namespace whose characters survived
+    the derivation, and self-correcting for the rest once their plugin calls `createStore` again.
+  - **browser** — one IndexedDB database per namespace, so `indexedDB.databases()` is the enumeration.
+    Where that API is missing (older Firefox) it throws rather than falling back to the namespaces
+    opened this session, which would silently under-report.
+  - **google-drive** — one folder listing under the root, excluding the blob folder.
+  - **profiles** — the namespaces the CURRENT principal would actually read. Routing is per namespace,
+    so candidates are gathered from every partition the principal can reach and each is kept only if
+    its own route sends it to a partition that really holds it; listing the union unfiltered would
+    report another profile's isolated namespace as present, which is what partitioning exists to
+    prevent.
+  - **CachingStorageBackend** — forwards only when the wrapped backend has it, assigned per instance so
+    `'namespaces' in backend` stays truthful. A decorator that always declared the method would answer
+    for backends that cannot, turning a degradable capability into a runtime failure.
+
 ## 0.4.4
 
 ## 0.4.3
