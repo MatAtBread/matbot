@@ -145,6 +145,38 @@ async function inspectPluginDir(sub: string, specifier: string, source: { type: 
   };
 }
 
+/**
+ * Is this discovered plugin already named by a config section?
+ *
+ * A specifier is not an identity, so this cannot be a string lookup — which is what it was, against the
+ * path form discovery happens to build (`./plugins/foo`). The moment `plugin add` began recording the
+ * canonical package name, a plugin that is configured AND loaded started reporting `configuredVia: null`,
+ * because `@scope/foo` is not the string `./plugins/foo`. The same blindness covered an absolute path or a
+ * `file:` URL naming the very same directory.
+ *
+ * So compare what an entry REFERS to: the package's name, the specifier as discovery wrote it, or — for
+ * anything path-shaped — the directory it resolves to. A bare name that is not this package's name, and a
+ * URL, are left to the name/specifier comparison: neither addresses a local directory.
+ */
+function configuredIn(entries: ReadonlySet<string>, p: DiscoveryEntry, projectDir: string): boolean {
+  if (entries.has(p.specifier) || entries.has(p.name)) return true;
+
+  const dir = p.source?.uri.startsWith('file:') === true ? fileURLToPath(p.source.uri) : undefined;
+  if (dir === undefined) return false;
+  const target = path.resolve(dir);
+
+  for (const entry of entries) {
+    let entryDir: string | undefined;
+    if (entry.startsWith('file:')) {
+      try { entryDir = fileURLToPath(entry); } catch { continue; }
+    } else if (entry.startsWith('./') || entry.startsWith('../') || path.isAbsolute(entry)) {
+      entryDir = path.resolve(projectDir, entry);
+    }
+    if (entryDir !== undefined && path.resolve(entryDir) === target) return true;
+  }
+  return false;
+}
+
 // TODO: This is a convenience shim for end users in monorepo setups and is
 // intentionally narrow. It should eventually be replaced with a proper
 // discovery interface — registry lookup, repo scanning, or a plugin marketplace.
@@ -442,8 +474,8 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
         type:  'result',
         value: found.map(p => ({
           ...p,
-          configuredVia: pluginEntries.has(p.specifier) ? 'plugins'
-                       : providerModules.has(p.specifier) ? 'providers'
+          configuredVia: configuredIn(pluginEntries, p, projectDir) ? 'plugins'
+                       : configuredIn(providerModules, p, projectDir) ? 'providers'
                        : null,
         })),
       };

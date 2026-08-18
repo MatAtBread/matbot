@@ -239,6 +239,14 @@ plugin-api is now a build error instead of a link that fails the typecheck on li
   that still works but should be rewritten says what to replace it with — once at boot, and again attached
   to the failure if that plugin does not load.
 
+- **`discover_local` reports a plugin as configured however the config entry names it.** It answered that
+  question by string-matching the path form it had just built (`./plugins/foo`) against the `plugins:` list,
+  so the moment `plugin add` began recording the canonical package name, a plugin that was both configured
+  *and loaded* reported `configuredVia: null` — the report contradicting the running process. The same
+  blindness covered an absolute path or a `file:` URL naming that very directory. A specifier is not an
+  identity, so the comparison is now on what an entry refers to: the package's name, the specifier as
+  discovery wrote it, or the directory a path-shaped entry resolves to.
+
 - **`plugin add` records the canonical package name, not the path it was given.** A path is right only for
   one working copy, while the name resolves in a checkout and in an installed deployment alike and is the
   handle `remove`/`reload` address a plugin by — the rule the `provider` tool and the setup wizard have
