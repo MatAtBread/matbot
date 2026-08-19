@@ -34,12 +34,31 @@ churn and less likely to affect a consumer who doesn't use them.
   pending with no error, so its reconnect loop never ran at all. A long, quiet turn is exactly the window a
   socket dies in. Reconnect was never the missing piece; liveness detection was.
 
+- **The in-process (`matbot.html`) transport had the same prompt hole, with no socket in it.** Injecting a
+  prompt was one pass over whatever streams were draining, and a session the user is not looking at has
+  none — so the question reached nobody and the turn parked, in a system with no network. Parked and
+  injected on subscribe, exactly as the server now does. The clearest evidence that the prompt rule is
+  about statefulness rather than transport: `evalInBrowser`, one function below it, already checked.
+
+- **Becoming visible revives a quiet stream instead of waiting out the watchdog.** `visibilitychange` and
+  `pageshow` both, because they answer different questions — the latter is the back/forward cache, where a
+  page is restored with its scripts un-rerun and its streams gone, which Safari leans on heavily and where
+  mobile Safari has frozen JS (so a timer cannot be the only mechanism). Deliberately *not* a
+  disconnect-on-hide policy: a hidden tab usually keeps its connections, so forcing the gap would make the
+  recovery re-read certain rather than rare. Only a stream that has actually gone quiet is torn down.
+
 - **A viewer going away is no longer treated as an answer.** The "no viewers left" release resolved the
   pending prompt with `''`, which the prompt implementation turns into the *field's default* — an answer
   nobody gave, to a question nobody saw. Harmless-looking on a confirm (it declines) and destructive on
   `plugin store-key`, whose default is `''` and where a blank value **removes the key**. A prompt now
   simply stays pending, to be put to the next viewer; `POST /abort` and server shutdown cancel it
   (`PromptCancelledError`, which a tool already reports as an error) rather than inventing a choice.
+
+- **`docs/SSE-CLIENTS.md`** — how to write a UI of your own against this server, since Maxie and anything
+  like it has to reimplement all of the above. What the two streams guarantee and what they don't, the four
+  mistakes that are invisible in testing and permanent in production, the socket budget, and what changes
+  for a soft-tabbed UI (where `visibilitychange` never fires, so the heartbeat watchdog is the only
+  liveness signal) or the serverless in-process build (where turn durability is the opposite way round).
 
 ## 0.4.6
 

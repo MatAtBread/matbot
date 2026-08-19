@@ -117,6 +117,32 @@
   // tab sits on a stream that ended minutes ago. So bound the silence. The server heartbeats this stream
   // every 20s, so anything past three of those is dead rather than idle.
   const STREAM_IDLE_MS = 65000;
+  // Anything shorter than a beat-and-a-bit is proof of life, so it is also the threshold for "did this
+  // stream survive being hidden?" — see the page-lifecycle hooks below.
+  const STREAM_FRESH_MS = 25000;
+
+  // Page lifecycle. A hidden tab may keep its connections (usually does, on desktop) or lose them
+  // silently, and the difference is not knowable in advance — so ask on the way back rather than
+  // guessing on the way out. Deliberately NOT a disconnect-on-hide policy: a stream that survived needs
+  // no recovery at all, and recovery costs the caller a re-read, so making the gap certain would make
+  // that cost certain too. Only a stream that has gone quiet is torn down, which drops the wait for the
+  // idle watchdog from up to 65s to the moment the user looks at the tab.
+  //
+  // BOTH events, because they answer different questions. `visibilitychange` covers tab switching and
+  // app backgrounding. `pageshow` covers the back/forward cache, where the page is restored without its
+  // scripts re-running and its streams gone — Safari leans on bfcache heavily, and mobile Safari also
+  // freezes JS outright while hidden, so the timer below cannot be the only mechanism there.
+  const liveStreams = new Set();   // { lastByteAt, revive } per open session stream
+  const reviveStale = () => {
+    const now = Date.now();
+    for (const st of liveStreams) if (now - st.lastByteAt > STREAM_FRESH_MS) st.revive();
+  };
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') reviveStale();
+    });
+    window.addEventListener('pageshow', reviveStale);
+  }
 
   // One persistent GET /events/sessions/:id carrying ALL turns for the session, demuxed by the
   // caller. Reconnects with a 1s backoff until `signal` aborts.
@@ -137,21 +163,38 @@
         const reader = res.body.getReader();
         const dec = new TextDecoder();
         let buf = '';
-        while (true) {
-          // A timeout wins the race only when nothing at all arrived, heartbeat included. Cancelling
-          // the reader settles the read we walked away from.
-          let timer;
-          const idle = new Promise(r => { timer = setTimeout(() => r('idle'), STREAM_IDLE_MS); });
-          const next = await Promise.race([reader.read(), idle]);
+        // Registered for the page-lifecycle sweep: `revive` resolves the same race the watchdog does,
+        // so becoming visible on a quiet stream takes the identical reconnect path a timeout would.
+        let wake;
+        // Declared out here so the `finally` can clear a race we never settled: a consumer that stops
+        // iterating closes this generator mid-`await`, and a deadline left pending then outlives the
+        // stream it was guarding.
+        let timer;
+        const state = { lastByteAt: Date.now(), revive: () => wake?.('idle') };
+        liveStreams.add(state);
+        try {
+          while (true) {
+            // A timeout wins the race only when nothing at all arrived, heartbeat included. Cancelling
+            // the reader settles the read we walked away from.
+            const idle = new Promise(r => {
+              wake = r;
+              timer = setTimeout(() => r('idle'), STREAM_IDLE_MS);
+            });
+            const next = await Promise.race([reader.read(), idle]);
+            clearTimeout(timer);
+            if (next === 'idle') { await reader.cancel().catch(() => {}); break; }
+            const { done, value } = next;
+            if (done) break;
+            if (signal.aborted) { reader.cancel(); break; }
+            state.lastByteAt = Date.now();
+            buf += dec.decode(value, { stream: true });
+            const parsed = parseSSEChunk(buf);
+            buf = parsed.remaining;
+            for (const ev of parsed.events) yield ev;
+          }
+        } finally {
+          liveStreams.delete(state);
           clearTimeout(timer);
-          if (next === 'idle') { await reader.cancel().catch(() => {}); break; }
-          const { done, value } = next;
-          if (done) break;
-          if (signal.aborted) { reader.cancel(); break; }
-          buf += dec.decode(value, { stream: true });
-          const parsed = parseSSEChunk(buf);
-          buf = parsed.remaining;
-          for (const ev of parsed.events) yield ev;
         }
       } catch {
         if (signal.aborted) return;
