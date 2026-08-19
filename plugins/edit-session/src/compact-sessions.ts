@@ -17,15 +17,19 @@
  * only the policy: which sessions, and where each one's cutoff falls.
  *
  * The current session (ctx.session.id) is deferred to the quiescent edge rather than compacted in
- * place: the running turn owns that document until it commits. Each edit is individually wrapped so
- * one failure does not abort the rest. Idempotent: a session whose content has already been stripped
- * yields 0 messagesStripped and no error.
+ * place: the running turn owns that document until it commits. Idempotent: a session whose content has
+ * already been stripped yields 0 messagesStripped and no error.
+ *
+ * A sweep spans a whole store, so it meets sessions it cannot write — one shared in read-only from
+ * another profile. That is a condition, not a fault: it is reported per session under `skipped` and the
+ * sweep continues. Every other failure aborts, deliberately — a sweep that met a broken backend and
+ * still reported a tidy summary would be worse than one that raised.
  *
  * Invoke via background tool or call directly as a tool.
  */
 
 import type { Tool, ToolExecutor, ToolContract, ToolContext, ToolResultOf, Session, Store } from '@matatbread/matbot-plugin-api';
-import { lastActivityAt, currentPrincipal, runAs } from '@matatbread/matbot-plugin-api';
+import { lastActivityAt, currentPrincipal, runAs, isReadOnlyError } from '@matatbread/matbot-plugin-api';
 
 import { compactBefore } from './compaction.js'
 import { defer } from './defer.js'
@@ -83,9 +87,19 @@ async function compactOne(
   if (stripped === 0) return { done: false, reason: 'nothing to strip' };
 
   const next: Session = { ...current, messages, updatedAt: lastActivityAt({ ...current, messages }) };
-  const res = await store.cas(current.id, current.version, { ...next, version: crypto.randomUUID() });
-  if (!res.ok) return { done: false, reason: 'concurrent modification' };
-  return { done: true, tier, stripped };
+  try {
+    const res = await store.cas(current.id, current.version, { ...next, version: crypto.randomUUID() });
+    if (!res.ok) return { done: false, reason: 'concurrent modification' };
+    return { done: true, tier, stripped };
+  } catch (e) {
+    // A partitioned store holds sessions this principal may read and may not write — a share. Asking
+    // first would couple this policy to one backend's optional ownership capability and still race a
+    // share landing before the write, so the write stays the authority and its refusal — per-operation
+    // by contract, not a process fault — becomes this session's skip reason. Deliberately just the one
+    // branded error: a real fault must still abort the sweep, or the tool reports a pass it never made.
+    if (!isReadOnlyError(e)) throw e;
+    return { done: false, reason: `read-only (shared in from "${e.owner || 'global'}")` };
+  }
 }
 
 // ── tool factory ──────────────────────────────────────────────────────────────
@@ -167,7 +181,9 @@ A message left with no content is removed rather than kept empty, so message pos
 The session you are called from is compacted too, but only once the current turn commits — it is
 reported under \`deferred\`, without a tier or a count, and this turn goes on seeing its full history.
 Idempotent — safe to run on a schedule.
-Returns a summary of what was compacted, deferred and skipped.`,
+Returns a summary of what was compacted, deferred and skipped. A session you cannot write — one shared
+in read-only from another profile — is reported under \`skipped\` with its owner; it is not an error and
+does not stop the rest of the sweep.`,
     inputSchema: {
       type: 'object',
       properties: {
