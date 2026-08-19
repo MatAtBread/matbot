@@ -1,5 +1,11 @@
 # @matatbread/matbot-rumsfeld
 
+## 0.4.6
+
+### Patch Changes
+
+- @matatbread/matbot-plugin-api@0.4.6
+
 ## 0.4.5
 
 ### Patch Changes
