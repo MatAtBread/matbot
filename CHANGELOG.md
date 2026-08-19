@@ -183,7 +183,24 @@ plugin-api is now a build error instead of a link that fails the typecheck on li
   replaced rather than trusted. `paths` is gone with it, so the link is the single mechanism both tsc and
   Node resolve through — two meant a typecheck could pass while the import failed.
 
+#### background
+
+- **`every_action({ action: 'suspend' | 'resume', id: '*' })` skips a schedule it cannot write.** The same
+  exposure as `compact_sessions` below, one namespace over — `schedules` is isolatable like any other, so a
+  schedule shared in read-only refuses the write — but with a worse ending: the throw escaped after the loop
+  had already flipped and woken the schedules before it, so a partial change was announced as a total
+  failure. Refused schedules are now listed under a new optional `skipped` (id plus owner) and `count`/`ids`
+  report what actually changed, so "all" that wasn't all says so. Any other failure still stops the sweep.
+
 #### edit-session
+
+- **`compact_sessions` retries a lost CAS once.** A lost compare-and-swap is not a verdict on the session,
+  and the tier decision is a pure function of a fresh read, so it re-reads and re-decides rather than
+  leaving the session for the next scheduled run. Two writers reach it: a concurrent edit, and a
+  `StorageBackend` swap landing between the read and the write, which `mediumGuard` deliberately reports as
+  this same lost CAS with "re-read and retry" — the retry's read comes from the backend now in force, so it
+  converges. Bounded at one attempt: spinning inside a sweep over every other session is the wrong place to
+  insist.
 
 - **`compact_sessions` skips a session it cannot write instead of aborting the sweep.** A store partitioned
   by profile holds sessions the caller may read and may not write — ones shared in read-only from another
@@ -193,6 +210,13 @@ plugin-api is now a build error instead of a link that fails the typecheck on li
   reported there with its owner, and the sweep goes on. Only that one branded error is caught — a genuine
   fault still aborts, because a sweep that met a broken backend and returned a tidy summary would be worse
   than one that raised.
+
+#### skills
+
+- **A skill is indexed before its analysis cache is written, not after.** The cache is an optimisation on the
+  skill document; the index is what makes the skill findable. Writing the cache first meant a document this
+  principal cannot write — a skill shared in read-only — threw on the optimisation and took the indexing with
+  it, leaving the skill absent from search with only a console warning.
 
 #### storage-profiles
 

@@ -8,7 +8,9 @@ import type { Readable }    from 'node:stream';
 import type {
   MatbotPluginSpec, MatbotMachine, Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext, FileStore, Store, Principal,
 } from '@matatbread/matbot-plugin-api';
-import { PLUGIN_API_VERSION, currentPrincipal, ItemChangeKind } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, currentPrincipal, ItemChangeKind, isReadOnlyError } from '@matatbread/matbot-plugin-api';
+
+interface SkippedSchedule { id: string; reason: string }
 
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
@@ -22,8 +24,10 @@ declare module '@matatbread/matbot-plugin-api' {
     // (all) vs a single id, which a caller can't predeclare, so each keeps its two-shape result union.
     every_action:
       | ToolContract<Array<{ id: string; interval: string; nextRun: string; active: boolean; name?: string; lastRun?: string; output?: string }>, { action: 'list' }>
-      | ToolContract<{ resumed:   true; count: number; ids: string[] } | { resumed:   true; id: string }, { action: 'resume';  id: string }>
-      | ToolContract<{ suspended: true; count: number; ids: string[] } | { suspended: true; id: string }, { action: 'suspend'; id: string }>
+      // `skipped` appears only when the sweep met a schedule it could not write (one shared in read-only):
+      // "all" that silently wasn't all is the failure the field reported one namespace over.
+      | ToolContract<{ resumed:   true; count: number; ids: string[]; skipped?: SkippedSchedule[] } | { resumed:   true; id: string }, { action: 'resume';  id: string }>
+      | ToolContract<{ suspended: true; count: number; ids: string[]; skipped?: SkippedSchedule[] } | { suspended: true; id: string }, { action: 'suspend'; id: string }>
       | ToolContract<{ cancelled: true; id: string }, { action: 'cancel'; id: string }>;
   }
 }
@@ -382,16 +386,27 @@ async function setActive(id: string, active: boolean): Promise<boolean> {
   return true;
 }
 
-async function setActiveAll(active: boolean): Promise<string[]> {
+async function setActiveAll(active: boolean): Promise<{ ids: string[]; skipped: Array<{ id: string; reason: string }> }> {
   const result = await scheduleStore?.query({});
   const ids: string[] = [];
+  const skipped: Array<{ id: string; reason: string }> = [];
   for (const doc of result?.items ?? []) {
     if ((doc.active !== false) === active) continue; // already in the target state
-    await scheduleStore?.set(doc.id, { ...doc, active, version: Date.now().toString() });
+    try {
+      await scheduleStore?.set(doc.id, { ...doc, active, version: Date.now().toString() });
+    } catch (e) {
+      // `*` spans the whole store, and a partitioned one holds schedules this principal may read and not
+      // write. One refusal is not a refusal of the request: name it and carry on. Throwing here would
+      // discard a report covering the schedules already flipped AND woken above — a partial change
+      // announced as a total failure, which is the one ending a retry cannot put right.
+      if (!isReadOnlyError(e)) throw e;
+      skipped.push({ id: doc.id, reason: `read-only (shared in from "${e.owner || 'global'}")` });
+      continue;
+    }
     wakeSchedule(doc.id);
     ids.push(doc.id);
   }
-  return ids;
+  return { ids, skipped };
 }
 
 const everyActionTool: Tool<ToolResultOf<'every_action'>> = {
@@ -406,7 +421,11 @@ ACTIONS
 
 The id is a schedule id from 'list' or from the background tool. For suspend and resume, pass
 id "*" to act on ALL schedules at once. cancel requires a specific id — "*" is not accepted
-(no bulk delete).`,
+(no bulk delete).
+
+With id "*", a schedule you cannot write — one shared in read-only from another profile — is left
+alone and listed under \`skipped\` with its owner. \`ids\` is what actually changed, so \`count\` plus
+\`skipped\` accounts for everything eligible; the absence of \`skipped\` means all of them changed.`,
   inputSchema: {
     type:       'object',
     required:   ['action'],
@@ -449,10 +468,11 @@ id "*" to act on ALL schedules at once. cancel requires a specific id — "*" is
         case 'resume': {
           const active = act.action === 'resume';
           if (act.id === '*') {
-            const ids = await setActiveAll(active);
+            const { ids, skipped } = await setActiveAll(active);
+            const report = { count: ids.length, ids, ...(skipped.length > 0 ? { skipped } : {}) };
             yield {
               type:  'result',
-              value: active ? { resumed: true, count: ids.length, ids } : { suspended: true, count: ids.length, ids },
+              value: active ? { resumed: true, ...report } : { suspended: true, ...report },
             };
             return;
           }

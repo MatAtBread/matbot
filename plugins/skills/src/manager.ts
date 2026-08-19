@@ -404,8 +404,12 @@ export class SkillManagerImpl implements SkillManager {
       // still findable, but it stays uncached so a later pass can retry the analysis. (Future: mark
       // timed-out skills for off-line analysis instead.)
       if (signal.aborted) console.warn(`[skills] analysis timed out (${ANALYSIS_TIMEOUT_MS}ms) for ${doc.name}; indexed from heuristic`);
-      if (cache !== undefined) await this.cacheKnowledge(doc.id, cache);
+      // Index BEFORE caching. The cache is an optimisation on the skill document (so a restart re-indexes
+      // for free); the index is the thing that makes the skill findable at all. Caching first meant a doc
+      // this principal cannot write — a skill shared in read-only — threw on the optimisation and took the
+      // indexing with it, leaving the skill invisible to search with only a console warning to say so.
       await this.knowledge.index(entry);
+      if (cache !== undefined) await this.cacheKnowledge(doc.id, cache);
     } catch (e) {
       console.warn(`[skills] reindex failed for ${doc.name}:`, e);
     } finally {

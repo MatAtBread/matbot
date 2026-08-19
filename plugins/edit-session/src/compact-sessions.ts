@@ -70,6 +70,7 @@ async function compactOne(
   sessionId:  string,
   opts:       Required<CompactSessionsParams>,
   inactiveMs: number,
+  attempt = 0,
 ): Promise<CompactOutcome> {
   // Re-read via get() so the CAS below uses a fresh version — a query result may be stale
   const current = await store.get(sessionId);
@@ -89,7 +90,17 @@ async function compactOne(
   const next: Session = { ...current, messages, updatedAt: lastActivityAt({ ...current, messages }) };
   try {
     const res = await store.cas(current.id, current.version, { ...next, version: crypto.randomUUID() });
-    if (!res.ok) return { done: false, reason: 'concurrent modification' };
+    // A lost CAS is not a verdict on this session, and the whole decision above is a pure function of a
+    // fresh read — so re-read and re-decide once rather than leaving it for the next scheduled run. Two
+    // writers reach here: a concurrent edit, and a StorageBackend swap landing between the read and the
+    // write, which `mediumGuard` reports as exactly this loss and tells the caller to retry (the retry's
+    // `get` comes from the backend now in force, so it converges). Bounded at one: a session losing twice
+    // is contended, and spinning inside a sweep over every other session is the wrong place to insist.
+    if (!res.ok) {
+      return attempt === 0
+        ? compactOne(store, sessionId, opts, inactiveMs, 1)
+        : { done: false, reason: 'concurrent modification' };
+    }
     return { done: true, tier, stripped };
   } catch (e) {
     // A partitioned store holds sessions this principal may read and may not write — a share. Asking
