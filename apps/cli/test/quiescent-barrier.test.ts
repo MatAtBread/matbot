@@ -145,3 +145,41 @@ test('an ordinary entry pays nothing when no work is staged', async () => {
     un();
   }
 });
+
+test('work staged while a flush is settling still lands, with nothing else arriving', { timeout: 15000 }, async () => {
+  await quiesced();
+
+  // The awkward case: `depth` is already 0 (a flush is merely settling), so announcing raises no hold to
+  // wait on and nothing is coming to force another edge. On an idle process the work would sit staged
+  // indefinitely — the same starvation, reached from the other side. The settling flush answers it on the
+  // way out, guarded on `wanted` so an idempotent async flusher cannot manufacture an endless chain.
+  const landed: string[] = [];
+  let queued: string | undefined;
+  const un = onContextQuiesce(async () => {
+    const work = queued;
+    if (work === undefined) return;
+    queued = undefined;
+    await new Promise(r => setTimeout(r, 20));
+    landed.push(work);
+  });
+
+  try {
+    queued = 'first';
+    const settling = flushIfQuiescent();
+    assert.ok(settling, 'the flusher went async, so this edge is settling');
+
+    // Announced mid-settle, and then NOTHING else touches the machine: no entrant, no release.
+    queued = 'second';
+    flushIfQuiescent();
+
+    await settling;
+    // Only timers from here — no quiesced(), no machineBusy, nothing that would itself supply the edge
+    // this test is asserting the settle provides. (An earlier version awaited quiesced() here to give the
+    // re-sweep time, and that call WAS the missing edge, so the test passed with the fix removed.)
+    await new Promise(r => setTimeout(r, 80));
+
+    assert.deepEqual(landed, ['first', 'second'], 'both landed without any further activity');
+  } finally {
+    un();
+  }
+});

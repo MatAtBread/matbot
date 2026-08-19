@@ -156,7 +156,10 @@ export function onContextQuiesce(flush: Quiescer): () => void {
  * stays raised for the whole asynchronous extent, not just the synchronous sweep.
  */
 export function flushIfQuiescent(): Promise<void> | undefined {
-  if (cs.depth !== 0) { cs.wanted = true; return cs.inflight; }
+  // Raised whenever this could not land the work — held, or a flush already settling. The settling case
+  // matters as much as the held one: `depth` is 0 there, so nothing is coming to force another edge, and
+  // an idle process would leave the work staged indefinitely.
+  if (cs.depth !== 0 || cs.flushing) { cs.wanted = true; return cs.inflight; }
   return sweep();
 }
 
@@ -202,6 +205,12 @@ function sweep(): Promise<void> | undefined {
     }
     cs.flushing = false;
     cs.inflight = undefined;
+    // A stager that announced DURING this settle got `wanted` raised and no edge, and if the machine is
+    // idle nothing else is coming to give it one. So answer it here — guarded, and therefore terminating:
+    // only `flushIfQuiescent` raises `wanted`, and the sweep lowers it on entry, so an idempotent async
+    // flusher (which returns a promise whether or not it had work) cannot manufacture the next round. That
+    // is the distinction the "one pass, deliberately not a loop" note on `quiesced` turns on.
+    if (cs.wanted === true && cs.depth === 0) sweep();
     wake();
   });
   cs.inflight = all;
