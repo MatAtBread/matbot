@@ -112,15 +112,16 @@ exactly the reason above — host-specific, so injected rather than in the neutr
 
 ### The `/host` boundary
 
-`plugin-api`'s root answers exactly one question: **what does a plugin need in order to be a plugin?** Anything whose audience is an *embedder standing a machine up* lives behind `@matatbread/matbot-plugin-api/host` — carrier installers (`installPrincipalCarrier`, `installUsageCarrier` and the platform carrier factories), the capture-safe swap proxies (`forwardingProxy`, `makeSwappable`), the mount table's producer half (`createMountTable`, `MountTable`), the quiescent-edge machinery (`machineBusy`, `contextSwitch`, `onContextQuiesce`, `scheduleAtEdge`, `quiesced`), `unifyServices`, `singleTurnRequest`, `HookRegistry`, `createNotifier`/`scopedNotifier`, and the `Broadcaster` primitive. `core` re-exports all of it, so an app depending on core needs no direct `/host` import — and no plugin in this repo imports any of it.
+`plugin-api`'s root answers exactly one question: **what does a plugin need in order to be a plugin?** Anything whose audience is an *embedder standing a machine up* lives behind `@matatbread/matbot-plugin-api/host` — carrier installers (`installPrincipalCarrier`, `installUsageCarrier` and the platform carrier factories), the capture-safe swap proxies (`forwardingProxy`, `makeSwappable`), the mount table's producer half (`createMountTable`, `MountTable`), the quiescent-edge machinery a host needs (`machineBusy`, `contextSwitch`, `quiesced`, `scheduleAtEdge`), `unifyServices`, `singleTurnRequest`, `HookRegistry`, `createNotifier`/`scopedNotifier`, and the `Broadcaster` primitive. `core` re-exports all of it, so an app depending on core needs no direct `/host` import — and no plugin in this repo imports any of it.
 
-**It is a file boundary, not an export list**, so it cannot quietly erode: host assembly lives in `host-machine.ts`, and `index.ts` uses `export type *` plus a named value list for the two files that are deliberately split down the middle. Three subsystems are split rather than moved whole, because each has a real author-facing half:
+**It is a file boundary, not an export list**, so it cannot quietly erode: host assembly lives in `host-machine.ts`, and `index.ts` uses `export type *` plus a named value list for the two files that are deliberately split down the middle. Four subsystems are split rather than moved whole, because each has a real author-facing half:
 
 | Subsystem | Root (plugin) | `/host` (embedder) |
 |---|---|---|
 | principal  | `runAs`, `currentPrincipal`, `tryCurrentPrincipal` | `installPrincipalCarrier`, `enterPrincipal`, `createConstantPrincipalCarrier` |
 | notifications | `Notifier` type, `notifyingStore`, `ItemChangeKind`/`RegistryChangeKind` | `createNotifier`, `scopedNotifier`, `Broadcaster` |
 | mount table | `Mounted`, `MountConsumeOptions`, `MountedMachine` (the contract of `services.mounted`) | `MountTable`, `createMountTable` (driven by register + the quiescent edge) |
+| quiescent edge | `onContextQuiesce`, `Quiescer` — defer work to the next safe moment | `machineBusy`, `contextSwitch`, `quiesced`, `scheduleAtEdge` |
 
 Fan-out is the one place the split implies a rule rather than just a location: a plugin that wants to publish an event uses the **`Notifier`**, which is why the raw broadcaster is host-side.
 

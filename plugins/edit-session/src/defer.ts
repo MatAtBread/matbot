@@ -1,4 +1,4 @@
-import { onContextQuiesce } from '@matatbread/matbot-plugin-api/host';
+import { onContextQuiesce } from '@matatbread/matbot-plugin-api';
 
 /**
  * Run an edit of the *running turn's own* session after that turn has committed.
