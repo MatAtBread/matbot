@@ -58,7 +58,15 @@ export interface ItemChange extends NotificationBase {
   readonly detail?:   unknown;
 }
 
-/** A process-global registry gained or lost a member (tools, plugins). No owner, no item identity. */
+/**
+ * A process-global registry gained or lost a member. No owner, no item identity.
+ *
+ * `registry` is `tools`, `plugins`, or `services` — the last published by the mount table at the
+ * quiescent edge, where `name` is the `MatbotServices` key and a remount reads as `added` (the key
+ * has a member; it is not the one it had). It is how "the medium under everything was replaced" reaches
+ * a reader outside this process, which no {@link ItemChange} can say: that addresses one item, and a
+ * `StorageBackend` swap invalidates every item in every namespace at once without writing any of them.
+ */
 export interface RegistryChange extends NotificationBase {
   readonly registry:  string;
   readonly name:      string;

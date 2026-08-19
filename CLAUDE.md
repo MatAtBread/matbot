@@ -248,6 +248,15 @@ The wait lives *inside* `machineBusy` rather than at the call site, for the reas
 
 A plugin reacts to a registry service (re)mounting or being unloaded through **`services.mounted`** — a `Mounted` whose one method, `consume({ key, replay?, signal?, onUnmount? }, handler)`, is keyed on the service it cares about. The host batches mount notifications to the **quiescent edge**: `register`/`unregister` mark a key dirty; the edge computes each key's net presence transition and **multicasts** to that key's subscribers. A reload (unregister+register before the edge) collapses to a single **remount**; an unregister not replaced by the edge is a **committed unload**, delivered to `onUnmount`. The contract guarantees only *eventual, ordered* delivery per key — **it says nothing about timing** (a register is not observably inline, nor pinned to a turn boundary). `StorageBackend`'s swap also lands at the edge (CAS coherence); other keys repoint immediately but still notify at the edge.
 
+**The table is the in-process half; the bus is the other.** Each transition is *also* published as a
+`RegistryChange` on the `services` registry (`name` = the `MatbotServices` key, a remount reading as
+`added`) — because a swapped `StorageBackend` writes nothing, so `notifyingStore` announces nothing, and
+every document in every namespace silently starts coming from somewhere else. No `ItemChange` can say
+that: it addresses one item. It is published **after** that key's handlers settle and **whether or not
+any exist** — the handlers are how the caches a remote reader queries *through* get rebuilt (announcing
+first invites the stale read the announcement exists to end), and the interests map holds this process's
+plugins, which says nothing about who is listening on the bus.
+
 **Litmus — does a plugin need it?** Only if its `setup()` reads another service's *current state* to build cached/derived state. A pure map (no setup data; data arrives later as a tool call or hook) resolves its dependency per-invocation through the proxy/member and subscribes to nothing.
 
 ```ts
@@ -473,6 +482,11 @@ named `StoreChange` — the medium is an implementation concern, and making a pl
 my thing a Store?" to use the bus was the wrong first question. Define a kind of your own only when
 you carry something a consumer **cannot** get by re-reading — progress, a measurement, an external
 event. That is a new shape, not a new source; `detail` is not the place to smuggle it.
+
+`RegistryChange` covers the three process-global registries — `tools`, `plugins` and `services` — where
+there is no owner and no item identity, only a member gained or lost. The `services` arm is the mount
+table's (above): it is the only way "the medium under every namespace was replaced" reaches a reader
+outside this process.
 
 **`namespace` is an address space, not a plugin.** It looks 1:1 with plugins from the web UI's
 `switch`, and it isn't: `files` is emitted by workspace, by background (a detached job's output), and

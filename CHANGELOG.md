@@ -156,7 +156,34 @@ where it cannot be forgotten.
   the reason rather than the symptom, and dropped entirely if the plugin loads anyway: a host cannot
   distinguish an unused declaration from a fatal one.
 
+### Bug fixes
+
+- **A `StorageBackend` swap is now announced on the notification bus.** `notifyingStore` sees writes made
+  *through* it, so replacing the medium — every document in every namespace now coming from somewhere
+  else — passed it in silence: nothing was written, so no `ItemChange` addressed anything. `services.mounted`
+  carried the fact to in-process subscribers only, which is why the SkillManager rebuilt its cache while the
+  browser showing those skills did not know to re-read them. The mount table now also publishes each
+  transition as a `RegistryChange` on a third registry, `services` (`name` is the `MatbotServices` key; a
+  remount reads as `added`), so a reader outside the process learns what an item-addressed notification
+  cannot say.
+
+  It is published *after* that key's handlers settle, and whether or not any exist — the handlers are how
+  the caches a remote reader queries through get rebuilt, and the interests map holds this process's
+  plugins, which says nothing about who is listening on the bus.
+
 ### Optional
+
+#### frontend-web
+
+- **Every panel re-reads when the storage backend is swapped.** Enabling or disabling a storage plugin
+  changed the sidebar's conversations and its plugin list but left skills and the workspace showing the
+  displaced backend's contents. Neither was ever refreshed *because of* the swap: the plugin list moved
+  because the plugin list had changed, and the conversation list moved because the client's end-of-turn
+  refresh is debounced by 150ms and happened to land after the quiescent edge — the file listing, fired
+  in the same breath without the debounce, landed before it. The UI now dispatches on the new
+  `services` `RegistryChange` and re-queries sessions, skills and files together when `StorageBackend`
+  transitions, rather than waiting for an unrelated change to refresh a panel by luck. The open
+  conversation's own message pane is deliberately left alone.
 
 #### cli
 

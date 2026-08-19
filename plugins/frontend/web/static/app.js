@@ -3322,8 +3322,16 @@ async function init() {
         // Tool churn refreshes skills (skills are tools, and one may be registered out of band — e.g.
         // the Drive backend restoring matbot-skills at boot); plugin churn refreshes the plugins panel,
         // covering the tool-less plugins the tool registry can't see.
+        //
+        // A `services` change is the mount table announcing that a registry service was replaced. Only
+        // StorageBackend concerns this UI, and it concerns all of it: every panel below lists documents
+        // or files read out of the system of record, and swapping it invalidates the lot at once without
+        // writing anything — so no per-item ItemChange arrives to say so. Re-read everything rather than
+        // waiting for an unrelated change to happen past and refresh a panel by luck.
         case '@matatbread/matbot-plugin-api#RegistryChange':
-          if (n.registry === 'tools') refreshSkills(); else refreshPlugins();
+          if (n.registry === 'tools')                                     refreshSkills();
+          else if (n.registry !== 'services')                             refreshPlugins();
+          else if (n.name === 'StorageBackend') { refreshSessions(); refreshSkills(); refreshFiles(); }
           break;
         default: break;
       }
