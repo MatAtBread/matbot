@@ -79,7 +79,7 @@ test('suspending every schedule skips one it cannot write and still reports what
   assert.equal(ev.type, 'result', `the sweep must complete, not throw: ${String(ev.message)}`);
   assert.deepEqual(written.sort(), ['mine-a', 'mine-b'], 'every writable schedule is suspended');
 
-  const value = ev.value as { suspended: true; count: number; ids: string[]; skipped?: Array<{ id: string; reason: string }> };
+  const value = ev.value as { suspended: true; count: number; ids: string[]; skipped?: Array<{ id: string; kind: string; reason: string }> };
   assert.deepEqual(value.ids.sort(), ['mine-a', 'mine-b']);
   assert.equal(value.count, 2, 'count reports what changed, not what was examined');
 
@@ -87,6 +87,7 @@ test('suspending every schedule skips one it cannot write and still reports what
   assert.ok(value.skipped, 'a schedule that could not be suspended must be reported');
   assert.equal(value.skipped.length, 1);
   assert.equal(value.skipped[0]?.id, READ_ONLY);
+  assert.equal(value.skipped?.[0]?.kind, 'denied', 'a permanent refusal must not read as a transient one');
   assert.match(String(value.skipped?.[0]?.reason), /read-only/i);
   assert.match(String(value.skipped?.[0]?.reason), /global/, 'naming the owner is the actionable half');
 });

@@ -66,7 +66,7 @@ function partitionedStore(): { store: Store<Session>; writes: string[] } {
 type Report = {
   examined: number;
   compacted: Array<{ sessionId: string; tier: string; messagesStripped: number }>;
-  skipped:   Array<{ sessionId: string; title: string; reason: string }>;
+  skipped:   Array<{ sessionId: string; title: string; kind: string; reason: string }>;
   deferred:  Array<{ sessionId: string }>;
 };
 
@@ -100,6 +100,9 @@ test('a read-only session shared in from another profile is skipped, not fatal',
   for (const id of READ_ONLY) {
     const entry = skipped.get(id);
     assert.ok(entry, `${id} must be reported under skipped`);
+    // `kind` is the machine-readable half: a caller must be able to tell "never going to work, it isn't
+    // yours" from "try later" without parsing English out of `reason`.
+    assert.equal(entry.kind, 'denied', 'a refusal that will be refused again is denied, not unavailable');
     assert.match(entry.reason, /read-only/i, `the reason must say why: got ${JSON.stringify(entry.reason)}`);
     // The owner is the actionable half — which profile to go and ask. `''` is the base partition, and
     // the reason renders it the way ReadOnlyError's own message does rather than leaking the sentinel.
@@ -107,43 +110,35 @@ test('a read-only session shared in from another profile is skipped, not fatal',
     assert.equal(entry.title, `title of ${id}`, 'a skipped session is still identifiable');
   }
 
-  assert.equal(skipped.get('owned-fresh')?.reason, 'below thresholds', 'ordinary skips are unchanged');
+  const fresh = skipped.get('owned-fresh');
+  assert.equal(fresh?.reason, 'below thresholds', 'ordinary skips are unchanged');
+  assert.equal(fresh?.kind, 'ineligible', 'and "nothing to do" is not classed as a failure at all');
 });
 
-test('a lost CAS is retried once — including the one a backend swap reports', async () => {
-  // mediumGuard reports a write whose read came from the previous storage backend as a LOST CAS, not a
-  // throw ("Re-read and retry"), because a caller already has a path for "someone else got there first".
-  // A sweep that treated it as a verdict skipped the session until the next scheduled run — and since
-  // every item of a page is stamped by the same query, a swap mid-sweep would report the whole rest of
-  // the page as concurrently modified. One retry converges, because the re-read comes from the backend
-  // now in force.
-  const { store } = partitionedStore();
-  const refused = new Map<string, number>();
-  const once: Store<Session> = { ...store, async cas(id, expected, next) {
-    const n = (refused.get(id) ?? 0) + 1;
-    refused.set(id, n);
-    if (n === 1 && id === 'owned-archived') return { ok: false as const, current: await store.get(id) };
-    return store.cas(id, expected, next);
-  } };
-
-  const report = await sweep(once);
-  assert.equal(report.compacted[0]?.sessionId, 'owned-archived', 'the retry lands the compaction');
-  assert.equal(refused.get('owned-archived'), 2, 'exactly one retry, not a spin');
-  assert.ok(!report.skipped.some(s => s.reason === 'concurrent modification'));
-});
-
-test('a session that keeps losing the race is skipped rather than spun on', async () => {
+test('a lost CAS is reported once and not retried from inside the sweep', async () => {
+  // A lost compare-and-swap here is either a concurrent writer — answered by the next scheduled run, since
+  // compaction is idempotent — or a StorageBackend swap, which `mediumGuard` reports AS a lost CAS with
+  // "re-read and retry". That advice cannot be taken at this level: a swap lands at the quiescent edge, and
+  // under the pump the machine is held across the whole queue, so the edge is unreachable until the turn
+  // ends. An inline retry would re-read the same medium and lose again; sleeping first would hold open the
+  // turn the edge is waiting for. This pins ONE attempt, so a well-meaning retry cannot be added back here
+  // without the reasoning being revisited.
   const { store } = partitionedStore();
   let attempts = 0;
-  const always: Store<Session> = { ...store, async cas(id, expected, next) {
+  const contended: Store<Session> = { ...store, async cas(id, expected, next) {
     if (id !== 'owned-archived') return store.cas(id, expected, next);
     attempts++;
     return { ok: false as const, current: await store.get(id) };
   } };
 
-  const report = await sweep(always);
-  assert.equal(attempts, 2, 'bounded: one attempt plus one retry');
-  assert.ok(report.skipped.some(s => s.sessionId === 'owned-archived' && s.reason === 'concurrent modification'));
+  const report = await sweep(contended);
+  assert.equal(attempts, 1, 'exactly one attempt per session — no inline retry, no spin');
+  const lost = report.skipped.find(s => s.sessionId === 'owned-archived');
+  assert.ok(lost, 'the loss is reported rather than swallowed');
+  // The distinction the whole `kind` field exists for: this one IS worth trying again, and the read-only
+  // one above is not. Reported as the same opaque string, a caller could only guess.
+  assert.equal(lost.kind, 'unavailable', 'a lost race is retryable-later, not a denial');
+  assert.match(lost.reason, /storage backend was swapped|concurrent edit/, 'and the prose says what happened');
 });
 
 test('a fault that is not a per-operation refusal still aborts the sweep', async () => {

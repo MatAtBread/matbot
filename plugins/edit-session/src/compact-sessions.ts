@@ -41,7 +41,10 @@ declare module '@matatbread/matbot-plugin-api' {
         examined:  number;
         pages:     number;
         compacted: Array<{ sessionId: string; title: string; tier: 'full' | 'partial'; messagesStripped: number }>;
-        skipped:   Array<{ sessionId: string; title: string; reason: string }>;
+        /** `kind` separates "nothing to do" from the two failures a caller must treat differently —
+         *  `denied` (never going to work, it isn't yours) vs `unavailable` (try later). `reason` is the
+         *  human-readable detail; branch on `kind`, never on the prose. */
+        skipped:   Array<{ sessionId: string; title: string; kind: SkipKind; reason: string }>;
         /** The calling turn's own session, whose compaction was queued for after this turn commits.
          *  No tier and no count: both are decided when it is applied, and reporting them would mean
          *  waiting for an edge this turn has to end to reach. */
@@ -57,9 +60,23 @@ interface CompactSessionsParams {
   activeMessages?: number; // Number of messages at the end of the session to NOT compact. Default 10
 }
 
+/**
+ * Why a session was not compacted, in the one dimension a caller can act on — the 4xx/5xx distinction.
+ * `reason` is prose for a human; `kind` is for whoever has to decide what to do next, and must not be
+ * inferred by matching on the prose.
+ *
+ *   `ineligible`  — nothing to do, and nothing wrong. The policy examined it and declined.
+ *   `denied`      — refused, and asking again will be refused again (a session owned by someone else).
+ *   `unavailable` — could not be completed now; the same call later may well succeed.
+ *
+ * The two failure classes are genuinely different remedies, which is why one string covering both was
+ * wrong: `denied` means stop and go to the owner, `unavailable` means come back.
+ */
+export type SkipKind = 'ineligible' | 'denied' | 'unavailable';
+
 type CompactOutcome =
   | { done: true;  tier: 'full' | 'partial'; stripped: number }
-  | { done: false; reason: string };
+  | { done: false; kind: SkipKind; reason: string };
 
 // The whole per-session policy — tier decision included — behind one re-read, so it is equally
 // correct run inline during the scan or later from the quiescent edge (the current session's deferred
@@ -71,44 +88,50 @@ async function compactOne(
   opts:       Required<CompactSessionsParams>,
   inactiveMs: number,
 ): Promise<CompactOutcome> {
-  // Twice, because a lost CAS is not a verdict on this session and everything below is a pure function of
-  // a fresh read — so losing once is worth re-reading and re-deciding rather than leaving the session for
-  // the next scheduled run. Two writers land here: a concurrent edit, and a StorageBackend swap between
-  // the read and the write, which `mediumGuard` reports as exactly this loss and tells the caller to retry
-  // (the second read comes from the backend now in force, so it converges). No more than twice: a session
-  // losing again is contended, and a sweep over every other session is the wrong place to insist.
-  for (let attempt = 0; attempt < 2; attempt++) {
-    // Re-read via get() so the CAS below uses a fresh version — a query result may be stale
-    const current = await store.get(sessionId);
-    if (!current) return { done: false, reason: 'deleted before compaction' };
+  // Re-read via get() so the CAS below uses a fresh version — a query result may be stale
+  const current = await store.get(sessionId);
+  if (!current) return { done: false, kind: 'ineligible', reason: 'deleted before it could be compacted' };
 
-    const tier: 'full' | 'partial' | undefined =
-      current.status === 'archived' || Date.now() - new Date(current.updatedAt).getTime() >= inactiveMs ? 'full'
-      : current.messages.length > opts.activeMessages * 2                                               ? 'partial'
-      : undefined;
-    if (tier === undefined) return { done: false, reason: 'below thresholds' };
+  const tier: 'full' | 'partial' | undefined =
+    current.status === 'archived' || Date.now() - new Date(current.updatedAt).getTime() >= inactiveMs ? 'full'
+    : current.messages.length > opts.activeMessages * 2                                               ? 'partial'
+    : undefined;
+  if (tier === undefined) return { done: false, kind: 'ineligible', reason: 'below thresholds' };
 
-    // A negative msgIndex ("keep the last N") is what makes the deferred path self-correcting: it is
-    // resolved against the document at apply time, so the turn's own tail is among the messages kept.
-    const { messages, stripped } = compactBefore(current.messages, tier === 'full' ? -1 : -opts.activeMessages);
-    if (stripped === 0) return { done: false, reason: 'nothing to strip' };
+  // A negative msgIndex ("keep the last N") is what makes the deferred path self-correcting: it is
+  // resolved against the document at apply time, so the turn's own tail is among the messages kept.
+  const { messages, stripped } = compactBefore(current.messages, tier === 'full' ? -1 : -opts.activeMessages);
+  if (stripped === 0) return { done: false, kind: 'ineligible', reason: 'nothing left to strip — already compacted' };
 
-    const next: Session = { ...current, messages, updatedAt: lastActivityAt({ ...current, messages }) };
-    try {
-      const res = await store.cas(current.id, current.version, { ...next, version: crypto.randomUUID() });
-      if (res.ok) return { done: true, tier, stripped };
-    } catch (e) {
-      // A partitioned store holds sessions this principal may read and may not write — a share. Asking
-      // first would couple this policy to one backend's optional ownership capability and still race a
-      // share landing before the write, so the write stays the authority and its refusal — per-operation
-      // by contract, not a process fault — becomes this session's skip reason. Deliberately just the one
-      // branded error: a real fault must still abort the sweep, or the tool reports a pass it never made.
-      // Not retried: a refusal is settled, and asking again would only be refused again.
-      if (!isReadOnlyError(e)) throw e;
-      return { done: false, reason: `read-only (shared in from "${e.owner || 'global'}")` };
-    }
+  const next: Session = { ...current, messages, updatedAt: lastActivityAt({ ...current, messages }) };
+  try {
+    const res = await store.cas(current.id, current.version, { ...next, version: crypto.randomUUID() });
+    // ONE attempt per session, deliberately. Two things reach a lost CAS here, and neither is answered by
+    // trying again from inside the sweep:
+    //
+    //   A concurrent writer — answered by the next scheduled run instead. Compaction is idempotent and this
+    //   tool is a scheduled whole-store pass, so a session skipped now is compacted on the next one; the
+    //   only thing a retry buys is latency, paid for by doubling the reads of a sweep over every session.
+    //
+    //   A StorageBackend swap, which `mediumGuard` reports AS this loss with "re-read and retry" — advice
+    //   that cannot be taken here. A swap is deferred to the quiescent edge, and under the pump (a tool
+    //   call inside a turn) the machine is held across the whole queue, so the edge is unreachable until
+    //   this turn ends: the retry would re-read the same medium and lose again, and sleeping first only
+    //   holds open the very turn the edge is waiting for. The retry belongs at the edge, where the swap
+    //   has actually landed — which is a layer above this one, not a loop inside it.
+    if (!res.ok) return { done: false, kind: 'unavailable',
+      reason: 'the session changed while it was being written (a concurrent edit, or the storage backend was swapped) — a later run will pick it up' };
+    return { done: true, tier, stripped };
+  } catch (e) {
+    // A partitioned store holds sessions this principal may read and may not write — a share. Asking
+    // first would couple this policy to one backend's optional ownership capability and still race a
+    // share landing before the write, so the write stays the authority and its refusal — per-operation
+    // by contract, not a process fault — becomes this session's skip reason. Deliberately just the one
+    // branded error: a real fault must still abort the sweep, or the tool reports a pass it never made.
+    if (!isReadOnlyError(e)) throw e;
+    return { done: false, kind: 'denied',
+      reason: `owned by "${e.owner || 'global'}" and shared in read-only — only its owner can compact it` };
   }
-  return { done: false, reason: 'concurrent modification' };
 }
 
 // ── tool factory ──────────────────────────────────────────────────────────────
@@ -119,7 +142,7 @@ export function makeCompactSessionsTool(store: Store<Session>): Tool<ToolResultO
     async *execute(input: CompactSessionsParams | null | undefined, ctx: ToolContext) {
       const currentSessionId = ctx.session.id;
       const compacted: Array<{ sessionId: string; title: string; tier: 'full' | 'partial'; messagesStripped: number }> = [];
-      const skipped: Array<{ sessionId: string; title: string; reason: string }> = [];
+      const skipped: Array<{ sessionId: string; title: string; kind: SkipKind; reason: string }> = [];
       const deferred: Array<{ sessionId: string; title: string }> = [];
       let cursor: string | undefined;
       let totalExamined = 0;
@@ -165,7 +188,7 @@ export function makeCompactSessionsTool(store: Store<Session>): Tool<ToolResultO
 
           const outcome = await compactOne(store, session.id, opts, inactiveMs);
           if (outcome.done) compacted.push({ sessionId: session.id, title: session.title ?? '', tier: outcome.tier, messagesStripped: outcome.stripped });
-          else              skipped.push({ sessionId: session.id, title: session.title ?? '', reason: outcome.reason });
+          else              skipped.push({ sessionId: session.id, title: session.title ?? '', kind: outcome.kind, reason: outcome.reason });
         }
 
         yield { type: 'progress', pct: cursor ? Math.round((totalExamined / (page.total ?? 1)) * 100) : 100, message: `Examined ${totalExamined} sessions, compacted ${compacted.length}` };
@@ -190,9 +213,14 @@ A message left with no content is removed rather than kept empty, so message pos
 The session you are called from is compacted too, but only once the current turn commits — it is
 reported under \`deferred\`, without a tier or a count, and this turn goes on seeing its full history.
 Idempotent — safe to run on a schedule.
-Returns a summary of what was compacted, deferred and skipped. A session you cannot write — one shared
-in read-only from another profile — is reported under \`skipped\` with its owner; it is not an error and
-does not stop the rest of the sweep.`,
+Returns a summary of what was compacted, deferred and skipped. Each \`skipped\` entry carries a \`kind\`
+saying what to do about it — do not try to read this out of the \`reason\` prose:
+  ineligible  — nothing to do and nothing wrong (below the thresholds, or already compacted).
+  denied      — you may read that session but not write it (owned by another profile and shared in
+                read-only). Asking again will be refused again; only its owner can compact it.
+  unavailable — the write could not complete this time (a concurrent edit, or the storage backend
+                changed underneath the sweep). A later run may well succeed; nothing is wrong.
+None of the three is an error, and none stops the rest of the sweep.`,
     inputSchema: {
       type: 'object',
       properties: {

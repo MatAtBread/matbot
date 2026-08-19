@@ -189,18 +189,25 @@ plugin-api is now a build error instead of a link that fails the typecheck on li
   exposure as `compact_sessions` below, one namespace over — `schedules` is isolatable like any other, so a
   schedule shared in read-only refuses the write — but with a worse ending: the throw escaped after the loop
   had already flipped and woken the schedules before it, so a partial change was announced as a total
-  failure. Refused schedules are now listed under a new optional `skipped` (id plus owner) and `count`/`ids`
-  report what actually changed, so "all" that wasn't all says so. Any other failure still stops the sweep.
+  failure. Refused schedules are now listed under a new optional `skipped` — each with a `kind` (`denied` /
+  `unavailable`, the 4xx/5xx distinction) and a `reason` naming the owner — while `count`/`ids` report what
+  actually changed, so "all" that wasn't all says so. Any other failure still stops the sweep.
 
 #### edit-session
 
-- **`compact_sessions` retries a lost CAS once.** A lost compare-and-swap is not a verdict on the session,
-  and the tier decision is a pure function of a fresh read, so it re-reads and re-decides rather than
-  leaving the session for the next scheduled run. Two writers reach it: a concurrent edit, and a
-  `StorageBackend` swap landing between the read and the write, which `mediumGuard` deliberately reports as
-  this same lost CAS with "re-read and retry" — the retry's read comes from the backend now in force, so it
-  converges. Bounded at one attempt: spinning inside a sweep over every other session is the wrong place to
-  insist.
+- **A skipped session says which of the two kinds of skip it was.** Each `skipped` entry now carries a
+  `kind` alongside its prose `reason`: `ineligible` (nothing to do — below the thresholds, or already
+  compacted), `denied` (readable but not writable by you, so asking again will be refused again) or
+  `unavailable` (the write could not complete this time; a later run may succeed). The 4xx/5xx distinction,
+  and the remedies are opposite — go to the owner versus come back later — so one opaque string could not
+  carry both. Branch on `kind`; the prose is for people.
+
+  A lost compare-and-swap is `unavailable` and is **not** retried inside the sweep. `mediumGuard` reports a
+  `StorageBackend` swap as exactly this lost CAS, advising "re-read and retry", but that advice cannot be
+  taken here: the swap lands at the quiescent edge, and under the pump the machine is held across the whole
+  queue, so the edge is unreachable until the turn ends — an inline retry would re-read the same medium and
+  lose again, and sleeping first would only hold open the turn the edge is waiting for. Compaction is
+  idempotent and scheduled, so the next run is the retry.
 
 - **`compact_sessions` skips a session it cannot write instead of aborting the sweep.** A store partitioned
   by profile holds sessions the caller may read and may not write — ones shared in read-only from another

@@ -10,7 +10,12 @@ import type {
 } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION, currentPrincipal, ItemChangeKind, isReadOnlyError } from '@matatbread/matbot-plugin-api';
 
-interface SkippedSchedule { id: string; reason: string }
+// Why a schedule was left alone, split the way a caller has to act on it — the 4xx/5xx distinction.
+// `denied` will be refused again however many times it is asked; `unavailable` may succeed later. `reason`
+// is the prose; branch on `kind`, never on the prose. Kept local rather than shared with edit-session's
+// identical shape: two plugins agreeing on three words is not yet an abstraction worth a package.
+type SkipKind = 'denied' | 'unavailable';
+interface SkippedSchedule { id: string; kind: SkipKind; reason: string }
 
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
@@ -386,10 +391,10 @@ async function setActive(id: string, active: boolean): Promise<boolean> {
   return true;
 }
 
-async function setActiveAll(active: boolean): Promise<{ ids: string[]; skipped: Array<{ id: string; reason: string }> }> {
+async function setActiveAll(active: boolean): Promise<{ ids: string[]; skipped: SkippedSchedule[] }> {
   const result = await scheduleStore?.query({});
   const ids: string[] = [];
-  const skipped: Array<{ id: string; reason: string }> = [];
+  const skipped: SkippedSchedule[] = [];
   for (const doc of result?.items ?? []) {
     if ((doc.active !== false) === active) continue; // already in the target state
     try {
@@ -400,7 +405,8 @@ async function setActiveAll(active: boolean): Promise<{ ids: string[]; skipped: 
       // discard a report covering the schedules already flipped AND woken above — a partial change
       // announced as a total failure, which is the one ending a retry cannot put right.
       if (!isReadOnlyError(e)) throw e;
-      skipped.push({ id: doc.id, reason: `read-only (shared in from "${e.owner || 'global'}")` });
+      skipped.push({ id: doc.id, kind: 'denied',
+        reason: `owned by "${e.owner || 'global'}" and shared in read-only — only its owner can change it` });
       continue;
     }
     wakeSchedule(doc.id);
@@ -423,9 +429,12 @@ The id is a schedule id from 'list' or from the background tool. For suspend and
 id "*" to act on ALL schedules at once. cancel requires a specific id — "*" is not accepted
 (no bulk delete).
 
-With id "*", a schedule you cannot write — one shared in read-only from another profile — is left
-alone and listed under \`skipped\` with its owner. \`ids\` is what actually changed, so \`count\` plus
-\`skipped\` accounts for everything eligible; the absence of \`skipped\` means all of them changed.`,
+With id "*", \`ids\` is what actually changed and anything left alone is listed under \`skipped\`, so
+\`count\` plus \`skipped\` accounts for everything eligible; no \`skipped\` means all of them changed.
+Each entry carries a \`kind\` saying what to do about it — do not read this out of the \`reason\` prose:
+  denied      — you may read that schedule but not write it (owned by another profile and shared in
+                read-only). Asking again will be refused again; only its owner can change it.
+  unavailable — the write could not complete this time. Retrying later may well work.`,
   inputSchema: {
     type:       'object',
     required:   ['action'],
