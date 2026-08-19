@@ -205,8 +205,9 @@ test('a hold is released on every exit, so nothing can strand the machine', asyn
   try {
     // A stuck counter is unrecoverable — every later flush no-ops forever, and the only symptom is a
     // deferred mutation that never happens — so each way out of a hold is checked, not just the
-    // happy one.
-    assert.throws(() => machineBusy(() => { throw new Error('sync boom'); }), /sync boom/);
+    // happy one. Entry can wait for staged work, so the result is always a promise and a synchronous
+    // throw arrives as a rejection: one reporting path for both, rather than two.
+    await assert.rejects(machineBusy(() => { throw new Error('sync boom'); }), /sync boom/);
     assert.ok(fired > 0, 'a synchronous throw still released the hold');
 
     fired = 0;
@@ -214,8 +215,16 @@ test('a hold is released on every exit, so nothing can strand the machine', asyn
     assert.ok(fired > 0, 'a rejected promise still released the hold');
 
     fired = 0;
-    machineBusy(() => 'sync value');
+    assert.equal(await machineBusy(() => 'sync value'), 'sync value');
     assert.ok(fired > 0, 'a synchronous return released the hold');
+
+    // Nothing staged, so the barrier is down — and then `fn` must run within the call rather than a
+    // microtask later, or something could slip between the check and the hold.
+    fired = 0;
+    let ranInline = false;
+    const holding = machineBusy(() => { ranInline = true; });
+    assert.ok(ranInline, 'the unbarred path holds the machine synchronously');
+    await holding;
 
     // Nesting: only the outermost release is an edge. Reset inside, the entry edge having already run.
     fired = 0;

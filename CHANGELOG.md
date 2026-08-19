@@ -79,6 +79,27 @@ its `package.json` and `tsconfig.json` are overwritten accordingly, so hand edit
 plugin-api link left dangling by an earlier build is replaced rather than trusted, and an unresolvable
 plugin-api is now a build error instead of a link that fails the typecheck on line 1.
 
+**`machineBusy` is a barrier and returns a promise.** `machineBusy(fn)` and `contextSwitch(principal, fn)`
+now return `Promise<T>` rather than mirroring `fn`'s sync/async return, because entry can wait: staged
+deferred work lands before the hold is taken. A synchronous `fn` still runs inline within the call — the
+barrier adds a hold, never a scheduling gap — but a synchronous throw now arrives as a rejection. Only
+`core`'s turn pump called either (`contextSwitch` had no callers at all), so first-party code is unaffected;
+anyone holding the machine directly must `await`.
+
+The change is about **liveness, not coherence**. The edge was a counter, and nothing forced it to zero: under
+continuously overlapping holds — several sessions on a busy server, each pump holding across its own queue —
+it never arrived, so a deferred `session_edit` never landed and a staged `StorageBackend` swap never applied.
+Both are failures with no symptom. Coherence was never this module's job and still isn't: `mediumGuard` fails
+a write whose read came from another backend, which is what makes barring entry safe to add. Exclusivity for
+an async flusher — no entrant slipping in through its `await` — falls out of the barrier for free.
+
+The wait is **bounded** (2s, then it proceeds and warns), because a counter cannot distinguish a nested
+entrant from a concurrent one: an LLM reaching a matbot HTTP endpoint through its own `http` or `bash` tool
+runs inside its own turn's hold, and would otherwise wait on a drain that includes itself. The bound degrades
+to the previous behaviour rather than hanging. `quiesced()` survives for an operation that needs deferred work
+complete without holding the machine; the pump no longer calls it, since the barrier delivers that guarantee
+where it cannot be forgotten.
+
 ### API gaps filled
 
 - **`PluginListResult` gains `duplicateSingletons`: a second copy of `plugin-api` or `core`.** Reported
