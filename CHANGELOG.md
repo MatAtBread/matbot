@@ -183,6 +183,25 @@ plugin-api is now a build error instead of a link that fails the typecheck on li
   replaced rather than trusted. `paths` is gone with it, so the link is the single mechanism both tsc and
   Node resolve through — two meant a typecheck could pass while the import failed.
 
+#### edit-session
+
+- **`compact_sessions` skips a session it cannot write instead of aborting the sweep.** A store partitioned
+  by profile holds sessions the caller may read and may not write — ones shared in read-only from another
+  profile, or from the base — and their `cas` raises a branded `ReadOnlyError`. Nothing caught it, so the
+  first such session ended the whole sweep with an exception: a profile with any share in it compacted
+  *nothing*, while the tool's own contract advertised a `skipped` array for exactly this. Each one is now
+  reported there with its owner, and the sweep goes on. Only that one branded error is caught — a genuine
+  fault still aborts, because a sweep that met a broken backend and returned a tidy summary would be worse
+  than one that raised.
+
+#### storage-profiles
+
+- **`share`'s `owner` action no longer reports the base partition as an empty string.** The base's id *is*
+  the empty string — the path segment that isn't there, and right as routing — but both the single and the
+  `id: '*'` bulk form handed it back verbatim, in a result whose `null` already means "you own it". Two
+  readings of one answer, with the misleading one the likelier. It now renders as `"global"`, the way the
+  `ReadOnlyError` from a refused write to the same item already named it.
+
 #### sessions
 
 - **`session_action query` rejects an unknown top-level key instead of matching everything.** The store
