@@ -104,10 +104,21 @@ export type Quiescer = (unregister: () => void) => void | Promise<void>;
  * onContextQuiesce(() => { if (nothingToDo) return; … });
  * ```
  *
- * A standing (repeated) flusher is the only case that still needs {@link flushIfQuiescent}, and only to
- * say "I have work *now*" — it was registered long ago, so its registration cannot have announced this
- * particular work. The mount table (`markDirty` then flush) and the staged `StorageBackend` swap are
- * both that shape. A one-shot never needs it.
+ * A standing flusher needs {@link flushIfQuiescent} to say "I have work *now*", since it registered long
+ * before this particular work existed. There is exactly one in-tree — the host's, which applies a staged
+ * `StorageBackend` swap and then flushes the mount table — and it is worth knowing why it isn't a one-shot,
+ * because a one-shot could express it:
+ *
+ * - **It collapses.** The pending swap is a last-write-wins *slot*, so three stagings before an edge apply
+ *   once. Three one-shots would apply three backends in turn and announce up to three remounts, when only
+ *   the last one matters.
+ * - **It sequences.** Applying the swap marks `StorageBackend` dirty, and the *same* callback then flushes
+ *   the mount table, so the remount lands in the same edge as the swap. As two one-shots that ordering
+ *   would rest on registration order, which is the wrong thing for it to depend on.
+ *
+ * Neither is "registration can't announce this". Reach for a standing flusher when repeated announcements
+ * should coalesce, or when two pieces of work must run in a fixed order; otherwise a one-shot is simpler
+ * and cannot forget to announce.
  *
  * What the edge guarantees a flusher:
  *
