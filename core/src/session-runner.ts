@@ -9,7 +9,7 @@ import type { HookRegistry } from './hooks.js';
 import type { ToolTypeIndex, ToolPresenter } from '@matatbread/matbot-plugin-api';
 import { appendMessage, createMessage } from './session.js';
 import { isReadOnlyError, foldOntoUserTurn, lastUserIndex, runAs } from '@matatbread/matbot-plugin-api';
-import { machineBusy, quiesced, withUsageScope } from '@matatbread/matbot-plugin-api/host';
+import { machineBusy, withUsageScope } from '@matatbread/matbot-plugin-api/host';
 import { runSession } from './runner.js';
 
 export interface SessionRunnerDeps {
@@ -264,12 +264,13 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
     // usage flushes at, for the same reason. `machineBusy` releases on every exit including a throw,
     // so no early return out of the loop below can leave the machine held.
     //
-    // Wait out any deferred work still settling BEFORE holding: a flusher that rewrites this very
-    // session (a `session_edit` deferred out of the last turn) must finish before this turn reads its
-    // copy, or the read would take the pre-edit document and the write-back below would put it back.
-    // The edge is only reachable while nothing holds the machine, so the wait comes first and the
-    // hold second — the reverse would deadlock on an edge this pump is itself preventing.
-    return quiesced().then(() => machineBusy(async () => {
+    // It also waits for deferred work to land before taking the hold, which is why there is no separate
+    // `quiesced()` here any more: a flusher that rewrites this very session (a `session_edit` deferred
+    // out of the last turn) finishes before the loop below reads its copy, or the read would take the
+    // pre-edit document and the write-back would put it back. That wait used to be spelled at this call
+    // site, and spelling it here made it something the next caller of `machineBusy` could omit without
+    // any symptom — so it moved inside the hold it guards.
+    return machineBusy(async () => {
     try {
       while (s.queue.length > 0) {
         // Per-submission concat: the head always runs; if the head is a concat submission it absorbs
@@ -545,7 +546,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
       notify(s, { type: 'idle', sessionId: id });
       maybeCleanup(id, s);
     }
-    }));
+    });
   };
 
   return {

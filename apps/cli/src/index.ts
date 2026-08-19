@@ -18,7 +18,7 @@ import { appendMessage, createMessage,
          getPluginNameForSpecifier, getRegisteredPlugins, recordServiceKey,
          installPrincipalCarrier, installUsageCarrier, recordUsage, usageByProvider, addUsage, enterPrincipal, currentPrincipal,
          unifyServices, forwardingProxy, makeSwappable, singleTurnRequest,
-         createMountTable, onContextQuiesce, flushIfQuiescent,
+         createMountTable, scheduleAtEdge,
          createSingleTurnTool, createAboutMatbotTool,
          isMissingSecretError, createNotifier, notifyingStore,
          wireDescription}            from '@matatbread/matbot-core';
@@ -30,7 +30,8 @@ import { createAlsUsageCarrier }           from './usage-als.js';
 import { EnvFileVault }                     from './env-vault.js';
 import { FilesystemStore }                 from '@matatbread/matbot-storage-filesystem';
 import { FilesystemFileStore }             from '@matatbread/matbot-files-node';
-import { createBuiltinTools, createProviderTool, classifySpecifier, materializeRemote } from '@matatbread/matbot-tool-plugin';
+import { createBuiltinTools, createProviderTool, classifySpecifier, materializeRemote, remoteDependencyNotes,
+         findDuplicateSingletons, describeDuplicateSingleton, type MaterializedRemote } from '@matatbread/matbot-tool-plugin';
 import { LookupKnowledgeIndex }               from '@matatbread/matbot-core';
 import { access, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { readFileSync }                     from 'node:fs';
@@ -127,17 +128,32 @@ async function resolvePluginSpecifiers(specifiers: readonly string[], configDir:
   const req = createRequire(path.join(configDir, '_'));
   const dotPlugins = path.join(configDir, '.plugins');
   const results: PluginLoadRequest[] = [];
+  // Deferred to after the loop: a remote plugin's dependency may be another remote plugin configured
+  // LATER, whose files (and name link) do not exist while this one is being fetched.
+  const materialized: { spec: string; m: MaterializedRemote }[] = [];
+  const adviceBySpec = new Map<string, string>();
 
   for (const spec of specifiers) {
     const classified = await classifySpecifier(spec, configDir);
     let importSpec: string;
 
-    if (classified.kind === 'remote') {
+    if (classified.kind === 'http') {
+      // A specifier that still works but should be rewritten: said once at boot, and carried as a note so
+      // it is also attached to the failure if this plugin turns out not to load.
+      if (classified.advice !== undefined) {
+        console.warn(`[matbot] ${classified.advice}`);
+        adviceBySpec.set(spec, classified.advice);
+      }
       try {
-        importSpec = pathToFileURL(await materializeRemote(spec, dotPlugins, configDir, forceRefresh)).href;
+        const m = await materializeRemote(spec, dotPlugins, configDir, forceRefresh);
+        importSpec = pathToFileURL(m.entry).href;
+        materialized.push({ spec, m });
       } catch (e) {
-        console.warn(`[matbot] Could not fetch remote plugin "${spec}": ${e instanceof Error ? e.message : String(e)}`);
-        results.push({ spec, importSpec: spec });  // unresolved — let loadPlugins surface the failure
+        const reason = e instanceof Error ? e.message : String(e);
+        console.warn(`[matbot] Could not fetch remote plugin "${spec}": ${reason}`);
+        // Unresolved: loadPlugins reports the failure, but importing an http URL fails on the scheme
+        // and says nothing about the fetch — so hand it the reason we already have.
+        results.push({ spec, importSpec: spec, notes: [`could not be fetched: ${reason}`] });
         continue;
       }
     } else if (classified.kind === 'local' || classified.kind === 'missing-path') {
@@ -165,8 +181,22 @@ async function resolvePluginSpecifiers(specifiers: readonly string[], configDir:
       spec,
       importSpec,
       ...(meta.name     !== undefined ? { name:     meta.name }     : {}),
+      ...(meta.version  !== undefined ? { version:  meta.version }  : {}),
       ...(meta.runtimes !== undefined ? { runtimes: meta.runtimes } : {}),
     });
+  }
+
+  // Every remote is now on disk, so an unsatisfied dependency really is unsatisfied. Warned here
+  // because the plugin may well load anyway (an unused declaration, an import the regex over-collected);
+  // carried as `notes` so that IF it does fail, the recorded failure says why rather than naming a file.
+  for (const { spec, m } of materialized) {
+    const notes = await remoteDependencyNotes(m);
+    for (const note of notes) console.warn(`[matbot] Plugin "${spec}" ${note}`);
+    const advice = adviceBySpec.get(spec);
+    const all = advice !== undefined ? [...notes, advice] : notes;
+    if (all.length === 0) continue;
+    const entry = results.find(r => r.spec === spec);
+    if (entry !== undefined) entry.notes = all;
   }
 
   return results;
@@ -651,18 +681,22 @@ async function runSetupWizard(configPath: string): Promise<import('./config.js')
         }
       }
     }
-    const configDir  = path.dirname(configPath);
-    const envPath    = path.join(configDir, '.env');
-    const envVarName = `MATBOT_API_KEY_${providerName.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
+    const configDir = path.dirname(configPath);
+    const varName   = `MATBOT_API_KEY_${providerName.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
 
-    let envContent = '';
-    try { envContent = await readFile(envPath, 'utf8'); } catch { /* no existing .env */ }
-    const envLines = envContent
-      ? envContent.split('\n').filter(l => !l.startsWith(`${envVarName}=`) && l !== '')
-      : [];
-    envLines.push(`${envVarName}=${apiKey}`);
-    await writeFile(envPath, envLines.join('\n') + '\n', 'utf8');
-    process.env[envVarName] = apiKey;
+    // What was typed at the API key prompt may be the NAME of a key the .env already holds rather
+    // than a secret, and nothing here can tell the two apart — which is what createSecret is for.
+    // Writing .env by hand bypassed it, so naming an existing key minted a synthetic
+    // MATBOT_API_KEY_* whose value was that key's name.
+    const wizardVault = new EnvFileVault(
+      path.join(configDir, '.env'),
+      process.env as Record<string, string | undefined>,
+    );
+    const keyName = apiKey ? await wizardVault.createSecret(varName, apiKey) : undefined;
+    // The boot vault is built from process.env, so carry the secret across. Resolve rather than
+    // reuse `apiKey`: where that was a reference, the string is a key name, and assigning it
+    // would overwrite the very key being referenced.
+    if (keyName !== undefined) process.env[keyName] = await wizardVault.resolve(`\${${keyName}}`);
 
     // Reference the provider by package name — the location-independent form. It resolves via
     // node_modules when matbot is installed, and in a source checkout via resolvePluginSpecifiers'
@@ -676,8 +710,7 @@ async function runSetupWizard(configPath: string): Promise<import('./config.js')
       `    module: ${moduleSpec}`,
       `    endpoint: ${endpoint}`,
       `    model: ${model}`,
-      `    credentials:`,
-      `      apiKey: \${${envVarName}}`,
+      ...(keyName !== undefined ? ['    credentials:', `      apiKey: \${${keyName}}`] : []),
     ].join('\n') + '\n';
 
     await mkdir(configDir, { recursive: true });
@@ -690,7 +723,9 @@ async function runSetupWizard(configPath: string): Promise<import('./config.js')
         name:        providerName,
         module:      moduleSpec,
         model,
-        credentials: { apiKey },
+        // The placeholder, not the typed string: this run must resolve the same key the written
+        // config names, or a reference would be posted to the endpoint as if it were the secret.
+        ...(keyName !== undefined ? { credentials: { apiKey: `\${${keyName}}` } } : {}),
         endpoint,
       }]]),
     };
@@ -975,11 +1010,11 @@ async function main(): Promise<void> {
   // single remount. Notification timing is deliberately unspecified — see the `Mounted` contract.
   const mountTable = createMountTable(() => services);
   let pendingSwap: { next: StorageBackend | undefined } | undefined;
-  const stageSwap = (next: StorageBackend | undefined): void => {
-    pendingSwap = { next };
-    flushIfQuiescent();
-  };
-  onContextQuiesce(() => {
+  // One apply per edge however many times a swap or a mount change was announced: `pendingSwap` is a
+  // last-write-wins slot read at fire time, so three registers before an edge install one backend rather
+  // than three in turn. One callback also keeps the swap ordered ahead of the mount flush, so the remount
+  // it marks lands in the same edge. Registering is what announces it, so there is nothing else to call.
+  const scheduleEdge = scheduleAtEdge(() => {
     if (pendingSwap !== undefined) {
       const { next } = pendingSwap;
       pendingSwap = undefined;
@@ -987,6 +1022,11 @@ async function main(): Promise<void> {
     }
     mountTable.flush();
   });
+
+  const stageSwap = (next: StorageBackend | undefined): void => {
+    pendingSwap = { next };
+    scheduleEdge();
+  };
 
   // Swap the KnowledgeIndex, draining the displaced impl's entries into the incoming one.
   const swapKnowledge = (next: KnowledgeIndex): void => {
@@ -1029,7 +1069,7 @@ async function main(): Promise<void> {
       else if (key === 'Vault')          activeVault = value as Vault;
       else if (key === 'Notifier')       activeNotifier = value as Notifier;
       else serviceRegistry.set(key as string, value);
-      if (key !== 'StorageBackend') { mountTable.markDirty(key); flushIfQuiescent(); }
+      if (key !== 'StorageBackend') { mountTable.markDirty(key); scheduleEdge(); }
     },
     // Symmetric with register: a swap-key reverts to the app's captured boot default instead of
     // dangling on the unloaded plugin's impl; everything else is a plain registry delete. Marking dirty
@@ -1040,7 +1080,7 @@ async function main(): Promise<void> {
       else if (key === 'Vault')          activeVault = bootVault;
       else if (key === 'Notifier')       activeNotifier = bootNotifier;
       else serviceRegistry.delete(key);
-      if (key !== 'StorageBackend') { mountTable.markDirty(key as keyof MatbotServices); flushIfQuiescent(); }
+      if (key !== 'StorageBackend') { mountTable.markDirty(key as keyof MatbotServices); scheduleEdge(); }
     },
     registerFrontend() { /* bound per-plugin in setupPlugin's scopedServices; base is a no-op */ },
 
@@ -1198,6 +1238,15 @@ async function main(): Promise<void> {
   recordOrigPaths(providerModules);
 
   await loadPluginsWithDescriptions(resolvedPluginMods, services, path.dirname(configPath));
+
+  // Said once, now that the installed set is known and before anything uses it. A second copy of a host
+  // singleton is survivable by design — which is precisely why nothing else would ever mention it — and
+  // it is not repaired here: replacing a package-manager-installed directory with a symlink invites the
+  // next `install` to undo it. `plugin list` reports the same thing on demand.
+  for (const dup of await findDuplicateSingletons({
+    configDir: path.dirname(configPath),
+    plugins:   getRegisteredPlugins(),
+  })) console.warn(`[matbot] ${describeDuplicateSingleton(dup)}`);
 
   // The pre-scan opened a manifest storageBackend directly, before the loader knew the plugin's name,
   // so the scoped register() that records a service key never ran. Attribute it now that names exist,

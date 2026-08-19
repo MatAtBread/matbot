@@ -30,3 +30,11 @@ export { currentPrincipal, tryCurrentPrincipal, runAs } from './principal-contex
 // notifier is the host's job (`/host`).
 export type * from './notify.js';
 export { ItemChangeKind, RegistryChangeKind, notifyingStore } from './notify.js';
+
+// The quiescent edge: defer work to the next moment it is safe to touch machine state. A plugin that has
+// something to do after the current operation — a store edit the running turn would otherwise write over —
+// wants exactly this and nothing else in the file. HOLDING the machine (`machineBusy`, `contextSwitch`),
+// waiting on it (`quiesced`) and coalescing repeated stagings (`scheduleAtEdge`) are the host's side, so
+// they stay behind `/host`.
+export type * from './context-switch.js';
+export { onContextQuiesce } from './context-switch.js';

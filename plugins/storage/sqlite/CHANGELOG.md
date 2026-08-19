@@ -1,8 +1,92 @@
 # @matatbread/matbot-storage-sqlite
 
+## 0.4.5
+
+### Patch Changes
+
+- Updated dependencies [99152f3]
+- Updated dependencies [20d87fe]
+- Updated dependencies [e65e2a3]
+  - @matatbread/matbot-plugin-api@0.4.5
+  - @matatbread/matbot-core@0.4.5
+
 ## 0.4.4
 
 ### Patch Changes
+
+- b62a000: A namespace is now stored under its own name, and validated where untrusted ones arrive.
+
+  **SQLite no longer mangles table names.** A namespace became a table by replacing every character
+  outside `[A-Za-z0-9]` with `_`, so `A-B` and `A_B` both produced `A_B_store` and **silently shared one
+  table** — two stores, one set of rows, no error. The derivation bought nothing: every statement already
+  wrapped the table in double quotes, and a quoted identifier holds any namespace at all (punctuation,
+  spaces, unicode, a `"` doubled per SQL). It is simply removed, so the mapping is exact in both
+  directions.
+
+  A database written under the old naming keeps its data: the first time a namespace is opened, a table
+  under the legacy mangled name is `ALTER TABLE … RENAME`d to the exact one. That is done at
+  `createStore` because it is the only moment the namespace and its table are both known — the mangling
+  cannot be inverted, so nothing scanning `sqlite_master` alone could pair them. It fires only when the
+  exact table is absent and the legacy one present; a database holding both is one where two namespaces
+  were already sharing a table, and the rows follow whichever opens first, there being no record of who
+  wrote them.
+
+  This also removes the `namespace_registry` table added earlier in this release: with names exact,
+  `namespaces()` reads `sqlite_master` and strips the suffix, with nothing to keep in step.
+
+  **`store_action` validates the namespace** (`create` and `expose`) against
+  `[A-Za-z0-9][A-Za-z0-9_-]*`, max 64. The namespace is LLM-supplied and is not an opaque key: the
+  filesystem backend makes it a directory name **verbatim** — document ids are percent-encoded,
+  namespaces never were — so `../evil` or `a/b` wrote outside `.data` entirely. Checking at the one
+  boundary untrusted names arrive is what lets each backend keep using it directly. The set admits every
+  namespace matbot itself uses, `profile-registry` and `plugin-manifest` included.
+
+  **`create` now also refuses a namespace already present in the backend**, compared
+  case-insensitively — the first consumer of `StorageBackend.namespaces?()`. It catches what the meta
+  store structurally cannot: a namespace owned by a plugin rather than created here, so `store_action`
+  can no longer create a store over `sessions`. Case-insensitively because a namespace is a directory,
+  and `Sessions` and `sessions` are one directory on macOS and Windows. Backends that cannot enumerate
+  contribute nothing and an empty namespace is not reported, so it is one check among several rather
+  than an oracle.
+
+- 20d87fe: `StorageBackend.namespaces?(): Promise<string[]>` — a backend can now be enumerated, not only addressed.
+
+  `createStore` is addressed BY name, so a caller could only ever read a namespace it already knew
+  about. Nothing could traverse a backend: copy one into another, audit what is stored, or report on a
+  `.data` directory. `namespaces()` supplies the missing half.
+
+  **Optional, because absence is a type.** A backend over a medium with no listing operation cannot
+  answer and must not guess — a caller that needs a complete list degrades to being told the namespaces
+  explicitly. It is specifically NOT implemented as "the namespaces `createStore` happened to be called
+  with this session": that is a lower bound wearing an answer's clothes, and a traversal built on it
+  silently skips whatever no plugin has touched. Files are excluded — they are their own axis with
+  their own enumeration (`FileStore.list`), not a namespace among the document stores. A namespace
+  holding no documents may be omitted, and results are sorted so a diff of two backends is stable.
+
+  Implemented by every backend, each of which reaches it differently:
+
+  - **filesystem** — a directory is a namespace when it _directly_ holds at least one document. A
+    content test, not a name test: `.data` is a shared root and anything may put a directory there, so
+    naming exclusions would mean this backend carrying a list of other packages' directories. Falling
+    out of "directly": a plugin's working state and a nested partition root are both excluded because
+    neither holds documents of its own, which is true regardless of who created them.
+  - **sqlite** — via a new `namespace_registry` table. The table name is derived by replacing every
+    character outside `[A-Za-z0-9]` with `_`, which is not invertible (`a-b` and `a_b` both give
+    `a_b_store`), so `sqlite_master` alone cannot answer. Databases written before the registry existed
+    are backfilled on read by stripping the suffix — exact for any namespace whose characters survived
+    the derivation, and self-correcting for the rest once their plugin calls `createStore` again.
+  - **browser** — one IndexedDB database per namespace, so `indexedDB.databases()` is the enumeration.
+    Where that API is missing (older Firefox) it throws rather than falling back to the namespaces
+    opened this session, which would silently under-report.
+  - **google-drive** — one folder listing under the root, excluding the blob folder.
+  - **profiles** — the namespaces the CURRENT principal would actually read. Routing is per namespace,
+    so candidates are gathered from every partition the principal can reach and each is kept only if
+    its own route sends it to a partition that really holds it; listing the union unfiltered would
+    report another profile's isolated namespace as present, which is what partitioning exists to
+    prevent.
+  - **CachingStorageBackend** — forwards only when the wrapped backend has it, assigned per instance so
+    `'namespaces' in backend` stays truthful. A decorator that always declared the method would answer
+    for backends that cannot, turning a degradable capability into a runtime failure.
 
 - The SQLite backend compiles `StoreQuery` to SQL instead of loading the namespace into memory.
 

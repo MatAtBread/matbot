@@ -140,6 +140,12 @@ export function createProfileTool(getDir: () => ProfileDirectory | undefined): T
 // Companion to the `profile` tool: shares an individual stored item (a session, a fact, …) between
 // profiles. Kept a separate tool — sharing is about an item + a target, not the profile registry the
 // `profile` tool manages. Resolves the directory live per call, like `profile`.
+// The base partition's id is the empty string — the path segment that isn't there, and correct as routing.
+// It is not a name, and `null` in this result already means "you own it", so reporting `''` offers two
+// readings of one answer with the wrong one the likelier. Rendered only at this boundary, the way the
+// ReadOnlyError raised by a refused write to the same item renders the same owner.
+const ownerName = (id: string): string => id || 'global';
+
 export function createShareTool(
   getDir:    () => ProfileDirectory | undefined,
   getSkills: () => SkillCopier | undefined,
@@ -155,11 +161,12 @@ export function createShareTool(
         switch (args.action ?? 'share') {
           case 'owner': {
             if (id === '*') {
-              yield { type: 'result', value: { owners: await dir.sharedInOwners(ns) } };
+              const owners = Object.entries(await dir.sharedInOwners(ns)).map(([k, v]) => [k, ownerName(v)]);
+              yield { type: 'result', value: { owners: Object.fromEntries(owners) } };
               return;
             }
             const owner = await dir.ownerOf(ns, id);
-            yield { type: 'result', value: { owner: owner === undefined ? null : owner.id } };
+            yield { type: 'result', value: { owner: owner === undefined ? null : ownerName(owner.id) } };
             return;
           }
           case 'unshare': {
@@ -208,7 +215,8 @@ export function createShareTool(
       'reads your live item, not a copy, and only you can edit it. `unshare` removes that exposure. ' +
       '`copy` instead writes an independent duplicate the target fully owns and can edit (item ids are ' +
       'preserved). `owner` reports which profile owns the item the current profile would read (null when ' +
-      'you own it) — the read-only signal; `owner` with `id` of `*` instead returns an `owners` map of ' +
+      'you own it, "global" when it belongs to the shared base rather than to any profile) — the read-only ' +
+      'signal; `owner` with `id` of `*` instead returns an `owners` map of ' +
       'every shared-in item in the namespace to its owner, to gate a whole list in one call. For ' +
       'share/unshare/copy an `id` of `*` means the WHOLE namespace (every item in it). Sharing and copying ' +
       'exist only because profiles do; only a namespace ' +

@@ -64,3 +64,46 @@ test('a well-formed query with sort and limit still validates (regression)', () 
     validateQuery(q({ where: { op: 'eq', field: 'value', value: 'x' }, sort: [{ field: 'value', dir: 'asc' }], limit: 5 })),
   );
 });
+
+// ── session_action, which takes the same grammar FLAT beside `action` ────────────────────────────
+// The store tools nest it (`{ action: 'query', query: { … } }`) and hand the caller's object straight to
+// `store.query`, so `validateQuery` sees the stray key. session_action reimplements the grammar over
+// synthesized conversation text and destructured `{ where, sort, limit, cursor }` out of its arguments
+// FIRST — so an unknown key never reached validation at all: it was dropped, the query degraded to
+// match-everything, and the caller got every session back with no error. Same bug class, one level up,
+// reported from a live session.
+const sessionDocs = [
+  { id: 'a', version: 'v', status: 'active',   messages: [{ id: 'm', role: 'user', content: [{ type: 'text', text: 'hello' }] }] },
+  { id: 'b', version: 'v', status: 'archived', messages: [{ id: 'm', role: 'user', content: [{ type: 'text', text: 'goodbye' }] }] },
+];
+
+const sessionStore = (): unknown => ({
+  async *list() { for (const d of sessionDocs) yield d; },
+  get: async (id: string) => sessionDocs.find(d => d.id === id) ?? null,
+  set: async () => {}, cas: async () => ({ ok: true }), delete: async () => true,
+  query: async () => ({ items: sessionDocs }),
+});
+
+async function runSessionQuery(args: Record<string, unknown>): Promise<{ type: string; value?: unknown; message?: string }> {
+  const { makeSessionTools } = await import('@matatbread/matbot-sessions');
+  const tool = (makeSessionTools(sessionStore() as never) as Array<{ name: string; executor: { execute: (i: unknown, c: unknown) => AsyncIterable<{ type: string; value?: unknown; message?: string }> } }>)
+    .find(t => t.name === 'session_action')!;
+  for await (const ev of tool.executor.execute(args, {} as never)) {
+    if (ev.type === 'result' || ev.type === 'error') return ev;
+  }
+  throw new Error('tool yielded no result');
+}
+
+test('session_action rejects an unknown query key instead of matching everything', async () => {
+  const ev = await runSessionQuery({ action: 'query', filter: { op: 'eq', field: 'status', value: 'active' } });
+  assert.equal(ev.type, 'error',
+    `expected a rejection; got a result: ${String(JSON.stringify(ev.value)).slice(0, 200)}`);
+  assert.match(String(ev.message), /unknown query key 'filter'/);
+  assert.match(String(ev.message), /where, sort, limit, cursor/, 'the valid set has to be named');
+});
+
+test('session_action still accepts the grammar it does support', async () => {
+  const ev = await runSessionQuery({ action: 'query', where: { op: 'eq', field: 'status', value: 'active' }, limit: 0 });
+  assert.equal(ev.type, 'result', `a well-formed query must still work: ${String(ev.message)}`);
+  assert.equal((ev.value as { total?: number }).total, 1);
+});

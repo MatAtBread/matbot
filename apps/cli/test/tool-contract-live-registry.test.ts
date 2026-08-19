@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { buildMatbotToolsDts, checkSnippetAgainst } from '@matatbread/matbot-tool-types';
 
 // The scan's roots are a SUPERSET of the loaded plugins — a glob of the monorepo `plugins/` tree is unioned
@@ -57,4 +59,29 @@ test('a tool no plugin registered is not callable through the proxy', async () =
     'a live tool must still typecheck');
   assert.notDeepEqual(await check(`async function f() { return tool.telegram_send({ text: 'hi' }); }`), [],
     'an unloaded plugin\'s tool must not typecheck');
+});
+
+// The dts is only as good as its plugin-api anchor, and the anchor used to come from the project root
+// alone: `<projectRoot>/plugin-api/src/index.ts`, else a require from the project dir. A deployment where
+// matbot is not resolvable there — installed globally, or a config dir outside the project — got `null`, and
+// the silence was the damage: skills_compiler falls back to a three-arm hardcoded stub, and the model then
+// generates against a registry view that omits most live tools. Measured before the fix: asked to call
+// `whoami`, it declared a `ToolContracts` arm for it ITSELF, inventing `{ id: string; type: string }`, which
+// compiled clean and merely resembled the real `Principal`. A wrong guess compiles just as well, and the
+// cast gate cannot see it — nothing was cast, a contract was asserted.
+test('a project root that cannot resolve plugin-api still derives contracts', async () => {
+  const nowhere = await mkdtemp(join(tmpdir(), 'matbot-no-api-'));
+  try {
+    // A loaded plugin's resolvedUrl is the only root here: the temp dir has no `plugins/` tree to glob and
+    // no node_modules to require from, which is exactly the deployment shape that used to return null.
+    const whoami = join(root, 'plugins', 'whoami', 'src', 'index.ts');
+    const built  = await buildMatbotToolsDts(nowhere, [`file://${whoami}`], ['whoami']);
+    assert.ok(built, 'must fall back to this module\'s own resolution rather than returning null');
+    assert.ok(built.tools.emitted.includes('whoami'),
+      `the contract has to be derived, not stubbed; emitted: ${built.tools.emitted.join(', ')}`);
+    // And be the REAL one. The stub's stand-in for this was an invented `{ id: string; type: string }`.
+    assert.match(built.dts, /whoami: ToolContract<Principal/);
+  } finally {
+    await rm(nowhere, { recursive: true, force: true });
+  }
 });

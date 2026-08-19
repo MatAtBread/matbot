@@ -14,7 +14,10 @@ export interface PluginLoadRequest {
   spec:       string;
   importSpec: string;
   name?:      string;
+  version?:   string;
   runtimes?:  readonly Runtime[];
+  /** Resolution-time findings the loader appends to a failure it records for this spec. */
+  notes?:     readonly string[];
 }
 
 // Where to begin the upward package.json search for a load specifier. Specifiers that
@@ -50,22 +53,29 @@ async function descriptionFromPackageJson(specifier: string, baseDir: string): P
 }
 
 /**
- * Read the canonical name (+ optional matbotRuntime) from the package.json governing a resolved
- * import URL — the node analogue of the web assembler's specNames. Walks up to the first package.json
- * carrying a `name` (a nameless intermediate is not the plugin's manifest), so the CLI can hand the
- * loader a precomputed identity and `plugin.specifier` can stay the human/config specifier.
+ * Read the canonical name (+ optional version and matbotRuntime) from the package.json governing a
+ * resolved import URL — the node analogue of the web assembler's specNames. Walks up to the first
+ * package.json carrying a `name` (a nameless intermediate is not the plugin's manifest), so the CLI can
+ * hand the loader a precomputed identity and `plugin.specifier` can stay the human/config specifier.
+ *
+ * The version comes from here for the same reason the name does: the resolver's own lookup starts from
+ * the config specifier, which for a bare name, a URL or a version range reaches no manifest.
  */
-export async function readPluginMeta(specifier: string, baseDir: string): Promise<{ name?: string; runtimes?: Runtime[] }> {
+export async function readPluginMeta(specifier: string, baseDir: string): Promise<{ name?: string; version?: string; runtimes?: Runtime[] }> {
   let dir = startDir(specifier, baseDir);
   if (dir === undefined) return {};
   while (true) {
     try {
-      const pkg = JSON.parse(await readFile(path.join(dir, 'package.json'), 'utf8')) as { name?: string; matbotRuntime?: unknown };
+      const pkg = JSON.parse(await readFile(path.join(dir, 'package.json'), 'utf8')) as { name?: string; version?: unknown; matbotRuntime?: unknown };
       if (typeof pkg.name === 'string') {
         const runtimes = Array.isArray(pkg.matbotRuntime)
           ? pkg.matbotRuntime.filter((r): r is Runtime => typeof r === 'string')
           : undefined;
-        return { name: pkg.name, ...(runtimes !== undefined ? { runtimes } : {}) };
+        return {
+          name: pkg.name,
+          ...(typeof pkg.version === 'string' ? { version: pkg.version } : {}),
+          ...(runtimes !== undefined ? { runtimes } : {}),
+        };
       }
     } catch { /* no package.json here, keep walking up */ }
     const parent = path.dirname(dir);

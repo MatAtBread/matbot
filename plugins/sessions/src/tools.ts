@@ -148,6 +148,16 @@ function makeSessionActionTool(store: Store<Session>): Tool<ToolResultOf<'sessio
             // otherwise take the caller's clauses, lowercasing synth-field operands for case-insensitivity.
             let page: PageState;
             try {
+              // Validate what the CALLER passed, before the destructure above discards the rest of it.
+              // This grammar is flat — every key beside `action` is a query key — so an unknown one
+              // (`filter`, the SQL-ism LLMs reach for) was simply dropped: the query degraded to
+              // match-everything and the caller got every session back with no error. That silent miss is
+              // the whole reason `validateQuery` rejects unknown top-level keys, and projecting first is
+              // exactly what hid them from it. The store tools avoid this by handing the caller's `query`
+              // object straight to the store; the flat grammar has to do it here.
+              const { action: _action, ...envelope } = args as Record<string, unknown>;
+              validateQuery(envelope as unknown as StoreQuery);
+
               if (cursor !== undefined) {
                 page = decodeCursor(cursor);
                 validateQuery({

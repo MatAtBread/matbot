@@ -41,7 +41,8 @@ core/              — @matatbread/matbot-core: agentic loop, hook dispatch, plu
                        ./providers-base — SSE parser, HTTP helpers (write a provider)
                        ./storage-base   — filter/sort engine, StoreQuery (write a storage backend)
 plugins/            — one directory per package, flat but for the frontend/providers/storage groups
-    tool-plugin/   — built-in provider/plugin management tools (node)
+    tool-plugin/   — ALL of node's plugin support (node): the acquisition library the host drives,
+                     plus the `plugin`/`provider` tools over it. See "Acquisition vs. management" below
     rumsfeld/      — contextual_search + find_fact tools; knowledge fault handler
     persist-ki-bge/— persistent KnowledgeIndex + BGE reranker
     triggers/      — data-driven hooks (condition → tool invocation)
@@ -85,17 +86,42 @@ apps/
 
 **Dependency direction:** `apps` → `plugins/*-node` → `plugins/*` → `core` → `plugin-api`. Nothing in `plugin-api/`, `core/`, or `plugins/` may depend on `apps/`.
 
+### Acquisition vs. management
+
+Plugin **management is core's** — `loadPlugins` plus the registry own the whole lifecycle: the pre-import
+runtime gate, the import, shape verification, identity stamping, register + setup, rollback, the failed
+list, name↔specifier mapping. Nothing about that is in a plugin, and core depends on nothing but
+`plugin-api`.
+
+Plugin **acquisition is `tool-plugin`'s**: turning a config string into something importable —
+`classifySpecifier` (local / npm / http), materialising an http plugin into `.plugins/`, provisioning a
+local one's dependencies with npm, reporting a duplicated singleton. It cannot live in core, because every
+line of it is `node:fs`, `node:child_process`, `createRequire` and symlinks, and **core must run in the
+browser**. The browser's own acquisition is `apps/web-bundle`'s bootstrap (fetch → type-strip → `blob:`),
+and both hosts hand the neutral loader the same pre-resolved `{ spec, importSpec }`.
+
+So `tool-plugin` deliberately holds two things with two audiences: **the acquisition library, whose main
+consumer is `apps/cli`'s boot and not the tools at all**, and the LLM-facing `plugin`/`provider` tools.
+That is not drift awaiting a split — one half without the other has no use, and a package per concern would
+buy a name at the cost of a package. Expect to find ~800 lines in here that no tool calls.
+
+The seam a future split would use already exists and is deliberately short of acquisition:
+`PluginResolver` (`plugin-api/src/plugin.ts`) is the host-injected `identify`/`version`/`runtimes`, for
+exactly the reason above — host-specific, so injected rather than in the neutral core. Extending it with
+`acquire()` is the shape to reach for IF a second node host ever needs acquisition without the tools.
+
 ### The `/host` boundary
 
-`plugin-api`'s root answers exactly one question: **what does a plugin need in order to be a plugin?** Anything whose audience is an *embedder standing a machine up* lives behind `@matatbread/matbot-plugin-api/host` — carrier installers (`installPrincipalCarrier`, `installUsageCarrier` and the platform carrier factories), the capture-safe swap proxies (`forwardingProxy`, `makeSwappable`), the mount table's producer half (`createMountTable`, `MountTable`), the quiescent-edge machinery (`machineBusy`, `contextSwitch`, `onContextQuiesce`, `flushIfQuiescent`), `unifyServices`, `singleTurnRequest`, `HookRegistry`, `createNotifier`/`scopedNotifier`, and the `Broadcaster` primitive. `core` re-exports all of it, so an app depending on core needs no direct `/host` import — and no plugin in this repo imports any of it.
+`plugin-api`'s root answers exactly one question: **what does a plugin need in order to be a plugin?** Anything whose audience is an *embedder standing a machine up* lives behind `@matatbread/matbot-plugin-api/host` — carrier installers (`installPrincipalCarrier`, `installUsageCarrier` and the platform carrier factories), the capture-safe swap proxies (`forwardingProxy`, `makeSwappable`), the mount table's producer half (`createMountTable`, `MountTable`), the quiescent-edge machinery a host needs (`machineBusy`, `contextSwitch`, `quiesced`, `scheduleAtEdge`), `unifyServices`, `singleTurnRequest`, `HookRegistry`, `createNotifier`/`scopedNotifier`, and the `Broadcaster` primitive. `core` re-exports all of it, so an app depending on core needs no direct `/host` import — and no plugin in this repo imports any of it.
 
-**It is a file boundary, not an export list**, so it cannot quietly erode: host assembly lives in `host-machine.ts`, and `index.ts` uses `export type *` plus a named value list for the two files that are deliberately split down the middle. Three subsystems are split rather than moved whole, because each has a real author-facing half:
+**It is a file boundary, not an export list**, so it cannot quietly erode: host assembly lives in `host-machine.ts`, and `index.ts` uses `export type *` plus a named value list for the two files that are deliberately split down the middle. Four subsystems are split rather than moved whole, because each has a real author-facing half:
 
 | Subsystem | Root (plugin) | `/host` (embedder) |
 |---|---|---|
 | principal  | `runAs`, `currentPrincipal`, `tryCurrentPrincipal` | `installPrincipalCarrier`, `enterPrincipal`, `createConstantPrincipalCarrier` |
 | notifications | `Notifier` type, `notifyingStore`, `ItemChangeKind`/`RegistryChangeKind` | `createNotifier`, `scopedNotifier`, `Broadcaster` |
 | mount table | `Mounted`, `MountConsumeOptions`, `MountedMachine` (the contract of `services.mounted`) | `MountTable`, `createMountTable` (driven by register + the quiescent edge) |
+| quiescent edge | `onContextQuiesce`, `Quiescer` — defer work to the next safe moment | `machineBusy`, `contextSwitch`, `quiesced`, `scheduleAtEdge` |
 
 Fan-out is the one place the split implies a rule rather than just a location: a plugin that wants to publish an event uses the **`Notifier`**, which is why the raw broadcaster is host-side.
 
@@ -208,13 +234,28 @@ type ScratchStore = Store<Session>;
 
 A **context switch** is the machine analogue of an OS one — "page in pending machine state, then set the owner." Two primitives, one per half: `runAs(principal, fn)` sets the owner (the principal carrier stays a pure identity primitive), and `machineBusy(fn)` holds the machine, running host-registered flushers (`onContextQuiesce`) at the release edge. `contextSwitch(principal, fn)` is simply both, for an operation that is both. The hold is a *wrapper*, never a `begin`/`end` pair: it releases on every exit including a throw, and a stranded counter is unrecoverable — every later flush would no-op forever, with no symptom but a deferred mutation that never happens.
 
-**A flusher may suspend the edge.** `onContextQuiesce` takes `() => void | Promise<void>`; returning a promise makes the edge *wait*, and an operation that must not overlap deferred work calls `quiesced()` before holding the machine (the pump does, so a `session_edit` deferred out of the last turn lands before the next turn takes its copy). Flushers are invoked in registration order and then settle together; the synchronous prefix runs inline, so the host can still stage a mutation and land it with a bare `flushIfQuiescent()`. What the edge cannot give is exclusivity: once any flusher awaits, an HTTP endpoint can accept a request and run a whole tool call inside that window, so serialising flushers against *each other* would remove one source of concurrent mutation and leave every other. Contention over a service is the service's to resolve — a `Store` answers with CAS — and the sweep's job is only to make it rare. The exception it does own, because no service can see it, is a change of *medium*: a backend swap is staged, never applied, while a flush is settling.
+**Scheduling edge work is one call.** `onContextQuiesce` registers *and announces*, so the barrier engages and the edge is guaranteed to arrive — a one-shot is `onContextQuiesce(un => { un(); work() })` (the closure holds the work; no pending flag), and a standing flusher is the same without the `un()`, which then MUST be idempotent since it runs at every edge. Repeated announcements that should collapse into **one** apply — the host's staged `StorageBackend` swap, a dirty mount key — use `scheduleAtEdge(work)`, a guarded one-shot: the guard coalesces the stagings and the work reads a last-write-wins slot, so three registers before an edge install one backend rather than three in turn. Continuous delivery is a *standing registration*, never a callback re-registering itself — registering means "I have work now", so a self-re-registering callback would announce fresh work from inside the sweep answering the last lot and re-enter forever; there is no independent clock to wait for. `onContextQuiesce` is a *subscription* (ask twice, run twice — each call carries its own work); `scheduleAtEdge` is a *dirty flag* (poke it N times, run once, reading a slot at fire time). `flushIfQuiescent` is private: announcing is what registering does, so exposing "force an edge" only offered callers a way to reason about firing that they should not need. Registering also schedules its own edge attempt on a microtask, never inline: a callback must not run before the statement registering it has returned.
+
+**A flusher may suspend the edge.** `onContextQuiesce` takes `(un) => void | Promise<void>`; returning a promise makes the edge *wait*. Flushers are invoked in registration order and then settle together; the synchronous prefix runs inline, so synchronous work registered on an idle machine is in effect by the time the sweep returns. Serialising flushers against *each other* is deliberately not done — it would remove one source of concurrent mutation and leave every other, at the price of every flusher waiting on the slowest.
+
+**The edge is a barrier, not a counter — for liveness, not for coherence.** `machineBusy` waits for staged work to land before taking the hold, so a flusher runs with the machine to itself for its whole extent (an entrant can no longer walk in through a flusher's `await`). The reason is *not* CAS coherence: that belongs to `mediumGuard`, which fails a write whose read came from another backend on the version stamp, and to the `Store`'s own CAS — contention over a service is the service's to resolve. It is that **a counter cannot force `depth` to reach zero**. Under continuously overlapping holds — several sessions on a busy server, each pump holding across its own queue — the edge never arrives, and a deferred session edit that never lands and a staged swap that never applies are both failures with no symptom. Barring entry is the only way to make the drain reachable.
+
+The wait lives *inside* `machineBusy` rather than at the call site, for the reason `runAs` is ambient and a mount interest is bound to its plugin's load extent: spelled outside, a second caller who omits it gets no error and no symptom, just work that stops landing. It is **bounded** (one constant, then it proceeds with a warning), because a counter cannot distinguish a nested entrant from a concurrent one — an LLM reaching a matbot HTTP endpoint through its own `http`/`bash` tool is inside its own turn's hold, and would otherwise wait on a drain that includes itself. Telling the two apart needs a hold-identity carrier and the platform split that implies; the bound degrades to the pre-barrier behaviour instead of hanging. `quiesced()` remains for an operation that needs deferred work complete without holding the machine; the pump no longer calls it.
 
 **What holds the machine is the operation, not the turn.** The pump holds it across its **whole queue** and `runAs`es per item, because the pump's own store work does not stop at a turn's end: it reads the committed document back for `followup`, appends markers to it, rewrites it for a retract, and persists the next turn's user message before that turn opens. A per-turn hold declared all of that idle — six edges fell inside one two-turn queue — so a mutation could land in precisely the gap the deferral exists to close. The queue draining is the real boundary, and it is the one accounting already flushes at, for the same stated reason: "the end of a turn" is not a moment anything can be totalled or swapped at. Entry points that *receive* work without performing it — a web request holding an SSE stream open, a telegram message — stay `runAs` and are deliberately not busy; counting them would mean the machine never reaches an edge at all.
 
 ### The mount table (`services.mounted`)
 
 A plugin reacts to a registry service (re)mounting or being unloaded through **`services.mounted`** — a `Mounted` whose one method, `consume({ key, replay?, signal?, onUnmount? }, handler)`, is keyed on the service it cares about. The host batches mount notifications to the **quiescent edge**: `register`/`unregister` mark a key dirty; the edge computes each key's net presence transition and **multicasts** to that key's subscribers. A reload (unregister+register before the edge) collapses to a single **remount**; an unregister not replaced by the edge is a **committed unload**, delivered to `onUnmount`. The contract guarantees only *eventual, ordered* delivery per key — **it says nothing about timing** (a register is not observably inline, nor pinned to a turn boundary). `StorageBackend`'s swap also lands at the edge (CAS coherence); other keys repoint immediately but still notify at the edge.
+
+**The table is the in-process half; the bus is the other.** Each transition is *also* published as a
+`RegistryChange` on the `services` registry (`name` = the `MatbotServices` key, a remount reading as
+`added`) — because a swapped `StorageBackend` writes nothing, so `notifyingStore` announces nothing, and
+every document in every namespace silently starts coming from somewhere else. No `ItemChange` can say
+that: it addresses one item. It is published **after** that key's handlers settle and **whether or not
+any exist** — the handlers are how the caches a remote reader queries *through* get rebuilt (announcing
+first invites the stale read the announcement exists to end), and the interests map holds this process's
+plugins, which says nothing about who is listening on the bus.
 
 **Litmus — does a plugin need it?** Only if its `setup()` reads another service's *current state* to build cached/derived state. A pure map (no setup data; data arrives later as a tool call or hook) resolves its dependency per-invocation through the proxy/member and subscribes to nothing.
 
@@ -441,6 +482,11 @@ named `StoreChange` — the medium is an implementation concern, and making a pl
 my thing a Store?" to use the bus was the wrong first question. Define a kind of your own only when
 you carry something a consumer **cannot** get by re-reading — progress, a measurement, an external
 event. That is a new shape, not a new source; `detail` is not the place to smuggle it.
+
+`RegistryChange` covers the three process-global registries — `tools`, `plugins` and `services` — where
+there is no owner and no item identity, only a member gained or lost. The `services` arm is the mount
+table's (above): it is the only way "the medium under every namespace was replaced" reaches a reader
+outside this process.
 
 **`namespace` is an address space, not a plugin.** It looks 1:1 with plugins from the web UI's
 `switch`, and it isn't: `files` is emitted by workspace, by background (a detached job's output), and

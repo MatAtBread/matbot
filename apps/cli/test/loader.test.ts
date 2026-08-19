@@ -75,6 +75,56 @@ test('a setup() throw is rolled back and recorded in skip mode', async () => {
   assert.equal(failed.name, 'throws-in-setup');
 });
 
+// The failure a load reports is downstream of its cause: a dependency the host could not satisfy
+// arrives as ERR_MODULE_NOT_FOUND naming a file. Only the host saw the cause, so what it noticed
+// while resolving has to survive into the entry the `plugin` tool and web UI read.
+test('what the host noticed while resolving is folded into the recorded failure', async () => {
+  const missing = new URL('./fixtures/does-not-exist.ts', import.meta.url).href;
+  await loadPlugins(
+    [{ spec: missing, importSpec: missing, notes: ['imports "left-pad", which resolves nowhere the host can see'] }],
+    stubServices, false, undefined, 'skip',
+  );
+  const failed = getFailedPlugins().find(f => f.specifier === missing);
+  assert.ok(failed, 'the failed load should be recorded');
+  assert.match(failed.error, /left-pad/);
+});
+
+// …and must not outlive the load: a host cannot tell an unused declaration from a fatal one, so a
+// plugin that loads anyway reports nothing.
+test('notes are dropped when the plugin loads regardless', async () => {
+  const loadsAnyway = new URL('./fixtures/loads-despite-notes.ts', import.meta.url).href;
+  const loaded = await loadPlugins(
+    [{ spec: loadsAnyway, importSpec: loadsAnyway, notes: ['declares a dependency on "left-pad"'] }],
+    noopServices, false, undefined, 'skip',
+  );
+  assert.equal(loaded.length, 1);
+  assert.equal(getFailedPlugins().some(f => f.specifier === loadsAnyway), false);
+});
+
+// `resolver.version(spec)` starts from the config specifier, and a bare name, a URL or a version range
+// locates no manifest — so a plugin configured by name reported no version at all in `plugin list`,
+// while the identical plugin configured by path reported one. The host read the package.json it
+// imported; it just had no channel to say so. (`name` had one, which is why identity was unaffected.)
+test('a version the host read is used, where resolving the specifier finds none', async () => {
+  const bareName = '@fixtures/valid-plugin';
+  const resolverServices = {
+    ...noopServices,
+    resolver: { identify: async () => bareName, version: async () => undefined },
+  } as unknown as MatbotMachine;
+
+  const [withHost] = await loadPlugins(
+    [{ spec: bareName, importSpec: validPlugin, name: bareName, version: '0.4.5' }],
+    resolverServices, false, undefined, 'throw',
+  );
+  assert.equal(withHost?.version, '0.4.5');
+
+  const [without] = await loadPlugins(
+    [{ spec: bareName, importSpec: validPlugin, name: bareName }],
+    resolverServices, false, undefined, 'throw',
+  );
+  assert.equal(without?.version, undefined, 'and nothing is invented when neither side knows');
+});
+
 test('a successful load clears a prior recorded failure for the same specifier', async () => {
   recordFailedPlugin({ specifier: validPlugin, error: 'stale failure from a previous boot' });
   assert.ok(getFailedPlugins().some(f => f.specifier === validPlugin));

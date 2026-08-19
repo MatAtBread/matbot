@@ -5,12 +5,12 @@ import { getRegisteredPlugins, getRegisteredTools, getRegisteredFrontendPlugins,
          getRegisteredServiceKeys, getHookPlugins, getSystemContextPlugins,
          getSpecifierForPlugin, getPluginNameForSpecifier, getFailedPlugins, clearFailedPlugin } from '@matatbread/matbot-core';
 import { readFile, writeFile, access, readdir } from 'node:fs/promises';
-import { spawn }                             from 'node:child_process';
 import { pathToFileURL, fileURLToPath }       from 'node:url';
 import { createRequire }                     from 'node:module';
 import path                                  from 'node:path';
-import process                               from 'node:process';
-import { classifySpecifier, fetchRemoteManifest } from '../remote-cache.js';
+import { classifySpecifier, fetchRemoteManifest, canonicalLocalSpecifier } from '../remote-cache.js';
+import { planProvision, applyProvision, discardProvision, runCommand, type ProvisionPlan } from '../provision.js';
+import { findDuplicateSingletons } from '../singletons.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -143,6 +143,38 @@ async function inspectPluginDir(sub: string, specifier: string, source: { type: 
     ...(pkg.version !== undefined ? { version: pkg.version } : {}),
     ...(runtimes !== undefined ? { matbotRuntime: runtimes } : {}),
   };
+}
+
+/**
+ * Is this discovered plugin already named by a config section?
+ *
+ * A specifier is not an identity, so this cannot be a string lookup — which is what it was, against the
+ * path form discovery happens to build (`./plugins/foo`). The moment `plugin add` began recording the
+ * canonical package name, a plugin that is configured AND loaded started reporting `configuredVia: null`,
+ * because `@scope/foo` is not the string `./plugins/foo`. The same blindness covered an absolute path or a
+ * `file:` URL naming the very same directory.
+ *
+ * So compare what an entry REFERS to: the package's name, the specifier as discovery wrote it, or — for
+ * anything path-shaped — the directory it resolves to. A bare name that is not this package's name, and a
+ * URL, are left to the name/specifier comparison: neither addresses a local directory.
+ */
+function configuredIn(entries: ReadonlySet<string>, p: DiscoveryEntry, projectDir: string): boolean {
+  if (entries.has(p.specifier) || entries.has(p.name)) return true;
+
+  const dir = p.source?.uri.startsWith('file:') === true ? fileURLToPath(p.source.uri) : undefined;
+  if (dir === undefined) return false;
+  const target = path.resolve(dir);
+
+  for (const entry of entries) {
+    let entryDir: string | undefined;
+    if (entry.startsWith('file:')) {
+      try { entryDir = fileURLToPath(entry); } catch { continue; }
+    } else if (entry.startsWith('./') || entry.startsWith('../') || path.isAbsolute(entry)) {
+      entryDir = path.resolve(projectDir, entry);
+    }
+    if (entryDir !== undefined && path.resolve(entryDir) === target) return true;
+  }
+  return false;
 }
 
 // TODO: This is a convenience shim for end users in monorepo setups and is
@@ -286,19 +318,6 @@ async function detectPackageManager(dir: string): Promise<string> {
   return 'npm';
 }
 
-function runCommand(cmd: string, args: string[], cwd: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const chunks: string[] = [];
-    const child = spawn(cmd, args, { cwd, shell: process.platform === 'win32' });
-    child.stdout?.on('data', (d: Buffer) => chunks.push(d.toString()));
-    child.stderr?.on('data', (d: Buffer) => chunks.push(d.toString()));
-    child.on('close', code => {
-      if (code === 0) resolve(chunks.join(''));
-      else reject(new Error(`${cmd} exited with code ${String(code)}\n${chunks.join('')}`));
-    });
-  });
-}
-
 // The dependency names recorded in the project package.json — used to discover what a pnpm/npm
 // install of a tarball/git URL actually added (a URL is not a loadable specifier on restart, but
 // the installed package name is). dependencies + optionalDependencies cover what `add` writes.
@@ -428,6 +447,10 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
       }));
 
       const failed = getFailedPlugins();
+      // Reported alongside failures because it is the same kind of fact — something about the installed
+      // set that is worth knowing and that nothing else would ever mention. It is not a failure: a second
+      // copy of a singleton is survivable by design, which is exactly why it would otherwise go unnoticed.
+      const duplicateSingletons = await findDuplicateSingletons({ configDir: projectDir, plugins: loaded });
 
       yield {
         type:  'result',
@@ -436,6 +459,7 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
           configured,
           ...(failed.length ? { failed: failed.map(f => ({ specifier: f.specifier, error: f.error, ...(f.name !== undefined ? { name: f.name } : {}) })) } : {}),
           ...(toolsByPlugin.has(undefined) ? { builtinTools: toolsByPlugin.get(undefined) } : {}),
+          ...(duplicateSingletons.length ? { duplicateSingletons } : {}),
         },
       };
       return;
@@ -450,8 +474,8 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
         type:  'result',
         value: found.map(p => ({
           ...p,
-          configuredVia: pluginEntries.has(p.specifier) ? 'plugins'
-                       : providerModules.has(p.specifier) ? 'providers'
+          configuredVia: configuredIn(pluginEntries, p, projectDir) ? 'plugins'
+                       : configuredIn(providerModules, p, projectDir) ? 'providers'
                        : null,
         })),
       };
@@ -525,9 +549,10 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
       // loader's runtime gate + the post-import shape check.)
       let description: string | undefined;
       let remoteName: string | undefined;
-      if (classified.kind === 'remote') {
+      if (classified.kind === 'http') {
+        if (classified.advice !== undefined) yield { type: 'stdout', chunk: `${classified.advice}\n` };
         try {
-          const manifest = await fetchRemoteManifest(specifier);
+          const manifest = await fetchRemoteManifest(specifier, path.join(projectDir, '.plugins'), /* live */ true);
           const rt = manifest.runtimes;
           if (rt === undefined) {
             yield { type: 'error', message:
@@ -551,24 +576,66 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
         description = await pkgDescriptionFromSpecifier(specifier, projectDir);
       }
 
+      // A local plugin brings its own dependencies, and nothing used to install them: its bare imports
+      // resolved to whatever happened to be installed around it. Resolve them BEFORE asking — npm's
+      // `--package-lock-only` answers "what would this install" without putting a package on disk — so
+      // the transitives appear in the approval the user is already being asked for, rather than as a
+      // second prompt for consequences of the first.
+      let plan: ProvisionPlan | undefined;
+      if (classified.kind === 'local') {
+        try {
+          plan = await planProvision(classified.dir);
+        } catch (e) {
+          yield { type: 'error', message:
+            `Could not resolve the dependencies of "${specifier}": ${e instanceof Error ? e.message : String(e)}. ` +
+            `Nothing was changed in ${path.basename(configPath)}.` };
+          return;
+        }
+        if (plan.unsupported.length > 0) {
+          // Not a failure: these are workspace/link/file protocols, which say "something already resolves
+          // me" — every in-repo plugin looks like this. Say so once, then install as before.
+          const ranges = plan.unsupported.map(u => `${u.name}@${u.range}`).join(', ');
+          yield { type: 'stdout', chunk:
+            `Leaving dependencies to their own resolution (${ranges}) — not registry ranges, so npm is not asked.\n` };
+        }
+      }
+
       // confirmAction rather than a `confirmed` input parameter: plugin installation is a
       // privileged operation. Breaking the LLM's execution chain and requiring an
       // out-of-band human response prevents prompt injection or a malicious plugin
       // from auto-installing further plugins by simply passing confirmed:true.
+      const deps = plan !== undefined && plan.packages.length > 0
+        ? `\n\nIt will also install ${plan.packages.length} package(s) from npm:\n${plan.packages.map(p => `- ${p}`).join('\n')}`
+        : '';
       const confirmed = await confirmAction(
         ctx,
-        `Install plugin **"${specifier}"**?${description !== undefined ? `\n_${description}_` : ''}`,
+        `Install plugin **"${specifier}"**?${description !== undefined ? `\n_${description}_` : ''}${deps}`,
       );
       if (!confirmed) {
+        if (plan !== undefined) await discardProvision(plan);
         yield { type: 'result', value: { message: 'Cancelled.' } };
         return;
+      }
+
+      if (plan !== undefined && plan.packages.length > 0) {
+        yield { type: 'stdout', chunk: `Installing ${plan.packages.length} dependency package(s) with npm...\n` };
+        try {
+          const { linked, output } = await applyProvision(plan);
+          if (output) yield { type: 'stdout', chunk: output };
+          if (linked.length > 0) yield { type: 'stdout', chunk: `Linked the host's ${linked.join(', ')}.\n` };
+        } catch (e) {
+          yield { type: 'error', message:
+            `Could not install the dependencies of "${specifier}": ${e instanceof Error ? e.message : String(e)}. ` +
+            `Nothing was changed in ${path.basename(configPath)}.` };
+          return;
+        }
       }
 
       // The specifier written to matbot.yaml is usually the one given, but a tarball/git URL is not
       // a loadable specifier on restart — record the installed package name instead.
       let configSpecifier = specifier;
 
-      if (classified.kind === 'npm' || classified.kind === 'pnpm-url') {
+      if (classified.kind === 'npm') {
         const pm = await detectPackageManager(projectDir);
         yield { type: 'stdout', chunk: `Installing "${specifier}" with ${pm}...\n` };
         const before = await readDependencyNames(projectDir);
@@ -579,10 +646,26 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
           yield { type: 'error', message: describeInstallFailure(specifier, pm, e) };
           return;
         }
-        if (classified.kind === 'pnpm-url') {
+        // A tarball or git URL is not a loadable specifier on restart, so record what the install
+        // actually added instead. A plain registry name needs no translation — it already IS the name.
+        if (/^(?:https?:\/\/|git\+)/.test(classified.spec)) {
           const installedName = await addedDependencyName(projectDir, before);
           if (installedName !== undefined) configSpecifier = installedName;
         }
+      }
+
+      // A path is the least portable thing this could record: it is right only for this working copy,
+      // while the name resolves here AND in an installed deployment, and is the handle remove/reload
+      // address the plugin by. So record the name whenever it resolves back to the directory just
+      // approved — the same rule the `provider` tool and the setup wizard already follow.
+      //
+      // Kept for the guard below, not re-derived: `nameFromSpecifier` resolves a bare name through
+      // node_modules, where a local-by-name plugin is precisely NOT — so re-reading it would come back
+      // undefined and quietly skip the duplicate check for every plugin this normalises.
+      let localName: string | undefined;
+      if (classified.kind === 'local') {
+        const named = await canonicalLocalSpecifier(classified.dir, projectDir);
+        if (named !== undefined) { configSpecifier = named; localName = named; }
       }
 
       // Duplicate-name guard: a plugin's canonical package.json `name` is its identity (and the handle
@@ -590,7 +673,7 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
       // collision *before* writing config — otherwise the load below fails (the registry throw is
       // swallowed by loadPlugins) and leaves a dangling matbot.yaml entry. Almost always the same
       // package added by two specifiers: a config error, not something to silently double-install.
-      const pluginName = remoteName ?? await nameFromSpecifier(configSpecifier, projectDir);
+      const pluginName = remoteName ?? localName ?? await nameFromSpecifier(configSpecifier, projectDir);
       if (pluginName !== undefined) {
         const clash = getRegisteredPlugins().find(p => p.name === pluginName);
         if (clash !== undefined) {
@@ -641,7 +724,7 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
         // remedy plainly — install the dependency too — instead of surfacing the raw module-not-found,
         // which makes the model hunt for npm name variations. The entry is LEFT in config (it activates
         // once the dependency is present), like any other fixable activation failure.
-        const missing = classified.kind === 'remote' ? missingPackageOf(e) : undefined;
+        const missing = classified.kind === 'http' ? missingPackageOf(e) : undefined;
         if (missing !== undefined) {
           const fromNpm = missing.startsWith('@matatbread/')
             ? `Installing it from npm is simplest — \`${missing}\` — because npm resolves ITS dependencies too.`
@@ -763,29 +846,34 @@ export const pluginTool: Tool<ToolResultOf<'plugin'>> = {
     'frontends to the running process. List or discover them, install or remove one, reload one ' +
     'to pick up code changes without restarting, or supply a secret a plugin or provider ' +
     'reported missing.\n\n' +
-    'A `specifier` (for add/remove/reload) is EXACTLY ONE of these forms — pass a concrete string, ' +
-    'not a fuzzy name (run `discover_local` first to find the exact specifier). If the user gives you a ' +
-    'specifier, pass it through VERBATIM — never reformat it (especially a github: one):\n' +
+    'A `specifier` (for add/remove/reload) takes exactly one of THREE routes — local, npm, or http — ' +
+    'each a set of spellings for the same mechanism. Pass a concrete string, not a fuzzy name (run ' +
+    '`discover_local` first to find the exact specifier). If the user gives you a specifier, pass it ' +
+    'through VERBATIM — never reformat it (especially a github: one):\n' +
     '```ts\n' +
     'type Specifier =\n' +
-    '  // npm registry — published packages; resolves via your .npmrc (npmjs, verdaccio, or private)\n' +
+    '  // LOCAL — anything the disk already answers, PREFERRED over the registry. A path (resolved\n' +
+    '  //   against the project dir; a package.json MUST exist at/above it — the leading "./" is\n' +
+    '  //   optional), or a bare package NAME that a local package declares: in a source checkout\n' +
+    '  //   "@matatbread/matbot-edit-session" is `plugins/edit-session`, and is used in place rather\n' +
+    '  //   than installing a published copy of code already here.\n' +
+    '  | "./<dir>" | "../<dir>" | "/<abs-dir>" | "file:///<abs-dir>" | "<dir>/<subdir>"\n' +
+    '  | "<name>" | "@<scope>/<name>"            // when a local package declares that name\n' +
+    '  // NPM — a name nothing local claims (the registry, via your .npmrc: npmjs, verdaccio, private),\n' +
+    '  //   or anything a package manager must unpack or clone. A "@<version|tag|range>" suffix is ALWAYS\n' +
+    '  //   the registry — a range is a constraint only it can solve. "npm:" forces it for a bare name.\n' +
     '  | "<name>" | "@<scope>/<name>"            // e.g. "@matatbread/matbot-persist-ki-bge"\n' +
     '  | "<name>@<version|tag|range>"            // e.g. "foo@1.2.3", "@scope/foo@^0.1", "foo@latest"\n' +
-    '  // local filesystem — resolved against the project dir; a package.json MUST exist at/above it.\n' +
-    '  //   The leading "./" is optional: a bare path is local IFF it exists, else it is read as npm.\n' +
-    '  | "./<dir>" | "../<dir>" | "/<abs-dir>" | "file:///<abs-dir>" | "<dir>/<subdir>"\n' +
-    '  // HTTP(S) — raw source fetched & cached into .plugins/; OR a .tgz tarball (installed via your\n' +
-    '  //   package manager). Raw source MUST resolve a package.json: the URL is one, OR points at a\n' +
-    '  //   directory containing one, OR is a code entry with a package.json as its DIRECT SIBLING.\n' +
+    '  | "https://<host>/<path>/<pkg>.tgz" | "git+https://<host>/<owner>/<repo>.git"\n' +
+    '  | "npm:<name>" | "npm:<name>@<version|tag|range>"\n' +
+    '  // HTTP — raw source, fetched & cached into .plugins/. MUST resolve a package.json: the URL is\n' +
+    '  //   one, OR points at a directory containing one, OR is a code entry with one as its DIRECT\n' +
+    '  //   SIBLING. "github:" is shorthand for this same route — use it for matbot source plugins,\n' +
+    '  //   including one in a repo subdir; its "#<ref>" (branch/tag/commit) comes LAST, after "/<subdir>".\n' +
     '  | "https://<host>/<path>/" | "https://<host>/<path>/package.json"\n' +
-    '  | "https://<host>/<path>/<entry>.ts" | "https://<host>/<path>/<pkg>.tgz"\n' +
-    '  // GitHub — RAW source fetched & cached. Use this for matbot source plugins (incl. a repo subdir).\n' +
-    '  //   The "#<ref>" (branch/tag/commit) comes LAST, after any "/<subdir>". The "#path:" and git+ forms\n' +
-    '  //   install via the package manager instead and work ONLY for fully-packaged (published) packages,\n' +
-    '  //   NOT raw workspace source — do not use them for a repo subdir.\n' +
-    '  | "github:<owner>/<repo>" | "github:<owner>/<repo>#<ref>"\n' +
-    '  | "github:<owner>/<repo>/<subdir>" | "github:<owner>/<repo>/<subdir>#<ref>"\n' +
-    '  | "github:<owner>/<repo>#path:/<subdir>" | "git+https://<host>/<owner>/<repo>.git";\n' +
+    '  | "https://<host>/<path>/<entry>.ts"\n' +
+    '  | "github:<owner>/<repo>" | "github:<owner>/<repo>/<subdir>"\n' +
+    '  | "github:<owner>/<repo>#<ref>" | "github:<owner>/<repo>/<subdir>#<ref>";\n' +
     '```\n' +
     'Raw-source (HTTP/github) installs are packages: a package.json must resolve (the URL itself, a ' +
     'directory containing one, or — for a code-entry URL — its direct sibling), it must declare a "name", ' +
@@ -794,14 +882,21 @@ export const pluginTool: Tool<ToolResultOf<'plugin'>> = {
     'DEPENDENCY RESOLUTION BY SOURCE — decisive when a plugin depends on OTHER packages:\n' +
     '  • npm names and .tgz/git URLs install through the package manager, which resolves the FULL ' +
     'dependency tree. Use these for a plugin that depends on other packages.\n' +
-    '  • A local path resolves dependencies only if they already exist in the surrounding node_modules ' +
-    '(true in a workspace checkout, where everything is installed).\n' +
-    '  • RAW source (HTTP/github) fetches ONLY that one plugin\'s own files — it does NOT install a ' +
-    'dependency graph. A raw-source plugin that imports another package needs that package provided ' +
-    'separately (install it too, or just install the plugin from npm). So PREFER npm for any plugin ' +
-    'with dependencies; reserve raw github/HTTP for self-contained plugins or testing a single ' +
-    'plugin\'s source. If a raw-source install fails with a missing package, that package is a genuine ' +
-    'unmet dependency — install it (from npm), do not retry name variations.\n\n' +
+    '  • A local plugin (a path, or a name it declares) INSTALLS the `dependencies` its own ' +
+    'package.json declares (npm, transitives ' +
+    'included, listed in the install approval). A manifest using workspace:/catalog:/link:/file: ranges is ' +
+    'left alone — those mean something already resolves it, which is true of any plugin inside this repo.\n' +
+    '  • HTTP/github fetches ONE package\'s files and installs no dependency graph. Its relative, ' +
+    'root-relative and absolute-URL imports are all fetched on demand, so a third-party dependency ' +
+    'written as a URL ("https://esm.sh/ms@2.1.3") works — but a BARE import means the host\'s own copy, ' +
+    'so anything else must already be present. A dependency it declares but nothing satisfies is reported ' +
+    'at boot; an import that resolves nowhere fails naming both the specifier and the file that imported ' +
+    'it, and is a genuine unmet dependency — install it, add it to `plugins:` if it is itself a matbot ' +
+    'plugin, or express it as a URL. Do not retry name variations. ESM only on this route.\n\n' +
+    'What `add` RECORDS in matbot.yaml is the canonical package **name** whenever that name resolves to ' +
+    'the same place — so adding "./plugins/foo" configures "@scope/foo", the form that also works in an ' +
+    'installed deployment. A path is kept only when nothing else resolves it. Pass whatever specifier you ' +
+    'have; the tool normalises.\n\n' +
     'For remove/reload, prefer the plugin\'s canonical package.json **name** (the stable identity shown ' +
     'as `name` by `list`) — the exact matbot.yaml entry also works, but the resolved `specifier` shown ' +
     'under `loaded` may be a file: URL and is NOT the handle. A plugin name is unique, so addressing by ' +
@@ -822,11 +917,11 @@ export const pluginTool: Tool<ToolResultOf<'plugin'>> = {
       specifier: {
         type:        'string',
         description: 'For remove/reload: the plugin\'s canonical package.json name (preferred — the `name` from `list`), ' +
-                     'or its exact matbot.yaml entry. For add: a load specifier — exactly one of: an npm name ' +
-                     '("@scope/name", optionally "@version"); a local path ("./dir", "/abs", "file://…", or a bare existing ' +
-                     'path); an HTTP(S) URL to raw source (a package.json, a directory containing one, or a code entry with a ' +
-                     'sibling package.json) or a .tgz; or a github: / git+ specifier. A raw-source package.json must declare a ' +
-                     '"name". See the tool description for the full grammar.',
+                     'or its exact matbot.yaml entry. For add: a load specifier taking exactly one of three routes — ' +
+                     'local (a path, or a bare name a local package declares — preferred over the registry), npm (a ' +
+                     'name nothing local claims, a version-suffixed name, a .tgz, a git ' +
+                     'URL, or an explicit "npm:<name>"), or http (an HTTP(S) URL or "github:<owner>/<repo>[/<subdir>][#<ref>]"). ' +
+                     'An http package.json must resolve and declare a "name". See the tool description for the full grammar.',
       },
       key: {
         type:        'string',

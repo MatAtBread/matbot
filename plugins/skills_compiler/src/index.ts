@@ -1,6 +1,10 @@
 import { PLUGIN_API_VERSION, currentPrincipal, invokeTool, toolResult, toolText } from '@matatbread/matbot-plugin-api';
 import type { MatbotPluginSpec, MatbotMachine, ToolExecutor, ToolEvent, ToolContext, ToolContract, ToolResultOf, Session, Message } from '@matatbread/matbot-plugin-api';
 import { buildMatbotToolsDts, checkProjectDir } from '@matatbread/matbot-tool-types';
+import { writePluginScaffold } from './scaffold.js';
+// Re-exported for the scaffold's own tests: what it must not assume about where matbot.yaml sits is
+// only checkable by building outside a source checkout, which no in-repo compile does.
+export { writePluginScaffold, hostPluginApiDir } from './scaffold.js';
 // Type-only, for the skills plugin's `MatbotServices.SkillManager` declaration. Erased, and a
 // devDependency, so there is no runtime dependency on the package: consumption stays
 // `services.SkillManager?.` and degrades when skills isn't loaded. This file used to declare its own
@@ -98,22 +102,12 @@ const r = await tool.<tool_name>(params);
 // out in full). Kept in one place so those two prompts don't drift.
 const STRICT_TS = 'Remember verbatimModuleSyntax (use `import type` for type-only imports, `import` for value imports), exactOptionalPropertyTypes (omit an optional key rather than passing undefined), and noUncheckedIndexedAccess (guard every array[i] before use).';
 
-// Augments the generated plugin's view of `ToolContracts` so `toolResult(invokeTool(..., name, ...))` is
-// typed for the common tools it calls. The real augmentations live in those tools' own packages
-// (ask-user, rumsfeld), but the generated plugin is a separate compilation that only sees plugin-api —
-// so we ship this alongside it. This is only the FALLBACK, used when no plugin source is scannable;
-// normally buildMatbotToolsDts derives these arms from the live source. Kept in step (arm form) with
-// those packages' ToolContracts declarations.
-const TOOL_CONTRACTS_DTS = `import '@matatbread/matbot-plugin-api';
-import type { ToolContract } from '@matatbread/matbot-plugin-api';
-declare module '@matatbread/matbot-plugin-api' {
-  interface ToolContracts {
-    ask_user: ToolContract<{ name: string; answer: string }, { name: string; label: string; type: 'text' | 'password' | 'select' | 'confirm'; options?: string[]; allowOther?: boolean; default?: string; required?: boolean; cancelable?: boolean }>;
-    find_fact: ToolContract<string[] | null, { question: string; terms: { term: string; context?: string }[]; provider?: string }>;
-    contextual_search: ToolContract<{ name: string; content: string }, { terms: { term: string; context?: string }[] }>;
-  }
-}
-`;
+// There used to be a hardcoded three-arm `ToolContracts` fallback here (ask_user, find_fact,
+// contextual_search), used when the live dts could not be derived. It is deliberately gone. A stub is not a
+// smaller truth, it is a false one: the codegen prompt asserts "a tool not declared here does not exist",
+// so under a stub that sentence is wrong about most of the registry, and the model closes the gap by
+// declaring contracts itself — asserting shapes tsc cannot contradict. The dts is an INPUT to generation,
+// derived from the live registry and nothing else; when it cannot be derived the compile fails.
 
 // Where compiled plugins are written, installed from, and loaded — relative to the project root (the
 // dir holding matbot.yaml). NOT `.data/` (the LLM's read-write workspace) nor `.plugins/` (the
@@ -162,7 +156,7 @@ export function createSkillCompilerPlugin(): MatbotPluginSpec {
             yield { type: 'error', message: 'No configPath available; cannot locate the project root on disk.' };
             return;
           }
-          const { dirname, join, relative } = await import('node:path');
+          const { dirname, join } = await import('node:path');
           const projectRoot = dirname(services.configPath);
 
           // ── inspect: read back the current compiled version (source + file listing), no mutation ──
@@ -252,7 +246,7 @@ export function createSkillCompilerPlugin(): MatbotPluginSpec {
           const buildDir  = join(projectRoot, COMPILED_PLUGINS_DIR, pluginDir);
           const specifier = `./${relDir}`;
 
-          const { mkdir, readFile, symlink, readlink, writeFile } = await import('node:fs/promises');
+          const { readFile, writeFile } = await import('node:fs/promises');
 
           // Prior compiled source on disk + operator feedback ⇒ ITERATE: edit the existing implementation
           // instead of re-demonstrating from scratch. Re-demonstration discards working code and can
@@ -293,7 +287,7 @@ export function createSkillCompilerPlugin(): MatbotPluginSpec {
           // also tells us whether this plugin is already installed/loaded — which decides add vs reload
           // at install time.
           yield { type: 'progress', pct: 6, message: 'Deriving tool contracts...' };
-          let toolContractsDts = TOOL_CONTRACTS_DTS;
+          let toolContractsDts: string | undefined;
           let alreadyInstalled = false;
           try {
             let pluginUrls: string[] = [];
@@ -316,7 +310,26 @@ export function createSkillCompilerPlugin(): MatbotPluginSpec {
               toolContractsDts = generated.dts;
               yield { type: 'progress', pct: 8, message: `Typed ${generated.tools.emitted.length} tool result(s) and ${generated.services.emitted.length} service(s).` };
             }
-          } catch { /* keep the static fallback */ }
+          } catch { /* reported below — an undefined dts is the one signal that matters here */ }
+
+          // No dts, no compile. This used to fall back to three hardcoded arms, and that fallback was the
+          // defect: the prompt tells the model "a tool not declared here does not exist", so a stub makes
+          // that sentence false about most of the registry, and the model fills the gap by declaring
+          // contracts itself — asserting shapes tsc cannot contradict (measured: an invented
+          // `whoami: ToolContract<{ id: string; type: string }, {}>` that compiled clean and only resembled
+          // the real `Principal`). The dts is an INPUT to code generation, derived from the live registry;
+          // when it cannot be derived, the honest outcome is no generated tool, not a guessed one. An empty
+          // derived set is fine and NOT this case — "we know of no tools" is true, and the gate holds the
+          // model to it.
+          if (toolContractsDts === undefined) {
+            yield { type: 'error', message:
+              'Could not derive the tool contracts this plugin would be generated against, so nothing was ' +
+              'generated. The compiler types generated code off the live tool registry; without it the model ' +
+              'would be inventing contracts, which compile and then fail at runtime. Check that ' +
+              '@matatbread/matbot-plugin-api resolves from the project (or that its source is present), then ' +
+              'retry.' };
+            return;
+          }
 
           // The environment spec embedded in every codegen prompt (initial, iterate and repair): the
           // machine API plus the ambient contracts the build typechecks against — the prompt and tsc
@@ -343,6 +356,10 @@ ${toolContractsDts}
           // The authoritative statement of what the tool must do, built once per path and used TWICE: in
           // pass 1's prompt, and as the standing system prompt for every repair pass (see repairSystem).
           let specBlock: string;
+          // Written into the scaffold's package.json, which is where the host backfills a plugin's
+          // manifest description from — so `plugin list` describes this package whatever the generated
+          // source happens to declare. Undefined on iterate: the scaffold keeps what is already there.
+          let pkgDescription: string | undefined;
 
           if (!iterate) {
             yield { type: 'progress', pct: 10, message: `Executing "${skill}"...` };
@@ -445,6 +462,7 @@ ${toolContractsDts}
             yield { type: 'progress', pct: 55, message: 'Preparing build...' };
 
             const toolDesc = (design.toolDescription as string).replace(/`/g, '\\`');
+            pkgDescription = design.toolDescription as string;
             const toolParams = (design.parameters || []) as Array<{name: string; type: string; description: string; required: boolean}>;
             const reqd = toolParams.filter(p => p.required).map(p => JSON.stringify(p.name)).join(', ');
             const props = JSON.stringify(Object.fromEntries(toolParams.map(p => [p.name, { type: p.type, description: p.description }]))) || '{}';
@@ -496,6 +514,7 @@ declare module '@matatbread/matbot-plugin-api' {
 
 export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,
+  manifest: { description: \`${toolDesc}\` },   // what \`plugin list\` shows for the package; keep it
   async setup(services: MatbotMachine) {
     const executor: ToolExecutor<ToolResultOf<'${toolName}'>> = {
       async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent<ToolResultOf<'${toolName}'>>> {
@@ -587,56 +606,19 @@ This may be the third or fourth attempt at this file, so it may already have dri
           // the workspace plugin plus a false assumption that the file store materialises on the local
           // filesystem. The build needs a real local path it owns.
 
-          // Compute relative paths from the plugin build dir to tsconfig.base.json and the plugin-api
-          // package at the project root. The build dir is outside the pnpm workspace packages, so tsc
-          // needs explicit paths to resolve the peer dep.
-          const baseTsconfigPath = relative(buildDir, join(projectRoot, 'tsconfig.base.json'));
-          const pluginApiPath = relative(buildDir, join(projectRoot, 'plugin-api', 'src', 'index.ts'));
-          const tsconfigJson = JSON.stringify({
-            extends: baseTsconfigPath,
-            compilerOptions: {
-              paths: { "@matatbread/matbot-plugin-api": [pluginApiPath] },
-              declaration: false, declarationMap: false, sourceMap: false,
-            },
-            include: ["src/**/*"],
-          }, null, 2);
-
-          // Recompiling to the same destination is a new version, not a silent overwrite: read the version
-          // already on disk (if any) and bump its patch. A first compile — or an unparseable/absent
-          // package.json — starts at 0.1.0.
-          let version = '0.1.0';
-          try {
-            const existing = JSON.parse(await readFile(join(buildDir, 'package.json'), 'utf8')) as { version?: string };
-            const m = typeof existing.version === 'string' ? existing.version.match(/^(\d+)\.(\d+)\.(\d+)$/) : null;
-            if (m) version = `${m[1]}.${m[2]}.${Number(m[3]) + 1}`;
-          } catch { /* no existing package.json → first version */ }
-          const packageJson = JSON.stringify({
-            name: pluginPkgName, matbotRuntime: ["node"], version, type: "module",
-            exports: { ".": "./src/index.ts" }, files: ["src"],
-            peerDependencies: { "@matatbread/matbot-plugin-api": "workspace:^" },
-          }, null, 2);
-
+          // The scaffold — package.json, a self-contained tsconfig, the ambient tool dts, and the
+          // plugin-api link that is the only way tsc and Node resolve it here. Its own module because
+          // what it must NOT assume (that matbot.yaml sits at a source checkout's root) is worth
+          // stating once, in one place, with the measurements behind it.
           yield { type: 'progress', pct: 68, message: 'Writing plugin scaffold...' };
+          let version: string;
           try {
-            await mkdir(join(buildDir, 'src'), { recursive: true });
-            await writeFile(join(buildDir, 'package.json'), packageJson);
-            await writeFile(join(buildDir, 'tsconfig.json'), tsconfigJson);
-            await writeFile(join(buildDir, 'src', 'matbot-tools.d.ts'), toolContractsDts);
+            ({ version } = await writePluginScaffold({
+              buildDir, configDir: projectRoot, pkgName: pluginPkgName, toolContractsDts,
+              ...(pkgDescription !== undefined ? { description: pkgDescription } : {}),
+            }));
           } catch (e) {
             yield { type: 'error', message: `Could not write plugin to ${relDir}: ${e instanceof Error ? e.message : String(e)}` };
-            return;
-          }
-
-          // node_modules symlink so Node's ESM resolver finds the peer dep at runtime — the build dir is
-          // outside the pnpm workspace packages, so it has no node_modules of its own.
-          const linkDir = join(buildDir, 'node_modules', '@matatbread');
-          const linkPath = join(linkDir, 'matbot-plugin-api');
-          const linkTarget = join(projectRoot, 'plugin-api');
-          try {
-            await mkdir(linkDir, { recursive: true });
-            try { await readlink(linkPath); } catch { await symlink(linkTarget, linkPath); }
-          } catch (e) {
-            yield { type: 'error', message: `Could not create node_modules symlink: ${e instanceof Error ? e.message : String(e)}` };
             return;
           }
 
@@ -717,7 +699,9 @@ Fix every reported error, keeping the specification satisfied. Output ONLY the c
               return;
             }
 
-            const tc = await checkProjectDir(buildDir);
+            // `ownContracts`: this tool's arm is the one the template tells it to keep; an arm for any OTHER
+            // tool is an assertion about a contract it was handed, and is rejected like a cast.
+            const tc = await checkProjectDir(buildDir, { ownContracts: [toolName] });
             if (tc.ok) typecheckOk = true;
             else typecheckOutput = tc.output.trim() || 'typecheck failed';
           }
@@ -769,11 +753,14 @@ Fix every reported error, keeping the specification satisfied. Output ONLY the c
           }
 
           // A declined/cancelled install confirmation is a RESULT from the `plugin` tool ("Cancelled."),
-          // not a throw — so don't trust the message text, verify the effect: the plugin took hold only
-          // if the compiled tool is now resolvable. (On the reload path a still-resolvable OLD version
-          // can mask a cancelled reload — the registry can't distinguish that; accepted.) Without this
-          // check a cancelled install reported `installed` and hid the source skill.
-          if (!alreadyInstalled && !services.tools.resolve(toolName)) {
+          // not a throw — so don't trust the message text, verify the effect: the plugin took hold only if
+          // the compiled tool is now resolvable. Checked on BOTH paths. It used to skip the check whenever
+          // the plugin was already configured, which assumed the reload path always has an old version still
+          // loaded — and when it does not (a build dir deleted under a config that still lists it, so the
+          // boot load failed), a cancelled reload reported `installed` and went on to hide the source skill:
+          // no tool, and the skill that described it hidden too. What remains genuinely undetectable is a
+          // cancelled reload masked by a still-resolvable OLD version; the registry cannot tell those apart.
+          if (!services.tools.resolve(toolName)) {
             yield {
               type: 'result',
               value: {

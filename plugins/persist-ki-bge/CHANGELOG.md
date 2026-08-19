@@ -1,5 +1,13 @@
 # @matatbread/matbot-persist-ki-bge
 
+## 0.4.5
+
+### Patch Changes
+
+- Updated dependencies [99152f3]
+- Updated dependencies [20d87fe]
+  - @matatbread/matbot-plugin-api@0.4.5
+
 ## 0.4.4
 
 ### Patch Changes

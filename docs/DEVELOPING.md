@@ -176,14 +176,103 @@ resolved `file://` path or per-load `blob:` URL. `reload` re-imports a plugin (a
 resolve hook installed, the first-party modules it imports) from disk to pick up code changes; see
 CLAUDE.md's *Plugin hot-reload* for the freshness mechanism and its caveats.
 
-### Remote (raw-source) plugins
+### Three routes in
 
-`add` accepts an `npm` package, a local path, or a raw-source specifier (`github:` or an
-`https://` URL). A raw-source install **must resolve a `package.json` with a `name`** — the URL
-itself, a directory containing one, or a code entry whose `package.json` is its *direct* sibling;
-absence is a hard error (no munged "index" names). Fetched remote code is mirrored under a
-matbot-writes / LLM-reads-only `.plugins/` cache next to `matbot.yaml` (kept separate from the
-read-write `.data/` tree), so a restart loads from disk rather than re-fetching.
+A plugin specifier takes one of three routes, and each hands resolution to whoever already owns it —
+matbot writes none of the three resolvers. Which one runs is decided by what the specifier *is*:
+
+| Route | What it is | Resolved by |
+|---|---|---|
+| **local** | a path, or a bare name the disk already answers | the **filesystem** — already an answer |
+| **npm** | a name nothing local claims, a version-suffixed name, an explicit `npm:…`, a `.tgz`/`.tar.gz`, or a git URL | the **package manager** — `^1.2.3` is a *question*: constraint solving, a registry, a lockfile |
+| **http** | an `http(s)://` URL, or `github:owner/repo[/sub][#ref]` | the **URL itself** — nothing to resolve but a fetch |
+
+**A bare name is local if anything here declares it.** Not if a *path* of that shape exists — that is a
+coincidence, and in a checkout it never happens: `@matatbread/matbot-edit-session` is
+`plugins/edit-session`. So the disk is asked what it can answer — "does a package under `plugins/` call
+itself this?" — over the same two-deep root `discover_local` scans, and only an unclaimed name is a
+registry question. Otherwise `plugin add @matatbread/matbot-edit-session` in a full checkout would install
+a *published copy of code already on disk*: a second package, free to skew in version, shadowing the source
+being worked on. A `@<range>` suffix is always the registry, local package or not — a constraint is exactly
+what a filesystem cannot solve.
+
+The same fact runs the other way when a plugin is **recorded**: `plugin add` writes the canonical package
+name, not the path it was given, whenever that name resolves back to the directory just approved. The name
+works in a checkout and in an installed deployment; a path works in one working copy. A plugin the name
+cannot reach — under `compiled-plugins/`, in a sibling checkout via `../` — keeps its path.
+
+Two rules close the model. **A plugin is always a package**: never raw source without a manifest, because
+matbot's own fields (`matbotRuntime`) live there. And **a bare specifier means host-provided** — the
+singletons `plugin-api` and `core` always resolve to the host's own copy, never to a second one fetched
+or installed alongside. matbot's version routinely exists on no registry, so a package manager could
+never be asked to supply it.
+
+That guarantee is a **link**, not a resolver rule: the two singletons are symlinked into
+`.plugins/node_modules` pointing at the host's own directories, which is the disk's version of the browser
+bundle's import map. It has to be something on disk, because everything that resolves from inside the cache
+must agree — the ESM resolver, `createRequire`, tsc — and because there is no anchor a module hook could use
+instead: `apps/cli` depends on `core`, not on `plugin-api`. Walking up is not enough either. An installed
+deployment happens to work (`.plugins/` sits under a project whose flat `node_modules/@matatbread/…` is
+above it); a pnpm workspace keeps its links inside each package, so a source checkout's root has no
+`@matatbread` for the walk to find.
+
+`npm:` is the one override, for when the shape does not give the answer away — a bare name that happens
+to collide with a directory, or a URL serving a tarball without a `.tgz` in its path. A tarball or git URL
+is a URL and still takes the npm route: nothing is importable at the far end until something unpacks or
+clones it.
+
+### Local plugins and their dependencies
+
+Adding a local plugin (`./my-plugin`, or any path resolving to a package) installs the **`dependencies`
+its own package.json declares**, so a plugin may wrap a third-party module. `plugin add` resolves them
+first and lists the resolved set — transitives included — in the same approval it asks for the install,
+then installs exactly that with npm (`--ignore-scripts`, and `--omit=peer` so the host's
+`plugin-api`/`core` are *linked* to the host's own copies rather than fetched from a registry as a second
+version). Declining installs nothing and leaves no lockfile.
+
+Only registry ranges are handed to npm. A manifest carrying `workspace:`, `catalog:`, `link:`, `file:` or
+a URL range is left **entirely** alone — those say "something already resolves me", which is what every
+plugin inside this repo looks like — and `plugin add` says so rather than half-installing it.
+
+### The http route
+
+`add` accepts an `https://` URL or a `github:owner/repo[/sub][#ref]` shorthand for one. The install
+**must resolve a `package.json` with a `name`** — the URL itself, a directory containing one, or a code
+entry whose `package.json` is its *direct* sibling; absence is a hard error (no munged "index" names).
+Fetched code is mirrored under a matbot-writes / LLM-reads-only `.plugins/` cache next to `matbot.yaml`
+(kept separate from the read-write `.data/` tree).
+
+**Node drives the module graph, fetching as it resolves.** Only the manifest and the entry are fetched up
+front; each further import is fetched when Node actually resolves it, by a module hook that maps the
+importing file back to where it came from. So a **dynamic `import(variable)`**, a **root-relative**
+`/ms@2.1.3/…` specifier and an **absolute URL import** all work — none of which a scan of the source ahead
+of time can see. `import.meta.url` is still a `file:` URL, so `createRequire`, `fileURLToPath` and reading
+a sibling file behave normally, and the tree stays a real package the model can read.
+
+**That tree is the cache.** A file already mirrored is read from disk and never re-fetched, so a restart
+makes no requests at all and works with no network. The trade is deliberate: a restart never picks up
+changed upstream source. `reload` with `refresh` (the default here) is the one path that does — it evicts
+the plugin's subtree, so the manifest and every file come from upstream, which is also how a moved entry
+or a renamed package is noticed.
+
+**This route fetches one package; it installs no dependency graph.** A bare import means host-provided, so:
+
+- a third-party dependency must already be present, or be written as a **URL import** — which is now
+  fetched and cached like anything else;
+- a dependency on **another matbot plugin** is met by adding that plugin to `plugins:` too, and one
+  declared in the manifest but present nowhere is reported at boot;
+- an import that resolves nowhere fails naming the specifier *and* the importer, because the resolution
+  genuinely happened rather than being predicted.
+
+#### Boundaries worth knowing before you hit them
+
+- **Any source CDN, including the rewriting ones.** jsdelivr and unpkg serve source with bare imports
+  intact; esm.sh rewrites them to root-relative paths. Both work — the second used to be silently dropped.
+- **ESM only.** A CommonJS dependency reached by URL will not load. jsdelivr's default paths serve CJS for
+  many packages; `/+esm` and esm.sh are the ESM forms.
+- **A tarball or git URL is not this route** — it takes npm, because something has to unpack it.
+- **Hot reload does not cross a hard-dependency edge.** To pick up a dependency's code changes, reload the
+  *dependent*, not the dependency. Unchanged by any of this, and documented in CLAUDE.md.
 
 ---
 

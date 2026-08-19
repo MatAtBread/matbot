@@ -92,11 +92,22 @@ export async function buildMatbotToolsDts(
   const { fileURLToPath } = await import('node:url');
   const { createRequire } = await import('node:module');
 
-  // Anchor plugin-api at the monorepo source if present, else the installed package.
+  // Anchor plugin-api: the monorepo source if present, then the project's own install, and finally THIS
+  // module's own resolution — which always works, because tool-types peer-depends on plugin-api, so
+  // whatever copy the host loaded is reachable from here.
+  //
+  // The last step is not belt-and-braces. Without it, a deployment where matbot is not resolvable from the
+  // config dir (installed globally, or a config dir outside the project) returned null, and the *silence*
+  // was the damage: ToolTypeIndex has no dts, skills_compiler falls back to a three-arm hardcoded stub, and
+  // the model then generates against a view of the registry that omits most live tools. Measured: asked to
+  // call `whoami`, it declared a `ToolContracts` arm for it *itself* — inventing `{ id: string; type: string }`
+  // — which compiled clean and only happened to resemble the real `Principal`. A wrong guess compiles too,
+  // and the cast gate cannot see it: nothing was cast, a contract was asserted. Same failure the scaffold's
+  // dangling plugin-api link used to cause, and the same fix.
   const monorepoApi = join(projectRoot, 'plugin-api', 'src', 'index.ts');
   let pluginApiIndex: string | undefined = existsSync(monorepoApi) ? monorepoApi : undefined;
-  if (!pluginApiIndex) {
-    try { pluginApiIndex = createRequire(join(projectRoot, '_')).resolve('@matatbread/matbot-plugin-api'); } catch { /* unresolved */ }
+  for (const from of pluginApiIndex === undefined ? [join(projectRoot, '_'), fileURLToPath(import.meta.url)] : []) {
+    try { pluginApiIndex = createRequire(from).resolve('@matatbread/matbot-plugin-api'); break; } catch { /* try the next anchor */ }
   }
   if (!pluginApiIndex) return null;
 

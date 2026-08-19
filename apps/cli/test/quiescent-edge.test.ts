@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   createSessionRunner, createSession, installPrincipalCarrier, installUsageCarrier, HookRegistry,
-  onContextQuiesce, flushIfQuiescent, machineBusy, quiesced,
+  onContextQuiesce, machineBusy, quiesced,
 } from '@matatbread/matbot-core';
 import type {
   Session, Store, ToolRegistry, ProviderAdapter, ProviderConfig, CompletionEvent,
@@ -164,25 +164,35 @@ test('the synchronous prefix lands within the call, and one slow flusher does no
   await quiesced();
 
   const log: string[] = [];
-  const slow = (name: string, ms: number) => async (): Promise<void> => {
-    log.push(`${name}:start`);
-    await new Promise(r => setTimeout(r, ms));
-    log.push(`${name}:end`);
+  // Each fires once. Registering a flusher now announces it and schedules an edge attempt of its own, so a
+  // flusher that logged unconditionally would record the registration sweep as well as the explicit one —
+  // which is the documented contract ("flushers MUST be idempotent: a no-op when nothing is pending, since
+  // the edge is reached after every operation"), not a wrinkle of this test.
+  const once = (name: string, ms: number) => {
+    let done = false;
+    return async (): Promise<void> => {
+      if (done) return;
+      done = true;
+      log.push(`${name}:start`);
+      await new Promise(r => setTimeout(r, ms));
+      log.push(`${name}:end`);
+    };
   };
 
   let landedSynchronously = false;
   const uns = [
     // Registered first and synchronous — the host's staged-mutation flusher has this shape, and
-    // depends on being in effect by the time flushIfQuiescent() returns.
-    onContextQuiesce(() => { landedSynchronously = true; log.push('sync'); }),
-    onContextQuiesce(slow('a', 40)),
-    onContextQuiesce(slow('b', 5)),
+    // depends on being in effect by the time the sweep returns.
+    onContextQuiesce(un => { un(); landedSynchronously = true; log.push('sync'); }),
+    onContextQuiesce(once('a', 40)),
+    onContextQuiesce(once('b', 5)),
   ];
 
   try {
-    const settling = flushIfQuiescent();
+    // `quiesced()` runs the sweep synchronously up to its first await, so the synchronous prefix has
+    // landed by the time it hands back its promise — which is the guarantee under test.
+    const settling = quiesced();
     assert.ok(landedSynchronously, 'the synchronous prefix ran inline, before the call returned');
-    assert.ok(settling, 'an async flusher makes the edge waitable');
     await settling;
 
     // Started in registration order, then left to settle together: sequencing them would remove one
@@ -205,8 +215,9 @@ test('a hold is released on every exit, so nothing can strand the machine', asyn
   try {
     // A stuck counter is unrecoverable — every later flush no-ops forever, and the only symptom is a
     // deferred mutation that never happens — so each way out of a hold is checked, not just the
-    // happy one.
-    assert.throws(() => machineBusy(() => { throw new Error('sync boom'); }), /sync boom/);
+    // happy one. Entry can wait for staged work, so the result is always a promise and a synchronous
+    // throw arrives as a rejection: one reporting path for both, rather than two.
+    await assert.rejects(machineBusy(() => { throw new Error('sync boom'); }), /sync boom/);
     assert.ok(fired > 0, 'a synchronous throw still released the hold');
 
     fired = 0;
@@ -214,8 +225,16 @@ test('a hold is released on every exit, so nothing can strand the machine', asyn
     assert.ok(fired > 0, 'a rejected promise still released the hold');
 
     fired = 0;
-    machineBusy(() => 'sync value');
+    assert.equal(await machineBusy(() => 'sync value'), 'sync value');
     assert.ok(fired > 0, 'a synchronous return released the hold');
+
+    // Nothing staged, so the barrier is down — and then `fn` must run within the call rather than a
+    // microtask later, or something could slip between the check and the hold.
+    fired = 0;
+    let ranInline = false;
+    const holding = machineBusy(() => { ranInline = true; });
+    assert.ok(ranInline, 'the unbarred path holds the machine synchronously');
+    await holding;
 
     // Nesting: only the outermost release is an edge. Reset inside, the entry edge having already run.
     fired = 0;
@@ -228,7 +247,7 @@ test('a hold is released on every exit, so nothing can strand the machine', asyn
 
     // And the machine is genuinely idle afterwards, not merely un-flushed.
     fired = 0;
-    flushIfQuiescent();
+    await quiesced();
     assert.equal(fired, 1, 'the machine is idle after all of that');
   } finally {
     un();

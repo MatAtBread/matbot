@@ -1,6 +1,7 @@
 import type {
   CompletionRequest, MatbotMachine, MatbotServices, Mounted, MountConsumeOptions, SingleTurnRequest,
 } from './plugin.js';
+import { RegistryChangeKind } from './notify.js';
 
 /*
  * Host-side machine assembly — the wiring an *embedder* does once at boot, not API a plugin author
@@ -111,6 +112,20 @@ function reportMountHandlerError(e: unknown): void {
  * the last-committed presence per key, so a reload collapses to one remount and a committed unload is
  * well-defined. Presence is read by member access on the unified machine, which resolves both the core
  * getters (StorageBackend/Vault/KnowledgeIndex) and the registry-backed augmented keys.
+ *
+ * Each transition is ALSO published onto the bus as a `RegistryChange` on the `services` registry — the
+ * mount table reaches in-process subscribers only, and a service being replaced is exactly the kind of
+ * fact a reader outside this process has no other way to learn. It matters most for `StorageBackend`:
+ * `notifyingStore` announces writes made THROUGH it, so replacing the medium wholesale — every document
+ * in every namespace now coming from somewhere else — passes it silently, and a browser listing sessions,
+ * skills and files went on showing the displaced backend's contents until something unrelated happened
+ * to make it re-query.
+ *
+ * Published AFTER that key's handlers settle, and independently of whether any exist. The handlers are
+ * how the in-process caches a remote reader queries THROUGH (a SkillManager's documents, function-tools'
+ * compiled set) get rebuilt, so announcing first would invite exactly the stale read this exists to fix.
+ * A subscriber-less key still announces: the interests map holds this process's plugins, and says nothing
+ * about who is listening on the bus.
  */
 export function createMountTable(getMachine: () => MatbotMachine): MountTable {
   const interests = new Map<string, Set<MountInterest>>();
@@ -119,11 +134,13 @@ export function createMountTable(getMachine: () => MatbotMachine): MountTable {
 
   const present = (key: string): boolean => (getMachine() as unknown as Record<string, unknown>)[key] !== undefined;
 
-  const run = (fn: (machine: MatbotMachine) => void | Promise<void>, machine: MatbotMachine): void => {
+  // Returns when the handler has settled, so flush can hold the bus announcement until the in-process
+  // caches are rebuilt. Still isolates a throw: an announcement must not be lost to a bad subscriber.
+  const run = (fn: (machine: MatbotMachine) => void | Promise<void>, machine: MatbotMachine): Promise<void> => {
     try {
       const r = fn(machine);
-      if (r instanceof Promise) r.catch(reportMountHandlerError);
-    } catch (e) { reportMountHandlerError(e); }
+      return r instanceof Promise ? r.catch(reportMountHandlerError) : Promise.resolve();
+    } catch (e) { reportMountHandlerError(e); return Promise.resolve(); }
   };
 
   const mounted: Mounted = {
@@ -161,13 +178,19 @@ export function createMountTable(getMachine: () => MatbotMachine): MountTable {
         const before = committed.get(key) ?? false;
         const after  = present(key);
         committed.set(key, after);
-        const subs = interests.get(key);
-        if (subs === undefined) continue;
+        if (!after && !before) continue;                    // marked dirty, but never present: nothing happened
+        const subs    = interests.get(key) ?? [];
+        const settled: Promise<void>[] = [];
         if (after) {
-          for (const i of subs) run(i.handler, machine);                                  // mount / remount
-        } else if (before) {
-          for (const i of subs) if (i.onUnmount !== undefined) run(i.onUnmount, machine);  // committed unload
+          for (const i of subs) settled.push(run(i.handler, machine));                                  // mount / remount
+        } else {
+          for (const i of subs) if (i.onUnmount !== undefined) settled.push(run(i.onUnmount, machine));  // committed unload
         }
+        // Detached: the edge does not wait on fan-out, only on the flushers that asked to suspend it.
+        void Promise.allSettled(settled).then(() => machine.Notifier.notify({
+          kind: RegistryChangeKind, source: 'services', registry: 'services',
+          name: key, operation: after ? 'added' : 'removed',
+        }));
       }
     },
   };
