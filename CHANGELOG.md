@@ -9,6 +9,29 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## 0.4.6
+
+### Optional
+
+#### tool-types
+
+- **Two plugins may declare a same-named local type without breaking the derived dts.** Bundling flattens
+  every referenced workspace type into one scope, but the bundle was keyed by declaration identity, so two
+  file-local types sharing a name were both emitted side by side — a `TS2300` in the artefact, and both
+  references then resolving to an *error* type. `background` and `edit-session` each own a `SkipKind`, which
+  is legal TypeScript and deliberate (`background` says why it is not shared), so the generator now
+  represents it: the first symbol to claim a name keeps it, later ones are alpha-renamed (`SkipKind$1`), and
+  every reference is rewritten to match. Keyed by symbol, never declaration, so a merged interface is not
+  renamed apart. The narrowing both plugins tell callers to rely on ("branch on `kind`, never on the prose")
+  reaches a generator again — `function-tools` and the skills compiler are graded against this dts, and it
+  had been grading them against an error type.
+
+- **The emitted dts is now compiled by a test.** Nothing in the repo compiled the generator's own output:
+  `typecheck` builds each plugin separately so two file-local types never meet, `check:contracts` never
+  compiles the dts, and the checker *deliberately* drops diagnostics inside the ambient prefix (a broken
+  prefix is our bug, not the snippet's) — which is why the above was silent and surfaced downstream. One
+  assertion separates "the contracts resolve" from "the contracts appear to resolve".
+
 ## 0.4.5
 
 ### Breaking changes
