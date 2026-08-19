@@ -1,5 +1,13 @@
 # @matatbread/matbot-provider-google
 
+## 0.4.6
+
+### Patch Changes
+
+- @matatbread/matbot-core@0.4.6
+- @matatbread/matbot-plugin-api@0.4.6
+- @matatbread/matbot-provider-openai-compat@0.4.6
+
 ## 0.4.5
 
 ### Patch Changes

@@ -248,23 +248,61 @@ export async function buildMatbotToolsDts(
   const importNames  = new Set<string>();
   const bundledDecls = new Map<string, string>();
 
+  // Bundling flattens every referenced workspace type into ONE scope, but a type's name is only unique
+  // within its own file: two plugins each declaring a file-local `SkipKind` is legal TypeScript and here
+  // a deliberate one (`plugins/background/src/index.ts` says why it isn't shared), so the generator has
+  // to represent it rather than ask the sources not to do it. Emitted side by side they were a TS2300
+  // that nothing compiled the dts to catch, and both references then resolved to an error type — the
+  // narrowing the contract exists to give, silently gone. So the first symbol to claim a name keeps it
+  // and later ones are alpha-renamed (`SkipKind$1`), with every reference rewritten to match.
+  //
+  // Keyed by SYMBOL, never by declaration: a merged interface is several declarations of one symbol, and
+  // renaming those apart would break the merge the source relies on. Names already spoken for by a
+  // plugin-api import are reserved up front — which one of those gets imported isn't known until the
+  // walk ends, and a needless `$1` is cosmetic where a collision is fatal.
+  const bundleNames = new Map<TS.Symbol, string>();
+  const usedNames   = new Set<string>(apiTypeNames);
+  const bundleName  = (sym: TS.Symbol): string => {
+    const already = bundleNames.get(sym);
+    if (already !== undefined) return already;
+    const base = sym.name;
+    let name = base;
+    for (let i = 1; usedNames.has(name); i++) name = `${base}$${i}`;
+    usedNames.add(name);
+    bundleNames.set(sym, name);
+    return name;
+  };
+
   interface Ctx { imports: Set<string>; seen: Set<string>; heritageBail: string | null; }
 
   // Emit `node`'s source text with every bailing type-reference replaced in place by `unknown` (leaf
   // substitution). Accumulates imports (plugin-api refs) and bundled declarations (workspace refs,
   // recursively emitted through here too). Sets `ctx.heritageBail` if a bail sits in an `extends` base,
   // where `unknown` can't go — the caller then collapses that whole member.
-  const emitNode = (node: TS.Node, ctx: Ctx): string => {
+  const emitNode = (node: TS.Node, ctx: Ctx, declName?: string): string => {
     const base = node.getStart();
     const repls: Array<{ s: number; e: number; t: string }> = [];
+    // Rewrite the declaration's OWN name when it was renamed out of a collision. Claim the name before
+    // recursing, so a self-referential type reaches the same entry instead of allocating a second.
+    if (declName !== undefined && (ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node))
+        && node.name.getText() !== declName) {
+      repls.push({ s: node.name.getStart() - base, e: node.name.getEnd() - base, t: declName });
+    }
     const bundle = (sym: TS.Symbol): void => {
+      const name = bundleName(sym);
       for (const d of sym.declarations ?? []) {
         if (!ts.isInterfaceDeclaration(d) && !ts.isTypeAliasDeclaration(d)) continue;
         const key = declKey(d);
         if (ctx.seen.has(key)) continue;
         ctx.seen.add(key);
-        bundledDecls.set(key, stripModifiers(emitNode(d, ctx)));
+        bundledDecls.set(key, stripModifiers(emitNode(d, ctx, name)));
       }
+    };
+    // A reference names a symbol, not a file, so it also carries the local spelling of an `import { X as Y }`.
+    // Rewriting to the allocated name settles both that and the collision rename in one substitution.
+    const rename = (ref: TS.Node, to: string): void => {
+      if (ref.getText() === to) return;
+      repls.push({ s: ref.getStart() - base, e: ref.getEnd() - base, t: to });
     };
     const visit = (n: TS.Node): void => {
       if (ctx.heritageBail) return;
@@ -272,7 +310,7 @@ export async function buildMatbotToolsDts(
         const c = classifyEntity(n.typeName);
         if (c.tag === 'bail') { repls.push({ s: n.getStart() - base, e: n.getEnd() - base, t: unknownOf(c.label) }); return; }
         if (c.tag === 'api') importNames.add(n.typeName.getText());
-        else if (c.tag === 'bundle') bundle(c.sym);
+        else if (c.tag === 'bundle') { rename(n.typeName, bundleName(c.sym)); bundle(c.sym); }
         n.typeArguments?.forEach(visit);
         return;
       }
@@ -280,7 +318,7 @@ export async function buildMatbotToolsDts(
         const c = classifyEntity(n.expression);
         if (c.tag === 'bail') { ctx.heritageBail = c.label; return; }
         if (c.tag === 'api') importNames.add(n.expression.getText());
-        else if (c.tag === 'bundle') bundle(c.sym);
+        else if (c.tag === 'bundle') { rename(n.expression, bundleName(c.sym)); bundle(c.sym); }
         n.typeArguments?.forEach(visit);
         return;
       }
