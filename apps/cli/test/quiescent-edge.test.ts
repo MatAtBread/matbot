@@ -164,19 +164,28 @@ test('the synchronous prefix lands within the call, and one slow flusher does no
   await quiesced();
 
   const log: string[] = [];
-  const slow = (name: string, ms: number) => async (): Promise<void> => {
-    log.push(`${name}:start`);
-    await new Promise(r => setTimeout(r, ms));
-    log.push(`${name}:end`);
+  // Each fires once. Registering a flusher now announces it and schedules an edge attempt of its own, so a
+  // flusher that logged unconditionally would record the registration sweep as well as the explicit one —
+  // which is the documented contract ("flushers MUST be idempotent: a no-op when nothing is pending, since
+  // the edge is reached after every operation"), not a wrinkle of this test.
+  const once = (name: string, ms: number) => {
+    let done = false;
+    return async (): Promise<void> => {
+      if (done) return;
+      done = true;
+      log.push(`${name}:start`);
+      await new Promise(r => setTimeout(r, ms));
+      log.push(`${name}:end`);
+    };
   };
 
   let landedSynchronously = false;
   const uns = [
     // Registered first and synchronous — the host's staged-mutation flusher has this shape, and
     // depends on being in effect by the time flushIfQuiescent() returns.
-    onContextQuiesce(() => { landedSynchronously = true; log.push('sync'); }),
-    onContextQuiesce(slow('a', 40)),
-    onContextQuiesce(slow('b', 5)),
+    onContextQuiesce(un => { un(); landedSynchronously = true; log.push('sync'); }),
+    onContextQuiesce(once('a', 40)),
+    onContextQuiesce(once('b', 5)),
   ];
 
   try {

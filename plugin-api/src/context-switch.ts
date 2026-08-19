@@ -86,12 +86,28 @@ function wake(): void {
  * next operation is about to read — a store edge deferred out of a turn lands in the window before
  * the next turn takes its copy, or not at all.
  */
-export type Quiescer = () => void | Promise<void>;
+export type Quiescer = (unregister: () => void) => void | Promise<void>;
 
 /**
- * Register a machine-update flush, run at every quiescent edge (nothing holding the machine).
- * Flushers MUST be idempotent: a no-op when nothing is pending, since the edge is reached after every
- * operation. Returns an unregister fn.
+ * Register work to run at a quiescent edge — the next moment nothing holds the machine. Returns an
+ * unregister fn, and passes the same fn to the flusher.
+ *
+ * **Registering is all a stager does.** It announces the work, so the barrier engages and the edge is
+ * guaranteed to arrive; there is no second call to remember. Two idioms, and between them they cover
+ * everything in-tree:
+ *
+ * ```ts
+ * // ONE-SHOT — "do this at the next edge". The closure holds the work, so there is no pending flag.
+ * onContextQuiesce(un => { un(); applyTheThing(); });
+ *
+ * // REPEATED — "do this at every edge". Same thing without the un(), and then it MUST be idempotent:
+ * onContextQuiesce(() => { if (nothingToDo) return; … });
+ * ```
+ *
+ * A standing (repeated) flusher is the only case that still needs {@link flushIfQuiescent}, and only to
+ * say "I have work *now*" — it was registered long ago, so its registration cannot have announced this
+ * particular work. The mount table (`markDirty` then flush) and the staged `StorageBackend` swap are
+ * both that shape. A one-shot never needs it.
  *
  * What the edge guarantees a flusher:
  *
@@ -134,8 +150,23 @@ export type Quiescer = () => void | Promise<void>;
  * should resolve it once rather than either side of an await, exactly as a turn should.
  */
 export function onContextQuiesce(flush: Quiescer): () => void {
+  const unregister = (): void => { cs.quiescers.delete(flush); };
   cs.quiescers.add(flush);
-  return () => { cs.quiescers.delete(flush); };
+
+  // **Registering IS announcing.** A stager should not have to also remember to ask for an edge: the one
+  // plugin doing this in-tree registered a one-shot and never called `flushIfQuiescent`, so the barrier
+  // never engaged on its behalf and its work depended on someone else happening to release. Two calls that
+  // must be paired, where omitting the second is silent, is the shape this module exists to avoid.
+  //
+  // The barrier is raised synchronously (it invokes nothing) so it engages at once, while the edge ATTEMPT
+  // waits for a microtask — a callback must not run before the statement registering it has finished, or a
+  // one-shot reading anything initialised on that same line, `unregister` included, would see it missing.
+  // Nothing depends on registration landing synchronously; the host's inline-landing guarantee is attached
+  // to an explicit `flushIfQuiescent()`, which still has it.
+  if (cs.depth !== 0 || cs.flushing) cs.wanted = true;
+  void Promise.resolve().then(() => { if (cs.quiescers.has(flush)) flushIfQuiescent(); });
+
+  return unregister;
 }
 
 /**
@@ -183,7 +214,7 @@ function sweep(): Promise<void> | undefined {
     .map(q => {
       // A synchronous throw is the flusher's own business, never that of the operation whose release
       // happened to reach the edge. A rejection is handled below, by allSettled.
-      try { return q() ?? undefined; }
+      try { return q(() => { cs.quiescers.delete(q); }) ?? undefined; }
       catch (e) { console.error('[matbot] context-quiesce flush threw:', e instanceof Error ? e.message : e); return undefined; }
     })
     .filter((p): p is Promise<void> => p !== undefined);

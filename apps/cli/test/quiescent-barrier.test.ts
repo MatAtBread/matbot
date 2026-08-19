@@ -183,3 +183,46 @@ test('work staged while a flush is settling still lands, with nothing else arriv
     un();
   }
 });
+
+test('a one-shot lands under continuous overlap without announcing anything itself', { timeout: 15000 }, async () => {
+  await quiesced();
+
+  // `defer()` in edit-session is exactly this shape — register a one-shot, never call flushIfQuiescent —
+  // and it is the deferred session edit whose starvation motivated the barrier in the first place. While
+  // announcing was a separate call, the barrier never engaged for it: the work landed only because the pump
+  // happened to release, and under overlap it would have starved exactly as before. Registering announces
+  // now, so the shape that reads as obviously correct IS correct.
+  let landed = 0;
+
+  // Register from inside a hold, then keep entrants arriving without ever leaving the machine unheld.
+  let cur = openHold(() => { onContextQuiesce(un => { un(); landed++; }); });
+  await Promise.resolve();
+  assert.equal(landed, 0, 'the hold it was registered under is in the way');
+
+  for (let i = 0; i < 6; i++) {
+    const next = openHold();
+    cur.release();
+    await cur.done;
+    cur = next;
+    if (landed > 0) break;
+  }
+  assert.equal(landed, 1, 'a one-shot forced its own edge with no explicit announcement');
+
+  cur.release();
+  await cur.done;
+});
+
+test('a one-shot registered on an idle machine still runs, and exactly once', async () => {
+  await quiesced();
+
+  let ran = 0;
+  onContextQuiesce(un => { un(); ran++; });
+  assert.equal(ran, 0, 'not inline: a callback must not run before the statement registering it returns');
+
+  await new Promise(r => setTimeout(r, 5));
+  assert.equal(ran, 1, 'the microtask attempt found the machine idle and ran it');
+
+  await machineBusy(() => {});
+  await quiesced();
+  assert.equal(ran, 1, 'and it unregistered itself, so later edges do not re-run it');
+});

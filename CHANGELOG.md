@@ -79,6 +79,21 @@ its `package.json` and `tsconfig.json` are overwritten accordingly, so hand edit
 plugin-api link left dangling by an earlier build is replaced rather than trusted, and an unresolvable
 plugin-api is now a build error instead of a link that fails the typecheck on line 1.
 
+**`onContextQuiesce` registers and announces, and passes its own unregister fn.** Scheduling edge work is
+now one call: `onContextQuiesce(un => { un(); work() })` is a one-shot, the same without `un()` is a standing
+flusher. Registering raises the barrier, so the edge is guaranteed to arrive rather than depending on some
+other operation happening to release. `flushIfQuiescent()` remains for a standing flusher that acquires work
+*later* — registered long ago, it cannot have announced this particular work — which is the mount table and
+the staged swap, and nothing else.
+
+Announcing used to be a second, separate call, and the only plugin registering a one-shot (`edit-session`'s
+deferred session edit) never made it — so the barrier never engaged for the very work whose starvation
+motivated it. Two calls that must be paired, where omitting the second is silent, is the failure mode this
+module exists to prevent. The flusher signature gains a leading `unregister` parameter, mirroring the hook
+channels' `ctx.removeHook()`; existing zero-argument flushers are unaffected. Registration schedules its edge
+attempt on a microtask rather than inline, so a callback cannot run before the statement registering it has
+returned — which also means a **non-idempotent** standing flusher now sees one extra sweep at registration.
+
 **`machineBusy` is a barrier and returns a promise.** `machineBusy(fn)` and `contextSwitch(principal, fn)`
 now return `Promise<T>` rather than mirroring `fn`'s sync/async return, because entry can wait: staged
 deferred work lands before the hold is taken. A synchronous `fn` still runs inline within the call — the
