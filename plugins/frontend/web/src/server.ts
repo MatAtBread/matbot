@@ -37,6 +37,12 @@ export interface WebServerDeps {
   configPath?:    string;
   /** Derives the security principal for each request. Defaults to {@link defaultWebPrincipal}. */
   resolvePrincipal?: WebPrincipalResolver;
+  /** How often to write a keep-alive comment on each SSE stream, in ms. Default 20s — comfortably inside
+   *  the 60s that proxies and load balancers commonly idle a quiet connection out at. Lower it behind a
+   *  more aggressive intermediary; it is not a tuning knob for anything else, and in particular do not
+   *  RAISE it past ~21s: the bundled client's idle watchdog gives up after 65s of total silence, so a
+   *  slower beat would have it tear down and reconnect a stream that is perfectly healthy. */
+  heartbeatMs?:   number;
 }
 
 /**
@@ -172,9 +178,32 @@ export function createWebServer(deps: WebServerDeps) {
   // Sessions with a live server-owned busy tracker (see the submit handler). One transient tracker
   // per busy period drives the idle broadcast independently of any client events stream.
   const busyTrackers = new Set<string>();
-  // session ID → the parked prompt's settlers. `resolve` delivers an answer (applying the default
-  // fallback); `cancel` rejects it with PromptCancelledError — the "give up" path.
-  const pendingPrompts = new Map<string, { resolve: (answer: string) => void; cancel: () => void }>();
+  // session ID → the parked prompt. `resolve` delivers an answer (applying the default fallback);
+  // `cancel` rejects it with PromptCancelledError — the "give up" path.
+  //
+  // `event` is the serialised `prompt` frame, kept so the prompt can be RE-SENT to a stream that
+  // arrives later. Raising a prompt is one fire-and-forget write, and a stream can be absent (the user
+  // is on another conversation) or dead-but-unreaped; either way the write reached nobody, nothing
+  // replayed it, and the turn parked forever with no prompt anywhere on screen. The prompt is state,
+  // not an event: it stays true until answered, so every new viewer of the session is told about it.
+  const pendingPrompts = new Map<string, { resolve: (answer: string) => void; cancel: () => void; event: string }>();
+
+  // Neither end of an SSE stream can tell quiet from dead without traffic on it. A socket killed by
+  // sleep, a network change, a proxy's idle timeout or a frozen background tab stays `writable` here
+  // and pending in the client's `reader.read()` — so the server never reaps it (and goes on reporting
+  // successful writes into it) while the client never errors, so never reconnects. A periodic comment
+  // fixes both: the write eventually fails and closes this connection, and the client's own idle
+  // watchdog fires. Well inside the 60s that proxies and load balancers typically idle out at.
+  const HEARTBEAT_MS = deps.heartbeatMs ?? 20_000;
+  const heartbeat = (res: ServerResponse): () => void => {
+    const timer = setInterval(() => {
+      if (res.writable) res.write(sseComment('hb'));
+      else clearInterval(timer);
+    }, HEARTBEAT_MS);
+    // A heartbeat must never be the reason the process stays up.
+    timer.unref();
+    return () => clearInterval(timer);
+  };
   // call ID → settlers for an in-flight web_user_environment round-trip. Keyed by the tool call's
   // `callId` (not session id) because a turn can issue parallel tool calls; the answer arrives via
   // POST /sessions/:id/env-result carrying that callId. See evalInBrowser below.
@@ -455,7 +484,8 @@ export function createWebServer(deps: WebServerDeps) {
       // WatchVisibility after frontend-web's setup, and the firehose must resolve it live.
       startFirehose();
       globalListeners.set(res, principal);
-      req.on('close', () => { globalListeners.delete(res); });
+      const stopGlobalHeartbeat = heartbeat(res);
+      req.on('close', () => { stopGlobalHeartbeat(); globalListeners.delete(res); });
       return; // keep connection open
     }
 
@@ -514,17 +544,20 @@ export function createWebServer(deps: WebServerDeps) {
             pendingPrompts.delete(targetId);
             sendToSession(targetId, sseEvent('prompt-resolved', { type: 'prompt-resolved', traceId }));
           };
-          pendingPrompts.set(targetId, {
-            resolve: answer => { settled(); resolve(answer || def || ''); },
-            cancel:  ()     => { settled(); reject(promptCancelledError()); },
-          });
-          sendToSession(targetId, sseEvent('prompt', {
+          // Built once and kept, so a stream that connects later is told about it (see pendingPrompts).
+          const event = sseEvent('prompt', {
             type: 'prompt',
             traceId,
             question: typeof p === 'string' ? p : p.label,
             ...(def !== undefined ? { defaultValue: def } : {}),
             ...(typeof p === 'string' ? {} : { field: p }),
-          }));
+          });
+          pendingPrompts.set(targetId, {
+            event,
+            resolve: answer => { settled(); resolve(answer || def || ''); },
+            cancel:  ()     => { settled(); reject(promptCancelledError()); },
+          });
+          sendToSession(targetId, event);
         })) as PromptFn;
 
       // The first submit of a busy period anchors the server-owned busy tracker on its OWN view
@@ -587,25 +620,36 @@ export function createWebServer(deps: WebServerDeps) {
         'connection':    'keep-alive',
       });
       res.write(sseComment('events stream open'));
+      const stopHeartbeat = heartbeat(res);
 
       let conns = sessionConns.get(sId);
       if (conns === undefined) { conns = new Set(); sessionConns.set(sId, conns); }
       conns.add(res);
 
+      // A prompt outstanding on this session, to a viewer that was not here when it was raised (or was
+      // a socket nobody had reaped yet). Sent before this turn's replay, and that placement is sound
+      // rather than lucky: `renderTurn` creates its assistant wrap lazily on first activity, and the
+      // running turn's user message is already in the committed history the client renders before
+      // connecting — so the wrap lands after that bubble whichever event arrives first. Order *within*
+      // the wrap is cosmetic and only differs on a resumed stream.
+      const parked = pendingPrompts.get(sId);
+      if (parked !== undefined) res.write(parked.event);
+
       const ac = new AbortController();
       req.on('close', () => {
+        stopHeartbeat();
         ac.abort();
         const set = sessionConns.get(sId);
         if (set) {
           set.delete(res);
-          if (set.size === 0) {
-            sessionConns.delete(sId);
-            // No viewers left: release any pending prompt so a turn parked on ctx.prompt() doesn't
-            // hang awaiting an answer that can never arrive.
-            const r = pendingPrompts.get(sId);
-            if (r) { pendingPrompts.delete(sId); r.resolve(''); }
-          }
+          if (set.size === 0) sessionConns.delete(sId);
         }
+        // A pending prompt is deliberately LEFT pending. This used to resolve it with '', which the
+        // promptFn turns into the field's default — an answer nobody gave, for a question nobody saw.
+        // Harmless-looking on a confirm (it declines) and destructive on `plugin store-key`, whose
+        // default is '' and where blank REMOVES the key. Nothing about a viewer going away is a
+        // decision, and the prompt now survives to be re-sent to the next one; a user who really is
+        // finished with it has POST /abort, which cancels rather than invents.
       });
 
       const view = await deps.run.open({ sessionId: sId, signal: ac.signal });
@@ -631,9 +675,10 @@ export function createWebServer(deps: WebServerDeps) {
     if (method === 'POST' && abortMatch) {
       const sId    = abortMatch[1]!;
       // Release any pending prompt first so a turn parked on ctx.prompt() can observe the abort
-      // rather than hang, then drop the queue + abort the running turn.
-      const r = pendingPrompts.get(sId);
-      if (r) { pendingPrompts.delete(sId); r.resolve(''); }
+      // rather than hang, then drop the queue + abort the running turn. Cancel, not resolve('') —
+      // giving up is the one thing the user unambiguously did, and PromptCancelledError is how a tool
+      // is told so; resolving would hand it the field's default as though it had been chosen.
+      pendingPrompts.get(sId)?.cancel();
       deps.run.abort(sId);
       updateBusy(sId);
       json(res, 200, { ok: true });
@@ -813,8 +858,9 @@ export function createWebServer(deps: WebServerDeps) {
 
     watchAc.abort();                              // ends the firehose subscription
 
-    // Resolve all pending prompts so callers don't hang.
-    for (const entry of pendingPrompts.values()) entry.resolve('');
+    // Settle all pending prompts so callers don't hang. Cancelled, not defaulted: the server going
+    // away is not an answer, and a tool reports a cancel as an error rather than acting on it.
+    for (const entry of pendingPrompts.values()) entry.cancel();
     pendingPrompts.clear();
 
     // Reject any in-flight environment round-trips so their tool calls close with an error.

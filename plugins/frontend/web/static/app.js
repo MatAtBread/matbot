@@ -2556,6 +2556,20 @@ async function* turnEvents(traceId) {
   }
 }
 
+// Re-read the conversation from the server and rebind its stream — what a page refresh does, without
+// losing the page. Deliberately the same three steps openSession() takes (get + render + connect), and
+// in the same order, so a resync is not a second way to reach this state: the stream's replay of the
+// running turn lands on top of freshly-rendered committed history exactly as it does at open, and the
+// `queued` event adopts the bubble history just drew rather than adding a second one.
+async function resyncSession(sid) {
+  if (sid !== currentSessionId) return;
+  const [session, busy] = await Promise.all([apiGetSession(sid), apiSessionBusy(sid)]);
+  if (sid !== currentSessionId) return;          // navigated away while we were asking
+  if (session) renderSession(session);
+  setBusyState(busy);
+  connectSessionStream(sid);                     // aborts the stream this was called from
+}
+
 async function connectSessionStream(sid) {
   if (streamAc) streamAc.abort();
   streamAc = new AbortController();
@@ -2578,6 +2592,12 @@ async function connectSessionStream(sid) {
         void runWebEnv(ev.expression).then(out => T.answerEnv(sid, { callId, ...out }));
         continue;
       }
+      // The transport reconnected. Anything that happened while it was gone is unrecoverable from the
+      // stream — it replays the RUNNING turn and nothing else — so a turn we still show as in flight may
+      // have finished, committed, and left our loading dots up forever (the symptom being a turn that
+      // "never completes" until you refresh). Committed history is the only source for that, so re-read
+      // it. Guarded on there being an open turn: an idle session's reconnect needs no work.
+      if (ev.type === 'stream-resumed') { if (turnQueues.size > 0) void resyncSession(sid); continue; }
       pushTurnEvent(ev);
     }
   } catch {

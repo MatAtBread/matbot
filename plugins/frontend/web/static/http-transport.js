@@ -112,18 +112,40 @@
     return res.json().catch(() => ({}));
   }
 
+  // A dead socket is indistinguishable from a quiet one, and a long turn is very quiet: `reader.read()`
+  // simply never settles, no error is thrown, and the reconnect below never gets a chance to run — the
+  // tab sits on a stream that ended minutes ago. So bound the silence. The server heartbeats this stream
+  // every 20s, so anything past three of those is dead rather than idle.
+  const STREAM_IDLE_MS = 65000;
+
   // One persistent GET /events/sessions/:id carrying ALL turns for the session, demuxed by the
   // caller. Reconnects with a 1s backoff until `signal` aborts.
+  //
+  // Each RECONNECT yields a synthetic `{ type: 'stream-resumed' }` first. A reconnect is not a
+  // continuation: the stream replays the running turn, and says nothing about turns that began and
+  // ended while it was gone — so a caller holding per-turn render state has to reconcile against
+  // committed history, and this is the only moment it can know to. The first connect yields nothing,
+  // being the caller's own starting point.
   async function* sessionEvents(sid, signal) {
+    let connected = false;
     while (!signal.aborted) {
       try {
         const res = await apiFetch('/events/sessions/' + sid, { signal });
         if (!res.ok || !res.body) break;
+        if (connected) yield { type: 'stream-resumed' };
+        connected = true;
         const reader = res.body.getReader();
         const dec = new TextDecoder();
         let buf = '';
         while (true) {
-          const { done, value } = await reader.read();
+          // A timeout wins the race only when nothing at all arrived, heartbeat included. Cancelling
+          // the reader settles the read we walked away from.
+          let timer;
+          const idle = new Promise(r => { timer = setTimeout(() => r('idle'), STREAM_IDLE_MS); });
+          const next = await Promise.race([reader.read(), idle]);
+          clearTimeout(timer);
+          if (next === 'idle') { await reader.cancel().catch(() => {}); break; }
+          const { done, value } = next;
           if (done) break;
           if (signal.aborted) { reader.cancel(); break; }
           buf += dec.decode(value, { stream: true });
