@@ -1,5 +1,12 @@
 # @matatbread/matbot-skills-node
 
+## 0.4.7
+
+### Patch Changes
+
+- @matatbread/matbot-plugin-api@0.4.7
+- @matatbread/matbot-skills@0.4.7
+
 ## 0.4.6
 
 ### Patch Changes

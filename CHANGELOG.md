@@ -9,6 +9,38 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## 0.4.7
+
+### Optional
+
+#### frontend-web
+
+- **The per-session SSE stream survives its own connection dropping.** One defect with two faces, and the
+  same root: the stream was fire-and-forget in one direction and unrecoverable in the other. Raising an
+  interactive prompt was a single write, so it was lost outright whenever the session had no live stream at
+  that instant — the user on another conversation, a reloading tab, or a socket killed by sleep that nobody
+  had reaped — and the turn then parked forever with no prompt anywhere on screen, which is the
+  `skill_action` compile install confirmation that "never appeared". A prompt is *state*, not an event: it
+  stays true until answered, so it is kept and re-sent to every stream that connects while it is
+  outstanding. Read the other way round, the same gap is a turn that "never completes": a stream replays the
+  *running* turn and says nothing about one that began and ended while it was gone, so the loading dots
+  stayed up until the page was refreshed. The transport announces the discontinuity and the UI re-reads
+  committed history — what a refresh does, without losing the page.
+
+- **Both SSE endpoints heartbeat** (`WebServerDeps.heartbeatMs`, default 20s), and the client bounds how
+  long it will sit in silence. Nothing was written to a quiet stream between turns, so neither end could
+  tell quiet from dead: the server kept a zombie connection in its viewer set and went on reporting
+  successful writes into it (which is *how* a prompt was lost), while the client's `reader.read()` stayed
+  pending with no error, so its reconnect loop never ran at all. A long, quiet turn is exactly the window a
+  socket dies in. Reconnect was never the missing piece; liveness detection was.
+
+- **A viewer going away is no longer treated as an answer.** The "no viewers left" release resolved the
+  pending prompt with `''`, which the prompt implementation turns into the *field's default* — an answer
+  nobody gave, to a question nobody saw. Harmless-looking on a confirm (it declines) and destructive on
+  `plugin store-key`, whose default is `''` and where a blank value **removes the key**. A prompt now
+  simply stays pending, to be put to the next viewer; `POST /abort` and server shutdown cancel it
+  (`PromptCancelledError`, which a tool already reports as an error) rather than inventing a choice.
+
 ## 0.4.6
 
 ### Optional

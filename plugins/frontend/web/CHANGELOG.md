@@ -1,5 +1,33 @@
 # @matatbread/matbot-frontend-web
 
+## 0.4.7
+
+### Patch Changes
+
+- The per-session SSE stream survives its own connection dropping.
+
+  Raising an interactive prompt was one fire-and-forget write, so it was lost outright whenever the
+  session had no live stream at that instant — the user on another conversation, a reloading tab, or a
+  socket killed by sleep that nobody had reaped — and the turn then parked forever with no prompt
+  anywhere on screen. A prompt is state, not an event: it is now kept until answered and re-sent to
+  every stream that connects while it is outstanding.
+
+  Neither end could tell a quiet stream from a dead one, because nothing was written to it between
+  turns. Both SSE endpoints now heartbeat (`heartbeatMs`, default 20s), which is what lets the server
+  reap a dead connection and the client's new idle watchdog notice one; without it a long, quiet turn
+  left the tab reading a stream that had ended minutes before, never erroring, so never reconnecting.
+
+  A reconnect is not a continuation — the stream replays the running turn and says nothing about one
+  that began and ended while it was gone, which is why a completed turn kept its loading dots until the
+  page was refreshed. The transport announces the discontinuity and the UI re-reads committed history.
+
+  A viewer going away is no longer treated as an answer. It used to resolve the prompt with `''`, which
+  becomes the field's _default_ — harmless-looking on a confirm and destructive on `plugin store-key`,
+  whose default is `''` and where blank removes the key. Abort and shutdown cancel instead.
+
+  - @matatbread/matbot-core@0.4.7
+  - @matatbread/matbot-plugin-api@0.4.7
+
 ## 0.4.6
 
 ### Patch Changes
