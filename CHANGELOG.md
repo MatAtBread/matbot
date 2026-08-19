@@ -79,6 +79,19 @@ its `package.json` and `tsconfig.json` are overwritten accordingly, so hand edit
 plugin-api link left dangling by an earlier build is replaced rather than trusted, and an unresolvable
 plugin-api is now a build error instead of a link that fails the typecheck on line 1.
 
+**`onContextQuiesce` moved to the plugin-api root, out from behind `/host`.** Deferring work to the next
+safe moment is the one piece of the quiescent edge a plugin has any use for, and it sat behind the subpath
+documented as boot assembly for an embedder — where `CLAUDE.md` also asserted that no plugin imports it. That
+assertion was false: `edit-session` reached into `/host` for exactly this, being the only plugin that ever
+wanted it. So `context-switch.ts` is now a fourth split-down-the-middle file, alongside principal,
+notifications and the mount table: the root exports `onContextQuiesce` and `Quiescer`, while holding the
+machine (`machineBusy`, `contextSwitch`), waiting on it (`quiesced`) and coalescing stagings
+(`scheduleAtEdge`) stay host-side. Importing from `/host` still resolves, so nothing breaks.
+
+`check:isolation` now fails if any package under `plugins/` imports `@matatbread/matbot-plugin-api/host`. The
+boundary was described as a file boundary that "cannot quietly erode", and it had quietly eroded — a claim in
+prose is not a check.
+
 **`onContextQuiesce` registers and announces, and passes its own unregister fn.** Scheduling edge work is
 now one call: `onContextQuiesce(un => { un(); work() })` is a one-shot, the same without `un()` is a standing
 flusher. Registering raises the barrier, so the edge is guaranteed to arrive rather than depending on some
