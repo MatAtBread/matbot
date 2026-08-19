@@ -70,47 +70,45 @@ async function compactOne(
   sessionId:  string,
   opts:       Required<CompactSessionsParams>,
   inactiveMs: number,
-  attempt = 0,
 ): Promise<CompactOutcome> {
-  // Re-read via get() so the CAS below uses a fresh version — a query result may be stale
-  const current = await store.get(sessionId);
-  if (!current) return { done: false, reason: 'deleted before compaction' };
+  // Twice, because a lost CAS is not a verdict on this session and everything below is a pure function of
+  // a fresh read — so losing once is worth re-reading and re-deciding rather than leaving the session for
+  // the next scheduled run. Two writers land here: a concurrent edit, and a StorageBackend swap between
+  // the read and the write, which `mediumGuard` reports as exactly this loss and tells the caller to retry
+  // (the second read comes from the backend now in force, so it converges). No more than twice: a session
+  // losing again is contended, and a sweep over every other session is the wrong place to insist.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    // Re-read via get() so the CAS below uses a fresh version — a query result may be stale
+    const current = await store.get(sessionId);
+    if (!current) return { done: false, reason: 'deleted before compaction' };
 
-  const tier: 'full' | 'partial' | undefined =
-    current.status === 'archived' || Date.now() - new Date(current.updatedAt).getTime() >= inactiveMs ? 'full'
-    : current.messages.length > opts.activeMessages * 2                                               ? 'partial'
-    : undefined;
-  if (tier === undefined) return { done: false, reason: 'below thresholds' };
+    const tier: 'full' | 'partial' | undefined =
+      current.status === 'archived' || Date.now() - new Date(current.updatedAt).getTime() >= inactiveMs ? 'full'
+      : current.messages.length > opts.activeMessages * 2                                               ? 'partial'
+      : undefined;
+    if (tier === undefined) return { done: false, reason: 'below thresholds' };
 
-  // A negative msgIndex ("keep the last N") is what makes the deferred path self-correcting: it is
-  // resolved against the document at apply time, so the turn's own tail is among the messages kept.
-  const { messages, stripped } = compactBefore(current.messages, tier === 'full' ? -1 : -opts.activeMessages);
-  if (stripped === 0) return { done: false, reason: 'nothing to strip' };
+    // A negative msgIndex ("keep the last N") is what makes the deferred path self-correcting: it is
+    // resolved against the document at apply time, so the turn's own tail is among the messages kept.
+    const { messages, stripped } = compactBefore(current.messages, tier === 'full' ? -1 : -opts.activeMessages);
+    if (stripped === 0) return { done: false, reason: 'nothing to strip' };
 
-  const next: Session = { ...current, messages, updatedAt: lastActivityAt({ ...current, messages }) };
-  try {
-    const res = await store.cas(current.id, current.version, { ...next, version: crypto.randomUUID() });
-    // A lost CAS is not a verdict on this session, and the whole decision above is a pure function of a
-    // fresh read — so re-read and re-decide once rather than leaving it for the next scheduled run. Two
-    // writers reach here: a concurrent edit, and a StorageBackend swap landing between the read and the
-    // write, which `mediumGuard` reports as exactly this loss and tells the caller to retry (the retry's
-    // `get` comes from the backend now in force, so it converges). Bounded at one: a session losing twice
-    // is contended, and spinning inside a sweep over every other session is the wrong place to insist.
-    if (!res.ok) {
-      return attempt === 0
-        ? compactOne(store, sessionId, opts, inactiveMs, 1)
-        : { done: false, reason: 'concurrent modification' };
+    const next: Session = { ...current, messages, updatedAt: lastActivityAt({ ...current, messages }) };
+    try {
+      const res = await store.cas(current.id, current.version, { ...next, version: crypto.randomUUID() });
+      if (res.ok) return { done: true, tier, stripped };
+    } catch (e) {
+      // A partitioned store holds sessions this principal may read and may not write — a share. Asking
+      // first would couple this policy to one backend's optional ownership capability and still race a
+      // share landing before the write, so the write stays the authority and its refusal — per-operation
+      // by contract, not a process fault — becomes this session's skip reason. Deliberately just the one
+      // branded error: a real fault must still abort the sweep, or the tool reports a pass it never made.
+      // Not retried: a refusal is settled, and asking again would only be refused again.
+      if (!isReadOnlyError(e)) throw e;
+      return { done: false, reason: `read-only (shared in from "${e.owner || 'global'}")` };
     }
-    return { done: true, tier, stripped };
-  } catch (e) {
-    // A partitioned store holds sessions this principal may read and may not write — a share. Asking
-    // first would couple this policy to one backend's optional ownership capability and still race a
-    // share landing before the write, so the write stays the authority and its refusal — per-operation
-    // by contract, not a process fault — becomes this session's skip reason. Deliberately just the one
-    // branded error: a real fault must still abort the sweep, or the tool reports a pass it never made.
-    if (!isReadOnlyError(e)) throw e;
-    return { done: false, reason: `read-only (shared in from "${e.owner || 'global'}")` };
   }
+  return { done: false, reason: 'concurrent modification' };
 }
 
 // ── tool factory ──────────────────────────────────────────────────────────────
