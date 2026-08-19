@@ -104,12 +104,22 @@ export type Quiescer = (unregister: () => void) => void | Promise<void>;
  * onContextQuiesce(() => { if (nothingToDo) return; … });
  * ```
  *
- * Repeated announcements that should collapse into one apply — the host's staged `StorageBackend` swap, a
- * dirty mount key — are a guarded one-shot, which is {@link scheduleAtEdge}. Nothing in-tree registers a
- * standing flusher any more; the shape remains for "observe every edge", which needs no announcement at all.
+ * **This or {@link scheduleAtEdge}?** They answer different questions, and the difference is what happens
+ * when you ask twice.
  *
- * Note that continuous delivery is a *standing registration*, never a callback re-registering itself: see
- * {@link scheduleAtEdge} for why re-registration would re-enter the edge immediately and forever.
+ * This is a *subscription*: each call adds a callback, and every callback added runs. Ask twice and the work
+ * happens twice — correct when each call carries its own work (two deferred session edits are two edits, and
+ * both must land). `scheduleAtEdge` is a *dirty flag*: you create one scheduler up front, and however many
+ * times you poke it before an edge, the work runs once. Correct when the calls describe a **slot** rather
+ * than a queue — three `register('StorageBackend')` calls mean one backend to install, not three to install
+ * in turn, and the work reads the slot at fire time so the last writer wins.
+ *
+ * Picking wrongly is not subtle in either direction: a subscription where you wanted a flag re-applies stale
+ * intermediate values, and a flag where you wanted a subscription silently drops work.
+ *
+ * Continuous delivery is a *standing registration* — this, without calling `unregister` — and never a
+ * callback re-registering itself: see {@link scheduleAtEdge} for why re-registration re-enters the edge
+ * immediately and forever.
  *
  * What the edge guarantees a flusher:
  *
@@ -172,25 +182,25 @@ export function onContextQuiesce(flush: Quiescer): () => void {
 }
 
 /**
- * **Force the edge now if it can be reached, and announce the work if it cannot.**
+ * Announce registered work and land it if the edge is already here — **private**, and the second half of
+ * {@link onContextQuiesce}.
  *
- * This was once how a caller told the edge that work existed, paired with a registration — and the one
- * plugin registering a one-shot never made the second call, so the barrier never engaged for it. Registering
- * announces now, which is the same guarantee with nothing to forget, and that leaves this doing only what
- * its name says. Nothing in-tree calls it; it is kept because "apply now if you are allowed to" is a
- * reasonable thing for a host to want, and because it is the only way to observe a sweep's settling promise
- * directly (which is what the tests want it for).
+ * It was public, and announcing was then a call a stager had to remember to pair with its registration. The
+ * one plugin registering a one-shot never made it, so the barrier never engaged for the very work whose
+ * starvation motivated it. Registering announces now, which is the same guarantee with nothing to forget —
+ * and once that was true, nothing outside this module had any reason to call this. Exposing "force an edge"
+ * only offered a way to reason about firing that a caller should not have to have.
  *
- * It remains separate from the opportunistic sweep {@link machineBusy} performs at its own edges: only a
- * caller knows work exists, and a sweep that raised `wanted` merely because it found the machine busy would
- * bar every overlapping operation on behalf of nothing.
+ * It stays separate from the opportunistic sweep {@link machineBusy} performs at its own edges: only a
+ * registration knows work exists, and a sweep that raised `wanted` merely because it found the machine busy
+ * would bar every overlapping operation on behalf of nothing.
  *
  * Returns the settling promise when some flusher went async, and `undefined` when the edge is already
  * complete — the caller decides whether it can afford to wait ({@link quiesced} does; a synchronous
  * caller cannot). Re-entering while one is settling joins it rather than starting a second: `flushing`
  * stays raised for the whole asynchronous extent, not just the synchronous sweep.
  */
-export function flushIfQuiescent(): Promise<void> | undefined {
+function flushIfQuiescent(): Promise<void> | undefined {
   // Raised whenever this could not land the work — held, or a flush already settling. The settling case
   // matters as much as the held one: `depth` is 0 there, so nothing is coming to force another edge, and
   // an idle process would leave the work staged indefinitely.

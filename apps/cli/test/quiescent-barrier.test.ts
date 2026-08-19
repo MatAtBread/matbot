@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { onContextQuiesce, flushIfQuiescent, machineBusy, quiesced, scheduleAtEdge } from '@matatbread/matbot-core';
+import { onContextQuiesce, machineBusy, quiesced, scheduleAtEdge } from '@matatbread/matbot-core';
 
 // The quiescent edge used to be a COUNTER: `machineBusy` incremented, ran, decremented, and a flush
 // happened only if it found the count at zero. Nothing forced it to zero. So under continuously
@@ -32,12 +32,10 @@ test('staged work lands while holds are still overlapping', { timeout: 15000 }, 
   await quiesced();
 
   let landed = 0;
-  let pending = false;
-  const un = onContextQuiesce(() => { if (pending) { pending = false; landed++; } });
 
   try {
-    // Stage from INSIDE a hold — staged while idle it would land inline, and prove nothing.
-    let cur = openHold(() => { pending = true; flushIfQuiescent(); });
+    // Register from INSIDE a hold — registered while idle it would land almost at once, and prove nothing.
+    let cur = openHold(() => { onContextQuiesce(un => { un(); landed++; }); });
     await Promise.resolve();
     assert.equal(landed, 0, 'it cannot have landed yet: this hold is what is in the way');
 
@@ -57,7 +55,7 @@ test('staged work lands while holds are still overlapping', { timeout: 15000 }, 
     cur.release();
     await cur.done;
   } finally {
-    un();
+    await quiesced();
   }
 });
 
@@ -68,21 +66,17 @@ test('an async flusher runs with the machine to itself', { timeout: 15000 }, asy
   // count sat at zero while a flush settled, so anything could enter inside a single `await`. A flusher
   // that reads a document, thinks, and writes it back was exposed for its whole middle.
   const order: string[] = [];
-  let pending = false;
-  const un = onContextQuiesce(async () => {
-    if (!pending) return;                       // idempotent: the edge is reached after every operation
-    pending = false;
+  const slowEdit = async (): Promise<void> => {
     order.push('flush:start');
     await new Promise(r => setTimeout(r, 30));
     order.push('flush:end');
-  });
+  };
 
   try {
-    // Stage while held, so the flush begins at this hold's release rather than inline — leaving it in
-    // flight, which is the only moment exclusivity is a question at all.
+    // Register while held, so the work begins at this hold's release rather than almost immediately —
+    // leaving it in flight, which is the only moment exclusivity is a question at all.
     await machineBusy(async () => {
-      pending = true;
-      flushIfQuiescent();
+      onContextQuiesce(un => { un(); return slowEdit(); });
       order.push('holder:done');
     });
 
@@ -93,7 +87,7 @@ test('an async flusher runs with the machine to itself', { timeout: 15000 }, asy
     assert.deepEqual(order, ['holder:done', 'flush:start', 'flush:end', 'entrant'],
       'an entrant must not run inside the flusher\'s await');
   } finally {
-    un();
+    await quiesced();
   }
 });
 
@@ -104,9 +98,6 @@ test('a flusher that cannot be satisfied does not wedge the machine', { timeout:
   // and then waits on something needing the edge would wait for a drain including its own hold. Rather
   // than a hold-identity carrier (AsyncLocalStorage, and a browser equivalent) the barrier is BOUNDED: it
   // gives up, warns, and proceeds — degrading to exactly the pre-barrier behaviour instead of hanging.
-  let pending = false;
-  const un = onContextQuiesce(() => { if (pending) { /* never clears it */ } });
-
   const warnings: string[] = [];
   const realWarn = console.warn;
   console.warn = (...a: unknown[]) => { warnings.push(a.map(String).join(' ')); };
@@ -116,8 +107,8 @@ test('a flusher that cannot be satisfied does not wedge the machine', { timeout:
     // inner entry cannot possibly be admitted, because the drain it waits for includes the outer hold.
     const started = Date.now();
     await machineBusy(async () => {
-      pending = true;
-      flushIfQuiescent();
+      // Registered but unreachable: the edge it needs is behind this very hold.
+      onContextQuiesce(un => { un(); });
       await machineBusy(() => { /* nested: only reachable because the wait is bounded */ });
     });
     const elapsed = Date.now() - started;
@@ -128,7 +119,7 @@ test('a flusher that cannot be satisfied does not wedge the machine', { timeout:
       `giving up must be diagnosable, not silent: ${JSON.stringify(warnings)}`);
   } finally {
     console.warn = realWarn;
-    un();
+    await quiesced();
   }
 });
 
@@ -154,23 +145,17 @@ test('work staged while a flush is settling still lands, with nothing else arriv
   // indefinitely — the same starvation, reached from the other side. The settling flush answers it on the
   // way out, guarded on `wanted` so an idempotent async flusher cannot manufacture an endless chain.
   const landed: string[] = [];
-  let queued: string | undefined;
-  const un = onContextQuiesce(async () => {
-    const work = queued;
-    if (work === undefined) return;
-    queued = undefined;
+  const slow = (name: string) => async (): Promise<void> => {
     await new Promise(r => setTimeout(r, 20));
-    landed.push(work);
-  });
+    landed.push(name);
+  };
 
   try {
-    queued = 'first';
-    const settling = flushIfQuiescent();
-    assert.ok(settling, 'the flusher went async, so this edge is settling');
+    onContextQuiesce(un => { un(); return slow('first')(); });
+    const settling = quiesced();   // runs the sweep; the callback went async, so this edge is settling
 
-    // Announced mid-settle, and then NOTHING else touches the machine: no entrant, no release.
-    queued = 'second';
-    flushIfQuiescent();
+    // Registered mid-settle, and then NOTHING else touches the machine: no entrant, no release.
+    onContextQuiesce(un => { un(); return slow('second')(); });
 
     await settling;
     // Only timers from here — no quiesced(), no machineBusy, nothing that would itself supply the edge
@@ -180,7 +165,7 @@ test('work staged while a flush is settling still lands, with nothing else arriv
 
     assert.deepEqual(landed, ['first', 'second'], 'both landed without any further activity');
   } finally {
-    un();
+    await quiesced();
   }
 });
 

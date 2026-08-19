@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   createSessionRunner, createSession, installPrincipalCarrier, installUsageCarrier, HookRegistry,
-  onContextQuiesce, flushIfQuiescent, machineBusy, quiesced,
+  onContextQuiesce, machineBusy, quiesced,
 } from '@matatbread/matbot-core';
 import type {
   Session, Store, ToolRegistry, ProviderAdapter, ProviderConfig, CompletionEvent,
@@ -182,16 +182,17 @@ test('the synchronous prefix lands within the call, and one slow flusher does no
   let landedSynchronously = false;
   const uns = [
     // Registered first and synchronous — the host's staged-mutation flusher has this shape, and
-    // depends on being in effect by the time flushIfQuiescent() returns.
+    // depends on being in effect by the time the sweep returns.
     onContextQuiesce(un => { un(); landedSynchronously = true; log.push('sync'); }),
     onContextQuiesce(once('a', 40)),
     onContextQuiesce(once('b', 5)),
   ];
 
   try {
-    const settling = flushIfQuiescent();
+    // `quiesced()` runs the sweep synchronously up to its first await, so the synchronous prefix has
+    // landed by the time it hands back its promise — which is the guarantee under test.
+    const settling = quiesced();
     assert.ok(landedSynchronously, 'the synchronous prefix ran inline, before the call returned');
-    assert.ok(settling, 'an async flusher makes the edge waitable');
     await settling;
 
     // Started in registration order, then left to settle together: sequencing them would remove one
@@ -246,7 +247,7 @@ test('a hold is released on every exit, so nothing can strand the machine', asyn
 
     // And the machine is genuinely idle afterwards, not merely un-flushed.
     fired = 0;
-    flushIfQuiescent();
+    await quiesced();
     assert.equal(fired, 1, 'the machine is idle after all of that');
   } finally {
     un();

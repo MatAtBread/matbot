@@ -85,8 +85,10 @@ flusher. Registering raises the barrier, so the edge is guaranteed to arrive rat
 other operation happening to release. New `scheduleAtEdge(work)` covers repeated announcements that should
 collapse into one apply — a guarded one-shot whose guard coalesces the stagings while the work reads a
 last-write-wins slot, so three `register('StorageBackend')` calls before an edge install one backend rather
-than three in turn. Both hosts use it and no longer keep a standing flusher, which leaves `flushIfQuiescent()`
-with no in-tree callers: it now only forces an edge that is already reachable. Continuous delivery remains a
+than three in turn. Both hosts use it and no longer keep a standing flusher, which left
+`flushIfQuiescent()` with no callers at all — so it is **no longer exported**. Announcing is what registering
+does, and exposing "force an edge" only offered callers a way to reason about firing that they should not need
+to have. The tests that used it now register work the way a consumer would. Continuous delivery remains a
 standing registration and must never be a callback re-registering itself — registering announces, so that
 would be unbounded demand and the edge would re-enter forever.
 
