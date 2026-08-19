@@ -28,7 +28,7 @@ export {
   unifyServices, forwardingProxy, makeSwappable, singleTurnRequest, createMountTable,
   createBroadcaster, subscribable, createNotifier, scopedNotifier,
   installPrincipalCarrier, enterPrincipal, createConstantPrincipalCarrier,
-  contextSwitch, machineBusy, quiesced, onContextQuiesce, flushIfQuiescent,
+  contextSwitch, machineBusy, quiesced, onContextQuiesce, flushIfQuiescent, scheduleAtEdge,
   installUsageCarrier, createSerialUsageCarrier, recordUsage, recordSpan, currentUsageSink,
   currentUsageScope, currentUsageSite, withUsageScope, withUsageSite,
 } from '@matatbread/matbot-plugin-api/host';

@@ -82,10 +82,13 @@ plugin-api is now a build error instead of a link that fails the typecheck on li
 **`onContextQuiesce` registers and announces, and passes its own unregister fn.** Scheduling edge work is
 now one call: `onContextQuiesce(un => { un(); work() })` is a one-shot, the same without `un()` is a standing
 flusher. Registering raises the barrier, so the edge is guaranteed to arrive rather than depending on some
-other operation happening to release. `flushIfQuiescent()` remains for a standing flusher saying "I have work now",
-having registered long before that work existed. There is exactly one in-tree — the host's swap-then-mount-
-flush — and it stays standing because a last-write-wins slot collapses repeated stagings into a single apply,
-and because one callback sequences the swap ahead of the mount flush without depending on registration order.
+other operation happening to release. New `scheduleAtEdge(work)` covers repeated announcements that should
+collapse into one apply — a guarded one-shot whose guard coalesces the stagings while the work reads a
+last-write-wins slot, so three `register('StorageBackend')` calls before an edge install one backend rather
+than three in turn. Both hosts use it and no longer keep a standing flusher, which leaves `flushIfQuiescent()`
+with no in-tree callers: it now only forces an edge that is already reachable. Continuous delivery remains a
+standing registration and must never be a callback re-registering itself — registering announces, so that
+would be unbounded demand and the edge would re-enter forever.
 
 Announcing used to be a second, separate call, and the only plugin registering a one-shot (`edit-session`'s
 deferred session edit) never made it — so the barrier never engaged for the very work whose starvation

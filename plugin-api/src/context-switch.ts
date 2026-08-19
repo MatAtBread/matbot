@@ -104,21 +104,12 @@ export type Quiescer = (unregister: () => void) => void | Promise<void>;
  * onContextQuiesce(() => { if (nothingToDo) return; … });
  * ```
  *
- * A standing flusher needs {@link flushIfQuiescent} to say "I have work *now*", since it registered long
- * before this particular work existed. There is exactly one in-tree — the host's, which applies a staged
- * `StorageBackend` swap and then flushes the mount table — and it is worth knowing why it isn't a one-shot,
- * because a one-shot could express it:
+ * Repeated announcements that should collapse into one apply — the host's staged `StorageBackend` swap, a
+ * dirty mount key — are a guarded one-shot, which is {@link scheduleAtEdge}. Nothing in-tree registers a
+ * standing flusher any more; the shape remains for "observe every edge", which needs no announcement at all.
  *
- * - **It collapses.** The pending swap is a last-write-wins *slot*, so three stagings before an edge apply
- *   once. Three one-shots would apply three backends in turn and announce up to three remounts, when only
- *   the last one matters.
- * - **It sequences.** Applying the swap marks `StorageBackend` dirty, and the *same* callback then flushes
- *   the mount table, so the remount lands in the same edge as the swap. As two one-shots that ordering
- *   would rest on registration order, which is the wrong thing for it to depend on.
- *
- * Neither is "registration can't announce this". Reach for a standing flusher when repeated announcements
- * should coalesce, or when two pieces of work must run in a fixed order; otherwise a one-shot is simpler
- * and cannot forget to announce.
+ * Note that continuous delivery is a *standing registration*, never a callback re-registering itself: see
+ * {@link scheduleAtEdge} for why re-registration would re-enter the edge immediately and forever.
  *
  * What the edge guarantees a flusher:
  *
@@ -181,16 +172,18 @@ export function onContextQuiesce(flush: Quiescer): () => void {
 }
 
 /**
- * **Announce staged work and land it if the edge is already here.** Called by whoever *queues* a
- * deferred mutation — the host after staging a `StorageBackend` swap or marking a mount key dirty, a
- * plugin after registering a one-shot flusher. Queued while idle (depth 0) it applies immediately, so an
- * idle-time swap doesn't wait for the next request to take effect. Queued while the machine is held it
- * cannot apply, and *that* is what raises the barrier: the work is now `wanted`, so {@link machineBusy}
- * turns new entrants away until `depth` drains to 0 and this runs.
+ * **Force the edge now if it can be reached, and announce the work if it cannot.**
  *
- * The announcement is the whole reason this is separate from the opportunistic sweep {@link machineBusy}
- * performs at its own edges. Only a stager knows that work exists; a sweep that raised `wanted` merely
- * because it found the machine busy would bar every overlapping operation on behalf of nothing.
+ * This was once how a caller told the edge that work existed, paired with a registration — and the one
+ * plugin registering a one-shot never made the second call, so the barrier never engaged for it. Registering
+ * announces now, which is the same guarantee with nothing to forget, and that leaves this doing only what
+ * its name says. Nothing in-tree calls it; it is kept because "apply now if you are allowed to" is a
+ * reasonable thing for a host to want, and because it is the only way to observe a sweep's settling promise
+ * directly (which is what the tests want it for).
+ *
+ * It remains separate from the opportunistic sweep {@link machineBusy} performs at its own edges: only a
+ * caller knows work exists, and a sweep that raised `wanted` merely because it found the machine busy would
+ * bar every overlapping operation on behalf of nothing.
  *
  * Returns the settling promise when some flusher went async, and `undefined` when the edge is already
  * complete — the caller decides whether it can afford to wait ({@link quiesced} does; a synchronous
@@ -281,6 +274,37 @@ function sweep(): Promise<void> | undefined {
  */
 export async function quiesced(): Promise<void> {
   await sweep();
+}
+
+/**
+ * Run `work` at the next quiescent edge, **coalescing** repeated calls onto one edge. Returns the scheduler;
+ * call it every time you stage something.
+ *
+ * The guarded one-shot, named — because the announcements a host makes are usually about a *slot* rather than
+ * a queue: three `register('StorageBackend')` calls before an edge mean one backend to install, not three to
+ * install in turn. Read the slot inside `work` and repeated stagings collapse for free, while one callback
+ * keeps whatever `work` does in a fixed order.
+ *
+ * **Why continuous delivery is a standing registration and not this.** Registering means "I have work now",
+ * which is what forces the edge — so a callback that re-registered itself would announce fresh work from
+ * inside the sweep answering the last lot, and the edge would re-enter immediately and forever. A `setInterval`
+ * cannot be built out of `setTimeout` here, because there is no independent clock to wait for: the edge is
+ * driven by demand, and re-registration is unbounded demand. Want every edge? Register once and don't
+ * unregister — and then be idempotent, since you will be called after every operation.
+ */
+export function scheduleAtEdge(work: () => void | Promise<void>): () => void {
+  let scheduled = false;
+  return () => {
+    if (scheduled) return;
+    scheduled = true;
+    // Lowered before `work`, so work that itself stages more (a mount handler registering a service)
+    // schedules a fresh edge rather than finding this one still claiming to be pending.
+    onContextQuiesce(un => {
+      un();
+      scheduled = false;
+      return work();
+    });
+  };
 }
 
 /** How long an entrant waits at the barrier before proceeding anyway. See {@link admit}. */

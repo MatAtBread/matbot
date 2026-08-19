@@ -6,7 +6,7 @@ import {
   createMessage, isMissingSecretError, loadPlugins,
   unloadPlugin as unloadPluginFn, unifyServices,
   forwardingProxy, makeSwappable, singleTurnRequest, createSingleTurnTool, createAboutMatbotTool, createNotifier, notifyingStore,
-  createMountTable, onContextQuiesce, flushIfQuiescent,
+  createMountTable, scheduleAtEdge,
 } from '@matatbread/matbot-core';
 import type {
   MatbotMachine, MatbotServices, Store, Session, ProviderConfig, ProviderAdapter,
@@ -307,11 +307,11 @@ export async function boot(env: BootEnv): Promise<void> {
   // single remount. Notification timing is deliberately unspecified — see the `Mounted` contract.
   const mountTable = createMountTable(() => services);
   let pendingSwap: { next: StorageBackend } | undefined;
-  const stageSwap = (next: StorageBackend): void => {
-    pendingSwap = { next };
-    flushIfQuiescent();
-  };
-  onContextQuiesce(() => {
+  // One apply per edge however many times a swap or a mount change was announced: `pendingSwap` is a
+  // last-write-wins slot read at fire time, so three registers before an edge install one backend rather
+  // than three in turn. One callback also keeps the swap ordered ahead of the mount flush, so the remount
+  // it marks lands in the same edge. Registering is what announces it, so there is nothing else to call.
+  const scheduleEdge = scheduleAtEdge(() => {
     if (pendingSwap !== undefined) {
       const { next } = pendingSwap;
       pendingSwap = undefined;
@@ -319,6 +319,11 @@ export async function boot(env: BootEnv): Promise<void> {
     }
     mountTable.flush();
   });
+
+  const stageSwap = (next: StorageBackend): void => {
+    pendingSwap = { next };
+    scheduleEdge();
+  };
   const swapKnowledge = (next: KnowledgeIndex): void => {
     const prev = knowledgeImpl;
     if (prev === next) return;
@@ -360,7 +365,7 @@ export async function boot(env: BootEnv): Promise<void> {
       else if (key === 'Vault')          activeVault = value as Vault;
       else if (key === 'Notifier')       activeNotifier = value as Notifier;
       else serviceRegistry.set(key as string, value);
-      if (key !== 'StorageBackend') { mountTable.markDirty(key); flushIfQuiescent(); }
+      if (key !== 'StorageBackend') { mountTable.markDirty(key); scheduleEdge(); }
     },
     // Symmetric with register: a swap-key reverts to the app's captured boot default instead of
     // dangling on the unloaded plugin's impl; everything else is a plain registry delete. Marking dirty
@@ -371,7 +376,7 @@ export async function boot(env: BootEnv): Promise<void> {
       else if (key === 'Vault')          activeVault = bootVault;
       else if (key === 'Notifier')       activeNotifier = bootNotifier;
       else serviceRegistry.delete(key);
-      if (key !== 'StorageBackend') { mountTable.markDirty(key as keyof MatbotServices); flushIfQuiescent(); }
+      if (key !== 'StorageBackend') { mountTable.markDirty(key as keyof MatbotServices); scheduleEdge(); }
     },
     registerFrontend() { /* bound per-plugin in setupPlugin's scope; base is a no-op */ },
 

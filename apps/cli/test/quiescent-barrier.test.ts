@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { onContextQuiesce, flushIfQuiescent, machineBusy, quiesced } from '@matatbread/matbot-core';
+import { onContextQuiesce, flushIfQuiescent, machineBusy, quiesced, scheduleAtEdge } from '@matatbread/matbot-core';
 
 // The quiescent edge used to be a COUNTER: `machineBusy` incremented, ran, decremented, and a flush
 // happened only if it found the count at zero. Nothing forced it to zero. So under continuously
@@ -225,4 +225,49 @@ test('a one-shot registered on an idle machine still runs, and exactly once', as
   await machineBusy(() => {});
   await quiesced();
   assert.equal(ran, 1, 'and it unregistered itself, so later edges do not re-run it');
+});
+
+test('scheduleAtEdge coalesces repeated stagings into one apply', { timeout: 15000 }, async () => {
+  await quiesced();
+
+  // A host's announcements are usually about a SLOT, not a queue: three register('StorageBackend') calls
+  // before an edge mean one backend to install. A plain one-shot per call would install three in turn and
+  // announce up to three remounts; the guard collapses them, and reading the slot inside the work is what
+  // makes the last writer win.
+  const applied: string[] = [];
+  let slot: string | undefined;
+  const schedule = scheduleAtEdge(() => { applied.push(slot!); });
+
+  await machineBusy(async () => {
+    slot = 'a'; schedule();
+    slot = 'b'; schedule();
+    slot = 'c'; schedule();
+  });
+
+  assert.deepEqual(applied, ['c'], 'three stagings, one apply, and the last one wins');
+
+  // And it re-arms: the guard is not a one-time latch.
+  await machineBusy(async () => { slot = 'd'; schedule(); });
+  assert.deepEqual(applied, ['c', 'd']);
+});
+
+test('scheduleAtEdge does not re-enter the edge from inside its own work', { timeout: 15000 }, async () => {
+  await quiesced();
+
+  // Registering announces, so a callback that re-registered itself would announce fresh work from inside the
+  // sweep answering the last lot — and the edge would re-enter immediately and forever. There is no
+  // independent clock to wait for, so re-registration is unbounded demand. The guard resets BEFORE the work
+  // runs precisely so work may schedule again legitimately; what must not happen is a self-sustaining chain.
+  let runs = 0;
+  const schedule = scheduleAtEdge(() => {
+    runs++;
+    if (runs > 20) throw new Error('runaway edge');
+  });
+
+  await machineBusy(async () => { schedule(); });
+  const afterFirst = runs;
+  await new Promise(r => setTimeout(r, 50));
+
+  assert.equal(afterFirst, 1, 'one staging, one run');
+  assert.equal(runs, 1, 'and it stayed at one — no self-sustaining edge');
 });
