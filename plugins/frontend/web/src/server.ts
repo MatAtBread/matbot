@@ -633,7 +633,13 @@ export function createWebServer(deps: WebServerDeps) {
       // connecting — so the wrap lands after that bubble whichever event arrives first. Order *within*
       // the wrap is cosmetic and only differs on a resumed stream.
       const parked = pendingPrompts.get(sId);
-      if (parked !== undefined) res.write(parked.event);
+      if (parked !== undefined) {
+        // Logged because this is the recovery nobody can see from the outside: the client cannot tell a
+        // re-sent prompt from a first one, which is the point, so the server is the only place the fact
+        // that a question was rescued is observable at all.
+        console.log(`[frontend-web] re-sent the outstanding prompt for session ${sId} to a new stream`);
+        res.write(parked.event);
+      }
 
       const ac = new AbortController();
       req.on('close', () => {

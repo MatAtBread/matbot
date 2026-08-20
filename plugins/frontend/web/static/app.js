@@ -2597,7 +2597,17 @@ async function connectSessionStream(sid) {
       // have finished, committed, and left our loading dots up forever (the symptom being a turn that
       // "never completes" until you refresh). Committed history is the only source for that, so re-read
       // it. Guarded on there being an open turn: an idle session's reconnect needs no work.
-      if (ev.type === 'stream-resumed') { if (turnQueues.size > 0) void resyncSession(sid); continue; }
+      if (ev.type === 'stream-resumed') {
+        // Logged either way: "nothing in flight" is as much a proof the hook ran as a re-read is, and
+        // this path exists precisely for conditions that are hard to provoke on demand.
+        if (turnQueues.size > 0) {
+          console.info(`[matbot] re-reading history — ${turnQueues.size} turn(s) still shown as running`);
+          void resyncSession(sid);
+        } else {
+          console.info('[matbot] nothing in flight — no re-read needed');
+        }
+        continue;
+      }
       pushTurnEvent(ev);
     }
   } catch {

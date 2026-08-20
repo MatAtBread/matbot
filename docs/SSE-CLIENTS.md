@@ -251,6 +251,54 @@ happens to look.
 
 ---
 
+## Seeing it work
+
+The recovery paths fire in conditions that are hard to provoke and easy to mistake for working anyway —
+a client on a healthy socket behaves identically whether or not any of this exists. So the bundled client
+logs every branch to the console, and each recipe below is a way to force one from DevTools.
+
+What you will see, all prefixed `[matbot]`:
+
+| | |
+|---|---|
+| `session stream silent past the deadline (65s, no heartbeat) — reconnecting in 1s` | the watchdog |
+| `session stream quiet on returning to the foreground (Ns, no heartbeat) — reconnecting in 1s` | the foreground revive |
+| `session stream failed (…) — reconnecting in 1s` | an ordinary error, the only case that worked before |
+| `stream is live (Ns since last frame) — nothing to do` | a foreground check that correctly did nothing |
+| `session stream reconnected — reconciling` | the resume signal reaching the consumer |
+| `re-reading history — N turn(s) still shown as running` | the recovery that clears a stuck turn |
+| `nothing in flight — no re-read needed` | resumed while idle; no re-render |
+
+Server-side, `[frontend-web] re-sent the outstanding prompt for session … to a new stream` is the only
+place a rescued prompt is observable, since a client cannot tell a re-sent one from a first one.
+
+**Watch the wire.** DevTools → Network → the `events/sessions/<id>` request → **EventStream** (Chrome) or
+**Response** (Firefox). A `: hb` every 20s is the proof the heartbeat is live at all; do this first,
+because if it is absent nothing else below means anything.
+
+**Force a reconnect + reconcile.** Start a long turn (`sleep 90` through the `bash` tool is ideal — a
+genuinely quiet stream), then Network → throttling → **Offline** for a few seconds, then back to Online.
+The fetch errors, so you get the `failed (…)` line, then `reconnected`, then either the re-read or the
+no-op depending on whether a turn was in flight. This proves the reconcile half but *not* the watchdog:
+an offline switch raises an error, which is the one case that always worked.
+
+**Force the watchdog.** It needs silence without an error, which no network toggle produces — so remove
+the heartbeat instead: start the server with `heartbeatMs` set to something long (10 minutes), and run a
+turn that stays quiet for over 65s. At 65s you get `silent past the deadline`, a reconnect, and the turn
+completing correctly afterwards. Before this fix that same 65s produced nothing at all, forever.
+
+**Force the foreground revive.** Same long `heartbeatMs`, start a quiet turn, switch to another
+application for ~30s, come back. You should see `quiet on returning to the foreground` immediately rather
+than waiting out the remaining watchdog. Switching back with the beat *on* gives you `stream is live`
+instead — which is the intended behaviour, not a failure: a stream that survived needs no recovery.
+
+**Force the prompt rescue** — the one worth doing, because it needs no DevTools and it is the original
+bug. Run a turn that sleeps and then asks something (`sleep 60`, then any `ask_user`), and switch to a
+different conversation before the question fires. Come back after it. The question is waiting for you, and
+the server logs the re-send. Before the fix, switching away answered it for you with the field's default.
+
+---
+
 ## If you own the server half too
 
 Then some of these rules are not yours to obey but yours to *provide*. A client cannot work around a

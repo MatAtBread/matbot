@@ -47,6 +47,14 @@ churn and less likely to affect a consumer who doesn't use them.
   disconnect-on-hide policy: a hidden tab usually keeps its connections, so forcing the gap would make the
   recovery re-read certain rather than rare. Only a stream that has actually gone quiet is torn down.
 
+- **Every recovery branch says which one fired**, to the console, and `docs/SSE-CLIENTS.md` has a recipe
+  for forcing each from DevTools. These paths exist for conditions that are hard to provoke, and a client
+  on a healthy socket behaves identically whether or not any of them exist — so "it still works" was never
+  evidence either way. Notably the watchdog cannot be provoked by a network toggle at all (going offline
+  raises an *error*, which is the one case that always worked); it needs silence without an error, which
+  means removing the heartbeat via a long `heartbeatMs`. The server also logs a re-sent prompt, that being
+  the only place a rescued question is observable — a client cannot tell a re-sent prompt from a first one.
+
 - **A viewer going away is no longer treated as an answer.** The "no viewers left" release resolved the
   pending prompt with `''`, which the prompt implementation turns into the *field's default* — an answer
   nobody gave, to a question nobody saw. Harmless-looking on a confirm (it declines) and destructive on
