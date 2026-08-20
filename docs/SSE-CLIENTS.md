@@ -293,13 +293,19 @@ switching away answered it for you with the field's default.
 A UI that shows features conditionally (a profiles panel, a sharing button) has to ask whether the tool
 behind one exists, and the natural way — call it and read the 404 — has two traps.
 
-**A 404 is not a verdict.** It means "not registered when you asked". The `/tools` endpoints hold an
-unknown name briefly during boot, because the server starts listening before the plugins configured after
-it, but that window is a courtesy and cannot be made authoritative: a plugin's `setup()` may itself call
-`loadPlugin()`, so tools can register long after the initial burst and no deadline the server picks can
-outlast a slow enough nested load. So treat "absent" as provisional and **re-read on
-`RegistryChange{registry:'tools'}`**, which is the same identity-never-value rule everything else on the
-bus follows. Debounce it — a boot announces dozens of tools — and stop once the answer is yes.
+**A control built from a tool call is derived state, so it has to track the registry — both ways.** A 404
+means "not registered when you asked", never "absent": the `/tools` endpoints hold an unknown name briefly
+during boot, because the server starts listening before the plugins configured after it, but that window is
+a courtesy and cannot be made authoritative — a plugin's `setup()` may itself call `loadPlugin()`, so tools
+can register long after the initial burst and no deadline the server picks can outlast a slow enough nested
+load. And a plugin can be *unloaded* while your page is up, from your own plugins panel, taking its tools
+with it.
+
+So re-derive on `RegistryChange{registry:'tools'}` rather than latching an answer at boot. A one-way latch
+gets both directions wrong: a capability that loads late never appears however long you wait, and one that
+leaves goes on offering operations that now 404. Debounce it — a boot announces dozens of tools — separate
+the one-time wiring from the part that re-runs, so an arrival doesn't stack duplicate listeners, and keep
+one probe in flight at a time, since mid-boot a probe for an absent tool *waits* rather than 404ing.
 
 **Don't serialise your bootstrap on it.** An optional capability should never gate the shell, however fast
 the answer is expected to be. Render without it and wire it in when it arrives. If some part of startup

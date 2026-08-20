@@ -3369,7 +3369,10 @@ async function init() {
         // writing anything — so no per-item ItemChange arrives to say so. Re-read everything rather than
         // waiting for an unrelated change to happen past and refresh a panel by luck.
         case '@matatbread/matbot-plugin-api#RegistryChange':
-          if (n.registry === 'tools')                        { refreshSkills(); reprobeProfiles(); }
+          // Every panel here is rendered from a tool's output, so all of them follow tool churn — a plugin
+          // arriving or leaving changes what they should show. Each refresher is debounced, so a boot's
+          // burst of registrations collapses to one pass per panel.
+          if (n.registry === 'tools') { refreshSkills(); refreshFiles(); refreshSessions(); syncCapabilities(); }
           else if (n.registry !== 'services')                             refreshPlugins();
           else if (n.name === 'StorageBackend') { refreshSessions(); refreshSkills(); refreshFiles(); }
           break;
@@ -3541,24 +3544,38 @@ function namespaceChecklist(available, selected) {
   return { box, current: () => [...cbs].filter(([, cb]) => cb.checked).map(([ns]) => ns) };
 }
 
-// A tool appeared, so an optional capability we concluded was absent may have just arrived. `setup()` can
-// itself call `loadPlugin()` — google-drive and per-user bootstrap plugins both do — so a plugin's tools
-// can register long after the initial burst, and any deadline the server picks for "boot is over" is a
-// guess that a slow enough nested load will beat. So don't depend on one: the answer to "is this feature
-// installed" is not a fact settled at load, it is a fact that can change, and the bus already says when it
-// has. At most once successfully (the guard stops on activation) and debounced, since a boot registers
-// dozens of tools and each one announces itself.
-let reprobeTimer = null;
-function reprobeProfiles() {
-  if (profilesActive || reprobeTimer !== null) return;
-  reprobeTimer = setTimeout(() => {
-    reprobeTimer = null;
-    if (profilesActive) return;
-    void initProfiles().then(() => {
-      if (!profilesActive) return;
-      void refreshSessions();
-      loadFiles();
-    });
+// A control this UI built out of a tool call is DERIVED from the tool registry, so it has to track the
+// registry — in both directions. Neither direction is hypothetical: a plugin's `setup()` may itself call
+// `loadPlugin()` (google-drive, per-user bootstrap plugins), so a capability can register arbitrarily late
+// and beat any deadline the server picks for "boot is over"; and a plugin can be unloaded from this very
+// UI's plugins panel, so one can leave while the page is up.
+//
+// `profilesActive` used to be a one-way latch set at boot, which got both wrong: an install whose profiles
+// plugin loaded late never showed the panel however long you waited, and one that unloaded it went on
+// offering sharing operations that 404. So re-derive rather than remember.
+//
+// Debounced, because a boot announces dozens of tools and each one arrives as its own notification.
+let profilesWired       = false;  // the menu's listeners, attached once regardless of arrivals/departures
+let capabilitySyncTimer = null;
+let capabilitySyncing   = false;
+function syncCapabilities() {
+  if (capabilitySyncTimer !== null) return;
+  capabilitySyncTimer = setTimeout(async () => {
+    capabilitySyncTimer = null;
+    // One at a time. Mid-boot a probe for an absent tool does not 404 immediately — the server holds an
+    // unknown name until the tool registry settles — so without this the burst of registrations would
+    // stack several long requests instead of asking again once the first has answered.
+    if (capabilitySyncing) { syncCapabilities(); return; }
+    capabilitySyncing = true;
+    try {
+      if (!profilesActive) {
+        await initProfiles();                          // probes; a 404 leaves it off and costs nothing
+        if (profilesActive) { refreshSessions(); loadFiles(); }
+        return;
+      }
+      try { await callTool('profile_action', { action: 'list' }); }
+      catch { withdrawProfiles(); }
+    } finally { capabilitySyncing = false; }
   }, 400);
 }
 
@@ -3706,23 +3723,44 @@ async function initProfiles() {
     render(list, namespaces);
   };
 
-  btn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    if (menu.hidden) {
-      const r = btn.getBoundingClientRect();
-      menu.style.left = r.left + 'px';
-      menu.style.top  = (r.bottom + 4) + 'px';
-      refresh();
-      menu.hidden = false;
-    } else {
-      menu.hidden = true;
-    }
-  });
-  document.addEventListener('click', (e) => {
-    if (!menu.hidden && !menu.contains(e.target) && e.target !== btn && !btn.contains(e.target)) menu.hidden = true;
-  });
+  // Wired once, however many times this runs. The plugin can come and go (see syncCapabilities), and the
+  // menu is re-rendered per open by `refresh` anyway — so re-attaching here would only stack duplicate
+  // handlers, one per arrival. `menu` and `btn` are looked up by id, so the first closure stays valid.
+  if (!profilesWired) {
+    profilesWired = true;
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (menu.hidden) {
+        const r = btn.getBoundingClientRect();
+        menu.style.left = r.left + 'px';
+        menu.style.top  = (r.bottom + 4) + 'px';
+        refresh();
+        menu.hidden = false;
+      } else {
+        menu.hidden = true;
+      }
+    });
+    document.addEventListener('click', (e) => {
+      if (!menu.hidden && !menu.contains(e.target) && e.target !== btn && !btn.contains(e.target)) menu.hidden = true;
+    });
+  }
 
   refresh();                                          // initial render, also pulling the isolatable-namespace set
+}
+
+// Withdraw the profile UI: its tool has gone, so every control built out of it is now offering operations
+// that 404. Leaves the listeners attached (they are harmless with the button hidden) and re-reads the two
+// panels that render ownership, since theirs went with it.
+function withdrawProfiles() {
+  profilesActive = false;
+  profileNames   = new Set();
+  const btn  = document.getElementById('profile-btn');
+  const menu = document.getElementById('profile-menu');
+  if (btn)  btn.hidden  = true;
+  if (menu) menu.hidden = true;
+  updateShareBtn();
+  refreshSessions();
+  loadFiles();
 }
 
 // ── Sharing (chat-header) ─────────────────────────────────────────────────────────

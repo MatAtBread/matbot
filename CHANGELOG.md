@@ -71,10 +71,17 @@ churn and less likely to affect a consumer who doesn't use them.
   Nothing's *correctness* rests on that guess, which is the part that matters. A `setup()` may itself call
   `loadPlugin()` — google-drive and per-user bootstrap plugins both do — so tools can register long after
   the burst, and no deadline the server picks can outlast a slow enough nested load. A 404 therefore means
-  "not registered when you asked", never "absent": the UI re-probes on `RegistryChange{registry:'tools'}`
-  (debounced, and at most once successfully), so a late-loading profiles plugin lights up its panel whenever
-  it arrives. That is the same identity-never-value rule the rest of the bus works by, and it makes the
-  boot window a courtesy rather than a contract.
+  "not registered when you asked", never "absent", and the boot window is a courtesy rather than a contract.
+
+- **A control the UI built out of a tool call now tracks the tool registry, in both directions.** Every
+  panel rendered from a tool's output follows tool churn, and the profile/sharing UI — which was gated on a
+  one-way flag latched at boot — is re-derived instead. The latch got both directions wrong, and neither is
+  hypothetical: a capability whose plugin loads late (via a nested `loadPlugin`, so arbitrarily late) never
+  appeared however long you waited, and one *unloaded* from this very UI's plugins panel went on offering
+  sharing operations that 404. Withdrawal hides the controls and re-reads the two panels that render
+  ownership. The one-time wiring is separated from the part that re-runs, so an arrival cannot stack
+  duplicate listeners; the sync is debounced against a boot's burst of registrations and keeps one probe in
+  flight, since mid-boot a probe for an absent tool waits rather than 404ing.
 
 - **The web UI no longer serialises its whole bootstrap behind that probe.** `initProfiles()` is now awaited
   only when there is a URL fragment to interpret, because its one ordering-critical job is adopting a
