@@ -23,8 +23,13 @@ import { makeWebEnvTool } from '../src/web-env.js';
 function makeInProcessTransport(services) {
   const run = services.run;
 
-  // sid → the parked prompt's settlers (mirror server.ts pendingPrompts). resolve applies the
-  // default fallback; cancel rejects with PromptCancelledError (the "give up" path).
+  // sid → the parked prompt (mirror server.ts pendingPrompts). resolve applies the default fallback;
+  // cancel rejects with PromptCancelledError (the "give up" path). `event` is the `prompt` event itself,
+  // kept so a stream that starts draining LATER is told about it: injecting is one fire-and-forget pass
+  // over whatever hubs exist, and a session the user is not currently looking at has none — so the
+  // question reached nobody and the turn parked with nothing on screen. A prompt is state, not an event.
+  // (No socket here, so none of the liveness machinery the HTTP transport needs applies; this half of the
+  // problem is not about sockets at all, which is why it bites in-process too.)
   const pendingPrompts = new Map();
   // callId → settlers for an in-flight web_user_environment round-trip (mirror server.ts
   // pendingEvalCalls). Keyed by the tool call's callId, answered via answerEnv.
@@ -115,10 +120,6 @@ function makeInProcessTransport(services) {
         pendingPrompts.delete(sid);
         for (const inject of hub(sid)) inject({ type: 'prompt-resolved', traceId });
       };
-      pendingPrompts.set(sid, {
-        resolve: answer => { settled(); resolve(answer || def || ''); },
-        cancel:  ()     => { settled(); reject(promptCancelledError()); },
-      });
       const ev = {
         type: 'prompt',
         traceId,
@@ -126,6 +127,11 @@ function makeInProcessTransport(services) {
         ...(def !== undefined ? { defaultValue: def } : {}),
         ...(typeof p === 'string' ? {} : { field: p }),
       };
+      pendingPrompts.set(sid, {
+        event:   ev,
+        resolve: answer => { settled(); resolve(answer || def || ''); },
+        cancel:  ()     => { settled(); reject(promptCancelledError()); },
+      });
       for (const inject of hub(sid)) inject(ev);
     });
   }
@@ -219,6 +225,13 @@ function makeInProcessTransport(services) {
     const pump = () => { if (wake) { const w = wake; wake = null; w(); } };
     const inject = ev => { queue.push(ev); pump(); };
     hub(sid).add(inject);
+
+    // An outstanding question for this session, asked while nothing was draining it (the user was on
+    // another conversation). Queued ahead of the runner's replay below, which is where it belongs: the
+    // UI creates a turn's render state lazily, and the running turn's user message is already in the
+    // committed history it renders before subscribing.
+    const parked = pendingPrompts.get(sid);
+    if (parked !== undefined) inject(parked.event);
 
     let view;
     try {

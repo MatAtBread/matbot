@@ -2556,6 +2556,20 @@ async function* turnEvents(traceId) {
   }
 }
 
+// Re-read the conversation from the server and rebind its stream — what a page refresh does, without
+// losing the page. Deliberately the same three steps openSession() takes (get + render + connect), and
+// in the same order, so a resync is not a second way to reach this state: the stream's replay of the
+// running turn lands on top of freshly-rendered committed history exactly as it does at open, and the
+// `queued` event adopts the bubble history just drew rather than adding a second one.
+async function resyncSession(sid) {
+  if (sid !== currentSessionId) return;
+  const [session, busy] = await Promise.all([apiGetSession(sid), apiSessionBusy(sid)]);
+  if (sid !== currentSessionId) return;          // navigated away while we were asking
+  if (session) renderSession(session);
+  setBusyState(busy);
+  connectSessionStream(sid);                     // aborts the stream this was called from
+}
+
 async function connectSessionStream(sid) {
   if (streamAc) streamAc.abort();
   streamAc = new AbortController();
@@ -2578,6 +2592,12 @@ async function connectSessionStream(sid) {
         void runWebEnv(ev.expression).then(out => T.answerEnv(sid, { callId, ...out }));
         continue;
       }
+      // The transport reconnected. Anything that happened while it was gone is unrecoverable from the
+      // stream — it replays the RUNNING turn and nothing else — so a turn we still show as in flight may
+      // have finished, committed, and left our loading dots up forever (the symptom being a turn that
+      // "never completes" until you refresh). Committed history is the only source for that, so re-read
+      // it. Guarded on there being an open turn: an idle session's reconnect needs no work.
+      if (ev.type === 'stream-resumed') { if (turnQueues.size > 0) void resyncSession(sid); continue; }
       pushTurnEvent(ev);
     }
   } catch {
@@ -3196,7 +3216,27 @@ async function init() {
     marked.use({ breaks: true, gfm: true });
   }
 
-  await initProfiles();
+  // Profiles are optional, so this is a probe: it calls a tool that may not exist and reads the 404 as
+  // "feature off". Awaiting it put the whole shell behind an optional capability — and behind the server's
+  // boot grace, which parks an unknown name rather than 404ing it, so an install without the profiles
+  // plugin paid up to 30s of blank page for a question whose answer was "no".
+  //
+  // Not unconditionally async, though: initProfiles adopts a `#<profile>:…` deep-link, and it must do so
+  // BEFORE anything opens a session under the old identity (the transport reads the active profile from
+  // localStorage per request). That ordering is only load-bearing when there is a fragment to interpret,
+  // and a profile name is indistinguishable from a bare session id without the profile list — so the test
+  // is the presence of a fragment, not its shape.
+  if (location.hash) {
+    await initProfiles();
+  } else {
+    // Nothing to adopt: let the shell come up and wire the profile UI in when the answer arrives. The two
+    // panels that render ownership have already loaded by then with profilesActive false, so re-read them.
+    void initProfiles().then(() => {
+      if (!profilesActive) return;
+      void refreshSessions();
+      loadFiles();
+    });
+  }
 
   {
     const MIN = 10, MAX = 22;
@@ -3329,7 +3369,19 @@ async function init() {
         // writing anything — so no per-item ItemChange arrives to say so. Re-read everything rather than
         // waiting for an unrelated change to happen past and refresh a panel by luck.
         case '@matatbread/matbot-plugin-api#RegistryChange':
-          if (n.registry === 'tools')                                     refreshSkills();
+          // Every panel here is rendered from a tool's output, so all of them follow tool churn — a plugin
+          // arriving or leaving changes what they should show. Each refresher is debounced, so a boot's
+          // burst of registrations collapses to one pass per panel.
+          if (n.registry === 'tools') {
+            refreshSkills(); refreshFiles(); refreshSessions(); syncCapabilities();
+            // A "plugin not loaded" notice is derived state too, and the one banner not attached to a panel
+            // that re-reads had no way to go away — it sat there contradicting a feature that now works.
+            // Keyed on the name so it is not dismissed while still true: the workspace banner self-heals
+            // because refreshFiles redraws its panel, and this one has no panel to redraw.
+            if (n.name === 'session_edit' && n.operation === 'added') {
+              document.getElementById('edit-session-banner')?.remove();
+            }
+          }
           else if (n.registry !== 'services')                             refreshPlugins();
           else if (n.name === 'StorageBackend') { refreshSessions(); refreshSkills(); refreshFiles(); }
           break;
@@ -3501,6 +3553,41 @@ function namespaceChecklist(available, selected) {
   return { box, current: () => [...cbs].filter(([, cb]) => cb.checked).map(([ns]) => ns) };
 }
 
+// A control this UI built out of a tool call is DERIVED from the tool registry, so it has to track the
+// registry — in both directions. Neither direction is hypothetical: a plugin's `setup()` may itself call
+// `loadPlugin()` (google-drive, per-user bootstrap plugins), so a capability can register arbitrarily late
+// and beat any deadline the server picks for "boot is over"; and a plugin can be unloaded from this very
+// UI's plugins panel, so one can leave while the page is up.
+//
+// `profilesActive` used to be a one-way latch set at boot, which got both wrong: an install whose profiles
+// plugin loaded late never showed the panel however long you waited, and one that unloaded it went on
+// offering sharing operations that 404. So re-derive rather than remember.
+//
+// Debounced, because a boot announces dozens of tools and each one arrives as its own notification.
+let profilesWired       = false;  // the menu's listeners, attached once regardless of arrivals/departures
+let capabilitySyncTimer = null;
+let capabilitySyncing   = false;
+function syncCapabilities() {
+  if (capabilitySyncTimer !== null) return;
+  capabilitySyncTimer = setTimeout(async () => {
+    capabilitySyncTimer = null;
+    // One at a time. Mid-boot a probe for an absent tool does not 404 immediately — the server holds an
+    // unknown name until the tool registry settles — so without this the burst of registrations would
+    // stack several long requests instead of asking again once the first has answered.
+    if (capabilitySyncing) { syncCapabilities(); return; }
+    capabilitySyncing = true;
+    try {
+      if (!profilesActive) {
+        await initProfiles();                          // probes; a 404 leaves it off and costs nothing
+        if (profilesActive) { refreshSessions(); loadFiles(); }
+        return;
+      }
+      try { await callTool('profile_action', { action: 'list' }); }
+      catch { withdrawProfiles(); }
+    } finally { capabilitySyncing = false; }
+  }, 400);
+}
+
 async function initProfiles() {
   let profiles;
   try { profiles = (await callTool('profile_action', { action: 'list' })).profiles; }
@@ -3645,23 +3732,44 @@ async function initProfiles() {
     render(list, namespaces);
   };
 
-  btn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    if (menu.hidden) {
-      const r = btn.getBoundingClientRect();
-      menu.style.left = r.left + 'px';
-      menu.style.top  = (r.bottom + 4) + 'px';
-      refresh();
-      menu.hidden = false;
-    } else {
-      menu.hidden = true;
-    }
-  });
-  document.addEventListener('click', (e) => {
-    if (!menu.hidden && !menu.contains(e.target) && e.target !== btn && !btn.contains(e.target)) menu.hidden = true;
-  });
+  // Wired once, however many times this runs. The plugin can come and go (see syncCapabilities), and the
+  // menu is re-rendered per open by `refresh` anyway — so re-attaching here would only stack duplicate
+  // handlers, one per arrival. `menu` and `btn` are looked up by id, so the first closure stays valid.
+  if (!profilesWired) {
+    profilesWired = true;
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (menu.hidden) {
+        const r = btn.getBoundingClientRect();
+        menu.style.left = r.left + 'px';
+        menu.style.top  = (r.bottom + 4) + 'px';
+        refresh();
+        menu.hidden = false;
+      } else {
+        menu.hidden = true;
+      }
+    });
+    document.addEventListener('click', (e) => {
+      if (!menu.hidden && !menu.contains(e.target) && e.target !== btn && !btn.contains(e.target)) menu.hidden = true;
+    });
+  }
 
   refresh();                                          // initial render, also pulling the isolatable-namespace set
+}
+
+// Withdraw the profile UI: its tool has gone, so every control built out of it is now offering operations
+// that 404. Leaves the listeners attached (they are harmless with the button hidden) and re-reads the two
+// panels that render ownership, since theirs went with it.
+function withdrawProfiles() {
+  profilesActive = false;
+  profileNames   = new Set();
+  const btn  = document.getElementById('profile-btn');
+  const menu = document.getElementById('profile-menu');
+  if (btn)  btn.hidden  = true;
+  if (menu) menu.hidden = true;
+  updateShareBtn();
+  refreshSessions();
+  loadFiles();
 }
 
 // ── Sharing (chat-header) ─────────────────────────────────────────────────────────

@@ -9,7 +9,9 @@ architectural intent for any contributor.
 For the project overview see [README.md](../README.md); for installation and configuration
 see [GETTING-STARTED.md](GETTING-STARTED.md). For building multi-user deployments — per-user
 gating, the bootstrap-plugin pattern, and the global tool-visibility ceiling — see
-[PER-USER-PLUGINS.md](PER-USER-PLUGINS.md).
+[PER-USER-PLUGINS.md](PER-USER-PLUGINS.md). For writing a **UI of your own** against the web
+frontend's HTTP+SSE API — prompt delivery, stream liveness, and reconnect reconciliation — see
+[SSE-CLIENTS.md](SSE-CLIENTS.md).
 
 ---
 

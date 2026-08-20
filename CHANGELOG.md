@@ -9,6 +9,107 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## 0.4.7
+
+### Optional
+
+#### frontend-web
+
+- **The per-session SSE stream survives its own connection dropping.** One defect with two faces, and the
+  same root: the stream was fire-and-forget in one direction and unrecoverable in the other. Raising an
+  interactive prompt was a single write, so it was lost outright whenever the session had no live stream at
+  that instant — the user on another conversation, a reloading tab, or a socket killed by sleep that nobody
+  had reaped — and the turn then parked forever with no prompt anywhere on screen, which is the
+  `skill_action` compile install confirmation that "never appeared". A prompt is *state*, not an event: it
+  stays true until answered, so it is kept and re-sent to every stream that connects while it is
+  outstanding. Read the other way round, the same gap is a turn that "never completes": a stream replays the
+  *running* turn and says nothing about one that began and ended while it was gone, so the loading dots
+  stayed up until the page was refreshed. The transport announces the discontinuity and the UI re-reads
+  committed history — what a refresh does, without losing the page.
+
+- **`GET /ui-config`** serves the values the server and its UI have to agree on — `heartbeatMs` today — and
+  the client derives its idle and freshness thresholds from it. They were two constants in two files kept
+  consistent by hand, so changing the server's interval silently made the client wrong, and wrong here means
+  tearing down a healthy stream on every deadline. Deliberately narrow and deliberately not a feature-flag
+  channel: whether a capability exists is answered by the tool registry, which changes while the page is up.
+
+- **A stale "plugin not loaded" banner clears when the plugin loads.** `session_edit`'s banner (it does offer
+  to install, like the workspace panel's) had no panel behind it to redraw, so it sat there contradicting a
+  feature that now worked. Keyed on the tool's own `added` notification, so it is never dismissed while
+  still true.
+
+- **Both SSE endpoints heartbeat** (`WebServerDeps.heartbeatMs`, default 20s), and the client bounds how
+  long it will sit in silence. Nothing was written to a quiet stream between turns, so neither end could
+  tell quiet from dead: the server kept a zombie connection in its viewer set and went on reporting
+  successful writes into it (which is *how* a prompt was lost), while the client's `reader.read()` stayed
+  pending with no error, so its reconnect loop never ran at all. A long, quiet turn is exactly the window a
+  socket dies in. Reconnect was never the missing piece; liveness detection was.
+
+- **The in-process (`matbot.html`) transport had the same prompt hole, with no socket in it.** Injecting a
+  prompt was one pass over whatever streams were draining, and a session the user is not looking at has
+  none — so the question reached nobody and the turn parked, in a system with no network. Parked and
+  injected on subscribe, exactly as the server now does. The clearest evidence that the prompt rule is
+  about statefulness rather than transport: `evalInBrowser`, one function below it, already checked.
+
+- **Becoming visible revives a quiet stream instead of waiting out the watchdog.** `visibilitychange` and
+  `pageshow` both, because they answer different questions — the latter is the back/forward cache, where a
+  page is restored with its scripts un-rerun and its streams gone, which Safari leans on heavily and where
+  mobile Safari has frozen JS (so a timer cannot be the only mechanism). Deliberately *not* a
+  disconnect-on-hide policy: a hidden tab usually keeps its connections, so forcing the gap would make the
+  recovery re-read certain rather than rare. Only a stream that has actually gone quiet is torn down.
+
+- **A viewer going away is no longer treated as an answer.** The "no viewers left" release resolved the
+  pending prompt with `''`, which the prompt implementation turns into the *field's default* — an answer
+  nobody gave, to a question nobody saw. Harmless-looking on a confirm (it declines) and destructive on
+  `plugin store-key`, whose default is `''` and where a blank value **removes the key**. A prompt now
+  simply stays pending, to be put to the next viewer; `POST /abort` and server shutdown cancel it
+  (`PromptCancelledError`, which a tool already reports as an error) rather than inventing a choice.
+
+- **An optional tool the UI probes for no longer costs 30 seconds of blank page.** The `/tools` endpoints
+  hold a name that has not registered yet, because the server starts listening inside `setup()` — before the
+  plugins configured after it, and before core's own tools — so a browser already open when the server
+  restarts would otherwise 404 tools that are merely late. But the wait ended on a *clock*: 30s from server
+  construction, whatever the registry was doing. A name that would **never** register — the UI asking
+  `profile_action` whether a profiles backend exists — therefore parked for the whole remaining window
+  before 404ing, long after every plugin had finished loading. Nothing was slow at boot; the wait was for a
+  deadline, not for an event. The tool registry going quiet is the signal that was missing: boot registers
+  in a dense burst, so 2.5s of silence means the burst is over and an unknown name is genuinely unknown.
+  Re-armed rather than polled, so a boot that keeps registering keeps its grace, and the 30s ceiling still
+  backstops a wrong guess. Deliberately a heuristic — "loading has finished" is not a fact a plugin can be
+  told, and inventing a notification for it would put boot sequencing into core to save a frontend two
+  seconds.
+
+  Nothing's *correctness* rests on that guess, which is the part that matters. A `setup()` may itself call
+  `loadPlugin()` — google-drive and per-user bootstrap plugins both do — so tools can register long after
+  the burst, and no deadline the server picks can outlast a slow enough nested load. A 404 therefore means
+  "not registered when you asked", never "absent", and the boot window is a courtesy rather than a contract.
+
+- **A control the UI built out of a tool call now tracks the tool registry, in both directions.** Every
+  panel rendered from a tool's output follows tool churn, and the profile/sharing UI — which was gated on a
+  one-way flag latched at boot — is re-derived instead. The latch got both directions wrong, and neither is
+  hypothetical: a capability whose plugin loads late (via a nested `loadPlugin`, so arbitrarily late) never
+  appeared however long you waited, and one *unloaded* from this very UI's plugins panel went on offering
+  sharing operations that 404. Withdrawal hides the controls and re-reads the two panels that render
+  ownership. The one-time wiring is separated from the part that re-runs, so an arrival cannot stack
+  duplicate listeners; the sync is debounced against a boot's burst of registrations and keeps one probe in
+  flight, since mid-boot a probe for an absent tool waits rather than 404ing.
+
+- **The web UI no longer serialises its whole bootstrap behind that probe.** `initProfiles()` is now awaited
+  only when there is a URL fragment to interpret, because its one ordering-critical job is adopting a
+  `#<profile>:…` deep-link before anything opens a session under the old identity. With no fragment the
+  shell comes up immediately and the profile UI wires itself in when the answer arrives, re-reading the two
+  panels that render ownership. The fragment's *presence* is the test, not its shape: a profile name is
+  indistinguishable from a bare session id without the profile list, which is the thing being fetched.
+
+- **`docs/SSE-CLIENTS.md`** — how to write a UI of your own against this server, since anything embedding
+  matbot has to reimplement all of the above. What the two streams guarantee and what they don't, the four
+  mistakes that are invisible in testing and permanent in production, and the socket budget. Written
+  against the *transition* rather than the browser event: a soft-tabbed shell gets no lifecycle event when
+  a panel is hidden, so the rules attach to whatever the UI's own foreground/background signal is (a click,
+  a route change, a store mutation) with `visibilitychange`/`pageshow` as two sources among several. Plus a
+  section for an embedder who owns the server half too — five guarantees a client cannot work around the
+  absence of — and one on the serverless in-process build, where turn durability is the opposite way round.
+
 ## 0.4.6
 
 ### Optional
