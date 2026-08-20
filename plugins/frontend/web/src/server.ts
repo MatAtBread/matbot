@@ -39,9 +39,9 @@ export interface WebServerDeps {
   resolvePrincipal?: WebPrincipalResolver;
   /** How often to write a keep-alive comment on each SSE stream, in ms. Default 20s — comfortably inside
    *  the 60s that proxies and load balancers commonly idle a quiet connection out at. Lower it behind a
-   *  more aggressive intermediary; it is not a tuning knob for anything else, and in particular do not
-   *  RAISE it past ~21s: the bundled client's idle watchdog gives up after 65s of total silence, so a
-   *  slower beat would have it tear down and reconnect a stream that is perfectly healthy. */
+   *  more aggressive intermediary; it is not a tuning knob for anything else. Safe to change: the client
+   *  reads it from `GET /ui-config` and derives its own idle deadline, rather than hardcoding a number
+   *  that had to be kept consistent with this one by hand. */
   heartbeatMs?:   number;
 }
 
@@ -502,6 +502,22 @@ export function createWebServer(deps: WebServerDeps) {
     // --- GET /health ---
     if (method === 'GET' && url === '/health') {
       json(res, 200, { status: 'ok' }); return;
+    }
+
+    // --- GET /ui-config ---
+    // Values the server and its UI have to AGREE on, so that agreement is data rather than a comment in
+    // each of them saying what the other assumes. `heartbeatMs` is the whole of it today: the client needs
+    // to know how long silence has to last to mean "dead", and it cannot know that without knowing how
+    // often this server speaks. It used to be a constant in each half kept consistent by hand, where
+    // changing one silently made the other wrong.
+    //
+    // Deliberately narrow, or it becomes a dumping ground. Only numbers the two ends must share, and in
+    // particular NOT feature flags: whether a capability exists is answered by the tool registry, which
+    // can change while the page is up, and baking that into a boot-time config would be the one-way latch
+    // this UI just stopped using. Nothing here is per-principal or sensitive, which is why it needs no
+    // more authentication than /health — keep it that way, or it needs the resolver like everything else.
+    if (method === 'GET' && url === '/ui-config') {
+      json(res, 200, { heartbeatMs: HEARTBEAT_MS }); return;
     }
 
     // --- GET /events --- (one multiplexed SSE stream: session busy/idle plus every notification,

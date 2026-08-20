@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 
 // The client half of the same defect. `sessionEvents` reconnects, but a reconnect is not a
 // continuation: the server replays the RUNNING turn and says nothing about a turn that began and ended
@@ -23,6 +24,19 @@ function fireAfterSilence(name: string, ms: number): void {
   const realNow = Date.now;
   Date.now = () => realNow() + ms;
   try { fire(name); } finally { Date.now = realNow; }
+}
+
+/** A stub matbot server: answers /ui-config as the real one does, delegates the rest. The transport fetches
+ *  that config at load, so a catch-all handler would hand it an SSE stream it can never parse. */
+function stubServer(heartbeatMs: number, handler: (req: IncomingMessage, res: ServerResponse) => void) {
+  return createServer((req, res) => {
+    if (req.url === '/ui-config') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ heartbeatMs }));
+      return;
+    }
+    handler(req, res);
+  });
 }
 
 /** Load static/http-transport.js — browser globals stubbed, relative URLs pointed at `base`. */
@@ -49,7 +63,7 @@ async function loadTransport(base: string): Promise<{
 
 test('a reconnect is announced, so the caller knows to reconcile', { timeout: 20000 }, async () => {
   let connects = 0;
-  const server = createServer((req, res) => {
+  const server = stubServer(20000, (req, res) => {
     if (!req.url?.startsWith('/events/sessions/')) { res.writeHead(404).end(); return; }
     connects++;
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
@@ -81,7 +95,7 @@ test('a reconnect is announced, so the caller knows to reconcile', { timeout: 20
 });
 
 test('the first connect announces nothing — it is the caller\'s own starting point', { timeout: 20000 }, async () => {
-  const server = createServer((req, res) => {
+  const server = stubServer(20000, (_req, res) => {
     res.writeHead(200, { 'content-type': 'text/event-stream' });
     res.write(': open\n\n');
     res.write(`event: queued\ndata: ${JSON.stringify({ type: 'queued' })}\n\n`);
@@ -101,7 +115,7 @@ test('the first connect announces nothing — it is the caller\'s own starting p
 
 test('becoming visible revives a quiet stream without waiting out the watchdog', { timeout: 20000 }, async () => {
   let connects = 0;
-  const server = createServer((req, res) => {
+  const server = stubServer(20000, (req, res) => {
     if (!req.url?.startsWith('/events/sessions/')) { res.writeHead(404).end(); return; }
     connects++;
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
@@ -138,7 +152,7 @@ test('becoming visible revives a quiet stream without waiting out the watchdog',
 
 test('becoming visible leaves a stream that is still delivering alone', { timeout: 20000 }, async () => {
   let connects = 0;
-  const server = createServer((req, res) => {
+  const server = stubServer(20000, (_req, res) => {
     connects++;
     res.writeHead(200, { 'content-type': 'text/event-stream' });
     res.write(': open\n\n');
@@ -163,6 +177,41 @@ test('becoming visible leaves a stream that is still delivering alone', { timeou
     ac.abort();
     assert.equal(connects, 1, 'a live stream must not be torn down');
     assert.deepEqual(seen, ['queued'], 'and no resume announced');
+  } finally {
+    await new Promise<void>(r => server.close(() => r()));
+  }
+});
+
+test('the idle deadline follows the heartbeat the server reports', { timeout: 20000 }, async () => {
+  // The client cannot know how long silence has to last without knowing how often the server speaks. With
+  // a 1s beat announced, three-beats-and-a-bit is ~8s — so the watchdog must fire in seconds here, not at
+  // the 65s a hardcoded default would have waited. Nothing skews the clock: this is the real deadline.
+  let connects = 0;
+  const server = stubServer(1000, (_req, res) => {
+    connects++;
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write(': open\n\n');
+    res.write(`event: text-delta\ndata: ${JSON.stringify({ type: 'text-delta', n: connects })}\n\n`);
+    // Then silence, and never a beat — so the deadline is the only thing that can end this.
+  });
+  await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  try {
+    const T = await loadTransport(base);
+    await new Promise(r => setTimeout(r, 150));        // let the /ui-config fetch land
+    const ac = new AbortController();
+    const seen: string[] = [];
+    const started = Date.now();
+    const done = (async () => {
+      for await (const ev of T.sessionEvents('s1', ac.signal)) {
+        seen.push(ev.type);
+        if (seen.length === 3) { ac.abort(); return; }
+      }
+    })();
+    await Promise.race([done, new Promise((_, rej) => setTimeout(() => rej(new Error(`saw ${seen.join(', ')}`)), 15000))]);
+    const waited = Date.now() - started;
+    assert.deepEqual(seen, ['text-delta', 'stream-resumed', 'text-delta']);
+    assert.ok(waited < 12_000, `deadline should track the served beat, not a default — waited ${waited}ms`);
   } finally {
     await new Promise<void>(r => server.close(() => r()));
   }

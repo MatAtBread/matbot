@@ -3372,7 +3372,16 @@ async function init() {
           // Every panel here is rendered from a tool's output, so all of them follow tool churn — a plugin
           // arriving or leaving changes what they should show. Each refresher is debounced, so a boot's
           // burst of registrations collapses to one pass per panel.
-          if (n.registry === 'tools') { refreshSkills(); refreshFiles(); refreshSessions(); syncCapabilities(); }
+          if (n.registry === 'tools') {
+            refreshSkills(); refreshFiles(); refreshSessions(); syncCapabilities();
+            // A "plugin not loaded" notice is derived state too, and the one banner not attached to a panel
+            // that re-reads had no way to go away — it sat there contradicting a feature that now works.
+            // Keyed on the name so it is not dismissed while still true: the workspace banner self-heals
+            // because refreshFiles redraws its panel, and this one has no panel to redraw.
+            if (n.name === 'session_edit' && n.operation === 'added') {
+              document.getElementById('edit-session-banner')?.remove();
+            }
+          }
           else if (n.registry !== 'services')                             refreshPlugins();
           else if (n.name === 'StorageBackend') { refreshSessions(); refreshSkills(); refreshFiles(); }
           break;

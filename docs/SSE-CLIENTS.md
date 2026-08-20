@@ -134,9 +134,11 @@ application-level pings too. Reconnect was never the hard part; **detection** is
 So both matbot SSE endpoints write `: hb` every ~20s (`WebServerDeps.heartbeatMs`), and a client must:
 
 1. **Bound the silence.** Track the last byte received — any byte, heartbeat included. If nothing arrives
-   for more than ~3 beats, treat the stream as dead, cancel it and reconnect. The reference client uses
-   65s. Do not raise `heartbeatMs` above ~21s without changing this to match; they are two halves of one
-   number.
+   for more than ~3 beats, treat the stream as dead, cancel it and reconnect. Derive that from the server's
+   interval rather than hardcoding it: `GET /ui-config` reports `heartbeatMs`, which exists precisely so
+   this coupling is data. A silence threshold is only meaningful relative to how often the other end
+   speaks, and two constants in two files kept consistent by hand means changing one silently makes the
+   other wrong — wrong here being a healthy stream torn down on every deadline.
 2. **Recover on the way back, not on the way out.** A backgrounded view usually keeps its connections, so
    deliberately disconnecting when one is hidden guarantees a gap that mostly would not have happened —
    and recovery costs a re-read. Instead, whenever a conversation comes *back* to the foreground, check
@@ -257,7 +259,7 @@ These paths fire in conditions that are hard to provoke, and a client on a healt
 identically whether or not any of them exist — so "it still works" is not evidence in either direction.
 Each recipe below forces one.
 
-**Confirm the heartbeat.** Not from DevTools: Chrome's **EventStream** panel lists parsed `event:`/`data:`
+**Confirm the heartbeat.** `GET /ui-config` tells you the interval to expect. Not from DevTools, though: Chrome's **EventStream** panel lists parsed `event:`/`data:`
 frames only, so SSE *comment* lines — which is what a heartbeat is — never appear there, and their absence
 means nothing. Read the raw stream instead:
 
@@ -285,6 +287,20 @@ and that no-op is the intended behaviour rather than a missed case.
 turn that sleeps and then asks something (`sleep 60`, then any `ask_user`), and switch to a different
 conversation before the question fires. Come back after it: the question is waiting. Before the fix,
 switching away answered it for you with the field's default.
+
+---
+
+## Numbers the two ends share
+
+`GET /ui-config` returns values the server and its UI must agree on — today just `heartbeatMs`. Read it at
+startup and derive your own thresholds from it; don't hardcode anything that has a counterpart on the
+server.
+
+It is deliberately narrow, and worth keeping that way. **Not** a feature-flag channel: whether a capability
+exists is answered by the tool registry, which changes while the page is up, so baking that into a
+boot-time config would reintroduce exactly the latch the next section is about. Nothing in it is
+per-principal or sensitive, which is why it needs no more authentication than `/health` — the moment
+something there is either, it needs the principal resolver like every other route.
 
 ---
 

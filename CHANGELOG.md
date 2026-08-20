@@ -27,6 +27,17 @@ churn and less likely to affect a consumer who doesn't use them.
   stayed up until the page was refreshed. The transport announces the discontinuity and the UI re-reads
   committed history — what a refresh does, without losing the page.
 
+- **`GET /ui-config`** serves the values the server and its UI have to agree on — `heartbeatMs` today — and
+  the client derives its idle and freshness thresholds from it. They were two constants in two files kept
+  consistent by hand, so changing the server's interval silently made the client wrong, and wrong here means
+  tearing down a healthy stream on every deadline. Deliberately narrow and deliberately not a feature-flag
+  channel: whether a capability exists is answered by the tool registry, which changes while the page is up.
+
+- **A stale "plugin not loaded" banner clears when the plugin loads.** `session_edit`'s banner (it does offer
+  to install, like the workspace panel's) had no panel behind it to redraw, so it sat there contradicting a
+  feature that now worked. Keyed on the tool's own `added` notification, so it is never dismissed while
+  still true.
+
 - **Both SSE endpoints heartbeat** (`WebServerDeps.heartbeatMs`, default 20s), and the client bounds how
   long it will sit in silence. Nothing was written to a quiet stream between turns, so neither end could
   tell quiet from dead: the server kept a zombie connection in its viewer set and went on reporting

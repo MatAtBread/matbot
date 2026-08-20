@@ -47,7 +47,7 @@ function boot(tools: Tool[]) {
     vault: { resolve: async (v: string) => v } as unknown as Vault,
     loadPlugin: async () => { throw new Error('unused'); }, unloadPlugin: async () => false,
   });
-  return { web, notifier, registry };
+  return { web, notifier, registry, store, run };
 }
 
 /** A plugin's setup() registering a tool, as the registry announces it. */
@@ -63,6 +63,24 @@ async function serve(tools: Tool[]) {
   await new Promise<void>(r => b.web.server.listen(0, '127.0.0.1', r));
   return { ...b, base: `http://127.0.0.1:${(b.web.server.address() as { port: number }).port}` };
 }
+
+test('GET /ui-config reports the heartbeat the client has to reason about', { timeout: 20000 }, async () => {
+  // The client's idle deadline is only meaningful relative to how often this server speaks, and it used to
+  // hardcode a number that had to match this one by hand. Serving the fact makes the coupling data.
+  const b = boot([]);
+  b.web.server.close();
+  const web = createWebServer({
+    store: b.store, run: b.run, notifier: b.notifier, tools: b.registry, heartbeatMs: 1234,
+    vault: { resolve: async (v: string) => v } as unknown as Vault,
+    loadPlugin: async () => { throw new Error('unused'); }, unloadPlugin: async () => false,
+  });
+  await new Promise<void>(r => web.server.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${(web.server.address() as { port: number }).port}`;
+  try {
+    const cfg = await (await fetch(`${base}/ui-config`)).json() as { heartbeatMs?: number };
+    assert.equal(cfg.heartbeatMs, 1234);
+  } finally { await web.close(); }
+});
 
 const echo: Tool = {
   name: 'echo', description: 'echoes', inputSchema: { type: 'object', properties: {} },
