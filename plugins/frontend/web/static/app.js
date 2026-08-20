@@ -3226,7 +3226,27 @@ async function init() {
     marked.use({ breaks: true, gfm: true });
   }
 
-  await initProfiles();
+  // Profiles are optional, so this is a probe: it calls a tool that may not exist and reads the 404 as
+  // "feature off". Awaiting it put the whole shell behind an optional capability — and behind the server's
+  // boot grace, which parks an unknown name rather than 404ing it, so an install without the profiles
+  // plugin paid up to 30s of blank page for a question whose answer was "no".
+  //
+  // Not unconditionally async, though: initProfiles adopts a `#<profile>:…` deep-link, and it must do so
+  // BEFORE anything opens a session under the old identity (the transport reads the active profile from
+  // localStorage per request). That ordering is only load-bearing when there is a fragment to interpret,
+  // and a profile name is indistinguishable from a bare session id without the profile list — so the test
+  // is the presence of a fragment, not its shape.
+  if (location.hash) {
+    await initProfiles();
+  } else {
+    // Nothing to adopt: let the shell come up and wire the profile UI in when the answer arrives. The two
+    // panels that render ownership have already loaded by then with profilesActive false, so re-read them.
+    void initProfiles().then(() => {
+      if (!profilesActive) return;
+      void refreshSessions();
+      loadFiles();
+    });
+  }
 
   {
     const MIN = 10, MAX = 22;

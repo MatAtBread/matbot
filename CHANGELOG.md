@@ -62,6 +62,27 @@ churn and less likely to affect a consumer who doesn't use them.
   simply stays pending, to be put to the next viewer; `POST /abort` and server shutdown cancel it
   (`PromptCancelledError`, which a tool already reports as an error) rather than inventing a choice.
 
+- **An optional tool the UI probes for no longer costs 30 seconds of blank page.** The `/tools` endpoints
+  hold a name that has not registered yet, because the server starts listening inside `setup()` — before the
+  plugins configured after it, and before core's own tools — so a browser already open when the server
+  restarts would otherwise 404 tools that are merely late. But the wait ended on a *clock*: 30s from server
+  construction, whatever the registry was doing. A name that would **never** register — the UI asking
+  `profile_action` whether a profiles backend exists — therefore parked for the whole remaining window
+  before 404ing, long after every plugin had finished loading. Nothing was slow at boot; the wait was for a
+  deadline, not for an event. The tool registry going quiet is the signal that was missing: boot registers
+  in a dense burst, so 2.5s of silence means the burst is over and an unknown name is genuinely unknown.
+  Re-armed rather than polled, so a boot that keeps registering keeps its grace, and the 30s ceiling still
+  backstops a wrong guess. Deliberately a heuristic — "loading has finished" is not a fact a plugin can be
+  told, and inventing a notification for it would put boot sequencing into core to save a frontend two
+  seconds.
+
+- **The web UI no longer serialises its whole bootstrap behind that probe.** `initProfiles()` is now awaited
+  only when there is a URL fragment to interpret, because its one ordering-critical job is adopting a
+  `#<profile>:…` deep-link before anything opens a session under the old identity. With no fragment the
+  shell comes up immediately and the profile UI wires itself in when the answer arrives, re-reading the two
+  panels that render ownership. The fragment's *presence* is the test, not its shape: a profile name is
+  indistinguishable from a bare session id without the profile list, which is the thing being fetched.
+
 - **`docs/SSE-CLIENTS.md`** — how to write a UI of your own against this server, since anything embedding
   matbot has to reimplement all of the above. What the two streams guarantee and what they don't, the four
   mistakes that are invisible in testing and permanent in production, and the socket budget. Written

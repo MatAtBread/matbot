@@ -169,6 +169,21 @@ export function createWebServer(deps: WebServerDeps) {
   const BOOT_TOOL_GRACE_MS = 30_000;
   const bootGraceUntil = Date.now() + BOOT_TOOL_GRACE_MS;
 
+  // ...but the ceiling is not the wait. A name that will NEVER register — the UI probing for an optional
+  // capability, `profile_action` when the profiles backend is not configured — used to park for the whole
+  // remaining window and then 404, because the grace expired on a CLOCK rather than on the thing it was
+  // actually waiting for. It waited out 30 seconds even when every plugin had loaded and the registry was
+  // final seconds earlier; there was simply no signal saying so.
+  //
+  // The tool registry going quiet IS that signal. Boot registers tools in a dense burst (each plugin's
+  // setup(), then core's own), so a gap this long means the burst is over and an unknown name is genuinely
+  // unknown. A heuristic, deliberately: "loading has finished" is not a fact this plugin can be told, and
+  // inventing a notification for it would put a boot-sequencing concern into core to save a frontend a
+  // couple of seconds. Generous enough to sit well clear of a slow plugin import, and the 30s ceiling still
+  // backstops the case where it guesses wrong.
+  const TOOL_REGISTRY_QUIET_MS = 2_500;
+  let lastToolChangeAt = Date.now();
+
   // Persistent per-session event subscribers (the GET /events/sessions/:id SSE streams). Submits are
   // fire-and-forget — all turn output, and interactive prompts, reach clients over these. Holding one
   // connection per session (not per submission) is what keeps queued submits off the browser's
@@ -225,6 +240,15 @@ export function createWebServer(deps: WebServerDeps) {
   };
 
   const watchAc = new AbortController();
+
+  // The tool-registry activity clock behind TOOL_REGISTRY_QUIET_MS. Subscribed here rather than inside
+  // startFirehose, which is deliberately lazy: a /tools call can (and at boot does) arrive before any
+  // client opens an event stream, which is exactly when this needs to have been counting.
+  deps.notifier.consume(
+    () => { lastToolChangeAt = Date.now(); },
+    watchAc.signal,
+    n => n.kind === RegistryChangeKind && n.registry === 'tools',
+  );
 
   // ── The firehose ────────────────────────────────────────────────────────────
   //
@@ -404,7 +428,17 @@ export function createWebServer(deps: WebServerDeps) {
     const ac = new AbortController();
     const onAbort = () => ac.abort();
     signal.addEventListener('abort', onAbort, { once: true });
-    const timer = setTimeout(() => ac.abort(), Math.max(0, bootGraceUntil - Date.now()));
+    // Give up at whichever comes first: the registry settling, or the hard ceiling. Re-armed rather than
+    // polled — every wake-up either finds the registry quiet (and stops) or finds it moved on and waits
+    // for the new deadline, so a boot that keeps registering keeps its grace.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const armGiveUp = (): void => {
+      const settleAt = Math.min(lastToolChangeAt + TOOL_REGISTRY_QUIET_MS, bootGraceUntil);
+      const wait     = settleAt - Date.now();
+      if (wait <= 0) { ac.abort(); return; }
+      timer = setTimeout(armGiveUp, wait);
+    };
+    armGiveUp();
     const stream = deps.notifier.subscribe(ac.signal,
       n => n.kind === RegistryChangeKind && n.registry === 'tools' && n.operation === 'added' && n.name === name);
     const it = stream[Symbol.asyncIterator]();
