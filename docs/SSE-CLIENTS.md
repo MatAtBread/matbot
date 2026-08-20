@@ -1,11 +1,17 @@
 # Writing a matbot UI client
 
-For anyone building a **frontend other than the bundled one** against `@matatbread/matbot-frontend-web` —
-a React app, a soft-tabbed shell, an embedded panel. It is about the *streams*: what they guarantee, what
-they do not, and the four mistakes that are invisible in testing and permanent in production.
+For anyone building a **frontend other than the bundled one** — a React app, a soft-tabbed shell, an
+embedded panel — and for anyone reimplementing the **server** side of it as well. It is about the
+*streams*: what they guarantee, what they do not, and the four mistakes that are invisible in testing and
+permanent in production.
 
-`plugins/frontend/web/static/app.js` + `http-transport.js` are the reference implementation of everything
-below. Where this document states a rule, that pair obeys it and its comments say why.
+Most of it is client-side. The last section is for the case where the server is yours too: some rules then
+stop being ones you obey and become ones you have to provide, and a client cannot work around their
+absence.
+
+`plugins/frontend/web/static/app.js` + `http-transport.js` are the reference client, and
+`plugins/frontend/web/src/server.ts` the reference server. Where this document states a rule, that code
+obeys it and its comments say why — the code is the model; this is the contract it happens to implement.
 
 ---
 
@@ -61,7 +67,8 @@ Browsers cap HTTP/1.1 at ~6 connections per host. That is why matbot has **one**
 **one** multiplexed global stream rather than a stream per panel: exceeding the cap does not fail loudly,
 it starves ordinary `fetch` calls, so the sidebar stops loading and `POST /prompt` hangs — which looks
 exactly like a server problem. If your UI holds several session streams open at once (see **Soft tabs**),
-count them, and either keep the total under about four or serve over HTTP/2, where they multiplex.
+count them (see **Holding vs. opening**), and either keep the total under about four or serve over
+HTTP/2, where they multiplex.
 
 ---
 
@@ -130,14 +137,17 @@ So both matbot SSE endpoints write `: hb` every ~20s (`WebServerDeps.heartbeatMs
    for more than ~3 beats, treat the stream as dead, cancel it and reconnect. The reference client uses
    65s. Do not raise `heartbeatMs` above ~21s without changing this to match; they are two halves of one
    number.
-2. **Recover on the way back, not on the way out.** Hidden tabs usually keep their connections, so a
-   deliberate disconnect-on-hide guarantees a gap that mostly would not have happened — and recovery
-   costs a re-read. Instead, on `visibilitychange → visible` **and** on `pageshow`, check the last-byte
-   stamp and only reconnect if the stream has gone quiet. Both events, because they answer different
-   questions: `visibilitychange` covers tab switching and app backgrounding, `pageshow` covers the
-   back/forward cache, where the page is restored with its scripts un-rerun and its streams gone. Safari
-   leans on bfcache heavily, and mobile Safari freezes JS while hidden — so a timer alone cannot be your
-   only mechanism there.
+2. **Recover on the way back, not on the way out.** A backgrounded view usually keeps its connections, so
+   deliberately disconnecting when one is hidden guarantees a gap that mostly would not have happened —
+   and recovery costs a re-read. Instead, whenever a conversation comes *back* to the foreground, check
+   the last-byte stamp and reconnect only if the stream has actually gone quiet. What counts as "comes
+   back to the foreground" is your UI's to define — see **Foreground is yours to define**.
+
+   The bundled client shows one conversation at a time, so its two sources are `visibilitychange` and
+   `pageshow`. Both, because they answer different questions: `visibilitychange` covers tab switching and
+   app backgrounding, `pageshow` covers the back/forward cache, where the page is restored with its
+   scripts un-rerun and its streams gone. Safari leans on bfcache heavily, and mobile Safari freezes JS
+   while hidden — so a timer alone cannot be your only mechanism there.
 
 ---
 
@@ -173,32 +183,95 @@ leave the DOM alone. It is not built; if you need it, say so rather than working
 
 ---
 
-## Soft tabs
+## Foreground is yours to define
 
-A shell that shows conversations with `display: none | block` keeps one page, always visible. Two
-consequences:
+Everything above says "when a conversation comes back to the foreground" rather than naming an event,
+because the event is yours. matbot shows one conversation at a time, so its only two sources are
+`visibilitychange` and `pageshow`. A shell with soft tabs — panels toggled `display: none | block`, a
+route change, a store mutation, a click handler — has a third that no browser API will tell it about:
+**switching soft tabs is not a page-visibility change**, so a hidden panel's stream gets no lifecycle
+event at all, ever.
 
-- **`visibilitychange` never fires.** Switching soft tabs is not a page-visibility change, so the
-  page-lifecycle hooks above do nothing for you. The heartbeat watchdog is your *only* liveness signal
-  for a stream belonging to a hidden panel. Implement it.
-- **A hidden panel's stream is as live as a visible one's** — the page is not throttled — so you have a
-  genuine choice, and it is a trade rather than a right answer:
+The fix is not to find a different event. It is to name the *transition* once and route every source into
+it:
 
-**Hold a stream per conversation, all open.** Nothing is ever missed, so recovery is rare. Costs a
-connection per open conversation — mind the ~6-socket cap, which you will hit at about four
-conversations plus the global stream, and which manifests as unrelated fetches hanging rather than as an
-error.
+```
+onConversationForeground(id)   ← a tab click, a route change, a panel un-hide,
+                                 visibilitychange → visible, pageshow
+onConversationBackground(id)   ← the same, in reverse
+```
 
-**Open on switch, close on leave.** One connection, no cap risk. But every switch back is now a
-reconnect, so the recovery path above stops being an edge case and becomes the main path: you *will*
-return to a conversation whose turn finished while you were away, and you *will* be handed a `prompt`
-frame as the first thing on a fresh stream. Both are handled correctly by the rules above and silently
-wrongly without them.
+Then the rules below attach to those two functions, and it stops mattering which source fired.
 
-**Either way, keep the session's *prompt* reachable.** A blocked turn is invisible from another panel, so
-consider surfacing "this conversation is waiting for you" at the tab level — the ingredients are the
-`prompt` frame plus `session-busy` from the global stream, which you already hold for every conversation
-regardless of which panel is showing.
+### What foreground must do
+
+1. **If you hold no stream for it:** render committed history, *then* subscribe, and expect a `prompt`
+   frame possibly before anything else (see **Prompts**).
+2. **If you hold one:** check its last-byte stamp. Fresher than a beat-and-a-bit ⇒ it demonstrably
+   survived, do nothing — no reconnect, no re-render. Quieter than that ⇒ tear it down and reconnect
+   rather than waiting out the full watchdog.
+3. **Either way**, for any turn you still show as running, reconcile against committed history — because
+   you cannot distinguish "still running" from "finished while I wasn't reading". A show-after-close is a
+   reconnect, not a first connect, so treat it as one.
+
+### What background must not do
+
+This is the shorter list and the more important one, because a cleanup hook is exactly where the wrong
+thing gets written — a React `useEffect` teardown, a panel's `onHide`:
+
+- **Do not answer a pending prompt.** Backgrounding is not a decision the user made. Not with the
+  default, not with `''`, not at all.
+- **Do not abort the turn.** It is doing work the user asked for; nobody is watching, which is not the
+  same as nobody wanting the result.
+- **Do not hold a stream you have stopped reading.** That is worse than closing it: an undrained
+  `ReadableStream` applies backpressure, so the server's writes buffer up on its side with no bound, and
+  you still miss `prompt-resolved`. Either keep consuming it or close it.
+
+Closing on background is fine — just record that you did, so the next foreground knows it owes a
+reconciliation.
+
+### Holding vs. opening
+
+A genuine trade with no right answer, and the soft-tab case is the one where it bites, since a hidden
+panel's page is not throttled and its stream is as live as a visible one's.
+
+**Hold a stream per conversation.** Nothing is ever missed, so reconciliation is rare. Costs a connection
+each: watch the ~6-socket cap, which you reach at about four conversations plus the global stream, and
+which shows up as unrelated `fetch` calls hanging rather than as an error.
+
+**Open on foreground, close on background.** One connection, no cap risk. But reconciliation stops being
+an edge case and becomes the main path — you *will* routinely return to a conversation whose turn finished
+while you were away, and you *will* routinely be handed a `prompt` as the first frame on a fresh stream.
+Both are handled by the rules above and silently wrongly without them.
+
+**Either way, keep a blocked turn visible from outside its panel.** A conversation waiting on a prompt
+looks idle from another tab. `session-busy` on the global stream is held for every conversation regardless
+of which panel is showing, so a badge is cheap; without one, a parked question is invisible until someone
+happens to look.
+
+---
+
+## If you own the server half too
+
+Then some of these rules are not yours to obey but yours to *provide*. A client cannot work around a
+server that does not, so if you are reimplementing the server side (against matbot's as a model), these
+five are the load-bearing ones:
+
+1. **Heartbeat every stream.** Without periodic traffic a client cannot distinguish quiet from dead, and
+   *you* cannot reap a socket nobody holds — you will go on reporting successful writes into it. This is
+   the one that makes the other four detectable.
+2. **Park the outstanding prompt and re-send it on every new subscription.** A prompt written once to
+   whoever happened to be connected is a prompt lost, and no amount of client cleverness recovers it. The
+   client's job is to render one that arrives unexpectedly; getting it there is yours.
+3. **Never settle a prompt because viewers went away.** Leave it pending. A default answer is worse than a
+   hung turn, because it is indistinguishable from a decision.
+4. **Replay the running turn on subscribe** — the in-flight delta, in order, after committed history ends.
+   Without it a client that reconnects mid-turn has a gap it cannot even see.
+5. **Expose committed history and an authoritative busy flag.** Reconciliation is a re-read; if there is
+   nothing to re-read, the client's only recovery is a full page reload.
+
+matbot's own answers are in `plugins/frontend/web/src/server.ts`, and the reasoning for each is in the
+comments beside them.
 
 ---
 
@@ -236,6 +309,8 @@ Two things do carry over, and one does not carry the way you would guess:
 - [ ] Never fabricate an answer — no defaults on close, unmount or switch.
 - [ ] Honour `prompt-resolved`, idempotently.
 - [ ] Track last-byte time; give up after ~3 missed heartbeats and reconnect.
-- [ ] Hook `visibilitychange` **and** `pageshow`; reconnect only if quiet.
+- [ ] Route every foreground/background source — clicks and route changes included, not just
+      `visibilitychange`/`pageshow` — into one transition, and reconnect only if the stream is quiet.
+- [ ] On background: answer nothing, abort nothing, and don't hold a stream you stopped reading.
 - [ ] On reconnect, re-read history for any turn still shown as running.
 - [ ] Count your open streams against the ~6-socket cap.

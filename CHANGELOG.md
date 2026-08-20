@@ -54,11 +54,14 @@ churn and less likely to affect a consumer who doesn't use them.
   simply stays pending, to be put to the next viewer; `POST /abort` and server shutdown cancel it
   (`PromptCancelledError`, which a tool already reports as an error) rather than inventing a choice.
 
-- **`docs/SSE-CLIENTS.md`** — how to write a UI of your own against this server, since Maxie and anything
-  like it has to reimplement all of the above. What the two streams guarantee and what they don't, the four
-  mistakes that are invisible in testing and permanent in production, the socket budget, and what changes
-  for a soft-tabbed UI (where `visibilitychange` never fires, so the heartbeat watchdog is the only
-  liveness signal) or the serverless in-process build (where turn durability is the opposite way round).
+- **`docs/SSE-CLIENTS.md`** — how to write a UI of your own against this server, since anything embedding
+  matbot has to reimplement all of the above. What the two streams guarantee and what they don't, the four
+  mistakes that are invisible in testing and permanent in production, and the socket budget. Written
+  against the *transition* rather than the browser event: a soft-tabbed shell gets no lifecycle event when
+  a panel is hidden, so the rules attach to whatever the UI's own foreground/background signal is (a click,
+  a route change, a store mutation) with `visibilitychange`/`pageshow` as two sources among several. Plus a
+  section for an embedder who owns the server half too — five guarantees a client cannot work around the
+  absence of — and one on the serverless in-process build, where turn durability is the opposite way round.
 
 ## 0.4.6
 
