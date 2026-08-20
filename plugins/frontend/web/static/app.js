@@ -2597,17 +2597,7 @@ async function connectSessionStream(sid) {
       // have finished, committed, and left our loading dots up forever (the symptom being a turn that
       // "never completes" until you refresh). Committed history is the only source for that, so re-read
       // it. Guarded on there being an open turn: an idle session's reconnect needs no work.
-      if (ev.type === 'stream-resumed') {
-        // Logged either way: "nothing in flight" is as much a proof the hook ran as a re-read is, and
-        // this path exists precisely for conditions that are hard to provoke on demand.
-        if (turnQueues.size > 0) {
-          console.info(`[matbot] re-reading history — ${turnQueues.size} turn(s) still shown as running`);
-          void resyncSession(sid);
-        } else {
-          console.info('[matbot] nothing in flight — no re-read needed');
-        }
-        continue;
-      }
+      if (ev.type === 'stream-resumed') { if (turnQueues.size > 0) void resyncSession(sid); continue; }
       pushTurnEvent(ev);
     }
   } catch {
@@ -3379,7 +3369,7 @@ async function init() {
         // writing anything — so no per-item ItemChange arrives to say so. Re-read everything rather than
         // waiting for an unrelated change to happen past and refresh a panel by luck.
         case '@matatbread/matbot-plugin-api#RegistryChange':
-          if (n.registry === 'tools')                                     refreshSkills();
+          if (n.registry === 'tools')                        { refreshSkills(); reprobeProfiles(); }
           else if (n.registry !== 'services')                             refreshPlugins();
           else if (n.name === 'StorageBackend') { refreshSessions(); refreshSkills(); refreshFiles(); }
           break;
@@ -3549,6 +3539,27 @@ function namespaceChecklist(available, selected) {
     box.appendChild(lab);
   }
   return { box, current: () => [...cbs].filter(([, cb]) => cb.checked).map(([ns]) => ns) };
+}
+
+// A tool appeared, so an optional capability we concluded was absent may have just arrived. `setup()` can
+// itself call `loadPlugin()` — google-drive and per-user bootstrap plugins both do — so a plugin's tools
+// can register long after the initial burst, and any deadline the server picks for "boot is over" is a
+// guess that a slow enough nested load will beat. So don't depend on one: the answer to "is this feature
+// installed" is not a fact settled at load, it is a fact that can change, and the bus already says when it
+// has. At most once successfully (the guard stops on activation) and debounced, since a boot registers
+// dozens of tools and each one announces itself.
+let reprobeTimer = null;
+function reprobeProfiles() {
+  if (profilesActive || reprobeTimer !== null) return;
+  reprobeTimer = setTimeout(() => {
+    reprobeTimer = null;
+    if (profilesActive) return;
+    void initProfiles().then(() => {
+      if (!profilesActive) return;
+      void refreshSessions();
+      loadFiles();
+    });
+  }, 400);
 }
 
 async function initProfiles() {

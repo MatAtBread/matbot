@@ -253,49 +253,58 @@ happens to look.
 
 ## Seeing it work
 
-The recovery paths fire in conditions that are hard to provoke and easy to mistake for working anyway —
-a client on a healthy socket behaves identically whether or not any of this exists. So the bundled client
-logs every branch to the console, and each recipe below is a way to force one from DevTools.
+These paths fire in conditions that are hard to provoke, and a client on a healthy socket behaves
+identically whether or not any of them exist — so "it still works" is not evidence in either direction.
+Each recipe below forces one.
 
-What you will see, all prefixed `[matbot]`:
+**Confirm the heartbeat.** Not from DevTools: Chrome's **EventStream** panel lists parsed `event:`/`data:`
+frames only, so SSE *comment* lines — which is what a heartbeat is — never appear there, and their absence
+means nothing. Read the raw stream instead:
 
-| | |
-|---|---|
-| `session stream silent past the deadline (65s, no heartbeat) — reconnecting in 1s` | the watchdog |
-| `session stream quiet on returning to the foreground (Ns, no heartbeat) — reconnecting in 1s` | the foreground revive |
-| `session stream failed (…) — reconnecting in 1s` | an ordinary error, the only case that worked before |
-| `stream is live (Ns since last frame) — nothing to do` | a foreground check that correctly did nothing |
-| `session stream reconnected — reconciling` | the resume signal reaching the consumer |
-| `re-reading history — N turn(s) still shown as running` | the recovery that clears a stuck turn |
-| `nothing in flight — no re-read needed` | resumed while idle; no re-render |
+```
+curl -sN http://localhost:<port>/events/sessions/<id> | grep --line-buffered '^: hb'
+```
 
-Server-side, `[frontend-web] re-sent the outstanding prompt for session … to a new stream` is the only
-place a rescued prompt is observable, since a client cannot tell a re-sent one from a first one.
+Do this first; if beats are absent, nothing below is meaningful.
 
-**Watch the wire.** DevTools → Network → the `events/sessions/<id>` request → **EventStream** (Chrome) or
-**Response** (Firefox). A `: hb` every 20s is the proof the heartbeat is live at all; do this first,
-because if it is absent nothing else below means anything.
-
-**Force a reconnect + reconcile.** Start a long turn (`sleep 90` through the `bash` tool is ideal — a
+**Force a reconnect and reconcile.** Start a long turn (`sleep 90` through the `bash` tool is ideal — a
 genuinely quiet stream), then Network → throttling → **Offline** for a few seconds, then back to Online.
-The fetch errors, so you get the `failed (…)` line, then `reconnected`, then either the re-read or the
-no-op depending on whether a turn was in flight. This proves the reconcile half but *not* the watchdog:
-an offline switch raises an error, which is the one case that always worked.
+Note what this does *not* prove: going offline raises an **error**, and the error path is the one case that
+always worked. It exercises the reconcile, not the detection.
 
-**Force the watchdog.** It needs silence without an error, which no network toggle produces — so remove
-the heartbeat instead: start the server with `heartbeatMs` set to something long (10 minutes), and run a
-turn that stays quiet for over 65s. At 65s you get `silent past the deadline`, a reconnect, and the turn
-completing correctly afterwards. Before this fix that same 65s produced nothing at all, forever.
+**Force the watchdog.** It needs silence *without* an error, which no network control produces — so remove
+the heartbeat instead: start the server with `heartbeatMs` set long (10 minutes) and run a turn that stays
+quiet for over 65s. Before this existed, that same 65s produced nothing at all, forever.
 
-**Force the foreground revive.** Same long `heartbeatMs`, start a quiet turn, switch to another
-application for ~30s, come back. You should see `quiet on returning to the foreground` immediately rather
-than waiting out the remaining watchdog. Switching back with the beat *on* gives you `stream is live`
-instead — which is the intended behaviour, not a failure: a stream that survived needs no recovery.
+**Force the foreground revive.** Same long `heartbeatMs`, quiet turn, switch to another application for
+~30s, come back: recovery should happen on your return rather than at the end of the watchdog's window.
+With the beat *on* it should do nothing instead — a stream that survived being hidden needs no recovery,
+and that no-op is the intended behaviour rather than a missed case.
 
-**Force the prompt rescue** — the one worth doing, because it needs no DevTools and it is the original
-bug. Run a turn that sleeps and then asks something (`sleep 60`, then any `ask_user`), and switch to a
-different conversation before the question fires. Come back after it. The question is waiting for you, and
-the server logs the re-send. Before the fix, switching away answered it for you with the field's default.
+**Force the prompt rescue** — worth doing first, since it needs no DevTools and is the original bug. Run a
+turn that sleeps and then asks something (`sleep 60`, then any `ask_user`), and switch to a different
+conversation before the question fires. Come back after it: the question is waiting. Before the fix,
+switching away answered it for you with the field's default.
+
+---
+
+## Optional capabilities
+
+A UI that shows features conditionally (a profiles panel, a sharing button) has to ask whether the tool
+behind one exists, and the natural way — call it and read the 404 — has two traps.
+
+**A 404 is not a verdict.** It means "not registered when you asked". The `/tools` endpoints hold an
+unknown name briefly during boot, because the server starts listening before the plugins configured after
+it, but that window is a courtesy and cannot be made authoritative: a plugin's `setup()` may itself call
+`loadPlugin()`, so tools can register long after the initial burst and no deadline the server picks can
+outlast a slow enough nested load. So treat "absent" as provisional and **re-read on
+`RegistryChange{registry:'tools'}`**, which is the same identity-never-value rule everything else on the
+bus follows. Debounce it — a boot announces dozens of tools — and stop once the answer is yes.
+
+**Don't serialise your bootstrap on it.** An optional capability should never gate the shell, however fast
+the answer is expected to be. Render without it and wire it in when it arrives. If some part of startup
+genuinely depends on the answer — the bundled client adopts a `#<profile>:…` deep-link before anything
+opens a session under the old identity — make *that* the only thing that waits, not the whole page.
 
 ---
 

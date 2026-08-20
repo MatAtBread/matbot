@@ -135,11 +135,7 @@
   const liveStreams = new Set();   // { lastByteAt, revive } per open session stream
   const reviveStale = () => {
     const now = Date.now();
-    for (const st of liveStreams) {
-      const quiet = now - st.lastByteAt;
-      if (quiet > STREAM_FRESH_MS) st.revive(quiet);
-      else console.info(`[matbot] stream is live (${Math.round(quiet / 1000)}s since last frame) — nothing to do`);
-    }
+    for (const st of liveStreams) if (now - st.lastByteAt > STREAM_FRESH_MS) st.revive();
   };
   if (typeof document !== 'undefined') {
     document.addEventListener('visibilitychange', () => {
@@ -159,49 +155,36 @@
   async function* sessionEvents(sid, signal) {
     let connected = false;
     while (!signal.aborted) {
-      // Why the stream ended, read by the catch and the log below — so it is scoped to the attempt, not
-      // to the try. This mechanism is otherwise entirely invisible, and its whole point is to fire in the
-      // cases that are hardest to reproduce on purpose.
-      let ended = 'closed';
       try {
         const res = await apiFetch('/events/sessions/' + sid, { signal });
         if (!res.ok || !res.body) break;
-        if (connected) {
-          console.info('[matbot] session stream reconnected — reconciling');
-          yield { type: 'stream-resumed' };
-        }
+        if (connected) yield { type: 'stream-resumed' };
         connected = true;
         const reader = res.body.getReader();
         const dec = new TextDecoder();
         let buf = '';
         // Registered for the page-lifecycle sweep: `revive` resolves the same race the watchdog does,
-        // so becoming visible on a quiet stream takes the identical reconnect path a timeout would — it
-        // passes the observed silence purely so the log can say which of the two fired.
+        // so becoming visible on a quiet stream takes the identical reconnect path a timeout would.
         let wake;
         // Declared out here so the `finally` can clear a race we never settled: a consumer that stops
         // iterating closes this generator mid-`await`, and a deadline left pending then outlives the
         // stream it was guarding.
         let timer;
-        const state = { lastByteAt: Date.now(), revive: quiet => wake?.(quiet) };
+        const state = { lastByteAt: Date.now(), revive: () => wake?.('idle') };
         liveStreams.add(state);
         try {
           while (true) {
             // A timeout wins the race only when nothing at all arrived, heartbeat included. Cancelling
             // the reader settles the read we walked away from.
             const idle = new Promise(r => {
-              wake = quiet => r({ gave_up: quiet ?? STREAM_IDLE_MS, foreground: quiet !== undefined });
-              timer = setTimeout(() => r({ gave_up: STREAM_IDLE_MS, foreground: false }), STREAM_IDLE_MS);
+              wake = r;
+              timer = setTimeout(() => r('idle'), STREAM_IDLE_MS);
             });
             const next = await Promise.race([reader.read(), idle]);
             clearTimeout(timer);
-            if (next.gave_up !== undefined) {
-              ended = `${next.foreground ? 'quiet on returning to the foreground' : 'silent past the deadline'} `
-                + `(${Math.round(next.gave_up / 1000)}s, no heartbeat)`;
-              await reader.cancel().catch(() => {});
-              break;
-            }
+            if (next === 'idle') { await reader.cancel().catch(() => {}); break; }
             const { done, value } = next;
-            if (done) { ended = 'closed by the server'; break; }
+            if (done) break;
             if (signal.aborted) { reader.cancel(); break; }
             state.lastByteAt = Date.now();
             buf += dec.decode(value, { stream: true });
@@ -213,12 +196,10 @@
           liveStreams.delete(state);
           clearTimeout(timer);
         }
-      } catch (e) {
+      } catch {
         if (signal.aborted) return;
-        ended = 'failed (' + (e && e.message ? e.message : e) + ')';
       }
       if (signal.aborted) return;
-      console.info(`[matbot] session stream ${ended} — reconnecting in 1s`);
       await new Promise(r => setTimeout(r, 1000));
     }
   }

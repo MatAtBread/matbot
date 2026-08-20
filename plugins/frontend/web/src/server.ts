@@ -181,6 +181,13 @@ export function createWebServer(deps: WebServerDeps) {
   // inventing a notification for it would put a boot-sequencing concern into core to save a frontend a
   // couple of seconds. Generous enough to sit well clear of a slow plugin import, and the 30s ceiling still
   // backstops the case where it guesses wrong.
+  //
+  // Nothing's CORRECTNESS rests on the guess, which is the part that matters — because a `setup()` may
+  // itself call `loadPlugin()` (google-drive, per-user bootstrap plugins), so tools can register long after
+  // the burst and no deadline chosen here can outlast a slow enough nested load. A 404 is therefore not a
+  // verdict: it means "not registered when you asked". A client that cares whether an optional capability
+  // exists re-reads on `RegistryChange`, which is the same "identity, never value — re-query" rule the
+  // whole bus works by. This window only exists to spare the common case a spurious 404 during the burst.
   const TOOL_REGISTRY_QUIET_MS = 2_500;
   let lastToolChangeAt = Date.now();
 
@@ -667,13 +674,7 @@ export function createWebServer(deps: WebServerDeps) {
       // connecting — so the wrap lands after that bubble whichever event arrives first. Order *within*
       // the wrap is cosmetic and only differs on a resumed stream.
       const parked = pendingPrompts.get(sId);
-      if (parked !== undefined) {
-        // Logged because this is the recovery nobody can see from the outside: the client cannot tell a
-        // re-sent prompt from a first one, which is the point, so the server is the only place the fact
-        // that a question was rescued is observable at all.
-        console.log(`[frontend-web] re-sent the outstanding prompt for session ${sId} to a new stream`);
-        res.write(parked.event);
-      }
+      if (parked !== undefined) res.write(parked.event);
 
       const ac = new AbortController();
       req.on('close', () => {

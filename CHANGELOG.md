@@ -47,14 +47,6 @@ churn and less likely to affect a consumer who doesn't use them.
   disconnect-on-hide policy: a hidden tab usually keeps its connections, so forcing the gap would make the
   recovery re-read certain rather than rare. Only a stream that has actually gone quiet is torn down.
 
-- **Every recovery branch says which one fired**, to the console, and `docs/SSE-CLIENTS.md` has a recipe
-  for forcing each from DevTools. These paths exist for conditions that are hard to provoke, and a client
-  on a healthy socket behaves identically whether or not any of them exist — so "it still works" was never
-  evidence either way. Notably the watchdog cannot be provoked by a network toggle at all (going offline
-  raises an *error*, which is the one case that always worked); it needs silence without an error, which
-  means removing the heartbeat via a long `heartbeatMs`. The server also logs a re-sent prompt, that being
-  the only place a rescued question is observable — a client cannot tell a re-sent prompt from a first one.
-
 - **A viewer going away is no longer treated as an answer.** The "no viewers left" release resolved the
   pending prompt with `''`, which the prompt implementation turns into the *field's default* — an answer
   nobody gave, to a question nobody saw. Harmless-looking on a confirm (it declines) and destructive on
@@ -75,6 +67,14 @@ churn and less likely to affect a consumer who doesn't use them.
   backstops a wrong guess. Deliberately a heuristic — "loading has finished" is not a fact a plugin can be
   told, and inventing a notification for it would put boot sequencing into core to save a frontend two
   seconds.
+
+  Nothing's *correctness* rests on that guess, which is the part that matters. A `setup()` may itself call
+  `loadPlugin()` — google-drive and per-user bootstrap plugins both do — so tools can register long after
+  the burst, and no deadline the server picks can outlast a slow enough nested load. A 404 therefore means
+  "not registered when you asked", never "absent": the UI re-probes on `RegistryChange{registry:'tools'}`
+  (debounced, and at most once successfully), so a late-loading profiles plugin lights up its panel whenever
+  it arrives. That is the same identity-never-value rule the rest of the bus works by, and it makes the
+  boot window a courtesy rather than a contract.
 
 - **The web UI no longer serialises its whole bootstrap behind that probe.** `initProfiles()` is now awaited
   only when there is a URL fragment to interpret, because its one ordering-critical job is adopting a
