@@ -221,13 +221,21 @@ const DESCRIPTION = `WHEN TO USE THIS — judge it by the SIZE and SHAPE of the 
   2. LOOPS AND CONDITIONALS. The same call over n items, read-each-and-decide, retry-until-it-works,
      branch on what came back. A round per iteration, and every intermediate result kept for the session.
 
-Authoring a lambda costs a call or two of its own (usually \`{ action: 'types' }\`, then the body), so it is
-NOT the cheaper route for a couple of direct calls whose results are small — leave those alone. It wins
-decisively the moment bulk would pass through the conversation to answer something small, or n grows.
+NOT FOR THIS — the pathological case, and the tempting one: wrapping a SINGLE tool call whose result you
+are not reducing. If the body is one \`await tool.x(params)\` and a \`return\` of what came back, the lambda is
+strictly WORSE than the call it wraps — the same result reaches you either way, and the wrapper cost you a
+types call and a round to write it. There is no reason to wrap a single call whose result you are not going
+to aggregate, filter, count, loop over, or feed into another call. Call the tool.
+
+Authoring a lambda costs a call or two of its own (usually \`{ action: 'types' }\`, then the body), so two
+direct calls with small results are also fine as they are. It wins decisively the moment bulk would pass
+through the conversation to answer something small, or n grows.
 
   Piping it yourself:  workspace_action(list) → 200 names in context → workspace_action(read) → contents
                        in context → workspace_action(read) → … (a round each, all of it kept)
   One lambda:          (args: { prefix: string }): number { … list, read each, count matches … } → the number
+  Pointless — do NOT: (args: { name: string }): string { return await tool.workspace_action({ action: 'read', name: args.name }); }
+                       ↑ reduces nothing, so it is the same result for more work: call workspace_action.
 
 Compose multiple tool calls — filter, count, reshape their results — without routing every intermediate result
 back through the model. Compositions are expressed as TypeScript functions that orchestrate other tools in a single pass.
@@ -273,7 +281,8 @@ ACTIONS
            visible on the *next turn*.
   lambda — Compile and run an ANONYMOUS one-argument function once, now, against \`params\`. Nothing is
            persisted or registered. This is the ordinary way to reduce a bulky or repetitive tool chain to
-           just its answer — if the same chain is worth repeating later, define it instead. Type-checked against the live tool types before running (like define),
+           just its answer — but NOT a wrapper for a single call (see NOT FOR THIS above). If the same
+           chain is worth repeating later, define it instead. Type-checked against the live tool types before running (like define),
            so a bad composition is caught before it runs; pass \`noTypeCheck: true\` to bypass.
   check  — Re-run define's type-check over a function you already defined, without running or re-registering
            it. Pass \`name\` for one, or omit it to check every defined function. Use this after anything that
@@ -330,15 +339,17 @@ const INPUT_SCHEMA: JSONSchema = {
  * CLAUDE.md) rather than something rebuilt per turn.
  */
 const MULTI_STAGE_ADVICE =
-  "Reach for `tool_function { action: 'lambda' }` for two kinds of work: (a) a tool whose result is " +
-  'VERBOSE where you need only a fraction of it — a count, a total, an aggregate, a summary, a couple of ' +
-  'fields; and (b) anything with a LOOP or a CONDITIONAL — the same call over n items, read-each-and-' +
-  'decide, retry-until, branch on what came back. A lambda does the whole thing in one call and returns ' +
-  'only what you asked for; the listings, rows and file bodies it reads on the way are never sent to you, ' +
-  "so they never occupy the rest of the session. Run `{ action: 'types' }` first and write " +
-  '`await tool.x(...)` against the real result types. It is not free — the types call plus authoring the ' +
-  'body is a call or two — so two direct calls with small results are fine as they are; a lambda pays ' +
-  'where bulk would otherwise pass through the conversation to answer something small, or where n grows.';
+  "The test for `tool_function { action: 'lambda' }` is whether you are REDUCING a result: (a) a tool " +
+  'whose result is VERBOSE and you need a fraction of it — a count, a total, an aggregate, a summary, a ' +
+  'couple of fields; or (b) a LOOP or a CONDITIONAL — the same call over n items, read-each-and-decide, ' +
+  'retry-until, branch on what came back. There a lambda does the whole thing in one call and returns only ' +
+  'the answer, and the listings, rows and file bodies it read on the way are never sent to you. Run ' +
+  "`{ action: 'types' }` first and write `await tool.x(...)` against the real result types. " +
+  'DO NOT wrap a single tool call whose result you are not reducing. A lambda whose body is one ' +
+  '`await tool.x(params)` and a `return` of what came back is strictly WORSE than calling that tool: the ' +
+  'same result reaches you either way, and the wrapper cost you a types call and a round to write it. If ' +
+  'the body would not filter, count, aggregate, loop, or feed the result into a second call, it has ' +
+  'nothing to do — call the tool directly.';
 
 const errorEvent = (message: string): ToolEvent => ({ type: 'error', message });
 

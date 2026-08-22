@@ -9,6 +9,20 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## Unreleased
+
+### Optional
+
+#### function-tools
+
+- **The lambda guidance names its own pathological case.** 0.4.8's nudge over-corrected: told when a lambda
+  pays, the model began wrapping almost every tool call in one — the same result reaching the conversation
+  either way, for a types call and an authoring round more. Both texts had stated the exclusion as a cost
+  rather than a rule, which is easy to rationalise past. The test is now one question — are you REDUCING a
+  result? — and the exclusion is a prohibition: a lambda whose body is one `await tool.x(params)` and a
+  `return` of what came back is strictly worse than the call it wraps. The tool description gains a
+  `NOT FOR THIS` block and a worked anti-example.
+
 ## 0.4.8
 
 ### Breaking changes
