@@ -1426,6 +1426,18 @@
     }
     .msg-divider:hover .msg-divider-line,
     .msg-divider.open .msg-divider-line { background: #d1d5db; }
+    /* An action that waits on an LLM (Summarise) closes the popup and then takes seconds. The line it
+       was opened from carries the wait, so the click has visible consequences before the result lands. */
+    .msg-divider-line.working {
+      background: linear-gradient(90deg, #e5e7eb 0%, #6366f1 50%, #e5e7eb 100%);
+      background-size: 200% 100%;
+      animation: divider-working 1.2s linear infinite;
+      height: 2px;
+    }
+    @keyframes divider-working {
+      from { background-position: 200% 0; }
+      to   { background-position: -200% 0; }
+    }
 
     .msg-divider-menu {
       position: absolute;

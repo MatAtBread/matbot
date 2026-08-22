@@ -552,7 +552,7 @@ export async function boot(env: BootEnv): Promise<void> {
 
   // about_matbot: the harness's own version + description. The harness isn't a plugin, so this singleton
   // fact gets a dedicated tool; the assembler bakes the web-bundle's own package version into the env.
-  toolReg.register(createAboutMatbotTool(env.harnessVersion ?? '?'));
+  toolReg.register(createAboutMatbotTool(env.harnessVersion ?? '?', services));
 
   // Let the frontend offer "add another provider" from the UI (runs the wizard form).
   (globalThis as unknown as Record<string, unknown>).__mbProviders = {

@@ -34,7 +34,7 @@ export function machine(): { services: MatbotMachine; tools: Map<string, Tool> }
     }),
     mounted:       { observe() {} },
     hooks:         { register() {}, removeByPlugin() {} },
-    systemContext: { register() {}, removeByPlugin() {}, build: async () => '' },
+    systemContext: { register() {}, removeByPlugin() {}, build: async () => '', parts: async () => [] },
     register:   async () => {},
     unregister: () => {},
     registerFrontend: () => {},

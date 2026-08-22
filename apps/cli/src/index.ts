@@ -1283,7 +1283,7 @@ async function main(): Promise<void> {
 
   // about_matbot: the harness's own version + description. The harness isn't a plugin (no `plugin list`
   // row), so this singleton fact gets a dedicated tool; the app passes its own package version.
-  toolReg.register(createAboutMatbotTool(selfVersion()));
+  toolReg.register(createAboutMatbotTool(selfVersion(), services));
 
   // ── Dump tools (one-shot) ───────────────────────────────────────────────────────
   // `--dump-tools [path]`: serialize the live registry and exit. Each tool's `description` is the WIRE

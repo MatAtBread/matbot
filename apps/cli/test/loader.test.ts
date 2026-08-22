@@ -52,7 +52,7 @@ const noopServices = {
   createStore: () => ({ get: async () => null, set: async () => {}, cas: async () => ({ ok: true }), delete: async () => {} }),
   mounted:    { consume() {} },
   hooks:      { register() {}, removeByPlugin() {} },
-  systemContext: { register() {}, removeByPlugin() {}, build: async () => '' },
+  systemContext: { register() {}, removeByPlugin() {}, build: async () => '', parts: async () => [] },
   register:   async () => {},
   unregister: () => {},
   registerFrontend: () => {},

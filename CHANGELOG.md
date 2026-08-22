@@ -9,6 +9,91 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## Unreleased
+
+### Breaking changes
+
+- **`createAboutMatbotTool(version)` is now `createAboutMatbotTool(version, services)`.** The tool reports
+  the system prompt in force, so it needs the live machine to rebuild it — the same second argument
+  `createSingleTurnTool` already takes. `SystemContextRegistry` gains a required `parts(ctx)` with it,
+  which breaks a host that hand-rolls that registry instead of constructing core's
+  `SystemContextRegistryImpl` (nothing in this repo does).
+
+### API gaps filled
+
+- **`SystemContextRegistry.parts(ctx)` — the system prompt, attributed.** The prompt is assembled once per
+  submit and never persisted, so there was no route to it from a tool and no way to say WHICH plugin put a
+  line in it. `parts()` returns each contribution with the name of the plugin that registered it, and
+  `build()` now derives from it — one traversal, so the text sent and the breakdown reported cannot drift.
+  `about_matbot` carries both: `systemPrompt` (exactly what the turn received) and `systemContext` (the
+  same content, per contributor), which is how "what are your instructions?" and "why do you keep doing
+  that?" get an answer that names the thing to change.
+
+### Optional
+
+#### background
+
+- **`at` — run a prompt once, at a stated time.** Previously a job ran now or repeated forever, so an
+  appointment could only be faked as a recurring schedule suspended after its first fire. `at` takes an
+  ISO-8601 date-time or a duration from now, returns the instant it resolved to, and is persisted, listed
+  and cancellable through `every_action` (`interval: "once"`, fire time in `nextRun`) until it runs, at
+  which point it deletes itself. The absence of an interval is what marks it a one-shot — no second flag
+  to contradict it. A time already past at creation is refused, naming what it resolved to; a time that
+  goes by while matbot is down is honoured late on the next start.
+
+- **Bug fix: a wait beyond ~24.8 days spun instead of sleeping.** `setTimeout` clamps a delay larger than
+  a 32-bit signed integer to 1ms, so a distant schedule woke immediately and went straight back round.
+  Long waits are slept in chunks against a deadline, which also covers a long recurring interval.
+
+#### edit-session
+
+- **`session_edit` `summarise` — compact by meaning rather than by shape.** `compact` keeps every word
+  either party said and strips the machinery, which preserves the discussion, the dead ends and the stale
+  intermediate data while scattering what a successor needs. `summarise` rewrites `messages[0..msgIndex)`
+  as a two-part hand-off document — a `user` message carrying what was wanted, an `assistant` message
+  carrying what is known now — via one `singleTurn` on `provider` (default: the turn's own), both halves
+  `origin: 'robo'`. Two things in that prompt are load-bearing: it keeps ANSWERS (dropping "intermediate
+  data a successor can obtain again" describes every answer in a Q&A session, since each came from a tool
+  result — so the rule drops the bulk that produced an answer, never the answer), and it does not presume
+  the session had an objective (a conversation that ranged over topics is not a failure case — the list of
+  topics is the goal). It also says to ignore any request in the transcript to summarise or tidy the
+  conversation: that is the operation, not the work.
+
+  **`msgIndex` is optional here alone: omit it and the range is the whole session** — ending, in the
+  session the calling turn is running in, where that turn began. A turn's user message and tool rounds are
+  on `ctx.session` before any tool runs, so an unclamped "everything" includes the request to summarise and
+  the assistant's attempts at it, which are the freshest thing a hand-off prompt looks at; the first real
+  summarise duly reported the compaction as the goal. `[0, messages.length)` is a legal range, an explicit
+  index is honoured as given, and cut/fork/split/compact still require one.
+
+  The replaced messages move into a `summarised` marker rather than being destroyed: elided from every
+  submission, so they leave the context without leaving the record, and expanded again by a LATER
+  summarise so history is never summarised twice. That expansion means the summariser's prompt grows while
+  the live conversation does not, so a repeat summarise can exceed a window the session itself fits in —
+  left to fail (nothing is mutated, and naming a bigger `provider` is the remedy) rather than budgeted
+  against a character count that only approximates a token window. The LLM call runs before any mutation, so a failed or
+  malformed summary leaves the session untouched and says why; a write to another session CASes against
+  the version the summary was read from, and the calling turn's own session defers to the quiescent edge
+  like `cut`/`split`/`compact`. `summarize` is the same action.
+
+#### frontend-web
+
+- **Summarise is on the message-divider popup**, beside Compact. It passes the provider selected above the
+  composer — required rather than optional there, since the direct tool endpoint builds a session-less
+  context with no provider to fall back on — and pulses the divider line while the call is in flight,
+  because the popup closes and this is the only action on that toolbar that takes seconds.
+
+#### function-tools
+
+- **`tool_function` now recommends itself in the system prompt.** A model that never considers the tool
+  never reads its description, and left alone it pulls a verbose result into the conversation to extract a
+  line of it, or drives a loop a round at a time — keeping every intermediate result for the rest of the
+  session. The plugin registers a `SystemContextContributor` (constant text, so a stable cache prefix),
+  and the tool's description now opens with when to use it. Both are framed on the size and shape of the
+  work rather than the number of calls — a verbose result you need a fraction of, or a loop or conditional
+  — and both say what a lambda costs, since fetching the types and authoring the body is itself a call or
+  two. It appears only when the plugin is loaded, which is why it cannot live anywhere else.
+
 ## 0.4.7
 
 ### Optional

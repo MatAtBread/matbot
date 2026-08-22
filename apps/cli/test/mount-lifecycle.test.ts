@@ -27,7 +27,7 @@ function machineWithMountTable(): {
     Notifier:     { notify(n: Notification) { published.push(n); }, subscribe: () => (async function* () {})(), consume() {} },
     createStore:  () => ({ get: async () => null, set: async () => {}, cas: async () => ({ ok: true }), delete: async () => {} }),
     hooks:        { register() {}, removeByPlugin() {} },
-    systemContext:{ register() {}, removeByPlugin() {}, build: async () => '' },
+    systemContext:{ register() {}, removeByPlugin() {}, build: async () => '', parts: async () => [] },
     register:     async () => {},
     unregister:   () => {},
     registerFrontend: () => {},

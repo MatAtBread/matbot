@@ -1999,6 +1999,7 @@ function createMsgDivider(msgIdx) {
     ['✂',  'Cut',             'cut',       true],
     ['⎇',  'Fork',            'fork',      false],
     ['🗜', 'Compact',   'compact',   true],
+    ['📝', 'Summarise', 'summarise', true],
     ['⇉',  'Split',          'split',      false],
   ])) {
     const btn = document.createElement('button');
@@ -2088,6 +2089,28 @@ async function handleDividerAction(divider, action) {
       await callTool('session_edit', { action: 'compact', sessionId: currentSessionId, msgIndex: msgIdx });
       const session = await apiGetSession(currentSessionId);
       if (session) renderSession(session);
+    } else if (action === 'summarise') {
+      // The provider is the one selected above the composer: summarising with the model you are talking
+      // to is the sane default, and it is REQUIRED here — this endpoint builds a session-less tool context
+      // with no provider on it, so the tool has nothing to fall back to (unlike a call made inside a turn).
+      const provider = providerSel.value;
+      if (!provider) { alert('Choose a provider above the message box first — summarising needs a model to write the summary.'); return; }
+      if (!confirm(
+        'Summarise every message before this point?\n\n'
+        + provider + ' rewrites them as a two-part hand-off: what you wanted, and what is known now. '
+        + 'The originals are not deleted — they are kept in a collapsed marker the model never sees, so a '
+        + 'later summarise still reads the real history.\n\nThis takes a few seconds.')) return;
+      const line = divider.querySelector('.msg-divider-line');
+      line?.classList.add('working');
+      try {
+        await callTool('session_edit', { action: 'summarise', sessionId: currentSessionId, msgIndex: msgIdx, provider });
+        const session = await apiGetSession(currentSessionId);
+        if (session) renderSession(session);
+      } finally {
+        // renderSession replaces the dividers, so this only matters on the failure path — where the line
+        // must stop pulsing, or it advertises work that is no longer happening.
+        line?.classList.remove('working');
+      }
     }
   } catch (e) {
     if (String(e).includes('404')) {
@@ -2105,7 +2128,7 @@ function showEditSessionBanner() {
   banner.className = 'plugin-prompt-banner';
   banner.style.display = 'flex';
   const span = document.createElement('span');
-  span.textContent = 'edit-session plugin not loaded — Cut, Fork, Split, and Compact are unavailable.';
+  span.textContent = 'edit-session plugin not loaded — Cut, Fork, Split, Compact and Summarise are unavailable.';
   banner.appendChild(span);
   const btn = document.createElement('button');
   btn.textContent = 'Install edit-session';

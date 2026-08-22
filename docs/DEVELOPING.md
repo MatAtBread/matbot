@@ -1087,11 +1087,11 @@ Store-backed index with optional Cloudflare BGE reranker.
 | `@matatbread/matbot-tool-http` | `http` | Make HTTP requests |
 | `@matatbread/matbot-tool-workspace` | `workspace_action` | Read/write/list/delete workspace files |
 | `@matatbread/matbot-tool-ask-user` | `ask_user` | Ask the user a question mid-turn (one-shot prompt) |
-| `@matatbread/matbot-tool-background` | `background`, `every_action` | Detached background jobs and recurring schedules |
+| `@matatbread/matbot-tool-background` | `background`, `every_action` | Detached background jobs — now, at a stated time, or on a recurring schedule |
 | `@matatbread/matbot-tool-mcp` | `mcp_action` | Connect to MCP servers — stdio (local) and remote (delegates to mcp-http); Node only |
 | `@matatbread/matbot-mcp-http` | `mcp_action` | Connect to HTTP/SSE MCP servers (Node + browser) |
 | `@matatbread/matbot-sessions` | `session_action` | Session lifecycle: list, get, rename, hide |
-| `@matatbread/matbot-edit-session` | `session_edit`, `compact_sessions` | Trim, branch, split, and compact sessions |
+| `@matatbread/matbot-edit-session` | `session_edit`, `compact_sessions` | Trim, branch, split, compact and LLM-summarise sessions |
 | `@matatbread/matbot-triggers` | `trigger_action`, `triggers_config` (`screen`/`followup` hooks) | Data-driven hooks: stored conditions that invoke a tool when an LLM classifier judges them matched |
 | `@matatbread/matbot-tool-json-validation` | `toolcall` hook | Validate tool inputs against their schema; the model self-corrects on mismatch |
 | `@matatbread/matbot-skills` | `skill_action`, `skills_config` | Cross-runtime skill CRUD (named markdown playbooks) |

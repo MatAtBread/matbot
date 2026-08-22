@@ -213,8 +213,24 @@ class FunctionStore {
   }
 }
 
-const DESCRIPTION = `Compose multiple tool calls — filter, count, reshape their results — without routing every intermediate result
-back through the model. Compositions is expressed as TypeScript functions that orchestrate other tools in a single pass.
+const DESCRIPTION = `WHEN TO USE THIS — judge it by the SIZE and SHAPE of the work, not by the number of calls:
+
+  1. A VERBOSE result you need a fraction of. A listing, a table, a file body, a search dump — where what
+     you actually want is a count, a total, an aggregate, a summary, or two fields. Reading it through the
+     conversation puts the whole thing in your context permanently in order to extract a line of it.
+  2. LOOPS AND CONDITIONALS. The same call over n items, read-each-and-decide, retry-until-it-works,
+     branch on what came back. A round per iteration, and every intermediate result kept for the session.
+
+Authoring a lambda costs a call or two of its own (usually \`{ action: 'types' }\`, then the body), so it is
+NOT the cheaper route for a couple of direct calls whose results are small — leave those alone. It wins
+decisively the moment bulk would pass through the conversation to answer something small, or n grows.
+
+  Piping it yourself:  workspace_action(list) → 200 names in context → workspace_action(read) → contents
+                       in context → workspace_action(read) → … (a round each, all of it kept)
+  One lambda:          (args: { prefix: string }): number { … list, read each, count matches … } → the number
+
+Compose multiple tool calls — filter, count, reshape their results — without routing every intermediate result
+back through the model. Compositions are expressed as TypeScript functions that orchestrate other tools in a single pass.
 
 Inside a function, call any registered tool through the injected \`tool\` proxy:
 \`const r = await tool.<tool_name>(params)\` runs that tool and resolves to its structured result (the same
@@ -256,7 +272,8 @@ ACTIONS
            recompiles it. Never shadows a tool you didn't define here. Note: tools defined this way become
            visible on the *next turn*.
   lambda — Compile and run an ANONYMOUS one-argument function once, now, against \`params\`. Nothing is
-           persisted or registered. Type-checked against the live tool types before running (like define),
+           persisted or registered. This is the ordinary way to reduce a bulky or repetitive tool chain to
+           just its answer — if the same chain is worth repeating later, define it instead. Type-checked against the live tool types before running (like define),
            so a bad composition is caught before it runs; pass \`noTypeCheck: true\` to bypass.
   check  — Re-run define's type-check over a function you already defined, without running or re-registering
            it. Pass \`name\` for one, or omit it to check every defined function. Use this after anything that
@@ -303,6 +320,25 @@ const INPUT_SCHEMA: JSONSchema = {
     name:       { type: 'string', description: 'remove: the defined function/tool name to delete. check (optional): the one function to check — omit it to check every defined function.' },
   },
 };
+
+/**
+ * Always-injected system-prompt guidance: prefer ONE lambda over a round-per-call chain when a turn's
+ * work is multi-stage. It belongs in the system prompt rather than in this tool's own description
+ * because it is advice about *when to reach for the tool at all* — a model that never considers
+ * `tool_function` never reads its description, and by the time it does the round-per-call turn is
+ * already under way. Constant text, so it is a stable cache prefix (see the `contribute` hook note in
+ * CLAUDE.md) rather than something rebuilt per turn.
+ */
+const MULTI_STAGE_ADVICE =
+  "Reach for `tool_function { action: 'lambda' }` for two kinds of work: (a) a tool whose result is " +
+  'VERBOSE where you need only a fraction of it — a count, a total, an aggregate, a summary, a couple of ' +
+  'fields; and (b) anything with a LOOP or a CONDITIONAL — the same call over n items, read-each-and-' +
+  'decide, retry-until, branch on what came back. A lambda does the whole thing in one call and returns ' +
+  'only what you asked for; the listings, rows and file bodies it reads on the way are never sent to you, ' +
+  "so they never occupy the rest of the session. Run `{ action: 'types' }` first and write " +
+  '`await tool.x(...)` against the real result types. It is not free — the types call plus authoring the ' +
+  'body is a call or two — so two direct calls with small results are fine as they are; a lambda pays ' +
+  'where bulk would otherwise pass through the conversation to answer something small, or where n grows.';
 
 const errorEvent = (message: string): ToolEvent => ({ type: 'error', message });
 
@@ -410,6 +446,7 @@ export function createFunctionToolsPlugin(): MatbotPluginSpec {
       // boot load is above; this reacts only to future swaps.
       services.mounted.observe({ key: 'StorageBackend', signal: lifecycle.signal }, () => void fns.reload());
       services.tools.register(functionTool(services, fns));
+      services.systemContext.register(() => MULTI_STAGE_ADVICE);
     },
 
     async teardown() { lifecycle?.abort(); store?.removeAll(); },
