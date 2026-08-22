@@ -80,7 +80,11 @@
       body: JSON.stringify(input),
     });
     const data = await res.json();
-    if (!res.ok) throw new Error('HTTP ' + res.status + (data.error ?? ''));
+    // Two newlines between the status and the body's message: they are two facts, and concatenated they
+    // read as one mangled sentence ("HTTP 500Concurrent modification — please retry."). A tool's error is
+    // written for a person and surfaced in an alert(), so the break is the difference between legible and
+    // not. Status alone when the body carried nothing to say.
+    if (!res.ok) throw new Error('HTTP ' + res.status + (data.error ? '\n\n' + data.error : ''));
     return data;
   }
 
