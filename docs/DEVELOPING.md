@@ -1209,8 +1209,16 @@ pnpm publish-check      # dry audit: what would publish, and what would stop it
 pnpm publish-all        # preflight → publish → reconcile → verify
 ```
 
-Every `@matatbread/*` package is in one `fixed` group, so they all move together — a release is
-one version number across the workspace.
+Every `@matatbread/*` package is in one **`linked`** group: a release versions only the packages that
+actually changed, and those that do move together to one number. Everything else keeps the version it
+last shipped at, so a release is no longer 45 identical bumps to say four things.
+
+It was a `fixed` group, which released every package whether or not it had changed. Two measurements
+retired it: a patch drags in no dependents at all (peer ranges are `workspace:^`, rewritten at pack time
+from the dependency's own version, so there is nothing to update), and a *minor* on `plugin-api` escalates
+every peer-dependent to `1.0.0` **whether the group is fixed or not** — at `0.x`, `^0.4.7` does not admit
+`0.5.0`, so changesets treats each peer range as broken. `fixed` was only unifying the numbers; it never
+prevented that, and the escalation stops for good at `>=1.0.0`.
 
 `pnpm publish-all` (`scripts/publish.mjs`) treats **the registry, not a command's exit code, as the
 source of truth**: preflight → canary → settle → reconcile → verify. It reads what npm actually
@@ -1234,8 +1242,10 @@ registry state rather than replaying a transcript, so re-running skips what land
 what didn't. There is no manual clean-up path and no need to work out which of ~45 packages made it.
 
 Preflight blocks on the things that kill a whole run — an expired npm token (checked against the
-registry, because an expired token looks identical to a good one on disk), a dirty tree, a split
-version group, an entry point missing from disk or excluded by `files`. Anything that merely *ships
+registry, because an expired token looks identical to a good one on disk), a dirty tree, an entry point
+missing from disk or excluded by `files`, a `workspace:` range naming something unpublishable. A spread of
+versions is no longer among them: under `linked` it is the expected state, so it is reported and got out
+of the way. Anything that merely *ships
 imperfectly* — a missing `files` field, changesets accumulated since this version was cut — warns
 and gets out of the way.
 
