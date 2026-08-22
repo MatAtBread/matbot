@@ -3,6 +3,7 @@
 '@matatbread/matbot-core': patch
 '@matatbread/matbot-cli': patch
 '@matatbread/matbot-web-bundle': patch
+'@matatbread/matbot-frontend-web': patch
 ---
 
 `about_matbot` reports the system prompt in force, broken down by the plugin that contributed each part.
@@ -27,3 +28,12 @@ live machine to rebuild the prompt, the same second argument `createSingleTurnTo
 Rebuilt rather than recorded: against the turn's own session it is the same text, and where a
 contributor's source moved mid-turn (a skill added, a plugin loaded) it correctly reports what the next
 call will carry rather than what the last one did.
+
+**The web UI puts it behind the version in the header.** Clicking `matbot vX.Y.Z` runs `about_matbot`
+over HTTP and shows the harness line, the provider, and the system prompt broken down per contributing
+plugin with a character count each — the one thing the UI had no window onto at all. Re-run on each open
+rather than reusing the copy taken at boot, because the interesting half changes while the page is up (a
+plugin loads, a skill is flagged for the catalogue) and a stale answer to "what are you being told?" is
+worse than none. It names the provider selected in the tab rather than the tool's `currentProvider`, which
+is absent here by construction: the direct tool endpoint builds a session-less context, so there is no
+turn to report — and the overlay says which it is showing rather than implying the tool answered.

@@ -1394,6 +1394,115 @@ if (skillEditorOverlay) {
 // Material "flash on" bolt — inherits currentColor so the .empty class can grey it out.
 const BOLT_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M11 21h-1l1-7H7.5c-.58 0-.57-.32-.38-.66.19-.34.05-.08.07-.12C8.48 10.94 10.42 7.54 13 3h1l-1 7h3.5c.49 0 .56.33.47.51l-.07.15C12.96 17.55 11 21 11 21z"/></svg>';
 
+// ── About overlay ────────────────────────────────────────────────────────────
+// Clicking the version runs about_matbot over HTTP. Re-run on each open rather than reusing the copy
+// taken at boot: the interesting half is the system prompt, which changes while the page is up — a
+// plugin loads, a skill is flagged for the catalogue — and a stale answer to "what are you being told?"
+// is worse than none.
+const aboutOverlay = document.getElementById('about-overlay');
+
+function aboutRow(key, value, dim) {
+  const row = document.createElement('div');
+  row.className = 'about-row';
+  const k = document.createElement('span');
+  k.className = 'about-key';
+  k.textContent = key;
+  const v = document.createElement('span');
+  v.className = 'about-val';
+  v.textContent = value;
+  if (dim) {
+    const note = document.createElement('span');
+    note.className = 'about-dim';
+    note.textContent = ' ' + dim;
+    v.appendChild(note);
+  }
+  row.appendChild(k);
+  row.appendChild(v);
+  return row;
+}
+
+async function openAbout() {
+  if (!aboutOverlay) return;
+  const title = document.getElementById('about-title');
+  const body  = document.getElementById('about-body');
+  aboutOverlay.classList.add('open');
+  title.textContent = 'About matbot';
+  body.textContent  = 'Loading…';
+
+  let about;
+  try { about = await callTool('about_matbot'); }
+  catch (e) {
+    body.textContent = 'about_matbot failed: ' + (e instanceof Error ? e.message : String(e));
+    return;
+  }
+
+  title.textContent = 'matbot v' + about.version;
+  body.replaceChildren();
+  body.appendChild(aboutRow('Harness', about.about));
+  // The tool reports the provider of the TURN it runs in, and this call has no turn — the direct tool
+  // endpoint builds a session-less context. So name the tab's selection instead, and say which it is.
+  body.appendChild(about.currentProvider
+    ? aboutRow('Provider', about.currentProvider)
+    : aboutRow('Provider', providerSel.value || '(none selected)', '— selected in this tab; this call runs outside a turn'));
+
+  const parts = Array.isArray(about.systemContext) ? about.systemContext : [];
+  const chars = (about.systemPrompt || '').length;
+  const section = document.createElement('div');
+  section.className = 'about-section';
+  const h = document.createElement('h3');
+  h.textContent = 'System prompt';
+  const count = document.createElement('span');
+  count.className = 'about-count';
+  count.textContent = parts.length
+    ? parts.length + (parts.length === 1 ? ' contribution, ' : ' contributions, ') + chars.toLocaleString() + ' chars'
+    : '';
+  section.appendChild(h);
+  section.appendChild(count);
+  body.appendChild(section);
+
+  if (!parts.length) {
+    const empty = document.createElement('div');
+    empty.className = 'about-empty';
+    empty.textContent = 'Nothing — no plugin contributed to the system prompt, so turns carry no system message at all.';
+    body.appendChild(empty);
+    return;
+  }
+
+  for (const part of parts) {
+    const wrap = document.createElement('div');
+    wrap.className = 'about-part';
+    const head = document.createElement('div');
+    head.className = 'about-part-plugin';
+    const name = document.createElement('span');
+    // A contributor registered outside the plugin facade has no name to report — the host's own.
+    name.textContent = part.plugin || '(host)';
+    const size = document.createElement('span');
+    size.className = 'about-chars';
+    size.textContent = (part.text || '').length.toLocaleString() + ' chars';
+    head.appendChild(name);
+    head.appendChild(size);
+    const pre = document.createElement('pre');
+    pre.textContent = part.text || '';
+    wrap.appendChild(head);
+    wrap.appendChild(pre);
+    body.appendChild(wrap);
+  }
+
+  const note = document.createElement('div');
+  note.className = 'about-note';
+  note.textContent = 'Built now, for a session-less call: a contributor that varies with the conversation '
+    + 'would read differently inside a turn. Every contributor loaded here is session-independent.';
+  body.appendChild(note);
+}
+
+if (aboutOverlay) {
+  aboutOverlay.addEventListener('click', (e) => { if (e.target === aboutOverlay) aboutOverlay.classList.remove('open'); });
+  document.getElementById('about-close').onclick = () => aboutOverlay.classList.remove('open');
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && aboutOverlay.classList.contains('open')) aboutOverlay.classList.remove('open');
+  });
+}
+
 const toolTriggerOverlay = document.getElementById('tool-trigger-overlay');
 const toolTriggerTitle   = document.getElementById('tool-trigger-title');
 const toolTriggerCards   = document.getElementById('tool-trigger-cards');
@@ -3301,7 +3410,8 @@ async function init() {
     const versionElt = document.getElementById('matbot-version');
     if (versionElt) {
       versionElt.textContent = 'v'+aboutMatbot.version;
-      versionElt.title = aboutMatbot.about;
+      versionElt.title = aboutMatbot.about + ' — click for the system prompt in force';
+      versionElt.onclick = openAbout;
     }
   }
 

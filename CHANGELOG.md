@@ -78,6 +78,12 @@ churn and less likely to affect a consumer who doesn't use them.
 
 #### frontend-web
 
+- **The system prompt is visible from the header.** Clicking `matbot vX.Y.Z` runs `about_matbot` over HTTP
+  and shows an overlay with the harness line, the provider, and the prompt broken down per contributing
+  plugin — re-run on each open, since a plugin loading or a skill being catalogued changes it while the page
+  is up. It reports the provider selected in the tab, saying so, because the direct tool endpoint has no
+  turn for the tool to report one from.
+
 - **Summarise is on the message-divider popup**, beside Compact. It passes the provider selected above the
   composer — required rather than optional there, since the direct tool endpoint builds a session-less
   context with no provider to fall back on — and pulses the divider line while the call is in flight,
