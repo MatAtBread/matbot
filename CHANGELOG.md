@@ -47,6 +47,24 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Bug fixes
 
+- **Prior reasoning is replayed on a field, not as prose — it was leaking into visible answers.** Both
+  converters degraded a stored `reasoning` block into a literal `[Prior reasoning: …]` **text** part on
+  any turn that also carried tool calls. That was wrong twice over. It did not give the endpoint what it
+  asks for (a reasoning field, not prose). And it was *imitable*: a model that sees the pattern in its own
+  prior turns starts emitting `[Prior reasoning: …` as ordinary output — observed on DeepSeek via
+  openai-compat as a 4600-character answer that opened mid-reasoning and never closed its bracket.
+
+  `openai-compat` now sends it back on `reasoning_content`, the same field `adapter.ts` reads it from;
+  nothing goes into the visible `content` channel. Still only on tool-call turns — a plain-chat replay is
+  tokens for nothing. Verified against live endpoints: DeepSeek accepts the field, and a strict
+  OpenAI-family backend (gpt-5.x) accepts and ignores it, so this is safe for everything openai-compat
+  fronts.
+
+  `anthropic` now elides it. Only the openai-compat adapter ever produces a `reasoning` block, so one
+  reaching that converter came from a different provider earlier in a mixed-provider session — foreign
+  round-trip state, which the Messages API has no slot for and which must never be posted into a slot it
+  does not belong in. Voicing another model's private reasoning as this one's prose was exactly that.
+
 - **A robo resubmission's non-text blocks now carry `origin: 'robo'`.** The stamp was applied to text
   blocks only, so machine-authored media was silently presented as the user's own. `origin` is authorship,
   orthogonal to what a block carries.

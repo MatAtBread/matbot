@@ -1,4 +1,4 @@
-import type { Message, Tool, JSONSchema } from '@matatbread/matbot-plugin-api';
+import type { Message, MessageContent, Tool, JSONSchema } from '@matatbread/matbot-plugin-api';
 
 // Gemini 3 thought signatures ride on a tool-call's `ProviderMeta`, namespaced under `google`. Homed in
 // THIS package (not the native @matatbread/matbot-provider-google adapter) because both surfaces round-
@@ -15,6 +15,9 @@ type OAIRole    = 'system' | 'user' | 'assistant' | 'tool';
 export interface OAIMessage {
   role:         OAIRole;
   content?:     string | OAIContentPart[] | null;
+  /** Prior reasoning replayed on the SAME field the adapter read it from (`delta.reasoning_content`).
+   *  Set only on an assistant turn that also carries tool calls — see the `reasoning` case below. */
+  reasoning_content?: string;
   tool_calls?:  OAIToolCall[];
   tool_call_id?: string;
   name?:        string;
@@ -158,15 +161,9 @@ export function toOAIMessages(messages: Message[], cache = false, geminiMode = f
         case 'marker':         // opaque UI annotation; transparent to the model
         case 'unknown-content':
           return [];
-        case 'reasoning': {
-          // OpenAI/DeepSeek reasoning — strip for plain-chat turns (DeepSeek ignores prior reasoning
-          // when there are no tool calls). On tool-call turns DeepSeek requires it to be passed back
-          // or the request 400s, so degrade to a text marker.
-          const hasToolCalls = msg.content.some(mc => mc.type === 'tool-call');
-          return hasToolCalls
-            ? [{ type: 'text', text: `[Prior reasoning: ${c.reasoning}]` }]
-            : [];
-        }
+        case 'reasoning':
+          // Never as text — replayed on `reasoning_content` below, the field it was READ from. See there.
+          return [];
       }
     });
 
@@ -184,6 +181,24 @@ export function toOAIMessages(messages: Message[], cache = false, geminiMode = f
     // text is sent as `{ role, tool_calls }`, content omitted.
     const oaiMsg: OAIMessage = { role: msg.role };
     if (content !== undefined) oaiMsg.content = content;
+
+    // Prior reasoning goes back on `reasoning_content` — the same field `adapter.ts` READ it from.
+    // It used to be degraded into a `[Prior reasoning: …]` TEXT part instead, which was wrong twice
+    // over: it did not satisfy what the endpoint asks for (a reasoning field, not prose), and the
+    // model could not tell matbot's framing from its own words, so it learned the pattern and began
+    // emitting `[Prior reasoning: …` as ordinary output — reasoning leaking into the visible answer,
+    // in a text block that never closed its bracket. A field cannot be imitated; a sentence can.
+    //
+    // Still only on tool-call turns: a plain-chat replay is tokens for nothing (the endpoint ignores
+    // prior reasoning there), and that condition is the one part of the original behaviour that was
+    // load-bearing. Unknown message fields are ignored by strict OpenAI-family backends — verified
+    // accepted by both DeepSeek and gpt-5.x — so this is safe for everything openai-compat fronts.
+    if (toolCalls.length > 0) {
+      const reasoning = msg.content
+        .filter((c): c is Extract<MessageContent, { type: 'reasoning' }> => c.type === 'reasoning')
+        .map(c => c.reasoning).join('\n');
+      if (reasoning) oaiMsg.reasoning_content = reasoning;
+    }
 
     if (toolCalls.length > 0) {
       oaiMsg.tool_calls = toolCalls.map(c => {
