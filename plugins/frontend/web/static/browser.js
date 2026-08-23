@@ -175,9 +175,13 @@ function makeInProcessTransport(services) {
   // owns a tracker that drains its own view to idle, so statusEvents() emits the off transition even
   // when no sessionEvents consumer is attached.
   async function submit(sid, body) {
+    // Three shapes, because the UI sends all three: a bare string (a typed message), an array (a
+    // submission carrying attachments), or a single block (a form response). No validation here,
+    // unlike the HTTP handler — in-process there is no untrusted client on the other side, only this
+    // app's own code.
     const contentArr = typeof body.content === 'string'
       ? [{ type: 'text', text: body.content }]
-      : [body.content];
+      : Array.isArray(body.content) ? body.content : [body.content];
     const traceId = crypto.randomUUID();
 
     const isTracker = !busyTrackers.has(sid);
@@ -339,10 +343,26 @@ function makeInProcessTransport(services) {
     window.open(URL.createObjectURL(new Blob([bytes], { type: handle.mimeType })), '_blank');
   }
 
+  // Same story as openFile: no HTTP media route in-process, so materialise a blob: URL. Reads through
+  // the MediaStore (falling back to the plain file area, which is what the host seeds it with anyway)
+  // and applies the store's own default-deny `allowed` flag — the identical gate the node route reads.
+  async function mediaUrl(fileId) {
+    const store = services.MediaStore ?? services.files;
+    const handle = await store?.get(fileId);
+    if (!handle || !handle.allowed) return null;
+    const chunks = [];
+    let total = 0;
+    for await (const chunk of handle.stream()) { chunks.push(chunk); total += chunk.byteLength; }
+    const bytes = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    return URL.createObjectURL(new Blob([bytes], { type: handle.mimeType }));
+  }
+
   return {
     hostRuntime: 'browser',
     callTool, createSession: createSessionFn, sessionBusy, submit,
-    sessionEvents, answerPrompt, answerEnv, abort, statusEvents, notifications, openFile,
+    sessionEvents, answerPrompt, answerEnv, abort, statusEvents, notifications, openFile, mediaUrl,
   };
 }
 

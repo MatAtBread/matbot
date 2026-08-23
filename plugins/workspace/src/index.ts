@@ -13,7 +13,7 @@ declare module '@matatbread/matbot-plugin-api' {
     // matching result narrowed by the `action` it passed (see ToolContract / the multi-action note on ToolContracts).
     workspace_action:
       | ToolContract<string,                                { action: 'read';   name: string; encoding?: 'utf8' | 'base64' }>              // file contents (utf8 or base64)
-      | ToolContract<{ name: string; bytes: number },       { action: 'write';  name: string; content: string; encoding?: 'utf8' | 'base64' }>  // stored name and byte count
+      | ToolContract<{ name: string; bytes: number; fileId: string }, { action: 'write'; name: string; content: string; encoding?: 'utf8' | 'base64' }>  // stored name, byte count and the store id it was minted under
       | ToolContract<Array<{ name: string; size: number }>, { action: 'list';   prefix?: string }>                                         // matching files
       | ToolContract<{ name: string },                      { action: 'delete'; name: string }>;                                          // the removed name
   }
@@ -146,7 +146,9 @@ const workspaceExecutor: ToolExecutor<ToolResultOf<'workspace_action'>> = {
         }
 
         announceFile(handle.id, 'saved', safe);
-        yield { type: 'result', value: { name: safe, bytes: handle.size } };
+        // `fileId` too: a caller that just uploaded had no way to address what it wrote except by
+        // guessing the name back, which is not the same question once a backend partitions or renames.
+        yield { type: 'result', value: { name: safe, bytes: handle.size, fileId: handle.id } };
         return;
       }
 

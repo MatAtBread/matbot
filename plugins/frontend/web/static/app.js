@@ -2020,14 +2020,93 @@ function renderSessions(sessions) {
   }
 }
 
-function makeBubble(className, text) {
+function makeBubble(className, text, media) {
   const div = document.createElement('div');
   div.className = 'message ' + className;
+  if (media?.length) div.appendChild(makeMediaStrip(media));
   const inner = document.createElement('div');
   inner.className = 'md-body';
   inner.innerHTML = md(text);
   div.appendChild(inner);
   return div;
+}
+
+// One resolved URL per stored file. Memoised because a `blob:` URL costs a full read of the store to
+// mint (see the browser transport) and the same message re-renders on every navigate-back; bounded by
+// the distinct media in a session, which is what the residency budget already bounds on the wire.
+const mediaUrlCache = new Map();
+function resolveMediaUrl(fileId) {
+  let p = mediaUrlCache.get(fileId);
+  if (!p) { p = T.mediaUrl(fileId).catch(() => null); mediaUrlCache.set(fileId, p); }
+  return p;
+}
+
+// Render the media blocks of a user turn. Two sources, one look: a live submission may still have the
+// bytes in hand, while a reloaded one has only a `file-ref` and must ask the transport where they live —
+// a path on the node server, a freshly minted `blob:` in-process. Items arrive as
+// { mimeType, name, src? , fileId? }; a `fileId` resolves asynchronously, so the element goes in now and
+// gets its source when the answer lands.
+function makeMediaStrip(items) {
+  const strip = document.createElement('div');
+  strip.className = 'bubble-media';
+  for (const it of items) {
+    // Each arm owns its own `apply`, so a resolved (or refused) URL lands on the right property. A
+    // store that will not serve the file answers null, and a broken-image glyph says nothing useful
+    // about why — fall back to the chip, which at least names what was attached.
+    let el, apply;
+    if (it.mimeType.startsWith('image/')) {
+      const img = document.createElement('img');
+      img.alt = it.name; img.title = it.name; img.loading = 'lazy';
+      el = img;
+      apply = (src) => {
+        if (!src) { img.replaceWith(makeFileChip(it)); return; }
+        img.onerror = () => img.replaceWith(makeFileChip({ ...it, src }));
+        img.onclick  = () => window.open(src, '_blank', 'noopener');
+        img.src = src;
+      };
+    } else if (it.mimeType.startsWith('audio/')) {
+      const audio = document.createElement('audio');
+      audio.controls = true; audio.title = it.name;
+      el = audio;
+      apply = (src) => { if (!src) audio.replaceWith(makeFileChip(it)); else audio.src = src; };
+    } else {
+      const chip = makeFileChip(it);
+      el = chip;
+      apply = (src) => { if (src) chip.href = src; };
+    }
+    strip.appendChild(el);
+    if (it.src) apply(it.src);
+    else void resolveMediaUrl(it.fileId).then(apply);
+  }
+  return strip;
+}
+
+function makeFileChip(it) {
+  const chip = document.createElement('a');
+  chip.className = 'file-chip';
+  chip.target = '_blank'; chip.rel = 'noopener';
+  if (it.src) chip.href = it.src;
+  chip.textContent = (it.mimeType.startsWith('audio/') ? '🔊 ' : '📄 ') + it.name;
+  return chip;
+}
+
+// The media blocks of a stored message, as the strip wants them. Only `file-ref` survives into history
+// — inline bytes are never persisted — so this is the reload path and the reload path only.
+function storedMedia(content) {
+  return (content ?? [])
+    .filter(c => c.type === 'file-ref')
+    .map(c => ({ mimeType: c.mimeType, name: c.name, fileId: c.fileId }));
+}
+
+// The media blocks of a LIVE event. A submission that has just been enqueued is echoed back as
+// `file-ref`s (the runner rewrote it at the boundary before announcing), so this is usually the same
+// shape — but a caller submitting inline bytes directly would land here too, hence both arms.
+function liveMedia(content) {
+  return (content ?? [])
+    .filter(c => c.type === 'file-ref' || c.type === 'image' || c.type === 'document' || c.type === 'audio')
+    .map(c => c.type === 'file-ref'
+      ? { mimeType: c.mimeType, name: c.name, fileId: c.fileId }
+      : { mimeType: c.mimeType, name: c.name ?? 'attachment', src: `data:${c.mimeType};base64,${c.data}` });
 }
 
 // Scroll the latest message into view (e.g. the user just sent it). Respect the suppression timer
@@ -2038,12 +2117,12 @@ function scrollMessagesToBottom() {
   }
 }
 
-function appendUserBubble(text, msgIdx, pending, traceId) {
+function appendUserBubble(text, msgIdx, pending, traceId, media) {
   messagesEl.querySelector('.empty-state')?.remove();
   if (messagesEl.querySelector('.message')) {
     messagesEl.appendChild(createMsgDivider(msgIdx));
   }
-  const div = makeBubble('user' + (pending ? ' pending' : ''), text);
+  const div = makeBubble('user' + (pending ? ' pending' : ''), text, media);
   if (traceId) div.dataset.trace = traceId;
   messagesEl.appendChild(div);
   scrollMessagesToBottom();
@@ -2051,12 +2130,12 @@ function appendUserBubble(text, msgIdx, pending, traceId) {
 }
 
 // A machine-authored turn (a followup resubmission). Presented agent-side with the robot badge.
-function appendRoboBubble(text, msgIdx, traceId) {
+function appendRoboBubble(text, msgIdx, traceId, media) {
   messagesEl.querySelector('.empty-state')?.remove();
   if (messagesEl.querySelector('.message')) {
     messagesEl.appendChild(createMsgDivider(msgIdx));
   }
-  const div = makeBubble('robo', text);
+  const div = makeBubble('robo', text, media);
   if (traceId) div.dataset.trace = traceId;
   messagesEl.appendChild(div);
   scrollMessagesToBottom();
@@ -2069,11 +2148,16 @@ function appendRoboBubble(text, msgIdx, traceId) {
 function appendUserTurn(content, msgIdx, traceId) {
   const runs = [];
   for (const c of content) {
-    if (c.type !== 'text' || !c.text) continue;
+    const isText  = c.type === 'text' && c.text;
+    const isMedia = c.type === 'file-ref';
+    if (!isText && !isMedia) continue;
     const robo = c.origin === 'robo';
     const prev = runs[runs.length - 1];
-    if (prev && prev.robo === robo) prev.text += '\n' + c.text;
-    else runs.push({ robo, text: c.text });
+    // A media block joins the run beside it rather than starting one of its own: "here, look at this"
+    // is one bubble with a photo in it, not a bubble and then a photo.
+    const run = prev && prev.robo === robo ? prev : (runs.push({ robo, text: '', media: [] }), runs[runs.length - 1]);
+    if (isText)  run.text = run.text ? run.text + '\n' + c.text : c.text;
+    if (isMedia) run.media.push(...storedMedia([c]));
   }
   if (!runs.length) return null;
   messagesEl.querySelector('.empty-state')?.remove();
@@ -2082,7 +2166,7 @@ function appendUserTurn(content, msgIdx, traceId) {
   }
   let last = null;
   for (const run of runs) {
-    last = makeBubble(run.robo ? 'robo' : 'user', run.text);
+    last = makeBubble(run.robo ? 'robo' : 'user', run.text, run.media);
     // Tag with the turn's traceId so a replayed `queued` for this still-running turn adopts the
     // existing bubble (renderTurn) instead of drawing a second one.
     if (traceId) last.dataset.trace = traceId;
@@ -2737,6 +2821,117 @@ async function connectSessionStream(sid) {
   }
 }
 
+// ── Composer attachments ─────────────────────────────────────────────────────
+//
+// Attachments are held here as base64 and posted BY VALUE inside the submit body; the runner's own
+// boundary rewrite turns each into a `file-ref` before anything is enqueued. No upload-first leg, and
+// deliberately so: the web client creates its session lazily on first send, so uploading in advance
+// would need either a draft key or an eagerly-created session that is abandoned when the user thinks
+// better of it. This way the one ingestion path is the same one Telegram uses, where bytes arrive with
+// the message and there is no upload leg to have.
+//
+// Client-side caps mirror the server's so the common mistake is caught before a 20MB round trip; the
+// server still enforces them, since a client's limits are a courtesy, not a control.
+const MAX_ATTACH_BYTES  = 20 * 1024 * 1024;
+const MAX_SESSION_BYTES = 50 * 1024 * 1024;
+
+/** @type {{ id: string, name: string, mimeType: string, data: string, size: number, url: string }[]} */
+let attachments = [];
+
+const attachmentsEl = document.getElementById('attachments');
+const attachBtn     = document.getElementById('attach-btn');
+const attachInput   = document.getElementById('attach-input');
+
+// Which inline arm this becomes on the wire. Mirrors core's mapping; anything not image/* or audio/* is
+// a document, which the converters degrade per provider rather than dropping.
+function attachArm(mimeType) {
+  if (mimeType.startsWith('image/')) return 'image';
+  if (mimeType.startsWith('audio/')) return 'audio';
+  return 'document';
+}
+
+let attachErrorTimer;
+function showAttachError(msg) {
+  let el = document.querySelector('.attach-error');
+  if (!el) {
+    el = document.createElement('div');
+    el.className = 'attach-error';
+    attachmentsEl.parentNode.insertBefore(el, attachmentsEl);
+  }
+  el.textContent = msg;
+  clearTimeout(attachErrorTimer);
+  attachErrorTimer = setTimeout(() => el.remove(), 8000);
+}
+
+function renderAttachments() {
+  attachmentsEl.replaceChildren();
+  attachmentsEl.hidden = attachments.length === 0;
+  for (const a of attachments) {
+    const chip = document.createElement('div');
+    chip.className = 'attach-chip';
+    if (a.mimeType.startsWith('image/')) {
+      const img = document.createElement('img');
+      img.src = a.url; img.alt = a.name;
+      chip.appendChild(img);
+    } else {
+      const glyph = document.createElement('span');
+      glyph.className = 'attach-glyph';
+      glyph.textContent = a.mimeType.startsWith('audio/') ? '🔊' : '📄';
+      chip.appendChild(glyph);
+    }
+    const name = document.createElement('span');
+    name.className = 'attach-name'; name.textContent = a.name; name.title = a.name;
+    const size = document.createElement('span');
+    size.className = 'attach-size'; size.textContent = formatSize(a.size);
+    const rm = document.createElement('button');
+    rm.type = 'button'; rm.textContent = '×'; rm.title = 'Remove';
+    rm.onclick = () => {
+      URL.revokeObjectURL(a.url);
+      attachments = attachments.filter(x => x !== a);
+      renderAttachments();
+    };
+    chip.append(name, size, rm);
+    attachmentsEl.appendChild(chip);
+  }
+}
+
+function clearAttachments() {
+  for (const a of attachments) URL.revokeObjectURL(a.url);
+  attachments = [];
+  renderAttachments();
+}
+
+async function addAttachments(fileList) {
+  if (composerReadOnly) return;
+  for (const file of Array.from(fileList)) {
+    if (file.size > MAX_ATTACH_BYTES) {
+      showAttachError(`"${file.name}" is ${formatSize(file.size)}, over the ${formatSize(MAX_ATTACH_BYTES)} per-file limit.`);
+      continue;
+    }
+    const staged = attachments.reduce((n, a) => n + a.size, 0);
+    if (staged + file.size > MAX_SESSION_BYTES) {
+      showAttachError(`Attaching "${file.name}" would take this message over the ${formatSize(MAX_SESSION_BYTES)} media limit.`);
+      continue;
+    }
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const CHUNK = 0x8000;
+    let bin = '';
+    for (let i = 0; i < bytes.length; i += CHUNK) bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+    attachments.push({
+      id:       crypto.randomUUID(),
+      name:     file.name,
+      // A file the OS could not type would be posted with an empty mimeType, which no converter can
+      // route; call it a generic binary and let the provider degrade it to a text note.
+      mimeType: file.type || 'application/octet-stream',
+      data:     btoa(bin),
+      size:     file.size,
+      url:      URL.createObjectURL(file),
+    });
+  }
+  renderAttachments();
+  inputEl.focus();
+}
+
 // Read the input box and submit it. The single entry point for *typed* messages; canned/programmatic
 // messages (plugin install banners, etc.) call submit() directly so they aren't gated by the input.
 // concat = true (Shift+Enter / send button): fold into the running turn's batch — fastest way to
@@ -2744,11 +2939,30 @@ async function connectSessionStream(sid) {
 // next ask depends on this one's tools/state (e.g. install a plugin, then use it).
 async function sendMessage(concat = true) {
   if (composerReadOnly) return;                          // shared-in session: writes are rejected by the backend
-  const content = inputEl.value.trim();
-  if (!content) return;
+  const text = inputEl.value.trim();
+  // An attachment on its own IS a submission — "what is this?" is often the photo alone.
+  if (!text && attachments.length === 0) return;
+  const content = [
+    ...(text ? [{ type: 'text', text }] : []),
+    ...attachments.map(a => ({ type: attachArm(a.mimeType), data: a.data, mimeType: a.mimeType, name: a.name })),
+  ];
   inputEl.value = '';
   inputEl.style.height = 'auto';
-  await submit(content, concat);
+  // Cleared before the await, not after: the post can take seconds with bytes on it, and leaving the
+  // chips up invites a second send of the same files.
+  const sent = attachments;
+  attachments = [];
+  renderAttachments();
+  const ok = await submit(content, concat);
+  if (ok) {
+    for (const a of sent) URL.revokeObjectURL(a.url);
+  } else if (sent.length) {
+    // A refused submission (over a limit, no media store, a dead socket) never reached a turn — put the
+    // files back rather than making the user find them again. The text is already surfaced inline by
+    // showSubmitError, so only the attachments need restoring.
+    attachments = [...sent, ...attachments];
+    renderAttachments();
+  }
 }
 
 // Submit typed content to the current session, fire-and-forget. The server enqueues it and the
@@ -2759,7 +2973,8 @@ async function sendMessage(concat = true) {
 // X", X only visible to a later turn). The human path passes its choice explicitly via sendMessage.
 async function submit(content, concat = false) {
   const provider = providerSel.value;
-  if (!content || !provider) return;
+  // An array submission is empty when it has no blocks — `!content` only catches the string case.
+  if (!provider || !content || (Array.isArray(content) && content.length === 0)) return;
   if (!currentSessionId) {
     const { id } = await apiNewSession();
     currentSessionId = id;
@@ -2767,7 +2982,7 @@ async function submit(content, concat = false) {
   // Ensure the persistent event stream is bound to this session before we enqueue, so the turn's
   // events have a consumer (covers the just-created session and the "New session" button path).
   if (streamSessionId !== currentSessionId) connectSessionStream(currentSessionId);
-  await postSubmit(currentSessionId, content, concat);
+  return postSubmit(currentSessionId, content, concat);
 }
 
 // POST a submission and return. The user bubble + response arrive on the stream as a 'queued' event
@@ -2776,17 +2991,23 @@ async function submit(content, concat = false) {
 // non-2xx is shown inline so the message is never silently lost.
 async function postSubmit(sid, content, concat = false) {
   const provider = providerSel.value;
-  if (!provider) return;
+  if (!provider) return false;
   try {
     await T.submit(sid, { content, provider, concatQueue: concat, mode: currentSteerMode() });
+    return true;
   } catch (e) {
     showSubmitError(content, e.name === 'TimeoutError' ? 'submit timed out (no response)' : (e.message || String(e)));
+    return false;
   }
 }
 
 // The submission never reached a turn, so show what was typed plus the failure, inline.
 function showSubmitError(content, msg) {
-  const text = typeof content === 'string' ? content : '';
+  const text = typeof content === 'string'
+    ? content
+    : Array.isArray(content)
+      ? content.filter(c => c.type === 'text').map(c => c.text).join('\n')
+      : '';
   if (text) appendUserBubble(text);
   const div = document.createElement('div');
   div.className = 'msg-error';
@@ -2880,7 +3101,8 @@ async function renderTurn(sid, traceId) {
           // order). queued > 0 ⇒ it's waiting behind a running turn → float the egg-timer; queued
           // === 0 ⇒ it runs immediately → show loading dots. A content event later promotes it.
           if (!userBubble) {
-            const text = (ev.content ?? []).filter(c => c.type === 'text').map(c => c.text).join('\n');
+            const text  = (ev.content ?? []).filter(c => c.type === 'text').map(c => c.text).join('\n');
+            const media = liveMedia(ev.content);
             // Adopt an already-rendered bubble for this turn rather than draw a second one: on reload /
             // navigate-back the running turn's user message is in committed history (renderSession drew
             // it, tagged with traceId), and the server now also seeds this turn's replay with a `queued`
@@ -2889,12 +3111,14 @@ async function renderTurn(sid, traceId) {
             if (existing) {
               userBubble = existing;
               userBubbleText = existing.querySelector('.md-body')?.textContent ?? text;
-            } else if (text) {
+            } else if (text || media.length) {
               // A robo turn (followup resubmit) arrives all-robo → agent-side bubble. Live submissions
               // are never mixed (a hook-augmented turn only shows its split on reload, from committed
               // history), so an all-or-nothing check here is enough.
               const robo = (ev.content ?? []).some(c => c.type === 'text' && c.origin === 'robo');
-              userBubble = robo ? appendRoboBubble(text, undefined, traceId) : appendUserBubble(text, undefined, ev.queued > 0, traceId);
+              userBubble = robo
+                ? appendRoboBubble(text, undefined, traceId, media)
+                : appendUserBubble(text, undefined, ev.queued > 0, traceId, media);
               userBubbleText = text;
             }
           }
@@ -2909,13 +3133,14 @@ async function renderTurn(sid, traceId) {
           // the interrupt moment. Render like an immediately-running submission — it runs next, right
           // after the interrupted turn commits its partial work.
           if (!userBubble) {
-            const text = (ev.content ?? []).filter(c => c.type === 'text').map(c => c.text).join('\n');
+            const text  = (ev.content ?? []).filter(c => c.type === 'text').map(c => c.text).join('\n');
+            const media = liveMedia(ev.content);
             const existing = messagesEl.querySelector(`.message[data-trace="${traceId}"]`);
             if (existing) {
               userBubble = existing;
               userBubbleText = existing.querySelector('.md-body')?.textContent ?? text;
-            } else if (text) {
-              userBubble = appendUserBubble(text, undefined, false, traceId);
+            } else if (text || media.length) {
+              userBubble = appendUserBubble(text, undefined, false, traceId, media);
               userBubbleText = text;
             }
           }
@@ -2927,11 +3152,21 @@ async function renderTurn(sid, traceId) {
           // A later submission the runner folded into this turn (concat policy). Grow the head bubble
           // so the UI matches the single merged user message that gets persisted. Joined with '\n' to
           // match how renderSession concatenates a multi-block user message on reload.
-          const text = (ev.content ?? []).filter(c => c.type === 'text').map(c => c.text).join('\n');
+          const text  = (ev.content ?? []).filter(c => c.type === 'text').map(c => c.text).join('\n');
+          const media = liveMedia(ev.content);
           if (userBubble && text) {
             userBubbleText = userBubbleText ? `${userBubbleText}\n${text}` : text;
             const inner = userBubble.querySelector('.md-body');
             if (inner) inner.innerHTML = md(userBubbleText);
+          }
+          // Media grows the head bubble's strip, creating it if the folded-into turn had none — the
+          // merged user message that gets persisted carries every batch item's blocks, so the live view
+          // has to as well or the reload disagrees with what you just watched.
+          if (userBubble && media.length) {
+            let strip = userBubble.querySelector('.bubble-media');
+            if (!strip) { strip = makeMediaStrip([]); userBubble.prepend(strip); }
+            // Snapshot: `children` is live, and appendChild removes each node from it as we go.
+            for (const el of [...makeMediaStrip(media).children]) strip.appendChild(el);
           }
           break;
         }
@@ -3189,7 +3424,8 @@ async function renderTurn(sid, traceId) {
             .filter(c => c.type === 'text')
             .map(c => c.text)
             .join('\n');
-          if (text) appendRoboBubble(text, undefined, ev.traceId);
+          const media = liveMedia(ev.content);
+          if (text || media.length) appendRoboBubble(text, undefined, ev.traceId, media);
           break;
         }
 
@@ -3311,6 +3547,43 @@ inputEl.addEventListener('keydown', e => {
 inputEl.addEventListener('input', () => {
   inputEl.style.height = 'auto';
   inputEl.style.height = Math.min(inputEl.scrollHeight, 180) + 'px';
+});
+
+// ── Composer attachment bindings ──────────────────────────────────────────────
+// Three ways in, because each is the natural one for a different source: the button for a file you
+// have, drop for one on your desktop, paste for a screenshot that exists nowhere else.
+if (attachBtn && attachInput) {
+  attachBtn.onclick = () => attachInput.click();
+  attachInput.addEventListener('change', () => {
+    if (attachInput.files?.length) void addAttachments(attachInput.files);
+    attachInput.value = '';   // so re-picking the same file fires `change` again
+  });
+}
+
+const inputAreaEl = document.getElementById('input-area');
+if (inputAreaEl) {
+  inputAreaEl.addEventListener('dragover', (e) => {
+    if (composerReadOnly) return;
+    e.preventDefault();
+    inputAreaEl.classList.add('drag-over');
+  });
+  inputAreaEl.addEventListener('dragleave', (e) => {
+    if (!inputAreaEl.contains(e.relatedTarget)) inputAreaEl.classList.remove('drag-over');
+  });
+  inputAreaEl.addEventListener('drop', (e) => {
+    e.preventDefault();
+    inputAreaEl.classList.remove('drag-over');
+    if (e.dataTransfer?.files.length) void addAttachments(e.dataTransfer.files);
+  });
+}
+
+inputEl.addEventListener('paste', (e) => {
+  // Only intercept when the clipboard actually carries files. Pasting text that happens to arrive
+  // alongside an image flavour must still paste as text, so the default is left alone otherwise.
+  const files = Array.from(e.clipboardData?.files ?? []);
+  if (files.length === 0) return;
+  e.preventDefault();
+  void addAttachments(files);
 });
 
 // Busy is now authoritative from the server (the per-session 'session-busy' status events), not a

@@ -7,7 +7,7 @@ import { nodePluginResolver }               from './plugin-resolver.js';
 import type { Principal, ProviderAdapter,
               ProviderConfig, Session,
               Store, StoreQuery, QueryResult, CASResult,
-              MessageContent, FileStore, Usage } from '@matatbread/matbot-core';
+              MessageContent, UserContent, FileStore, Usage } from '@matatbread/matbot-core';
 import { appendMessage, createMessage,
          createSession,
          createSessionRunner,
@@ -450,7 +450,7 @@ If [prompt] and --prompt-file are both omitted, starts an interactive REPL.
 
 async function runTurn(
   session:      Session,
-  content:      string | MessageContent[],
+  content:      string | UserContent[],
   run:          SessionRunner,
   providerName: string,
   principal:    Principal,
@@ -461,7 +461,7 @@ async function runTurn(
   const onSigint = (): void => { run.abort(session.id); };
   process.once('SIGINT', onSigint);
 
-  const contentArr: MessageContent[] = typeof content === 'string'
+  const contentArr: UserContent[] = typeof content === 'string'
     ? [{ type: 'text', text: content }]
     : content;
 
@@ -1045,6 +1045,13 @@ async function main(): Promise<void> {
 
   const serviceRegistry     = new Map<string, unknown>();
 
+  // The host's own file area doubles as the media store, so attachments work out of the box rather than
+  // needing a plugin to switch them on. Seeded into the registry (not put on `baseServices`) precisely so
+  // a plugin CAN replace it — `unifyServices` resolves an own property before the registry, so a member
+  // spelled on the base object is one `register()` can never reach. The value is the swappable file
+  // proxy, so media follows a StorageBackend swap exactly as every other file does.
+  serviceRegistry.set('MediaStore', fileStore);
+
   // Constructed just after the services object (it closes over services.loadPlugin); exposed via
   // the `run` getter below so frontends submit/observe through one serialiser instead of each
   // calling runSession directly.
@@ -1079,6 +1086,9 @@ async function main(): Promise<void> {
       else if (key === 'KnowledgeIndex') knowledgeImpl = bootKnowledge;
       else if (key === 'Vault')          activeVault = bootVault;
       else if (key === 'Notifier')       activeNotifier = bootNotifier;
+      // Reverts to the host file area rather than vanishing: unloading a plugin that put media on S3
+      // should leave attachments working on disk, not silently turn them off until a restart.
+      else if (key === 'MediaStore')     serviceRegistry.set('MediaStore', fileStore);
       else serviceRegistry.delete(key);
       if (key !== 'StorageBackend') { mountTable.markDirty(key as keyof MatbotServices); scheduleEdge(); }
     },
@@ -1201,6 +1211,7 @@ async function main(): Promise<void> {
     toolTypeIndex: () => services.ToolTypeIndex,   // resolved live: the tool-types plugin registers it after boot
     toolPresenter: () => services.ToolPresenter,   // resolved live: a tool-search/deferral plugin registers it after boot
     steeringPolicy: () => services.SteeringPolicy, // resolved live: a steering plugin registers it after boot
+    mediaStore:    () => services.MediaStore,      // resolved live: seeded to the host file area, a plugin may swap it
     hooks:         hookReg,
     systemContext: systemContextReg,
     vault,

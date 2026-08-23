@@ -10,11 +10,12 @@ export {
   notAPluginError, isNotAPluginError,
   promptCancelledError, isPromptCancelledError,
   readOnlyError, isReadOnlyError,
+  mediaRejectedError, isMediaRejectedError,
   StoreQueryError,
 } from '@matatbread/matbot-plugin-api';
 export type {
   MissingSecretError, IncompatibleRuntimeError, NotAPluginError, PromptCancelledError, ReadOnlyError,
-  MatbotErrorKind,
+  MediaRejectedError, MatbotErrorKind,
 } from '@matatbread/matbot-plugin-api';
 export { applyCreateSecret }  from '@matatbread/matbot-plugin-api';
 export { isTruncatedToolResult, notifyingStore, ItemChangeKind, RegistryChangeKind } from '@matatbread/matbot-plugin-api';
@@ -49,6 +50,7 @@ export * from './tool-registry.js';
 export * from './provider-registry.js';
 export * from './system-context.js';
 export * from './single-turn.js';
+export * from './media.js';
 export * from './about.js';
 export * from './config/index.js';
 export * from './security/index.js';

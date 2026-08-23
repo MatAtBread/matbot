@@ -1,5 +1,6 @@
 import type { PipelineEvent } from './events.js';
 import type { MessageContent, Session } from './messages.js';
+import type { MimeType } from './primitives.js';
 import type { Principal } from './principal.js';
 import type { SteeringMode } from './steering.js';
 import type { PromptFn } from './tools.js';
@@ -30,10 +31,41 @@ export interface OpenOpts {
   traceId?:  string;
 }
 
+/**
+ * What a *person* may submit — deliberately a narrow subset of {@link MessageContent}, not all of it.
+ * A submission crosses a wire boundary (an HTTP body, a chat platform's update), and widening it to
+ * the full union would let a client post a forged `tool-result`, `thinking` block or `marker` straight
+ * into persisted history.
+ *
+ * The three inline media arms are a **boundary form only**: `open()` writes them through the
+ * `MediaStore` and replaces each with a `file-ref` before the submission is enqueued, so what persists
+ * is always a reference. Bytes are never written into a session document — a 5MB image is ~6.7MB of
+ * base64 riding *both* whole-document writes of every subsequent turn, for the rest of the session.
+ * A caller that has already uploaded (or, like the web composer, would rather not re-post bytes) may
+ * pass the `file-ref` itself and skip the rewrite.
+ */
+export type UserContent = (
+  | { type: 'text';          text: string }
+  | { type: 'image';         data: string; mimeType: MimeType; name?: string }
+  | { type: 'document';      data: string; mimeType: MimeType; name?: string }
+  | { type: 'audio';         data: string; mimeType: MimeType; name?: string }
+  | { type: 'file-ref';      fileId: string; name: string; mimeType: MimeType }
+  | { type: 'form-response'; values: Record<string, string> }
+) & {
+  /** Authorship, carried through exactly as on {@link MessageContent} — an in-process caller driving a
+   *  session (the skills compiler's scratch run) submits machine-authored content and must be able to
+   *  say so. Unlike the arms above this is presentation, not protocol: a remote client asserting it only
+   *  makes its own bubble render agent-side, so it costs the boundary nothing to accept. */
+  origin?: 'robo';
+};
+
 /** Observe a session AND enqueue a submission. The compiler enforces provider/principal here;
  *  a remote frontend deserializing a request body must still validate the wire input itself. */
 export interface SubmitOpenOpts extends OpenOpts {
-  content:      MessageContent[];
+  /** Text plus, optionally, media. Inline media arms are rewritten to `file-ref`s against the
+   *  `MediaStore` before enqueue; with no store registered the submission is refused (see
+   *  {@link MediaRejectedError}) rather than silently dropping what the user attached. */
+  content:      UserContent[];
   provider:     string;
   principal:    Principal;
   /** When true, this submission may be merged with others drained in the same batch. Default false

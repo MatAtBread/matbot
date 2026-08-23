@@ -1,8 +1,8 @@
 import type {
-  FileStore, Principal, Vault, Message, ModelParameters,
+  FileStore, MediaStore, Principal, Vault, Message, ModelParameters,
   ProviderAdapter, ProviderConfig, ProviderRegistry, Tool, ToolRegistry, FrontendInfo,
   Store, Session, SystemContextRegistry, KnowledgeIndex, PromptFn, SessionRunner, Usage, HookRegistrar,
-  TypeScriptStripper, ToolTypeIndex, ToolPresenter, SteeringPolicy,
+  TypeScriptStripper, ToolTypeIndex, ToolPresenter, SteeringPolicy, UserContent,
 } from './types.js';
 import type { Notifications, Notifier } from './notify.js';
 
@@ -53,7 +53,11 @@ export interface CompletionResponse {
 
 export interface SingleTurnRequest {
   provider: string;
-  prompt:   string;
+  /** The one user message. A plain string is the common case; a {@link UserContent}[] carries media
+   *  alongside the text, for a one-shot that has to *look* at something. Any `file-ref` arm is passed
+   *  through as-is — a one-shot has no session and no residency window, so the caller resolves bytes
+   *  itself (as the `single_turn` tool's `attach` does) rather than the builder guessing a store. */
+  prompt:   string | UserContent[];
   system?:  string;
   /** Forwarded verbatim to {@link CompletionRequest.parameters} — same merge, same guidance. */
   parameters?: Partial<ModelParameters>;
@@ -158,6 +162,13 @@ export interface MatbotServices {
    *  runner uses its own defaults. A plain registered service, consumed by the runner as a member.
    *  See {@link SteeringPolicy}. */
   readonly SteeringPolicy?: SteeringPolicy | undefined;
+  /** Where user-attached session media is written at the submission boundary and read back from on the
+   *  wire. A host that has a file area registers its own as the boot default, so this is normally
+   *  present; a plugin may register a different medium (media on S3, sessions on disk). Absent ⇒ a
+   *  by-value attachment is REFUSED at the boundary naming the reason, and an already-persisted
+   *  `file-ref` degrades to the converters' `[Attached file: x]` note. A text-only deployment is
+   *  unaffected either way. See {@link MediaStore}. */
+  readonly MediaStore?: MediaStore | undefined;
 }
 
 /** The assembled machine: registry services wired to the fixed runtime — what `setup()` receives. */

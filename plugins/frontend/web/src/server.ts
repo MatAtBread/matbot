@@ -1,10 +1,13 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type {
-  MatbotPlugin, Principal, Session, Store, Tool, ToolRegistry, FileStore, Vault,
+  MatbotPlugin, Principal, Session, Store, Tool, ToolRegistry, FileStore, MediaStore, Vault,
   FormField, PromptFn, SessionRunner, WatchVisibility, VisibilityQuery, FilePartition, SteeringMode,
-  Notifier, Notification,
+  Notifier, Notification, UserContent, MimeType,
 } from '@matatbread/matbot-core';
-import { createSession, promptCancelledError, runAs, tryCurrentPrincipal, ItemChangeKind, RegistryChangeKind } from '@matatbread/matbot-core';
+import {
+  createSession, promptCancelledError, runAs, tryCurrentPrincipal, ItemChangeKind, RegistryChangeKind,
+  isMediaRejectedError,
+} from '@matatbread/matbot-core';
 import { sseComment, sseEvent } from './sse-writer.js';
 import { makeWebEnvTool } from './web-env.js';
 import { promises } from "node:fs";
@@ -31,6 +34,11 @@ export interface WebServerDeps {
    *  resolves the `~<partition>` segment of a `GET /files/` URL back to the area those bytes were written
    *  to. Absent ⇒ one undivided file area, and the segment (if any) is moot. */
   filePartition?: () => FilePartition | undefined;
+  /** Where session media lives, for `GET /media/:id`. A thunk for the same reason as the two above: a
+   *  plugin may register a different medium after this frontend sets up, and capturing the value would
+   *  pin the render route to whatever was there at boot. Absent ⇒ the route 404s and history renders the
+   *  filename chip with no thumbnail; the turn itself is unaffected. */
+  mediaStore?:    () => MediaStore | undefined;
   /** The notification bus this frontend both publishes to (a session created over HTTP) and subscribes
    *  to (the firehose). */
   notifier:       Notifier;
@@ -62,7 +70,10 @@ declare module '@matatbread/matbot-plugin-api' {
 }
 
 interface SubmitBody {
-  content:      string | { type: 'form-response'; values: Record<string, string> };
+  /** A bare string is the common case. An array is a submission with media: the inline arms carry
+   *  base64 the runner rewrites to `file-ref`s at its boundary before anything is enqueued. Validated
+   *  below rather than trusted — the type is what a well-behaved client sends, not what arrives. */
+  content:      string | UserContent | UserContent[];
   provider:     string;       // opaque name passed to deps.resolveProvider
   sessionId?:   string;
   traceId?:     string;
@@ -105,6 +116,49 @@ export function urlPrincipal(req: IncomingMessage): Principal | undefined {
 // identity as the rest of the app. The header still wins here too, for when this default is used directly.
 export const defaultWebPrincipal: WebPrincipalResolver = (req) =>
   headerPrincipal(req) ?? urlPrincipal(req) ?? tryCurrentPrincipal() ?? ANONYMOUS_WEB_USER;
+
+/**
+ * Body ceiling for `POST /sessions/:id/submit`, the one route that may carry attachments. Sized off the
+ * core per-file cap (20MB) plus base64's third, plus room for several files and the prose around them.
+ * Every other route keeps `readBody`'s 1MB default — this is not a general raise.
+ */
+const SUBMIT_BODY_LIMIT = 64 * 1024 * 1024;
+
+/**
+ * Validate one submitted content block. `SubmitBody` says what a well-behaved client sends; this is what
+ * actually arrives. The list is deliberately a WHITELIST of the {@link UserContent} arms rather than a
+ * blacklist of the dangerous ones: `MessageContent` also carries `tool-result`, `thinking` and `marker`,
+ * and a client able to post those could write forged tool output or an opaque marker straight into
+ * persisted history. Anything not named here is rejected, including an arm a later plugin-api adds.
+ */
+function validateUserContent(c: unknown): UserContent | string {
+  if (typeof c !== 'object' || c === null) return 'each content block must be an object';
+  const b = c as Record<string, unknown>;
+  const origin = b['origin'] === 'robo' ? { origin: 'robo' as const } : {};
+  switch (b['type']) {
+    case 'text':
+      if (typeof b['text'] !== 'string') return 'a text block needs a string "text"';
+      return { type: 'text', text: b['text'], ...origin };
+    case 'image': case 'document': case 'audio': {
+      if (typeof b['data'] !== 'string')     return `a ${b['type']} block needs base64 "data"`;
+      if (typeof b['mimeType'] !== 'string') return `a ${b['type']} block needs a "mimeType"`;
+      return {
+        type: b['type'], data: b['data'], mimeType: b['mimeType'] as MimeType,
+        ...(typeof b['name'] === 'string' ? { name: b['name'] } : {}), ...origin,
+      };
+    }
+    case 'file-ref':
+      if (typeof b['fileId'] !== 'string' || typeof b['name'] !== 'string' || typeof b['mimeType'] !== 'string') {
+        return 'a file-ref block needs "fileId", "name" and "mimeType"';
+      }
+      return { type: 'file-ref', fileId: b['fileId'], name: b['name'], mimeType: b['mimeType'] as MimeType, ...origin };
+    case 'form-response':
+      if (typeof b['values'] !== 'object' || b['values'] === null) return 'a form-response block needs "values"';
+      return { type: 'form-response', values: b['values'] as Record<string, string>, ...origin };
+    default:
+      return `content blocks of type "${String(b['type'])}" cannot be submitted`;
+  }
+}
 
 async function readBody(req: IncomingMessage, maxBytes = 1_048_576): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -565,9 +619,13 @@ export function createWebServer(deps: WebServerDeps) {
     if (method === 'POST' && submitMatch) {
       const sessionId = submitMatch[1]!;
 
+      // A submission may carry attachments by value, so this route alone reads a body big enough for
+      // them: the per-file cap is 20MB and base64 inflates by a third. Every other route keeps 1MB.
+      // Buffered rather than streamed because the runner's boundary rewrite wants the bytes anyway —
+      // and matbot is a single-tenant harness, not a service sizing itself for concurrent uploads.
       let raw: string;
-      try { raw = await readBody(req); }
-      catch (e) { json(res, 400, { error: String(e) }); return; }
+      try { raw = await readBody(req, SUBMIT_BODY_LIMIT); }
+      catch (e) { json(res, 413, { error: String(e) }); return; }
 
       let body: SubmitBody;
       try { body = JSON.parse(raw) as SubmitBody; }
@@ -579,12 +637,23 @@ export function createWebServer(deps: WebServerDeps) {
 
       const traceId = body.traceId ?? crypto.randomUUID();
 
-      // Normalise content into MessageContent[]. The runner appends + persists the user message
-      // when this submission's turn actually starts (persist-at-turn-start) — never here — so a
-      // mid-turn submit queues behind the running turn instead of clobbering session state.
-      const contentArr = typeof body.content === 'string'
-        ? [{ type: 'text' as const, text: body.content }]
-        : [body.content];
+      // Normalise content into UserContent[], validating every block that is not a plain string. The
+      // runner appends + persists the user message when this submission's turn actually starts
+      // (persist-at-turn-start) — never here — so a mid-turn submit queues behind the running turn
+      // instead of clobbering session state. Inline media is rewritten to `file-ref`s at that same
+      // boundary, so nothing base64 reaches the store even though it reached this handler.
+      const contentArr: UserContent[] = [];
+      {
+        const blocks = typeof body.content === 'string'
+          ? [{ type: 'text' as const, text: body.content }]
+          : Array.isArray(body.content) ? body.content : [body.content];
+        for (const b of blocks) {
+          const checked = validateUserContent(b);
+          if (typeof checked === 'string') { json(res, 400, { error: checked }); return; }
+          contentArr.push(checked);
+        }
+        if (contentArr.length === 0) { json(res, 400, { error: 'A submission must carry at least one content block.' }); return; }
+      }
 
       // Fire-and-forget: we enqueue and return immediately. The turn's output — and this prompt —
       // reach the client over its persistent GET /events/sessions/:id stream, not this request.
@@ -662,6 +731,14 @@ export function createWebServer(deps: WebServerDeps) {
         }
       } catch (e) {
         if (isTracker) busyTrackers.delete(targetId);
+        // A refused attachment is the CLIENT's problem to fix (drop the file, attach a smaller one), not
+        // a server fault — and nothing was enqueued, so there is no turn to clean up. 413 for a size, 501
+        // for a deployment with no media store, 400 for bytes that would not decode.
+        if (isMediaRejectedError(e)) {
+          const status = e.reason === 'no-store' ? 501 : e.reason === 'unreadable' ? 400 : 413;
+          json(res, status, { error: e.message, reason: e.reason, ...(e.file !== undefined ? { file: e.file } : {}) });
+          return;
+        }
         json(res, 500, { error: String(e) });
       }
       return;
@@ -858,6 +935,46 @@ export function createWebServer(deps: WebServerDeps) {
       if (body.ok) entry.resolve(body.value);
       else entry.reject(new Error(typeof body.error === 'string' && body.error ? body.error : 'Browser evaluation failed.'));
       json(res, 200, { ok: true });
+      return;
+    }
+
+    // --- GET /media/[~<partition>/]<fileId> --- (session media, for rendering a thumbnail in history)
+    // Everything `GET /files/` is, addressed by ID rather than by name. That is the whole difference and
+    // the whole point: `workspace/notes.md` is guessable and a store id is not, which matters for bytes a
+    // person attached rather than a tool published.
+    //
+    // It applies NO gate of its own. Whether these bytes may leave the box is `allowed`, a flag the store
+    // persists and the producer opts into per put; which file area the id resolves in is the backend's,
+    // via the same opaque `~<partition>` token `/files/` uses. Both answers belong to the layer that
+    // implements storage, not to the layer exposing it — a UI can lie about a principal, and one that
+    // compared `handle.sessionId` here would be inventing an access rule the store never agreed to.
+    const mediaMatch = /^\/media\/(?:~([^/]+)\/)?([^/?]+)$/.exec(url);
+    if (method === 'GET' && mediaMatch) {
+      const media = deps.mediaStore?.() ?? deps.files;
+      if (!media) { json(res, 404, { error: 'Not found' }); return; }
+      let partition: string | undefined, fileId: string;
+      try {
+        partition = mediaMatch[1] !== undefined ? decodeURIComponent(mediaMatch[1]) : undefined;
+        fileId    = decodeURIComponent(mediaMatch[2]!);
+      }
+      catch { json(res, 400, { error: 'Invalid path encoding' }); return; }
+
+      const read = () => media.get(fileId);
+      const filePartition = deps.filePartition?.();
+      const handle = partition !== undefined && filePartition
+        ? await filePartition.enter(partition, read)
+        : await read();
+      // Reported as missing rather than forbidden, exactly as `/files/` does: don't reveal that an id exists.
+      if (!handle || !handle.allowed) { json(res, 404, { error: 'Not found' }); return; }
+
+      res.writeHead(200, {
+        'content-type':  handle.mimeType,
+        // Immutable: an anonymous put mints a fresh id per upload, so a given id's bytes never change.
+        'cache-control': 'private, max-age=31536000, immutable',
+        ...corsHeaders(origin),
+      });
+      for await (const chunk of handle.stream()) res.write(chunk);
+      res.end();
       return;
     }
 

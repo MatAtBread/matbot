@@ -1599,6 +1599,66 @@
       align-items: flex-end;
       max-width: 720px;
     }
+
+    /* ── Composer attachments ─────────────────────────────────── */
+    /* Chips sit ABOVE the input row rather than inside it: the textarea grows to 180px and the row is
+       bottom-aligned, so anything sharing that line drifts as you type. */
+    #attachments {
+      display: flex; flex-wrap: wrap; gap: 6px;
+      max-width: 720px; margin-bottom: 6px;
+    }
+    .attach-chip {
+      display: flex; align-items: center; gap: 6px;
+      background: #f3f4f6; border: 1px solid #e5e7eb; border-radius: 8px;
+      padding: 4px 6px 4px 4px; font-size: 0.85em; max-width: 240px;
+    }
+    .attach-chip img {
+      width: 28px; height: 28px; object-fit: cover; border-radius: 4px; flex-shrink: 0;
+      background: #e5e7eb;
+    }
+    .attach-chip .attach-glyph {
+      width: 28px; height: 28px; border-radius: 4px; flex-shrink: 0;
+      background: #e5e7eb; display: flex; align-items: center; justify-content: center; font-size: 0.9em;
+    }
+    .attach-chip .attach-name {
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .attach-chip .attach-size { color: #6b7280; flex-shrink: 0; }
+    .attach-chip button {
+      border: none; background: none; cursor: pointer; color: #6b7280;
+      font-size: 1.1em; line-height: 1; padding: 0 2px; flex-shrink: 0;
+    }
+    .attach-chip button:hover { color: #111; }
+    .attach-error {
+      color: #b91c1c; font-size: 0.85em; max-width: 720px; margin-bottom: 6px;
+    }
+    #attach-btn {
+      border: 1px solid #d1d5db; background: #fff; color: #6b7280;
+      border-radius: 50%; cursor: pointer; flex-shrink: 0; padding: 0;
+      height: 2.4em; width: 2.4em;
+      display: flex; align-items: center; justify-content: center;
+      transition: background 0.1s, color 0.1s;
+    }
+    #attach-btn svg { width: 1.1em; height: 1.1em; }
+    #attach-btn:hover { background: #f3f4f6; color: #111; }
+    #input-row.read-only #attach-btn { pointer-events: none; opacity: 0.4; }
+    /* Drag-over feedback on the whole composer, not just the (small) button. */
+    #input-area.drag-over #input { border-color: #2563eb; background: #eff6ff; }
+
+    /* Media rendered inside a message bubble. Capped so a tall photo doesn't push the reply off-screen. */
+    .bubble-media { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+    .bubble-media:first-child { margin-top: 0; }
+    .bubble-media img {
+      max-width: 260px; max-height: 260px; border-radius: 8px; display: block; cursor: zoom-in;
+      background: #e5e7eb;
+    }
+    .bubble-media .file-chip {
+      display: flex; align-items: center; gap: 6px;
+      background: rgba(0,0,0,0.06); border-radius: 8px; padding: 6px 10px; font-size: 0.9em;
+      text-decoration: none; color: inherit;
+    }
+    .bubble-media .file-chip:hover { background: rgba(0,0,0,0.12); }
+    .bubble-media audio { max-width: 260px; }
     #input {
       flex: 1;
       border: 1px solid #d1d5db;
@@ -2192,7 +2252,10 @@
           <span class="mode-label">interrupt</span>
         </span>
       </div>
+      <div id="attachments" hidden></div>
       <div id="input-row">
+        <button id="attach-btn" title="Attach an image, PDF or audio clip" aria-label="Attach a file"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>
+        <input id="attach-input" type="file" multiple hidden>
         <textarea id="input" rows="1" placeholder="Shift+⬅️ to send, ⬅️ for newline"></textarea>
         <button id="send-btn" aria-label="Send"><svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" aria-hidden="true"><path d="M9 6v12l9-6z"/></svg></button>
         <button id="stop-btn" style="visibility:hidden" title="Stop the running turn and drop anything queued" aria-label="Stop"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg></button>

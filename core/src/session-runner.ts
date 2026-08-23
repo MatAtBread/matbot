@@ -1,6 +1,6 @@
 import type {
   Session, Message, MessageContent, Principal, PromptFn, PipelineEvent,
-  Store, ToolRegistry, SystemContextRegistry, Vault, FileStore, Tool,
+  Store, ToolRegistry, SystemContextRegistry, Vault, FileStore, MediaStore, UserContent, Tool,
   ProviderAdapter, ProviderConfig, SessionRunner, SessionView, OpenOpts, SubmitOpenOpts,
   SteeringPolicy, SteeringDecision, TurnEntry,
 } from './types.js';
@@ -11,6 +11,7 @@ import { appendMessage, createMessage } from './session.js';
 import { isReadOnlyError, foldOntoUserTurn, lastUserIndex, runAs } from '@matatbread/matbot-plugin-api';
 import { machineBusy, withUsageScope } from '@matatbread/matbot-plugin-api/host';
 import { runSession } from './runner.js';
+import { ingestMedia } from './media.js';
 
 export interface SessionRunnerDeps {
   store:           Store<Session>;
@@ -28,6 +29,10 @@ export interface SessionRunnerDeps {
   // disposed (queue vs interrupt) and supplies an interrupt's continuation nudge. Absent ⇒ the runner's
   // own defaults (DEFAULT_STEERING_POLICY / DEFAULT_STEER_NUDGE).
   steeringPolicy?: () => SteeringPolicy | undefined;
+  // Resolved live (a host registers its boot default, a plugin may replace it): where a submission's
+  // by-value media is written at the boundary, and where the runner reads it back from. Absent ⇒ an
+  // attachment is refused with a reason and a stored `file-ref` degrades to the converters' text note.
+  mediaStore?:     () => MediaStore | undefined;
   hooks?:          HookRegistry;
   systemContext?:  SystemContextRegistry;
   vault?:          Vault;
@@ -306,9 +311,15 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
         // A redo re-runs the existing committed user turn — no title derivation, no new user message.
         if (head.redo === undefined) {
           if (!session.title && !session.messages.some(m => m.role === 'user')) {
+            // Falls back to the attachment names when the turn has no words of its own: an image-only
+            // first turn is a real submission, and got no title at all — which reads in the session
+            // list as a session that failed to start.
             const text = content
               .filter((c): c is Extract<MessageContent, { type: 'text' }> => c.type === 'text')
-              .map(c => c.text).join(' ').trim();
+              .map(c => c.text).join(' ').trim()
+              || content
+                .filter((c): c is Extract<MessageContent, { type: 'file-ref' }> => c.type === 'file-ref')
+                .map(c => c.name).join(', ');
             if (text) {
               const words = text.split(/\s+/).slice(0, 8).join(' ');
               session = { ...session, title: words.length > 60 ? `${words.slice(0, 60)}…` : words };
@@ -351,6 +362,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
         // inputSchema (no contract) are left as-is; absent ToolTypeIndex (browser) ⇒ plain descriptions.
         const wire = await deps.toolTypeIndex?.()?.wireContracts();
         const toolPresenter = deps.toolPresenter?.();
+        const mediaStore    = deps.mediaStore?.();
         const toolMap = deps.tools !== undefined
           ? new Map<string, Tool>(deps.tools.list().map(t => {
               const wc = wire?.[t.name];
@@ -400,6 +412,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
               ...(deps.systemContext !== undefined ? { systemContext: deps.systemContext } : {}),
               ...(deps.workdir       !== undefined ? { workdir:       deps.workdir       } : {}),
               ...(deps.files         !== undefined ? { files:         deps.files         } : {}),
+              ...(mediaStore         !== undefined ? { mediaStore                        } : {}),
               ...(deps.configPath    !== undefined ? { configPath:    deps.configPath    } : {}),
               ...(deps.vault         !== undefined ? { vault:         deps.vault         } : {}),
               ...(head.prompt        !== undefined ? { prompt:        head.prompt        } : {}),
@@ -455,7 +468,11 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
               // event and the persisted user message the pump builds from this item.
               for (const raw of resubmits.reverse()) {
                 const rt = crypto.randomUUID();
-                const content = raw.map(c => (c.type === 'text' ? { ...c, origin: 'robo' as const } : c));
+                // Every block, not just text: `origin` is authorship, orthogonal to what the block
+                // carries, and a resubmission that attached an image was silently presenting it as the
+                // user's own. The arms a stamp would be wrong on don't occur here — a hook returns
+                // content, not a thinking block — so a blanket stamp beats an arm-by-arm list.
+                const content = raw.map(c => ({ ...c, origin: 'robo' as const }));
                 s.queue.unshift({
                   traceId:       rt,
                   rootTraceId:   head.rootTraceId,
@@ -565,8 +582,17 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
         }
         s = stateFor(opts.sessionId);
         traceId = opts.traceId ?? crypto.randomUUID();
-        const { content, provider, principal } = opts;
+        const { provider, principal } = opts;
         const mode = opts.mode ?? 'queue';
+
+        // The media boundary, before anything else this submission touches: by-value attachments are
+        // written through the MediaStore and become `file-ref`s here, so nothing downstream — the
+        // steering classifier, the `queued`/`steer` events, the persisted user message — ever sees
+        // bytes. One place, and every frontend inherits it, which is what lets Telegram (where bytes
+        // arrive WITH the message and there is no upload-in-advance leg) work with no code of its own.
+        // Throws MediaRejectedError on a refusal; nothing is enqueued, so the caller has nothing to
+        // undo — it just tells the user which file and why.
+        const content = await ingestMedia(opts.content, opts.sessionId, deps.mediaStore?.());
 
         // Decide interrupt vs queue for a submission arriving mid-turn. Steering is only meaningful
         // while a turn is running; with nothing running it enqueues and runs next regardless of mode.

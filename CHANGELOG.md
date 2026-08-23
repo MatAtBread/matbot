@@ -11,7 +11,82 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ## Unreleased
 
+### API gaps filled
+
+- **User-supplied session media.** A person can attach an image, PDF or audio clip to a message and the
+  model sees it. The mirror of the existing `model-content` pull path, and it needed no new
+  `MessageContent` arm: bytes arrive **by value** in `SubmitOpenOpts.content` (now `UserContent[]`, a
+  deliberately narrow subset of `MessageContent` — a wire boundary must not accept a forged `tool-result`,
+  `thinking` block or `marker`), and `SessionRunner.open()` writes each inline arm through the new
+  `MediaStore` service and replaces it with a `file-ref` **before the submission is enqueued**. What
+  persists is always a reference; no base64 ever reaches a session document. The runner resolves those
+  refs back to inline bytes on the outgoing copy only, newest-first, inside an 8MB byte budget computed
+  once per turn — beyond it the ref is left alone and the provider adapters degrade it to the
+  `[Attached file: x]` note they already wrote.
+
+  `MediaStore` is an **alias of `FileStore`**, so every existing implementation (filesystem, SQLite, OPFS,
+  Drive) is a candidate unchanged and putting media on a different medium is a registration, not a port.
+  Both hosts seed their own file area as the boot default, so this works with no configuration; a plugin
+  may `register('MediaStore', …)` to replace it, and unregistering reverts to the host default rather
+  than turning media off. With nothing registered, an attachment is refused *naming the file* and text is
+  completely unaffected.
+
+- **`MediaRejectedError`** (`mediaRejectedError` / `isMediaRejectedError`), branded like the other typed
+  errors. Carries `reason` (`no-store` / `too-large` / `session-quota` / `unreadable`) and the offending
+  `file`. Refusing at the boundary is the point: the alternative is a provider 400 part-way through a turn
+  the user already believes was sent. Caps are 20MB per file and 50MB per session, the session total
+  derived by summing what the store holds rather than counted.
+
+- **`SingleTurnRequest.prompt` accepts `UserContent[]`** as well as a string, so a one-shot completion can
+  carry media.
+
+### Bug fixes
+
+- **A robo resubmission's non-text blocks now carry `origin: 'robo'`.** The stamp was applied to text
+  blocks only, so machine-authored media was silently presented as the user's own. `origin` is authorship,
+  orthogonal to what a block carries.
+
+- **An attachment-only first turn gets a title.** Auto-titling read text blocks only, so a session opened
+  with just a photo got no title at all — which reads in the session list as a session that failed to
+  start. Falls back to the attachment names.
+
 ### Optional
+
+#### single_turn
+
+- **`attach?: string[]`** — name stored files (by store id or by name, looked up across the `MediaStore`
+  and the turn's own file store) to send alongside the prompt as inline media. A file the store does not
+  have is reported, not silently dropped: a consulted model answering about something it never saw
+  produces a confidently wrong answer.
+
+#### workspace
+
+- **`workspace_action write` returns the `fileId` it minted**, alongside `name` and `bytes`. A caller that
+  had just uploaded could previously only address the file by guessing its name back, which is not the
+  same question once a backend partitions or renames.
+
+#### frontend-web
+
+- **Composer attachments** — a paperclip button, drag-and-drop onto the composer, and paste (for a
+  screenshot that exists nowhere else). Attachments render as removable chips with a thumbnail, post by
+  value inside the submit body, and are **restored to the composer if the submission is refused** rather
+  than lost. Client-side caps mirror the server's so the common mistake is caught before the round trip.
+- **Media renders in the message thread** — inline in the user bubble, live and on reload, via a new
+  `GET /media/<fileId>`. That route is id-addressed rather than name-addressed (a store id is not
+  guessable the way `workspace/notes.md` is) and applies **no gate of its own**: `allowed` is the store's
+  own persisted flag and area routing is the backend's, because access control belongs to the layer
+  implementing storage, not the layer exposing it.
+- `POST /sessions/:id/submit` reads a larger body (64MB) since it may carry attachments; every other route
+  keeps the 1MB default. A refused attachment maps to 413/501/400 with the reason and the filename, not a
+  bare 500, and the client's submit timeout now scales with the payload instead of a flat 20s.
+
+#### frontend-telegram
+
+- **Photos, documents, audio, voice notes and video are now received** and sent to the model — the case
+  that proves the by-value boundary, since bytes arrive WITH the message and no upload-in-advance leg
+  exists or can exist. A photo's largest rendition is used (a thumbnail is what makes vision look bad),
+  and `caption` is read as the message's prose — previously a photo-with-a-question was dropped entirely,
+  because the dispatch loop gated on `text`.
 
 #### function-tools
 

@@ -15,9 +15,11 @@ export type MessageContent = (
   | { type: 'refusal';           text: string }
 
   // ── inline media: bytes plus a mime type. The first three are also `ModelContent` — the arms a tool
-  //    may hand the model to look at (see the `model-content` ToolEvent). `image-url` and `file-ref`
-  //    are references rather than data, and nothing produces them yet; they are reconsidered together
-  //    when durable user-supplied media is built (a `document` / `document-reference` split). ──
+  //    may hand the model to look at (see the `model-content` ToolEvent) — AND the boundary form of
+  //    `UserContent`, the arms a person may attach to a submission. `file-ref` is what such an
+  //    attachment becomes once `open()` has written it through the `MediaStore`: it is the only media
+  //    arm that ever persists, and the runner resolves it back to inline bytes on the outgoing copy
+  //    while it fits the residency budget. `image-url` remains unproduced. ──
   | { type: 'image';             data: string; mimeType: MimeType }
   | { type: 'document';          data: string; mimeType: MimeType; name?: string }
   | { type: 'audio';             data: string; mimeType: MimeType }

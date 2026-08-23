@@ -224,6 +224,7 @@ declare module '@matatbread/matbot-plugin-api' {
 ```ts
 type SessionStore = Store<Session>;
 type ScratchStore = Store<Session>;
+type MediaStore   = FileStore;      // session media; see Media
 ```
 
 **Swappable core members** (`StorageBackend`, `KnowledgeIndex`, `Vault`, `Notifier`) use `register` to swap live impls behind capture-safe forwarding proxies. A captured reference keeps resolving to the current impl. On `unregister` (i.e. when the providing plugin is unloaded) a swap-member **reverts to the host's captured boot default** rather than dangling on the gone impl — the app decides its own base services (the CLI: filesystem or in-memory; the browser: OPFS), and the registry only remembers and restores them. The host's boot default is captured **before** any storage-plugin pre-scan, so a config-supplied backend never poses as the base; a pre-scanned backend is recorded as plugin-owned, so unloading its plugin reverts to that base.
@@ -565,6 +566,19 @@ Opaque, durable annotations in the message stream — `{ type: 'marker', creator
 
 ## Media
 
+Two paths, no overlap, distinguished by **who owns the bytes**:
+
+| | Carried as | Resolved by | Lifetime |
+|---|---|---|---|
+| **Tool media** — the model pulled it | nothing; wire-only | the runner, from the tool's `model-content` event | dies with the turn |
+| **Session media** — a person attached it | a `file-ref` in the message | the runner, via `MediaStore` | dies with the session |
+
+The runner therefore never guesses which store an id belongs to: it only ever resolves session media.
+A model referring to a *workspace* file transfers no ownership and needs no new mechanism — it calls a
+tool, which pulls (below).
+
+### Tool media — the pull path
+
 The model **pulls** media; nothing pushes it. A tool yields `{ type: 'model-content', content: ModelContent[] }` —
 the inline arms of `MessageContent` (`image` / `document` / `audio`), bytes plus a mime type. The runner
 pins them directly after the tool message they answer and splices them into the **outgoing copy** for
@@ -588,10 +602,69 @@ the tool's concern; the loop's concern is the wire.
 Not a `PipelineEvent`: nothing durable backs it, so a frontend drawing it live would show something that
 vanishes on reload. A tool that also wants the *user* to see something has `file` and `marker`.
 
-**Durable, user-supplied media is separate, unbuilt work.** It needs a reference that survives reload
-without putting base64 in the store — a future `document` (inline data + metadata) / `document-reference`
-(url, possibly `matbot://…`) split, at which point the `image-url` / `file-ref` arms are reconsidered
-together. Nothing produces those arms today.
+### Session media — the push path
+
+What a *person* attached. Bytes arrive **by value at the submission boundary** and are gone from the
+message before it is enqueued: `open()` writes each inline arm through `MediaStore` and replaces it with
+a `file-ref`. **What persists is always a reference** — the one absolute rule, with no exception to
+police, because the alternative is measurable: `store.set` runs at turn start *and* at every turn end,
+two whole-document writes plus a read, so a 5MB image is ~6.7MB of base64 riding every one of them for
+the rest of the session.
+
+By-value is a *boundary form*, not a wire format. It exists because Telegram has no upload-in-advance
+leg and cannot have one — bytes arrive WITH the message. Doing it in `open()` means one place, and every
+frontend inherits it; the web composer posts inline base64 in the submit body for the same reason, which
+also dodges the pre-session draft-key problem (the client creates its session lazily on first send).
+
+**`MediaStore` is an alias of `FileStore`**, registered under its own `MatbotServices` key. `FileMetaData`
+already carries `sessionId`/`messageId`/`namespace`/`allowed` and `FileFilter` already filters on
+`sessionId`, so session-scoped lifetime, per-message attribution and a servable flag are in the shape
+already — which means every existing implementation (filesystem, SQLite, OPFS, Drive) is a candidate
+media store *unchanged*, and media on one medium with sessions on another is a **registration, not a
+port**. Two implementations of one interface get an alias, never an invented role name. A bespoke
+`MediaResolver` was considered and rejected: it bought nothing the alias didn't, and left something to
+implement.
+
+Both hosts seed their own file area as the boot default, so attachments work out of the box; the seed
+goes in the *registry* rather than on `baseServices`, because `unifyServices` resolves an own property
+first and a member spelled there is one `register()` could never reach. Unregistering reverts to that
+default rather than turning media off.
+
+**Residency is a byte budget** (`MEDIA_RESIDENCY_BYTES`, 8MB), walked newest-first, computed **once per
+turn**. Beyond it a `file-ref` is left alone and the converters degrade it to `[Attached file: x]` —
+honest, already written, and the file is still fetchable. A byte budget rather than a turn count because
+the cost is denominated in bytes: three turns is a fine window for a thumbnail and a ruinous one for a
+40MB PDF, and a count cannot tell them apart. Recomputing per *round* would let a message fall out of the
+window between two provider calls, busting the prompt cache and leaving the model referring to something
+no longer there.
+
+**Refuse at the boundary, naming the file** (`MediaRejectedError`, with `reason`). The alternative is a
+provider 400 part-way through a turn the user already believes was sent, with no way back. Nothing is
+enqueued on a refusal, so there is nothing to unwind. Caps: 20MB/file, 50MB/session — the session total
+**derived** by summing what the store holds, never a counter, which is wrong after a restart, a swap, or
+anything deleting a file behind it.
+
+**`UserContent` is a narrow subset of `MessageContent`, deliberately.** A submission crosses a wire
+boundary; widening it to the full union would let a client post a forged `tool-result`, `thinking` block
+or `marker` straight into persisted history. The web server validates against a **whitelist** of the
+arms, so an arm a later plugin-api adds is rejected rather than admitted by omission.
+
+**Referential integrity is the storage backend's job.** Whether bytes physically live inline in the
+session document or in a blob store is the `MediaStore` implementation's business and must not leak above
+the door — which is why a text-only `StorageBackend` implements *nothing*, and `cut`/`fork`/`split`/
+`compact` keep working: they move whole messages. Likewise, serving media over HTTP applies **no gate the
+route invents**: `allowed` is a flag the store persists and the producer opts into per put, and area
+routing is the backend's via `FilePartition`. Access control belongs to the layer implementing storage,
+not the layer exposing it — a UI can lie about a principal.
+
+Known-benign: a semantic back-reference ("that image I uploaded") cannot survive a `split` or a
+`compact` that leaves the media on the far side. "I can't see any uploaded image" is the *correct* answer
+there and is visible to the user. Structural integrity — bytes travelling with their message — is a
+separate thing and is preserved.
+
+Still open: sweep-on-session-delete has no contract, because `session_action` has no `delete` action to
+hang one on. No leak today (media is `sessionId`-scoped and therefore enumerable); define it when a
+delete exists.
 
 ---
 

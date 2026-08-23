@@ -30,6 +30,20 @@ export interface FileFilter {
   createdBefore?: ISODate;
 }
 
+/**
+ * Where user-supplied session media lives — the bytes a person attached to a message, resolved back
+ * onto the wire by the runner for as long as they stay inside the residency budget.
+ *
+ * Deliberately an ALIAS of {@link FileStore} rather than an interface of its own: `FileMetaData`
+ * already carries `sessionId`/`messageId`/`namespace`/`allowed` and `FileFilter` already filters on
+ * `sessionId`, so session-scoped lifetime, per-message attribution and a servable flag are in the
+ * shape already. The consequence is the point — every existing FileStore (filesystem, SQLite, OPFS,
+ * Drive) is a candidate media store unchanged, so putting media on one medium and everything else on
+ * another is a *registration*, not a port. Two implementations of one interface get an alias, never an
+ * invented role name (cf. `SessionStore`).
+ */
+export type MediaStore = FileStore;
+
 export interface FileStore {
   /** Store a file. When `name` is provided, upserts by (name + namespace); otherwise always creates a new entry. */
   put(
