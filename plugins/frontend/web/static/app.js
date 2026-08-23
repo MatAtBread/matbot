@@ -3578,6 +3578,26 @@ if (inputAreaEl) {
   });
 }
 
+// The cog reveals #input-meta — the provider select and the steering toggle — as a panel above the
+// composer on narrow screens. It is the SAME element the desktop meta row shows inline, restyled by the
+// breakpoint, so there is one #provider-select and one #mode-interrupt however the composer is laid out
+// and nothing here has to know which layout is in force.
+const composerCog = document.getElementById('composer-cog');
+if (composerCog && inputAreaEl) {
+  const closeOptions = () => inputAreaEl.classList.remove('settings-open');
+  composerCog.onclick = (e) => {
+    e.stopPropagation();
+    inputAreaEl.classList.toggle('settings-open');
+  };
+  // Dismiss the way a sheet should: anywhere outside it, or Escape. Tapping the textarea to resume
+  // typing is an outside click, which is the common exit and needs no button of its own.
+  document.addEventListener('click', (e) => {
+    if (!inputAreaEl.classList.contains('settings-open')) return;
+    if (!document.getElementById('input-meta')?.contains(e.target)) closeOptions();
+  });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeOptions(); });
+}
+
 inputEl.addEventListener('paste', (e) => {
   // Only intercept when the clipboard actually carries files. Pasting text that happens to arrive
   // alongside an image flavour must still paste as text, so the default is left alone otherwise.

@@ -115,6 +115,28 @@ churn and less likely to affect a consumer who doesn't use them.
 
 #### frontend-web
 
+- **The mobile composer gives the textarea a row of its own.** It had only ever got narrower: at 390px,
+  three round buttons and their gaps took 141px of a 374px line, leaving room for ~29 characters — and
+  only two of those buttons were legal touch targets, the paperclip being 34px against a 44px minimum
+  while costing 40px of the line. Below 640px the controls now sit on their own row as four equal-width
+  labelled pills (Options / Attach / Stop / Send), and the textarea takes the full 374px, ~50 characters.
+  Wide beats tall for mis-taps — ~90px of separation instead of 6px — and the width is what buys room for
+  a word, which is a far stronger anti-misfire device than a 15px glyph. The extra ~28px of chrome is
+  repaid the moment a message wraps twice, which at 29 characters a line it did constantly.
+
+  Send owns the bottom-right corner and keeps it whether or not a turn is running (Stop's slot stays
+  reserved, so Send's position is fixed to the pixel): the corner a thumb lands on must not change
+  meaning. Provider and the queue/interrupt toggle — set rarely, and both unhittable at their inline size
+  — move behind the Options cog into a panel above the composer, where they render full-size.
+
+  `#input-row` is a **grid**, and the breakpoint changes only its template: no element moves between
+  parents, so the read-only state, the drag target and every handler keep working, and DOM order is free
+  to differ from visual order. The panel is the same `#input-meta` element the desktop shows inline,
+  restyled in place rather than duplicated — there is still exactly one `#provider-select`.
+
+- **Desktop puts attach after the textarea**, at the same 45px as Send and Stop rather than a smaller 32px
+  circle; outlined rather than filled is what marks it the secondary control. The meta row is denser.
+
 - **Composer attachments** — a paperclip button, drag-and-drop onto the composer, and paste (for a
   screenshot that exists nowhere else). Attachments render as removable chips with a thumbnail, post by
   value inside the submit body, and are **restored to the composer if the submission is refused** rather
