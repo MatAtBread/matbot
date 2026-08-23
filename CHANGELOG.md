@@ -9,9 +9,25 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
-## Unreleased
+## 0.4.8
+
+### Breaking changes
+
+- **`createAboutMatbotTool(version)` is now `createAboutMatbotTool(version, services)`.** The tool reports
+  the system prompt in force, so it needs the live machine to rebuild it — the same second argument
+  `createSingleTurnTool` already takes. `SystemContextRegistry` gains a required `parts(ctx)` with it,
+  which breaks a host that hand-rolls that registry instead of constructing core's
+  `SystemContextRegistryImpl` (nothing in this repo does).
 
 ### API gaps filled
+
+- **`SystemContextRegistry.parts(ctx)` — the system prompt, attributed.** The prompt is assembled once per
+  submit and never persisted, so there was no route to it from a tool and no way to say WHICH plugin put a
+  line in it. `parts()` returns each contribution with the name of the plugin that registered it, and
+  `build()` now derives from it — one traversal, so the text sent and the breakdown reported cannot drift.
+  `about_matbot` carries both: `systemPrompt` (exactly what the turn received) and `systemContext` (the
+  same content, per contributor), which is how "what are your instructions?" and "why do you keep doing
+  that?" get an answer that names the thing to change.
 
 - **User-supplied session media.** A person can attach an image, PDF or audio clip to a message and the
   model sees it. The mirror of the existing `model-content` pull path, and it needed no new
@@ -75,125 +91,6 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Optional
 
-#### single_turn
-
-- **`attach?: string[]`** — name stored files (by store id or by name, looked up across the `MediaStore`
-  and the turn's own file store) to send alongside the prompt as inline media. A file the store does not
-  have is reported, not silently dropped: a consulted model answering about something it never saw
-  produces a confidently wrong answer.
-
-#### workspace
-
-- **`workspace_action show` — the model can look at a stored image, PDF or audio clip.** matbot's first
-  real producer of the `model-content` pull path, which until now was built, tested against a fake tool,
-  and emitted by nothing: the *push* half (a person attaches something) worked, while the model asking to
-  see a file it already knows about had no route at all. Asked to examine a workspace PNG, a model would
-  correctly reason that it needed the bytes inline, find no tool that could do it, and fall back to
-  `bash` — curling the file back off matbot's own HTTP port, sniffing the PNG header, reaching for PIL.
-  `show` streams the file, hands it over as the matching inline arm, and returns **metadata only**
-  (`{ name, mimeType, bytes }`), so the transcript records that a file was shown and never the bytes it
-  showed.
-
-  `read` could not have been extended to do this and the description could not have papered over it: a
-  `read` result is a **string**, so base64 there is 4/3 of the file *persisted into the session document*
-  and re-sent on every later round, for something the model still cannot see. That trap was previously
-  advertised (*"use encoding 'base64' for binary files (images, PDFs, zips)"*) with nothing to say it was
-  not vision; `base64` is now documented as the way to **move** bytes, and the description points at
-  `show` for looking at them.
-
-  Refusals name the type and point somewhere useful. SVG is the one exclusion inside `image/*` — it is
-  XML, no vision endpoint decodes it, and `read` gives you the source, which is the better answer anyway;
-  text goes the same way, and an unknown type is refused rather than guessed into a `document` arm a
-  provider would 400 on. One file may be up to **8MB**, refused on the handle's declared size before any
-  read: shown media rides the outgoing copy for the rest of the turn, so it is paid for once per *round*,
-  not once. Same number as `MEDIA_RESIDENCY_BYTES` because it is the same question — how many bytes may
-  ride the outgoing copy — and, like that one, a first guess.
-
-- **`workspace_action write` returns the `fileId` it minted**, alongside `name` and `bytes`. A caller that
-  had just uploaded could previously only address the file by guessing its name back, which is not the
-  same question once a backend partitions or renames.
-
-#### frontend-web
-
-- **The mobile composer gives the textarea a row of its own.** It had only ever got narrower: at 390px,
-  three round buttons and their gaps took 141px of a 374px line, leaving room for ~29 characters — and
-  only two of those buttons were legal touch targets, the paperclip being 34px against a 44px minimum
-  while costing 40px of the line. Below 640px the controls now sit on their own row as four equal-width
-  labelled pills (Options / Attach / Stop / Send), and the textarea takes the full 374px, ~50 characters.
-  Wide beats tall for mis-taps — ~90px of separation instead of 6px — and the width is what buys room for
-  a word, which is a far stronger anti-misfire device than a 15px glyph. The extra ~28px of chrome is
-  repaid the moment a message wraps twice, which at 29 characters a line it did constantly.
-
-  Send owns the bottom-right corner and keeps it whether or not a turn is running (Stop's slot stays
-  reserved, so Send's position is fixed to the pixel): the corner a thumb lands on must not change
-  meaning. Provider and the queue/interrupt toggle — set rarely, and both unhittable at their inline size
-  — move behind the Options cog into a panel above the composer, where they render full-size.
-
-  `#input-row` is a **grid**, and the breakpoint changes only its template: no element moves between
-  parents, so the read-only state, the drag target and every handler keep working, and DOM order is free
-  to differ from visual order. The panel is the same `#input-meta` element the desktop shows inline,
-  restyled in place rather than duplicated — there is still exactly one `#provider-select`.
-
-- **Desktop puts attach after the textarea**, at the same 45px as Send and Stop rather than a smaller 32px
-  circle; outlined rather than filled is what marks it the secondary control. The meta row is denser.
-
-- **Composer attachments** — a paperclip button, drag-and-drop onto the composer, and paste (for a
-  screenshot that exists nowhere else). Attachments render as removable chips with a thumbnail, post by
-  value inside the submit body, and are **restored to the composer if the submission is refused** rather
-  than lost. Client-side caps mirror the server's so the common mistake is caught before the round trip.
-- **Media renders in the message thread** — inline in the user bubble, live and on reload, via a new
-  `GET /media/<fileId>`. That route is id-addressed rather than name-addressed (a store id is not
-  guessable the way `workspace/notes.md` is) and applies **no gate of its own**: `allowed` is the store's
-  own persisted flag and area routing is the backend's, because access control belongs to the layer
-  implementing storage, not the layer exposing it.
-- `POST /sessions/:id/submit` reads a larger body (64MB) since it may carry attachments; every other route
-  keeps the 1MB default. A refused attachment maps to 413/501/400 with the reason and the filename, not a
-  bare 500, and the client's submit timeout now scales with the payload instead of a flat 20s.
-- **No Web Crypto in the served client.** `crypto.randomUUID` needs a secure context, so it is undefined
-  over plain HTTP to anything but localhost — which is how a LAN or test deployment is normally reached.
-  The web-bundle loader shims it, but that loader runs only in browser-bundle mode; in server-backed mode
-  `app.js` is served bare. The composer no longer mints an id it never read.
-
-#### frontend-telegram
-
-- **Photos, documents, audio, voice notes and video are now received** and sent to the model — the case
-  that proves the by-value boundary, since bytes arrive WITH the message and no upload-in-advance leg
-  exists or can exist. A photo's largest rendition is used (a thumbnail is what makes vision look bad),
-  and `caption` is read as the message's prose — previously a photo-with-a-question was dropped entirely,
-  because the dispatch loop gated on `text`.
-
-#### function-tools
-
-- **The lambda guidance names its own pathological case.** 0.4.8's nudge over-corrected: told when a lambda
-  pays, the model began wrapping almost every tool call in one — the same result reaching the conversation
-  either way, for a types call and an authoring round more. Both texts had stated the exclusion as a cost
-  rather than a rule, which is easy to rationalise past. The test is now one question — are you REDUCING a
-  result? — and the exclusion is a prohibition: a lambda whose body is one `await tool.x(params)` and a
-  `return` of what came back is strictly worse than the call it wraps. The tool description gains a
-  `NOT FOR THIS` block and a worked anti-example.
-
-## 0.4.8
-
-### Breaking changes
-
-- **`createAboutMatbotTool(version)` is now `createAboutMatbotTool(version, services)`.** The tool reports
-  the system prompt in force, so it needs the live machine to rebuild it — the same second argument
-  `createSingleTurnTool` already takes. `SystemContextRegistry` gains a required `parts(ctx)` with it,
-  which breaks a host that hand-rolls that registry instead of constructing core's
-  `SystemContextRegistryImpl` (nothing in this repo does).
-
-### API gaps filled
-
-- **`SystemContextRegistry.parts(ctx)` — the system prompt, attributed.** The prompt is assembled once per
-  submit and never persisted, so there was no route to it from a tool and no way to say WHICH plugin put a
-  line in it. `parts()` returns each contribution with the name of the plugin that registered it, and
-  `build()` now derives from it — one traversal, so the text sent and the breakdown reported cannot drift.
-  `about_matbot` carries both: `systemPrompt` (exactly what the turn received) and `systemContext` (the
-  same content, per contributor), which is how "what are your instructions?" and "why do you keep doing
-  that?" get an answer that names the thing to change.
-
-### Optional
-
 #### background
 
 - **`at` — run a prompt once, at a stated time.** Previously a job ran now or repeated forever, so an
@@ -252,6 +149,45 @@ churn and less likely to affect a consumer who doesn't use them.
   context with no provider to fall back on — and pulses the divider line while the call is in flight,
   because the popup closes and this is the only action on that toolbar that takes seconds.
 
+- **The mobile composer gives the textarea a row of its own.** It had only ever got narrower: at 390px,
+  three round buttons and their gaps took 141px of a 374px line, leaving room for ~29 characters — and
+  only two of those buttons were legal touch targets, the paperclip being 34px against a 44px minimum
+  while costing 40px of the line. Below 640px the controls now sit on their own row as four equal-width
+  labelled pills (Options / Attach / Stop / Send), and the textarea takes the full 374px, ~50 characters.
+  Wide beats tall for mis-taps — ~90px of separation instead of 6px — and the width is what buys room for
+  a word, which is a far stronger anti-misfire device than a 15px glyph. The extra ~28px of chrome is
+  repaid the moment a message wraps twice, which at 29 characters a line it did constantly.
+
+  Send owns the bottom-right corner and keeps it whether or not a turn is running (Stop's slot stays
+  reserved, so Send's position is fixed to the pixel): the corner a thumb lands on must not change
+  meaning. Provider and the queue/interrupt toggle — set rarely, and both unhittable at their inline size
+  — move behind the Options cog into a panel above the composer, where they render full-size.
+
+  `#input-row` is a **grid**, and the breakpoint changes only its template: no element moves between
+  parents, so the read-only state, the drag target and every handler keep working, and DOM order is free
+  to differ from visual order. The panel is the same `#input-meta` element the desktop shows inline,
+  restyled in place rather than duplicated — there is still exactly one `#provider-select`.
+
+- **Desktop puts attach after the textarea**, at the same 45px as Send and Stop rather than a smaller 32px
+  circle; outlined rather than filled is what marks it the secondary control. The meta row is denser.
+
+- **Composer attachments** — a paperclip button, drag-and-drop onto the composer, and paste (for a
+  screenshot that exists nowhere else). Attachments render as removable chips with a thumbnail, post by
+  value inside the submit body, and are **restored to the composer if the submission is refused** rather
+  than lost. Client-side caps mirror the server's so the common mistake is caught before the round trip.
+- **Media renders in the message thread** — inline in the user bubble, live and on reload, via a new
+  `GET /media/<fileId>`. That route is id-addressed rather than name-addressed (a store id is not
+  guessable the way `workspace/notes.md` is) and applies **no gate of its own**: `allowed` is the store's
+  own persisted flag and area routing is the backend's, because access control belongs to the layer
+  implementing storage, not the layer exposing it.
+- `POST /sessions/:id/submit` reads a larger body (64MB) since it may carry attachments; every other route
+  keeps the 1MB default. A refused attachment maps to 413/501/400 with the reason and the filename, not a
+  bare 500, and the client's submit timeout now scales with the payload instead of a flat 20s.
+- **No Web Crypto in the served client.** `crypto.randomUUID` needs a secure context, so it is undefined
+  over plain HTTP to anything but localhost — which is how a LAN or test deployment is normally reached.
+  The web-bundle loader shims it, but that loader runs only in browser-bundle mode; in server-backed mode
+  `app.js` is served bare. The composer no longer mints an id it never read.
+
 #### function-tools
 
 - **`tool_function` now recommends itself in the system prompt.** A model that never considers the tool
@@ -262,6 +198,60 @@ churn and less likely to affect a consumer who doesn't use them.
   work rather than the number of calls — a verbose result you need a fraction of, or a loop or conditional
   — and both say what a lambda costs, since fetching the types and authoring the body is itself a call or
   two. It appears only when the plugin is loaded, which is why it cannot live anywhere else.
+
+- **…and then names its own pathological case.** The nudge above over-corrected: told when a lambda
+  pays, the model began wrapping almost every tool call in one — the same result reaching the conversation
+  either way, for a types call and an authoring round more. Both texts had stated the exclusion as a cost
+  rather than a rule, which is easy to rationalise past. The test is now one question — are you REDUCING a
+  result? — and the exclusion is a prohibition: a lambda whose body is one `await tool.x(params)` and a
+  `return` of what came back is strictly worse than the call it wraps. The tool description gains a
+  `NOT FOR THIS` block and a worked anti-example.
+
+#### single_turn
+
+- **`attach?: string[]`** — name stored files (by store id or by name, looked up across the `MediaStore`
+  and the turn's own file store) to send alongside the prompt as inline media. A file the store does not
+  have is reported, not silently dropped: a consulted model answering about something it never saw
+  produces a confidently wrong answer.
+
+#### workspace
+
+- **`workspace_action show` — the model can look at a stored image, PDF or audio clip.** matbot's first
+  real producer of the `model-content` pull path, which until now was built, tested against a fake tool,
+  and emitted by nothing: the *push* half (a person attaches something) worked, while the model asking to
+  see a file it already knows about had no route at all. Asked to examine a workspace PNG, a model would
+  correctly reason that it needed the bytes inline, find no tool that could do it, and fall back to
+  `bash` — curling the file back off matbot's own HTTP port, sniffing the PNG header, reaching for PIL.
+  `show` streams the file, hands it over as the matching inline arm, and returns **metadata only**
+  (`{ name, mimeType, bytes }`), so the transcript records that a file was shown and never the bytes it
+  showed.
+
+  `read` could not have been extended to do this and the description could not have papered over it: a
+  `read` result is a **string**, so base64 there is 4/3 of the file *persisted into the session document*
+  and re-sent on every later round, for something the model still cannot see. That trap was previously
+  advertised (*"use encoding 'base64' for binary files (images, PDFs, zips)"*) with nothing to say it was
+  not vision; `base64` is now documented as the way to **move** bytes, and the description points at
+  `show` for looking at them.
+
+  Refusals name the type and point somewhere useful. SVG is the one exclusion inside `image/*` — it is
+  XML, no vision endpoint decodes it, and `read` gives you the source, which is the better answer anyway;
+  text goes the same way, and an unknown type is refused rather than guessed into a `document` arm a
+  provider would 400 on. One file may be up to **8MB**, refused on the handle's declared size before any
+  read: shown media rides the outgoing copy for the rest of the turn, so it is paid for once per *round*,
+  not once. Same number as `MEDIA_RESIDENCY_BYTES` because it is the same question — how many bytes may
+  ride the outgoing copy — and, like that one, a first guess.
+
+- **`workspace_action write` returns the `fileId` it minted**, alongside `name` and `bytes`. A caller that
+  had just uploaded could previously only address the file by guessing its name back, which is not the
+  same question once a backend partitions or renames.
+
+#### frontend-telegram
+
+- **Photos, documents, audio, voice notes and video are now received** and sent to the model — the case
+  that proves the by-value boundary, since bytes arrive WITH the message and no upload-in-advance leg
+  exists or can exist. A photo's largest rendition is used (a thumbnail is what makes vision look bad),
+  and `caption` is read as the message's prose — previously a photo-with-a-question was dropped entirely,
+  because the dispatch loop gated on `text`.
 
 ## 0.4.7
 
