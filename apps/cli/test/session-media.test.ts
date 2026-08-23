@@ -112,10 +112,13 @@ async function submit(
 const image = (data: string, name: string): UserContent =>
   ({ type: 'image', data, mimeType: 'image/png' as MimeType, name });
 
-// Chunked, because String.fromCharCode(...bytes) blows the argument limit around a megabyte — the same
-// hazard the encoder under test chunks around.
-function b64zeros(byteLength: number): string {
+// A PNG of the requested size: a real 8-byte signature then padding. The signature matters — ingestion
+// magic-byte-checks a declared image/png, so a buffer of zeros is (correctly) refused as not-a-PNG, and
+// a size test would then pass for the wrong reason. Chunked, because String.fromCharCode(...bytes) blows
+// the argument limit around a megabyte — the same hazard the encoder under test chunks around.
+function b64png(byteLength: number): string {
   const bytes = new Uint8Array(byteLength);
+  bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
   let bin = '';
   for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
   return btoa(bin);
@@ -176,7 +179,7 @@ test('media resolves newest-first, and what does not fit degrades to its ref', {
   const media   = memMediaStore();
 
   // Three turns, each attaching ~4MB — two fit the 8MB budget, the oldest does not.
-  const big = b64zeros(4 * 1024 * 1024);
+  const big = b64png(4 * 1024 * 1024);
   const seen: Message[][] = [];
   for (const n of ['first', 'second', 'third']) {
     await submit(store, capturingProvider(seen), media, session.id,
@@ -201,7 +204,7 @@ test('an oversized attachment is refused at the boundary, naming the file', { ti
   const session = createSession();
   const store   = memStore(session);
   const media   = memMediaStore();
-  const huge    = b64zeros(MAX_MEDIA_BYTES_PER_FILE + 1024);
+  const huge    = b64png(MAX_MEDIA_BYTES_PER_FILE + 1024);
 
   await assert.rejects(
     () => submit(store, capturingProvider([]), media, session.id, [image(huge, 'enormous.png')]),
@@ -216,6 +219,42 @@ test('an oversized attachment is refused at the boundary, naming the file', { ti
 
   assert.equal(media.held.size, 0, 'nothing was written');
   assert.equal((await store.get(session.id))!.messages.length, 0, 'and no turn was enqueued to unwind');
+});
+
+test('a file that is not the type it claims is refused before it can poison the session', { timeout: 20000 }, async () => {
+  const session = createSession();
+  const store   = memStore(session);
+  const media   = memMediaStore();
+
+  // The case that actually bit in testing: a 69-byte placeholder named .pdf. It sails past the size and
+  // quota checks, reaches Anthropic, and 400s — mid-turn, after the message is persisted. The `file-ref`
+  // is then in history, resolves into EVERY subsequent outgoing copy, and fails the session for good.
+  const notReallyAPdf = btoa('%PFD-1.4 this is not a pdf');
+  await assert.rejects(
+    () => submit(store, capturingProvider([]), media, session.id,
+      [{ type: 'document', data: notReallyAPdf, mimeType: 'application/pdf' as MimeType, name: 'note.pdf' }]),
+    (e: unknown) => {
+      assert.ok(isMediaRejectedError(e));
+      assert.equal(e.reason, 'unreadable');
+      assert.equal(e.file, 'note.pdf');
+      return true;
+    },
+  );
+  assert.equal(media.held.size, 0, 'nothing was stored, so nothing can be resolved later');
+  assert.equal((await store.get(session.id))!.messages.length, 0, 'and no turn was enqueued');
+});
+
+test('a real file passes, and an unsniffable type is not guessed at', { timeout: 20000 }, async () => {
+  const session = createSession();
+  const store   = memStore(session);
+  const media   = memMediaStore();
+
+  // A genuine PNG header, and a text file — whose bytes we know nothing about and must NOT refuse.
+  await submit(store, capturingProvider([]), media, session.id, [
+    image(PNG, 'real.png'),
+    { type: 'document', data: btoa('id,name\n1,ada\n'), mimeType: 'text/csv' as MimeType, name: 'rows.csv' },
+  ]);
+  assert.equal(media.held.size, 2, 'both accepted — the check refuses only what it KNOWS is wrong');
 });
 
 test('with no MediaStore, text is unaffected and an attachment says why', { timeout: 15000 }, async () => {

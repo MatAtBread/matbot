@@ -1,7 +1,9 @@
-// Insecure-context Web Crypto shims (crypto.randomUUID / crypto.subtle.digest, for plain-HTTP local
-// hosting) live in the web-bundle loader (apps/web-bundle/src/loader.js), which runs before any module
-// — including this frontend — so they're already in place by the time anything here runs. In
-// server-backed mode the runtime executes in Node, where Web Crypto is always available.
+// NO Web Crypto in this file. `crypto.randomUUID` and `crypto.subtle` require a SECURE CONTEXT, so they
+// are undefined over plain HTTP to anything but localhost — which is how a test or LAN deployment is
+// normally reached. The web-bundle loader (apps/web-bundle/src/loader.js) shims them, but that loader
+// runs only in browser-bundle mode; in server-backed mode this file is served bare and there is no shim.
+// "The runtime is Node, where Web Crypto is always available" is true of the RUNTIME and says nothing
+// about this page. Need an identity here? Use object identity, an index, or a server-minted id.
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
@@ -2835,7 +2837,7 @@ async function connectSessionStream(sid) {
 const MAX_ATTACH_BYTES  = 20 * 1024 * 1024;
 const MAX_SESSION_BYTES = 50 * 1024 * 1024;
 
-/** @type {{ id: string, name: string, mimeType: string, data: string, size: number, url: string }[]} */
+/** @type {{ name: string, mimeType: string, data: string, size: number, url: string }[]} */
 let attachments = [];
 
 const attachmentsEl = document.getElementById('attachments');
@@ -2918,7 +2920,6 @@ async function addAttachments(fileList) {
     let bin = '';
     for (let i = 0; i < bytes.length; i += CHUNK) bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
     attachments.push({
-      id:       crypto.randomUUID(),
       name:     file.name,
       // A file the OS could not type would be posted with an empty mimeType, which no converter can
       // route; call it a generic binary and let the provider degrade it to a text note.

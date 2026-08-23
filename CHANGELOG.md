@@ -33,7 +33,12 @@ churn and less likely to affect a consumer who doesn't use them.
 
 - **`MediaRejectedError`** (`mediaRejectedError` / `isMediaRejectedError`), branded like the other typed
   errors. Carries `reason` (`no-store` / `too-large` / `session-quota` / `unreadable`) and the offending
-  `file`. Refusing at the boundary is the point: the alternative is a provider 400 part-way through a turn
+  `file`. `unreadable` covers both bad base64 and a **magic-byte mismatch** — a file whose bytes are not
+  the type it claims. That check exists because the consequence is worse than one failed message: the
+  provider decodes the file itself and 400s mid-turn, by which point the `file-ref` is in history and
+  resolves into every *subsequent* outgoing copy, failing the session for good. It is not a validity
+  check — a well-formed header on a structurally broken document still passes, since only the provider
+  can know that. Refusing at the boundary is the point: the alternative is a provider 400 part-way through a turn
   the user already believes was sent. Caps are 20MB per file and 50MB per session, the session total
   derived by summing what the store holds rather than counted.
 
@@ -79,6 +84,10 @@ churn and less likely to affect a consumer who doesn't use them.
 - `POST /sessions/:id/submit` reads a larger body (64MB) since it may carry attachments; every other route
   keeps the 1MB default. A refused attachment maps to 413/501/400 with the reason and the filename, not a
   bare 500, and the client's submit timeout now scales with the payload instead of a flat 20s.
+- **No Web Crypto in the served client.** `crypto.randomUUID` needs a secure context, so it is undefined
+  over plain HTTP to anything but localhost — which is how a LAN or test deployment is normally reached.
+  The web-bundle loader shims it, but that loader runs only in browser-bundle mode; in server-backed mode
+  `app.js` is served bare. The composer no longer mints an id it never read.
 
 #### frontend-telegram
 

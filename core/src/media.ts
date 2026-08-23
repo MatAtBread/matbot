@@ -44,6 +44,41 @@ function armFor(mimeType: string): 'image' | 'audio' | 'document' {
   return 'document';
 }
 
+/**
+ * Leading bytes that unambiguously identify a format. Only the types where a mismatch is a GUARANTEED
+ * provider rejection — a model endpoint decodes these itself and 400s on anything it cannot parse.
+ * Nothing else is sniffed: for `text/*`, audio, or an octet-stream we genuinely do not know, and
+ * guessing would refuse valid files.
+ */
+const MAGIC: ReadonlyArray<{ mime: string; at: number; sig: readonly number[] }> = [
+  { mime: 'image/png',  at: 0, sig: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] },
+  { mime: 'image/jpeg', at: 0, sig: [0xff, 0xd8, 0xff] },
+  { mime: 'image/gif',  at: 0, sig: [0x47, 0x49, 0x46, 0x38] },                        // "GIF8"
+  { mime: 'image/webp', at: 0, sig: [0x52, 0x49, 0x46, 0x46] },                        // "RIFF" (…WEBP at 8)
+  { mime: 'image/webp', at: 8, sig: [0x57, 0x45, 0x42, 0x50] },                        // "WEBP"
+  { mime: 'application/pdf', at: 0, sig: [0x25, 0x50, 0x44, 0x46] },                   // "%PDF"
+];
+
+/**
+ * Does this file's content match the type it claims? Returns false only when we KNOW it does not.
+ *
+ * This is the boundary doing the one check it can: a provider decodes these formats itself and 400s
+ * on anything it cannot parse, and a 400 arrives mid-turn — after the message is persisted, with the
+ * `file-ref` now in history where it resolves into EVERY subsequent outgoing copy and fails the
+ * session for good. A renamed file, a truncated upload or a placeholder is caught here instead, while
+ * refusing still costs the user nothing but re-picking the file.
+ *
+ * It is not a validity check: a well-formed header on a structurally broken document still passes,
+ * because only the provider can know that.
+ */
+function contentMatchesType(bytes: Uint8Array, mimeType: string): boolean {
+  const base = mimeType.split(';')[0]!.trim().toLowerCase();
+  const rules = MAGIC.filter(m => m.mime === base);
+  if (rules.length === 0) return true;                       // nothing known about this type — don't guess
+  return rules.every(r =>
+    bytes.length >= r.at + r.sig.length && r.sig.every((b, i) => bytes[r.at + i] === b));
+}
+
 function decodeBase64(data: string): Uint8Array {
   return Uint8Array.from(atob(data), ch => ch.charCodeAt(0));
 }
@@ -111,6 +146,11 @@ export async function ingestMedia(
     try { bytes = decodeBase64(arm.data); }
     catch { throw mediaRejectedError('unreadable', `"${name}" is not valid base64 and could not be read.`, name); }
 
+    if (!contentMatchesType(bytes, arm.mimeType)) {
+      throw mediaRejectedError('unreadable',
+        `"${name}" does not contain valid ${arm.mimeType} data — the file may be corrupt, truncated, or ` +
+        `misnamed. Sending it would fail the whole conversation, not just this message.`, name);
+    }
     if (bytes.byteLength > MAX_MEDIA_BYTES_PER_FILE) {
       throw mediaRejectedError('too-large',
         `"${name}" is ${humanBytes(bytes.byteLength)}, over the ${humanBytes(MAX_MEDIA_BYTES_PER_FILE)} per-file limit.`, name);

@@ -140,7 +140,8 @@ export interface MediaRejectedError extends Error {
   matbot: 'MediaRejected';
   /** `no-store` — nothing is registered under `MediaStore`, so there is nowhere to put the bytes.
    *  `too-large` — one file exceeds the per-file cap. `session-quota` — this session's stored media
-   *  would exceed its total. `unreadable` — the bytes were malformed (bad base64). */
+   *  would exceed its total. `unreadable` — the bytes were malformed: not valid base64, or not the file
+   *  type they claim (a renamed, truncated or placeholder file, caught by a magic-byte check). */
   readonly reason: 'no-store' | 'too-large' | 'session-quota' | 'unreadable';
   /** The attachment's display name, when one file is to blame. */
   readonly file?:  string;

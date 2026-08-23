@@ -140,6 +140,7 @@ test('an oversized attachment is a 413 naming the file, not a 500', { timeout: 2
   const { web, session, base } = await serve(memMediaStore());
   try {
     const bytes = new Uint8Array(21 * 1024 * 1024);
+    bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);   // a real PNG signature: this must fail on SIZE, not type
     let bin = '';
     for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
     const res = await post(base, session.id, {
