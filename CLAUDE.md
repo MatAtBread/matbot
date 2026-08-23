@@ -575,7 +575,7 @@ Two paths, no overlap, distinguished by **who owns the bytes**:
 
 The runner therefore never guesses which store an id belongs to: it only ever resolves session media.
 A model referring to a *workspace* file transfers no ownership and needs no new mechanism — it calls a
-tool, which pulls (below).
+tool, which pulls (below): `workspace_action show`.
 
 ### Tool media — the pull path
 
@@ -588,6 +588,12 @@ visible to the model and never persisted.
 **Never persisted** — the transcript records what a tool *returned*, not the bytes it *showed*, so a
 session cannot accumulate base64 and no exit path has to remember to strip it. A later turn needing the
 bytes calls the tool again.
+
+This is also why a tool that has bytes cannot serve them through its *result* instead. A result is a
+value in the transcript, so base64 there is 4/3 of the file persisted **and** re-sent every later round,
+for something the model cannot see at all — the exact trap `workspace_action read` + `encoding: 'base64'`
+was, before `show` existed. A tool holding something the model should look at yields `model-content` and
+returns metadata; the two are not interchangeable, and a description cannot substitute for the event.
 
 **Rest-of-turn, not next-call-only** — withdrawing content the model has already seen breaks the prompt
 cache from that point and leaves it referring to something no longer there. The cost corollary is real:

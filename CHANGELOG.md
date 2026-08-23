@@ -84,6 +84,31 @@ churn and less likely to affect a consumer who doesn't use them.
 
 #### workspace
 
+- **`workspace_action show` — the model can look at a stored image, PDF or audio clip.** matbot's first
+  real producer of the `model-content` pull path, which until now was built, tested against a fake tool,
+  and emitted by nothing: the *push* half (a person attaches something) worked, while the model asking to
+  see a file it already knows about had no route at all. Asked to examine a workspace PNG, a model would
+  correctly reason that it needed the bytes inline, find no tool that could do it, and fall back to
+  `bash` — curling the file back off matbot's own HTTP port, sniffing the PNG header, reaching for PIL.
+  `show` streams the file, hands it over as the matching inline arm, and returns **metadata only**
+  (`{ name, mimeType, bytes }`), so the transcript records that a file was shown and never the bytes it
+  showed.
+
+  `read` could not have been extended to do this and the description could not have papered over it: a
+  `read` result is a **string**, so base64 there is 4/3 of the file *persisted into the session document*
+  and re-sent on every later round, for something the model still cannot see. That trap was previously
+  advertised (*"use encoding 'base64' for binary files (images, PDFs, zips)"*) with nothing to say it was
+  not vision; `base64` is now documented as the way to **move** bytes, and the description points at
+  `show` for looking at them.
+
+  Refusals name the type and point somewhere useful. SVG is the one exclusion inside `image/*` — it is
+  XML, no vision endpoint decodes it, and `read` gives you the source, which is the better answer anyway;
+  text goes the same way, and an unknown type is refused rather than guessed into a `document` arm a
+  provider would 400 on. One file may be up to **8MB**, refused on the handle's declared size before any
+  read: shown media rides the outgoing copy for the rest of the turn, so it is paid for once per *round*,
+  not once. Same number as `MEDIA_RESIDENCY_BYTES` because it is the same question — how many bytes may
+  ride the outgoing copy — and, like that one, a first guess.
+
 - **`workspace_action write` returns the `fileId` it minted**, alongside `name` and `bytes`. A caller that
   had just uploaded could previously only address the file by guessing its name back, which is not the
   same question once a backend partitions or renames.

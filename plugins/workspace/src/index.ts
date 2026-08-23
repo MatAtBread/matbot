@@ -1,4 +1,4 @@
-import type { Tool, ToolExecutor, ToolContext, ToolContract, ToolResultOf, MatbotPluginSpec, MatbotMachine } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolContext, ToolContract, ToolResultOf, MatbotPluginSpec, MatbotMachine, MimeType } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION, tryCurrentPrincipal, ItemChangeKind } from '@matatbread/matbot-plugin-api';
 
 // Set in setup(); announces this tool's own writes and deletes. A file store's `watch` may also see a
@@ -13,6 +13,7 @@ declare module '@matatbread/matbot-plugin-api' {
     // matching result narrowed by the `action` it passed (see ToolContract / the multi-action note on ToolContracts).
     workspace_action:
       | ToolContract<string,                                { action: 'read';   name: string; encoding?: 'utf8' | 'base64' }>              // file contents (utf8 or base64)
+      | ToolContract<{ name: string; mimeType: string; bytes: number }, { action: 'show'; name: string }>                                  // what was put in front of the model — metadata only; the bytes went to its eyes, not here
       | ToolContract<{ name: string; bytes: number; fileId: string }, { action: 'write'; name: string; content: string; encoding?: 'utf8' | 'base64' }>  // stored name, byte count and the store id it was minted under
       | ToolContract<Array<{ name: string; size: number }>, { action: 'list';   prefix?: string }>                                         // matching files
       | ToolContract<{ name: string },                      { action: 'delete'; name: string }>;                                          // the removed name
@@ -20,6 +21,35 @@ declare module '@matatbread/matbot-plugin-api' {
 }
 
 const WORKSPACE_NS = 'workspace';
+
+/**
+ * Ceiling on one `show`. Tool media rides the outgoing copy for the REST OF THE TURN — it is re-sent on
+ * every subsequent round — so the cost of showing something is paid once per round, not once. A refusal
+ * here is visible (the model is told, and can pick something smaller); the alternative is invisible and
+ * arrives as a bill.
+ *
+ * 8MB, the same number as `MEDIA_RESIDENCY_BYTES`, because it is the same question denominated the same
+ * way: how many bytes may ride the outgoing copy. Reusing it rather than inventing a second number is
+ * deliberate — and like that one, it is a first guess. One knob; measure before adding a second.
+ */
+const SHOW_MAX_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Which inline arm a stored file goes to the model as, or null if it must not go at all.
+ *
+ * SVG is the one exclusion inside `image/*`, and it is not an oversight: it is XML, no vision endpoint
+ * decodes it, and `read` already hands over its source — which is the more useful answer anyway. Text
+ * is refused for the same reason, pointing at `read`. Everything else unknown is refused rather than
+ * guessed into a `document` arm, because a format the endpoint cannot parse is a 400 mid-turn.
+ */
+function showArm(mimeType: string): 'image' | 'audio' | 'document' | null {
+  const base = mimeType.split(';')[0]!.trim().toLowerCase();
+  if (base === 'image/svg+xml')     return null;
+  if (base.startsWith('image/'))    return 'image';
+  if (base.startsWith('audio/'))    return 'audio';
+  if (base === 'application/pdf')   return 'document';
+  return null;
+}
 
 const MIME_MAP: Record<string, string> = {
   '.txt':  'text/plain; charset=utf-8',
@@ -90,6 +120,7 @@ async function collectStream(stream: AsyncIterable<Uint8Array>): Promise<Uint8Ar
 // the source of truth. The executor enforces it.
 type WorkspaceInput =
   | { action: 'read';   name: string; encoding?: 'utf8' | 'base64' }
+  | { action: 'show';   name: string }
   | { action: 'write';  name: string; content: string; encoding?: 'utf8' | 'base64' }
   | { action: 'list';   prefix?: string }
   | { action: 'delete'; name: string };
@@ -121,6 +152,60 @@ const workspaceExecutor: ToolExecutor<ToolResultOf<'workspace_action'>> = {
           type:  'result',
           value: encoding === 'base64' ? uint8ToBase64(bytes) : new TextDecoder().decode(bytes),
         };
+        return;
+      }
+
+      // The pull half of matbot's media model: the model asks to LOOK at a stored file, and the bytes go
+      // to its eyes rather than into the transcript. `read` cannot do this and never could — its result
+      // is a string, so base64 there is 4/3 of the file persisted into the session document and re-sent
+      // every round thereafter, for something the model still cannot see.
+      case 'show': {
+        const { name: inputName } = args as Extract<WorkspaceInput, { action: 'show' }>;
+        if (!inputName) { yield { type: 'error', message: 'action "show" requires "name".' }; return; }
+        const safe = safeName(inputName);
+        if (!safe) { yield { type: 'error', message: `Invalid name "${inputName}": it must name a file inside the workspace.` }; return; }
+
+        const handle = await ctx.files.getByName(safe, WORKSPACE_NS);
+        if (!handle) { yield { type: 'error', message: `File not found: "${safe}"` }; return; }
+
+        const arm = showArm(handle.mimeType);
+        if (arm === null) {
+          yield { type: 'error', message:
+            `"${safe}" is ${handle.mimeType}, which cannot be shown as an image, document or audio. ` +
+            `Use action "read" instead — for text, markup and SVG that is the better answer anyway, ` +
+            `since it gives you the source.` };
+          return;
+        }
+        // Refused BEFORE the read: the size is on the handle, so there is no reason to pull 40MB into
+        // memory to discover it was too big.
+        if (handle.size > SHOW_MAX_BYTES) {
+          yield { type: 'error', message:
+            `"${safe}" is ${(handle.size / (1024 * 1024)).toFixed(1)}MB, over the ` +
+            `${SHOW_MAX_BYTES / (1024 * 1024)}MB limit for one shown file. Shown media is re-sent on ` +
+            `every subsequent round of this turn, so a large file is expensive repeatedly. Show a ` +
+            `smaller version, or read it another way.` };
+          return;
+        }
+
+        let bytes: Uint8Array;
+        try {
+          bytes = await collectStream(handle.stream(ctx.signal));
+        } catch (e) {
+          yield { type: 'error', message: String(e) };
+          return;
+        }
+
+        // No magic-byte check here, unlike the submission boundary. There, a bad file persists as a
+        // `file-ref` and fails EVERY later turn; here the media is wire-only and turn-scoped, so a
+        // provider that rejects it costs this turn and nothing after it.
+        const data = uint8ToBase64(bytes);
+        yield { type: 'model-content', content: [arm === 'document'
+          ? { type: 'document', data, mimeType: handle.mimeType as MimeType, name: safe }
+          : { type: arm,        data, mimeType: handle.mimeType as MimeType }] };
+
+        // Metadata only. The transcript records that the file was shown, never the bytes it showed —
+        // which is what keeps a session from accumulating base64 as the model looks at things.
+        yield { type: 'result', value: { name: safe, mimeType: handle.mimeType, bytes: handle.size } };
         return;
       }
 
@@ -198,7 +283,7 @@ const workspaceExecutor: ToolExecutor<ToolResultOf<'workspace_action'>> = {
 const workspaceTool: Tool<ToolResultOf<'workspace_action'>> = {
   name: 'workspace_action',
   description:
-    'Read, write, list, and delete files in **matbot\'s cloud file storage** — the user\'s own files, kept ' +
+    'Read, show, write, list, and delete files in **matbot\'s cloud file storage** — the user\'s own files, kept ' +
     'in matbot\'s managed store (think a cloud drive, NOT the local disk), that the user has priority access ' +
     'to and direct visibility over (it backs the Workspace panel in the UI). PREFER this tool over shell/bash ' +
     'or any raw filesystem access whenever the user speaks of "a file", "the workspace", saving or reading ' +
@@ -213,17 +298,23 @@ const workspaceTool: Tool<ToolResultOf<'workspace_action'>> = {
     'names happen to share ("charts/data.csv"), which is why `list` always returns every matching file ' +
     'and its `prefix` selects by whole segments: "charts" matches "charts/data.csv", "char" matches ' +
     'nothing, and omitting it lists the whole workspace. Listed names are complete names, ready to pass ' +
-    'straight back as `name`.\n' +
-    "Use encoding 'base64' for binary files (images, PDFs, zips); 'utf8' (the default) for text.",
+    'straight back as `name`.\n\n' +
+    'TO LOOK AT AN IMAGE OR PDF STORED HERE, USE `show` — it puts the file in front of your own eyes, so ' +
+    'you can see a photo, a screenshot, a chart or a scanned page and answer questions about what is in ' +
+    'it. That is the ONLY way to see one: `read` returns text, so reading an image gives you base64 you ' +
+    'cannot look at, and there is no need to fetch, convert or copy the file anywhere first. `show` takes ' +
+    'images, PDFs and audio; for text, markup and SVG use `read`, which gives you the source.\n' +
+    "Use encoding 'base64' with read/write to MOVE binary bytes (copying a file, storing something you " +
+    "generated) — it is not a way to see a picture; 'utf8' (the default) is for text.",
   inputSchema: {
     type:       'object',
     required:   ['action'],
     properties: {
-      action:    { type: 'string', enum: ['read', 'write', 'list', 'delete'], description: 'The operation to perform.' },
-      name:      { type: 'string', description: 'read/write/delete only: the whole name of one file (e.g. "report.md", "charts/data.csv").' },
+      action:    { type: 'string', enum: ['read', 'show', 'write', 'list', 'delete'], description: 'The operation to perform. "show" displays a stored image, PDF or audio file to you so you can see/hear it; "read" returns file contents as text.' },
+      name:      { type: 'string', description: 'read/show/write/delete only: the whole name of one file (e.g. "report.md", "charts/data.csv").' },
       prefix:    { type: 'string', description: 'list only: restrict the listing to names beginning with these segments (e.g. "charts"). Omit it to list the whole workspace.' },
       content:   { type: 'string', description: 'File contents — required for action "write".' },
-      encoding:  { type: 'string', enum: ['utf8', 'base64'], default: 'utf8', description: "Used by read/write. 'base64' for binary files, 'utf8' (default) for text." },
+      encoding:  { type: 'string', enum: ['utf8', 'base64'], default: 'utf8', description: "Used by read/write only. 'base64' moves binary bytes in or out; it does NOT let you see an image — use action \"show\" for that. 'utf8' (default) for text." },
     },
   },
   executor: workspaceExecutor,
