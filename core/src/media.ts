@@ -36,8 +36,9 @@ export const MEDIA_RESIDENCY_BYTES = 8 * 1024 * 1024;
 
 const INLINE_ARMS = new Set(['image', 'document', 'audio']);
 
-/** Which inline arm a stored file comes back as. The provider adapters take it from here — anthropic and
- *  google inline all three, openai-compat degrades document/audio to a text note. */
+/** Which inline arm a stored file comes back as. What each adapter then does with it differs: google
+ *  inlines all three; anthropic inlines images and PDF/text documents and degrades the rest to a note;
+ *  openai-compat inlines images only. A degraded arm becomes a text note, never nothing. */
 function armFor(mimeType: string): 'image' | 'audio' | 'document' {
   if (mimeType.startsWith('image/')) return 'image';
   if (mimeType.startsWith('audio/')) return 'audio';
