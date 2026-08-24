@@ -8,15 +8,16 @@ import process from 'node:process';
 // merged entry, so both must declare it identically); the docker variant ignores `cwd`.
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
-    bash: ToolContract<{ exitCode: number; stdout: string; stderr: string }, { script: string; cwd?: string; env?: Record<string, string>; timeout?: number }>;
+    bash: ToolContract<{ exitCode: number; stdout: string; stderr: string }, { script: string; cwd?: string; env?: Record<string, string>; timeout?: number; maxOutputBytes?: number }>;
   }
 }
 
 interface BashInput {
-  script:   string;
-  cwd?:     string;
-  env?:     Record<string, string>;
-  timeout?: number;
+  script:          string;
+  cwd?:            string;
+  env?:            Record<string, string>;
+  timeout?:        number;
+  maxOutputBytes?: number;
 }
 
 /** Applied when the caller names no `timeout`. A script with no bound at all is unrecoverable on an
@@ -32,9 +33,15 @@ const KILL_GRACE_MS = 2_000;
  *  process we are no longer waiting for hits it. */
 const EXIT_DRAIN_MS = 250;
 
-/** Matches `docker-bash`'s cap. Beyond it the group is killed: the two same-named tools must behave
- *  alike, and a runaway that only stopped accumulating would still spin to the timeout. */
-const MAX_OUTPUT_BYTES = 100_000;
+/** Beyond this the group is killed — a runaway that only stopped accumulating would still spin to the
+ *  timeout. A DEFAULT, not a limit: `maxOutputBytes` overrides it per call, because the caller is the only
+ *  one who knows whether a verbose build is expected output or a `yes` loop.
+ *
+ *  Generous, because the two failure directions are not symmetric. Output that overflows is output whose
+ *  process was KILLED, so too low kills legitimate work — while runaway protection barely notices the
+ *  difference: anything genuinely runaway emits megabytes a second and trips this in well under a second
+ *  either way. Matches `docker-bash`'s default; the two same-named tools must behave alike. */
+const DEFAULT_MAX_OUTPUT_BYTES = 1_000_000;
 
 /** POSIX only: `detached` gives the script its own process group, so a kill can reach every stage it
  *  forked. On Windows it means a new console and `process.kill(-pid)` is not a thing, so that platform
@@ -45,7 +52,7 @@ const OWN_PROCESS_GROUP = process.platform !== 'win32';
 function spawnAndStream(
   command: string,
   args:    string[],
-  opts:    { cwd?: string; env: Record<string, string>; timeout?: number; signal: AbortSignal },
+  opts:    { cwd?: string; env: Record<string, string>; timeout?: number; maxBytes: number; signal: AbortSignal },
 ): AsyncIterable<ToolEvent<ToolResultOf<'bash'>>> {
   type Ev = ToolEvent<ToolResultOf<'bash'>>;
   const queue: Array<Ev | null> = [];
@@ -110,7 +117,7 @@ function spawnAndStream(
 
     if (stopReason !== null) {
       const why = stopReason === 'timeout'  ? `timed out after ${timeoutMs}ms`
-                : stopReason === 'overflow' ? `exceeded the ${MAX_OUTPUT_BYTES}-byte output limit`
+                : stopReason === 'overflow' ? `exceeded the ${opts.maxBytes}-byte output limit (raise it by passing a larger \`maxOutputBytes\`, or redirect bulk output to a file)`
                 :                             'aborted';
       push({ type: 'error', message: `Process ${why} and was killed, along with every process it spawned.`,
         ...(stdoutAcc ? { stdout: stdoutAcc } : {}),
@@ -152,7 +159,7 @@ function spawnAndStream(
 
   const onData = (d: Buffer, kind: 'stdout' | 'stderr'): void => {
     if (finalized) return;
-    const remaining = MAX_OUTPUT_BYTES - totalBytes;
+    const remaining = opts.maxBytes - totalBytes;
     const slice     = d.length > remaining ? d.subarray(0, Math.max(0, remaining)) : d;
     const chunk     = slice.toString();
     if (chunk) {
@@ -232,7 +239,11 @@ function spawnAndStream(
 function createLocalExecutor(): ToolExecutor<ToolResultOf<'bash'>> {
   return {
     async *execute(input: unknown, ctx: ToolContext) {
-      const { script, cwd: cwdInput, env, timeout } = input as BashInput;
+      const { script, cwd: cwdInput, env, timeout, maxOutputBytes } = input as BashInput;
+      if (maxOutputBytes !== undefined && (!Number.isFinite(maxOutputBytes) || maxOutputBytes < 1)) {
+        yield { type: 'error', message: '"maxOutputBytes" must be a positive number.' };
+        return;
+      }
       const cwd = cwdInput ?? ctx.workdir;
       if (cwd !== undefined) await mkdir(cwd, { recursive: true });
 
@@ -246,6 +257,7 @@ function createLocalExecutor(): ToolExecutor<ToolResultOf<'bash'>> {
         ...(cwd     !== undefined ? { cwd }     : {}),
         ...(timeout !== undefined ? { timeout } : {}),
         env: mergedEnv, signal: ctx.signal,
+        maxBytes: maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES,
       });
     },
   };
@@ -258,9 +270,11 @@ const TOOL_DESCRIPTION =
   'Pass any shell command or multi-line script in the `script` field — it is executed as `bash -c <script>`. ' +
   'Output streams line by line as it is produced. A non-zero exit code yields an error event with accumulated stdout/stderr attached. ' +
   'Use for build steps, running tests, package installs, or any shell automation. ' +
-  'The script and every process it spawns are killed after `timeout` milliseconds (default 600000, ' +
-  'ten minutes) or once output reaches 100000 bytes, whichever comes first — pass a larger `timeout` ' +
-  'for work that genuinely takes longer, and redirect bulk output to a file rather than printing it. ' +
+  'The script and every process it spawns are killed after `timeout` milliseconds (default 600000, ten ' +
+  'minutes) or once combined stdout+stderr reaches `maxOutputBytes` (default 1000000), whichever comes ' +
+  'first. Both are defaults, not limits: pass a larger value for work that genuinely needs it. Prefer ' +
+  'redirecting bulk output to a file over raising `maxOutputBytes`, since everything returned stays in ' +
+  'the conversation and is re-sent on every later round. ' +
   'The working directory defaults to a private scratch directory for temporary scripts and intermediate ' +
   'data: it is local to this tool, is not visible to the user, and cannot be served or shared. Files the ' +
   'user asked for do NOT belong here — write those with whichever tool manages stored files.';
@@ -273,6 +287,7 @@ const INPUT_SCHEMA = {
     cwd:     { type: 'string', description: 'Working directory. Defaults to the private scratch directory.' },
     env:     { type: 'object', additionalProperties: { type: 'string' }, description: 'Extra environment variables to set.' },
     timeout: { type: 'number', description: 'Kill the script, and every process it spawned, after this many milliseconds. Defaults to 600000 (ten minutes).' },
+    maxOutputBytes: { type: 'number', minimum: 1, description: 'Kill the script once combined stdout+stderr reaches this many bytes. Defaults to 1000000.' },
   },
 } as const;
 

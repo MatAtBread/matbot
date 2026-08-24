@@ -9,6 +9,23 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## Unreleased
+
+### Optional
+
+#### bash / docker-bash
+
+- **The output cap is a default, not a hard limit** — `maxOutputBytes` overrides it per call. 0.4.9 gave the
+  local `bash` a cap with no way past it, justified by parity with `docker-bash` while omitting the half of
+  `docker-bash` that makes a cap survivable. The only party that knows whether 400KB is a verbose build or a
+  `yes` loop is the one that wrote the command. Declared identically in both plugins (one tool name, one
+  merged contract); in `docker-bash` it overrides the `bash_config` setting for that command only, leaving
+  the persisted value as the default for the rest.
+- **The default rises from 100000 to 1000000 bytes** in both. The failure directions are not symmetric:
+  overflowing output is output whose process was *killed*, so too low kills legitimate work, while runaway
+  protection barely notices — anything genuinely runaway trips either number in well under a second. The
+  overflow error now names the remedy, and a nonsensical value is refused before the script runs.
+
 ## 0.4.9
 
 ### Bug fixes

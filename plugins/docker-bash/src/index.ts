@@ -5,7 +5,7 @@ declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
     // Declared identically to the local `bash` plugin (same tool name ⇒ one merged entry). `cwd` rides in
     // the shared params superset but is ignored by this container variant.
-    bash: ToolContract<{ exitCode: number; stdout: string; stderr: string }, { script: string; cwd?: string; env?: Record<string, string>; timeout?: number }>;
+    bash: ToolContract<{ exitCode: number; stdout: string; stderr: string }, { script: string; cwd?: string; env?: Record<string, string>; timeout?: number; maxOutputBytes?: number }>;
     // result of a get/set/restart action on the container configuration
     bash_config:
       | ToolContract<{ message: string; overrides: BashConfigOverrides; restarted: boolean },                  { action: 'set'; dns?: string[]; name?: string; maxOutputBytes?: number }>
@@ -59,7 +59,7 @@ const CONTAINER: ContainerConfig = {
   mountPoint:     '/app',
   dataSubdir:     '.data',
   execCwd:        '/app/.data/bash-cwd',
-  maxOutputBytes: 100_000,
+  maxOutputBytes: 1_000_000,
 };
 
 /** Settings key for user-configurable overrides. */
@@ -352,7 +352,7 @@ function spawnAndStream(
     }
     if (d.length > remaining) {
       finalized = true;
-      push({ type: 'error', message: `Output exceeded the ${opts.maxBytes}-byte limit; process killed. Raise it with bash_config { action: "set", maxOutputBytes }.`,
+      push({ type: 'error', message: `Output exceeded the ${opts.maxBytes}-byte limit; process killed. Raise it for one command by passing a larger \`maxOutputBytes\`, or for every command with bash_config { action: "set", maxOutputBytes }.`,
         ...(stdoutAcc ? { stdout: stdoutAcc } : {}),
         ...(stderrAcc ? { stderr: stderrAcc } : {}),
       });
@@ -432,9 +432,10 @@ function spawnAndStream(
 // ── Executor ──────────────────────────────────────────────────────────────────
 
 interface BashInput {
-  script:   string;
-  env?:     Record<string, string>;
-  timeout?: number;
+  script:          string;
+  env?:            Record<string, string>;
+  timeout?:        number;
+  maxOutputBytes?: number;
 }
 
 function createContainerExecutor(settings: PluginSettings): ToolExecutor<ToolResultOf<'bash'>> {
@@ -461,7 +462,11 @@ function createContainerExecutor(settings: PluginSettings): ToolExecutor<ToolRes
       await mkdir(hostExecCwd, { recursive: true });
       await mkdir(hostPidDir,  { recursive: true });
 
-      const { script, env, timeout } = input as BashInput;
+      const { script, env, timeout, maxOutputBytes } = input as BashInput;
+      if (maxOutputBytes !== undefined && (!Number.isFinite(maxOutputBytes) || maxOutputBytes < 1)) {
+        yield { type: 'error', message: '"maxOutputBytes" must be a positive number.' };
+        return;
+      }
 
       const execId            = randomUUID();
       const containerPidfile  = `${containerPidDir}/${execId}.pid`;
@@ -489,7 +494,7 @@ function createContainerExecutor(settings: PluginSettings): ToolExecutor<ToolRes
           ...(timeout !== undefined ? { timeout } : {}),
           env: {},
           signal: ctx.signal,
-          maxBytes: cfg.maxOutputBytes,
+          maxBytes: maxOutputBytes ?? cfg.maxOutputBytes,
           terminate: () => { killPromise = killGroup(cfg.name, hostPidfile); },
         });
       } finally {
@@ -507,7 +512,11 @@ const TOOL_DESCRIPTION =
   'Pass any shell command or multi-line script in the `script` field — it is executed as `bash -c <script>`. ' +
   'The container runs ubuntu:24.04 with network access; install standard packages with apt freely. ' +
   'The project root is mounted read-only at /app; /app/.data is read-write. ' +
-  'A non-zero exit code yields an error event with accumulated stdout/stderr attached.';
+  'A non-zero exit code yields an error event with accumulated stdout/stderr attached. ' +
+  'The script and every process it spawns are killed once combined stdout+stderr reaches `maxOutputBytes` ' +
+  '(default 1000000) — a default, not a limit: pass a larger value for one command, or use `bash_config` to ' +
+  'change it for every command. Prefer redirecting bulk output to a file, since everything returned stays ' +
+  'in the conversation and is re-sent on every later round.';
 
 const BASH_INPUT_SCHEMA = {
   type:       'object',
@@ -516,6 +525,7 @@ const BASH_INPUT_SCHEMA = {
     script:  { type: 'string', description: 'Bash script or command to run (passed to `bash -c`).' },
     env:     { type: 'object', additionalProperties: { type: 'string' }, description: 'Extra environment variables.' },
     timeout: { type: 'number', description: 'Kill the process after this many milliseconds.' },
+    maxOutputBytes: { type: 'number', minimum: 1, description: 'Kill the script once combined stdout+stderr reaches this many bytes, overriding the configured default (1000000) for this command only.' },
   },
 } as const;
 
@@ -524,7 +534,8 @@ const BASH_CONFIG_DESCRIPTION =
   '  - `dns`: DNS server IPs (e.g. ["1.1.1.1"]), or the token "host" to use the host\'s current resolvers. ' +
   'Omit, or pass [], to inherit the host\'s DNS (the default).\n' +
   '  - `name`: the container label.\n' +
-  '  - `maxOutputBytes`: cap on combined stdout+stderr per bash command (default 100000); on exceed the command is killed.\n' +
+  '  - `maxOutputBytes`: cap on combined stdout+stderr per bash command (default 1000000); on exceed the command is killed. ' +
+  'A single command can override it by passing `maxOutputBytes` to `bash` directly; set it here only to change the default for every command.\n' +
   'A `set` persists the overrides. Changing `dns`/`name` removes the running container so the next bash ' +
   'command recreates it; `maxOutputBytes` applies to subsequent commands with no restart. ' +
   'A `restart` force-recreates the container now (e.g. to re-resolve "host" DNS after the host\'s resolvers change).';

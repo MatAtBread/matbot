@@ -120,11 +120,14 @@ test('a timeout is reported as a kill, never as exit code 0', { skip: !posix, ti
   assert.match(errorOf(events), /timed out after 250ms and was killed/);
 });
 
-test('a default timeout applies when the caller names none', async () => {
-  // Named in the description the model reads, so it has to be the number the code uses.
-  const src = bashTool.inputSchema as { properties: { timeout: { description: string } } };
-  assert.match(src.properties.timeout.description, /600000/, 'the schema states the default it enforces');
-  assert.match(bashTool.description, /600000/, 'and so does the description');
+test('the bounds the description states are the bounds the code enforces', async () => {
+  // Both are defaults the model is told it may override, so the numbers in the prose it reads have to be
+  // the numbers actually applied — a stale default here is a tool that lies about when it will kill you.
+  const schema = bashTool.inputSchema as { properties: Record<string, { description: string }> };
+  assert.match(schema.properties.timeout!.description,        /600000/);
+  assert.match(schema.properties.maxOutputBytes!.description, /1000000/);
+  assert.match(bashTool.description, /600000/);
+  assert.match(bashTool.description, /1000000/);
 });
 
 test('a clean run still captures its whole output', { skip: !posix, timeout: 20000 }, async () => {
@@ -138,8 +141,30 @@ test('a clean run still captures its whole output', { skip: !posix, timeout: 200
   assert.doesNotMatch(result.stderr, /truncated/, 'nothing was holding the pipe, so nothing is claimed');
 });
 
-test('runaway output is capped, and the group killed with it', { skip: !posix, timeout: 30000 }, async () => {
-  const { events, ms } = await collect({ script: 'yes matbot' });
+test('a caller-supplied maxOutputBytes is honoured, and names how to raise it', { skip: !posix, timeout: 30000 }, async () => {
+  // The cap is a default, not a hard limit: an LLM that knows this command is verbose must be able to say
+  // so. Asserted with a tiny value, which also keeps the test off the 1MB default.
+  const { events, ms } = await collect({ script: 'yes matbot', maxOutputBytes: 5_000 });
   assert.ok(ms < 20000, `stopped on the cap rather than the timeout (took ${ms}ms)`);
-  assert.match(errorOf(events), /exceeded the 100000-byte output limit and was killed/);
+  const message = errorOf(events);
+  assert.match(message, /exceeded the 5000-byte output limit/, 'the caller\'s number, not the default');
+  assert.match(message, /maxOutputBytes/, 'and says how to raise it');
+
+  const out = events.filter(e => e.type === 'stdout').map(e => e.chunk).join('');
+  assert.ok(out.length <= 5_000, `nothing past the cap was accumulated (got ${out.length} bytes)`);
+});
+
+test('a run under the cap is untouched by it', { skip: !posix, timeout: 30000 }, async () => {
+  const { events } = await collect({ script: 'for i in $(seq 1 100); do echo "line $i"; done', maxOutputBytes: 100_000 });
+  const result = resultOf(events);
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.stdout.trimEnd().split('\n').length, 100);
+});
+
+test('a nonsensical maxOutputBytes is refused rather than silently ignored', { skip: !posix, timeout: 30000 }, async () => {
+  for (const bad of [0, -1, Number.NaN]) {
+    const { events } = await collect({ script: 'echo hi', maxOutputBytes: bad });
+    assert.match(errorOf(events), /"maxOutputBytes" must be a positive number/, `rejected ${String(bad)}`);
+    assert.ok(!events.some(e => e.type === 'result'), 'and the script did not run');
+  }
 });
