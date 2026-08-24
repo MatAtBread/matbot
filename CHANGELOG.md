@@ -9,23 +9,6 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
-## Unreleased
-
-### Optional
-
-#### bash / docker-bash
-
-- **The output cap is a default, not a hard limit** — `maxOutputBytes` overrides it per call. 0.4.9 gave the
-  local `bash` a cap with no way past it, justified by parity with `docker-bash` while omitting the half of
-  `docker-bash` that makes a cap survivable. The only party that knows whether 400KB is a verbose build or a
-  `yes` loop is the one that wrote the command. Declared identically in both plugins (one tool name, one
-  merged contract); in `docker-bash` it overrides the `bash_config` setting for that command only, leaving
-  the persisted value as the default for the rest.
-- **The default rises from 100000 to 1000000 bytes** in both. The failure directions are not symmetric:
-  overflowing output is output whose process was *killed*, so too low kills legitimate work, while runaway
-  protection barely notices — anything genuinely runaway trips either number in well under a second. The
-  overflow error now names the remedy, and a nonsensical value is refused before the script runs.
-
 ## 0.4.9
 
 ### Bug fixes
@@ -56,9 +39,15 @@ churn and less likely to affect a consumer who doesn't use them.
   still wins when it arrives, otherwise an idle drain window ends the call and says so in `stderr`.
 - **A kill is reported as a kill.** A signal-killed script gives `code === null`, which the success arm
   read as exit code 0 — so a timeout and an abort both reported a clean run to the model.
-- **Two bounds for an unattended host:** `timeout` now defaults to ten minutes (pass a bigger number for
-  work that genuinely takes longer), and output is capped at 100000 bytes, matching `docker-bash` — the
-  two same-named tools should not behave differently. Both are stated in the tool description.
+- **Two bounds for an unattended host, both defaults rather than limits.** `timeout` defaults to ten
+  minutes, and combined stdout+stderr to 1000000 bytes via a new `maxOutputBytes` param; either can be
+  raised per call, and both are stated in the tool description. A bound the caller cannot lift is a ceiling
+  on what the tool can be used for rather than a safety net — the only party who knows whether 400KB is a
+  verbose build or a `yes` loop is the one that wrote the command. The numbers are generous because the
+  failure directions are not symmetric: overflowing output is output whose process was *killed*, so too low
+  kills legitimate work, while runaway protection barely notices — anything genuinely runaway trips either
+  number in well under a second. Overflow names the remedy, and a nonsensical value is refused before the
+  script runs.
 
 #### docker-bash
 
@@ -67,6 +56,10 @@ churn and less likely to affect a consumer who doesn't use them.
   reaches it: an in-container process killed by a signal is propagated by `docker exec` as its own numeric
   exit code (verified — an in-container `kill -9` surfaces as 137), so that case was already reported
   correctly.
+- **`maxOutputBytes` is accepted per call here too**, overriding the `bash_config` setting for that one
+  command and leaving the persisted value as the default for the rest — changing a global to get one verbose
+  build through is the wrong shape of answer. Its default rises to 1000000 to match the local variant: two
+  tools sharing one name and one merged contract should not behave differently.
 
 ## 0.4.8
 
