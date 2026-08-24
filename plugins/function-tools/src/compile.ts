@@ -35,7 +35,8 @@ export async function buildAsyncFn(stripper: TypeScriptStripper, definition: str
 
 /**
  * Run a compiled function, streaming its tool calls to stdout as they happen and yielding the return
- * value as the final `result`. The function is handed the {@link makeToolBox}-built `tool` proxy and its
+ * value as the final `result`. That same queue is what `context.progress()` writes to, which is why a
+ * body that cannot `yield` can still report mid-run. The function is handed the {@link makeToolBox}-built `tool` proxy and its
  * `toolInContext` override factory: `tool.<name>(params)` resolves to that tool's structured result,
  * inheriting the calling turn's session/signal/prompt/provider; `toolInContext({ provider }).<name>(params)`
  * overrides a field for that call. Those two carry the context *downwards* but expose none of it to the
@@ -63,6 +64,13 @@ export async function* runFunction(
     callId:    ctx.callId,
     sessionId: ctx.session.id,
     signal:    ctx.signal,
+    // Normalised here rather than in each renderer: this is the boundary where a model-authored body
+    // hands over a number, and `i / n * 100` is the obvious way to compute one. The CLI prints it raw.
+    progress:  (pct, message) => emit({
+      type: 'progress',
+      pct:  Number.isFinite(pct) ? Math.max(0, Math.min(100, Math.round(pct))) : 0,
+      ...(message !== undefined && message !== '' ? { message } : {}),
+    }),
     ...(ctx.provider !== undefined ? { provider: ctx.provider } : {}),
     ...(ctx.workdir  !== undefined ? { workdir:  ctx.workdir  } : {}),
   };

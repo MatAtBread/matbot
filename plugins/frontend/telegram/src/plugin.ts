@@ -2,7 +2,7 @@ import type {
   MatbotPluginSpec, MatbotMachine, Principal, Session, PromptFn, FormField,
   ToolExecutor, ToolContract, ToolResultOf, UserContent, MimeType,
 } from '@matatbread/matbot-plugin-api';
-import { PLUGIN_API_VERSION, isMediaRejectedError } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, isMediaRejectedError, encodeBase64 } from '@matatbread/matbot-plugin-api';
 
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
@@ -60,12 +60,9 @@ export async function messageContent(
     // Named, not silently dropped: a model answering about a photo it never received produces a
     // confidently wrong answer, which is worse than being told the download failed.
     if (got === null) { failed.push(w.name); continue; }
-    const CHUNK = 0x8000;
-    let bin = '';
-    for (let i = 0; i < got.bytes.length; i += CHUNK) bin += String.fromCharCode(...got.bytes.subarray(i, i + CHUNK));
     content.push({
       type:     w.mimeType.startsWith('image/') ? 'image' : w.mimeType.startsWith('audio/') ? 'audio' : 'document',
-      data:     btoa(bin),
+      data:     encodeBase64(got.bytes),
       mimeType: w.mimeType as MimeType,
       name:     w.name,
     });

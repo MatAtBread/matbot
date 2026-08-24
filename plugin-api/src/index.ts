@@ -11,6 +11,8 @@
 export type * from './types.js';
 export { CONFIRM_YES, CONFIRM_NO, isTruncatedToolResult } from './types.js';
 
+export * from './base64.js';
+export * from './bytes.js';
 export * from './store-query.js';
 export * from './errors.js';
 export * from './vault.js';

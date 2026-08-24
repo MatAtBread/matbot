@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { stripTypeScriptTypes } from 'node:module';
+import { join } from 'node:path';
+import { checkSnippetAgainst } from '@matatbread/matbot-tool-types';
 import { parseSignature, paramsSchema, buildAsyncFn, runFunction } from '@matatbread/matbot-function-tools';
 import type { MatbotMachine, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
 
@@ -178,4 +180,101 @@ test('unrecognised parameter types degrade permissively, never to a constraint',
   assert.deepEqual(schemaFor(`x: 'a|b' | 'c'`).x, { type: 'string', enum: ['a|b', 'c'] });
   // `undefined` carries no JSON value; optionality is the parameter's, and lives in `required`.
   assert.deepEqual(schemaFor(`x: 'text' | 'json' | undefined`).x, { type: 'string', enum: ['text', 'json'] });
+});
+
+// A composed body is a plain async function and cannot `yield`, so `context.progress()` writes onto the
+// same queue `runFunction` already pumps for the nested-call stdout trace. The gate is the point of the
+// test: the tool call resolves only once the CONSUMER has seen the first progress event, so a delivery
+// that waited for the body to finish would deadlock rather than merely order events differently.
+test('context.progress reaches the consumer while the body is still running', { timeout: 5000 }, async () => {
+  let release = (): void => { };
+  const gate = new Promise<void>(r => { release = r; });
+  const machine = {
+    tools: {
+      resolve: (n: string) => n !== 'slow' ? null : {
+        executor: { async *execute() { await gate; yield { type: 'result', value: 'done' }; } },
+      },
+    },
+  } as unknown as MatbotMachine;
+  const ctx = {
+    callId: 'c1', session: { id: 'sess-abc' }, signal: new AbortController().signal,
+    prompt: () => Promise.reject(new Error('non-interactive')),
+  } as unknown as ToolContext;
+
+  const src = `f(): string {
+    context.progress(0, 'starting');
+    const r = await tool.slow({});
+    context.progress(100, 'finished');
+    return r;
+  }`;
+  const fn = await buildAsyncFn(stripper, src, []);
+  const events: ToolEvent[] = [];
+  for await (const ev of runFunction(machine, ctx, fn, [])) {
+    events.push(ev);
+    if (ev.type === 'progress' && ev.pct === 0) release();
+  }
+
+  assert.deepEqual(events.filter(e => e.type === 'progress'), [
+    { type: 'progress', pct: 0,   message: 'starting' },
+    { type: 'progress', pct: 100, message: 'finished' },
+  ]);
+  assert.deepEqual(events.at(-1), { type: 'result', value: 'done' });
+});
+
+// `pct` is normalised where the model-authored number is handed over, not in each renderer: the web
+// client clamps for its own layout but the CLI prints what it is given, and `i / n * 100` is the obvious
+// way for a body to compute one.
+test('progress percentages are rounded and clamped, and an empty message is omitted', async () => {
+  const machine = { tools: { resolve: () => null } } as unknown as MatbotMachine;
+  const ctx = {
+    callId: 'c1', session: { id: 'sess-abc' }, signal: new AbortController().signal,
+    prompt: () => Promise.reject(new Error('non-interactive')),
+  } as unknown as ToolContext;
+
+  const src = `f(): void {
+    context.progress((1 / 3) * 100, 'a third');
+    context.progress(-5);
+    context.progress(150);
+    context.progress(Number.NaN, '');
+  }`;
+  const fn = await buildAsyncFn(stripper, src, []);
+  const events: ToolEvent[] = [];
+  for await (const ev of runFunction(machine, ctx, fn, [])) events.push(ev);
+
+  assert.deepEqual(events, [
+    { type: 'progress', pct: 33, message: 'a third' },
+    { type: 'progress', pct: 0 },
+    { type: 'progress', pct: 100 },
+    { type: 'progress', pct: 0 },
+  ]);
+});
+
+// The authoring path, end to end: `define` grades a body against the same ambient `context` declaration
+// the dts generators emit, so a body calling `context.progress` must pass that gate. Asserted in both
+// directions — if the inline import failed to resolve, the ambient types would collapse to `any` and a
+// missing `progress` would pass silently, which is the one failure that would make this invisible.
+test('a body calling context.progress passes the type-check gate', async () => {
+  const root   = join(import.meta.dirname, '..', '..', '..');
+  const PREFIX = `declare const context: import('@matatbread/matbot-plugin-api').ComposedCallContext;\n`;
+  const check  = (snippet: string): Promise<string[]> => checkSnippetAgainst({
+    root,
+    source:       `${PREFIX}${snippet}\nexport {};\n`,
+    prefixLen:    PREFIX.length,
+    prefixLines:  PREFIX.split('\n').length - 1,
+    apiIndexPath: join(root, 'plugin-api', 'src', 'index.ts'),
+  });
+
+  assert.deepEqual(await check(`
+    async function __fn(names: string[]): Promise<number> {
+      for (const [i, n] of names.entries()) context.progress((i / names.length) * 100, 'Reading ' + n);
+      return names.length;
+    }
+    void __fn;
+  `), []);
+
+  const diags = await check(`
+    async function __fn(): Promise<void> { context.progress('half way'); }
+    void __fn;
+  `);
+  assert.ok(diags.length > 0, 'a message passed as the percentage should be rejected');
 });

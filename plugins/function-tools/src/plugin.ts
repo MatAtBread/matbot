@@ -255,8 +255,9 @@ parameter of the same name is rejected, because it would shadow the injection):
 
   tool           the proxy above — \`await tool.<tool_name>(params)\`
   toolInContext  the factory above — \`await toolInContext({ provider }).<tool_name>(params)\`
-  context        the call you are running under, read-only, exactly:
-                   { callId: string; sessionId: string; provider?: string; workdir?: string; signal: AbortSignal }
+  context        the call you are running under, exactly:
+                   { callId: string; sessionId: string; provider?: string; workdir?: string; signal: AbortSignal;
+                     progress: (pct: number, message?: string) => void }
 
 \`context\` is how you answer "which session/turn am I in?" from inside a function — there is no tool that
 reports it (\`session_action\` takes a \`sessionId\` as an explicit param; \`whoami\` returns the principal, not
@@ -264,9 +265,21 @@ the session). So the CURRENT session is \`context.sessionId\`:
 
   const s = await tool.session_action({ action: 'get', sessionId: context.sessionId });
 
-Pass \`context.signal\` to any \`fetch\` you make so a long run stays cancellable. Note that \`context\` is
-informational: a nested \`tool.<name>()\` call ALREADY inherits this session, signal and provider, so only
+Pass \`context.signal\` to any \`fetch\` you make so a long run stays cancellable. Note that \`context\`'s FIELDS
+are informational: a nested \`tool.<name>()\` call ALREADY inherits this session, signal and provider, so only
 pass its fields on where the callee takes them as explicit parameters (as \`session_action\` does above).
+
+TELL THE USER WHAT YOU ARE DOING while the body runs: \`context.progress(pct, message)\` — \`pct\` 0-100,
+\`message\` a short line of prose — draws a progress bar and caption against this call in the UI as it runs.
+It is not part of your result and is never sent back to you, so it costs you no context; it simply goes away
+when the call ends. Call it in any loop over n items, and between the stages of a multi-step body: a silent
+function that takes a minute is indistinguishable, to the person waiting, from a hung one.
+
+  const files = await tool.workspace_action({ action: 'list', prefix });
+  for (const [i, f] of files.entries()) {
+    context.progress((i / files.length) * 100, 'Reading ' + f.name);
+    if ((await tool.workspace_action({ action: 'read', name: f.name })).includes('TODO')) hits++;
+  }
 
 Before composing, run \`{ action: 'types' }\` to fetch TypeScript declarations of what the available tools'
 calls resolve to — write \`await tool.x(...)\` against those real return types instead of guessing shapes.
