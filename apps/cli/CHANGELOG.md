@@ -1,5 +1,12 @@
 # @matatbread/matbot-cli
 
+## 0.4.9
+
+### Patch Changes
+
+- Updated dependencies [f6d546d]
+  - @matatbread/matbot-core@0.4.9
+
 ## 0.4.8
 
 ### Patch Changes

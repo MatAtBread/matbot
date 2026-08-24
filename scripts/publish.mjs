@@ -164,15 +164,24 @@ function checkGit(problems, advisories) {
 function checkManifests(pkgs, problems, advisories) {
   const versions = new Set(pkgs.map(p => p.version));
   if (versions.size > 1) {
-    // A spread is now expected rather than broken. The changeset config `linked`s every @matatbread/*
-    // package instead of `fixed`ing them, so a release versions only what actually changed and everything
-    // else keeps the number it last shipped at. This was a whole-run blocker while every package moved in
-    // lockstep — a split could then only mean a hand-edited version — and the reason it gave for blocking
-    // ("consumers resolve a peer range with no match") does not survive the change: the ranges are
-    // `workspace:^`, rewritten at pack time from the dependency's OWN version, so a plugin at 0.4.8 asks
-    // for the plugin-api it was built against whatever its siblings are at. A range that cannot be
-    // rewritten is still a problem, and is caught per-package below.
-    advisories.push(`versions span ${[...versions].sort().join(', ')} — expected under linked versioning, where only changed packages are released`);
+    // A spread is now expected rather than broken. Two policies, deliberately different, both in
+    // `.changeset/config.json`: the HARNESS (core, plugin-api, cli, web-bundle) is a `fixed` group and
+    // always moves in lockstep, while plugins are in no group at all and version independently, each
+    // keeping the number it last shipped at until it changes.
+    //
+    // The harness half is not tidiness. `versionBanner()` treats any difference between the CLI's version
+    // and the resolved core/plugin-api versions as evidence of two physical copies of a host singleton and
+    // tells the user to reinstall — so shipping core ahead of the CLI prints a false skew warning on every
+    // boot. And `about_matbot` reports the APP's own package version, so a core-only release would change
+    // behaviour while the version the model states stayed put. Lockstep is what makes both honest.
+    //
+    // A spread was a whole-run blocker while every package moved together — a split could then only mean a
+    // hand-edited version — and the reason it gave ("consumers resolve a peer range with no match") does
+    // not survive independent plugin versioning: the ranges are `workspace:^`, rewritten at pack time from
+    // the dependency's OWN version, so a plugin at 0.4.8 asks for the plugin-api it was built against
+    // whatever its siblings are at. A range that cannot be rewritten is still a problem, caught per-package
+    // below.
+    advisories.push(`versions span ${[...versions].sort().join(', ')} — expected: the harness (core/plugin-api/cli/web-bundle) moves in lockstep, plugins version independently`);
   } else console.log(`   ${c.green('✓')} all ${pkgs.length} publishable packages at ${c.bold([...versions][0])}`);
 
   // changesets passes its config-level `access` to every publish, which is what has been carrying
