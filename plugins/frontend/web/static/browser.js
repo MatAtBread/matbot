@@ -175,9 +175,13 @@ function makeInProcessTransport(services) {
   // owns a tracker that drains its own view to idle, so statusEvents() emits the off transition even
   // when no sessionEvents consumer is attached.
   async function submit(sid, body) {
+    // Three shapes, because the UI sends all three: a bare string (a typed message), an array (a
+    // submission carrying attachments), or a single block (a form response). No validation here,
+    // unlike the HTTP handler — in-process there is no untrusted client on the other side, only this
+    // app's own code.
     const contentArr = typeof body.content === 'string'
       ? [{ type: 'text', text: body.content }]
-      : [body.content];
+      : Array.isArray(body.content) ? body.content : [body.content];
     const traceId = crypto.randomUUID();
 
     const isTracker = !busyTrackers.has(sid);
@@ -339,10 +343,73 @@ function makeInProcessTransport(services) {
     window.open(URL.createObjectURL(new Blob([bytes], { type: handle.mimeType })), '_blank');
   }
 
+  // How many bytes of minted `blob:` URLs to keep alive. Bounded in BYTES rather than entries for the
+  // same reason MEDIA_RESIDENCY_BYTES is: a 20-entry cache is 400KB of thumbnails or 160MB of PDFs, and
+  // a count cannot tell them apart. A first guess — one knob; measure before adding a second.
+  const MEDIA_CACHE_BYTES = 32 * 1024 * 1024;
+
+  // fileId → { url, size }, in LRU order: a Map iterates in insertion order, and a hit re-inserts.
+  const mediaCache = new Map();
+  const mediaInflight = new Map();
+  let mediaBytes = 0;
+
+  // The cache lives in the TRANSPORT, not in app.js, because this is the only layer that knows what an
+  // entry costs — it just read the bytes — and the only one that can undo it. A `blob:` URL keeps its
+  // Blob alive because it is REGISTERED, not because anything still references it, so dropping an entry
+  // without revoking leaks the whole file for the life of the page. The node transport needs none of
+  // this: there `mediaUrl` is string concatenation.
+  function retain(fileId, url, size) {
+    mediaCache.set(fileId, { url, size });
+    mediaBytes += size;
+    // Oldest first, and never the entry just requested — so a single file larger than the whole budget
+    // is still served (it simply evicts everything else, and is itself dropped by the next retain).
+    for (const [id, entry] of mediaCache) {
+      if (mediaBytes <= MEDIA_CACHE_BYTES) break;
+      if (id === fileId) continue;
+      URL.revokeObjectURL(entry.url);
+      mediaCache.delete(id);
+      mediaBytes -= entry.size;
+    }
+  }
+
+  // Same story as openFile: no HTTP media route in-process, so materialise a blob: URL. Reads through
+  // the MediaStore (falling back to the plain file area, which is what the host seeds it with anyway)
+  // and applies the store's own default-deny `allowed` flag — the identical gate the node route reads.
+  async function mintMediaUrl(fileId) {
+    const store = services.MediaStore ?? services.files;
+    const handle = await store?.get(fileId);
+    if (!handle || !handle.allowed) return null;
+    const chunks = [];
+    let total = 0;
+    for await (const chunk of handle.stream()) { chunks.push(chunk); total += chunk.byteLength; }
+    const bytes = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    const url = URL.createObjectURL(new Blob([bytes], { type: handle.mimeType }));
+    retain(fileId, url, bytes.byteLength);
+    return url;
+  }
+
+  function mediaUrl(fileId) {
+    const hit = mediaCache.get(fileId);
+    // Touch: delete-then-set moves it to the young end, so the eviction walk above stays LRU rather
+    // than first-in-first-out — the file being looked at right now must not be the next one dropped.
+    if (hit) { mediaCache.delete(fileId); mediaCache.set(fileId, hit); return Promise.resolve(hit.url); }
+    // In-flight dedup, and not merely to save a read: two <img>s for one file resolving concurrently
+    // would each mint a Blob, and only the second would reach the cache — the first would be
+    // unreachable AND unrevoked, which is the leak this whole change is about.
+    let pending = mediaInflight.get(fileId);
+    if (!pending) {
+      pending = mintMediaUrl(fileId).finally(() => mediaInflight.delete(fileId));
+      mediaInflight.set(fileId, pending);
+    }
+    return pending;
+  }
+
   return {
     hostRuntime: 'browser',
     callTool, createSession: createSessionFn, sessionBusy, submit,
-    sessionEvents, answerPrompt, answerEnv, abort, statusEvents, notifications, openFile,
+    sessionEvents, answerPrompt, answerEnv, abort, statusEvents, notifications, openFile, mediaUrl,
   };
 }
 

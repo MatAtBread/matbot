@@ -221,6 +221,9 @@ export interface ToolContext {
  * `files`, `prompt` and plugin (un)loading stay off a surface authored by a model and reachable only
  * through the tool contracts. A tool with real source takes `ToolContext` and needs none of this.
  *
+ * `progress` is the one method here and does not breach that, because the reason capabilities are kept
+ * off this surface is authority: it carries none — write-only, reading nothing and reaching nothing.
+ *
  * Not `ToolCallContext` — that name belongs to the `toolcall` hook's context; this is the composed
  * caller's own view, not a hook's view of a call about to run.
  */
@@ -231,6 +234,13 @@ export interface ComposedCallContext {
   readonly provider?: string;
   readonly workdir?:  string;
   readonly signal:    AbortSignal;
+  /**
+   * Report how far along the body is — a `progress` {@link ToolEvent}, identical to what a hand-written
+   * tool yields: surfaced live by the frontend, and neither persisted nor part of the result. A composed
+   * body is a plain async function and so cannot `yield`, which would otherwise leave the event channel
+   * its own nested `tool.x(…)` calls already stream on unreachable from the one place a long run happens.
+   */
+  readonly progress:  (pct: number, message?: string) => void;
 }
 
 /**

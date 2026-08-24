@@ -17,18 +17,38 @@ import { PLUGIN_API_VERSION, currentPrincipal, ItemChangeKind, isReadOnlyError }
 type SkipKind = 'denied' | 'unavailable';
 interface SkippedSchedule { id: string; kind: SkipKind; reason: string }
 
+/**
+ * The two string shapes this tool accepts, as types rather than as prose in a description.
+ *
+ * They are the validation regexes below, restated where a caller can be held to them: a composed
+ * function passing `interval: 'once a day'` or `at: 'tomorrow'` is a compile error rather than a tool
+ * error at run time, and the model reads the accepted shape off the rendered params instead of having to
+ * find the sentence about it. Deliberately approximate at the edges — `${number}` also admits `-5s` and
+ * `1e3s`, and a date is not checked for a real month — because the executor validates regardless and a
+ * type that rejects the mistakes people actually make has earned its keep. The correspondence between
+ * each regex and its type is asserted in exactly one place: `isDuration` for one, `isoAt` for the other.
+ */
+type Duration   = `${number}${'ms' | 's' | 'm' | 'h' | 'd'}`;
+// Spelled out rather than composed from an `IsoDate` alias: the dts bundler inlines a referenced type,
+// and the nested form (`${`${number}-${number}-${number}`}T${string}`) is what the model would then read
+// off the rendered params.
+type IsoInstant = `${number}-${number}-${number}` | `${number}-${number}-${number}T${string}`;
+
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
-    // `background` discriminates on `interval`'s presence, not an `action` field: a call passing an
-    // `interval` is a recurring schedule (narrows to the recurring arm); a run-once call omits it and
-    // matches the run-once arm — the recurring arm requires `interval`, so the two don't overlap.
+    // `background` discriminates on which timing field is present, not an `action` field: `interval` is
+    // a recurring schedule, `at` a single run at a stated time, neither a single run starting now. Each
+    // arm requires its own field, so no two overlap.
     background:
-      | ToolContract<{ id: string; interval: string; name?: string }, { prompt: string; interval: string; name?: string; output?: string; provider?: string }>  // recurring (id is the handle)
-      | ToolContract<{ status: 'started'; output?: string }, { prompt: string; output?: string; provider?: string }>;                                            // run-once
+      | ToolContract<{ id: string; interval: Duration; name?: string }, { prompt: string; interval: Duration; name?: string; output?: string; provider?: string }>          // recurring (id is the handle)
+      | ToolContract<{ id: string; at: IsoInstant; name?: string }, { prompt: string; at: Duration | IsoInstant; name?: string; output?: string; provider?: string }>        // timed one-shot (given either way, always echoed as the resolved instant)
+      | ToolContract<{ status: 'started'; output?: string }, { prompt: string; interval?: 'once' | null; output?: string; provider?: string }>;                              // run-once, now (the sentinels mean "no interval")
     // `every_action` discriminates on `action`; resume/suspend results further split on whether id is "*"
     // (all) vs a single id, which a caller can't predeclare, so each keeps its two-shape result union.
     every_action:
-      | ToolContract<Array<{ id: string; interval: string; nextRun: string; active: boolean; name?: string; lastRun?: string; output?: string }>, { action: 'list' }>
+      // `interval` reads "once" for a one-shot (the same sentinel `background` accepts), so one row shape
+      // covers both kinds and `nextRun` is the fire time in either.
+      | ToolContract<Array<{ id: string; interval: Duration | 'once'; nextRun: IsoInstant; active: boolean; name?: string; lastRun?: IsoInstant; output?: string }>, { action: 'list' }>
       // `skipped` appears only when the sweep met a schedule it could not write (one shared in read-only):
       // "all" that silently wasn't all is the failure the field reported one namespace over.
       | ToolContract<{ resumed:   true; count: number; ids: string[]; skipped?: SkippedSchedule[] } | { resumed:   true; id: string }, { action: 'resume';  id: string }>
@@ -62,13 +82,58 @@ const DURATION_FACTORS: Record<string, number> = {
   ms: 1, s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000,
 };
 
-function parseDuration(s: string): number {
-  const m = /^(\d+(?:\.\d+)?)(ms|s|m|h|d)$/.exec(s.trim());
-  if (!m) throw new Error(`Invalid duration "${s}". Use e.g. "30s", "5m", "1h", "24h".`);
+const DURATION_RE = /^(\d+(?:\.\d+)?)(ms|s|m|h|d)$/;
+
+/** The one place the duration regex and the `Duration` type are equated — a value typed `Duration`
+ *  anywhere else got there by passing through here, so nothing is cast on faith. */
+function isDuration(s: string): s is Duration { return DURATION_RE.test(s.trim()); }
+
+/** Takes a `Duration`, so it cannot fail: the shape was established by {@link isDuration}, which is what
+ *  lets each caller word its own refusal (an interval and an `at` are wrong in different ways). */
+function durationMs(d: Duration): number {
+  const m = DURATION_RE.exec(d.trim())!;
   return parseFloat(m[1]!) * (DURATION_FACTORS[m[2]!] ?? 1);
 }
 
-function formatDuration(ms: number): string {
+// `toISOString()` returns exactly `IsoInstant` by specification; this is the one place that is asserted,
+// so every date a Schedule carries has a shape a caller can rely on rather than being a bare string.
+const isoAt = (ms: number): IsoInstant => new Date(ms).toISOString() as IsoInstant;
+
+// Absolute instant or duration-from-now, both accepted: a model asked for "in two hours" can answer
+// that without knowing today's date, and one asked for "09:00 tomorrow" needs the absolute form. The
+// duration grammar is `interval`'s. A bare number is rejected rather than left to Date.parse, which
+// reads "5" as a year — the one failure mode that fires at a plausible-looking wrong time.
+const AT_ABSOLUTE = /^\d{4}-\d{2}-\d{2}/;
+
+/**
+ * `Date.parse` splits the absolute form on a detail worth stating rather than papering over. A
+ * DATE-ONLY `at` ("2026-08-23") is midnight **UTC** by spec; a date-time with **no offset**
+ * ("2026-08-23T09:00:00") is **local** — so the two differ by up to a day's worth of offset, and
+ * `AT_PAST_GRACE_MS` cannot catch it because the drift goes forward as often as back.
+ *
+ * And "local" is the HOST's zone, not the asker's. Under the node CLI or server that is the machine
+ * matbot runs on, which is very often not where the person is — a schedule they meant for 09:00 lands
+ * at the server's 09:00. In the web bundle the host IS the browser, so there it genuinely is their own
+ * zone. Same string, two different instants depending on which host created the schedule.
+ *
+ * Left as it is rather than normalised: forcing the offset-less form to UTC would silently move an
+ * appointment a browser-hosted user meant locally, and honouring the asker's zone needs a carrier this
+ * plugin has no access to. So the answer is to give an explicit offset (`Z`, `+01:00`), and the tool
+ * description says so — the only place a model will read it.
+ */
+function parseAt(s: string): number {
+  const t = s.trim();
+  if (isDuration(t)) return Date.now() + durationMs(t);
+  const abs = AT_ABSOLUTE.test(t) ? Date.parse(t) : NaN;
+  if (Number.isNaN(abs)) {
+    throw new Error(`Invalid "at" value "${s}". Give an ISO-8601 date-time ("2026-08-23T09:00:00Z", or ` +
+      '"2026-08-23" for midnight UTC), or a duration from now ("90m", "2h", "3d"). Include the offset: ' +
+      'a date-time without one is read in the HOST\'s timezone, not yours.');
+  }
+  return abs;
+}
+
+function formatDuration(ms: number): Duration {
   if (ms % 86_400_000 === 0) return `${ms / 86_400_000}d`;
   if (ms % 3_600_000  === 0) return `${ms / 3_600_000}h`;
   if (ms % 60_000     === 0) return `${ms / 60_000}m`;
@@ -78,22 +143,31 @@ function formatDuration(ms: number): string {
 
 // ── Schedule types & storage ──────────────────────────────────────────────────
 
-interface Schedule {
+interface ScheduleBase {
   id:         string;
   version:    string;
   prompt:     string;
-  intervalMs: number;
-  createdAt:  string;
-  nextRun:    string;
+  createdAt:  IsoInstant;
+  /** When this schedule next fires. For a one-shot it is the only time it ever fires. */
+  nextRun:    IsoInstant;
   active?:    boolean;
   name?:      string;
   output?:    string;
-  lastRun?:   string;
+  lastRun?:   IsoInstant;
   provider?:  string;
   // Creator identity, captured at creation and replayed each fire so a recurring job runs as the
   // user who scheduled it. Absent on legacy rows ⇒ the child falls back to its own boot default.
   principal?: Principal;
 }
+
+/** Fires every `intervalMs` until suspended or cancelled. */
+interface EverySchedule extends ScheduleBase { intervalMs: number }
+/** Fires once, at `nextRun`, and deletes itself. No `oneShot` flag: the ABSENCE of an interval is
+ *  what makes it one, exactly as it is on the `background` tool's own parameters — a separate flag
+ *  could disagree with the interval beside it, and nothing would say which was meant. */
+interface OnceSchedule  extends ScheduleBase { intervalMs?: undefined }
+
+type Schedule = EverySchedule | OnceSchedule;
 
 let scheduleStore:   Store<Schedule> | undefined;
 let activeConfigPath: string | undefined;
@@ -194,11 +268,36 @@ function spawnJob(configPath: string, prompt: string, output?: string, files?: F
 function sleep(ms: number, signal: AbortSignal, wakeSignal?: AbortSignal): Promise<void> {
   return new Promise(resolve => {
     if (signal.aborted || wakeSignal?.aborted) { resolve(); return; }
-    const id = isFinite(ms) ? setTimeout(resolve, ms) : undefined;
-    const cleanup = () => { if (id !== undefined) clearTimeout(id); resolve(); };
-    signal.addEventListener('abort', cleanup, { once: true });
-    wakeSignal?.addEventListener('abort', cleanup, { once: true });
+    // Detached on EVERY exit, including the ordinary timeout. `{ once: true }` only covers the abort
+    // path, and these signals outlive the sleep by design — `signal` lives as long as the schedule's
+    // loop — so a listener left behind per call accumulates for the process's life: one per interval
+    // fire, and now one per 24.8-day chunk of a single long `sleepUntil` wait. That is the
+    // MaxListenersExceededWarning, plus a retained closure behind each one.
+    let id: ReturnType<typeof setTimeout> | undefined;
+    const done = () => {
+      if (id !== undefined) clearTimeout(id);
+      signal.removeEventListener('abort', done);
+      wakeSignal?.removeEventListener('abort', done);
+      resolve();
+    };
+    id = isFinite(ms) ? setTimeout(done, ms) : undefined;
+    signal.addEventListener('abort', done, { once: true });
+    wakeSignal?.addEventListener('abort', done, { once: true });
   });
+}
+
+// setTimeout takes a 32-bit signed delay: hand it more and it fires IMMEDIATELY (node warns and clamps
+// to 1ms), so a wait longer than ~24.8 days becomes a tight loop rather than a long sleep — "remind me
+// next year" spinning at full speed against the store. A long wait is therefore slept in chunks against
+// its deadline, which is also the only form that survives the clock moving under it.
+const MAX_TIMEOUT_MS = 2_147_483_647;
+
+async function sleepUntil(deadlineMs: number, signal: AbortSignal, wakeSignal?: AbortSignal): Promise<void> {
+  for (;;) {
+    const remaining = deadlineMs - Date.now();
+    if (remaining <= 0 || signal.aborted || wakeSignal?.aborted === true) return;
+    await sleep(Math.min(remaining, MAX_TIMEOUT_MS), signal, wakeSignal);
+  }
 }
 
 function wakeSchedule(id: string): void {
@@ -206,9 +305,75 @@ function wakeSchedule(id: string): void {
   if (wakeAc) { sleepControllers.delete(id); wakeAc.abort(); }
 }
 
+// A single run at a stated time. Kept apart from the recurring loop rather than folded into it: it has
+// no interval to sleep, no stagger (its time IS its time, so spreading it would move the appointment),
+// and it ends by deleting itself — three of the recurring loop's four decisions inverted.
+function armOnce(sched: Schedule): void {
+  if (!activeConfigPath || !pluginAc) return;
+  if (activeLoops.has(sched.id)) return;
+
+  const ac = new AbortController();
+  pluginAc.signal.addEventListener('abort', () => ac.abort(), { once: true });
+  activeLoops.set(sched.id, ac);
+
+  void (async (): Promise<void> => {
+    // Re-read on every pass, like the recurring loop: suspend/resume and cancel both land in the store,
+    // and this loop learns of them only by reading it again after being woken.
+    while (!ac.signal.aborted) {
+      const stored: Schedule | null | undefined = await scheduleStore?.get(sched.id);
+      if (!stored) break;                                  // cancelled while it waited
+      sched = stored;
+
+      // Suspended ⇒ wait indefinitely (every_action resume wakes it). A one-shot whose time passed
+      // while it was suspended fires as soon as it is resumed, by the same rule as below.
+      const waitMs = sched.active === false ? Infinity : Date.parse(sched.nextRun) - Date.now();
+      // Past due — including a fire time that went by while the process was down. A one-shot is a
+      // request that stays true until it is honoured, so it runs late rather than expiring silently;
+      // `at` refuses a time already past at creation, so a late fire is only ever a real one.
+      if (waitMs <= 0) {
+        const child = spawnJob(activeConfigPath!, sched.prompt, sched.output, activeFiles, sched.provider, sched.principal);
+        if (child !== undefined) {
+          const killChild = () => { child.kill(); };
+          ac.signal.addEventListener('abort', killChild, { once: true });
+          await new Promise<void>(r => child.once('exit', () => {
+            ac.signal.removeEventListener('abort', killChild);
+            r();
+          }));
+        }
+        // Deleted only once the job has finished, mirroring the recurring loop's post-exit write: a
+        // process killed mid-run leaves the request outstanding and it fires again on the next boot,
+        // which for a one-shot is the kinder of the two failures.
+        await scheduleStore?.delete(sched.id);
+        break;
+      }
+
+      const wakeAc = new AbortController();
+      sleepControllers.set(sched.id, wakeAc);
+      await (waitMs === Infinity
+        ? sleep(Infinity, ac.signal, wakeAc.signal)              // suspended: until resumed
+        : sleepUntil(Date.parse(sched.nextRun), ac.signal, wakeAc.signal));
+      sleepControllers.delete(sched.id);
+    }
+
+    activeLoops.delete(sched.id);
+    sleepControllers.delete(sched.id);
+  })().catch((err: unknown) => {
+    process.stderr.write(
+      `[background] one-shot ${sched.id} failed: ${err instanceof Error ? err.message : String(err)}\n`,
+    );
+    activeLoops.delete(sched.id);
+    sleepControllers.delete(sched.id);
+  });
+}
+
 function armSchedule(sched: Schedule): void {
   if (!activeConfigPath || !pluginAc) return;
   if (activeLoops.has(sched.id)) return;
+
+  // The absence of an interval is what makes a schedule a one-shot, so this is the dispatch every
+  // caller goes through — boot's sweep and the tool both hand over a Schedule without knowing which.
+  const { intervalMs } = sched;
+  if (intervalMs === undefined) { armOnce(sched); return; }
 
   const ac = new AbortController();
   pluginAc.signal.addEventListener('abort', () => ac.abort(), { once: true });
@@ -218,7 +383,6 @@ function armSchedule(sched: Schedule): void {
     // Stagger startup: random delay in [10s, intervalMs] to avoid a pulse when
     // the process restarts with multiple schedules all due at the same time.
     // Skip the stagger for suspended schedules — they'll wait indefinitely anyway.
-    const { intervalMs } = sched;
     if (sched.active !== false) {
       const startupDelay = intervalMs <= 10_000
         ? intervalMs
@@ -231,7 +395,7 @@ function armSchedule(sched: Schedule): void {
 
     while (!ac.signal.aborted) {
       // Reload from store so suspend/resume state changes are picked up.
-      let stored = await scheduleStore?.get(sched.id);
+      let stored: Schedule | null | undefined = await scheduleStore?.get(sched.id);
       if (!stored) break;
       sched = stored;
 
@@ -260,14 +424,14 @@ function armSchedule(sched: Schedule): void {
       sched = stored;
 
       const now = Date.now();
-      sched.lastRun = new Date(now).toISOString();
-      sched.nextRun = new Date(now + intervalMs).toISOString();
+      sched.lastRun = isoAt(now);
+      sched.nextRun = isoAt(now + intervalMs);
       sched.version = now.toString();
       await scheduleStore?.set(sched.id, sched);
 
       const wakeAc = new AbortController();
       sleepControllers.set(sched.id, wakeAc);
-      await sleep(intervalMs, ac.signal, wakeAc.signal);
+      await sleepUntil(Date.now() + intervalMs, ac.signal, wakeAc.signal);
       sleepControllers.delete(sched.id);
     }
 
@@ -284,7 +448,13 @@ function armSchedule(sched: Schedule): void {
 
 // ── Tools ─────────────────────────────────────────────────────────────────────
 
-interface BackgroundInput { prompt: string; interval?: string | null; name?: string; output?: string; provider?: string; }
+interface BackgroundInput { prompt: string; interval?: string | null; at?: string | null; name?: string; output?: string; provider?: string; }
+
+// How late an `at` may already be at CREATION and still be accepted. A model that got the date or the
+// year wrong would otherwise fire instantly, which reads as the tool having ignored the time it was
+// given; refusing names the instant it resolved to, so the mistake is visible. This is unrelated to a
+// fire time missed while the process was down — that one is honoured late (see armOnce).
+const AT_PAST_GRACE_MS = 60_000;
 
 type EveryAction =
   | { action: 'list' }
@@ -299,18 +469,36 @@ function isRunOnce(interval: string | null | undefined): boolean {
 
 const backgroundTool: Tool<ToolResultOf<'background'>> = {
   name: 'background',
-  description: `Run a prompt in a detached background process. With no interval it runs once and
-returns immediately; with an interval it becomes a recurring schedule that persists across
-restarts (manage it afterwards with the every_action tool — the returned id is the handle).
+  description: `Run a prompt in a detached background process, in one of three timings — pass at most one
+timing field:
+
+  neither interval nor at — run once, starting NOW, and return immediately.
+  at                      — run once, at the time given. Persists across restarts.
+  interval                — run repeatedly, that far apart. Persists across restarts.
+
+Both timed forms return an id: the handle for the every_action tool (list / suspend / resume / cancel).
+A one-shot deletes itself once it has run, so it stops appearing in every_action list.
+
+at is either an ISO-8601 date-time ("2026-08-23T09:00:00Z", or "2026-08-23" for midnight UTC) or a
+duration from now ("90m", "2h", "3d") — prefer the duration form when you are unsure of today's date,
+since a wrong date is refused rather than run. ALWAYS include the offset on a date-time ("Z", "+01:00"):
+one without an offset is resolved in the timezone of the machine matbot runs on, which is not
+necessarily the user's, so "09:00" can land hours from where they meant it. The result echoes the instant it resolved to, so tell the
+user that time rather than the words you were given. A time that has already passed is refused; a time
+that goes by while matbot is not running is honoured late, on the next start.
+
+A job that runs while nobody is watching leaves no trace unless you name an output file: that file
+appearing in the workspace IS how the user finds out it ran, so name one for anything whose result
+matters.
+
+interval is a duration like "30s", "5m", "1h", "24h". Omitting it — or passing "once" or null — is the
+run-now form, unless at is given.
 
 The background process has access to the same tools and providers. Optionally name a workspace
 file to capture the process's stdout; without an output file, stdout is discarded.
 
 When the user asks for something in the background, do not wait for the output — notify them the
 task has started (and the output filename, if any); they will check the result themselves later.
-
-interval is a duration like "30s", "5m", "1h", "24h". Omitting it — or passing "once" or null —
-runs the prompt a single time.
 
 When running a task in the background, don't wait for the result - the user will be notified. If they
 wanted to see the result, they would have asked for it in the foreground.
@@ -322,11 +510,15 @@ wanted to see the result, they would have asked for it in the foreground.
       prompt: { type: 'string', description: 'The task for the background process to carry out.' },
       interval: {
         type:        'string',
-        description: 'Recurrence gap, e.g. "30s", "5m", "1h", "24h". Omit (or pass "once"/null) to run a single time.',
+        description: 'Recurrence gap, e.g. "30s", "5m", "1h", "24h". Omit (or pass "once"/null) to run a single time. Mutually exclusive with "at".',
+      },
+      at: {
+        type:        'string',
+        description: 'Run ONCE at this time: an ISO-8601 date-time ("2026-08-23T09:00:00Z") or a duration from now ("90m", "2h", "3d"). Always include the offset ("Z", "+01:00") — a date-time without one is read in the host machine\'s timezone, not the user\'s. Mutually exclusive with "interval". A time already in the past is refused.',
       },
       name: {
         type:        'string',
-        description: 'Recurring only: optional human-readable label shown in every_action (list).',
+        description: 'Timed or recurring only: optional human-readable label shown in every_action (list).',
       },
       output: {
         type:        'string',
@@ -340,10 +532,45 @@ wanted to see the result, they would have asked for it in the foreground.
   },
   executor: {
     async *execute(input: unknown, ctx: ToolContext) {
-      const { prompt, interval, name, output, provider } = input as BackgroundInput;
+      const { prompt, interval, at, name, output, provider } = input as BackgroundInput;
       // Default to the provider driving this turn, not the config default — a background task
       // inherits the model that spawned it unless the tool call names one explicitly.
       const effectiveProvider = provider ?? ctx.provider;
+      const timed = typeof at === 'string' && at.trim() !== '';
+
+      if (timed && !isRunOnce(interval)) {
+        yield { type: 'error', message: 'Pass "interval" (repeat this often) or "at" (run once, then), not both. For a recurring job that should start at a particular time, schedule a one-shot at that time whose prompt creates the recurring job.' };
+        return;
+      }
+
+      if (timed) {
+        if (!activeConfigPath || !scheduleStore) {
+          yield { type: 'error', message: 'A timed background job requires the plugin to be set up with a config path.' };
+          return;
+        }
+        let whenMs: number;
+        try { whenMs = parseAt(at!); }
+        catch (e) { yield { type: 'error', message: (e as Error).message }; return; }
+        const nowMs = Date.now();
+        if (whenMs < nowMs - AT_PAST_GRACE_MS) {
+          yield { type: 'error', message: `"at" resolved to ${isoAt(whenMs)}, which is in the past (it is now ${isoAt(nowMs)}). Check the date — or, to run the job immediately, call background without "at".` };
+          return;
+        }
+        const id = randomUUID();
+        const sched: OnceSchedule = {
+          id, version: nowMs.toString(), prompt, active: true,
+          createdAt: isoAt(nowMs),
+          nextRun:   isoAt(whenMs),
+          principal: currentPrincipal(),
+          ...(name              !== undefined ? { name              } : {}),
+          ...(output            !== undefined ? { output            } : {}),
+          ...(effectiveProvider !== undefined ? { provider: effectiveProvider } : {}),
+        };
+        await scheduleStore.set(sched.id, sched);
+        armSchedule(sched);
+        yield { type: 'result', value: { id, at: sched.nextRun, ...(name !== undefined ? { name } : {}) } };
+        return;
+      }
 
       if (isRunOnce(interval)) {
         if (!ctx.configPath) {
@@ -359,16 +586,22 @@ wanted to see the result, they would have asked for it in the foreground.
         yield { type: 'error', message: 'A recurring background job requires the plugin to be set up with a config path.' };
         return;
       }
-      let intervalMs: number;
-      try { intervalMs = parseDuration(interval!); }
-      catch (e) { yield { type: 'error', message: (e as Error).message }; return; }
+      // Narrowed rather than parsed-and-caught: the type IS the regex (see `Duration`), so a value that
+      // survives this line can be echoed back in the result without a cast, and this caller words its own
+      // refusal — an interval and an `at` are wrong in different ways and deserve different sentences.
+      const iv = interval!.trim();                 // isRunOnce above ruled out undefined / null / "once"
+      if (!isDuration(iv)) {
+        yield { type: 'error', message: `Invalid interval "${interval}". Use a duration like "30s", "5m", "1h", "24h" — or omit it (or pass "once") to run a single time.` };
+        return;
+      }
+      const intervalMs = durationMs(iv);
 
-      const id  = randomUUID();
-      const now = new Date();
+      const id    = randomUUID();
+      const nowMs = Date.now();
       const sched: Schedule = {
-        id, version: now.getTime().toString(), prompt, intervalMs, active: true,
-        createdAt: now.toISOString(),
-        nextRun:   new Date(now.getTime() + intervalMs).toISOString(),
+        id, version: nowMs.toString(), prompt, intervalMs, active: true,
+        createdAt: isoAt(nowMs),
+        nextRun:   isoAt(nowMs + intervalMs),
         principal: currentPrincipal(),
         ...(name              !== undefined ? { name              } : {}),
         ...(output            !== undefined ? { output            } : {}),
@@ -376,7 +609,7 @@ wanted to see the result, they would have asked for it in the foreground.
       };
       await scheduleStore.set(sched.id, sched);
       armSchedule(sched);
-      yield { type: 'result', value: { id, interval: interval!, ...(name !== undefined ? { name } : {}) } };
+      yield { type: 'result', value: { id, interval: iv, ...(name !== undefined ? { name } : {}) } };
     },
   },
 };
@@ -417,7 +650,9 @@ async function setActiveAll(active: boolean): Promise<{ ids: string[]; skipped: 
 
 const everyActionTool: Tool<ToolResultOf<'every_action'>> = {
   name: 'every_action',
-  description: `Manage recurring background schedules created by the background tool (when given an interval).
+  description: `Manage the background jobs the background tool scheduled for later — both recurring ones
+(created with an interval) and one-shots (created with an at). A one-shot's row reads interval "once",
+with its fire time in nextRun, and it disappears from the list once it has run.
 
 ACTIONS
   list    — Show every schedule with its id, interval, next run time, and active state.
@@ -462,7 +697,7 @@ Each entry carries a \`kind\` saying what to do about it — do not read this ou
             type:  'result',
             value: schedules.map((s: Schedule) => ({
               id:       s.id,
-              interval: formatDuration(s.intervalMs),
+              interval: s.intervalMs === undefined ? 'once' : formatDuration(s.intervalMs),
               nextRun:  s.nextRun,
               active:   s.active !== false,
               ...(s.name    !== undefined ? { name:    s.name    } : {}),

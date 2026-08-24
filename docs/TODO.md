@@ -1,6 +1,8 @@
 Things I think we're missing, esp in an enterprise env. No specific order
 
-* Media input & output (esp pdf, html, etc) - maybe pdfmake?
+* Media **output** — generating a PDF/HTML artefact for the user, rather than showing one to the
+  model. Maybe pdfmake. (Media *input* is built, both directions: a person attaches, or a tool hands
+  the model something to look at — see docs/MEDIA.md.)
 
 ## Considered and parked
 

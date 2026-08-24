@@ -1,4 +1,4 @@
-import type { Session, SystemContextContributor, SystemContextRegistry } from './types.js';
+import type { Session, SystemContextContributor, SystemContextPart, SystemContextRegistry } from './types.js';
 
 interface TaggedContributor {
   fn:          SystemContextContributor;
@@ -18,9 +18,23 @@ export class SystemContextRegistryImpl implements SystemContextRegistry {
     }
   }
 
+  async parts(ctx: { session: Session; signal: AbortSignal }): Promise<SystemContextPart[]> {
+    // Zipped, not indexed twice. Re-reading `_contributors` after the await pairs each text with
+    // whatever now sits at that index: a plugin unloading mid-await (`removeByPlugin` splices) shifts
+    // every survivor onto its predecessor's text and drops the last one, and since `build()` derives
+    // from this, that corrupts the prompt actually sent — not merely the breakdown reported.
+    const settled = await Promise.all(
+      this._contributors.map(async c => ({ c, text: await c.fn(ctx) })));
+    return settled.flatMap(({ c, text }) =>
+      typeof text === 'string' && text.length > 0
+        ? [{ text, ...(c.pluginName !== undefined ? { plugin: c.pluginName } : {}) }]
+        : []);
+  }
+
+  // The joined form is derived from the attributed one, so the prompt the model receives and the
+  // breakdown `about_matbot` reports cannot drift: there is one traversal and one filter.
   async build(ctx: { session: Session; signal: AbortSignal }): Promise<string | null> {
-    const parts = (await Promise.all(this._contributors.map(c => c.fn(ctx))))
-      .filter((s): s is string => typeof s === 'string' && s.length > 0);
-    return parts.length > 0 ? parts.join('\n\n') : null;
+    const parts = await this.parts(ctx);
+    return parts.length > 0 ? parts.map(p => p.text).join('\n\n') : null;
   }
 }

@@ -377,6 +377,7 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotMachine,
       },
       removeByPlugin: (name: string) => services.systemContext.removeByPlugin(name),
       build:          (ctx)          => services.systemContext.build(ctx),
+      parts:          (ctx)          => services.systemContext.parts(ctx),
     },
     async register(key, svc) {
       const keys = state.serviceKeys.get(plugin.name) ?? [];

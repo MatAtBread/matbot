@@ -265,6 +265,10 @@ export async function boot(env: BootEnv): Promise<void> {
   const hookReg          = new HookRegistry();
   const systemContextReg = new SystemContextRegistryImpl();
   const serviceRegistry  = new Map<string, unknown>();
+  // OPFS (or whatever backend is active) doubles as the media store, so attachments work with no extra
+  // plugin. Seeded into the registry rather than spelled on baseServices so `register('MediaStore', …)`
+  // can reach it — see the CLI host for the same note.
+  serviceRegistry.set('MediaStore', fileStore);
 
   let knowledgeImpl: KnowledgeIndex = new LookupKnowledgeIndex();
   // Wrapped so every session write announces itself — see the CLI host for why the sessions namespace
@@ -375,6 +379,7 @@ export async function boot(env: BootEnv): Promise<void> {
       else if (key === 'KnowledgeIndex') knowledgeImpl = bootKnowledge;
       else if (key === 'Vault')          activeVault = bootVault;
       else if (key === 'Notifier')       activeNotifier = bootNotifier;
+      else if (key === 'MediaStore')     serviceRegistry.set('MediaStore', fileStore);
       else serviceRegistry.delete(key);
       if (key !== 'StorageBackend') { mountTable.markDirty(key as keyof MatbotServices); scheduleEdge(); }
     },
@@ -504,6 +509,7 @@ export async function boot(env: BootEnv): Promise<void> {
     toolTypeIndex: () => services.ToolTypeIndex,   // fold each tool's wire contract into its description at dispatch
     toolPresenter: () => services.ToolPresenter,   // resolved live: a tool-search/deferral plugin registers it after boot
     steeringPolicy: () => services.SteeringPolicy, // resolved live: a steering plugin registers it after boot
+    mediaStore:    () => services.MediaStore,      // resolved live: seeded to the host file area, a plugin may swap it
   });
 
   // Load provider plugins first as a warm-up so the first turn needn't load its adapter mid-response.
@@ -552,7 +558,7 @@ export async function boot(env: BootEnv): Promise<void> {
 
   // about_matbot: the harness's own version + description. The harness isn't a plugin, so this singleton
   // fact gets a dedicated tool; the assembler bakes the web-bundle's own package version into the env.
-  toolReg.register(createAboutMatbotTool(env.harnessVersion ?? '?'));
+  toolReg.register(createAboutMatbotTool(env.harnessVersion ?? '?', services));
 
   // Let the frontend offer "add another provider" from the UI (runs the wizard form).
   (globalThis as unknown as Record<string, unknown>).__mbProviders = {

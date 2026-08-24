@@ -213,8 +213,32 @@ class FunctionStore {
   }
 }
 
-const DESCRIPTION = `Compose multiple tool calls — filter, count, reshape their results — without routing every intermediate result
-back through the model. Compositions is expressed as TypeScript functions that orchestrate other tools in a single pass.
+const DESCRIPTION = `WHEN TO USE THIS — judge it by the SIZE and SHAPE of the work, not by the number of calls:
+
+  1. A VERBOSE result you need a fraction of. A listing, a table, a file body, a search dump — where what
+     you actually want is a count, a total, an aggregate, a summary, or two fields. Reading it through the
+     conversation puts the whole thing in your context permanently in order to extract a line of it.
+  2. LOOPS AND CONDITIONALS. The same call over n items, read-each-and-decide, retry-until-it-works,
+     branch on what came back. A round per iteration, and every intermediate result kept for the session.
+
+NOT FOR THIS — the pathological case, and the tempting one: wrapping a SINGLE tool call whose result you
+are not reducing. If the body is one \`await tool.x(params)\` and a \`return\` of what came back, the lambda is
+strictly WORSE than the call it wraps — the same result reaches you either way, and the wrapper cost you a
+types call and a round to write it. There is no reason to wrap a single call whose result you are not going
+to aggregate, filter, count, loop over, or feed into another call. Call the tool.
+
+Authoring a lambda costs a call or two of its own (usually \`{ action: 'types' }\`, then the body), so two
+direct calls with small results are also fine as they are. It wins decisively the moment bulk would pass
+through the conversation to answer something small, or n grows.
+
+  Piping it yourself:  workspace_action(list) → 200 names in context → workspace_action(read) → contents
+                       in context → workspace_action(read) → … (a round each, all of it kept)
+  One lambda:          (args: { prefix: string }): number { … list, read each, count matches … } → the number
+  Pointless — do NOT: (args: { name: string }): string { return await tool.workspace_action({ action: 'read', name: args.name }); }
+                       ↑ reduces nothing, so it is the same result for more work: call workspace_action.
+
+Compose multiple tool calls — filter, count, reshape their results — without routing every intermediate result
+back through the model. Compositions are expressed as TypeScript functions that orchestrate other tools in a single pass.
 
 Inside a function, call any registered tool through the injected \`tool\` proxy:
 \`const r = await tool.<tool_name>(params)\` runs that tool and resolves to its structured result (the same
@@ -231,8 +255,9 @@ parameter of the same name is rejected, because it would shadow the injection):
 
   tool           the proxy above — \`await tool.<tool_name>(params)\`
   toolInContext  the factory above — \`await toolInContext({ provider }).<tool_name>(params)\`
-  context        the call you are running under, read-only, exactly:
-                   { callId: string; sessionId: string; provider?: string; workdir?: string; signal: AbortSignal }
+  context        the call you are running under, exactly:
+                   { callId: string; sessionId: string; provider?: string; workdir?: string; signal: AbortSignal;
+                     progress: (pct: number, message?: string) => void }
 
 \`context\` is how you answer "which session/turn am I in?" from inside a function — there is no tool that
 reports it (\`session_action\` takes a \`sessionId\` as an explicit param; \`whoami\` returns the principal, not
@@ -240,9 +265,21 @@ the session). So the CURRENT session is \`context.sessionId\`:
 
   const s = await tool.session_action({ action: 'get', sessionId: context.sessionId });
 
-Pass \`context.signal\` to any \`fetch\` you make so a long run stays cancellable. Note that \`context\` is
-informational: a nested \`tool.<name>()\` call ALREADY inherits this session, signal and provider, so only
+Pass \`context.signal\` to any \`fetch\` you make so a long run stays cancellable. Note that \`context\`'s FIELDS
+are informational: a nested \`tool.<name>()\` call ALREADY inherits this session, signal and provider, so only
 pass its fields on where the callee takes them as explicit parameters (as \`session_action\` does above).
+
+TELL THE USER WHAT YOU ARE DOING while the body runs: \`context.progress(pct, message)\` — \`pct\` 0-100,
+\`message\` a short line of prose — draws a progress bar and caption against this call in the UI as it runs.
+It is not part of your result and is never sent back to you, so it costs you no context; it simply goes away
+when the call ends. Call it in any loop over n items, and between the stages of a multi-step body: a silent
+function that takes a minute is indistinguishable, to the person waiting, from a hung one.
+
+  const files = await tool.workspace_action({ action: 'list', prefix });
+  for (const [i, f] of files.entries()) {
+    context.progress((i / files.length) * 100, 'Reading ' + f.name);
+    if ((await tool.workspace_action({ action: 'read', name: f.name })).includes('TODO')) hits++;
+  }
 
 Before composing, run \`{ action: 'types' }\` to fetch TypeScript declarations of what the available tools'
 calls resolve to — write \`await tool.x(...)\` against those real return types instead of guessing shapes.
@@ -256,7 +293,9 @@ ACTIONS
            recompiles it. Never shadows a tool you didn't define here. Note: tools defined this way become
            visible on the *next turn*.
   lambda — Compile and run an ANONYMOUS one-argument function once, now, against \`params\`. Nothing is
-           persisted or registered. Type-checked against the live tool types before running (like define),
+           persisted or registered. This is the ordinary way to reduce a bulky or repetitive tool chain to
+           just its answer — but NOT a wrapper for a single call (see NOT FOR THIS above). If the same
+           chain is worth repeating later, define it instead. Type-checked against the live tool types before running (like define),
            so a bad composition is caught before it runs; pass \`noTypeCheck: true\` to bypass.
   check  — Re-run define's type-check over a function you already defined, without running or re-registering
            it. Pass \`name\` for one, or omit it to check every defined function. Use this after anything that
@@ -303,6 +342,27 @@ const INPUT_SCHEMA: JSONSchema = {
     name:       { type: 'string', description: 'remove: the defined function/tool name to delete. check (optional): the one function to check — omit it to check every defined function.' },
   },
 };
+
+/**
+ * Always-injected system-prompt guidance: prefer ONE lambda over a round-per-call chain when a turn's
+ * work is multi-stage. It belongs in the system prompt rather than in this tool's own description
+ * because it is advice about *when to reach for the tool at all* — a model that never considers
+ * `tool_function` never reads its description, and by the time it does the round-per-call turn is
+ * already under way. Constant text, so it is a stable cache prefix (see the `contribute` hook note in
+ * CLAUDE.md) rather than something rebuilt per turn.
+ */
+const MULTI_STAGE_ADVICE =
+  "The test for `tool_function { action: 'lambda' }` is whether you are REDUCING a result: (a) a tool " +
+  'whose result is VERBOSE and you need a fraction of it — a count, a total, an aggregate, a summary, a ' +
+  'couple of fields; or (b) a LOOP or a CONDITIONAL — the same call over n items, read-each-and-decide, ' +
+  'retry-until, branch on what came back. There a lambda does the whole thing in one call and returns only ' +
+  'the answer, and the listings, rows and file bodies it read on the way are never sent to you. Run ' +
+  "`{ action: 'types' }` first and write `await tool.x(...)` against the real result types. " +
+  'DO NOT wrap a single tool call whose result you are not reducing. A lambda whose body is one ' +
+  '`await tool.x(params)` and a `return` of what came back is strictly WORSE than calling that tool: the ' +
+  'same result reaches you either way, and the wrapper cost you a types call and a round to write it. If ' +
+  'the body would not filter, count, aggregate, loop, or feed the result into a second call, it has ' +
+  'nothing to do — call the tool directly.';
 
 const errorEvent = (message: string): ToolEvent => ({ type: 'error', message });
 
@@ -410,6 +470,7 @@ export function createFunctionToolsPlugin(): MatbotPluginSpec {
       // boot load is above; this reacts only to future swaps.
       services.mounted.observe({ key: 'StorageBackend', signal: lifecycle.signal }, () => void fns.reload());
       services.tools.register(functionTool(services, fns));
+      services.systemContext.register(() => MULTI_STAGE_ADVICE);
     },
 
     async teardown() { lifecycle?.abort(); store?.removeAll(); },

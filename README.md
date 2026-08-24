@@ -302,6 +302,8 @@ shipped as first-party plugins in this repo).
 | [GETTING-STARTED.md](docs/GETTING-STARTED.md) | Installation, full CLI reference, config reference, worked examples |
 | [DEVELOPING.md](docs/DEVELOPING.md) | Full plugin API — tools, providers, storage, frontends, hooks, the browser bundle |
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Visual tour of the core, plugin seams, and turn flow |
+| [MEDIA.md](docs/MEDIA.md) | How images, PDFs and audio reach a model — submission, storage and delivery, with the first-party plugins as templates |
+| [SSE-CLIENTS.md](docs/SSE-CLIENTS.md) | Writing a UI client (or reimplementing the server half): what the streams guarantee, and the failures that are invisible in testing |
 | [CLAUDE.md](CLAUDE.md) | Design ethos, hard rules, and architectural intent — written for AI assistants working on the codebase, but essential reading for any contributor |
 
 ---

@@ -164,9 +164,15 @@ function checkGit(problems, advisories) {
 function checkManifests(pkgs, problems, advisories) {
   const versions = new Set(pkgs.map(p => p.version));
   if (versions.size > 1) {
-    // The changeset config puts every @matatbread/* package in one `fixed` group, so a split here
-    // means a manual edit slipped through and consumers will resolve a peer range that has no match.
-    problems.push(`fixed version group is not uniform: ${[...versions].sort().join(', ')}`);
+    // A spread is now expected rather than broken. The changeset config `linked`s every @matatbread/*
+    // package instead of `fixed`ing them, so a release versions only what actually changed and everything
+    // else keeps the number it last shipped at. This was a whole-run blocker while every package moved in
+    // lockstep — a split could then only mean a hand-edited version — and the reason it gave for blocking
+    // ("consumers resolve a peer range with no match") does not survive the change: the ranges are
+    // `workspace:^`, rewritten at pack time from the dependency's OWN version, so a plugin at 0.4.8 asks
+    // for the plugin-api it was built against whatever its siblings are at. A range that cannot be
+    // rewritten is still a problem, and is caught per-package below.
+    advisories.push(`versions span ${[...versions].sort().join(', ')} — expected under linked versioning, where only changed packages are released`);
   } else console.log(`   ${c.green('✓')} all ${pkgs.length} publishable packages at ${c.bold([...versions][0])}`);
 
   // changesets passes its config-level `access` to every publish, which is what has been carrying

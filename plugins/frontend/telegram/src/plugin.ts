@@ -1,8 +1,8 @@
 import type {
   MatbotPluginSpec, MatbotMachine, Principal, Session, PromptFn, FormField,
-  ToolExecutor, ToolContract, ToolResultOf,
+  ToolExecutor, ToolContract, ToolResultOf, UserContent, MimeType,
 } from '@matatbread/matbot-plugin-api';
-import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, isMediaRejectedError, encodeBase64 } from '@matatbread/matbot-plugin-api';
 
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
@@ -17,9 +17,58 @@ declare module '@matatbread/matbot-plugin-api' {
 import {
   createSession, runAs,
 } from '@matatbread/matbot-core';
-import { getUpdates, sendChatAction, sendMessage } from './bot.js';
+import { downloadFile, getUpdates, sendChatAction, sendMessage } from './bot.js';
+import type { TelegramMessage } from './bot.js';
 
 const PLUGIN_NAME = 'frontend-telegram';
+
+/**
+ * Turn a Telegram message into the submission content. This is the case that proves the by-value
+ * boundary: the bytes arrive WITH the message, there is no upload-in-advance leg and there cannot be
+ * one, so the frontend hands the runner inline arms and the runner's own rewrite puts them in the
+ * MediaStore before anything is enqueued. No media code lives here beyond fetching and typing.
+ *
+ * A photo is sent in several renditions; the last is the largest, and the largest is what a model
+ * should see — a thumbnail-sized image is the one that makes vision look bad.
+ */
+export async function messageContent(
+  botToken: string,
+  msg:      TelegramMessage,
+  signal:   AbortSignal,
+): Promise<{ content: UserContent[]; failed: string[] }> {
+  const content: UserContent[] = [];
+  const failed:  string[] = [];
+
+  // Prose rides in `caption` when an attachment came with it, and in `text` otherwise — never both.
+  const prose = msg.text ?? msg.caption;
+  if (prose) content.push({ type: 'text', text: prose });
+
+  const wanted: Array<{ fileId: string; name: string; mimeType: string }> = [];
+  const largest = msg.photo?.[msg.photo.length - 1];
+  if (largest) wanted.push({ fileId: largest.file_id, name: 'photo.jpg', mimeType: 'image/jpeg' });
+  for (const [f, fallbackName, fallbackMime] of [
+    [msg.document, 'document',   'application/octet-stream'],
+    [msg.audio,    'audio.mp3',  'audio/mpeg'],
+    [msg.voice,    'voice.ogg',  'audio/ogg'],
+    [msg.video,    'video.mp4',  'video/mp4'],
+  ] as const) {
+    if (f) wanted.push({ fileId: f.file_id, name: f.file_name ?? fallbackName, mimeType: f.mime_type ?? fallbackMime });
+  }
+
+  for (const w of wanted) {
+    const got = await downloadFile(botToken, w.fileId, signal);
+    // Named, not silently dropped: a model answering about a photo it never received produces a
+    // confidently wrong answer, which is worse than being told the download failed.
+    if (got === null) { failed.push(w.name); continue; }
+    content.push({
+      type:     w.mimeType.startsWith('image/') ? 'image' : w.mimeType.startsWith('audio/') ? 'audio' : 'document',
+      data:     encodeBase64(got.bytes),
+      mimeType: w.mimeType as MimeType,
+      name:     w.name,
+    });
+  }
+  return { content, failed };
+}
 const SETTINGS_KEY_PROVIDER = 'provider';
 const SETTINGS_KEY_KNOWN = 'knownChats';
 
@@ -174,7 +223,8 @@ export const plugin: MatbotPluginSpec = {
     const ac   = new AbortController();
     teardownAc = ac;
 
-    async function handleMessage(chatId: number, text: string, senderName?: string): Promise<void> {
+    async function handleMessage(msg: TelegramMessage, senderName?: string): Promise<void> {
+      const chatId = msg.chat.id;
       if (!knownChats.has(chatId)) {
         // A new user. Admit them only as the first-ever chat, or while the door is open.
         if (knownChats.size === 0 || (openDoor && (Date.now() - openDoor) < 30_000)) {
@@ -221,10 +271,18 @@ export const plugin: MatbotPluginSpec = {
           // Concurrent messages for this chat hit the same session, so the runner queues them — no
           // per-chat lock needed. We render only our own turn and its descendants (rootTraceId), so
           // concurrent submissions don't cross-render.
+          // Attachments are fetched here and handed over BY VALUE; the runner writes them to the
+          // MediaStore and swaps in `file-ref`s before the turn is enqueued.
+          const { content, failed } = await messageContent(botToken, msg, ac.signal);
+          if (failed.length > 0) {
+            await sendMessage(botToken, chatId, `I couldn't download: ${failed.join(', ')}. Try sending it again.`);
+          }
+          if (content.length === 0) return;
+
           const view = await run.open({
             sessionId: session.id,
             signal:    ac.signal,
-            content:   [{ type: 'text', text }],
+            content,
             provider:  providerName,
             principal,
             // ── Interactive prompts: deliberately NOT implemented ───────────────────────────────
@@ -287,9 +345,12 @@ export const plugin: MatbotPluginSpec = {
         }
       } catch (e) {
         if (!ac.signal.aborted) {
-          console.warn(`[frontend-telegram] Error for chat ${chatId}: ${e}\n`);
+          // A refused attachment already says exactly what is wrong and which file — relay it rather
+          // than flattening it to "an error occurred", which leaves the sender with nothing to act on.
+          const reply = isMediaRejectedError(e) ? e.message : 'An error occurred. Please try again.';
+          if (!isMediaRejectedError(e)) console.warn(`[frontend-telegram] Error for chat ${chatId}: ${e}\n`);
           try {
-            await sendMessage(botToken, chatId, 'An error occurred. Please try again.');
+            await sendMessage(botToken, chatId, reply);
           } catch { /* ignore send failures */ }
         }
       }
@@ -312,13 +373,14 @@ export const plugin: MatbotPluginSpec = {
           for (const update of updates) {
             offset = update.update_id + 1;
             const msg = update.message;
-            if (msg?.text) {
+            // A photo with no caption is a real message, so the gate is "did this carry anything?"
+            // rather than "does it have text" — the latter dropped every attachment on the floor.
+            if (msg && (msg.text || msg.caption || msg.photo || msg.document || msg.audio || msg.voice || msg.video)) {
               // Establish this message's principal at the dispatch entry so the session/settings
               // store access inside handleMessage runs under it (the turn itself is scoped by pump).
               const senderName = msg.from?.first_name || msg.from?.username;
               const principal: Principal = { id: `telegram-${senderName ?? msg.chat.id}`, type: 'user'};
-              void runAs(principal,
-                () => handleMessage(msg.chat.id, msg.text!, senderName));
+              void runAs(principal, () => handleMessage(msg, senderName));
             }
           }
         } catch (e) {

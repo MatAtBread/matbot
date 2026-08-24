@@ -64,6 +64,11 @@ declare global {
     statusEvents(signal?: AbortSignal): AsyncIterable<{ sessionId: string; busy: boolean }>;
     notifications(signal?: AbortSignal): AsyncIterable<any>;
     openFile(namespace: string, name: string): void;
+    /** A URL the page can point an <img>/<audio> at for one stored media file, or null when the store
+     *  will not serve it. Asynchronous because the two transports answer it very differently: the node
+     *  one returns a path to `GET /media/:id`, while in-process there is no HTTP route at all and the
+     *  bytes have to be materialised into a `blob:` URL — the same split `openFile` already makes. */
+    mediaUrl(fileId: string): Promise<string | null>;
   }
 
   interface Window {

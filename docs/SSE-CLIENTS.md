@@ -374,6 +374,9 @@ Two things do carry over, and one does not carry the way you would guess:
   is what you might lose — so a view is worth recovering. In-process, the provider request is made *from
   the page*, so losing the network interrupts the turn itself: there is no completed work sitting
   somewhere waiting to be re-read. Recovery there is not a UI problem and cannot be solved by a UI.
+- **There is no `/media/` route**, so a client that draws attachments needs one transport member —
+  `mediaUrl(fileId)` — returning a path on the server build and a `blob:` minted from the store here.
+  Memoise it: a blob costs a full store read. Same split as `openFile`; see [MEDIA.md](MEDIA.md).
 
 ---
 

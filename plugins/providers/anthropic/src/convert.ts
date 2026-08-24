@@ -65,15 +65,16 @@ export function toAnthropicMessages(messages: Message[], cc: CacheControl): Anth
           // format does not carry enough information to prove that, so elide
           // them deterministically rather than sending possibly-invalid input.
           return [];
-        case 'reasoning': {
-          // OpenAI/DeepSeek reasoning — Anthropic has no native equivalent. Strip for plain-chat turns
-          // (DeepSeek ignores prior reasoning when there are no tool calls). On tool-call turns DeepSeek
-          // requires it to be passed back or the request 400s, so degrade to a text marker.
-          const hasToolCalls = msg.content.some(mc => mc.type === 'tool-call');
-          return hasToolCalls
-            ? [{ type: 'text', text: `[Prior reasoning: ${c.reasoning}]` }]
-            : [];
-        }
+        case 'reasoning':
+          // Elided, like the `thinking` blocks above and for the same reason. A `reasoning` block is
+          // only ever produced by the openai-compat adapter, so one reaching HERE came from a different
+          // provider earlier in a mixed-provider session — foreign round-trip state, and the Messages
+          // API has no slot for it. It was previously degraded to a `[Prior reasoning: …]` TEXT block,
+          // which is exactly "posting foreign state into a slot it doesn't belong in": it put another
+          // model's private reasoning into this one's visible prose, where it reads as something the
+          // assistant said. Worse, it is imitable — a model that sees the pattern starts emitting
+          // `[Prior reasoning: …` as its own output, leaking reasoning into the answer.
+          return [];
         case 'image':
           return [{ type: 'image', source: { type: 'base64', media_type: c.mimeType, data: c.data } }];
         case 'image-url':

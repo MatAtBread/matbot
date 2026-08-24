@@ -9,6 +9,346 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## 0.4.8
+
+### Breaking changes
+
+- **`createAboutMatbotTool(version)` is now `createAboutMatbotTool(version, services)`.** The tool reports
+  the system prompt in force, so it needs the live machine to rebuild it — the same second argument
+  `createSingleTurnTool` already takes. `SystemContextRegistry` gains a required `parts(ctx)` with it,
+  which breaks a host that hand-rolls that registry instead of constructing core's
+  `SystemContextRegistryImpl` (nothing in this repo does).
+
+### API gaps filled
+
+- **`SystemContextRegistry.parts(ctx)` — the system prompt, attributed.** The prompt is assembled once per
+  submit and never persisted, so there was no route to it from a tool and no way to say WHICH plugin put a
+  line in it. `parts()` returns each contribution with the name of the plugin that registered it, and
+  `build()` now derives from it — one traversal, so the text sent and the breakdown reported cannot drift.
+  `about_matbot` carries both: `systemPrompt` (exactly what the turn received) and `systemContext` (the
+  same content, per contributor), which is how "what are your instructions?" and "why do you keep doing
+  that?" get an answer that names the thing to change.
+
+- **User-supplied session media.** A person can attach an image, PDF or audio clip to a message and the
+  model sees it. The mirror of the existing `model-content` pull path, and it needed no new
+  `MessageContent` arm: bytes arrive **by value** in `SubmitOpenOpts.content` (now `UserContent[]`, a
+  deliberately narrow subset of `MessageContent` — a wire boundary must not accept a forged `tool-result`,
+  `thinking` block or `marker`), and `SessionRunner.open()` writes each inline arm through the new
+  `MediaStore` service and replaces it with a `file-ref` **before the submission is enqueued**. What
+  persists is always a reference; no base64 ever reaches a session document. The runner resolves those
+  refs back to inline bytes on the outgoing copy only, newest-first, inside an 8MB byte budget computed
+  once per turn — beyond it the ref is left alone and the provider adapters degrade it to the
+  `[Attached file: x]` note they already wrote.
+
+  `MediaStore` is an **alias of `FileStore`**, so every existing implementation (filesystem, SQLite, OPFS,
+  Drive) is a candidate unchanged and putting media on a different medium is a registration, not a port.
+  Both hosts seed their own file area as the boot default, so this works with no configuration; a plugin
+  may `register('MediaStore', …)` to replace it, and unregistering reverts to the host default rather
+  than turning media off. With nothing registered, an attachment is refused *naming the file* and text is
+  completely unaffected.
+
+- **`MediaRejectedError`** (`mediaRejectedError` / `isMediaRejectedError`), branded like the other typed
+  errors. Carries `reason` (`no-store` / `unreadable` / `unsupported-type` / `too-large` /
+  `session-quota` / `unknown-ref`) and the offending `file`. Refusing at the boundary is the point: the
+  alternative is a provider 400 part-way through a turn the user already believes was sent.
+
+  Three of the six are about the bytes not being sendable. `unreadable` covers bad base64 and a
+  **magic-byte mismatch** — a file whose bytes are not the type it claims. `unsupported-type` catches the
+  same failure a step earlier, and is why `armFor` may return `null`: **`image/*` is the one prefix that
+  cannot be admitted by prefix alone**, because a provider *tries* to decode whatever the image arm carries
+  and 400s on what it cannot, where an unrecognised document or audio type degrades to a text note instead.
+  So HEIC (what an iPhone camera roll hands back), SVG, BMP and TIFF are refused rather than routed to an
+  arm that will fail — the same list and the same reasoning as `workspace`'s `showArm`. Both checks exist
+  because the consequence is worse than one failed message: the `file-ref` is by then in history, where it
+  resolves into every *subsequent* outgoing copy and fails the session for good. Neither is a validity
+  check — a well-formed header on a structurally broken document still passes, since only the provider can
+  know that.
+
+  `unknown-ref` is about the arm a caller may send *itself*. `UserContent` admits `file-ref`, so a frontend
+  that already uploaded can skip the rewrite — which makes a `fileId` on the wire the client's word about
+  which bytes to send, and the resolver inlines what it is handed. Each is therefore checked against the
+  session that owns it: the handle must exist, its `sessionId` must match, and its namespace must be
+  `session-media`. Ownership rather than `allowed`, since every media put sets `allowed: true` and so cannot
+  separate one session's media from another's. Reported as *unknown* rather than forbidden, for the reason
+  `GET /media/:id` gives — a refusal must not confirm that an id exists.
+
+  Caps are 50MB per session, the total **derived** by summing what the store holds rather than counted, and
+  per file **is** the 8MB residency budget rather than a second number: a file larger than the outgoing-copy
+  window can never be resident, so admitting one would only buy an attachment that is stored, charged to the
+  session total, and then permanently invisible to the model with nothing having said so.
+
+- **`SingleTurnRequest.prompt` accepts `UserContent[]`** as well as a string, so a one-shot completion can
+  carry media.
+
+- **`ComposedCallContext.progress(pct, message?)` — a composed function can report while it runs.** A
+  `tool_function` body is a plain async function and so cannot `yield`, which left the `progress`
+  `ToolEvent` — the one a hand-written tool emits, already rendered by the web client as a bar and caption
+  and by the CLI as `[NN%]` — unreachable from the one place a long run actually happens: a lambda looping
+  over n items. It needed no new channel and no change to the authoring syntax, because `runFunction`
+  already pumps a live event queue for the nested-call stdout trace; `progress` writes onto that same
+  queue, so an existing function is unaffected by construction. It is the one method on
+  `ComposedCallContext`, and does not breach that type's facts-not-capabilities rule for the reason the
+  rule exists: it carries no authority — write-only, reading nothing and reaching nothing. `pct` is
+  rounded and clamped where the model-authored number is handed over rather than in each renderer.
+
+### Bug fixes
+
+- **A mid-turn steer could interrupt a turn the user never saw.** The decision to interrupt tested
+  `s.running`, which is true across the pump's **whole queue** — so it answers "something is running",
+  never "still the one you meant". Every await in front of that test can outlive the turn being steered
+  (the classifier and the nudge always could; media ingestion, new in this release, can hold for seconds
+  on a large attachment), after which the abort landed on whatever was running by then and the `steer`
+  event named the wrong `interruptedTraceId`. The target turn's `traceId` is now captured when the
+  submission *arrives* and compared before aborting; if that turn has since committed the steer falls
+  through and queues, which is what it has become — an ordinary follow-up.
+
+- **`SystemContextRegistry.parts()` could pair a contribution with the wrong plugin, and drop one.** It
+  awaited the contributors and then re-indexed the *current* array, so a plugin unloading during the
+  await (a hot reload) shifted every survivor onto its predecessor's text and lost the last one
+  entirely. Since `build()` now derives from `parts()`, that corrupted the prompt actually sent, not
+  just the breakdown `about_matbot` reports. The contributor is zipped into its own awaited value.
+
+- **Prior reasoning is replayed on a field, not as prose — it was leaking into visible answers.** Both
+  converters degraded a stored `reasoning` block into a literal `[Prior reasoning: …]` **text** part on
+  any turn that also carried tool calls. That was wrong twice over. It did not give the endpoint what it
+  asks for (a reasoning field, not prose). And it was *imitable*: a model that sees the pattern in its own
+  prior turns starts emitting `[Prior reasoning: …` as ordinary output — observed on DeepSeek via
+  openai-compat as a 4600-character answer that opened mid-reasoning and never closed its bracket.
+
+  `openai-compat` now sends it back on `reasoning_content`, the same field `adapter.ts` reads it from;
+  nothing goes into the visible `content` channel. Still only on tool-call turns — a plain-chat replay is
+  tokens for nothing. Verified against live endpoints: DeepSeek accepts the field, and a strict
+  OpenAI-family backend (gpt-5.x) accepts and ignores it, so this is safe for everything openai-compat
+  fronts.
+
+  `anthropic` now elides it. Only the openai-compat adapter ever produces a `reasoning` block, so one
+  reaching that converter came from a different provider earlier in a mixed-provider session — foreign
+  round-trip state, which the Messages API has no slot for and which must never be posted into a slot it
+  does not belong in. Voicing another model's private reasoning as this one's prose was exactly that.
+
+- **A robo resubmission's non-text blocks now carry `origin: 'robo'`.** The stamp was applied to text
+  blocks only, so machine-authored media was silently presented as the user's own. `origin` is authorship,
+  orthogonal to what a block carries.
+
+- **An attachment-only first turn gets a title.** Auto-titling read text blocks only, so a session opened
+  with just a photo got no title at all — which reads in the session list as a session that failed to
+  start. Falls back to the attachment names.
+
+### Optional
+
+#### background
+
+- **`at` — run a prompt once, at a stated time.** Previously a job ran now or repeated forever, so an
+  appointment could only be faked as a recurring schedule suspended after its first fire. `at` takes an
+  ISO-8601 date-time or a duration from now, returns the instant it resolved to, and is persisted, listed
+  and cancellable through `every_action` (`interval: "once"`, fire time in `nextRun`) until it runs, at
+  which point it deletes itself. The absence of an interval is what marks it a one-shot — no second flag
+  to contradict it. A time already past at creation is refused, naming what it resolved to; a time that
+  goes by while matbot is down is honoured late on the next start.
+
+- **Bug fix: a wait beyond ~24.8 days spun instead of sleeping.** `setTimeout` clamps a delay larger than
+  a 32-bit signed integer to 1ms, so a distant schedule woke immediately and went straight back round.
+  Long waits are slept in chunks against a deadline, which also covers a long recurring interval.
+
+- **Bug fix: `sleep` leaked an abort listener per call.** It detached its listeners only on the abort
+  path, never on the ordinary timeout, against signals that outlive it by design — `signal` lives as long
+  as the schedule's loop. One per interval fire was already wrong; chunking a long wait multiplied it, so
+  an `at` a year out added ~15 in one go, until node warned about an EventTarget leak and the closures
+  behind them stayed reachable. Detached on every exit now.
+
+- **`at` now documents whose timezone an offset-less date-time is read in.** `Date.parse` makes a
+  date-only value midnight **UTC** and a date-time with no offset **local** — and "local" is the *host's*
+  zone: the machine matbot runs on under the CLI or server, which is usually not where the person asking
+  is, but genuinely their own browser in the web bundle. So the same string means two different instants
+  depending on which host created the schedule, and `AT_PAST_GRACE_MS` cannot catch it because the drift
+  goes forward as often as back. Deliberately not normalised — forcing UTC would silently move an
+  appointment a browser-hosted user meant locally, and honouring the asker's own zone needs a carrier the
+  plugin has no access to. Instead the tool description, the `at` schema and the parse error all now say
+  to include an explicit offset, which is the one thing that makes both hosts agree.
+
+#### edit-session
+
+- **`session_edit` `summarise` — compact by meaning rather than by shape.** `compact` keeps every word
+  either party said and strips the machinery, which preserves the discussion, the dead ends and the stale
+  intermediate data while scattering what a successor needs. `summarise` rewrites `messages[0..msgIndex)`
+  as a two-part hand-off document — a `user` message carrying what was wanted, an `assistant` message
+  carrying what is known now — via one `singleTurn` on `provider` (default: the turn's own), both halves
+  `origin: 'robo'`. Two things in that prompt are load-bearing: it keeps ANSWERS (dropping "intermediate
+  data a successor can obtain again" describes every answer in a Q&A session, since each came from a tool
+  result — so the rule drops the bulk that produced an answer, never the answer), and it does not presume
+  the session had an objective (a conversation that ranged over topics is not a failure case — the list of
+  topics is the goal). It also says to ignore any request in the transcript to summarise or tidy the
+  conversation: that is the operation, not the work.
+
+  **`msgIndex` is optional here alone: omit it and the range is the whole session** — ending, in the
+  session the calling turn is running in, where that turn began. A turn's user message and tool rounds are
+  on `ctx.session` before any tool runs, so an unclamped "everything" includes the request to summarise and
+  the assistant's attempts at it, which are the freshest thing a hand-off prompt looks at; the first real
+  summarise duly reported the compaction as the goal. `[0, messages.length)` is a legal range, an explicit
+  index is honoured as given, and cut/fork/split/compact still require one.
+
+  The replaced messages move into a `summarised` marker rather than being destroyed: elided from every
+  submission, so they leave the context without leaving the record, and expanded again by a LATER
+  summarise so history is never summarised twice. That expansion means the summariser's prompt grows while
+  the live conversation does not, so a repeat summarise can exceed a window the session itself fits in —
+  left to fail (nothing is mutated, and naming a bigger `provider` is the remedy) rather than budgeted
+  against a character count that only approximates a token window. The LLM call runs before any mutation, so a failed or
+  malformed summary leaves the session untouched and says why; a write to another session CASes against
+  the version the summary was read from, and the calling turn's own session defers to the quiescent edge
+  like `cut`/`split`/`compact`. `summarize` is the same action.
+
+#### frontend-web
+
+- **Bug fix: the media-URL cache never released a byte.** `resolveMediaUrl` memoised by `fileId` in a
+  module-global Map that nothing ever cleared — and in the browser bundle those values are `blob:` URLs,
+  which keep their Blob alive because they are *registered*, not because anything references them. So
+  every file a long-lived page had ever rendered stayed resident, up to the 50MB session cap per session
+  visited. The old comment's claim that it was "bounded by the distinct media in a session" was wrong
+  twice: it was never per-session, and the wire's residency budget bounds one turn's outgoing copy, not
+  a page's lifetime.
+
+  The cache moved into the **browser transport**, which is the only layer that knows what an entry costs
+  (it just read the bytes) and the only one that can revoke it — the node transport now caches nothing,
+  because there `mediaUrl` is string concatenation. It is an LRU bounded in **bytes** (32MB, a first
+  guess), for the reason `MEDIA_RESIDENCY_BYTES` is: a 20-entry cache is 400KB of thumbnails or 160MB of
+  PDFs, and a count cannot tell them apart. Concurrent misses for one id share a single read, which is
+  not merely an optimisation — two mints would leave the first Blob unreachable *and* unrevoked, the
+  exact leak being fixed. And because eviction can revoke a URL whose `<img>` is still on screen, an
+  element re-resolves **once** on error before falling back to the file chip; without that, a bounded
+  cache would silently downgrade a visible image, which is what makes the bound safe to have at all.
+
+- **The system prompt is visible from the header.** Clicking `matbot vX.Y.Z` runs `about_matbot` over HTTP
+  and shows an overlay with the harness line, the provider, and the prompt broken down per contributing
+  plugin — re-run on each open, since a plugin loading or a skill being catalogued changes it while the page
+  is up. It reports the provider selected in the tab, saying so, because the direct tool endpoint has no
+  turn for the tool to report one from.
+
+- **Summarise is on the message-divider popup**, beside Compact. It passes the provider selected above the
+  composer — required rather than optional there, since the direct tool endpoint builds a session-less
+  context with no provider to fall back on — and pulses the divider line while the call is in flight,
+  because the popup closes and this is the only action on that toolbar that takes seconds.
+
+- **The mobile composer gives the textarea a row of its own.** It had only ever got narrower: at 390px,
+  three round buttons and their gaps took 141px of a 374px line, leaving room for ~29 characters — and
+  only two of those buttons were legal touch targets, the paperclip being 34px against a 44px minimum
+  while costing 40px of the line. Below 640px the controls now sit on their own row as four equal-width
+  labelled pills (Options / Attach / Stop / Send), and the textarea takes the full 374px, ~50 characters.
+  Wide beats tall for mis-taps — ~90px of separation instead of 6px — and the width is what buys room for
+  a word, which is a far stronger anti-misfire device than a 15px glyph. The extra ~28px of chrome is
+  repaid the moment a message wraps twice, which at 29 characters a line it did constantly.
+
+  Send owns the bottom-right corner and keeps it whether or not a turn is running (Stop's slot stays
+  reserved, so Send's position is fixed to the pixel): the corner a thumb lands on must not change
+  meaning. Provider and the queue/interrupt toggle — set rarely, and both unhittable at their inline size
+  — move behind the Options cog into a panel above the composer, where they render full-size.
+
+  `#input-row` is a **grid**, and the breakpoint changes only its template: no element moves between
+  parents, so the read-only state, the drag target and every handler keep working, and DOM order is free
+  to differ from visual order. The panel is the same `#input-meta` element the desktop shows inline,
+  restyled in place rather than duplicated — there is still exactly one `#provider-select`.
+
+- **Desktop puts attach after the textarea**, at the same 45px as Send and Stop rather than a smaller 32px
+  circle; outlined rather than filled is what marks it the secondary control. The meta row is denser.
+
+- **Composer attachments** — a paperclip button, drag-and-drop onto the composer, and paste (for a
+  screenshot that exists nowhere else). Attachments render as removable chips with a thumbnail, post by
+  value inside the submit body, and are **restored to the composer if the submission is refused** rather
+  than lost. Client-side caps mirror the server's so the common mistake is caught before the round trip.
+- **Media renders in the message thread** — inline in the user bubble, live and on reload, via a new
+  `GET /media/<fileId>`. That route is id-addressed rather than name-addressed (a store id is not
+  guessable the way `workspace/notes.md` is) and applies **no gate of its own**: `allowed` is the store's
+  own persisted flag and area routing is the backend's, because access control belongs to the layer
+  implementing storage, not the layer exposing it.
+- `POST /sessions/:id/submit` reads a larger body (64MB) since it may carry attachments; every other route
+  keeps the 1MB default. A refused attachment maps to 413/501/400 with the reason and the filename, not a
+  bare 500, and the client's submit timeout now scales with the payload instead of a flat 20s.
+- **No Web Crypto in the served client.** `crypto.randomUUID` needs a secure context, so it is undefined
+  over plain HTTP to anything but localhost — which is how a LAN or test deployment is normally reached.
+  The web-bundle loader shims it, but that loader runs only in browser-bundle mode; in server-backed mode
+  `app.js` is served bare. The composer no longer mints an id it never read.
+
+#### function-tools
+
+- **The description teaches `context.progress()`.** Told only that a body can be slow, a model has no way
+  to say so; the injected-bindings block now carries the call, with a worked loop, and states that progress
+  is never sent back to it — so reporting costs no context and there is no reason to be sparing with it.
+
+- **`tool_function` now recommends itself in the system prompt.** A model that never considers the tool
+  never reads its description, and left alone it pulls a verbose result into the conversation to extract a
+  line of it, or drives a loop a round at a time — keeping every intermediate result for the rest of the
+  session. The plugin registers a `SystemContextContributor` (constant text, so a stable cache prefix),
+  and the tool's description now opens with when to use it. Both are framed on the size and shape of the
+  work rather than the number of calls — a verbose result you need a fraction of, or a loop or conditional
+  — and both say what a lambda costs, since fetching the types and authoring the body is itself a call or
+  two. It appears only when the plugin is loaded, which is why it cannot live anywhere else.
+
+- **…and then names its own pathological case.** The nudge above over-corrected: told when a lambda
+  pays, the model began wrapping almost every tool call in one — the same result reaching the conversation
+  either way, for a types call and an authoring round more. Both texts had stated the exclusion as a cost
+  rather than a rule, which is easy to rationalise past. The test is now one question — are you REDUCING a
+  result? — and the exclusion is a prohibition: a lambda whose body is one `await tool.x(params)` and a
+  `return` of what came back is strictly worse than the call it wraps. The tool description gains a
+  `NOT FOR THIS` block and a worked anti-example.
+
+#### single_turn
+
+- **`attach?: string[]`** — name stored files (by store id or by name, looked up across the `MediaStore`
+  and the turn's own file store) to send alongside the prompt as inline media. A file the store does not
+  have is reported, not silently dropped: a consulted model answering about something it never saw
+  produces a confidently wrong answer.
+
+#### workspace
+
+- **`workspace_action show` — the model can look at a stored image, PDF or audio clip.** matbot's first
+  real producer of the `model-content` pull path, which until now was built, tested against a fake tool,
+  and emitted by nothing: the *push* half (a person attaches something) worked, while the model asking to
+  see a file it already knows about had no route at all. Asked to examine a workspace PNG, a model would
+  correctly reason that it needed the bytes inline, find no tool that could do it, and fall back to
+  `bash` — curling the file back off matbot's own HTTP port, sniffing the PNG header, reaching for PIL.
+  `show` streams the file, hands it over as the matching inline arm, and returns **metadata only**
+  (`{ name, mimeType, bytes }`), so the transcript records that a file was shown and never the bytes it
+  showed.
+
+- **Bug fix: `show` refused audio, which it advertises.** `MIME_MAP` had no audio extension at all, so
+  every workspace `.mp3` typed as `application/octet-stream`, `showArm` returned null, and the tool that
+  promises audio told the model to `read` it — handing back base64 it cannot hear, the exact dead end
+  `show` exists to close. Audio extensions are mapped, and the default is inverted: a format we hold no
+  opinion about is routed and left for the **endpoint** to reject, because there is no per-model mime
+  capability table here and refusing was guessing on the model's behalf. Only SVG and `text/*` are still
+  refused, neither for capability reasons — `read` hands over their source, which is the better answer.
+
+  Deliberately the opposite policy to core's `armFor`, which must refuse an undecodable `image/*`.
+  Different blast radius rather than an inconsistency: there the refusal protects a **persisted**
+  `file-ref` that would fail every later turn too, while here the worst case is one turn, because tool
+  media is wire-only and dies with it.
+
+  `read` could not have been extended to do this and the description could not have papered over it: a
+  `read` result is a **string**, so base64 there is 4/3 of the file *persisted into the session document*
+  and re-sent on every later round, for something the model still cannot see. That trap was previously
+  advertised (*"use encoding 'base64' for binary files (images, PDFs, zips)"*) with nothing to say it was
+  not vision; `base64` is now documented as the way to **move** bytes, and the description points at
+  `show` for looking at them.
+
+  Refusals name the type and point somewhere useful. SVG is the one exclusion inside `image/*` — it is
+  XML, no vision endpoint decodes it, and `read` gives you the source, which is the better answer anyway;
+  text goes the same way, and an unknown type is refused rather than guessed into a `document` arm a
+  provider would 400 on. One file may be up to **8MB**, refused on the handle's declared size before any
+  read: shown media rides the outgoing copy for the rest of the turn, so it is paid for once per *round*,
+  not once. Same number as `MEDIA_RESIDENCY_BYTES` because it is the same question — how many bytes may
+  ride the outgoing copy — and, like that one, a first guess.
+
+- **`workspace_action write` returns the `fileId` it minted**, alongside `name` and `bytes`. A caller that
+  had just uploaded could previously only address the file by guessing its name back, which is not the
+  same question once a backend partitions or renames.
+
+#### frontend-telegram
+
+- **Photos, documents, audio, voice notes and video are now received** and sent to the model — the case
+  that proves the by-value boundary, since bytes arrive WITH the message and no upload-in-advance leg
+  exists or can exist. A photo's largest rendition is used (a thumbnail is what makes vision look bad),
+  and `caption` is read as the message's prose — previously a photo-with-a-question was dropped entirely,
+  because the dispatch loop gated on `text`.
+
 ## 0.4.7
 
 ### Optional

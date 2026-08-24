@@ -16,7 +16,7 @@
 
 const BRAND = 'matbot';
 
-export type MatbotErrorKind = 'MissingSecret' | 'IncompatibleRuntime' | 'NotAPlugin' | 'PromptCancelled' | 'ReadOnly';
+export type MatbotErrorKind = 'MissingSecret' | 'IncompatibleRuntime' | 'NotAPlugin' | 'PromptCancelled' | 'ReadOnly' | 'MediaRejected';
 
 function isKind(e: unknown, kind: MatbotErrorKind): boolean {
   return typeof e === 'object' && e !== null && (e as Record<string, unknown>)[BRAND] === kind;
@@ -124,4 +124,37 @@ export function readOnlyError(namespace: string, id: string, owner: string): Rea
 }
 export function isReadOnlyError(e: unknown): e is ReadOnlyError {
   return isKind(e, 'ReadOnly');
+}
+
+/**
+ * Thrown by `SessionRunner.open()` when media attached to a submission cannot be accepted. Refusing at
+ * the boundary is the whole point: the alternative is a provider 400 part-way through a turn the user
+ * already believes was sent, with no way back. `reason` says which limit bit, and the message NAMES the
+ * offending file and its size — a bare "too large" leaves a person guessing which of five attachments
+ * to drop.
+ *
+ * A frontend catches this (via {@link isMediaRejectedError}, never `instanceof`) and tells the user;
+ * nothing has been enqueued, so there is no turn to clean up.
+ */
+export interface MediaRejectedError extends Error {
+  matbot: 'MediaRejected';
+  /** `no-store` — nothing is registered under `MediaStore`, so there is nowhere to put the bytes.
+   *  `too-large` — one file exceeds the per-file cap. `session-quota` — this session's stored media
+   *  would exceed its total. `unreadable` — the bytes were malformed: not valid base64, or not the file
+   *  type they claim (a renamed, truncated or placeholder file, caught by a magic-byte check).
+   *  `unsupported-type` — a type no provider decodes (an iPhone HEIC, an SVG), which would 400 the
+   *  request rather than degrade. `unknown-ref` — a submitted `file-ref` does not name media attached
+   *  to this session; phrased as unknown rather than forbidden, exactly as `GET /media/:id` reports a
+   *  file it will not serve, so a refusal never confirms that an id exists. */
+  readonly reason: 'no-store' | 'too-large' | 'session-quota' | 'unreadable' | 'unsupported-type' | 'unknown-ref';
+  /** The attachment's display name, when one file is to blame. */
+  readonly file?:  string;
+}
+export function mediaRejectedError(reason: MediaRejectedError['reason'], message: string, file?: string): MediaRejectedError {
+  const e = new Error(message);
+  e.name = 'MediaRejectedError';
+  return Object.assign(e, { matbot: 'MediaRejected' as const, reason, ...(file !== undefined ? { file } : {}) });
+}
+export function isMediaRejectedError(e: unknown): e is MediaRejectedError {
+  return isKind(e, 'MediaRejected');
 }

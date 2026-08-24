@@ -1,7 +1,7 @@
 import type {
   Session, Message, MessageContent, ModelContent, Usage, UsageSite, ProviderMeta, TruncatedToolResult,
   TurnEvent, RunConfig, ProviderAdapter, ProviderConfig,
-  Tool, ToolRegistry, ToolContext, Store, FileStore, SystemContextRegistry, Vault, PromptFn, FormField,
+  Tool, ToolRegistry, ToolContext, Store, FileStore, MediaStore, SystemContextRegistry, Vault, PromptFn, FormField,
 } from './types.js';
 import type { MatbotPlugin } from './plugin.js';
 import type { ToolPresenter } from '@matatbread/matbot-plugin-api';
@@ -10,6 +10,7 @@ import { HookRegistry } from './hooks.js';
 import { appendMessage, createMessage } from './session.js';
 import { foldOntoUserTurn, bindPluginOps } from '@matatbread/matbot-plugin-api';
 import { addUsage } from './usage.js';
+import { MEDIA_RESIDENCY_BYTES, resolveSessionMedia } from './media.js';
 
 // Establish a usage call site across an async iteration. Wrapping the *loop* would not work: this
 // runner is itself an async generator, so it suspends at every `yield` and resumes under the consumer's
@@ -79,6 +80,10 @@ export interface RunSessionOpts {
   workdir?:       string;
   configPath?:    string;
   files?:         FileStore;
+  /** Where user-attached session media lives. Resolved once per turn into the outgoing copy, newest-first
+   *  and inside {@link MEDIA_RESIDENCY_BYTES}; absent ⇒ every `file-ref` stays a ref and the converters
+   *  degrade it. Never read for anything else — the runner does not otherwise touch a file. */
+  mediaStore?:    MediaStore;
   /** Supply a prompt implementation to allow tools to ask interactive questions. */
   prompt?:        PromptFn;
   /**
@@ -228,6 +233,14 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
   // Turn-scoped and wire-only: it is spliced into the outgoing copy below and dies with this call.
   const attachments = new Map<string, Message>();
 
+  // User-attached media, keyed by the message whose `file-ref` blocks it replaces. The mirror of
+  // `attachments` — same splice, different source and different placement: tool media is *pinned after*
+  // the tool message it answers, session media is swapped *in place*, so the model reads the image where
+  // the person actually put it. Resolved once here, not per round: the bytes cannot change mid-turn, and
+  // re-deciding each round could drop a message out of the byte budget between two calls — busting the
+  // prompt cache and leaving the model referring to something no longer there.
+  const sessionMedia = await resolveSessionMedia(session.messages, opts.mediaStore, MEDIA_RESIDENCY_BYTES, signal);
+
   for (;;) {
     // Respect an abort that arrived between turns (e.g. during tool execution).
     if (signal.aborted) {
@@ -283,10 +296,18 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
     // message can be a marker (e.g. a retract-redo leaves the retraction marker as the tail) — folding
     // there would drop the ephemeral with it. -1 ⇒ nothing to fold onto (no non-marker history).
     const foldIdx = ephemeral.length > 0 ? session.messages.findLastIndex(m => m.role !== 'marker') : -1;
-    const history = foldIdx >= 0 || attachments.size > 0
+    const history = foldIdx >= 0 || attachments.size > 0 || sessionMedia.size > 0
       ? session.messages.flatMap((m, i) => {
-          const folded = i === foldIdx ? { ...m, content: [...m.content, ...ephemeral] } : m;
-          const media  = attachments.get(m.id);
+          // Per BLOCK, never the whole array: `sessionMedia` was resolved once before this loop, and a
+          // raced verdict's `foldOntoUserTurn` (claimVerdicts, above) extends this same user message
+          // mid-turn. Substituting the array would put back the pre-fold copy on every later round —
+          // dropping durable robo-user blocks from the wire while leaving them persisted and on screen.
+          const refs    = sessionMedia.get(m.id);
+          const inlined = refs
+            ? { ...m, content: m.content.map(c => (c.type === 'file-ref' ? refs.get(c.fileId) ?? c : c)) }
+            : m;
+          const folded  = i === foldIdx ? { ...inlined, content: [...inlined.content, ...ephemeral] } : inlined;
+          const media   = attachments.get(m.id);
           return media ? [folded, media] : [folded];
         })
       : session.messages;

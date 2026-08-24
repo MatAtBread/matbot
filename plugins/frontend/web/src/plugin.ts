@@ -97,6 +97,7 @@ export const plugin: MatbotPluginSpec = {
       // register it after frontend-web sets up, and the firehose only reads it on the first /events connect.
       watchVisibility: () => services.WatchVisibility,
       filePartition:   () => services.FilePartition,
+      mediaStore:      () => services.MediaStore,
       notifier:        services.Notifier,
       ...(services.configPath !== undefined ? { configPath: services.configPath } : {}),
     });

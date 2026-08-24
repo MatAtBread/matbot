@@ -67,6 +67,8 @@
       display: flex;
       align-items: baseline;
     }
+    #matbot-version { cursor: pointer; }
+    #matbot-version:hover { text-decoration: underline; }
     #matbot-version {
       color: #9ca3af;
       margin: 0 0.5em;
@@ -734,6 +736,69 @@
     }
     .skill-editor-btn.primary:hover { background: #1d4ed8; }
     .skill-editor-btn:disabled { opacity: 0.5; cursor: default; }
+
+    /* ── About overlay ──────────────────────────────────────────── */
+    /* Reached by clicking the version in the header: runs about_matbot over HTTP and shows what the
+       harness is, which provider is in force, and the system prompt broken down by the plugin that
+       contributed each part — the one thing the UI otherwise has no window onto. */
+    #about-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.45);
+      z-index: 1001;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    #about-overlay.open { display: flex; }
+    #about-modal {
+      background: #fff;
+      border-radius: 10px;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+      width: 90%;
+      max-width: 900px;
+      max-height: 85%;
+      font-family: 'SF Mono', 'Cascadia Code', ui-monospace, monospace;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    #about-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 16px;
+      border-bottom: 1px solid #e5e7eb;
+    }
+    #about-title { flex: 1; font-weight: 600; font-size: 0.95em; }
+    #about-close {
+      background: none; border: none; cursor: pointer;
+      font-size: 1.4em; line-height: 1; color: #9ca3af; padding: 0 4px;
+    }
+    #about-close:hover { color: #111; }
+    #about-body { flex: 1; min-height: 0; overflow-y: auto; padding: 16px; font-size: 0.82em; }
+    .about-row { display: flex; gap: 10px; padding: 3px 0; line-height: 1.5; }
+    .about-key { color: #6b7280; min-width: 96px; }
+    .about-val { color: #111; word-break: break-word; }
+    .about-val .about-dim { color: #9ca3af; }
+    .about-section {
+      margin-top: 16px; padding-top: 12px; border-top: 1px solid #e5e7eb;
+      display: flex; align-items: baseline; gap: 8px;
+    }
+    .about-section h3 { margin: 0; font-size: 0.95em; font-weight: 600; }
+    .about-section .about-count { color: #9ca3af; font-weight: 400; }
+    .about-part { margin-top: 10px; }
+    .about-part-plugin {
+      color: #2563eb; font-size: 0.95em; display: flex; gap: 6px; align-items: baseline;
+    }
+    .about-part-plugin .about-chars { color: #9ca3af; }
+    .about-part pre {
+      margin: 4px 0 0; padding: 8px 10px; background: #f9fafb; border: 1px solid #f3f4f6;
+      border-radius: 6px; white-space: pre-wrap; word-break: break-word; line-height: 1.5;
+    }
+    .about-note { margin-top: 14px; color: #9ca3af; line-height: 1.5; }
+    .about-empty { color: #9ca3af; padding: 6px 0; }
 
     /* ── Tool-trigger manager overlay ───────────────────────────── */
     /* Reached from the trigger icon on a tool row: list/add/edit/delete the triggers that invoke this
@@ -1426,6 +1491,18 @@
     }
     .msg-divider:hover .msg-divider-line,
     .msg-divider.open .msg-divider-line { background: #d1d5db; }
+    /* An action that waits on an LLM (Summarise) closes the popup and then takes seconds. The line it
+       was opened from carries the wait, so the click has visible consequences before the result lands. */
+    .msg-divider-line.working {
+      background: linear-gradient(90deg, #e5e7eb 0%, #6366f1 50%, #e5e7eb 100%);
+      background-size: 200% 100%;
+      animation: divider-working 1.2s linear infinite;
+      height: 2px;
+    }
+    @keyframes divider-working {
+      from { background-position: 200% 0; }
+      to   { background-position: -200% 0; }
+    }
 
     .msg-divider-menu {
       position: absolute;
@@ -1475,13 +1552,15 @@
 
     /* ── Input area ────────────────────────────────────────────── */
 
-    #input-area { border-top: 1px solid #e5e7eb; padding: 8px 12px 12px; }
+    /* `relative` anchors the mobile options panel, which sits above the composer rather than over the
+       whole viewport: it belongs to this conversation's controls, not to the app. */
+    #input-area { border-top: 1px solid #e5e7eb; padding: 8px 12px 12px; position: relative; }
     #input-meta {
       display: flex;
       align-items: center;
-      gap: 6px;
-      margin-bottom: 4px;
-      font-size: 0.86em;
+      gap: 2px;
+      margin-bottom: 2px;
+      font-size: 0.825em;
       color: #9ca3af;
     }
     #provider-select {
@@ -1516,12 +1595,89 @@
     }
     #mode-toggle input:checked + .slider { background: #6b7280; }
     #mode-toggle input:checked + .slider::before { transform: translateX(14px); }
+    /* A grid, not a flex row, so the mobile breakpoint can rearrange the composer by changing the
+       TEMPLATE alone — no element moves between parents, and DOM order stays free to differ from
+       visual order (desktop keeps send-then-stop; mobile wants send in the corner, see below). */
     #input-row {
-      display: flex;
+      display: grid;
+      grid-template-areas: "text attach send stop";
+      grid-template-columns: 1fr auto auto auto;
       gap: 6px;
-      align-items: flex-end;
+      align-items: end;
       max-width: 720px;
     }
+    #attach-btn { grid-area: attach; }
+    #input      { grid-area: text; }
+    #send-btn   { grid-area: send; }
+    #stop-btn   { grid-area: stop; }
+    /* Desktop shows the provider and steering-mode controls inline in #input-meta, so the cog that
+       reveals them has nothing to do; the labels are likewise a narrow-screen affordance. */
+    #composer-cog { grid-area: cog; display: none; }
+    .ctl-label    { display: none; }
+
+    /* ── Composer attachments ─────────────────────────────────── */
+    /* Chips sit ABOVE the input row rather than inside it: the textarea grows to 180px and the row is
+       bottom-aligned, so anything sharing that line drifts as you type. */
+    #attachments {
+      display: flex; flex-wrap: wrap; gap: 6px;
+      max-width: 720px; margin-bottom: 6px;
+    }
+    .attach-chip {
+      display: flex; align-items: center; gap: 6px;
+      background: #f3f4f6; border: 1px solid #e5e7eb; border-radius: 8px;
+      padding: 4px 6px 4px 4px; font-size: 0.85em; max-width: 240px;
+    }
+    .attach-chip img {
+      width: 28px; height: 28px; object-fit: cover; border-radius: 4px; flex-shrink: 0;
+      background: #e5e7eb;
+    }
+    .attach-chip .attach-glyph {
+      width: 28px; height: 28px; border-radius: 4px; flex-shrink: 0;
+      background: #e5e7eb; display: flex; align-items: center; justify-content: center; font-size: 0.9em;
+    }
+    .attach-chip .attach-name {
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .attach-chip .attach-size { color: #6b7280; flex-shrink: 0; }
+    .attach-chip button {
+      border: none; background: none; cursor: pointer; color: #6b7280;
+      font-size: 1.1em; line-height: 1; padding: 0 2px; flex-shrink: 0;
+    }
+    .attach-chip button:hover { color: #111; }
+    .attach-error {
+      color: #b91c1c; font-size: 0.85em; max-width: 720px; margin-bottom: 6px;
+    }
+    /* Same metrics as #send-btn and #stop-btn (h/w are em, so the font-size must match for an identical
+       circle) — it sits in the same row of controls, and a smaller one read as a lesser control rather
+       than a different one. Outlined rather than filled is what marks it secondary. */
+    #attach-btn {
+      border: 1px solid #d1d5db; background: #fff; color: #6b7280;
+      border-radius: 50%; cursor: pointer; flex-shrink: 0; padding: 0;
+      font-size: 2.14em;
+      height: 1.5em; width: 1.5em;
+      display: flex; align-items: center; justify-content: center;
+      transition: background 0.1s, color 0.1s;
+    }
+    #attach-btn svg { width: 0.7em; height: 0.7em; }
+    #attach-btn:hover { background: #f3f4f6; color: #111; }
+    #input-row.read-only #attach-btn { pointer-events: none; opacity: 0.4; }
+    /* Drag-over feedback on the whole composer, not just the (small) button. */
+    #input-area.drag-over #input { border-color: #2563eb; background: #eff6ff; }
+
+    /* Media rendered inside a message bubble. Capped so a tall photo doesn't push the reply off-screen. */
+    .bubble-media { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+    .bubble-media:first-child { margin-top: 0; }
+    .bubble-media img {
+      max-width: 260px; max-height: 260px; border-radius: 8px; display: block; cursor: zoom-in;
+      background: #e5e7eb;
+    }
+    .bubble-media .file-chip {
+      display: flex; align-items: center; gap: 6px;
+      background: rgba(0,0,0,0.06); border-radius: 8px; padding: 6px 10px; font-size: 0.9em;
+      text-decoration: none; color: inherit;
+    }
+    .bubble-media .file-chip:hover { background: rgba(0,0,0,0.12); }
+    .bubble-media audio { max-width: 260px; }
     #input {
       flex: 1;
       border: 1px solid #d1d5db;
@@ -1825,11 +1981,101 @@
       }
       #messages    { padding-left: 16px; padding-right: 16px; }
       #input-area  {
-        padding-left: 8px;
-        padding-right: 8px;
-        padding-bottom: max(12px, env(safe-area-inset-bottom, 0px));
+        padding-top: 0px;
+        padding-left: 6px;
+        padding-right: 6px;
+        /* The control row is the bottom-most thing on screen, so on a device with a home indicator it
+           lands in the OS gesture strip and an upward swipe near Send goes to the OS instead of the
+           button. Longhands rather than the `padding` shorthand deliberately: the shorthand is exactly
+           what dropped this inset when the row was added. */
+        padding-bottom: max(2px, env(safe-area-inset-bottom, 0px));
       }
       .session-actions { display: flex; }
+
+      /* ── Mobile composer ─────────────────────────────────────
+         The textarea had only ever got narrower: three round buttons and their gaps took 141px of a
+         374px line, leaving ~29 characters. The paperclip was also only 34px across, spending 40px of
+         that line on a target under the 44px guideline.
+
+         So the textarea takes a row of its own and the controls take the next one, four equal columns
+         wide enough to carry a word each. What that buys is WIDTH and labels, not height: each control
+         is ~90px across with ~90px between centres (against 6px gaps before), and a label is the
+         strongest anti-misfire device available. The extra ~28px of chrome is repaid the moment a
+         message wraps twice — which at 29 characters a line it did constantly.
+
+         Height goes the other way, deliberately: 24px, SHORTER than the 34px paperclip above. Spending
+         a whole row and then making it tall would pay for the chrome twice, which is the thing being
+         avoided. So 44px is not met in the vertical axis and is not meant to be — the horizontal target
+         is the one a thumb misses in on a bottom row. If mis-taps do show up, widen the gutters or move
+         the row off the screen edge; growing the row height is the trade this layout already declined.
+
+         Send is bottom-RIGHT and stays there, which is why the mobile order is not the DOM order: the
+         corner your thumb lands on must always mean the same thing. Stop is beside it, red, and only
+         visible mid-turn. */
+      #input-row {
+        grid-template-areas:
+          "text text   text text"
+          "cog  attach stop send";
+        grid-template-columns: repeat(4, 1fr);
+        row-gap: 8px;
+      }
+      #composer-cog { display: flex; }
+      .ctl-label    { display: inline; }
+
+      #composer-cog, #attach-btn, #stop-btn, #send-btn {
+        width: auto;
+        height: 24px;
+        min-width: 0;
+        border-radius: 10px;
+        font-size: 0.78em;
+        font-weight: 600;
+        gap: 5px;
+        padding: 0 4px;
+        letter-spacing: 0.01em;
+      }
+      #composer-cog svg, #attach-btn svg, #stop-btn svg, #send-btn svg {
+        width: 15px; height: 15px; flex-shrink: 0;
+      }
+      #composer-cog {
+        border: 1px solid #d1d5db; background: #fff; color: #4b5563;
+        align-items: center; justify-content: center; cursor: pointer;
+      }
+      #composer-cog:hover { background: #f3f4f6; color: #111; }
+      #input-row.read-only #composer-cog { pointer-events: none; opacity: 0.4; }
+
+      /* The provider + steering controls, revealed by the cog. Same element as the desktop meta row —
+         restyled in place rather than duplicated or re-parented, so app.js keeps its one #provider-select
+         and one #mode-interrupt and needs to know nothing about the breakpoint. */
+      #input-meta { display: none; }
+      #input-area.settings-open #input-meta {
+        display: flex;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 14px;
+        position: absolute;
+        bottom: 100%;
+        left: 8px;
+        right: 8px;
+        margin-bottom: 8px;
+        background: #fff;
+        border: 1px solid #e5e7eb;
+        border-radius: 12px;
+        padding: 14px 16px;
+        box-shadow: 0 8px 24px rgba(0,0,0,0.14);
+        font-size: 1em;
+        color: #374151;
+        z-index: 50;
+      }
+      /* Full-size here: these are the same controls that are 11px decorations on the desktop meta row,
+         and the reason they are behind a cog at all is that they were unhittable at that size. */
+      #input-area.settings-open #provider-select {
+        max-width: none; width: 100%; font-size: 1em; color: #111;
+        border: 1px solid #d1d5db; border-radius: 8px; padding: 9px 8px; background: #fff;
+      }
+      #input-area.settings-open #mode-toggle { margin-left: 0; justify-content: space-between; color: #374151; }
+      #input-area.settings-open #mode-toggle .switch { width: 44px; height: 24px; }
+      #input-area.settings-open #mode-toggle .slider::before { height: 20px; width: 20px; }
+      #input-area.settings-open #mode-toggle input:checked + .slider::before { transform: translateX(20px); }
     }
 
   /* ── Print: unclip everything so the full #messages content prints ── */
@@ -2069,6 +2315,16 @@
     </div>
   </div>
 
+  <div id="about-overlay">
+    <div id="about-modal">
+      <div id="about-header">
+        <span id="about-title"></span>
+        <button id="about-close" title="Close">&times;</button>
+      </div>
+      <div id="about-body"></div>
+    </div>
+  </div>
+
   <div id="tool-trigger-overlay">
     <div id="tool-trigger-modal">
       <div id="tool-trigger-header">
@@ -2105,10 +2361,19 @@
           <span class="mode-label">interrupt</span>
         </span>
       </div>
+      <div id="attachments" hidden></div>
+      <!-- One DOM order, two layouts: `#input-row` is a grid, and the breakpoint changes only its
+           template. Desktop keeps the single line it always had; narrow screens give the textarea the
+           full width and put four equal-width labelled controls on a row beneath it. Nothing is moved
+           between parents, so `.read-only`, the drag target and every handler in app.js are untouched. -->
       <div id="input-row">
+        <button id="composer-cog" title="Provider and mid-turn message handling" aria-label="Options"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span class="ctl-label">Options</span></button>
+        <button id="attach-btn" title="Attach an image, PDF or audio clip" aria-label="Attach a file"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg><span class="ctl-label">Attach</span></button>
+        <input id="attach-input" type="file" multiple hidden
+               accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,audio/*,text/plain,text/markdown,text/csv">
         <textarea id="input" rows="1" placeholder="Shift+⬅️ to send, ⬅️ for newline"></textarea>
-        <button id="send-btn" aria-label="Send"><svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" aria-hidden="true"><path d="M9 6v12l9-6z"/></svg></button>
-        <button id="stop-btn" style="visibility:hidden" title="Stop the running turn and drop anything queued" aria-label="Stop"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg></button>
+        <button id="stop-btn" style="visibility:hidden" title="Stop the running turn and drop anything queued" aria-label="Stop"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg><span class="ctl-label">Stop</span></button>
+        <button id="send-btn" aria-label="Send"><svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" aria-hidden="true"><path d="M9 6v12l9-6z"/></svg><span class="ctl-label">Send</span></button>
       </div>
     </div>
     <button id="scroll-down-btn" style="display:none" title="Scroll to bottom" aria-label="Scroll to bottom"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>

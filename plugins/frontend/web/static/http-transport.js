@@ -80,7 +80,11 @@
       body: JSON.stringify(input),
     });
     const data = await res.json();
-    if (!res.ok) throw new Error('HTTP ' + res.status + (data.error ?? ''));
+    // Two newlines between the status and the body's message: they are two facts, and concatenated they
+    // read as one mangled sentence ("HTTP 500Concurrent modification — please retry."). A tool's error is
+    // written for a person and surfaced in an alert(), so the break is the difference between legible and
+    // not. Status alone when the body carried nothing to say.
+    if (!res.ok) throw new Error('HTTP ' + res.status + (data.error ? '\n\n' + data.error : ''));
     return data;
   }
 
@@ -99,11 +103,16 @@
   // Fire-and-forget enqueue: the turn's output arrives over sessionEvents(), not here. Throws on a
   // non-2xx or a transport failure (incl. the 20s timeout) so the caller can surface it inline.
   async function submit(sid, body) {
+    const payload = JSON.stringify(body);
+    // 20s is right for a typed message and far too short for one carrying 8MB of attachment on a slow
+    // uplink — a timeout there loses the message and the files with it. Scale with the payload (a
+    // pessimistic ~1Mbps floor) rather than raising the flat number, so a text submit still fails fast.
+    const timeout = Math.max(20000, Math.ceil(payload.length / 128) + 20000);
     const res = await apiFetch('/sessions/' + sid + '/submit', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(20000),
+      body: payload,
+      signal: AbortSignal.timeout(timeout),
     });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
@@ -298,9 +307,17 @@
     window.open('/files/' + (profileName ? '~' + profileName + '/' : '') + namespace + '/' + path, '_blank');
   }
 
+  // The server route gates on the file's own `allowed` flag, so there is nothing to check here — the
+  // partition segment rides in the path for the same reason it does in openFile: an <img> can't send
+  // the x-matbot-principal header.
+  function mediaUrl(fileId) {
+    const profileName = currentProfile();
+    return Promise.resolve('/media/' + (profileName ? '~' + encodeURIComponent(profileName) + '/' : '') + encodeURIComponent(fileId));
+  }
+
   window.matbotTransport = {
     hostRuntime: 'node',
     callTool, createSession, sessionBusy, submit,
-    sessionEvents, answerPrompt, answerEnv, abort, statusEvents, notifications, openFile,
+    sessionEvents, answerPrompt, answerEnv, abort, statusEvents, notifications, openFile, mediaUrl,
   };
 })();

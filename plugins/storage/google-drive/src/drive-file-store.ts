@@ -1,5 +1,6 @@
 import type { FileFilter, FileHandle, FileStore, MimeType } from '@matatbread/matbot-core';
 import type { DriveClient } from './drive-client.js';
+import { collectBytes } from '@matatbread/matbot-plugin-api';
 
 const DATA_SUFFIX = '.data';
 const META_SUFFIX = '.meta.json';
@@ -22,16 +23,6 @@ interface Slot {
   meta:       DriveFileMeta;
   dataFileId: string;
   metaFileId: string;
-}
-
-async function collect(data: AsyncIterable<Uint8Array>): Promise<Uint8Array<ArrayBuffer>> {
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  for await (const chunk of data) { chunks.push(chunk); size += chunk.byteLength; }
-  const out = new Uint8Array(size);
-  let off = 0;
-  for (const c of chunks) { out.set(c, off); off += c.byteLength; }
-  return out;
 }
 
 /**
@@ -102,7 +93,7 @@ export class DriveFileStore implements FileStore {
     meta?:    { sessionId?: string; messageId?: string; namespace?: string; allowed?: boolean },
   ): Promise<FileHandle> {
     await this.ensureLoaded();
-    const bytes = await collect(data);
+    const bytes = await collectBytes(data);
     return this.lock(async () => {
       const folder = await this.folderId;
 

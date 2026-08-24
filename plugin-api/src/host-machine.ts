@@ -206,7 +206,7 @@ export function singleTurnRequest(req: SingleTurnRequest): CompletionRequest {
     provider: req.provider,
     messages: [{
       id: '', traceId: '', createdAt: new Date().toISOString(), role: 'user',
-      content: [{ type: 'text', text: req.prompt }],
+      content: typeof req.prompt === 'string' ? [{ type: 'text', text: req.prompt }] : req.prompt,
     }],
     ...(req.system     !== undefined ? { system: req.system } : {}),
     ...(req.parameters !== undefined ? { parameters: req.parameters } : {}),

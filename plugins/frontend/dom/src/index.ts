@@ -1,5 +1,5 @@
 import type { MatbotPluginSpec, MatbotMachine, Tool, ToolContext, ToolContract, ToolResultOf } from '@matatbread/matbot-plugin-api';
-import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, collectBytes } from '@matatbread/matbot-plugin-api';
 import { ChatUI } from './ui.js';
 
 // Same tool name (and therefore the same one merged entry) as the served web frontend — declared
@@ -35,12 +35,7 @@ const urlForResourceTool: Tool<ToolResultOf<'url_for_resource'>> = {
       const handle = await ctx.files.getByName(name);
       if (!handle || !handle.allowed) { yield { type: 'result', value: { url: null } }; return; }
 
-      const chunks: Uint8Array[] = [];
-      let total = 0;
-      for await (const chunk of handle.stream(ctx.signal)) { chunks.push(chunk); total += chunk.byteLength; }
-      const bytes = new Uint8Array(total);
-      let offset = 0;
-      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+      const bytes = await collectBytes(handle.stream(ctx.signal));
       yield { type: 'result', value: { url: URL.createObjectURL(new Blob([bytes], { type: handle.mimeType })) } };
     },
   },

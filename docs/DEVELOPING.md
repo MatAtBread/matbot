@@ -788,6 +788,13 @@ When listed in `matbot.yaml`, `open()` is called before any `setup()` runs. When
 hot-loaded at runtime, `setup()` calls `register('StorageBackend', backend)`, which
 transparently re-targets all existing `Store` and `FileStore` proxy references.
 
+**Your `FileStore` is already a media store.** `MediaStore` is an alias of `FileStore`, so there is no
+second interface: persist the `opts` you are handed (`sessionId`, `messageId`, `namespace`, `allowed`)
+and honour `FileFilter.sessionId` in `list()`, and a host or plugin can `register('MediaStore', …)`
+against you unchanged. The one thing to get right is that `put(name, …)` and `put(undefined, …)` are
+different operations — a named put is addressable and upserts, an anonymous one mints a fresh id — and
+media always takes the anonymous path. See [MEDIA.md](MEDIA.md).
+
 ### `Store<T>` interface
 
 ```ts
@@ -852,6 +859,14 @@ export const plugin: MatbotPluginSpec = {
 
 Multiple frontends may run simultaneously. A frontend is auto-unregistered when its
 plugin unloads.
+
+A frontend that lets a person **attach** an image, PDF or audio clip submits `UserContent[]` with the
+bytes inline; the rewrite to a stored `file-ref` happens inside `open()`, so you inherit it rather than
+implement it. What you do own is validating what you accept (a whitelist of arms, never a blacklist —
+the boundary is a trust boundary), relaying a `MediaRejectedError` as something the user can act on, and
+serving the bytes back if you draw them. See [MEDIA.md](MEDIA.md); `frontend/web` and
+`frontend/telegram` are the two templates, and they differ in the way that matters — one could upload in
+advance and chooses not to, the other cannot.
 
 > **Security note:** the `toolcall` hook gates only the *runner* path (model-driven turns).
 > A frontend that executes tools directly — e.g. a `POST /tools` endpoint — bypasses it and
@@ -947,7 +962,12 @@ message itself.
 
 ## Media
 
-**The model pulls media; nothing pushes it.** A tool yields `model-content` — the inline arms of
+There are two ways bytes reach a model, and they are told apart by **who owns them**. *Tool media* — the
+model pulled it, by calling your tool — is the subject of this section. *Session media* — a person
+attached it to a message — is a different path with a storage half, and is covered in
+[MEDIA.md](MEDIA.md) along with everything a frontend or a storage backend has to provide.
+
+**For tool media, the model pulls; nothing pushes.** A tool yields `model-content` — the inline arms of
 `MessageContent` (`image` / `document` / `audio`), bytes plus a mime type — and the runner pins them
 directly after the tool message they answer, splicing them into the **outgoing copy** for the rest of
 the turn.
@@ -983,6 +1003,16 @@ Two consequences worth designing around:
 A tool that also wants the *user* to see something has `file` and `marker`. Media is deliberately not
 a `PipelineEvent`: nothing durable backs it, so a frontend drawing it live would show something that
 vanishes on reload.
+
+**A result cannot substitute for the event.** A result is a value in the transcript, so base64 there is
+4/3 of the file persisted *and* re-sent on every later round, for something the model still cannot see.
+The two are not interchangeable and no description makes them so.
+
+`workspace_action show` (`plugins/workspace/src/index.ts`) is the reference producer, and shows the two
+decisions such a tool has to make: which mime types it will hand over at all (it refuses SVG and text
+toward `read`, which gives the source and is the better answer anyway), and a size ceiling checked
+against the handle's declared size *before* the read, because shown media is paid for once per round
+rather than once.
 
 ---
 
@@ -1085,13 +1115,13 @@ Store-backed index with optional Cloudflare BGE reranker.
 | `@matatbread/matbot-tool-bash` | `bash` | Run bash scripts; stream stdout/stderr |
 | `@matatbread/matbot-tool-docker-bash` | `bash` (sandboxed), `bash_config` | Drop-in for bash, runs inside Docker; `bash_config` tunes the container at runtime |
 | `@matatbread/matbot-tool-http` | `http` | Make HTTP requests |
-| `@matatbread/matbot-tool-workspace` | `workspace_action` | Read/write/list/delete workspace files |
+| `@matatbread/matbot-tool-workspace` | `workspace_action` | Read/show/write/list/delete workspace files; `show` hands an image, PDF or audio clip to the model to look at |
 | `@matatbread/matbot-tool-ask-user` | `ask_user` | Ask the user a question mid-turn (one-shot prompt) |
-| `@matatbread/matbot-tool-background` | `background`, `every_action` | Detached background jobs and recurring schedules |
+| `@matatbread/matbot-tool-background` | `background`, `every_action` | Detached background jobs — now, at a stated time, or on a recurring schedule |
 | `@matatbread/matbot-tool-mcp` | `mcp_action` | Connect to MCP servers — stdio (local) and remote (delegates to mcp-http); Node only |
 | `@matatbread/matbot-mcp-http` | `mcp_action` | Connect to HTTP/SSE MCP servers (Node + browser) |
 | `@matatbread/matbot-sessions` | `session_action` | Session lifecycle: list, get, rename, hide |
-| `@matatbread/matbot-edit-session` | `session_edit`, `compact_sessions` | Trim, branch, split, and compact sessions |
+| `@matatbread/matbot-edit-session` | `session_edit`, `compact_sessions` | Trim, branch, split, compact and LLM-summarise sessions |
 | `@matatbread/matbot-triggers` | `trigger_action`, `triggers_config` (`screen`/`followup` hooks) | Data-driven hooks: stored conditions that invoke a tool when an LLM classifier judges them matched |
 | `@matatbread/matbot-tool-json-validation` | `toolcall` hook | Validate tool inputs against their schema; the model self-corrects on mismatch |
 | `@matatbread/matbot-skills` | `skill_action`, `skills_config` | Cross-runtime skill CRUD (named markdown playbooks) |
@@ -1209,8 +1239,16 @@ pnpm publish-check      # dry audit: what would publish, and what would stop it
 pnpm publish-all        # preflight → publish → reconcile → verify
 ```
 
-Every `@matatbread/*` package is in one `fixed` group, so they all move together — a release is
-one version number across the workspace.
+Every `@matatbread/*` package is in one **`linked`** group: a release versions only the packages that
+actually changed, and those that do move together to one number. Everything else keeps the version it
+last shipped at, so a release is no longer 45 identical bumps to say four things.
+
+It was a `fixed` group, which released every package whether or not it had changed. Two measurements
+retired it: a patch drags in no dependents at all (peer ranges are `workspace:^`, rewritten at pack time
+from the dependency's own version, so there is nothing to update), and a *minor* on `plugin-api` escalates
+every peer-dependent to `1.0.0` **whether the group is fixed or not** — at `0.x`, `^0.4.7` does not admit
+`0.5.0`, so changesets treats each peer range as broken. `fixed` was only unifying the numbers; it never
+prevented that, and the escalation stops for good at `>=1.0.0`.
 
 `pnpm publish-all` (`scripts/publish.mjs`) treats **the registry, not a command's exit code, as the
 source of truth**: preflight → canary → settle → reconcile → verify. It reads what npm actually
@@ -1234,8 +1272,10 @@ registry state rather than replaying a transcript, so re-running skips what land
 what didn't. There is no manual clean-up path and no need to work out which of ~45 packages made it.
 
 Preflight blocks on the things that kill a whole run — an expired npm token (checked against the
-registry, because an expired token looks identical to a good one on disk), a dirty tree, a split
-version group, an entry point missing from disk or excluded by `files`. Anything that merely *ships
+registry, because an expired token looks identical to a good one on disk), a dirty tree, an entry point
+missing from disk or excluded by `files`, a `workspace:` range naming something unpublishable. A spread of
+versions is no longer among them: under `linked` it is the expected state, so it is reported and got out
+of the way. Anything that merely *ships
 imperfectly* — a missing `files` field, changesets accumulated since this version was cut — warns
 and gets out of the way.
 
