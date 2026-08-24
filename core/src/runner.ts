@@ -44,6 +44,34 @@ const TRUNCATION_CREATOR = 'matbot-truncation';
 const abortReason = (signal: AbortSignal): string =>
   typeof signal.reason === 'string' ? signal.reason : 'user-abort';
 
+/** How long a tool executor may keep the turn alive AFTER the turn was aborted, before the runner stops
+ *  reading it. An abort must abort: any executor can fail to end — a child process whose stdout was
+ *  inherited by an orphan, a generator awaiting something that never settles, a bridged remote that went
+ *  away — and the runner awaiting it is then the only thing holding a turn that nothing left in the
+ *  process can end. Abandoning is bounded rather than immediate because a well-behaved tool cleaning up
+ *  after a cut-off (flushing a partial result, closing a handle) is the common case and worth waiting for.
+ *  Only armed once `signal` is aborted, so a long-running tool on a healthy turn is never cut short. */
+const ABANDONED_TOOL_GRACE_MS = 30_000;
+
+/** Resolves `ABANDON` once the signal has been aborted for `ms`, and never otherwise. */
+const ABANDON = Symbol('abandon');
+function abandonDeadline(signal: AbortSignal, ms: number): { wait: Promise<typeof ABANDON>; dispose: () => void } {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let arm:   (() => void) | undefined;
+  const wait = new Promise<typeof ABANDON>(resolve => {
+    arm = () => { timer = setTimeout(() => resolve(ABANDON), ms); };
+    if (signal.aborted) arm();
+    else signal.addEventListener('abort', arm, { once: true });
+  });
+  return {
+    wait,
+    dispose: () => {
+      if (timer !== undefined) clearTimeout(timer);
+      if (arm   !== undefined) signal.removeEventListener('abort', arm);
+    },
+  };
+}
+
 const INTERRUPTED_TOOL_RESULT = {
   error: 'Tool call interrupted before completion — the turn was interrupted while it was running. It may not have run to completion, and any side effect may or may not have occurred. Re-run it only if you still need its result.',
 } as const;
@@ -562,8 +590,24 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
         ...(opts.files       !== undefined ? { files:       opts.files       } : {}),
       };
 
+      // Iterated by hand rather than with `for await`, so the read can be bounded once the turn is
+      // aborted (see ABANDONED_TOOL_GRACE_MS): an executor that never returns would otherwise hold this
+      // turn open for ever, with no path back for the session.
+      const events   = siteScoped(site, tool.executor.execute(tc.input, toolCtx))[Symbol.asyncIterator]();
+      const deadline = abandonDeadline(signal, ABANDONED_TOOL_GRACE_MS);
       try {
-        for await (const toolEv of siteScoped(site, tool.executor.execute(tc.input, toolCtx))) {
+        for (;;) {
+          const step = await Promise.race([events.next(), deadline.wait]);
+          if (step === ABANDON) {
+            console.warn(`[matbot] tool "${tc.name}" did not return ${ABANDONED_TOOL_GRACE_MS}ms after the turn was aborted — abandoned.`);
+            // Not awaited: a tool that ignored the abort may well not return from `return()` either, and
+            // awaiting it here is the same hang one frame further out.
+            void events.return?.(undefined as never);
+            isError = true;
+            break;
+          }
+          if (step.done === true) break;
+          const toolEv = step.value;
           switch (toolEv.type) {
             case 'stdout':   yield { type: 'tool:stdout', callId: tc.id, chunk: toolEv.chunk, traceId }; break;
             case 'stderr':   yield { type: 'tool:stderr', callId: tc.id, chunk: toolEv.chunk, traceId }; break;
@@ -582,6 +626,8 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
       } catch (e) {
         result  = { error: String(e) };
         isError = true;
+      } finally {
+        deadline.dispose();
       }
 
       // A tool that errored under an aborted signal did so because it was cut off (a steer interrupt,
