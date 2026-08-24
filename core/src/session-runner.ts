@@ -585,6 +585,14 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
         const { provider, principal } = opts;
         const mode = opts.mode ?? 'queue';
 
+        // Which turn a steer is FOR is fixed here, before the first await, and checked again before the
+        // abort. `s.running` alone cannot answer it: it is true across the pump's whole queue, so it
+        // says "something is running", not "still the one you meant". Every await below can outlive a
+        // turn — the classifier and the nudge could already, and media ingestion can hold for seconds
+        // on a large attachment — after which aborting on `s.running` kills whatever is running NOW,
+        // a turn the user never saw, and names the wrong `interruptedTraceId` on the way.
+        const steerTarget = s.runningTraceId;
+
         // The media boundary, before anything else this submission touches: by-value attachments are
         // written through the MediaStore and become `file-ref`s here, so nothing downstream — the
         // steering classifier, the `queued`/`steer` events, the persisted user message — ever sees
@@ -615,8 +623,10 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
               ? (committed ? await policy.classify({ session: committed, steer: content }) : DEFAULT_STEERING_POLICY)
               : DEFAULT_STEERING_POLICY;
 
-          // Any await above may have outlived the running turn; only interrupt one still live.
-          if (decision === 'interrupt' && s.running) {
+          // Any await above may have outlived the turn this steer was for: interrupt only if THAT one
+          // is still the running turn. Otherwise fall through and queue — the turn they were steering
+          // has already committed, which makes this an ordinary follow-up rather than an interruption.
+          if (decision === 'interrupt' && s.running && s.runningTraceId === steerTarget) {
             const nudge = policy?.nudge !== undefined && committed
               ? policy.nudge({ session: committed, steer: content })
               : DEFAULT_STEER_NUDGE;

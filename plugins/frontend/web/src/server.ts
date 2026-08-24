@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import type {
   MatbotPlugin, Principal, Session, Store, Tool, ToolRegistry, FileStore, MediaStore, Vault,
   FormField, PromptFn, SessionRunner, WatchVisibility, VisibilityQuery, FilePartition, SteeringMode,
-  Notifier, Notification, UserContent, MimeType,
+  Notifier, Notification, UserContent, MimeType, MediaRejectedError,
 } from '@matatbread/matbot-core';
 import {
   createSession, promptCancelledError, runAs, tryCurrentPrincipal, ItemChangeKind, RegistryChangeKind,
@@ -119,8 +119,9 @@ export const defaultWebPrincipal: WebPrincipalResolver = (req) =>
 
 /**
  * Body ceiling for `POST /sessions/:id/submit`, the one route that may carry attachments. Sized off the
- * core per-file cap (20MB) plus base64's third, plus room for several files and the prose around them.
- * Every other route keeps `readBody`'s 1MB default — this is not a general raise.
+ * per-SESSION cap (50MB) plus base64's third, since one submission may legitimately carry up to that —
+ * not off the per-file cap, which is the smaller of the two. Every other route keeps `readBody`'s 1MB
+ * default — this is not a general raise.
  */
 const SUBMIT_BODY_LIMIT = 64 * 1024 * 1024;
 
@@ -620,7 +621,7 @@ export function createWebServer(deps: WebServerDeps) {
       const sessionId = submitMatch[1]!;
 
       // A submission may carry attachments by value, so this route alone reads a body big enough for
-      // them: the per-file cap is 20MB and base64 inflates by a third. Every other route keeps 1MB.
+      // them: a session may hold 50MB and base64 inflates by a third. Every other route keeps 1MB.
       // Buffered rather than streamed because the runner's boundary rewrite wants the bytes anyway —
       // and matbot is a single-tenant harness, not a service sizing itself for concurrent uploads.
       let raw: string;
@@ -732,10 +733,21 @@ export function createWebServer(deps: WebServerDeps) {
       } catch (e) {
         if (isTracker) busyTrackers.delete(targetId);
         // A refused attachment is the CLIENT's problem to fix (drop the file, attach a smaller one), not
-        // a server fault — and nothing was enqueued, so there is no turn to clean up. 413 for a size, 501
-        // for a deployment with no media store, 400 for bytes that would not decode.
+        // a server fault — and nothing was enqueued, so there is no turn to clean up.
+        //
+        // A total Record rather than a ternary chain with a fall-through: adding a `reason` is exactly
+        // when this gets forgotten, and 413 is an active lie about a wrong type or an unknown ref. Spelt
+        // this way a new arm is a compile error here instead.
         if (isMediaRejectedError(e)) {
-          const status = e.reason === 'no-store' ? 501 : e.reason === 'unreadable' ? 400 : 413;
+          const STATUS: Record<MediaRejectedError['reason'], number> = {
+            'no-store':         501,
+            'unreadable':       400,
+            'unsupported-type': 415,
+            'too-large':        413,
+            'session-quota':    413,
+            'unknown-ref':      404,
+          };
+          const status = STATUS[e.reason];
           json(res, status, { error: e.message, reason: e.reason, ...(e.file !== undefined ? { file: e.file } : {}) });
           return;
         }

@@ -51,7 +51,7 @@ function memFiles(): FileStore & { seed(name: string, mimeType: string, bytes: U
 
 const tool = workspacePlugin.tools!.find(t => t.name === 'workspace_action')!;
 
-async function show(files: FileStore, name: string): Promise<ToolEvent[]> {
+async function run(files: FileStore, input: Record<string, unknown>): Promise<ToolEvent[]> {
   const ctx = {
     callId: 'c1', session: createSession() as Session, signal: new AbortController().signal,
     vault: { resolve: async (v: string) => v } as unknown as Vault, files,
@@ -59,9 +59,11 @@ async function show(files: FileStore, name: string): Promise<ToolEvent[]> {
     loadPlugin: async () => { throw new Error('unused'); }, unloadPlugin: async () => false,
   } as unknown as ToolContext;
   const out: ToolEvent[] = [];
-  for await (const ev of tool.executor.execute({ action: 'show', name }, ctx)) out.push(ev);
+  for await (const ev of tool.executor.execute(input, ctx)) out.push(ev);
   return out;
 }
+
+const show = (files: FileStore, name: string): Promise<ToolEvent[]> => run(files, { action: 'show', name });
 
 const errorOf = (events: ToolEvent[]): string => {
   const e = events.find(ev => ev.type === 'error');
@@ -108,14 +110,45 @@ test('SVG and text are refused toward `read`, which is the better answer for the
   const files = memFiles();
   files.seed('diagram.svg', 'image/svg+xml',            new Uint8Array([0x3c, 0x73]));
   files.seed('notes.md',    'text/markdown; charset=utf-8', new Uint8Array([0x23]));
-  files.seed('blob.bin',    'application/octet-stream', new Uint8Array([0x00]));
 
-  // SVG is inside `image/*` and is the one exclusion there: no vision endpoint decodes it, and its
-  // source is more useful than a picture of it would be.
-  for (const [name, type] of [['diagram.svg', 'image/svg+xml'], ['notes.md', 'text/markdown'], ['blob.bin', 'application/octet-stream']] as const) {
+  // The only two refusals, and neither is about capability: `read` hands over the source, which is what
+  // you actually want from markup or prose. SVG is inside `image/*` and is the one exclusion there.
+  for (const [name, type] of [['diagram.svg', 'image/svg+xml'], ['notes.md', 'text/markdown']] as const) {
     const message = errorOf(await show(files, name));
     assert.ok(message.includes(type), `the refusal names the type it got: ${message}`);
     assert.match(message, /action "read"/, 'and points at the action that can help');
+  }
+});
+
+test('a type we hold no opinion about is shown, not refused — the endpoint gets to reject it', async () => {
+  const files = memFiles();
+  files.seed('blob.bin',  'application/octet-stream', new Uint8Array([0x00]));
+  files.seed('take.flac', 'audio/flac',               new Uint8Array([0x66, 0x4c, 0x61, 0x43]));
+
+  // There is no per-model mime capability table here, so refusing would be guessing on the model's
+  // behalf — and the guess was wrong in the obvious case (see below). Being wrong this way costs one
+  // turn: tool media is wire-only and dies with it, unlike a persisted session `file-ref`.
+  const blob = (await show(files, 'blob.bin')).find(e => e.type === 'model-content')!;
+  assert.equal(blob.content[0]!.type, 'document', 'an unrecognised binary goes over as a document arm');
+
+  const flac = (await show(files, 'take.flac')).find(e => e.type === 'model-content')!;
+  assert.equal(flac.content[0]!.type, 'audio');
+});
+
+test('audio written through the tool is typed as audio, not octet-stream', async () => {
+  const files = memFiles();
+
+  // The bug this closes: MIME_MAP had no audio extension at all, so `mimeFromName` — the ONLY source of
+  // a workspace file's type on write — fell to octet-stream for every .mp3. `show` then refused it and
+  // sent the model to `read`, which hands back base64 it cannot hear: the exact dead end `show` exists
+  // to close, in the tool that advertises audio.
+  for (const [name, arm] of [['memo.mp3', 'audio'], ['take.wav', 'audio'], ['clip.m4a', 'audio'],
+                             ['song.ogg', 'audio'], ['voice.opus', 'audio']] as const) {
+    const written = await run(files, { action: 'write', name, content: 'not really audio' });
+    assert.ok(!written.some(e => e.type === 'error'), `wrote ${name}: ${JSON.stringify(written)}`);
+    const shown = (await show(files, name)).find(e => e.type === 'model-content');
+    assert.ok(shown, `${name} is shown rather than refused`);
+    assert.equal(shown.content[0]!.type, arm, `${name} reaches the model as an ${arm} arm`);
   }
 });
 

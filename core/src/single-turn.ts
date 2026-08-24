@@ -1,25 +1,15 @@
 import type {
   Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext, MatbotMachine, MimeType, UserContent, FileStore,
 } from '@matatbread/matbot-plugin-api';
+import { collectBytes, encodeBase64 } from '@matatbread/matbot-plugin-api';
+// The arm mapping is the runner's, not a copy of it: it decides which types may be sent at all, and a
+// rule with two copies is one that gets fixed in one of them.
+import { armFor } from './media.js';
 
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
     single_turn: ToolContract<{ text: string }, { provider?: string; prompt: string; system?: string; attach?: string[] }>;  // the consulted provider's reply text
   }
-}
-
-/** Which inline arm a file comes back as — the same mapping the runner uses for session media. */
-function armFor(mimeType: string): 'image' | 'audio' | 'document' {
-  if (mimeType.startsWith('image/')) return 'image';
-  if (mimeType.startsWith('audio/')) return 'audio';
-  return 'document';
-}
-
-function encodeBase64(bytes: Uint8Array): string {
-  const CHUNK = 0x8000;
-  let bin = '';
-  for (let i = 0; i < bytes.length; i += CHUNK) bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
-  return btoa(bin);
 }
 
 /**
@@ -33,9 +23,10 @@ async function resolveAttachments(
   names:  readonly string[],
   stores: ReadonlyArray<FileStore | undefined>,
   signal: AbortSignal | undefined,
-): Promise<{ content: UserContent[]; missing: string[] }> {
+): Promise<{ content: UserContent[]; missing: string[]; unsupported: string[] }> {
   const content: UserContent[] = [];
   const missing: string[] = [];
+  const unsupported: string[] = [];
   for (const ref of names) {
     let handle = null;
     for (const store of stores) {
@@ -44,15 +35,14 @@ async function resolveAttachments(
       if (handle !== null) break;
     }
     if (handle === null) { missing.push(ref); continue; }
-    const chunks: Uint8Array[] = [];
-    let total = 0;
-    for await (const c of handle.stream(signal)) { chunks.push(c); total += c.byteLength; }
-    const bytes = new Uint8Array(total);
-    let at = 0;
-    for (const c of chunks) { bytes.set(c, at); at += c.byteLength; }
-    content.push({ type: armFor(handle.mimeType), data: encodeBase64(bytes), mimeType: handle.mimeType as MimeType, name: handle.name });
+    // A type no endpoint decodes is refused, not routed to an arm that will 400 the call. Reported
+    // apart from `missing`: "no such file" would send the model hunting for a file it named correctly.
+    const arm = armFor(handle.mimeType);
+    if (arm === null) { unsupported.push(`${ref} (${handle.mimeType})`); continue; }
+    const bytes = await collectBytes(handle.stream(signal));
+    content.push({ type: arm, data: encodeBase64(bytes), mimeType: handle.mimeType as MimeType, name: handle.name });
   }
-  return { content, missing };
+  return { content, missing, unsupported };
 }
 
 /**
@@ -88,9 +78,15 @@ export function createSingleTurnTool(services: MatbotMachine): Tool<ToolResultOf
       const attach = Array.isArray(args.attach) ? args.attach.filter((a): a is string => typeof a === 'string') : [];
       let prompt: string | UserContent[] = args.prompt;
       if (attach.length > 0) {
-        const { content, missing } = await resolveAttachments(attach, [services.MediaStore, ctx.files], ctx.signal);
+        const { content, missing, unsupported } = await resolveAttachments(attach, [services.MediaStore, ctx.files], ctx.signal);
         if (missing.length > 0) {
           yield { type: 'error', message: `single_turn: no such file(s): ${missing.join(', ')}. Attachments are looked up by store id or by name.` };
+          return;
+        }
+        if (unsupported.length > 0) {
+          yield { type: 'error', message:
+            `single_turn: no model endpoint decodes ${unsupported.join(', ')}, so sending it would fail ` +
+            'the call. Convert it to PNG or JPEG, or read the file as text and put that in the prompt.' };
           return;
         }
         prompt = [...content, { type: 'text', text: args.prompt }];
@@ -121,7 +117,8 @@ export function createSingleTurnTool(services: MatbotMachine): Tool<ToolResultOf
       'prompt, for the consulted model to look at. It is not a content type and not a way to forward ' +
       'media from THIS conversation — you can already see that; only name a file that exists in the ' +
       'workspace or media store. Whether the consulted provider can read a given file is its business; ' +
-      'one it cannot take degrades to a text note.',
+      'one it cannot take degrades to a text note. An image in a format no endpoint decodes (HEIC, ' +
+      'SVG, BMP, TIFF) is refused outright rather than sent — convert it first, or read it as text.',
     inputSchema: {
       type:       'object',
       required:   ['prompt'],

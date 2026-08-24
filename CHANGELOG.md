@@ -48,20 +48,65 @@ churn and less likely to affect a consumer who doesn't use them.
   completely unaffected.
 
 - **`MediaRejectedError`** (`mediaRejectedError` / `isMediaRejectedError`), branded like the other typed
-  errors. Carries `reason` (`no-store` / `too-large` / `session-quota` / `unreadable`) and the offending
-  `file`. `unreadable` covers both bad base64 and a **magic-byte mismatch** — a file whose bytes are not
-  the type it claims. That check exists because the consequence is worse than one failed message: the
-  provider decodes the file itself and 400s mid-turn, by which point the `file-ref` is in history and
-  resolves into every *subsequent* outgoing copy, failing the session for good. It is not a validity
-  check — a well-formed header on a structurally broken document still passes, since only the provider
-  can know that. Refusing at the boundary is the point: the alternative is a provider 400 part-way through a turn
-  the user already believes was sent. Caps are 20MB per file and 50MB per session, the session total
-  derived by summing what the store holds rather than counted.
+  errors. Carries `reason` (`no-store` / `unreadable` / `unsupported-type` / `too-large` /
+  `session-quota` / `unknown-ref`) and the offending `file`. Refusing at the boundary is the point: the
+  alternative is a provider 400 part-way through a turn the user already believes was sent.
+
+  Three of the six are about the bytes not being sendable. `unreadable` covers bad base64 and a
+  **magic-byte mismatch** — a file whose bytes are not the type it claims. `unsupported-type` catches the
+  same failure a step earlier, and is why `armFor` may return `null`: **`image/*` is the one prefix that
+  cannot be admitted by prefix alone**, because a provider *tries* to decode whatever the image arm carries
+  and 400s on what it cannot, where an unrecognised document or audio type degrades to a text note instead.
+  So HEIC (what an iPhone camera roll hands back), SVG, BMP and TIFF are refused rather than routed to an
+  arm that will fail — the same list and the same reasoning as `workspace`'s `showArm`. Both checks exist
+  because the consequence is worse than one failed message: the `file-ref` is by then in history, where it
+  resolves into every *subsequent* outgoing copy and fails the session for good. Neither is a validity
+  check — a well-formed header on a structurally broken document still passes, since only the provider can
+  know that.
+
+  `unknown-ref` is about the arm a caller may send *itself*. `UserContent` admits `file-ref`, so a frontend
+  that already uploaded can skip the rewrite — which makes a `fileId` on the wire the client's word about
+  which bytes to send, and the resolver inlines what it is handed. Each is therefore checked against the
+  session that owns it: the handle must exist, its `sessionId` must match, and its namespace must be
+  `session-media`. Ownership rather than `allowed`, since every media put sets `allowed: true` and so cannot
+  separate one session's media from another's. Reported as *unknown* rather than forbidden, for the reason
+  `GET /media/:id` gives — a refusal must not confirm that an id exists.
+
+  Caps are 50MB per session, the total **derived** by summing what the store holds rather than counted, and
+  per file **is** the 8MB residency budget rather than a second number: a file larger than the outgoing-copy
+  window can never be resident, so admitting one would only buy an attachment that is stored, charged to the
+  session total, and then permanently invisible to the model with nothing having said so.
 
 - **`SingleTurnRequest.prompt` accepts `UserContent[]`** as well as a string, so a one-shot completion can
   carry media.
 
+- **`ComposedCallContext.progress(pct, message?)` — a composed function can report while it runs.** A
+  `tool_function` body is a plain async function and so cannot `yield`, which left the `progress`
+  `ToolEvent` — the one a hand-written tool emits, already rendered by the web client as a bar and caption
+  and by the CLI as `[NN%]` — unreachable from the one place a long run actually happens: a lambda looping
+  over n items. It needed no new channel and no change to the authoring syntax, because `runFunction`
+  already pumps a live event queue for the nested-call stdout trace; `progress` writes onto that same
+  queue, so an existing function is unaffected by construction. It is the one method on
+  `ComposedCallContext`, and does not breach that type's facts-not-capabilities rule for the reason the
+  rule exists: it carries no authority — write-only, reading nothing and reaching nothing. `pct` is
+  rounded and clamped where the model-authored number is handed over rather than in each renderer.
+
 ### Bug fixes
+
+- **A mid-turn steer could interrupt a turn the user never saw.** The decision to interrupt tested
+  `s.running`, which is true across the pump's **whole queue** — so it answers "something is running",
+  never "still the one you meant". Every await in front of that test can outlive the turn being steered
+  (the classifier and the nudge always could; media ingestion, new in this release, can hold for seconds
+  on a large attachment), after which the abort landed on whatever was running by then and the `steer`
+  event named the wrong `interruptedTraceId`. The target turn's `traceId` is now captured when the
+  submission *arrives* and compared before aborting; if that turn has since committed the steer falls
+  through and queues, which is what it has become — an ordinary follow-up.
+
+- **`SystemContextRegistry.parts()` could pair a contribution with the wrong plugin, and drop one.** It
+  awaited the contributors and then re-indexed the *current* array, so a plugin unloading during the
+  await (a hot reload) shifted every survivor onto its predecessor's text and lost the last one
+  entirely. Since `build()` now derives from `parts()`, that corrupted the prompt actually sent, not
+  just the breakdown `about_matbot` reports. The contributor is zipped into its own awaited value.
 
 - **Prior reasoning is replayed on a field, not as prose — it was leaking into visible answers.** Both
   converters degraded a stored `reasoning` block into a literal `[Prior reasoning: …]` **text** part on
@@ -105,6 +150,22 @@ churn and less likely to affect a consumer who doesn't use them.
   a 32-bit signed integer to 1ms, so a distant schedule woke immediately and went straight back round.
   Long waits are slept in chunks against a deadline, which also covers a long recurring interval.
 
+- **Bug fix: `sleep` leaked an abort listener per call.** It detached its listeners only on the abort
+  path, never on the ordinary timeout, against signals that outlive it by design — `signal` lives as long
+  as the schedule's loop. One per interval fire was already wrong; chunking a long wait multiplied it, so
+  an `at` a year out added ~15 in one go, until node warned about an EventTarget leak and the closures
+  behind them stayed reachable. Detached on every exit now.
+
+- **`at` now documents whose timezone an offset-less date-time is read in.** `Date.parse` makes a
+  date-only value midnight **UTC** and a date-time with no offset **local** — and "local" is the *host's*
+  zone: the machine matbot runs on under the CLI or server, which is usually not where the person asking
+  is, but genuinely their own browser in the web bundle. So the same string means two different instants
+  depending on which host created the schedule, and `AT_PAST_GRACE_MS` cannot catch it because the drift
+  goes forward as often as back. Deliberately not normalised — forcing UTC would silently move an
+  appointment a browser-hosted user meant locally, and honouring the asker's own zone needs a carrier the
+  plugin has no access to. Instead the tool description, the `at` schema and the parse error all now say
+  to include an explicit offset, which is the one thing that makes both hosts agree.
+
 #### edit-session
 
 - **`session_edit` `summarise` — compact by meaning rather than by shape.** `compact` keeps every word
@@ -137,6 +198,24 @@ churn and less likely to affect a consumer who doesn't use them.
   like `cut`/`split`/`compact`. `summarize` is the same action.
 
 #### frontend-web
+
+- **Bug fix: the media-URL cache never released a byte.** `resolveMediaUrl` memoised by `fileId` in a
+  module-global Map that nothing ever cleared — and in the browser bundle those values are `blob:` URLs,
+  which keep their Blob alive because they are *registered*, not because anything references them. So
+  every file a long-lived page had ever rendered stayed resident, up to the 50MB session cap per session
+  visited. The old comment's claim that it was "bounded by the distinct media in a session" was wrong
+  twice: it was never per-session, and the wire's residency budget bounds one turn's outgoing copy, not
+  a page's lifetime.
+
+  The cache moved into the **browser transport**, which is the only layer that knows what an entry costs
+  (it just read the bytes) and the only one that can revoke it — the node transport now caches nothing,
+  because there `mediaUrl` is string concatenation. It is an LRU bounded in **bytes** (32MB, a first
+  guess), for the reason `MEDIA_RESIDENCY_BYTES` is: a 20-entry cache is 400KB of thumbnails or 160MB of
+  PDFs, and a count cannot tell them apart. Concurrent misses for one id share a single read, which is
+  not merely an optimisation — two mints would leave the first Blob unreachable *and* unrevoked, the
+  exact leak being fixed. And because eviction can revoke a URL whose `<img>` is still on screen, an
+  element re-resolves **once** on error before falling back to the file chip; without that, a bounded
+  cache would silently downgrade a visible image, which is what makes the bound safe to have at all.
 
 - **The system prompt is visible from the header.** Clicking `matbot vX.Y.Z` runs `about_matbot` over HTTP
   and shows an overlay with the harness line, the provider, and the prompt broken down per contributing
@@ -190,6 +269,10 @@ churn and less likely to affect a consumer who doesn't use them.
 
 #### function-tools
 
+- **The description teaches `context.progress()`.** Told only that a body can be slow, a model has no way
+  to say so; the injected-bindings block now carries the call, with a worked loop, and states that progress
+  is never sent back to it — so reporting costs no context and there is no reason to be sparing with it.
+
 - **`tool_function` now recommends itself in the system prompt.** A model that never considers the tool
   never reads its description, and left alone it pulls a verbose result into the conversation to extract a
   line of it, or drives a loop a round at a time — keeping every intermediate result for the rest of the
@@ -225,6 +308,19 @@ churn and less likely to affect a consumer who doesn't use them.
   `show` streams the file, hands it over as the matching inline arm, and returns **metadata only**
   (`{ name, mimeType, bytes }`), so the transcript records that a file was shown and never the bytes it
   showed.
+
+- **Bug fix: `show` refused audio, which it advertises.** `MIME_MAP` had no audio extension at all, so
+  every workspace `.mp3` typed as `application/octet-stream`, `showArm` returned null, and the tool that
+  promises audio told the model to `read` it — handing back base64 it cannot hear, the exact dead end
+  `show` exists to close. Audio extensions are mapped, and the default is inverted: a format we hold no
+  opinion about is routed and left for the **endpoint** to reject, because there is no per-model mime
+  capability table here and refusing was guessing on the model's behalf. Only SVG and `text/*` are still
+  refused, neither for capability reasons — `read` hands over their source, which is the better answer.
+
+  Deliberately the opposite policy to core's `armFor`, which must refuse an undecodable `image/*`.
+  Different blast radius rather than an inconsistency: there the refusal protects a **persisted**
+  `file-ref` that would fail every later turn too, while here the worst case is one turn, because tool
+  media is wire-only and dies with it.
 
   `read` could not have been extended to do this and the description could not have papered over it: a
   `read` result is a **string**, so base64 there is 4/3 of the file *persisted into the session document*

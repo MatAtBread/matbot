@@ -1981,20 +1981,33 @@
       }
       #messages    { padding-left: 16px; padding-right: 16px; }
       #input-area  {
-        padding: 0px 6px 2px;
+        padding-top: 0px;
+        padding-left: 6px;
+        padding-right: 6px;
+        /* The control row is the bottom-most thing on screen, so on a device with a home indicator it
+           lands in the OS gesture strip and an upward swipe near Send goes to the OS instead of the
+           button. Longhands rather than the `padding` shorthand deliberately: the shorthand is exactly
+           what dropped this inset when the row was added. */
+        padding-bottom: max(2px, env(safe-area-inset-bottom, 0px));
       }
       .session-actions { display: flex; }
 
       /* ── Mobile composer ─────────────────────────────────────
          The textarea had only ever got narrower: three round buttons and their gaps took 141px of a
-         374px line, leaving ~29 characters. Only two of those buttons were legal touch targets — the
-         paperclip was 34px, under the 44px minimum, while costing 40px of the line.
+         374px line, leaving ~29 characters. The paperclip was also only 34px across, spending 40px of
+         that line on a target under the 44px guideline.
 
          So the textarea takes a row of its own and the controls take the next one, four equal columns
-         wide enough to carry a word each. Wide beats tall for mis-taps (they are separated by ~90px of
-         dead space rather than 6px), a label is the strongest anti-misfire device available, and the
-         extra ~28px of chrome is repaid the moment a message wraps twice — which at 29 characters a
-         line it did constantly.
+         wide enough to carry a word each. What that buys is WIDTH and labels, not height: each control
+         is ~90px across with ~90px between centres (against 6px gaps before), and a label is the
+         strongest anti-misfire device available. The extra ~28px of chrome is repaid the moment a
+         message wraps twice — which at 29 characters a line it did constantly.
+
+         Height goes the other way, deliberately: 24px, SHORTER than the 34px paperclip above. Spending
+         a whole row and then making it tall would pay for the chrome twice, which is the thing being
+         avoided. So 44px is not met in the vertical axis and is not meant to be — the horizontal target
+         is the one a thumb misses in on a bottom row. If mis-taps do show up, widen the gutters or move
+         the row off the screen edge; growing the row height is the trade this layout already declined.
 
          Send is bottom-RIGHT and stays there, which is why the mobile order is not the DOM order: the
          corner your thumb lands on must always mean the same thing. Stop is beside it, red, and only
@@ -2356,7 +2369,8 @@
       <div id="input-row">
         <button id="composer-cog" title="Provider and mid-turn message handling" aria-label="Options"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span class="ctl-label">Options</span></button>
         <button id="attach-btn" title="Attach an image, PDF or audio clip" aria-label="Attach a file"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg><span class="ctl-label">Attach</span></button>
-        <input id="attach-input" type="file" multiple hidden>
+        <input id="attach-input" type="file" multiple hidden
+               accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,audio/*,text/plain,text/markdown,text/csv">
         <textarea id="input" rows="1" placeholder="Shift+⬅️ to send, ⬅️ for newline"></textarea>
         <button id="stop-btn" style="visibility:hidden" title="Stop the running turn and drop anything queued" aria-label="Stop"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg><span class="ctl-label">Stop</span></button>
         <button id="send-btn" aria-label="Send"><svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" aria-hidden="true"><path d="M9 6v12l9-6z"/></svg><span class="ctl-label">Send</span></button>

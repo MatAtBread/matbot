@@ -646,9 +646,21 @@ no longer there.
 
 **Refuse at the boundary, naming the file** (`MediaRejectedError`, with `reason`). The alternative is a
 provider 400 part-way through a turn the user already believes was sent, with no way back. Nothing is
-enqueued on a refusal, so there is nothing to unwind. Caps: 20MB/file, 50MB/session — the session total
-**derived** by summing what the store holds, never a counter, which is wrong after a restart, a swap, or
-anything deleting a file behind it.
+enqueued on a refusal, so there is nothing to unwind. Caps: 50MB/session, and per-file **is** the
+residency budget rather than a second number — a file larger than the outgoing-copy window can never be
+resident, so admitting one only buys an attachment that is accepted and permanently invisible. The
+session total is **derived** by summing what the store holds, never a counter, which is wrong after a
+restart, a swap, or anything deleting a file behind it.
+
+Two refusals are about *what* rather than how big. A type no endpoint decodes (HEIC off a camera roll,
+SVG) is refused because `image/*` is the one arm a provider *tries* to decode — everything else degrades
+to a text note, but a bad image 400s the request, and by then the `file-ref` is in history where it fails
+every later turn too. And a caller-supplied `file-ref` is checked against the session that owns it
+(`sessionId` + namespace; `allowed` cannot substitute, every put setting it true), because a `fileId` on
+the wire is the client's word about which bytes to send and the resolver inlines what it is handed. Both
+live at the submission boundary for the same reason as the size caps: it is the only point that knows the
+session *and* has a channel to say no — the runner could only drop a block silently, mid-turn, for
+something the user watched itself attach.
 
 **`UserContent` is a narrow subset of `MessageContent`, deliberately.** A submission crosses a wire
 boundary; widening it to the full union would let a client post a forged `tool-result`, `thinking` block

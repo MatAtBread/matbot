@@ -33,6 +33,7 @@ Everything in `core/src/media.ts` plus two hooks into the runner. In full:
 | `UserContent` | `plugin-api/src/types/session-runner.ts` | the narrow arm-set a submission may carry |
 | `ingestMedia()` | `core/src/media.ts` | the submission boundary: inline arms → `file-ref` |
 | `resolveSessionMedia()` | `core/src/media.ts` | turn-side: `file-ref` → inline bytes, inside a budget |
+| `armFor()` | `core/src/media.ts` | which inline arm a type may be sent as, or `null` for none |
 | `MediaStore` | `plugin-api/src/types/files.ts` | a `MatbotServices` key, aliasing `FileStore` |
 | `MediaRejectedError` | `plugin-api/src/errors.ts` | a refusal that names the file and the reason |
 | the caps | `core/src/media.ts` | four constants, listed under [Limits](#limits) |
@@ -110,8 +111,10 @@ session. The rule has no exception to police because there is nowhere else the b
 |---|---|---|
 | `no-store` | no `MediaStore` registered — a deployment fact, not a bad request | 501 |
 | `unreadable` | not valid base64, or content that does not match its declared type | 400 |
+| `unsupported-type` | a type no endpoint decodes — an `image/*` outside PNG/JPEG/GIF/WebP | 415 |
 | `too-large` | over the per-file cap | 413 |
 | `session-quota` | would take the session over its total | 413 |
+| `unknown-ref` | a submitted `file-ref` does not name media attached to this session | 404 |
 
 **Refuse at the boundary, naming the file.** The alternative is a provider 400 part-way through a turn
 the user already believes was sent, with no way back. Nothing is enqueued on a refusal, so there is
@@ -123,6 +126,29 @@ structurally broken file still passes, because only the provider can know that. 
 failure it prevents is not recoverable in-band: the `file-ref` is by then in history, where it resolves
 into *every* subsequent outgoing copy and fails the session for good. Nothing else is sniffed; for
 `text/*`, audio or an octet-stream we genuinely do not know, and guessing would refuse valid files.
+
+`unsupported-type` is the same failure caught one step earlier, and it is why `armFor` returns `null`
+rather than always naming an arm. **`image/*` is the one prefix that cannot be admitted by prefix
+alone**: a provider *tries* to decode whatever the image arm carries and 400s on what it cannot, where an
+unrecognised document or audio type degrades to a text note instead. So HEIC — what an iPhone camera roll
+hands back, and what a `<input type="file">` with no `accept` will happily offer — along with SVG (XML;
+`read` gives the source, which is the better answer), BMP and TIFF are refused rather than routed to an
+arm that will fail. Same list and same reasoning as `workspace`'s `showArm`; they stay separate because
+they answer for separate stores. A frontend should also set `accept` to the decodable types, which is what
+makes iOS transcode a camera-roll photo to JPEG instead of handing over HEIC — but drag and paste bypass
+`accept` entirely, so the boundary check is the gate and `accept` only saves the round trip.
+
+`unknown-ref` covers the arm a caller may legitimately send *itself*. `UserContent` admits `file-ref`, so
+a frontend that has already uploaded can skip the rewrite — which means a `fileId` arriving over the wire
+is the client's word about which bytes to send, and `resolveSessionMedia` inlines what it is handed. Each
+one is therefore checked against the session that owns it: the handle must exist, its `sessionId` must
+match, and its namespace must be `session-media`. Ownership rather than `allowed`, because every put above
+sets `allowed: true` — the flag the HTTP read route gates on cannot separate this session's media from
+another's, and `sessionId` + namespace is strictly the stronger check. Phrased as *unknown* rather than
+forbidden for the reason `GET /media/:id` gives: a refusal must not confirm that an id exists. The check
+belongs here and nowhere else, because this is the only point that knows the session **and** has a channel
+to say no — the runner could only drop the block silently, mid-turn, for something the user watched itself
+attach.
 
 The session total is **derived** by summing what the store already holds for the session, never kept as
 a counter — a counter is wrong after a restart, a swap, or anything deleting a file behind it.
@@ -189,9 +215,9 @@ here, and why `cut` / `fork` / `split` / `compact` keep working: they move whole
 ## Delivery to the model
 
 `resolveSessionMedia()` runs **once per turn**, before the round loop, and returns a
-message-id → replacement-content map the runner splices into the **outgoing copy only**. Session media is
-swapped **in place**, so the model reads the image where the person actually put it; tool media is pinned
-*after* the tool message it answers. Same splice, different placement, different source.
+message-id → (file-id → inline arm) map the runner splices into the **outgoing copy only**. Session media
+is swapped **in place**, so the model reads the image where the person actually put it; tool media is
+pinned *after* the tool message it answers. Same splice, different placement, different source.
 
 Resolution walks **newest-first** inside a byte budget (`MEDIA_RESIDENCY_BYTES`, 8MB). Beyond it the
 `file-ref` is left exactly as it is and the provider adapters degrade it to `[Attached file: x]` — honest,
@@ -204,6 +230,11 @@ Two design points that are load-bearing:
 - **Once per turn, not per round.** Recomputing per round would let a message fall out of the window
   *between two provider calls* — busting the prompt cache and leaving the model referring to something
   no longer there.
+- **Keyed per ref, spliced per block.** The map deliberately does not hand back each message's finished
+  content array, because that array is not final when resolution runs: a raced `screen` verdict folds
+  durable `robo-user` blocks onto the user message *inside* the round loop, and substituting an array
+  computed at turn start would drop them from every later round — persisted and on screen, but never
+  sent. Handing back the substitutions instead leaves the runner mapping blocks it still owns.
 
 What each arm becomes on the wire is the adapter's business, and they differ — a `document` your storage
 holds perfectly well may still reach one model as a note saying it exists:
@@ -296,11 +327,17 @@ size *before* the read.
 All in `core/src/media.ts`; the fifth is the tool-side ceiling in the workspace plugin. Every one is a
 first guess — one knob each, and measure before adding a second.
 
+The per-file cap is not independent: it **is** the residency budget. A file larger than the outgoing-copy
+window can never be resident (`spent + size > budget` is true on the first item, with `spent === 0`), so
+admitting one would store it, charge it to the session total, and then degrade it to `[Attached file: x]`
+on every turn for the rest of the session — accepted and permanently invisible, with no boundary having
+said a word. Raise the window and the cap follows.
+
 | Constant | Value | Bounds |
 |---|---|---|
-| `MAX_MEDIA_BYTES_PER_FILE` | 20MB | one attachment, at the submission boundary |
-| `MAX_MEDIA_BYTES_PER_SESSION` | 50MB | everything the store holds for a session |
 | `MEDIA_RESIDENCY_BYTES` | 8MB | how much resolved media may ride one turn's outgoing copy |
+| `MAX_MEDIA_BYTES_PER_FILE` | = residency | one attachment, at the submission boundary |
+| `MAX_MEDIA_BYTES_PER_SESSION` | 50MB | everything the store holds for a session |
 | `MEDIA_NAMESPACE` | `session-media` | where ingested media is written |
 | `SHOW_MAX_BYTES` (workspace) | 8MB | one file handed over by `workspace_action show` |
 

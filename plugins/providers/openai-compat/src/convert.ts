@@ -198,9 +198,7 @@ export function toOAIMessages(messages: Message[], cache = false, geminiMode = f
         .filter((c): c is Extract<MessageContent, { type: 'reasoning' }> => c.type === 'reasoning')
         .map(c => c.reasoning).join('\n');
       if (reasoning) oaiMsg.reasoning_content = reasoning;
-    }
 
-    if (toolCalls.length > 0) {
       oaiMsg.tool_calls = toolCalls.map(c => {
         if (c.type !== 'tool-call') return null!;
         const call: OAIToolCall = {

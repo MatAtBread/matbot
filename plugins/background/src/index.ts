@@ -105,13 +105,30 @@ const isoAt = (ms: number): IsoInstant => new Date(ms).toISOString() as IsoInsta
 // reads "5" as a year — the one failure mode that fires at a plausible-looking wrong time.
 const AT_ABSOLUTE = /^\d{4}-\d{2}-\d{2}/;
 
+/**
+ * `Date.parse` splits the absolute form on a detail worth stating rather than papering over. A
+ * DATE-ONLY `at` ("2026-08-23") is midnight **UTC** by spec; a date-time with **no offset**
+ * ("2026-08-23T09:00:00") is **local** — so the two differ by up to a day's worth of offset, and
+ * `AT_PAST_GRACE_MS` cannot catch it because the drift goes forward as often as back.
+ *
+ * And "local" is the HOST's zone, not the asker's. Under the node CLI or server that is the machine
+ * matbot runs on, which is very often not where the person is — a schedule they meant for 09:00 lands
+ * at the server's 09:00. In the web bundle the host IS the browser, so there it genuinely is their own
+ * zone. Same string, two different instants depending on which host created the schedule.
+ *
+ * Left as it is rather than normalised: forcing the offset-less form to UTC would silently move an
+ * appointment a browser-hosted user meant locally, and honouring the asker's zone needs a carrier this
+ * plugin has no access to. So the answer is to give an explicit offset (`Z`, `+01:00`), and the tool
+ * description says so — the only place a model will read it.
+ */
 function parseAt(s: string): number {
   const t = s.trim();
   if (isDuration(t)) return Date.now() + durationMs(t);
   const abs = AT_ABSOLUTE.test(t) ? Date.parse(t) : NaN;
   if (Number.isNaN(abs)) {
     throw new Error(`Invalid "at" value "${s}". Give an ISO-8601 date-time ("2026-08-23T09:00:00Z", or ` +
-      '"2026-08-23" for midnight UTC), or a duration from now ("90m", "2h", "3d").');
+      '"2026-08-23" for midnight UTC), or a duration from now ("90m", "2h", "3d"). Include the offset: ' +
+      'a date-time without one is read in the HOST\'s timezone, not yours.');
   }
   return abs;
 }
@@ -251,10 +268,21 @@ function spawnJob(configPath: string, prompt: string, output?: string, files?: F
 function sleep(ms: number, signal: AbortSignal, wakeSignal?: AbortSignal): Promise<void> {
   return new Promise(resolve => {
     if (signal.aborted || wakeSignal?.aborted) { resolve(); return; }
-    const id = isFinite(ms) ? setTimeout(resolve, ms) : undefined;
-    const cleanup = () => { if (id !== undefined) clearTimeout(id); resolve(); };
-    signal.addEventListener('abort', cleanup, { once: true });
-    wakeSignal?.addEventListener('abort', cleanup, { once: true });
+    // Detached on EVERY exit, including the ordinary timeout. `{ once: true }` only covers the abort
+    // path, and these signals outlive the sleep by design — `signal` lives as long as the schedule's
+    // loop — so a listener left behind per call accumulates for the process's life: one per interval
+    // fire, and now one per 24.8-day chunk of a single long `sleepUntil` wait. That is the
+    // MaxListenersExceededWarning, plus a retained closure behind each one.
+    let id: ReturnType<typeof setTimeout> | undefined;
+    const done = () => {
+      if (id !== undefined) clearTimeout(id);
+      signal.removeEventListener('abort', done);
+      wakeSignal?.removeEventListener('abort', done);
+      resolve();
+    };
+    id = isFinite(ms) ? setTimeout(done, ms) : undefined;
+    signal.addEventListener('abort', done, { once: true });
+    wakeSignal?.addEventListener('abort', done, { once: true });
   });
 }
 
@@ -453,7 +481,9 @@ A one-shot deletes itself once it has run, so it stops appearing in every_action
 
 at is either an ISO-8601 date-time ("2026-08-23T09:00:00Z", or "2026-08-23" for midnight UTC) or a
 duration from now ("90m", "2h", "3d") — prefer the duration form when you are unsure of today's date,
-since a wrong date is refused rather than run. The result echoes the instant it resolved to, so tell the
+since a wrong date is refused rather than run. ALWAYS include the offset on a date-time ("Z", "+01:00"):
+one without an offset is resolved in the timezone of the machine matbot runs on, which is not
+necessarily the user's, so "09:00" can land hours from where they meant it. The result echoes the instant it resolved to, so tell the
 user that time rather than the words you were given. A time that has already passed is refused; a time
 that goes by while matbot is not running is honoured late, on the next start.
 
@@ -484,7 +514,7 @@ wanted to see the result, they would have asked for it in the foreground.
       },
       at: {
         type:        'string',
-        description: 'Run ONCE at this time: an ISO-8601 date-time ("2026-08-23T09:00:00Z") or a duration from now ("90m", "2h", "3d"). Mutually exclusive with "interval". A time already in the past is refused.',
+        description: 'Run ONCE at this time: an ISO-8601 date-time ("2026-08-23T09:00:00Z") or a duration from now ("90m", "2h", "3d"). Always include the offset ("Z", "+01:00") — a date-time without one is read in the host machine\'s timezone, not the user\'s. Mutually exclusive with "interval". A time already in the past is refused.',
       },
       name: {
         type:        'string',

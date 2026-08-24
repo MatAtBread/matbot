@@ -104,7 +104,7 @@
   // non-2xx or a transport failure (incl. the 20s timeout) so the caller can surface it inline.
   async function submit(sid, body) {
     const payload = JSON.stringify(body);
-    // 20s is right for a typed message and far too short for one carrying 20MB of attachment on a slow
+    // 20s is right for a typed message and far too short for one carrying 8MB of attachment on a slow
     // uplink — a timeout there loses the message and the files with it. Scale with the payload (a
     // pessimistic ~1Mbps floor) rather than raising the flat number, so a text submit still fails fast.
     const timeout = Math.max(20000, Math.ceil(payload.length / 128) + 20000);

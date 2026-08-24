@@ -298,7 +298,14 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
     const foldIdx = ephemeral.length > 0 ? session.messages.findLastIndex(m => m.role !== 'marker') : -1;
     const history = foldIdx >= 0 || attachments.size > 0 || sessionMedia.size > 0
       ? session.messages.flatMap((m, i) => {
-          const inlined = sessionMedia.has(m.id) ? { ...m, content: sessionMedia.get(m.id)! } : m;
+          // Per BLOCK, never the whole array: `sessionMedia` was resolved once before this loop, and a
+          // raced verdict's `foldOntoUserTurn` (claimVerdicts, above) extends this same user message
+          // mid-turn. Substituting the array would put back the pre-fold copy on every later round —
+          // dropping durable robo-user blocks from the wire while leaving them persisted and on screen.
+          const refs    = sessionMedia.get(m.id);
+          const inlined = refs
+            ? { ...m, content: m.content.map(c => (c.type === 'file-ref' ? refs.get(c.fileId) ?? c : c)) }
+            : m;
           const folded  = i === foldIdx ? { ...inlined, content: [...inlined.content, ...ephemeral] } : inlined;
           const media   = attachments.get(m.id);
           return media ? [folded, media] : [folded];

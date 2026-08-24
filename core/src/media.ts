@@ -1,5 +1,5 @@
 import type { MediaStore, Message, MessageContent, MimeType, UserContent } from './types.js';
-import { mediaRejectedError } from '@matatbread/matbot-plugin-api';
+import { collectBytes, decodeBase64, encodeBase64, mediaRejectedError } from '@matatbread/matbot-plugin-api';
 
 /**
  * User-supplied session media: the two ends of the one path. Bytes arrive by value at the submission
@@ -15,14 +15,6 @@ import { mediaRejectedError } from '@matatbread/matbot-plugin-api';
 /** Namespace session media is written under, so it is distinguishable from workspace files sharing a store. */
 export const MEDIA_NAMESPACE = 'session-media';
 
-/** Per-file ceiling at the submission boundary. Refusing here — naming the file — is the point: the
- *  alternative is a provider 400 part-way through a turn the user already believes was sent. */
-export const MAX_MEDIA_BYTES_PER_FILE = 20 * 1024 * 1024;
-
-/** Per-session total, derived by summing what the store already holds for the session rather than kept
- *  as a counter: a counter is wrong after a restart, a swap, or anything deleting a file behind it. */
-export const MAX_MEDIA_BYTES_PER_SESSION = 50 * 1024 * 1024;
-
 /**
  * How many bytes of media the outgoing copy may carry. Walked newest-first, so the freshest attachment
  * always makes it and an old one falls out; beyond the budget the `file-ref` is left alone and the
@@ -34,14 +26,52 @@ export const MAX_MEDIA_BYTES_PER_SESSION = 50 * 1024 * 1024;
  */
 export const MEDIA_RESIDENCY_BYTES = 8 * 1024 * 1024;
 
+/** Per-file ceiling at the submission boundary. Refusing here — naming the file — is the point: the
+ *  alternative is a provider 400 part-way through a turn the user already believes was sent.
+ *
+ *  It IS the residency budget rather than a second, larger number, because a file bigger than the
+ *  window can never be resident: `spent + size > budget` is true on the very first item with
+ *  `spent === 0`, so such a file would be stored, charged to the session quota, and then degraded to
+ *  `[Attached file: x]` on every turn for the rest of the session — accepted, permanently invisible,
+ *  and with no boundary having said a word. Deriving it makes that state unrepresentable rather than a
+ *  second check to remember; raise the window and the cap follows. */
+export const MAX_MEDIA_BYTES_PER_FILE = MEDIA_RESIDENCY_BYTES;
+
+/** Per-session total, derived by summing what the store already holds for the session rather than kept
+ *  as a counter: a counter is wrong after a restart, a swap, or anything deleting a file behind it. */
+export const MAX_MEDIA_BYTES_PER_SESSION = 50 * 1024 * 1024;
+
 const INLINE_ARMS = new Set(['image', 'document', 'audio']);
 
-/** Which inline arm a stored file comes back as. What each adapter then does with it differs: google
- *  inlines all three; anthropic inlines images and PDF/text documents and degrades the rest to a note;
- *  openai-compat inlines images only. A degraded arm becomes a text note, never nothing. */
-function armFor(mimeType: string): 'image' | 'audio' | 'document' {
-  if (mimeType.startsWith('image/')) return 'image';
-  if (mimeType.startsWith('audio/')) return 'audio';
+/**
+ * Image types a vision endpoint actually decodes.
+ *
+ * `image/*` is the one prefix that cannot be admitted by prefix alone: a provider TRIES to decode
+ * whatever the image arm carries and 400s on what it cannot, where an unrecognised document or audio
+ * type degrades to a text note instead. So HEIC (what an iPhone camera roll hands back, and what a
+ * `<input type="file">` with no `accept` will happily offer), SVG (XML — `read` gives the source, which
+ * is the better answer anyway), BMP and TIFF have to be refused at the boundary rather than routed to
+ * an arm that will fail: by the time the 400 arrives the `file-ref` is in persisted history, where it
+ * resolves into every subsequent outgoing copy and fails the session for good.
+ *
+ * Same list and same reasoning as `workspace`'s `showArm`. The two stay separate because they answer
+ * for separate stores; if a third ever needs it, this is the one to hoist.
+ */
+const DECODABLE_IMAGE: ReadonlySet<string> = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+/**
+ * Which inline arm a stored file comes back as, or null for a type that must not be sent at all. What
+ * each adapter then does with an arm differs: google inlines all three; anthropic inlines images and
+ * PDF/text documents and degrades the rest to a note; openai-compat inlines images only. A degraded arm
+ * becomes a text note, never nothing — which is precisely why only `image/*` needs gating.
+ *
+ * Exported because `single_turn` resolves attachments through the same mapping: a mime-routing rule
+ * with two copies is one that gets fixed in one of them.
+ */
+export function armFor(mimeType: string): 'image' | 'audio' | 'document' | null {
+  const base = mimeType.split(';')[0]!.trim().toLowerCase();
+  if (base.startsWith('image/')) return DECODABLE_IMAGE.has(base) ? 'image' : null;
+  if (base.startsWith('audio/')) return 'audio';
   return 'document';
 }
 
@@ -80,28 +110,6 @@ function contentMatchesType(bytes: Uint8Array, mimeType: string): boolean {
     bytes.length >= r.at + r.sig.length && r.sig.every((b, i) => bytes[r.at + i] === b));
 }
 
-function decodeBase64(data: string): Uint8Array {
-  return Uint8Array.from(atob(data), ch => ch.charCodeAt(0));
-}
-
-function encodeBase64(bytes: Uint8Array): string {
-  // Chunked: String.fromCharCode(...bytes) blows the argument limit somewhere around a megabyte.
-  const CHUNK = 0x8000;
-  let bin = '';
-  for (let i = 0; i < bytes.length; i += CHUNK) bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
-  return btoa(bin);
-}
-
-async function collect(data: AsyncIterable<Uint8Array>): Promise<Uint8Array> {
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  for await (const c of data) { chunks.push(c); total += c.byteLength; }
-  const out = new Uint8Array(total);
-  let at = 0;
-  for (const c of chunks) { out.set(c, at); at += c.byteLength; }
-  return out;
-}
-
 function describe(name: string | undefined, mimeType: string): string {
   return name ?? `attachment.${mimeType.split('/')[1] ?? 'bin'}`;
 }
@@ -114,18 +122,27 @@ function humanBytes(n: number): string {
 
 /**
  * The submission boundary, in one place so every frontend inherits it: rewrite each by-value media arm
- * to a `file-ref` against the `MediaStore`, leaving text and already-uploaded refs untouched.
+ * to a `file-ref` against the `MediaStore`, leave text untouched, and VET each ref a caller supplied
+ * itself.
  *
  * A text-only submission never touches the store, so a deployment with no `MediaStore` registered is
  * completely unaffected — it only hears about one when someone actually attaches something, and then it
  * is told why rather than silently dropping it.
+ *
+ * Vetting the refs belongs here and nowhere else. A submission crosses a wire boundary, so a `fileId`
+ * is the client's word about which bytes to send, and `resolveSessionMedia` inlines whatever it is
+ * handed — no session, no namespace, no `allowed` consulted — which made "describe this" a read of any
+ * file in the store. This is the only point that knows the session AND has a channel to say no: the
+ * runner could only drop the block silently, mid-turn, for something the user watched itself attach.
  */
 export async function ingestMedia(
   content:   readonly UserContent[],
   sessionId: string,
   store:     MediaStore | undefined,
 ): Promise<MessageContent[]> {
-  if (!content.some(c => INLINE_ARMS.has(c.type))) return content as MessageContent[];
+  // A ref counts: it is the arm that needs CHECKING rather than rewriting, and one cannot be honoured
+  // without a store any more than a by-value arm can be stored without one.
+  if (!content.some(c => INLINE_ARMS.has(c.type) || c.type === 'file-ref')) return content as MessageContent[];
 
   if (store === undefined) {
     throw mediaRejectedError('no-store',
@@ -139,9 +156,30 @@ export async function ingestMedia(
 
   const out: MessageContent[] = [];
   for (const c of content) {
+    if (c.type === 'file-ref') {
+      // Ownership, not `allowed`: every put below sets `allowed: true`, so the flag the HTTP read route
+      // gates on cannot separate this session's media from another's. `sessionId` + namespace can, and
+      // together they are strictly the stronger check. Reported as unknown rather than forbidden, for
+      // the reason `GET /media/:id` gives: a refusal must not confirm that an id exists.
+      const held = await store.get(c.fileId).catch(() => null);
+      if (held === null || held.sessionId !== sessionId || held.namespace !== MEDIA_NAMESPACE) {
+        throw mediaRejectedError('unknown-ref',
+          `"${c.name}" is not media attached to this session. Attach the file itself, rather than a ` +
+          'reference to one.', c.name);
+      }
+      out.push(c as MessageContent);
+      continue;
+    }
     if (!INLINE_ARMS.has(c.type)) { out.push(c as MessageContent); continue; }
     const arm  = c as Extract<UserContent, { data: string }>;
     const name = describe(arm.name, arm.mimeType);
+
+    // Before the decode, because it needs no bytes and this is the cheapest of the three refusals.
+    if (armFor(arm.mimeType) === null) {
+      throw mediaRejectedError('unsupported-type',
+        `"${name}" is ${arm.mimeType}, which no model endpoint decodes — sending it would fail the ` +
+        'whole conversation, not just this message. Convert it to PNG or JPEG and attach that.', name);
+    }
 
     let bytes: Uint8Array;
     try { bytes = decodeBase64(arm.data); }
@@ -174,9 +212,15 @@ export async function ingestMedia(
 }
 
 /**
- * Turn-side resolution: which messages get their `file-ref`s swapped for inline bytes on the outgoing
- * copy, and what those messages then look like. Returns a message-id → replacement-content map for the
- * runner to splice; a message with nothing resolvable is absent from it.
+ * Turn-side resolution: which `file-ref`s get swapped for inline bytes on the outgoing copy. Returns
+ * message-id → (file-id → the inline arm to stand in for that ref); a message with nothing resolvable
+ * is absent from it, and so is a ref left outside the budget.
+ *
+ * Keyed per REF rather than returning each message's finished content array, because the array is not
+ * final when this runs: a raced `screen` verdict folds durable blocks onto the user message *inside* the
+ * round loop, and a caller splicing a whole array resolved at turn start would drop them from every
+ * later round — persisted and on screen, but never sent. Handing back the substitutions instead leaves
+ * the caller mapping blocks it still owns.
  *
  * Computed ONCE per turn rather than per round: the bytes cannot change mid-turn, and re-deciding each
  * round would let a message drop out of the window between two provider calls — busting the prompt
@@ -187,8 +231,8 @@ export async function resolveSessionMedia(
   store:    MediaStore | undefined,
   budget    = MEDIA_RESIDENCY_BYTES,
   signal?:  AbortSignal,
-): Promise<Map<string, MessageContent[]>> {
-  const resolved = new Map<string, MessageContent[]>();
+): Promise<Map<string, Map<string, MessageContent>>> {
+  const resolved = new Map<string, Map<string, MessageContent>>();
   if (store === undefined) return resolved;
 
   let spent = 0;
@@ -197,23 +241,26 @@ export async function resolveSessionMedia(
     const msg = messages[i]!;
     if (!msg.content.some(c => c.type === 'file-ref')) continue;
 
-    let changed = false;
-    const next: MessageContent[] = [];
+    const byFileId = new Map<string, MessageContent>();
     for (const c of msg.content) {
-      if (c.type !== 'file-ref') { next.push(c); continue; }
-      // Beyond the budget the ref is left exactly as it is — the converters already render it as
-      // `[Attached file: x]`, which is true and the file is still fetchable by name.
+      if (c.type !== 'file-ref') continue;
+      // Left out of the map, the ref stays exactly as it is — the converters already render it as
+      // `[Attached file: x]`, which is true and the file is still fetchable by name. Three ways to
+      // land there: a type no endpoint decodes, a ref the store no longer has, and the budget.
+      const arm = armFor(c.mimeType);
+      if (arm === null) continue;
+      // One resolution per id: the same ref twice in a message must not be paid for twice, and both
+      // blocks render from the one entry.
+      if (byFileId.has(c.fileId)) continue;
       const handle = spent < budget ? await store.get(c.fileId).catch(() => null) : null;
-      if (handle === null || spent + handle.size > budget) { next.push(c); continue; }
+      if (handle === null || spent + handle.size > budget) continue;
       spent += handle.size;
-      const data = encodeBase64(await collect(handle.stream(signal)));
-      const arm  = armFor(c.mimeType);
-      next.push(arm === 'document'
+      const data = encodeBase64(await collectBytes(handle.stream(signal)));
+      byFileId.set(c.fileId, arm === 'document'
         ? { type: 'document', data, mimeType: c.mimeType as MimeType, name: c.name }
         : { type: arm,        data, mimeType: c.mimeType as MimeType });
-      changed = true;
     }
-    if (changed) resolved.set(msg.id, next);
+    if (byFileId.size > 0) resolved.set(msg.id, byFileId);
   }
   return resolved;
 }

@@ -2033,15 +2033,13 @@ function makeBubble(className, text, media) {
   return div;
 }
 
-// One resolved URL per stored file. Memoised because a `blob:` URL costs a full read of the store to
-// mint (see the browser transport) and the same message re-renders on every navigate-back; bounded by
-// the distinct media in a session, which is what the residency budget already bounds on the wire.
-const mediaUrlCache = new Map();
-function resolveMediaUrl(fileId) {
-  let p = mediaUrlCache.get(fileId);
-  if (!p) { p = T.mediaUrl(fileId).catch(() => null); mediaUrlCache.set(fileId, p); }
-  return p;
-}
+// Memoising happens in the TRANSPORT, not here: minting a `blob:` costs a full read of the store, and
+// only the layer that read the bytes knows what keeping one costs or how to revoke it. This used to hold
+// a Map keyed by fileId that nothing ever cleared, so every file a long-lived page had rendered stayed
+// resident — the claim that it was "bounded by the distinct media in a session" was wrong twice over: it
+// was never per-session, and the wire's residency budget bounds one turn's outgoing copy, not a page's
+// lifetime.
+const resolveMediaUrl = (fileId) => T.mediaUrl(fileId).catch(() => null);
 
 // Render the media blocks of a user turn. Two sources, one look: a live submission may still have the
 // bytes in hand, while a reloaded one has only a `file-ref` and must ask the transport where they live —
@@ -2056,13 +2054,23 @@ function makeMediaStrip(items) {
     // store that will not serve the file answers null, and a broken-image glyph says nothing useful
     // about why — fall back to the chip, which at least names what was attached.
     let el, apply;
+    // The in-process transport bounds its blob cache in bytes, so a URL can be revoked while its element
+    // is still on screen. One re-resolve re-mints it; only a second failure is a real one, and then the
+    // chip at least names the file. Without this, eviction would silently downgrade a visible image —
+    // which is what makes a bounded cache safe to have at all.
+    let retried = false;
+    const recover = (retry, giveUp) => {
+      if (retried || !it.fileId) { giveUp(); return; }
+      retried = true;
+      void resolveMediaUrl(it.fileId).then(u => (u ? retry(u) : giveUp()));
+    };
     if (it.mimeType.startsWith('image/')) {
       const img = document.createElement('img');
       img.alt = it.name; img.title = it.name; img.loading = 'lazy';
       el = img;
       apply = (src) => {
         if (!src) { img.replaceWith(makeFileChip(it)); return; }
-        img.onerror = () => img.replaceWith(makeFileChip({ ...it, src }));
+        img.onerror = () => recover(u => { img.src = u; }, () => img.replaceWith(makeFileChip({ ...it, src })));
         img.onclick  = () => window.open(src, '_blank', 'noopener');
         img.src = src;
       };
@@ -2070,7 +2078,11 @@ function makeMediaStrip(items) {
       const audio = document.createElement('audio');
       audio.controls = true; audio.title = it.name;
       el = audio;
-      apply = (src) => { if (!src) audio.replaceWith(makeFileChip(it)); else audio.src = src; };
+      apply = (src) => {
+        if (!src) { audio.replaceWith(makeFileChip(it)); return; }
+        audio.onerror = () => recover(u => { audio.src = u; }, () => audio.replaceWith(makeFileChip(it)));
+        audio.src = src;
+      };
     } else {
       const chip = makeFileChip(it);
       el = chip;
@@ -2832,9 +2844,11 @@ async function connectSessionStream(sid) {
 // better of it. This way the one ingestion path is the same one Telegram uses, where bytes arrive with
 // the message and there is no upload leg to have.
 //
-// Client-side caps mirror the server's so the common mistake is caught before a 20MB round trip; the
-// server still enforces them, since a client's limits are a courtesy, not a control.
-const MAX_ATTACH_BYTES  = 20 * 1024 * 1024;
+// Client-side caps mirror the server's so the common mistake is caught before a pointless round trip;
+// the server still enforces them, since a client's limits are a courtesy, not a control. Keep the
+// per-file number equal to core's MEDIA_RESIDENCY_BYTES: a file bigger than the outgoing-copy window
+// can never be shown to the model, so accepting one here only defers the refusal.
+const MAX_ATTACH_BYTES  = 8 * 1024 * 1024;
 const MAX_SESSION_BYTES = 50 * 1024 * 1024;
 
 /** @type {{ name: string, mimeType: string, data: string, size: number, url: string }[]} */
@@ -2844,11 +2858,15 @@ const attachmentsEl = document.getElementById('attachments');
 const attachBtn     = document.getElementById('attach-btn');
 const attachInput   = document.getElementById('attach-input');
 
-// Which inline arm this becomes on the wire. Mirrors core's mapping; anything not image/* or audio/* is
-// a document, which the converters degrade per provider rather than dropping.
+// Which inline arm this becomes on the wire, or null for a type that must not be sent at all. Mirrors
+// core's `armFor`: anything not image/* or audio/* is a document, which the converters degrade per
+// provider rather than dropping — which is why only image/* is gated. A provider TRIES to decode
+// whatever the image arm carries and 400s on what it cannot, and by then the ref is in history.
+const DECODABLE_IMAGE = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 function attachArm(mimeType) {
-  if (mimeType.startsWith('image/')) return 'image';
-  if (mimeType.startsWith('audio/')) return 'audio';
+  const base = mimeType.split(';')[0].trim().toLowerCase();
+  if (base.startsWith('image/')) return DECODABLE_IMAGE.has(base) ? 'image' : null;
+  if (base.startsWith('audio/')) return 'audio';
   return 'document';
 }
 
@@ -2915,6 +2933,14 @@ async function addAttachments(fileList) {
       showAttachError(`Attaching "${file.name}" would take this message over the ${formatSize(MAX_SESSION_BYTES)} media limit.`);
       continue;
     }
+    // The third mirrored refusal. `accept` on the picker covers the common case (and is what makes iOS
+    // transcode a camera-roll photo to JPEG rather than handing over HEIC), but drag and paste bypass it
+    // entirely — and the round trip this saves is the whole file.
+    const mime = file.type || 'application/octet-stream';
+    if (attachArm(mime) === null) {
+      showAttachError(`"${file.name}" is ${mime}, which no model can read. Convert it to PNG or JPEG first.`);
+      continue;
+    }
     const bytes = new Uint8Array(await file.arrayBuffer());
     const CHUNK = 0x8000;
     let bin = '';
@@ -2923,7 +2949,7 @@ async function addAttachments(fileList) {
       name:     file.name,
       // A file the OS could not type would be posted with an empty mimeType, which no converter can
       // route; call it a generic binary and let the provider degrade it to a text note.
-      mimeType: file.type || 'application/octet-stream',
+      mimeType: mime,
       data:     btoa(bin),
       size:     file.size,
       url:      URL.createObjectURL(file),

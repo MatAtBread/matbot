@@ -1,5 +1,5 @@
 import type { Tool, ToolExecutor, ToolContext, ToolContract, ToolResultOf, MatbotPluginSpec, MatbotMachine, MimeType } from '@matatbread/matbot-plugin-api';
-import { PLUGIN_API_VERSION, tryCurrentPrincipal, ItemChangeKind } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, tryCurrentPrincipal, ItemChangeKind, collectBytes, decodeBase64, encodeBase64 } from '@matatbread/matbot-plugin-api';
 
 // Set in setup(); announces this tool's own writes and deletes. A file store's `watch` may also see a
 // write (the filesystem one does) — a duplicate notification is harmless, since a consumer re-queries
@@ -37,18 +37,28 @@ const SHOW_MAX_BYTES = 8 * 1024 * 1024;
 /**
  * Which inline arm a stored file goes to the model as, or null if it must not go at all.
  *
- * SVG is the one exclusion inside `image/*`, and it is not an oversight: it is XML, no vision endpoint
- * decodes it, and `read` already hands over its source — which is the more useful answer anyway. Text
- * is refused for the same reason, pointing at `read`. Everything else unknown is refused rather than
- * guessed into a `document` arm, because a format the endpoint cannot parse is a 400 mid-turn.
+ * Two refusals only, and neither is about capability: SVG is XML and `text/*` is prose or markup, and
+ * for both `read` hands over the source, which is the more useful answer. Everything else — including a
+ * type `MIME_MAP` never learned — is routed on the assumption that the endpoint takes it, and left to
+ * the endpoint to reject.
+ *
+ * That way round because we hold no per-model mime capability table, so refusing here is guessing on the
+ * model's behalf, and the guess was wrong in the obvious case: `MIME_MAP` had no audio extension at all,
+ * so every workspace `.mp3` typed as `application/octet-stream`, `show` refused it, and the tool that
+ * advertises audio sent the model to `read` — which hands back base64 it cannot hear. Being wrong the
+ * other way is cheap: tool media is wire-only and dies with the turn.
+ *
+ * Contrast core's `armFor`, which MUST refuse an undecodable `image/*`. Not an inconsistency — a
+ * different blast radius. There the refusal protects a PERSISTED `file-ref`, which resolves into every
+ * subsequent outgoing copy and so fails every later turn too; here the worst case is one turn.
  */
 function showArm(mimeType: string): 'image' | 'audio' | 'document' | null {
   const base = mimeType.split(';')[0]!.trim().toLowerCase();
   if (base === 'image/svg+xml')     return null;
+  if (base.startsWith('text/'))     return null;
   if (base.startsWith('image/'))    return 'image';
   if (base.startsWith('audio/'))    return 'audio';
-  if (base === 'application/pdf')   return 'document';
-  return null;
+  return 'document';
 }
 
 const MIME_MAP: Record<string, string> = {
@@ -62,6 +72,14 @@ const MIME_MAP: Record<string, string> = {
   '.xml':  'application/xml; charset=utf-8',
   '.svg':  'image/svg+xml',
   '.png':  'image/png',
+  '.mp3':  'audio/mpeg',
+  '.wav':  'audio/wav',
+  '.m4a':  'audio/mp4',
+  '.aac':  'audio/aac',
+  '.ogg':  'audio/ogg',
+  '.opus': 'audio/opus',
+  '.flac': 'audio/flac',
+  '.weba': 'audio/webm',
   '.jpg':  'image/jpeg',
   '.jpeg': 'image/jpeg',
   '.gif':  'image/gif',
@@ -89,29 +107,6 @@ function mimeFromName(name: string): string {
   const dot = name.lastIndexOf('.');
   const ext = dot !== -1 ? name.slice(dot).toLowerCase() : '';
   return MIME_MAP[ext] ?? 'application/octet-stream';
-}
-
-function base64ToUint8(b64: string): Uint8Array {
-  const binary = atob(b64);
-  const bytes  = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes;
-}
-
-function uint8ToBase64(bytes: Uint8Array): string {
-  let binary = '';
-  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]!);
-  return btoa(binary);
-}
-
-async function collectStream(stream: AsyncIterable<Uint8Array>): Promise<Uint8Array> {
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  for await (const chunk of stream) { chunks.push(chunk); total += chunk.byteLength; }
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) { out.set(chunk, offset); offset += chunk.byteLength; }
-  return out;
 }
 
 // The precise per-action contract. JSON Schema can't express "content is required only for write"
@@ -142,7 +137,7 @@ const workspaceExecutor: ToolExecutor<ToolResultOf<'workspace_action'>> = {
 
         let bytes: Uint8Array;
         try {
-          bytes = await collectStream(handle.stream(ctx.signal));
+          bytes = await collectBytes(handle.stream(ctx.signal));
         } catch (e) {
           yield { type: 'error', message: String(e) };
           return;
@@ -150,7 +145,7 @@ const workspaceExecutor: ToolExecutor<ToolResultOf<'workspace_action'>> = {
 
         yield {
           type:  'result',
-          value: encoding === 'base64' ? uint8ToBase64(bytes) : new TextDecoder().decode(bytes),
+          value: encoding === 'base64' ? encodeBase64(bytes) : new TextDecoder().decode(bytes),
         };
         return;
       }
@@ -171,9 +166,8 @@ const workspaceExecutor: ToolExecutor<ToolResultOf<'workspace_action'>> = {
         const arm = showArm(handle.mimeType);
         if (arm === null) {
           yield { type: 'error', message:
-            `"${safe}" is ${handle.mimeType}, which cannot be shown as an image, document or audio. ` +
-            `Use action "read" instead — for text, markup and SVG that is the better answer anyway, ` +
-            `since it gives you the source.` };
+            `"${safe}" is ${handle.mimeType}, which is better read than shown. Use action "read" ` +
+            `instead — for text, markup and SVG it gives you the source, which is what you want.` };
           return;
         }
         // Refused BEFORE the read: the size is on the handle, so there is no reason to pull 40MB into
@@ -189,7 +183,7 @@ const workspaceExecutor: ToolExecutor<ToolResultOf<'workspace_action'>> = {
 
         let bytes: Uint8Array;
         try {
-          bytes = await collectStream(handle.stream(ctx.signal));
+          bytes = await collectBytes(handle.stream(ctx.signal));
         } catch (e) {
           yield { type: 'error', message: String(e) };
           return;
@@ -198,7 +192,7 @@ const workspaceExecutor: ToolExecutor<ToolResultOf<'workspace_action'>> = {
         // No magic-byte check here, unlike the submission boundary. There, a bad file persists as a
         // `file-ref` and fails EVERY later turn; here the media is wire-only and turn-scoped, so a
         // provider that rejects it costs this turn and nothing after it.
-        const data = uint8ToBase64(bytes);
+        const data = encodeBase64(bytes);
         yield { type: 'model-content', content: [arm === 'document'
           ? { type: 'document', data, mimeType: handle.mimeType as MimeType, name: safe }
           : { type: arm,        data, mimeType: handle.mimeType as MimeType }] };
@@ -217,7 +211,7 @@ const workspaceExecutor: ToolExecutor<ToolResultOf<'workspace_action'>> = {
         if (!safe) { yield { type: 'error', message: `Invalid name "${inputName}": it must name a file inside the workspace.` }; return; }
 
         const bytes = encoding === 'base64'
-          ? base64ToUint8(content)
+          ? decodeBase64(content)
           : new TextEncoder().encode(content);
 
         async function* makeStream(): AsyncIterable<Uint8Array> { yield bytes; }
@@ -303,14 +297,16 @@ const workspaceTool: Tool<ToolResultOf<'workspace_action'>> = {
     'you can see a photo, a screenshot, a chart or a scanned page and answer questions about what is in ' +
     'it. That is the ONLY way to see one: `read` returns text, so reading an image gives you base64 you ' +
     'cannot look at, and there is no need to fetch, convert or copy the file anywhere first. `show` takes ' +
-    'images, PDFs and audio; for text, markup and SVG use `read`, which gives you the source.\n' +
+    'images, PDFs, audio and any other binary format — whether a given model can decode one is its own ' +
+    'business, and one it cannot take degrades to a note saying the file was there. For text, markup and ' +
+    'SVG use `read`, which gives you the source.\n' +
     "Use encoding 'base64' with read/write to MOVE binary bytes (copying a file, storing something you " +
     "generated) — it is not a way to see a picture; 'utf8' (the default) is for text.",
   inputSchema: {
     type:       'object',
     required:   ['action'],
     properties: {
-      action:    { type: 'string', enum: ['read', 'show', 'write', 'list', 'delete'], description: 'The operation to perform. "show" displays a stored image, PDF or audio file to you so you can see/hear it; "read" returns file contents as text.' },
+      action:    { type: 'string', enum: ['read', 'show', 'write', 'list', 'delete'], description: 'The operation to perform. "show" displays a stored image, PDF, audio or other binary file to you so you can see/hear it; "read" returns file contents as text.' },
       name:      { type: 'string', description: 'read/show/write/delete only: the whole name of one file (e.g. "report.md", "charts/data.csv").' },
       prefix:    { type: 'string', description: 'list only: restrict the listing to names beginning with these segments (e.g. "charts"). Omit it to list the whole workspace.' },
       content:   { type: 'string', description: 'File contents — required for action "write".' },

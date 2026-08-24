@@ -141,8 +141,12 @@ export interface MediaRejectedError extends Error {
   /** `no-store` — nothing is registered under `MediaStore`, so there is nowhere to put the bytes.
    *  `too-large` — one file exceeds the per-file cap. `session-quota` — this session's stored media
    *  would exceed its total. `unreadable` — the bytes were malformed: not valid base64, or not the file
-   *  type they claim (a renamed, truncated or placeholder file, caught by a magic-byte check). */
-  readonly reason: 'no-store' | 'too-large' | 'session-quota' | 'unreadable';
+   *  type they claim (a renamed, truncated or placeholder file, caught by a magic-byte check).
+   *  `unsupported-type` — a type no provider decodes (an iPhone HEIC, an SVG), which would 400 the
+   *  request rather than degrade. `unknown-ref` — a submitted `file-ref` does not name media attached
+   *  to this session; phrased as unknown rather than forbidden, exactly as `GET /media/:id` reports a
+   *  file it will not serve, so a refusal never confirms that an id exists. */
+  readonly reason: 'no-store' | 'too-large' | 'session-quota' | 'unreadable' | 'unsupported-type' | 'unknown-ref';
   /** The attachment's display name, when one file is to blame. */
   readonly file?:  string;
 }

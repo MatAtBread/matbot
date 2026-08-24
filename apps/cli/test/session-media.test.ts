@@ -1,12 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  createSessionRunner, createSession, installPrincipalCarrier, installUsageCarrier,
-  isMediaRejectedError, MEDIA_NAMESPACE, MAX_MEDIA_BYTES_PER_FILE,
+  createSessionRunner, createSession, installPrincipalCarrier, installUsageCarrier, HookRegistry,
+  isMediaRejectedError, MEDIA_NAMESPACE, MAX_MEDIA_BYTES_PER_FILE, MEDIA_RESIDENCY_BYTES,
 } from '@matatbread/matbot-core';
 import type {
   Session, Store, MediaStore, FileHandle, FileFilter, ProviderAdapter, ProviderConfig,
-  CompletionEvent, PipelineEvent, Principal, Message, MimeType, UserContent,
+  CompletionEvent, PipelineEvent, Principal, Message, MessageContent, MimeType, UserContent,
 } from '@matatbread/matbot-core';
 import { createAlsPrincipalCarrier } from '../src/principal-als.js';
 import { createAlsUsageCarrier } from '../src/usage-als.js';
@@ -159,8 +159,11 @@ test('an already-uploaded file-ref is passed through untouched', { timeout: 1500
   const session = createSession();
   const store   = memStore(session);
   const media   = memMediaStore();
+  // As an upload-in-advance leg would write it: the same `sessionId` + namespace `ingestMedia` sets on
+  // every put of its own. Those two fields are what the boundary checks a caller-supplied ref against.
   const handle  = await media.put(undefined, 'image/png' as MimeType,
-    (async function *() { yield new Uint8Array([1, 2, 3]); })(), { sessionId: session.id });
+    (async function *() { yield new Uint8Array([1, 2, 3]); })(),
+    { sessionId: session.id, namespace: MEDIA_NAMESPACE });
   const seen: Message[][] = [];
 
   await submit(store, capturingProvider(seen), media, session.id, [
@@ -281,4 +284,144 @@ test('an image-only first turn still gets a title', { timeout: 15000 }, async ()
 
   assert.equal((await store.get(session.id))!.title, 'holiday.png',
     'a submission with no words of its own is still a submission');
+});
+
+test('a file-ref the session does not own is refused, and never confirms the id exists', { timeout: 20000 }, async () => {
+  const session = createSession();
+  const store   = memStore(session);
+  const media   = memMediaStore();
+
+  // `UserContent` admits `file-ref` so an upload-in-advance leg can skip the rewrite — which makes the
+  // `fileId` the CLIENT's word about which bytes to send, and the resolver inlines what it is handed.
+  // Three ways it can be someone else's: another session's media, a file in this session with no
+  // session at all, and one under a different namespace (a workspace file sharing the store).
+  const elsewhere = await media.put(undefined, 'image/png' as MimeType,
+    (async function *() { yield new Uint8Array([1, 2, 3]); })(),
+    { sessionId: 'someone-elses-session', namespace: MEDIA_NAMESPACE });
+  const unowned = await media.put(undefined, 'image/png' as MimeType,
+    (async function *() { yield new Uint8Array([1, 2, 3]); })(), { namespace: MEDIA_NAMESPACE });
+  const workspaceFile = await media.put(undefined, 'image/png' as MimeType,
+    (async function *() { yield new Uint8Array([1, 2, 3]); })(),
+    { sessionId: session.id, namespace: 'workspace', allowed: true });
+
+  for (const [id, what] of [[elsewhere.id, 'another session'], [unowned.id, 'no session'],
+                            [workspaceFile.id, 'another namespace']] as const) {
+    await assert.rejects(
+      () => submit(store, capturingProvider([]), media, session.id, [
+        { type: 'text', text: 'describe this' },
+        { type: 'file-ref', fileId: id, name: 'dog.png', mimeType: 'image/png' as MimeType },
+      ]),
+      (e: unknown) => {
+        assert.ok(isMediaRejectedError(e), `a ref from ${what} is refused`);
+        assert.equal(e.reason, 'unknown-ref');
+        assert.equal(e.file, 'dog.png');
+        // Unknown, never forbidden: the same rule GET /media/:id follows. A refusal that said
+        // "not yours" would confirm the id exists, which is the half an attacker does not have.
+        assert.doesNotMatch(e.message, /forbid|denied|not yours|permission/i);
+        return true;
+      },
+    );
+  }
+
+  // `allowed` cannot stand in for this check: every media put sets it true, so it does not separate
+  // one session's media from another's.
+  assert.equal(media.held.get(elsewhere.id)!.meta.sessionId, 'someone-elses-session');
+  assert.equal((await store.get(session.id))!.messages.length, 0, 'and nothing was enqueued to unwind');
+});
+
+test('an image type no endpoint decodes is refused rather than routed to an arm that 400s', { timeout: 20000 }, async () => {
+  const session = createSession();
+  const store   = memStore(session);
+  const media   = memMediaStore();
+
+  // The iPhone case: a `<input type="file">` given `image/*` hands back HEIC from the camera roll. It
+  // would be stored, become a persisted `file-ref`, and then 400 the request on THIS turn and every
+  // later one — `image/*` is the one arm a provider tries to decode, where an unknown document or
+  // audio type degrades to a text note instead.
+  for (const mimeType of ['image/heic', 'image/svg+xml', 'image/bmp', 'image/tiff'] as const) {
+    await assert.rejects(
+      () => submit(store, capturingProvider([]), media, session.id,
+        [{ type: 'image', data: PNG, mimeType: mimeType as MimeType, name: `photo.${mimeType.split('/')[1]}` }]),
+      (e: unknown) => {
+        assert.ok(isMediaRejectedError(e), `${mimeType} is refused`);
+        assert.equal(e.reason, 'unsupported-type');
+        assert.match(e.message, new RegExp(mimeType.replace('+', '\\+')), 'the message names the type');
+        return true;
+      },
+    );
+  }
+
+  assert.equal(media.held.size, 0, 'nothing was written for any of them');
+
+  // A document or audio type nobody recognises is NOT refused: the adapters degrade it to a note.
+  const seen: Message[][] = [];
+  await submit(store, capturingProvider(seen), media, session.id,
+    [{ type: 'document', data: btoa('hello'), mimeType: 'application/x-fnarr' as MimeType, name: 'thing.fnarr' }]);
+  assert.equal(media.held.size, 1, 'an unrecognised document is stored, not refused');
+});
+
+test('the per-file cap is the residency window, so nothing is accepted that could never be shown', { timeout: 20000 }, async () => {
+  // The relationship, not the number: a file over the outgoing-copy budget can never be resident
+  // (`spent + size > budget` is true on the first item, with `spent === 0`), so accepting one would
+  // store it, charge it to the session total, and leave it permanently invisible with nothing said.
+  assert.equal(MAX_MEDIA_BYTES_PER_FILE, MEDIA_RESIDENCY_BYTES,
+    'the per-file cap derives from the residency budget rather than being a second, larger number');
+
+  const session = createSession();
+  const store   = memStore(session);
+  const media   = memMediaStore();
+  const seen: Message[][] = [];
+
+  // Just inside it: accepted AND resolved onto the wire, which is the property the equality buys.
+  await submit(store, capturingProvider(seen), media, session.id,
+    [image(b64png(MEDIA_RESIDENCY_BYTES - 4096), 'big.png')]);
+  const user = seen[0]!.find(m => m.role === 'user')!;
+  assert.equal(user.content.filter(c => c.type === 'image').length, 1,
+    'the largest file the boundary accepts is one the resolver can still show');
+});
+
+test('a durable fold onto a message carrying media survives onto the wire', { timeout: 20000 }, async () => {
+  const session = createSession();
+  const store   = memStore(session);
+  const media   = memMediaStore();
+  const seen: Message[][] = [];
+
+  // Session media is resolved ONCE, before the round loop. A raced screen verdict folds durable
+  // robo-user blocks onto that same user message afterwards, so a splice that substituted the whole
+  // content array would put back the pre-fold copy — persisted and on screen, but never sent.
+  const durable: MessageContent[] = [{ type: 'text', text: 'RACED: the user means the cat', origin: 'robo' }];
+  // One-shot, as the name says: a `claim()` that kept answering would have the runner fold and re-run
+  // the round forever, since a fired verdict is what tells it to restart.
+  let claimed = false;
+  const hooks = new HookRegistry();
+  hooks.register({
+    on: 'screen',
+    handler: () => ({ deferred: { claim: () => (claimed ? undefined : (claimed = true, { durable })) } }),
+  }, 'racer');
+
+  const config: ProviderConfig = { name: 'fake', module: 'fake', model: 'fake' };
+  const view = await createSessionRunner({
+    store,
+    resolveProvider: async () => ({ adapter: capturingProvider(seen), config }),
+    mediaStore:      () => media,
+    hooks,
+    loadPlugin:      async () => { throw new Error('loadPlugin unused'); },
+    unloadPlugin:    async () => false,
+  }).open({
+    sessionId: session.id, signal: new AbortController().signal, provider: 'fake', principal,
+    content: [{ type: 'text', text: 'what is this?' }, image(PNG, 'cat.png')],
+  });
+  for await (const ev of view.events) if (ev.type === 'idle') break;
+
+  const user = seen[0]!.find(m => m.role === 'user')!;
+  assert.equal(user.content.filter(c => c.type === 'image').length, 1, 'the image reached the model');
+  assert.ok(user.content.some(c => c.type === 'text' && c.text.startsWith('RACED:')),
+    'and so did the durable block folded on after media was resolved');
+
+  const saved = (await store.get(session.id))!;
+  const savedUser = saved.messages.find(m => m.role === 'user')!;
+  assert.ok(savedUser.content.some(c => c.type === 'text' && c.text.startsWith('RACED:')),
+    'the fold is persisted, which is why dropping it from the wire only shows up as a bad answer');
+  assert.equal(saved.messages.flatMap(m => m.content).filter(c => c.type === 'image').length, 0,
+    'and the bytes still never reached the document');
 });
