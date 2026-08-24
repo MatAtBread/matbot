@@ -9,7 +9,7 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
-## Unreleased
+## 0.4.9
 
 ### Bug fixes
 
@@ -42,6 +42,14 @@ churn and less likely to affect a consumer who doesn't use them.
 - **Two bounds for an unattended host:** `timeout` now defaults to ten minutes (pass a bigger number for
   work that genuinely takes longer), and output is capped at 100000 bytes, matching `docker-bash` — the
   two same-named tools should not behave differently. Both are stated in the tool description.
+
+#### docker-bash
+
+- **A kill is reported as a kill here too.** The container variant carried the same `code === null` →
+  exit code 0 misreport in its own `close` handler. Only the *local* `docker exec` client being signalled
+  reaches it: an in-container process killed by a signal is propagated by `docker exec` as its own numeric
+  exit code (verified — an in-container `kill -9` surfaces as 137), so that case was already reported
+  correctly.
 
 ## 0.4.8
 

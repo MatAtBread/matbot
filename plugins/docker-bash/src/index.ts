@@ -369,7 +369,7 @@ function spawnAndStream(
     push({ type: 'error', message: e.message });
     push(null);
   });
-  child.on('close', (code: number | null) => {
+  child.on('close', (code: number | null, sig: NodeJS.Signals | null) => {
     if (finalized) return;
     finalized = true;
     if (stopReason === 'timeout' || stopReason === 'aborted') {
@@ -378,13 +378,22 @@ function spawnAndStream(
         ...(stdoutAcc ? { stdout: stdoutAcc } : {}),
         ...(stderrAcc ? { stderr: stderrAcc } : {}),
       });
-    } else if (code !== null && code !== 0) {
+    } else if (code === null) {
+      // The docker client was killed by a signal nothing here sent (an operator, the OOM killer). `code`
+      // is null for that, which the success arm below used to read as exit code 0 — reporting a kill as a
+      // clean run. An in-container process that dies of a signal is a different case and still lands in
+      // the arm above it: `docker exec` propagates that as its own numeric exit code (137, …).
+      push({ type: 'error', message: `Process was killed by ${sig ?? 'a signal'}.`,
+        ...(stdoutAcc ? { stdout: stdoutAcc } : {}),
+        ...(stderrAcc ? { stderr: stderrAcc } : {}),
+      });
+    } else if (code !== 0) {
       push({ type: 'error', message: `Process exited with code ${code}`, code,
         ...(stdoutAcc ? { stdout: stdoutAcc } : {}),
         ...(stderrAcc ? { stderr: stderrAcc } : {}),
       });
     } else {
-      push({ type: 'result', value: { exitCode: code ?? 0, stdout: stdoutAcc, stderr: stderrAcc } });
+      push({ type: 'result', value: { exitCode: code, stdout: stdoutAcc, stderr: stderrAcc } });
     }
     push(null);
   });

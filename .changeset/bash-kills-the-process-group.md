@@ -1,5 +1,6 @@
 ---
 '@matatbread/matbot-tool-bash': patch
+'@matatbread/matbot-tool-docker-bash': patch
 '@matatbread/matbot-core': patch
 ---
 
@@ -28,7 +29,9 @@ stopped accumulating would still spin to the timeout.
 
 A third bug fell out of the same code: a signal-killed script gives `code === null`, which the success arm
 read as **exit code 0** — so a timeout kill and an abort both reported a clean run. A kill is now reported
-as a kill, naming the reason.
+as a kill, naming the reason. `docker-bash` carried the same misreport in its own `close` handler and gets
+the same arm; there it can only be reached by the *local* `docker exec` client being signalled, since an
+in-container signal death is propagated by `docker exec` as its own numeric exit code (137, …).
 
 In `core`, an aborted turn no longer depends on the tool's cooperation. The runner iterated executors with
 a bare `for await`, so any tool that never returns held the turn open for ever — `bash` got there through
