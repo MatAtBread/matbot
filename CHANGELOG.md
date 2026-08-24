@@ -9,6 +9,40 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## Unreleased
+
+### Bug fixes
+
+- **An aborted turn no longer depends on the tool's cooperation.** The runner iterated a tool executor with
+  a bare `for await`, so an executor that never returns held the turn open for ever — the session sat at
+  "working" and every further abort reported success, because the abort itself worked and the tool call was
+  simply unreachable. Once the turn is aborted the read is now bounded (`ABANDONED_TOOL_GRACE_MS`, 30s):
+  the runner stops reading, warns naming the tool, and records the call as interrupted — so every
+  `tool_use` still has its `tool_result` and the next request is not rejected for a dangling call. Armed
+  only on abort, so a legitimately long tool on a healthy turn is never cut short, and a tool cleaning up
+  after a cut-off is still waited for. `bash` reached that state through inherited file descriptors
+  (below), but any executor can.
+
+### Optional
+
+#### bash
+
+- **A `bash` call ends when the process it waited for ends, and takes every process it spawned with it**
+  ([#47](https://github.com/MatAtBread/matbot/issues/47), [#48](https://github.com/MatAtBread/matbot/issues/48)).
+  `bash -c` forks each pipeline stage as its own process; abort and `timeout` signalled the direct child
+  only, with no process group to signal, and completion hung off `'close'` — process exited *and* every
+  stdio stream at EOF. So `find / … | head -5` lost its shell to the SIGTERM, left `find` traversing the
+  filesystem reparented to init, and the orphan holding stdout meant the event stream never terminated:
+  an unrecoverable turn, fixable only by killing the orphan from outside the app. The script now gets its
+  own process group (POSIX; Windows keeps the direct-child kill), every stop signals the negative pid and
+  escalates SIGTERM → SIGKILL after a grace, and `'exit'` is authoritative for completion — `'close'`
+  still wins when it arrives, otherwise an idle drain window ends the call and says so in `stderr`.
+- **A kill is reported as a kill.** A signal-killed script gives `code === null`, which the success arm
+  read as exit code 0 — so a timeout and an abort both reported a clean run to the model.
+- **Two bounds for an unattended host:** `timeout` now defaults to ten minutes (pass a bigger number for
+  work that genuinely takes longer), and output is capped at 100000 bytes, matching `docker-bash` — the
+  two same-named tools should not behave differently. Both are stated in the tool description.
+
 ## 0.4.8
 
 ### Breaking changes
