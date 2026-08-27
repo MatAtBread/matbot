@@ -17,6 +17,7 @@ import { appendMessage, createMessage,
          unloadPlugin as unloadPluginFn,
          getPluginNameForSpecifier, getRegisteredPlugins, recordServiceKey,
          installPrincipalCarrier, installUsageCarrier, recordUsage, usageByProvider, addUsage, enterPrincipal, currentPrincipal,
+         installSettingsDefaults, settingsDefaultNamespaces,
          unifyServices, forwardingProxy, makeSwappable, singleTurnRequest,
          createMountTable, scheduleAtEdge,
          createSingleTurnTool, createAboutMatbotTool,
@@ -828,6 +829,12 @@ async function main(): Promise<void> {
   installUsageCarrier(createAlsUsageCarrier());
   enterPrincipal(resolveBootPrincipal(opts, matbotConfig));
 
+  // The install's read-only floor for plugin settings, before anything can build a settings facade.
+  // Read-through, never seeded: a stored value wins, `delete` reverts to the default, and nothing
+  // writes back — so a plugin or provider update cannot destroy it, and it applies to every principal
+  // (a seeded document could only ever have landed under the one that booted).
+  installSettingsDefaults(matbotConfig.defaultSettings);
+
   process.stderr.write(`[${new Date().toISOString()} ${_pid}] [matbot] ${versionBanner()}\n`);
 
   // The vault is a capture-safe forwarding proxy over a swappable backend (mirrors StorageBackend):
@@ -1249,6 +1256,21 @@ async function main(): Promise<void> {
   recordOrigPaths(providerModules);
 
   await loadPluginsWithDescriptions(resolvedPluginMods, services, path.dirname(configPath));
+
+  // A `default_settings:` key is a plugin NAME — loader-derived, and not necessarily the specifier
+  // written in `plugins:`. A key matching nothing loaded is the one silent failure the feature has:
+  // the yaml looks right and no default ever applies. Reserved dunder namespaces (the core's own) are
+  // not plugins and are exempt.
+  {
+    const loaded = new Set(getRegisteredPlugins().map(p => p.name));
+    for (const ns of settingsDefaultNamespaces()) {
+      if (loaded.has(ns) || (ns.startsWith('__') && ns.endsWith('__'))) continue;
+      console.warn(
+        `[matbot] default_settings names "${ns}", which is not a loaded plugin — its defaults will ` +
+        `never apply. Key it by the plugin's package name (\`plugin list\` reports them).`,
+      );
+    }
+  }
 
   // Said once, now that the installed set is known and before anything uses it. A second copy of a host
   // singleton is survivable by design — which is precisely why nothing else would ever mention it — and

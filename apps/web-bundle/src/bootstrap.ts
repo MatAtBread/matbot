@@ -1,12 +1,13 @@
 import {
   createSessionRunner, HookRegistry, SystemContextRegistryImpl, ToolRegistryImpl, ProviderRegistryImpl,
-  instantiateProvider, getPluginNameForSpecifier, recordServiceKey,
+  instantiateProvider, getPluginNameForSpecifier, getRegisteredPlugins, recordServiceKey,
   installPrincipalCarrier, createConstantPrincipalCarrier,
   installUsageCarrier, createSerialUsageCarrier, recordUsage, addUsage,
   createMessage, isMissingSecretError, loadPlugins,
   unloadPlugin as unloadPluginFn, unifyServices,
   forwardingProxy, makeSwappable, singleTurnRequest, createSingleTurnTool, createAboutMatbotTool, createNotifier, notifyingStore,
   createMountTable, scheduleAtEdge,
+  installSettingsDefaults, settingsDefaultNamespaces,
 } from '@matatbread/matbot-core';
 import type {
   MatbotMachine, MatbotServices, Store, Session, ProviderConfig, ProviderAdapter,
@@ -54,6 +55,10 @@ export interface BrowserConfig {
   /** Boot identity for this single-principal realm. Absent ⇒ the anonymous web user.
    *  A user-associated bundle (served per-tenant) bakes the tenant's identity here. */
   principal?: Principal;
+  /** Read-only floor for plugin settings, keyed by plugin NAME (the settings namespace) — the browser
+   *  analogue of `default_settings:` in matbot.yaml, baked into the bundle. A stored value always wins
+   *  and nothing writes back here, so a bundle rebuild is the only thing that changes a default. */
+  defaultSettings?: Record<string, Record<string, unknown>>;
 }
 
 const PROVIDERS_KEY = 'matbot.providers';
@@ -142,6 +147,10 @@ export async function boot(env: BootEnv): Promise<void> {
   // Token accounting needs a per-turn sink even though identity is constant; the serial carrier is
   // correct here because the browser runs one turn at a time (no async-context isolation to do).
   installUsageCarrier(createSerialUsageCarrier());
+
+  // The install's read-only floor for plugin settings, before anything can build a settings facade.
+  // Read-through, never seeded — see the CLI host and CLAUDE.md "Default plugin settings".
+  installSettingsDefaults(config.defaultSettings !== undefined ? new Map(Object.entries(config.defaultSettings)) : undefined);
 
   // Vault behind a capture-safe proxy (like StorageBackend/KnowledgeIndex): a plugin may
   // `register('Vault', impl)` to swap in a different secret store (e.g. a Drive-backed one), and
@@ -568,6 +577,17 @@ export async function boot(env: BootEnv): Promise<void> {
 
   // Then the rest — frontends, tools, storage, knowledge, hooks. The frontend plugin mounts the UI.
   await loadPlugins(config.plugins, services);
+
+  // A defaults key names a plugin, and the browser's baked-but-idle plugins load on demand — so an
+  // unmatched key here can be legitimate (the plugin is available, just not loaded yet) and this warns
+  // rather than treating it as a mistake.
+  {
+    const loaded = new Set(getRegisteredPlugins().map(p => p.name));
+    for (const ns of settingsDefaultNamespaces()) {
+      if (loaded.has(ns) || (ns.startsWith('__') && ns.endsWith('__'))) continue;
+      console.warn(`[matbot] defaultSettings names "${ns}", which is not a loaded plugin — its defaults do not apply.`);
+    }
+  }
 
   // The pre-scan opened a manifest storageBackend before the loader knew the plugin's name, bypassing
   // the scoped register() that records a service key. Attribute it now, so unloading that plugin reverts

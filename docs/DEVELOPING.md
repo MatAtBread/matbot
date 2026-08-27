@@ -480,6 +480,22 @@ interface PluginSettings {
 
 Keys are scoped per plugin — two plugins can use the same key without collision.
 
+The install can supply a **default** for any key, via `default_settings:` in `matbot.yaml`
+(`BrowserConfig.defaultSettings` in the browser), keyed by your package name. It is read-through, so
+you write nothing to support it:
+
+- `get` returns the stored value if there is one, else the install's default, else `undefined` — so
+  the familiar `(await settings.get(k)) ?? MY_DEFAULT` already prefers the install's value over your
+  code's, which is the intended precedence;
+- `set` persists only the key you set, and never materialises a default;
+- `delete` means "revert to the default", which is what a `clear`/`reset` action should say it does. A
+  caller wanting to override a configured default rather than revert to it stores a value (`null` is a
+  value, and reads back as `null`);
+- a default is not partitioned per principal — it is config, not data.
+
+Nothing distinguishes a defaulted read from a stored one at this interface. If a `get`/`status` action
+of yours reports settings back to the model, say "in effect" rather than "pinned".
+
 ### Calling LLMs directly
 
 `services.complete()` lets plugins call LLMs for classification, summarisation, or

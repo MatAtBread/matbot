@@ -328,6 +328,9 @@ async function main() {
       availableProviders,
       availablePlugins,
       ...(config.defaultProvider ? { defaultProvider: config.defaultProvider } : {}),
+      // Install defaults for plugins' own settings, keyed by plugin package name — `default_settings:`
+      // in matbot.yaml, baked. Passed through verbatim: matbot does not interpret a setting's value.
+      ...(config.defaultSettings ? { defaultSettings: config.defaultSettings } : {}),
     },
   };
 

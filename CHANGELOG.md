@@ -9,6 +9,44 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## 0.4.10
+
+### API gaps filled
+
+- **An install can supply defaults for a plugin's settings, from the config**
+  ([#51](https://github.com/MatAtBread/matbot/issues/51)). `default_settings:` in `matbot.yaml`
+  (`BrowserConfig.defaultSettings` in the browser) is keyed by plugin package name — the settings
+  namespace — and supplies the install's value for any key a plugin keeps in the settings store. The
+  point is to be able to ship an opinionated install without a wrapper package per plugin: plugin
+  identity is loader-derived from the package name, so wrapping a plugin purely to initialise it moves
+  its settings namespace to the wrapper, orphaning whatever the install already stored and colliding on
+  every tool name if both load.
+
+  It is a **read-only floor**, and the design is one rule: reads are layered, writes are not.
+  `settings.get` returns the stored key if present, else the install default, else `undefined` — which
+  lands above a plugin's own `?? codeDefault`, so config beats code and no plugin needed changing. The
+  CAS write path reads the stored document only, so `set` persists exactly the key it was given, and
+  `delete` means "revert to the configured default", which is what every existing `clear` action
+  already meant. Nothing is seeded and nothing is written back, so editing the yaml still takes effect
+  for every key nobody overrode, a plugin or provider update cannot destroy a default, and a default
+  applies to every principal rather than only the one that booted. Merging is per key (a value is
+  opaque), `${NAME}` is not resolved in these values (secrets stay the vault's), and a key naming no
+  loaded plugin is warned about at boot, since it would otherwise look like it had worked.
+
+### Bug fixes
+
+- **The config parser no longer returns half a file.** An unparseable construct made it `break` its
+  enclosing loop, which returned what had been read so far and left the rest of the document silently
+  discarded: a stray `-` in `plugins:` dropped every plugin after it and every top-level section below
+  it, `providers:` included, with no error — an install that boots and behaves as though half its
+  configuration had never been written. It now throws, naming the line. Two constructs it could not
+  read are now read: a bare `-` takes the block indented beneath it as its item value (the branch for
+  that existed but was unreachable, the dash test having required a trailing space), and a quoted
+  mapping key is unquoted like any other scalar — `'@scope/pkg':` previously addressed a key literally
+  spelled with its quotes. YAML's compact mapping in a sequence entry (`- key: value`) stays
+  unsupported and is now rejected rather than mis-read: telling it from a plugin specifier needs the
+  spec's colon-space rule, without which `- https://host/p.ts` parses as a mapping keyed `https`.
+
 ## 0.4.9
 
 ### Bug fixes

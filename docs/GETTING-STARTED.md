@@ -132,6 +132,10 @@ plugins:
   - @matatbread/matbot-tool-http
   - @matatbread/matbot-tool-workspace
   - @matatbread/matbot-frontend-web
+
+default_settings:                  # install defaults for plugins' own settings (read-only)
+  @matatbread/matbot-triggers:
+    classifierProvider: deepseek
 ```
 
 When working in the monorepo, reference packages by relative path (no install step needed):
@@ -220,6 +224,47 @@ plugins:
 Provider adapter plugins (`@matatbread/matbot-provider-*`) are loaded automatically
 when their `module` is referenced in a provider config entry — they don't need an
 explicit `plugins:` entry.
+
+---
+
+## Default plugin settings reference
+
+Plugins keep their own runtime settings in matbot's store (a classifier provider to use, a
+list of tools to ignore, a tuning knob). `default_settings:` supplies the install's value
+for any of them, so a plugin can be dropped into a project already configured — without
+wrapping it in a package of your own just to initialise it.
+
+```yaml
+default_settings:
+  @matatbread/matbot-triggers:
+    classifierProvider: fast-haiku
+  @matatbread/matbot-cognition:
+    innerVoiceProvider: fast-haiku
+    dream:
+      maxItems: 5
+```
+
+Keys are plugin **package names** — the name `plugin list` reports, which is not necessarily
+the specifier you wrote under `plugins:` (a plugin loaded as `./plugins/triggers` is still
+named `@matatbread/matbot-triggers`). A key naming no loaded plugin is warned about at
+startup, because it would otherwise look like it had worked. Values are whatever the plugin
+stores under that key, and matbot does not interpret them.
+
+The rules, all of which follow from this being a *default* rather than a setting:
+
+- **A stored value always wins.** Anything set at runtime — by a tool, by the web UI —
+  overrides the default for as long as it is stored.
+- **Nothing is seeded and nothing is written back.** The store holds only what was
+  explicitly set, so editing `default_settings:` still takes effect (on the next start) for
+  every key nobody has overridden, and a plugin or provider update cannot destroy it.
+- **Clearing a setting reverts to the default here**, not to nothing — so a plugin's
+  `clear`/`reset` action returns you to the install's intended value.
+- **Merging is per key.** A key's value is replaced wholesale, never merged into; matbot
+  does not look inside it.
+- **`${NAME}` placeholders are not resolved** in these values. Secrets belong in the vault
+  (`.env` / `plugin store-key`), which plugins request by name when they need them.
+- **It applies to every user.** A default is configuration rather than data, so it is not
+  partitioned per principal the way stored settings are.
 
 ---
 

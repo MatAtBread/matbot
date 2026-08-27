@@ -1,5 +1,32 @@
 # @matatbread/matbot-cli
 
+## 0.4.10
+
+### Patch Changes
+
+- Install defaults for plugin settings, from the config (`#51`).
+
+  `default_settings:` in `matbot.yaml` — `BrowserConfig.defaultSettings` in the browser — supplies the
+  install's value for any key a plugin keeps in the settings store, keyed by plugin package name (the
+  settings namespace). A project can now ship an opinionated install without a wrapper package per
+  plugin: identity is loader-derived from the package name, so wrapping a plugin purely to initialise it
+  moves its settings namespace to the wrapper, orphaning what the install already stored and colliding on
+  every tool name if both load.
+
+  It is a **read-only floor**, and the whole design is one rule: reads are layered, writes are not.
+  `settings.get` returns the stored key if present, else the install default, else `undefined` — which
+  lands above a plugin's own `?? codeDefault`, so config beats code and no plugin needed changing. The
+  CAS write path reads the stored document only, so `set` persists exactly the key it was given, and
+  `delete` means "revert to the configured default" — what every existing `clear` action already meant.
+  Nothing is seeded and nothing is written back: editing the yaml therefore still takes effect for every
+  key nobody overrode, a plugin or provider update cannot destroy a default, and it applies to every
+  principal rather than only the one that booted. A key naming no loaded plugin is warned about at boot,
+  since it would otherwise look like it had worked.
+
+- Updated dependencies
+- Updated dependencies
+  - @matatbread/matbot-core@0.4.10
+
 ## 0.4.9
 
 ### Patch Changes
