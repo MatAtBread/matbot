@@ -9,6 +9,34 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## 0.4.11
+
+### Bug fixes
+
+- **`runAs()` no longer drops the principal when `fn` returns deferred work**
+  ([#53](https://github.com/MatAtBread/matbot/issues/53)). An async generator's body does not begin until
+  the first pull, so an iterator returned out of the scope carried its whole extent outside it: `runAs`
+  established the identity for the *construction*, and the work then ran under whatever was ambient where it
+  was pulled. `ToolExecutor.execute()` returns exactly that shape, so a host wiring its own tool invocation
+  (an HTTP endpoint, a scheduler) reached for the broken form first — and with a boot principal entered at
+  process entry, it read a plausible-but-wrong identity rather than throwing, which is a silent
+  authorisation failure. matbot's own call sites were unaffected: each consumes inside the scope, including
+  both `frontend-web` tool routes.
+
+  `runAs` now re-establishes the identity around each pull of a returned async iterator, and unwraps a
+  native promise to find an iterator behind an `async () => execute(…)`. The value crossing back out stays
+  what it was — the wrapper is a Proxy over the pull points, so a class-based iterator keeps its own
+  members, its prototype and `instanceof`. Deliberately untouched: an exotic thenable (`PromiseLike.then`
+  need not return a promise, so adopting one would hand back a different object); a `ReadableStream`, whose
+  `for await` and `getReader` paths could be re-entered but whose `pipeTo`/`pipeThrough`/`tee` pull from
+  platform internals no wrapper reaches — a conditional guarantee being worse than none here, and its eager
+  `start()` already running inside the scope; a returned function, since the caller decides when and how
+  often to call it and can scope the call itself, where binding would pin an identity on every later
+  invocation; the caller's own continuations (a chained `catch`/`finally` runs in the caller's flow); and
+  `machineBusy`/`withUsageScope`, whose hold and roll-up settle when `fn` does and so cannot be re-entered
+  per pull. Nesting needs no rule of its own: `runAs(A, () => runAs(B, () => gen()))` resolves every pull to
+  B, as plain nesting does.
+
 ## 0.4.10
 
 ### API gaps filled

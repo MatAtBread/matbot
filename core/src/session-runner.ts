@@ -376,8 +376,8 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
           // Establish the submitter's principal for the whole turn here, not inside runSession:
           // pump runs detached (`void pump`), so this scope — not the request that enqueued — is the
           // turn's async root. Everything downstream (hooks, tools, and any Store/FileStore/Vault
-          // access they trigger) reads it via currentPrincipal(). The consumption MUST happen inside
-          // the callback: an async iterator returned out of the scope would lose it before it pulls.
+          // access they trigger) reads it via currentPrincipal(). The consumption is inside the callback
+          // because the pump owns it, not because it must be: runAs rescopes a returned iterator itself.
           // runAs, not a context switch of its own: the pump holds the machine across the whole queue
           // (see above), so a turn declares only its owner. Each item carries its own submitter.
           // The terminal event this turn ended on. `followup` is post-COMMIT, and only `done` is a
