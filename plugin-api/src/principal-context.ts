@@ -23,8 +23,9 @@ export interface PrincipalCarrier {
   /**
    * Establish `principal` for the dynamic extent of `fn` and return whatever `fn` returns. On node
    * this is per-async-flow (concurrent turns stay isolated); nesting cleanly shadows-and-restores,
-   * which is how in-flow delegation works. Consume any async iterable *inside* `fn` — returning an
-   * unconsumed iterator drops the scope before it is pulled.
+   * which is how in-flow delegation works. An implementation establishes the scope and nothing more:
+   * deferred work returned out of it (an unpulled iterator, a promise of one) is {@link runAs}'s to
+   * re-establish, and doing it here as well would only nest the same identity twice.
    */
   run<T>(principal: Principal, fn: () => T): T;
   /**
@@ -71,7 +72,67 @@ export function tryCurrentPrincipal(): Principal | undefined {
 
 /** Run `fn` with `principal` established as the ambient identity for its async extent. */
 export function runAs<T>(principal: Principal, fn: () => T): T {
-  return need().run(principal, fn);
+  const carrier = need();
+  return carrier.run(principal, () => rescope(carrier, principal, fn()));
+}
+
+// A generator's body does not begin until the first pull, so an iterator returned out of the scope carries
+// its whole extent with it: `fn` established the identity for the *construction*, and the work then runs in
+// whatever flow happens to pull it. The tool ABI returns exactly that shape (`executor.execute()`), so the
+// natural thing to write at a tool seam was the broken thing — silently, since a host that entered a boot
+// principal reads a plausible one rather than throwing. Re-establishing per pull rather than requiring the
+// caller to consume inside `fn`: the principal is a re-entrant label that grants nothing, and nesting
+// already shadows-and-restores, so re-entering costs nothing semantically. Deliberately NOT extended to
+// `machineBusy` or `withUsageScope`, whose shape is identical but whose hold and roll-up settle when `fn`
+// does — a resource with a settle edge cannot be re-entered per pull, only an identity can.
+function rescope<T>(carrier: PrincipalCarrier, principal: Principal, value: T): T {
+  if (isAsyncIterator(value)) return scopedIterator(carrier, principal, value) as T;
+  // `async () => execute(...)` defers the identical body behind one await. This DERIVES a promise rather
+  // than intercepting one, which is why a single `then` covers it: `catch`/`finally` on what the caller
+  // receives are downstream of the rescope, and a rejection is a value rather than a deferred body, so an
+  // `onRejected` would have nothing to re-establish and would cost the rejection's identity. Native only —
+  // `PromiseLike.then` need not return a promise, so adopting a thenable would replace an object the caller
+  // may use for more than awaiting (a chainable query builder), and `async` produces the native one anyway.
+  if (value instanceof Promise) return value.then(inner => rescope(carrier, principal, inner)) as T;
+  return value;
+}
+
+// Iterator-shaped, not merely async-iterable: a ReadableStream is `for await`-able too, and replacing one
+// with a bare iterator would take away the object callers use for `getReader`/`pipeTo`/`tee`. Carrying
+// `next` is then taken to mean the value IS the iterator — which is what a caller holding the result of
+// `execute()` has — rather than a factory for fresh ones, a thing it cannot also be.
+function isAsyncIterator(value: unknown): value is AsyncIterator<unknown> & AsyncIterable<unknown> {
+  return typeof value === 'object' && value !== null
+    && typeof (value as AsyncIterable<unknown>)[Symbol.asyncIterator] === 'function'
+    && typeof (value as AsyncIterator<unknown>).next === 'function';
+}
+
+function scopedIterator<T>(
+  carrier:   PrincipalCarrier,
+  principal: Principal,
+  source:    AsyncIterator<T> & AsyncIterable<T>,
+): AsyncIterableIterator<T> {
+  const inScope = <R>(f: () => R): R => carrier.run(principal, f);
+  // A Proxy rather than a fresh object literal: the value crossing back out must still BE what it was —
+  // a custom iterator's own methods, its prototype, `instanceof` — so only the pull points are replaced.
+  // Anything else is forwarded bound to the target, which a class-based iterator holding internal state
+  // (or an object with internal slots) requires.
+  const pulls: Record<PropertyKey, unknown> = {
+    [Symbol.asyncIterator]: () => proxy,
+    next:   (...args: [] | [undefined]) => inScope(() => source.next(...args)),
+    ...(source.return !== undefined ? { return: (value?: unknown) => inScope(() => source.return!(value)) } : {}),
+    ...(source.throw  !== undefined ? { throw:  (error?: unknown) => inScope(() => source.throw!(error))  } : {}),
+  };
+  const proxy = new Proxy(source, {
+    // `hasOwn`, not `in`: the latter reaches Object.prototype, which would serve `toString`/`constructor`
+    // off the lookup object instead of the iterator being wrapped.
+    get(target, prop) {
+      if (Object.hasOwn(pulls, prop)) return pulls[prop];
+      const value = Reflect.get(target, prop, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  }) as AsyncIterableIterator<T>;
+  return proxy;
 }
 
 /** Imperatively establish `principal` for the current flow (entry points only). */

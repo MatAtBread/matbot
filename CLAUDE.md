@@ -380,6 +380,26 @@ A `Principal` (`{ id, type }`) is the operation origin, carried **ambiently** (n
 
 **Why ambient.** The principal must survive tool-use boundaries into `Store`/`FileStore`/`Vault`/`KnowledgeIndex`/`complete()`. Threading makes security opt-in; ambient propagation is un-forgettable.
 
+**`runAs` covers deferred work, because the natural thing to write returns it.** A generator's body does not
+begin until the first pull, so an iterator returned out of the scope carried its whole extent outside it —
+and the tool ABI (`executor.execute()`) returns exactly that shape, which made a host wiring its own tool
+invocation reach for the broken form first. Worse than a throw: a host that entered a boot principal read a
+*plausible* one, so nothing looked wrong. So `runAs` re-establishes the identity around each pull of a
+returned async iterator, and unwraps a native promise to find one behind an `async () => execute(…)`. The
+value stays what it was — the wrapper is a Proxy over the four pull points, so a class-based iterator keeps
+its own members, its prototype and `instanceof`; an exotic thenable is left entirely alone, since
+`PromiseLike.then` need not return a promise and adopting one would hand back a different object. Two
+things are deliberately *not* rescoped: the caller's own continuations (a `catch`/`finally` chained onto the
+result runs in the caller's flow — the alternative extends a privilege rather than dropping one), and an
+iterator nested inside a returned object (`{ events }`), which no structural check can reach.
+
+**It does not generalise to the machine hold or the usage scope.** `machineBusy` and `withUsageScope` have
+the identical `() => T` shape and the identical footgun, and must keep the documented warning instead: an
+identity is a re-entrant label, whereas a hold and a roll-up settle when `fn` does. Re-acquiring the hold per
+pull is not holding across the stream (and would re-enter the admit barrier every yield), and a usage scope
+rolls up on settle, so a later pull's entries would land after the roll-up. `contextSwitch(p, () => gen())`
+therefore gets the right identity and still releases the hold early.
+
 **Platform split:** node uses `AsyncLocalStorage`-backed carrier (in `apps/cli`); browser/single-principal uses constant carrier (in plugin-api).
 
 **Establishment points:** entry-only — CLI `enterPrincipal`s boot principal; web server `runAs` per request; telegram `runAs` per message; `SessionRunner.pump` wraps each turn in `runAs(submitter)`.
