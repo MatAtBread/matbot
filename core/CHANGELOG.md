@@ -1,5 +1,45 @@
 # @matatbread/matbot-core
 
+## 0.4.10
+
+### Patch Changes
+
+- Install defaults for plugin settings, from the config (`#51`).
+
+  `default_settings:` in `matbot.yaml` — `BrowserConfig.defaultSettings` in the browser — supplies the
+  install's value for any key a plugin keeps in the settings store, keyed by plugin package name (the
+  settings namespace). A project can now ship an opinionated install without a wrapper package per
+  plugin: identity is loader-derived from the package name, so wrapping a plugin purely to initialise it
+  moves its settings namespace to the wrapper, orphaning what the install already stored and colliding on
+  every tool name if both load.
+
+  It is a **read-only floor**, and the whole design is one rule: reads are layered, writes are not.
+  `settings.get` returns the stored key if present, else the install default, else `undefined` — which
+  lands above a plugin's own `?? codeDefault`, so config beats code and no plugin needed changing. The
+  CAS write path reads the stored document only, so `set` persists exactly the key it was given, and
+  `delete` means "revert to the configured default" — what every existing `clear` action already meant.
+  Nothing is seeded and nothing is written back: editing the yaml therefore still takes effect for every
+  key nobody overrode, a plugin or provider update cannot destroy a default, and it applies to every
+  principal rather than only the one that booted. A key naming no loaded plugin is warned about at boot,
+  since it would otherwise look like it had worked.
+
+- The config parser no longer returns half a file.
+
+  An unparseable construct made the parser `break` its enclosing loop, which returned what had been read
+  so far and left the rest of the document **silently discarded**. A stray `-` in `plugins:` — the dash
+  alone on its line — dropped every plugin after it and every top-level section below it, `providers:`
+  included, with no error: an install that boots and behaves as though half its configuration had never
+  been written. It now throws, naming the line and what it could not read.
+
+  Two constructs it could not read are now read. A bare `-` takes the block indented beneath it as its
+  item value (the branch for it existed but was unreachable, because the dash test required a trailing
+  space), and a quoted mapping key is unquoted like any other scalar — `'@scope/pkg':` addressed a key
+  literally spelled with its quotes. YAML's compact mapping in a sequence entry (`- key: value`) stays
+  unsupported and is now rejected rather than mis-read: telling it from a plugin specifier needs the
+  spec's colon-space rule, without which `- https://host/p.ts` parses as a mapping keyed `https`.
+
+  - @matatbread/matbot-plugin-api@0.4.10
+
 ## 0.4.9
 
 ### Patch Changes

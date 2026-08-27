@@ -158,6 +158,47 @@ providers:
 
 ---
 
+## Default plugin settings
+
+`default_settings:` in `matbot.yaml` (`BrowserConfig.defaultSettings` in the browser) is a **read-only
+floor** under `services.settings()`, keyed by plugin NAME — the settings namespace — and installed by
+the host at boot with `installSettingsDefaults`. It exists so a project can ship an opinionated install
+without a wrapper package per plugin: identity is loader-derived from the package name, so wrapping a
+plugin to initialise it MOVES its settings namespace to the wrapper, orphaning what the install already
+stored and colliding on every tool name if both load.
+
+**One rule: reads are layered, writes are not.** `get` returns the stored key if present (`in`, so a
+stored `null` is an override), else the install default, else `undefined` — which lands *above* a
+plugin's own `?? codeDefault`, so config beats code with no plugin change. The CAS `update` path reads
+the stored document only, so `set` persists exactly the key it was given. Seeding — at install or on
+first write — was rejected: the first makes a later yaml edit silently dead, the second makes whether
+an edit works depend on unrelated write history, and both write a per-principal document for what is
+install-wide configuration. `delete` therefore means "revert to the configured default", which is what
+every existing `clear` action already meant.
+
+Merging is per **key**; a value is opaque (the only addressable unit `PluginSettings` has, and deep
+merge has no bounded semantics). No `${NAME}` resolution — secrets are the Vault's, and resolving at
+`get` time would give the settings facade a Vault dependency.
+
+**The defaults are consulted INSIDE `makePluginSettings`, not passed to it.** A parameter is a thing a
+call site forgets with no error and no symptom, and one already would: `plugins/browser` builds its own
+facade over a concrete backend to pin its plugin list across a `StorageBackend` swap. Same reasoning as
+the barrier living inside `machineBusy`.
+
+**The one silent failure is a key naming no loaded plugin** (the name is loader-derived and need not
+match the specifier in `plugins:`), so each host warns for unmatched keys once the loaded set is known;
+reserved dunder namespaces are exempt, not being plugins. Nothing distinguishes a defaulted read from a
+stored one — a `*_config get` action reports what is *in effect*, not what is pinned.
+
+**Deliberately no tooling to author a default.** The write path for a runtime actor is the override,
+which is CAS'd, per-principal and notifiable; authoring the floor is installation authoring, and a tool
+for it would be a second way to do one thing, with restart semantics and no CAS. Which file holds it is
+a host concern by construction — core takes a map, never a path — so a second location stays a ~10-line
+host change. `extends:` is NOT that mechanism today: the CLI chdirs to the base's directory and rewrites
+`configPath`, so a shared base becomes the project (`.data`, `.env`, and every yaml write land there).
+
+---
+
 ## Data layout
 
 All runtime state under `.data/` **next to `matbot.yaml`**, never in source:

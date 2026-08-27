@@ -14,6 +14,13 @@ export interface MatbotConfig {
   /** Install-default boot identity. The lowest-precedence source for the entry's principal
    *  (a `--principal` flag or `MATBOT_PRINCIPAL` env override it); absent ⇒ the system principal. */
   principal?:        Principal;
+  /**
+   * Install-supplied floor for plugin settings, keyed by plugin NAME (the settings namespace), read
+   * by {@link installSettingsDefaults}. Read-only: matbot never writes it back, so a default cannot
+   * be destroyed by a plugin or provider update, and it applies to every principal because it is
+   * config rather than data. A stored value always wins; `delete` reverts to the default here.
+   */
+  defaultSettings?:  ReadonlyMap<string, Readonly<Record<string, unknown>>>;
 }
 
 function asString(v: YamlValue | undefined, label: string): string {
@@ -104,6 +111,18 @@ export function parseConfig(
     }
   }
 
+  // Keyed by plugin name, not by the specifier written in `plugins:` — the name IS the settings
+  // namespace, and the same plugin can be reached by several specifiers (a local path, the package
+  // name, a version range). A key naming no loaded plugin is warned about at boot by the host: it is
+  // otherwise the one silent failure mode here, and reads as "I set the default and nothing happened".
+  const defaultSettingsRaw = doc['default_settings'];
+  const defaultSettings    = new Map<string, Readonly<Record<string, unknown>>>();
+  if (defaultSettingsRaw !== undefined && defaultSettingsRaw !== null) {
+    for (const [name, raw] of Object.entries(asRecord(defaultSettingsRaw, 'default_settings'))) {
+      defaultSettings.set(name, { ...asRecord(raw, `default_settings.${name}`) });
+    }
+  }
+
   const prompt           = typeof doc['prompt']            === 'string' ? doc['prompt']            : undefined;
   const ephemeral        = doc['ephemeral'] === true ? true : undefined;
   const defaultProvider  = typeof doc['default_provider'] === 'string' ? doc['default_provider']  : undefined;
@@ -116,6 +135,7 @@ export function parseConfig(
     ...(ephemeral        !== undefined ? { ephemeral        } : {}),
     ...(defaultProvider  !== undefined ? { defaultProvider  } : {}),
     ...(principal        !== undefined ? { principal        } : {}),
+    ...(defaultSettings.size > 0       ? { defaultSettings  } : {}),
   };
 }
 
