@@ -1,5 +1,11 @@
 # @matatbread/matbot-cli
 
+## 0.4.11
+
+### Patch Changes
+
+- @matatbread/matbot-core@0.4.11
+
 ## 0.4.10
 
 ### Patch Changes
