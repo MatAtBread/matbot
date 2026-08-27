@@ -27,11 +27,15 @@ churn and less likely to affect a consumer who doesn't use them.
   native promise to find an iterator behind an `async () => execute(…)`. The value crossing back out stays
   what it was — the wrapper is a Proxy over the pull points, so a class-based iterator keeps its own
   members, its prototype and `instanceof`. Deliberately untouched: an exotic thenable (`PromiseLike.then`
-  need not return a promise, so adopting one would hand back a different object), a `ReadableStream` (its
-  pull points are also reached through `getReader`/`pipeTo`), the caller's own continuations (a chained
-  `catch`/`finally` runs in the caller's flow — scoping those would extend a privilege rather than restore
-  one), and `machineBusy`/`withUsageScope`, whose hold and roll-up settle when `fn` does and so cannot be
-  re-entered per pull.
+  need not return a promise, so adopting one would hand back a different object); a `ReadableStream`, whose
+  `for await` and `getReader` paths could be re-entered but whose `pipeTo`/`pipeThrough`/`tee` pull from
+  platform internals no wrapper reaches — a conditional guarantee being worse than none here, and its eager
+  `start()` already running inside the scope; a returned function, since the caller decides when and how
+  often to call it and can scope the call itself, where binding would pin an identity on every later
+  invocation; the caller's own continuations (a chained `catch`/`finally` runs in the caller's flow); and
+  `machineBusy`/`withUsageScope`, whose hold and roll-up settle when `fn` does and so cannot be re-entered
+  per pull. Nesting needs no rule of its own: `runAs(A, () => runAs(B, () => gen()))` resolves every pull to
+  B, as plain nesting does.
 
 ## 0.4.10
 

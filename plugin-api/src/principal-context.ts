@@ -82,7 +82,9 @@ export function runAs<T>(principal: Principal, fn: () => T): T {
 // natural thing to write at a tool seam was the broken thing — silently, since a host that entered a boot
 // principal reads a plausible one rather than throwing. Re-establishing per pull rather than requiring the
 // caller to consume inside `fn`: the principal is a re-entrant label that grants nothing, and nesting
-// already shadows-and-restores, so re-entering costs nothing semantically. Deliberately NOT extended to
+// already shadows-and-restores, so re-entering costs nothing semantically — which is also what makes nesting
+// unremarkable: `runAs(A, () => runAs(B, () => gen()))` stacks two wrappers and every pull resolves to B,
+// the same answer plain nesting gives with no iterator in sight. Deliberately NOT extended to
 // `machineBusy` or `withUsageScope`, whose shape is identical but whose hold and roll-up settle when `fn`
 // does — a resource with a settle edge cannot be re-entered per pull, only an identity can.
 function rescope<T>(carrier: PrincipalCarrier, principal: Principal, value: T): T {
@@ -97,10 +99,16 @@ function rescope<T>(carrier: PrincipalCarrier, principal: Principal, value: T): 
   return value;
 }
 
-// Iterator-shaped, not merely async-iterable: a ReadableStream is `for await`-able too, and replacing one
-// with a bare iterator would take away the object callers use for `getReader`/`pipeTo`/`tee`. Carrying
-// `next` is then taken to mean the value IS the iterator — which is what a caller holding the result of
-// `execute()` has — rather than a factory for fresh ones, a thing it cannot also be.
+// Iterator-shaped, not merely async-iterable. A ReadableStream is `for await`-able too, and CAN be proxied
+// (measured: `instanceof`, `pipeTo` and a platform `new Response(stream)` all survive one) — but only two of
+// its pull paths could then be re-entered, `[Symbol.asyncIterator]` and `getReader().read()`, while
+// `pipeTo`/`pipeThrough`/`tee` pull from platform internals no wrapper reaches. A conditional guarantee is
+// worse than none in an identity primitive: a host testing with `for await` and shipping `pipeTo` would
+// regress silently. Its eager half is safe either way — `start()` runs at construction, inside the scope —
+// so what is uncovered is a lazy `pull()` that reads the principal, which no in-repo streamer is: every one
+// is an async generator, and `FileHandle.stream()` is `AsyncIterable` by contract. Carrying `next` is then
+// taken to mean the value IS the iterator — what a caller holding `execute()`'s result has — rather than a
+// factory for fresh ones, a thing it cannot also be.
 function isAsyncIterator(value: unknown): value is AsyncIterator<unknown> & AsyncIterable<unknown> {
   return typeof value === 'object' && value !== null
     && typeof (value as AsyncIterable<unknown>)[Symbol.asyncIterator] === 'function'

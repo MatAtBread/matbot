@@ -393,6 +393,20 @@ things are deliberately *not* rescoped: the caller's own continuations (a `catch
 result runs in the caller's flow — the alternative extends a privilege rather than dropping one), and an
 iterator nested inside a returned object (`{ events }`), which no structural check can reach.
 
+**Nesting is not a new rule, and a returned *function* is not bound.** `runAs(A, () => runAs(B, () => gen()))`
+stacks two wrappers and every pull resolves to B — the same answer plain nesting gives with no iterator in
+sight, at one extra carrier entry per layer per pull. A returned function is deliberately left alone, because
+the asymmetry that put the iterator wrap *inside* `runAs` does not hold for it: an iterator has exactly one
+thing that can be done to it, and pulling it IS the deferred half of the operation the scope was opened for,
+which the caller cannot spell from outside. A function is a *new* operation the caller starts later, N times,
+and the spelling is theirs and obvious — scope the call, not the construction (`() => runAs(p, () => fn(x))`).
+Binding one would pin an identity onto every future invocation, including the ones meant to run as someone
+else: privilege extension, the same thing rejected for a patched thenable's continuations. And nothing
+distinguishes a deferred body from a factory result — `typeof value === 'function'` is equally true of a
+class (a naive wrap breaks `new`), an unsubscribe function, and a comparator, where the iterator test names a
+specific ABI shape. If a host seam ever genuinely wants it, that is an explicit `bindPrincipal(p, fn)` the
+author opts into, because there the identity is a *decision* rather than a repair.
+
 **It does not generalise to the machine hold or the usage scope.** `machineBusy` and `withUsageScope` have
 the identical `() => T` shape and the identical footgun, and must keep the documented warning instead: an
 identity is a re-entrant label, whereas a hold and a roll-up settle when `fn` does. Re-acquiring the hold per

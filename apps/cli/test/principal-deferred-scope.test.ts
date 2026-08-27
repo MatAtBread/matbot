@@ -181,3 +181,75 @@ test('an override of an Object.prototype member is the target\'s, and a private 
   assert.deepEqual(seen, ['alice']);
   assert.equal(job.toString(), 'Job(2)', 'and it still reads the private field after the pulls');
 });
+
+// ── Nesting, and the ReadableStream boundary (review of #53) ──────────────────────────────────────
+const A = { id: 'a-outer', type: 'user' as const };
+const B = { id: 'b-inner', type: 'user' as const };
+const C = { id: 'c-deepest', type: 'user' as const };
+const Z = { id: 'z-consumer', type: 'user' as const };
+
+async function* tool(): AsyncGenerator<string> {
+  yield `open:${currentPrincipal().id}`;
+  await new Promise(r => setTimeout(r, 1));
+  yield `late:${currentPrincipal().id}`;
+}
+test('nested runAs: the innermost scope wins on every pull, as plain nesting does', async () => {
+  const events = runAs(A, () => runAs(B, () => tool()));
+  const seen: string[] = [];
+  for await (const e of events) seen.push(e);
+  assert.deepEqual(seen, ['open:b-inner', 'late:b-inner']);
+});
+
+test('three deep, consumed under a fourth identity', async () => {
+  const events = runAs(A, () => runAs(B, () => runAs(C, () => tool())));
+  const seen: string[] = [];
+  await runAs(Z, async () => { for await (const e of events) seen.push(e); });
+  assert.deepEqual(seen, ['open:c-deepest', 'late:c-deepest']);
+});
+
+test('the nested wrap is what plain nesting means — same answer without any iterator', async () => {
+  const direct = await runAs(A, () => runAs(B, async () => currentPrincipal().id));
+  assert.equal(direct, 'b-inner', 'so the iterator case is not a special rule');
+});
+
+test('early break through a double wrap still closes under the innermost scope', async () => {
+  let closedAs: string | undefined;
+  async function* withFinally(): AsyncGenerator<number> {
+    try { yield 1; yield 2; } finally { closedAs = currentPrincipal().id; }
+  }
+  const events = runAs(A, () => runAs(B, () => withFinally()));
+  for await (const _ of events) break;
+  assert.equal(closedAs, 'b-inner');
+});
+
+
+test('a stream\'s start() is eager, so it reads the right identity even unwrapped', async () => {
+  let startedAs: string | undefined;
+  const stream = runAs(A, () => new ReadableStream<number>({
+    start(c) { startedAs = currentPrincipal().id; c.enqueue(1); c.close(); },
+  }));
+  assert.equal(startedAs, 'a-outer');
+  const chunks: number[] = [];
+  for await (const v of stream as unknown as AsyncIterable<number>) chunks.push(v);
+  assert.deepEqual(chunks, [1]);
+});
+
+test('KNOWN GAP: a stream whose pull() reads the principal gets the consumer\'s, not the scope\'s', async () => {
+  let pulledAs: string | undefined;
+  let n = 0;
+  const stream = runAs(A, () => new ReadableStream<number>({
+    pull(c) { pulledAs = currentPrincipal().id; n < 2 ? c.enqueue(n++) : c.close(); },
+  }));
+  await runAs(Z, async () => { for await (const _ of stream as unknown as AsyncIterable<number>) { /* drain */ } });
+  assert.equal(pulledAs, 'z-consumer', 'the documented boundary: a lazy stream producer is not rescoped');
+});
+
+test('the same producer written as an async generator IS rescoped — the in-repo idiom', async () => {
+  let pulledAs: string | undefined;
+  async function* producer(): AsyncGenerator<number> {
+    for (let i = 0; i < 2; i++) { pulledAs = currentPrincipal().id; yield i; }
+  }
+  const events = runAs(A, () => producer());
+  await runAs(Z, async () => { for await (const _ of events) { /* drain */ } });
+  assert.equal(pulledAs, 'a-outer');
+});
