@@ -823,6 +823,13 @@ interface Store<T extends { id: string; version: string }> {
 }
 ```
 
+All writes are compare-and-swap where concurrent updates are possible — `cas(id, expectedVersion,
+next)`, never a bare `set`. The **one place CAS is not sufficient** is a session with a turn in
+flight: the runner commits its own in-memory copy with an unconditional `set`, so it clobbers a
+correct CAS without ever comparing versions. A live session's document belongs to the runner; write
+it from a hook, a UI route or a background job only at the quiescent edge (see [Persisting work
+computed after a turn](#persisting-work-computed-after-a-turn)).
+
 `StoreQuery` is a deliberately minimal grammar designed to translate to a real backend (SQL
 `WHERE`, Elasticsearch `bool`, Mongo `find`, IndexedDB cursor) rather than be interpreted by an
 embedded engine: a closed `Filter` AST (a union discriminated by `op` — `eq/neq/lt/lte/gt/gte`,
@@ -943,6 +950,71 @@ services.hooks.register({
 `role: 'user'` so the model responds to it. The per-block `origin?: 'robo'` on
 `MessageContent` records authorship for *presentation only* — it is never sent to the
 model.
+
+### Persisting work computed after a turn
+
+The runner holds **one in-memory copy** of the session for the extent of a turn and commits it at
+every exit with an unconditional `store.set` (`end()`, `core/src/runner.ts`). So while a turn is in
+flight the runner *owns* the document, and any other writer of that session is clobberable —
+including one that compare-and-swaps, because the clobberer does not compare versions. Post-commit
+the pump is likewise the sole writer, which is what makes its own unconditional appends safe.
+
+That leaves a real question with two wrong answers. Say a plugin summarises a long conversation and
+wants the summary to live on the session as a marker; the summarisation is an LLM call, so it cannot
+be done inline without the user paying for it.
+
+- **Await it inside `followup`** and the pump blocks. The hold spans the *whole queue*
+  (`machineBusy` in `session-runner.ts`), so the user's next message waits on your summarisation.
+  Correct, and silently slow.
+- **Fire and forget from `followup`** and the write races the next turn's `end()` and loses.
+  Silently.
+
+The answer is neither: compute detached, then land the *write* at the **quiescent edge** — the next
+moment nothing holds the machine.
+
+```ts
+import { onContextQuiesce } from '@matatbread/matbot-plugin-api';
+
+services.hooks.register({
+  on: 'followup',
+  handler(ctx) {
+    const { id } = ctx.session;
+    void summarise(ctx.session).then(marker => {
+      // One-shot: unregisters as it fires. The closure holds the work, so there is no pending flag.
+      onContextQuiesce(un => { un(); return applyMarker(id, marker); });
+    });
+    // Returns immediately — the pump moves on and the next turn starts.
+  },
+});
+```
+
+Registering is all a stager does: it **announces** the work, so the barrier engages and an edge is
+guaranteed to arrive rather than depending on the machine happening to go idle. And `machineBusy`
+waits for staged work before taking its hold, so the next pump run will not read its copy of the
+session until your flusher has settled — the window a detached write races is closed, not narrowed.
+
+The latency objection does not transfer, because what is registered is the *write*, not the work:
+the next turn waits for a store round-trip, not for an LLM call. Keep it that way. A flusher may
+return a promise and the edge will wait for it, which is the point — and also the trap, since a slow
+flusher is the blocking `followup` again by another route.
+
+Three practical notes:
+
+- **Re-read at the edge.** It is the first moment the committed document is readable; take it from
+  the store rather than closing over the copy your hook was handed.
+- **Serialise your own deferred writes.** Two landing at once compare-and-swap the same document
+  concurrently. `plugins/edit-session/src/defer.ts` is the worked example: a promise tail plus a
+  one-shot quiescer.
+- **A quiescer is not bound to your plugin's load extent**, unlike `services.mounted.observe`. A
+  one-shot is self-limiting; a standing registration survives `unloadPlugin` and will fire into a
+  torn-down closure, so unregister it yourself.
+
+**Or keep the state out of the session entirely.** If what you compute can live in your own
+document, write it there and fold it in at `screen` — which may replace the session outright, so one
+pass can inject the new summary and elide the previous one. Eliding on entry is also what stops
+`followup`'s append-only `markers` from accumulating one summary per summarisation. That path never
+writes the session and so has no clobber window at all; reach for the edge when the thing genuinely
+belongs *on* the session.
 
 ---
 
