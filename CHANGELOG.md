@@ -9,6 +9,129 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## 0.4.12
+
+**Tool inputs are typechecked, whoever the caller is.** A tool declares its call contract as a
+`ToolContract` arm — a real TypeScript type — and until now nothing enforced it: the model's arguments
+were checked against `inputSchema`, a lossy *projection* of that type, and only on the model's path.
+0.4.12 makes the type itself the thing enforced, at the one seam every caller passes through.
+
+### Breaking changes
+
+- **Validation moved off the `toolcall` hook and onto the executor, so it covers every door.** The hook
+  channel is unchanged and still supported — `toolcall` remains the place to *reject* a call, and
+  triggers still use it — but it is a **runner** channel, so a validator installed there guarded the
+  model's path while `POST /tools/:name` and `invokeTool` called `tool.executor.execute` directly and
+  fired no hooks at all. Core now consults an optional **`ToolCallValidator`** service (`MatbotServices`,
+  declared by core because core is what reads it) at the executor, wrapped once per tool at
+  registration. One check instead of one per door, and nothing to drift.
+
+  Core's own contract is therefore additive: with no validator registered nothing changes, since core
+  mandates no validation and only honours one that is registered. What breaks is the **behaviour of an
+  install that loads a validator plugin**, in two deliberate ways:
+
+  - **An unknown property is rejected**, as TypeScript rejects one on a fresh object literal, which is
+    exactly what a model-authored params object is. Accepting it silently is the commonest tool-call
+    hallucination made invisible: `sessionId` mis-sent as `session_id` was dropped, and the tool then
+    ran believing no session was given rather than reporting a typo. Callers that got away with a loose
+    payload now fail; `enforce: 'warn'` logs one release of "Would reject" to find them first.
+  - **Internal calls are validated too.** A statically-typed call site should already be sound, so this
+    is partly waste — but `invokeTool` with a dynamic name, a trigger's `invoke.params` (typed
+    `object`) and a compiled skill's payload are all internal callers no compiler has checked.
+
+  A rejected call yields an `error` event carrying the offending field paths and `TOOL_INPUT_INVALID`
+  (422 — the body parsed, its *shape* is wrong; and a process exit code cannot exceed 255, so it can
+  never be mistaken for one). The web tool routes answer with a 4xx code rather than 500.
+
+### API gaps filled
+
+- **`ToolContract` params types are compiled to validators.** `tool-types` emits a pure-JS validator per
+  tool from the **checker's resolved type**, inside the pass that already builds the dts — so
+  conditionals, generics, `Omit`/`Pick`/`Record`, `keyof` and indexed access all arrive already
+  evaluated, and the workspace is not scanned twice. A multi-action tool gets one validator that
+  dispatches on its discriminant, so a missing field is reported against the arm the caller actually
+  selected, which is what `inputSchema` cannot express: `session_action`'s schema requires only
+  `action`, and every per-arm requirement is lost in the projection.
+
+  It targets the JSON *projection* of the type rather than the type: a `toJSON` return wins, a class
+  instance is its own enumerable data properties, and methods, function-valued and `undefined`
+  properties cannot reach the wire at all. So only `bigint` is refused outright — the one thing
+  `JSON.stringify` itself throws on. A contract that cannot be honestly validated yields a stated
+  refusal, never a permissive validator.
+
+- **Errors name the field as a caller would write it, and show what was sent.**
+
+  ```
+  Invalid input for tool "about_matbot": .x: never (no value is valid), actual value `{"x":8}`
+  ```
+
+  Paths are dotted (`.items[0].name`) rather than JSON Pointer, because the reader is either a model
+  repairing its own call or a developer looking at a 422, and both write dots. The value is rendered
+  wrapped in its own field name, so it is a fragment the caller can compare against what it sent; an
+  array element or the root renders alone, having no name to wrap it in. A missing property shows no
+  value — JSON carries no `undefined`, so there is nothing to show beyond saying it is absent. The
+  rendering is capped, so a rejected attachment cannot turn one bad field into the bulk of a turn's
+  context, and it cannot throw: an internal caller may arrive with a bigint or a cycle, and a throw
+  while *reporting* an error would replace the diagnosis with a stack trace.
+
+- **`NoParams`** (`plugin-api`) — `Record<string, never>` for a tool that takes no arguments. `{}` was
+  the obvious spelling and is wrong: in TypeScript it means "any non-nullish value", and omitting the
+  type argument is looser still (`unknown`). Adopted by the no-argument tools, which consequently now
+  reject stray properties.
+
+### Bug fixes
+
+- **`POST /tools/:name` with no body handed the executor `null`, not `{}`.** Nothing noticed until the
+  input was actually validated, at which point the web UI's own no-argument calls 422'd on page load.
+  An absent body means "no arguments"; an explicitly posted `null` still reaches the executor unchanged,
+  since a client that says `null` said something and hiding that would hide a real client bug. Fixed in
+  the HTTP route and both in-process transports.
+
+- **A tool's own `teardown` is not responsible for unregistering its services**, and never was — the
+  loader unregisters a plugin's registered keys *before* awaiting its teardown, so a consumer sees
+  absence (which it can handle) rather than a closed service that looks present and throws on use. Now
+  pinned by a test, since a validator on the executor turns that particular failure into every tool
+  failing at once.
+
+### Optional
+
+- **`ts-validation`** (new, node) — consumes tool-types' supply, applies `enforce: off | warn | reject`
+  (default **reject**, since loading the plugin is the opt-in) and registers the `ToolCallValidator`
+  core consults. Its dependency on tool-types is hard and direct — a `dependencies` entry and a plain
+  import, the relationship `mcp` has to `mcp-http` — so it **installs the service itself** when nothing
+  else has: there is no load-order requirement and no mount-table latch. Listing `tool-types` as well
+  is still the better setup, since it then owns the service and other consumers (`function-tools`,
+  `skills_compiler`) get one too. Presence is duck-typed rather than `instanceof`-tested, so a reloaded
+  tool-types is recognised instead of duplicated.
+
+- **`tool-types`** — supplies validation and registers no validator service, so a code generator loading
+  it for `dts()` alone never silently starts having its tool calls rejected. Tools built at **runtime**
+  are covered as well: a `toolContract` string is not a `ts.Type`, so those are rendered into a virtual
+  augmentation and typed by a small second Program (that file plus plugin-api — no second workspace
+  scan). Those were the tools described to the model in full and enforced least, which is backwards,
+  their parameters having been authored by an LLM rather than a compiler. Each string is screened alone
+  before the batch is rendered — they become properties of one interface, where a stray brace would
+  swallow every arm after it — and the file must then typecheck cleanly, because an unresolved type
+  reference is `any`, which validates everything. A fault becomes a stated refusal rather than a
+  validator that reports success and checks nothing.
+
+- **`json-validation`** — moves onto the same seam and is no longer a hook, so schema checking covers
+  every door too, and still works in the browser where tool-types cannot run. A validator that displaces
+  another captures and defers to it when it has no opinion, so the typed and schema validators compose
+  along the line the type system already draws — typed contracts first, loose `inputSchema` behind —
+  rather than shadowing each other by load order. Its paths and values are reported identically, so
+  which validator rejected a call is invisible to the caller.
+
+- **`triggers`** — `trigger_action update` accepts `cooldown: null` to clear the stored limits. The
+  executor has always honoured it, its own error message documents it, and the web UI has always sent
+  it, but the arm declared `cooldown?: TriggerCooldown` — so a documented call was untypeable, which
+  went unnoticed until the params type was enforced. `add` still refuses `null`: there is no prior limit
+  to clear. The tool description now says so, rather than only the error path.
+
+- **`frontend-web`** — the empty-body fix above, plus a 4xx `code` from a tool error becomes that HTTP
+  status instead of 500. Only 400–499 is treated as a client error, so a process exit code (`bash` and
+  friends put theirs in the same field) still reports 500.
+
 ## 0.4.11
 
 ### Bug fixes
