@@ -167,6 +167,21 @@ were checked against `inputSchema`, a lossy *projection* of that type, and only 
   went unnoticed until the params type was enforced. `add` still refuses `null`: there is no prior limit
   to clear. The tool description now says so, rather than only the error path.
 
+- **`frontend-telegram`** — files a turn produces are rendered as attachments
+  ([#59](https://github.com/MatAtBread/matbot/issues/59)). The `file` pipeline event was swallowed, so
+  every file-producing tool looked like it had done nothing: the model says "here is the chart" and the
+  chat shows only that sentence. A file event is a durable handle, not bytes on the wire, so the
+  frontend pulls it and uploads it — an image inline, audio as a clip, anything else as a document —
+  captioned with its name, ahead of the turn's prose (a file lands while a tool is still running, and
+  the assistant's text is only flushed when the turn completes). `telegram_send` takes a `files` list
+  too, each entry a file id or name, for a notification with an attachment outside any session.
+
+  A method Telegram rejects retries as `sendDocument`, because the constraints those methods add — a
+  photo's width+height sum, a container it will not transcode — are not checkable in advance, and a file
+  that arrives beats one that renders inline. An oversized file (Telegram accepts 50MB, 10MB as a photo)
+  is reported in the chat rather than read at all, and a failed upload never propagates: a file that
+  would not send must not lose the answer it came with.
+
 - **`frontend-web`** — the empty-body fix above, plus a 4xx `code` from a tool error becomes that HTTP
   status instead of 500. Only 400–499 is treated as a client error, so a process exit code (`bash` and
   friends put theirs in the same field) still reports 500.
