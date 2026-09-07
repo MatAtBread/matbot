@@ -74,6 +74,25 @@ were checked against `inputSchema`, a lossy *projection* of that type, and only 
   context, and it cannot throw: an internal caller may arrive with a bigint or a cycle, and a throw
   while *reporting* an error would replace the diagnosis with a stack trace.
 
+- **Settings changes are observable** ([#58](https://github.com/MatAtBread/matbot/issues/58)). A
+  settings write announced nothing, so no consumer could know a setting had changed: every reader had a
+  choice between re-reading the store on each use — on the filesystem backend, a disk read — and caching
+  with unbounded staleness. `ts-validation` made that concrete, reading its `enforce` setting on every
+  tool call through every door to re-learn a value that changes approximately never; there was no correct
+  cache to write, event invalidation being impossible and a TTL being a guess.
+
+  `makePluginSettings` now wraps its store in `notifyingStore`, so `set`/`delete` publish an `ItemChange`
+  with `namespace: 'settings'`, `id` = the slugged plugin namespace, and the writing **principal** (an
+  override is per-principal, so a cache must be keyed by one). No contract is extended — `ItemChange`
+  already means "the thing at `(namespace, id)` is stale, re-read it, whatever holds it".
+
+  The bus is installed by the host as module state (`installSettingsNotifier`, beside
+  `installSettingsDefaults`) rather than passed in, for the reason already recorded for the defaults: a
+  parameter is a thing a call site forgets with no error and no symptom, and `plugins/browser` builds its
+  own facade over a concrete backend on purpose. It is read per publish rather than captured, so a facade
+  built before the host installs the bus is not silenced forever. Hosts pass their capture-safe `Notifier`
+  proxy, so a registered distributed notifier relays settings too.
+
 - **`NoParams`** (`plugin-api`) — `Record<string, never>` for a tool that takes no arguments. `{}` was
   the obvious spelling and is wrong: in TypeScript it means "any non-nullish value", and omitting the
   type argument is looser still (`unknown`). Adopted by the no-argument tools, which consequently now

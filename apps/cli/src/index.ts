@@ -17,7 +17,7 @@ import { appendMessage, createMessage,
          unloadPlugin as unloadPluginFn,
          getPluginNameForSpecifier, getRegisteredPlugins, recordServiceKey,
          installPrincipalCarrier, installUsageCarrier, recordUsage, usageByProvider, addUsage, enterPrincipal, currentPrincipal,
-         installSettingsDefaults, settingsDefaultNamespaces,
+         installSettingsDefaults, settingsDefaultNamespaces, installSettingsNotifier,
          unifyServices, forwardingProxy, makeSwappable, singleTurnRequest,
          createMountTable, scheduleAtEdge,
          createSingleTurnTool, createAboutMatbotTool,
@@ -882,6 +882,9 @@ async function main(): Promise<void> {
   // `core`. Swappable like the vault — register('Notifier', …) points this at a distributed impl.
   let activeNotifier: Notifier = createNotifier('core');
   const notifierProxy       = forwardingProxy<Notifier>(() => activeNotifier);
+  // Settings writes announce on the same bus, so a reader can cache one instead of re-reading it on
+  // every use. The proxy, not the impl, so a registered distributed Notifier relays them too.
+  installSettingsNotifier(notifierProxy);
   // Capture-safe service handles (see forwardingProxy): a captured reference — including a destructure
   // like `const { KnowledgeIndex, StorageBackend } = services` — keeps resolving to the live impl across
   // a register()-driven swap, instead of pinning whatever was current at capture time.

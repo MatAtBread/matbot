@@ -7,7 +7,7 @@ import {
   unloadPlugin as unloadPluginFn, unifyServices,
   forwardingProxy, makeSwappable, singleTurnRequest, createSingleTurnTool, createAboutMatbotTool, createNotifier, notifyingStore,
   createMountTable, scheduleAtEdge,
-  installSettingsDefaults, settingsDefaultNamespaces,
+  installSettingsDefaults, settingsDefaultNamespaces, installSettingsNotifier,
 } from '@matatbread/matbot-core';
 import type {
   MatbotMachine, MatbotServices, Store, Session, ProviderConfig, ProviderAdapter,
@@ -268,6 +268,8 @@ export async function boot(env: BootEnv): Promise<void> {
   // Boot notification bus (in-process fan-out); swappable via register('Notifier', …) like the vault.
   let activeNotifier: Notifier = createNotifier('core');
   const notifierProxy       = forwardingProxy<Notifier>(() => activeNotifier);
+  // Settings writes announce on the same bus — see the CLI host.
+  installSettingsNotifier(notifierProxy);
 
   // ── Registries ────────────────────────────────────────────────────────────────────────────
   const serviceRegistry  = new Map<string, unknown>();
