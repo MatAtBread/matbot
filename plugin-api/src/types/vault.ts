@@ -22,6 +22,18 @@ export interface VaultSpec {
    * reverse-index omit it, and `createSecret`'s dedup step is skipped.
    */
   findByValue?(value: string): string | undefined;
+  /**
+   * Why this backend cannot store a secret under `name` — `undefined` when it can. What is storable
+   * is the *backend's* business: an in-memory map takes anything referenceable, a `.env`-backed one
+   * takes environment-variable names, a header-based one may exclude `:`.
+   *
+   * The returned string is the RULE, phrased for whoever must now choose another name (often an LLM
+   * that invented the rejected one), not a restatement of the failure — it is the only place that
+   * knowledge exists, and it is what rides on the thrown {@link InvalidSecretNameError}. Enforced by
+   * `assertStorableKey`, which every backend's `writeSecret` calls before storing; a backend omitting
+   * this method accepts any name.
+   */
+  unstorableKey?(name: string): string | undefined;
 }
 
 export interface Vault extends VaultSpec {

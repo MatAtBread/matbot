@@ -11,13 +11,14 @@ export {
   promptCancelledError, isPromptCancelledError,
   readOnlyError, isReadOnlyError,
   mediaRejectedError, isMediaRejectedError,
+  invalidSecretNameError, isInvalidSecretNameError,
   StoreQueryError,
 } from '@matatbread/matbot-plugin-api';
 export type {
   MissingSecretError, IncompatibleRuntimeError, NotAPluginError, PromptCancelledError, ReadOnlyError,
-  MediaRejectedError, MatbotErrorKind,
+  MediaRejectedError, InvalidSecretNameError, MatbotErrorKind,
 } from '@matatbread/matbot-plugin-api';
-export { applyCreateSecret }  from '@matatbread/matbot-plugin-api';
+export { applyCreateSecret, assertStorableKey, unreferenceableKey, REFERENCEABLE_KEY_RULE } from '@matatbread/matbot-plugin-api';
 export { isTruncatedToolResult, notifyingStore, ItemChangeKind, RegistryChangeKind } from '@matatbread/matbot-plugin-api';
 // Ambient security principal: the interface is a type (carried by `export type *`); these are the values.
 export { currentPrincipal, tryCurrentPrincipal, runAs, lastActivityAt } from '@matatbread/matbot-plugin-api';

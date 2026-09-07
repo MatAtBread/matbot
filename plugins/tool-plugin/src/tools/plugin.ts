@@ -925,7 +925,7 @@ export const pluginTool: Tool<ToolResultOf<'plugin'>> = {
       },
       key: {
         type:        'string',
-        description: 'Name of the secret to store, e.g. SKILL_RANK_API_KEY (required for store-key). The value is prompted for separately and never enters the conversation; entering a blank value removes the key.',
+        description: 'Name of the secret to store, e.g. SKILL_RANK_API_KEY (required for store-key). The vault decides which names it can hold — the default one persists to a .env file and takes environment-variable names only (a letter or underscore, then letters, digits or underscores), so prefer that shape; a name it cannot store is rejected with an error stating its rule. The value is prompted for separately and never enters the conversation; entering a blank value removes the key.',
       },
     },
   },

@@ -87,6 +87,24 @@ were checked against `inputSchema`, a lossy *projection* of that type, and only 
   since a client that says `null` said something and hiding that would hide a real client bug. Fixed in
   the HTTP route and both in-process transports.
 
+- **A vault write refuses a name the backend cannot store**
+  ([#57](https://github.com/MatAtBread/matbot/issues/57)). A secret stored under a name the medium
+  cannot hold was accepted and then quietly lost — the default vault persists to a `.env` file, so
+  `email:70de70:password=…` is written, dropped by whatever reads the file back (`Ignoring invalid
+  environment assignment`), and the failure surfaces a boot later as a secret that has ceased to exist.
+  Most such names come from an LLM inventing one, which is precisely the caller with no way to know
+  the rule.
+
+  `VaultSpec` gains an optional **`unstorableKey(name)`**, answering *why* this backend cannot hold a
+  name — what is storable is the backend's business and nothing above it can know: an in-memory map
+  takes anything referenceable, the `.env`-backed one takes environment-variable names. Every backend's
+  `writeSecret` asserts it (so `createSecret` is covered too, ending as it does in a write) and throws
+  the new branded **`InvalidSecretNameError`**, carrying the rejected `key` and the backend's `rule` —
+  phrased as what IS storable, since the reader's next act is to choose another name. Removal
+  (`writeSecret(name, '')`) deliberately skips the check, so a name that predates the rule, or arrived
+  from an environment snapshot, stays deletable. Backends that omit the method accept any name; the
+  base rule every vault shares is that a name must be referenceable as `${NAME}` at all.
+
 - **A tool's own `teardown` is not responsible for unregistering its services**, and never was — the
   loader unregisters a plugin's registered keys *before* awaiting its teardown, so a consumer sees
   absence (which it can handle) rather than a closed service that looks present and throws on use. Now

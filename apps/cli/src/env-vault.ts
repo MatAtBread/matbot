@@ -9,6 +9,10 @@ import { readFile, writeFile } from 'node:fs/promises';
  *
  * Persistence hooks the write primitive, not createSecret — so the reference and dedup paths of
  * createSecret (which never call writeSecret) never append a dead line to .env.
+ *
+ * The file is also read as an environment file by whatever starts matbot, so the name policy is
+ * narrower than the base vault's: anything else is written, accepted, and then dropped by the reader
+ * with at most a log line nobody sees ("Ignoring invalid environment assignment").
  */
 export class EnvFileVault extends VaultImpl {
   private readonly envPath: string;
@@ -16,6 +20,12 @@ export class EnvFileVault extends VaultImpl {
   constructor(envPath: string, env?: Record<string, string | undefined>) {
     super({}, env);
     this.envPath = envPath;
+  }
+
+  override unstorableKey(name: string): string | undefined {
+    return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name)
+      ? undefined
+      : 'this vault persists to a .env file, so a secret name must be a valid environment-variable name: a letter or underscore, then letters, digits or underscores only (e.g. ACME_EMAIL_PASSWORD)';
   }
 
   override async writeSecret(name: string, value: string): Promise<void> {
