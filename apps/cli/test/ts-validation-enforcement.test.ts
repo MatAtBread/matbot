@@ -2,6 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { MatbotMachine } from '@matatbread/matbot-plugin-api';
 import type { ToolInputValidator } from '@matatbread/matbot-core';
+import { ItemChangeKind, runAs, installPrincipalCarrier } from '@matatbread/matbot-core';
+import { createAlsPrincipalCarrier } from '../src/principal-als.ts';
+
+installPrincipalCarrier(createAlsPrincipalCarrier());
 import type { ToolValidator } from '@matatbread/matbot-tool-types';
 import { plugin as tsValidation } from '@matatbread/matbot-tool-ts-validation';
 
@@ -29,9 +33,15 @@ function harness(opts: {
   services: MatbotMachine;
   warnings: string[];
   reg: Record<string, unknown>;
+  reads(): number;
+  write(enforce: string, principal?: string): void;
 } {
   const warnings: string[] = [];
   const store = new Map<string, unknown>();
+  let reads = 0;
+  // The invalidation half of the bus: the plugin caches `enforce` and re-reads only when a settings
+  // write announces itself, so a test needs to publish one.
+  const sinks: ((n: unknown) => void)[] = [];
   if (opts.enforce !== undefined) store.set('enforce', opts.enforce);
   let registered: ToolInputValidator | undefined;
 
@@ -50,7 +60,7 @@ function harness(opts: {
 
   const services = {
     settings: () => ({
-      get: async <T,>(k: string): Promise<T | undefined> => store.get(k) as T | undefined,
+      get: async <T,>(k: string): Promise<T | undefined> => { reads++; return store.get(k) as T | undefined; },
       set: async () => {}, delete: async () => {},
     }),
     register: async (key: string, value: unknown) => {
@@ -64,13 +74,25 @@ function harness(opts: {
     // to know when its dts is stale, and roots its scan at the config's directory. `configPath` is left
     // undefined so the scan roots at '.', which keeps these tests off the monorepo walk — the generated
     // output is pinned in tool-contract-validators.test.ts, not here.
-    Notifier: { consume: () => {}, notify: () => {}, subscribe: () => (async function* () {})() },
+    Notifier: {
+      consume: (h: (n: unknown) => void) => { sinks.push(h); },
+      notify: () => {}, subscribe: () => (async function* () {})(),
+    },
     tools: { list: () => [], resolve: () => null, register() {}, remove() {}, removeByPlugin() {} },
   } as unknown as MatbotMachine;
 
   const original = console.warn;
   return {
     warnings, services, reg,
+    reads: () => reads,
+    write(enforce: string, principal?: string) {
+      store.set('enforce', enforce);
+      for (const sink of sinks) {
+        sink({ kind: ItemChangeKind, plugin: 'core', source: 'settings', namespace: 'settings',
+               id: 'settings_doc', operation: 'saved',
+               ...(principal !== undefined ? { principal: { id: principal, type: 'user' } } : {}) });
+      }
+    },
     setup: async () => { await tsValidation.setup?.(services); },
     async validate(input: unknown) {
       if (!registered) await tsValidation.setup?.(services);
@@ -184,5 +206,47 @@ test('a supply that disappears mid-flight is re-created, not fatal', async () =>
   // whoever came before). What must never come back is a rejection the caller cannot act on.
   assert.ok(out === undefined || out.length === 0, `the call must not be refused, got ${JSON.stringify(out)}`);
   assert.ok(h.reg['ToolTypeIndex'], 'and the supply must have been re-installed');
+  await tsValidation.teardown?.();
+});
+
+// ── The `enforce` cache ────────────────────────────────────────────────────────
+// Validation now sits at the executor, so `enforce` is read on every tool call through every door.
+// Re-reading a store (a disk read on the filesystem backend) to re-learn a value that changes
+// approximately never is the cost; a settings ItemChange is what makes caching it correct rather than
+// a TTL guess.
+
+test('enforce is read once and then cached', async () => {
+  const h = harness({ enforce: 'reject', entry: PASSES });
+  await h.validate({ action: 'list' });
+  const after = h.reads();
+  await h.validate({ action: 'list' });
+  await h.validate({ action: 'list' });
+  assert.equal(h.reads(), after, 'later calls must not re-read the settings store');
+  await tsValidation.teardown?.();
+});
+
+test('a settings write invalidates it, so a change takes effect on the next call', async () => {
+  const h = harness({ enforce: 'warn', entry: FAILS });
+  assert.deepEqual(await h.validate({ action: 'rename' }), [], 'warn lets the call through');
+  h.write('reject');
+  const out = await h.validate({ action: 'rename' });
+  assert.ok(out && out.length > 0, 'the new value must be in force without a restart');
+  await tsValidation.teardown?.();
+});
+
+test('the cache is keyed by principal, and a write clears only that one', async () => {
+  // An override is per-principal and CAS'd, so one user switching to `off` must not switch it off for
+  // everyone — the disambiguation ItemChange.principal already carries.
+  const h = harness({ enforce: 'reject', entry: FAILS });
+  const asUser = (id: string) => runAs({ id, type: 'user' }, () => h.validate({ action: 'rename' }));
+
+  assert.ok((await asUser('a'))?.length, 'a is enforcing');
+  assert.ok((await asUser('b'))?.length, 'b is enforcing');
+  const before = h.reads();
+
+  h.write('off', 'a');
+  assert.equal(await asUser('a'), undefined, "a's write must take effect for a");
+  assert.ok((await asUser('b'))?.length, "and must not disturb b's cached value");
+  assert.equal(h.reads(), before + 1, 'exactly one entry was invalidated');
   await tsValidation.teardown?.();
 });

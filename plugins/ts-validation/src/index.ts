@@ -1,4 +1,4 @@
-import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, ItemChangeKind, tryCurrentPrincipal } from '@matatbread/matbot-plugin-api';
 import type { MatbotPluginSpec, MatbotMachine } from '@matatbread/matbot-plugin-api';
 import type { ToolInputValidator } from '@matatbread/matbot-core';
 // A HARD dependency, and a direct one — a `dependencies` entry, the same relationship `mcp` has to
@@ -42,6 +42,10 @@ function isEnforcement(v: unknown): v is Enforcement {
   return v === 'off' || v === 'warn' || v === 'reject';
 }
 
+// The routing namespace core announces settings writes under. Not imported from core, which is not a
+// dependency of this plugin (only its types are, and those are erased).
+const SETTINGS_NAMESPACE = 'settings';
+
 /**
  * The `ToolTypeIndex` this plugin installed itself, if it had to. Held so `teardown` can close it —
  * the index owns a worker thread — and so a live `unregister` of the service does not strand this
@@ -82,7 +86,7 @@ async function supplyFor(services: MatbotMachine): Promise<ToolValidatorSupplier
   try { return await installing; } finally { installing = undefined; }
 }
 
-function makeValidator(services: MatbotMachine): ToolInputValidator {
+function makeValidator(services: MatbotMachine, signal: AbortSignal): ToolInputValidator {
   // Reported once per tool, not per call: a refusal or caveat is a property of the CONTRACT, so
   // repeating it on every invocation would bury the turn's real output.
   const noted = new Set<string>();
@@ -92,10 +96,37 @@ function makeValidator(services: MatbotMachine): ToolInputValidator {
   // earlier one.
   const previous = services.ToolCallValidator;
 
+  // `enforce` is read on every tool call through every door, and `PluginSettings.get` is a store read —
+  // on the filesystem backend, a disk read — to re-learn a value that changes approximately never. So it
+  // is cached, which is only correct because a settings write now publishes an `ItemChange` (#58):
+  // invalidation is an event rather than a TTL, which is either too short to help or long enough that an
+  // operator's change appears not to work.
+  //
+  // Keyed by principal, because a settings override is per-principal — one user's `warn` must not become
+  // everyone's. Any settings write clears the writer's entry, not only a write to THIS plugin's document:
+  // telling them apart means re-deriving core's namespace slug here, where it would drift silently, and
+  // the cost of being loose is one extra store read after an unrelated setting changes.
+  const cached = new Map<string, Enforcement>();
+  services.Notifier.consume(n => {
+    if (n.kind !== ItemChangeKind || n.namespace !== SETTINGS_NAMESPACE) return;
+    const owner = n.principal?.id;
+    if (owner === undefined) cached.clear();
+    else cached.delete(owner);
+  }, signal, n => n.kind === ItemChangeKind);
+
+  const enforcement = async (): Promise<Enforcement> => {
+    const key = tryCurrentPrincipal()?.id ?? '';
+    const hit = cached.get(key);
+    if (hit !== undefined) return hit;
+    const raw      = await services.settings().get<string>(ENFORCE_KEY);
+    const resolved = isEnforcement(raw) ? raw : DEFAULT_ENFORCEMENT;
+    cached.set(key, resolved);
+    return resolved;
+  };
+
   return {
     async validateToolCall(name, parameters) {
-      const raw = await services.settings().get<string>(ENFORCE_KEY);
-      const enforce: Enforcement = isEnforcement(raw) ? raw : DEFAULT_ENFORCEMENT;
+      const enforce = await enforcement();
       if (enforce === 'off') return previous?.validateToolCall(name, parameters);
 
       // Resolved per call rather than captured, so an unload/reload of tool-types is followed rather
@@ -140,6 +171,9 @@ function makeValidator(services: MatbotMachine): ToolInputValidator {
   };
 }
 
+/** Ends the validator's settings-invalidation subscription at teardown. */
+let invalidation: AbortController | undefined;
+
 export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,
   manifest: { description: 'Enforces each tool\'s ToolContract params type at the executor, via core\'s ToolCallValidator seam — so the model\'s path, HTTP tool routes and invokeTool are all checked by one validator.' },
@@ -150,12 +184,17 @@ export const plugin: MatbotPluginSpec = {
     // then it owns the service, other consumers (function-tools, skills_compiler) get it, and this
     // resolves to theirs — but it is no longer a requirement.
     await supplyFor(services);
-    await services.register('ToolCallValidator', makeValidator(services));
+    invalidation = new AbortController();
+    await services.register('ToolCallValidator', makeValidator(services, invalidation.signal));
   },
 
   // Only ever closes an index this plugin installed itself. One that tool-types registered is
   // tool-types' to close, and the loader already unregisters the key before calling its teardown.
   async teardown() {
+    // The cache-invalidation subscription is this plugin's own, not a host-scoped interest, so it ends
+    // here — otherwise an unload leaves a handler writing into a torn-down closure once per reload.
+    invalidation?.abort();
+    invalidation = undefined;
     const own = installed;
     installed = undefined;
     await own?.spec.teardown?.();

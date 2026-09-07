@@ -133,7 +133,9 @@ were checked against `inputSchema`, a lossy *projection* of that type, and only 
 ### Optional
 
 - **`ts-validation`** (new, node) — consumes tool-types' supply, applies `enforce: off | warn | reject`
-  (default **reject**, since loading the plugin is the opt-in) and registers the `ToolCallValidator`
+  (default **reject**, since loading the plugin is the opt-in; cached per principal and invalidated by
+  the settings `ItemChange` above, since validation at the executor otherwise re-reads it from the store
+  on every tool call through every door) and registers the `ToolCallValidator`
   core consults. Its dependency on tool-types is hard and direct — a `dependencies` entry and a plain
   import, the relationship `mcp` has to `mcp-http` — so it **installs the service itself** when nothing
   else has: there is no load-order requirement and no mount-table latch. Listing `tool-types` as well
