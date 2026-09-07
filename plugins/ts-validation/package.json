@@ -1,8 +1,7 @@
 {
-  "name": "@matatbread/matbot-cognition",
+  "name": "@matatbread/matbot-tool-ts-validation",
   "matbotRuntime": [
-    "node",
-    "browser"
+    "node"
   ],
   "version": "0.4.12",
   "engines": {
@@ -11,13 +10,14 @@
   "files": [
     "src"
   ],
-  "description": "Cognitive services: seeds built-in cognition skills (Inner voice, Remember this, Dream time) into the active skills service. A home for further cognitive skills and tools.",
+  "description": "Validates tool-call inputs against each tool's ToolContract params TYPE (not its projected JSON Schema), returning an error result on mismatch so the model can self-correct. Hard-depends on @matatbread/matbot-tool-types (node only), installing it itself if it is not already loaded — so there is no load-order requirement.",
   "keywords": [
     "matbot",
     "matbot-plugin",
     "llm",
     "ai",
-    "agent"
+    "agent",
+    "typescript"
   ],
   "license": "Apache-2.0",
   "type": "module",
@@ -30,21 +30,21 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/MatAtBread/matbot.git",
-    "directory": "plugins/cognition"
+    "directory": "plugins/ts-validation"
   },
   "publishConfig": {
     "access": "public"
   },
   "dependencies": {
-    "@matatbread/matbot-tool-store": "workspace:^"
+    "@matatbread/matbot-tool-types": "workspace:^"
   },
   "peerDependencies": {
     "@matatbread/matbot-plugin-api": "workspace:^"
   },
   "devDependencies": {
+    "@types/node": "catalog:",
     "typescript": "catalog:",
     "@matatbread/matbot-plugin-api": "workspace:^",
-    "@matatbread/matbot-skills": "workspace:^",
-    "@matatbread/matbot-triggers": "workspace:^"
+    "@matatbread/matbot-tool-types": "workspace:^"
   }
 }

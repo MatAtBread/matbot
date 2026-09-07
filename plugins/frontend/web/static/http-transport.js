@@ -77,7 +77,7 @@
     const res = await apiFetch('/tools/' + toolName, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(input),
+      body: JSON.stringify(input ?? {}),   // a no-argument call is `{}`, not an absent body
     });
     const data = await res.json();
     // Two newlines between the status and the body's message: they are two facts, and concatenated they

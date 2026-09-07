@@ -11,7 +11,11 @@ declare module '@matatbread/matbot-plugin-api' {
       | ToolContract<{ triggers: Trigger[] }, { action: 'query'; tool?: string; params?: object }>
       | ToolContract<Trigger,                 { action: 'get'; id: string }>
       | ToolContract<{ id: string },          { action: 'add'; conditions: TriggerCondition[]; tool: string; params?: object; enabled?: boolean; cooldown?: TriggerCooldown }>
-      | ToolContract<Trigger,                 { action: 'update'; id: string; conditions?: TriggerCondition[]; tool?: string; params?: object; enabled?: boolean; cooldown?: TriggerCooldown }>
+      // `cooldown: null` CLEARS every limit, which an omitted `cooldown` deliberately does not (it
+      // leaves the stored one untouched). The executor has always accepted it and the web UI has always
+      // sent it; only this arm omitted it, so a documented call was untypeable — invisible until the
+      // params type was actually enforced. `add` takes no `null`: there is no prior limit to clear.
+      | ToolContract<Trigger,                 { action: 'update'; id: string; conditions?: TriggerCondition[]; tool?: string; params?: object; enabled?: boolean; cooldown?: TriggerCooldown | null }>
       | ToolContract<Trigger,                 { action: 'disable'; id: string }>
       | ToolContract<Trigger,                 { action: 'enable'; id: string }>
       | ToolContract<{ id: string },          { action: 'remove'; id: string }>
@@ -61,7 +65,8 @@ const GUIDANCE =
   'consecutive turns). Absent ⇒ unlimited, which is right for most triggers: a trigger that captures ' +
   'what the user just said SHOULD fire every turn, and rate-limiting it silently loses data. Use a ' +
   'cool-down for triggers whose consequence is a self-directed steer (critique, verify, reconsider), ' +
-  'where matching every turn is correct but acting every turn is a spin.';
+  'where matching every turn is correct but acting every turn is a spin. On "update", omitting ' +
+  '`cooldown` leaves the stored limits untouched; pass `null` to clear them.';
 
 type TriggerActionInput =
   | { action: 'list' }

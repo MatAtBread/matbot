@@ -15,7 +15,7 @@ import type {
   PluginResolver, StorageBackend, FileStore, PromptFn, MatbotPlugin, Principal, Runtime, Usage,
 } from '@matatbread/matbot-plugin-api';
 // Boot assembly, so from plugin-api's `/host` half — via core, which re-exports it for exactly this.
-import type { SwapFn } from '@matatbread/matbot-core';
+import type { SwapFn, ToolInputValidator } from '@matatbread/matbot-core';
 import { LookupKnowledgeIndex } from '@matatbread/matbot-core';
 import { mediumGuard } from '@matatbread/matbot-core/storage-base';
 import { BrowserStorageBackend, LocalStorageVault } from '@matatbread/matbot-browser';
@@ -270,10 +270,15 @@ export async function boot(env: BootEnv): Promise<void> {
   const notifierProxy       = forwardingProxy<Notifier>(() => activeNotifier);
 
   // ── Registries ────────────────────────────────────────────────────────────────────────────
-  const toolReg          = new ToolRegistryImpl(undefined, notifierProxy);
+  const serviceRegistry  = new Map<string, unknown>();
+  // Late-bound validator lookup, read per call — see the CLI host for the reasoning. No validator is
+  // registered in the browser today (tool-types is node-only, since it needs a TypeScript program), so
+  // this resolves to undefined and every call passes through; it is wired anyway so a browser-side
+  // validator — or validators shipped as generated JS — needs no host change to take effect.
+  const toolReg          = new ToolRegistryImpl(undefined, notifierProxy,
+    () => serviceRegistry.get('ToolCallValidator') as ToolInputValidator | undefined);
   const hookReg          = new HookRegistry();
   const systemContextReg = new SystemContextRegistryImpl();
-  const serviceRegistry  = new Map<string, unknown>();
   // OPFS (or whatever backend is active) doubles as the media store, so attachments work with no extra
   // plugin. Seeded into the registry rather than spelled on baseServices so `register('MediaStore', …)`
   // can reach it — see the CLI host for the same note.

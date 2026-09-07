@@ -105,6 +105,17 @@ export interface ToolContract<Result, Args = unknown> {
   readonly [ARGS]:   Args;
 }
 
+/**
+ * The params of a tool that takes none — an object with no properties.
+ *
+ * Spelled out because both obvious alternatives are wrong. **`{}` is not the empty object type**: in
+ * TypeScript it means "any non-nullish value", so `ToolContract<R, {}>` accepts `'hello'` and `42` and
+ * describes nothing. And **omitting `Args` is looser still**: it defaults to `unknown`, which a
+ * validator can only pass, so a caller sending `null` — or anything at all — is accepted. Both read as
+ * "no parameters" and neither says it.
+ */
+export type NoParams = Record<string, never>;
+
 type ToolResultArmed<E>           = E extends ToolContract<unknown, unknown> ? true : false;
 type ToolResultUnion<E>           = E extends ToolContract<infer R, unknown> ? R : never;
 type ToolResultMatched<E, P>      = E extends ToolContract<infer R, infer A> ? (P extends A ? R : never) : never;

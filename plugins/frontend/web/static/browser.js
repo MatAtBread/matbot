@@ -94,7 +94,10 @@ function makeInProcessTransport(services) {
     if (!tool) throw new Error(`Tool "${name}" not found (404)`);
     const ac = new AbortController();
     const ctx = makeToolCtx(ac);
-    for await (const ev of tool.executor.execute(input, ctx)) {
+    // `input ?? {}` for the same reason the HTTP route defaults an empty body to `{}`: a no-argument
+    // call reaches here as `undefined`, and every tool reads its params as an object. Kept in step with
+    // the HTTP transport so the two are interchangeable.
+    for await (const ev of tool.executor.execute(input ?? {}, ctx)) {
       if (ev.type === 'result') return ev.value;
       if (ev.type === 'error')  throw new Error(ev.message);
     }

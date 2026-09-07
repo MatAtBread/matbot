@@ -1,5 +1,17 @@
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
-import type { MatbotPluginSpec, Hook, JSONSchema } from '@matatbread/matbot-plugin-api';
+import type { MatbotPluginSpec, JSONSchema } from '@matatbread/matbot-plugin-api';
+// Type-only: it brings the `MatbotServices.ToolCallValidator` augmentation, which core declares because
+// core is what consults it (at the executor, so every door is covered rather than only the model's).
+import type { MatbotMachine } from '@matatbread/matbot-plugin-api';
+import type { ToolInputValidator } from '@matatbread/matbot-core';
+
+/** Structural, not imported: matches what core's `ToolInputValidator` expects back. Paths are DOTTED
+ *  (`.items[0].name`) so this validator and the typed one read identically to whoever gets the error,
+ *  and `value` is what was actually supplied — core renders it, and omits it when absent. */
+interface ValidationError { path: string; message: string; value?: unknown }
+
+/** `.name` for an identifier-shaped key, `["odd key"]` otherwise — the access a caller would write. */
+const propPath = (k: string): string => /^[A-Za-z_$][\w$]*$/.test(k) ? `.${k}` : `[${JSON.stringify(k)}]`;
 
 // A deliberately small JSON Schema validator covering the subset matbot tool
 // inputSchemas use: type, properties, required, items, enum, additionalProperties,
@@ -50,27 +62,27 @@ function matches(type: string, value: unknown): boolean {
   }
 }
 
-function validate(schema: JSONSchema, value: unknown, path: string, errs: string[]): void {
-  const at = path || '/';
+function validate(schema: JSONSchema, value: unknown, path: string, errs: ValidationError[]): void {
+  const at = path || '.';
   const type = schema['type'];
 
   if (typeof type === 'string' && !matches(type, value)) {
-    errs.push(`${at}: expected ${type}, got ${value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value}`);
+    errs.push({ path: at, message: `expected ${type}, got ${value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value}`, value });
     return;
   }
   if (Array.isArray(type) && !type.some(t => typeof t === 'string' && matches(t, value))) {
-    errs.push(`${at}: expected one of ${type.join(', ')}`);
+    errs.push({ path: at, message: `expected one of ${type.join(', ')}`, value });
     return;
   }
 
   const enumVals = schema['enum'];
   if (Array.isArray(enumVals) && !enumVals.some(e => e === value || JSON.stringify(e) === JSON.stringify(value))) {
-    errs.push(`${at}: must be one of ${enumVals.map(e => JSON.stringify(e)).join(', ')}`);
+    errs.push({ path: at, message: `must be one of ${enumVals.map(e => JSON.stringify(e)).join(', ')}`, value });
   }
 
   const pattern = schema['pattern'];
   if (typeof pattern === 'string' && typeof value === 'string' && !new RegExp(pattern).test(value)) {
-    errs.push(`${at}: does not match pattern ${pattern}`);
+    errs.push({ path: at, message: `does not match pattern ${pattern}`, value });
   }
 
   if (matches('object', value)) {
@@ -80,47 +92,58 @@ function validate(schema: JSONSchema, value: unknown, path: string, errs: string
     const additional = schema['additionalProperties'];
 
     for (const key of required) {
-      if (!(key in obj)) errs.push(`${path}/${key}: required property missing`);
+      // No `value`: a missing property has none, and JSON cannot carry `undefined` to show.
+      if (!(key in obj)) errs.push({ path: `${path}${propPath(key)}`, message: 'required property missing' });
     }
     for (const [key, v] of Object.entries(obj)) {
-      if (props[key]) validate(props[key], v, `${path}/${key}`, errs);
-      else if (additional === false) errs.push(`${path}/${key}: unexpected property`);
+      if (props[key]) validate(props[key], v, `${path}${propPath(key)}`, errs);
+      else if (additional === false) errs.push({ path: `${path}${propPath(key)}`, message: 'unexpected property', value: v });
       else if (typeof additional === 'object' && additional !== null) {
-        validate(additional as JSONSchema, v, `${path}/${key}`, errs);
+        validate(additional as JSONSchema, v, `${path}${propPath(key)}`, errs);
       }
     }
   }
 
   const items = schema['items'];
   if (Array.isArray(value) && typeof items === 'object' && items !== null) {
-    value.forEach((v, i) => validate(items as JSONSchema, v, `${path}/${i}`, errs));
+    value.forEach((v, i) => validate(items as JSONSchema, v, `${path}[${i}]`, errs));
   }
 }
 
-function makeValidatorHook(): Hook {
+// Registered as core's `ToolCallValidator` rather than installed as a `toolcall` hook. The hook was a
+// RUNNER channel, so it guarded the model's path and nothing else: `POST /tools/:name` and `invokeTool`
+// both call `tool.executor.execute` directly and fire no hooks. Core now consults this at the executor,
+// which is the one place all three doors already pass through — so there is one check instead of one per
+// door, and nothing to drift.
+function makeValidator(services: MatbotMachine): ToolInputValidator {
   const reported = new Set<string>();
+  // Whatever was registered before us. A validator that displaces another delegates to it when it has
+  // nothing to say, so the typed validator (contracts) and this one (schemas) compose in either load
+  // order instead of shadowing each other.
+  const previous = services.ToolCallValidator;
 
   return {
-    on:         'toolcall',
-    pluginName: '@matatbread/matbot-tool-json-validation',
-    async handler(ctx) {
-      const { tool, toolCall } = ctx;
+    async validateToolCall(name, parameters) {
+      const tool = services.tools.resolve(name);
+      // No such tool, or nothing to validate against: NO OPINION, never "valid".
+      if (!tool) return previous?.validateToolCall(name, parameters);
 
-      if (!reported.has(tool.name)) {
-        reported.add(tool.name);
+      if (!reported.has(name)) {
+        reported.add(name);
         const unvalidated = new Map<string, string>();
         findUnvalidated(tool.inputSchema, '', unvalidated);
         if (unvalidated.size > 0) {
           const list = [...unvalidated].map(([kw, at]) => `${kw} (at ${at})`).join(', ');
-          console.warn(`[json-validation] Tool "${tool.name}" schema uses keyword(s) this validator does not check: ${list}. Inputs exercising these are passed through unvalidated.`);
+          console.warn(`[json-validation] Tool "${name}" schema uses keyword(s) this validator does not check: ${list}. Inputs exercising these are passed through unvalidated.`);
         }
       }
 
-      const errs: string[] = [];
-      validate(tool.inputSchema, toolCall.input, '', errs);
-      if (errs.length === 0) return;
-
-      return { rejectTool: { message: `Invalid input for tool "${toolCall.name}": ${errs.join('; ')} [${this.pluginName}]` } };
+      const errs: ValidationError[] = [];
+      validate(tool.inputSchema, parameters, '', errs);
+      // A clean pass here is weak evidence — this validator is deliberately minimal — so defer to a
+      // predecessor that may know more (a typed contract) before reporting "valid".
+      if (errs.length === 0) return await previous?.validateToolCall(name, parameters) ?? [];
+      return errs;
     },
   };
 }
@@ -129,6 +152,6 @@ export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,
 
   async setup(services) {
-    services.hooks.register(makeValidatorHook());
+    await services.register('ToolCallValidator', makeValidator(services));
   },
 };

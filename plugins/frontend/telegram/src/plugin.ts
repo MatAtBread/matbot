@@ -1,6 +1,6 @@
 import type {
   MatbotPluginSpec, MatbotMachine, Principal, Session, PromptFn, FormField,
-  ToolExecutor, ToolContract, ToolResultOf, UserContent, MimeType,
+  ToolExecutor, ToolContract, NoParams, ToolResultOf, UserContent, MimeType,
 } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION, isMediaRejectedError, encodeBase64 } from '@matatbread/matbot-plugin-api';
 
@@ -10,7 +10,7 @@ declare module '@matatbread/matbot-plugin-api' {
     telegram_provider:
       | ToolContract<{ provider: string | null }, { action: 'get' }>
       | ToolContract<{ provider: string | null }, { action: 'set'; provider: string }>;
-    telegram_open_door: ToolContract<{ open_until: string }, Record<string, never>>;  // ISO time the join window stays open until
+    telegram_open_door: ToolContract<{ open_until: string }, NoParams>;  // ISO time the join window stays open until
     telegram_send:      ToolContract<{ sent: number }, { text: string; chatId?: number }>;  // how many chats the notification reached
   }
 }

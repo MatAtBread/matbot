@@ -1,9 +1,9 @@
-import type { Tool, ToolContract, ToolResultOf, Principal, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolContract, NoParams, ToolResultOf, Principal, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION, currentPrincipal } from '@matatbread/matbot-plugin-api';
 
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
-    whoami: ToolContract<Principal, Record<string, never>>;
+    whoami: ToolContract<Principal, NoParams>;
   }
 }
 

@@ -1,5 +1,5 @@
 import type {
-  Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext, MatbotMachine, SystemContextPart,
+  Tool, ToolExecutor, ToolContract, NoParams, ToolResultOf, ToolContext, MatbotMachine, SystemContextPart,
 } from '@matatbread/matbot-plugin-api';
 
 declare module '@matatbread/matbot-plugin-api' {
@@ -13,7 +13,7 @@ declare module '@matatbread/matbot-plugin-api' {
       systemPrompt:    string | null;
       /** The same text kept apart and attributed, so a contribution can be traced to its plugin. */
       systemContext:   SystemContextPart[];
-    }, Record<string, never>>;
+    }, NoParams>;
   }
 }
 
