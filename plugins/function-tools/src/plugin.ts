@@ -352,7 +352,10 @@ const INPUT_SCHEMA: JSONSchema = {
  * CLAUDE.md) rather than something rebuilt per turn.
  */
 const MULTI_STAGE_ADVICE =
-  "The test for `tool_function { action: 'lambda' }` is whether you are REDUCING a result: (a) a tool " +
+  "## tool_function { action: 'lambda' }\n\n" +
+  'Lambda functions allow you to run Javascript directly, which is often more efficient than shelling python ' +
+  'or bash, and works even if you have no shell tools available. You can call tools from lambda functions. ' +
+  'The test for lambda functions is whether you are REDUCING a result: (a) a tool ' +
   'whose result is VERBOSE and you need a fraction of it — a count, a total, an aggregate, a summary, a ' +
   'couple of fields; or (b) a LOOP or a CONDITIONAL — the same call over n items, read-each-and-decide, ' +
   'retry-until, branch on what came back. There a lambda does the whole thing in one call and returns only ' +
