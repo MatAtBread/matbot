@@ -1,4 +1,5 @@
 import type TS from 'typescript';
+import { buildToolValidator, type ToolValidator } from './validator.js';
 
 // Derive a self-contained `declare module … { interface ToolContracts {…} interface MatbotServices {…} }`
 // from the live type graph, so a compiled (or hand-rolled) plugin's compilation sees correct types for
@@ -57,6 +58,12 @@ export interface MatbotToolsDts {
   // (the arms) is thus also the source of the wire description, so a source tool's `ToolContracts`
   // augmentation is its single contract.
   contracts: Record<string, { params: string; result: string }>;
+  // Per source-scanned tool: a callable pure-JS validator for its params, emitted from the checker's
+  // RESOLVED type in this same pass — so conditionals/generics/`Omit` are already evaluated and no
+  // second `ts.Program` is ever built. A contract that cannot be honestly validated yields
+  // `{ refused }` rather than a permissive validator — and those refusals are the census of what the
+  // typed path does not cover. The emitted TEXT is not carried: `generateValidator` regenerates it.
+  validators: Record<string, ToolValidator>;
   // The names of every plugin-api type export. A source-less tool's `toolContract` string may name one
   // (e.g. `StoreQuery`); the consumer (ToolTypeIndex) uses this to import the ones it references so those
   // references resolve rather than dangle.
@@ -83,8 +90,19 @@ type Classification =
 // throws "not registered" at runtime, which is the one failure the check gate exists to prevent. Omit it
 // only when the caller genuinely wants the whole scanned tree (the clash census test); the registry is not
 // optional information for anything that shows the dts to a model.
+// `syntheticContracts` maps a tool name to its `toolContract` STRING — the form a tool built at runtime
+// must use, having no source to carry a `ToolContracts` augmentation (`function-tools`' generated
+// functions, `tool-store`'s per-namespace tools). They are rendered into one virtual augmentation file
+// added to THIS Program, so declaration merging puts them in the same `ToolContracts` as every scanned
+// arm and the validator generator below reaches them with no second code path and no second Program.
+//
+// They are then held OUT of the emitted dts and out of `contracts`: the caller splices those verbatim
+// from the same strings (`registryBlock`, `splitContract`), which is what the model already sees, and
+// re-deriving that text from the resolved type would change it — expanding an alias the author wrote
+// deliberately — for no gain. So this argument buys exactly one thing: the validators.
 export async function buildMatbotToolsDts(
   projectRoot: string, pluginEntryUrls?: readonly string[], liveToolNames?: readonly string[],
+  syntheticContracts?: Readonly<Record<string, string>>,
 ): Promise<MatbotToolsDts | null> {
   const ts = (await import('typescript')).default as typeof TS;
   const { readFileSync, readdirSync, statSync, existsSync } = await import('node:fs');
@@ -164,7 +182,7 @@ export async function buildMatbotToolsDts(
   }
   if (roots.size === 1) return null;                          // nothing to scan beyond plugin-api itself
 
-  const program = ts.createProgram([...roots], {
+  const options: TS.CompilerOptions = {
     target:                   ts.ScriptTarget.ES2022,
     module:                   ts.ModuleKind.NodeNext,
     moduleResolution:         ts.ModuleResolutionKind.NodeNext,
@@ -173,7 +191,8 @@ export async function buildMatbotToolsDts(
     noEmit:                   true,
     skipLibCheck:             true,
     baseUrl:                  projectRoot,
-  });
+  };
+  const program = ts.createProgram([...roots], options);
   const checker = program.getTypeChecker();
 
   const apiSf = program.getSourceFile(pluginApiIndex)
@@ -184,6 +203,125 @@ export async function buildMatbotToolsDts(
   const apiExports = checker.getExportsOfModule(apiModule);
   const TYPE_FLAGS = ts.SymbolFlags.Type | ts.SymbolFlags.Interface | ts.SymbolFlags.TypeAlias;
   const apiTypeNames = new Set(apiExports.filter(s => (s.flags & TYPE_FLAGS) !== 0).map(s => s.name));
+
+  /**
+   * Validators for the tools whose contract is a `toolContract` STRING. The emitter needs a `ts.Type`,
+   * and a string is not one, so the strings are rendered into a virtual augmentation file and typed.
+   *
+   * This is a SECOND, deliberately tiny Program — the virtual file plus plugin-api, no workspace scan —
+   * rather than an extra root on the one above, because the exact import list is only knowable once
+   * plugin-api's exports have been resolved by a checker, and that is the Program above. Guessing the
+   * list instead (rewrite every capitalised bare name to an inline `import(...)`) needs a denylist of
+   * TypeScript's own utility types, and the first thing it breaks is `Record<string, never>` — which is
+   * `NoParams`, the commonest synthetic params type there is. Exactness is worth the second Program;
+   * nothing is built at all when no synthetic tool is loaded.
+   *
+   * Only `paramNodes` is taken from here. The wire text and the dts arm are spliced from the same strings
+   * by the caller and are what the model already reads; re-deriving them from the resolved type would
+   * expand an alias the author wrote deliberately, for no gain.
+   */
+  const syntheticValidators = (): Record<string, ToolValidator> => {
+    const out: Record<string, ToolValidator> = {};
+    const usable: Record<string, string> = {};
+
+    // Screened one at a time, BEFORE any is rendered into the shared file: they become properties of one
+    // interface, where a single stray brace would swallow every arm after it and take the whole batch
+    // down. A malformed string is a stated refusal rather than a silent absence — nothing else in the
+    // system parses these, so until now a broken one was merely bad documentation.
+    for (const [name, text] of Object.entries(syntheticContracts ?? {})) {
+      const probe = ts.createSourceFile('/probe.ts', `type __P = ${text};\n`, ts.ScriptTarget.ES2022, true);
+      const bad = (probe as unknown as { parseDiagnostics?: readonly TS.Diagnostic[] }).parseDiagnostics ?? [];
+      if (bad.length > 0) {
+        out[name] = { refused: `toolContract does not parse as a type: ${ts.flattenDiagnosticMessageText(bad[0]!.messageText, ' ')}` };
+      } else out[name] = (usable[name] = text, { refused: 'not resolved' });   // replaced below, or kept as the refusal
+    }
+    const names = Object.keys(usable);
+    if (names.length === 0) return out;
+
+    const body = names.map(n => `    ${JSON.stringify(n)}: ${usable[n]!};`).join('\n');
+    // Exactly the plugin-api types these arms name, from the resolved export set — the same rule
+    // `registryBlock` uses for the dts. A synthetic tool inlines its own shape types, so what is left is
+    // genuine plugin-api exports.
+    const referenced = ['ToolContract', ...[...apiTypeNames].filter(t => new RegExp(`\\b${t}\\b`).test(body))];
+    const src = `import type { ${[...new Set(referenced)].join(', ')} } from '@matatbread/matbot-plugin-api';\n`
+      + `declare module '@matatbread/matbot-plugin-api' {\n  interface ToolContracts {\n${body}\n  }\n}\n`;
+
+    const virtualPath = join(projectRoot, '__matbot_synthetic_contracts__.ts');
+    const host = ts.createCompilerHost(options);
+    const innerGet = host.getSourceFile.bind(host);
+    const innerExists = host.fileExists.bind(host);
+    const innerRead = host.readFile.bind(host);
+    host.getSourceFile = (f, v, onError, create) =>
+      f === virtualPath ? ts.createSourceFile(f, src, v, true) : innerGet(f, v, onError, create);
+    host.fileExists = f => f === virtualPath || innerExists(f);
+    host.readFile   = f => (f === virtualPath ? src : innerRead(f));
+
+    // Anchor the import by PATH, exactly as the checker worker does. Resolving it by name would depend on
+    // where `projectRoot` happens to sit relative to a `node_modules` holding plugin-api, and in a pnpm
+    // workspace the repo root does not hold one — whereupon the import silently yields `any`, the emitter
+    // reports "accepts anything" as a caveat, and the tool looks validated while its params are wide open.
+    const prog = ts.createProgram([virtualPath, pluginApiIndex], {
+      ...options, paths: { '@matatbread/matbot-plugin-api': [pluginApiIndex] },
+    }, host);
+    const chk = prog.getTypeChecker();
+    const sf = prog.getSourceFile(virtualPath);
+    if (!sf) return out;
+
+    // The virtual file must typecheck. It is machine-generated from strings, so ANY diagnostic in it means
+    // a name did not resolve or an arm is malformed — and the consequence of continuing is not a wrong
+    // answer but a silent one: an unresolved reference is `any`, which validates everything. Refusing per
+    // tool keeps that visible and confines it, since `ts-validation` then defers to the `inputSchema`
+    // instead of claiming the type was enforced.
+    const broken = new Map<string, string>();
+    for (const d of [...prog.getSemanticDiagnostics(sf), ...prog.getSyntacticDiagnostics(sf)]) {
+      if (d.start === undefined) continue;
+      // Walk up from the diagnostic to the arm it sits inside; the property's name is the tool's.
+      let n: TS.Node | undefined = (function find(node: TS.Node): TS.Node | undefined {
+        if (d.start! < node.getStart() || d.start! >= node.getEnd()) return undefined;
+        for (const c of node.getChildren()) { const hit = find(c); if (hit) return hit; }
+        return ts.isPropertySignature(node) ? node : undefined;
+      })(sf);
+      const name = n !== undefined && ts.isPropertySignature(n)
+        ? (ts.isStringLiteral(n.name) || ts.isIdentifier(n.name) ? n.name.text : undefined)
+        : undefined;
+      const msg = ts.flattenDiagnosticMessageText(d.messageText, ' ');
+      if (name !== undefined) broken.set(name, msg);
+      // A file-level diagnostic (a failed import) cannot be attributed to one arm, so it condemns them all.
+      else for (const k of names) broken.set(k, msg);
+    }
+
+    // Read the arms off the virtual file's own declarations rather than the merged ToolContracts symbol:
+    // this Program has no scanned arms to merge, and going via the file keeps each tool's node in hand.
+    const walk = (n: TS.Node): void => {
+      if (ts.isPropertySignature(n) && n.type !== undefined
+          && (ts.isStringLiteral(n.name) || ts.isIdentifier(n.name))) {
+        const name = ts.isStringLiteral(n.name) ? n.name.text : n.name.text;
+        if (Object.hasOwn(usable, name)) {
+          const fault = broken.get(name);
+          if (fault !== undefined) {
+            out[name] = { refused: `toolContract does not typecheck: ${fault}` };
+            return;
+          }
+          const ann = n.type;
+          const arms = ts.isUnionTypeNode(ann) ? [...ann.types] : [ann];
+          const paramNodes: TS.TypeNode[] = [];
+          let ok = true;
+          for (const a of arms) {
+            // A `toolContract` is by contract `ToolContract<R, A>` or a `|`-union of those, written
+            // literally — so there is no alias to resolve here, and anything else is not a contract.
+            if (!ts.isTypeReferenceNode(a) || a.typeName.getText() !== 'ToolContract' || a.typeArguments?.length !== 2) { ok = false; break; }
+            paramNodes.push(a.typeArguments[1]!);
+          }
+          out[name] = ok
+            ? buildToolValidator(ts, chk, paramNodes.map(nd => chk.getTypeFromTypeNode(nd)), ann, { excessProperties: 'reject' })
+            : { refused: 'toolContract is not `ToolContract<Result, Args>` (or a union of those)' };
+        }
+      }
+      ts.forEachChild(n, walk);
+    };
+    walk(sf);
+    return out;
+  };
 
   // Resolve an augmentable interface from its CANONICAL top-level declaration in plugin-api, not the
   // index.ts re-export: `export * from './plugin.js'` (MatbotServices) exposes a stunted re-export view
@@ -555,19 +693,21 @@ export async function buildMatbotToolsDts(
     return text;
   };
 
-  const extractArms = (ann: TS.TypeNode): { params: string; result: string } | undefined => {
+  const extractArms = (ann: TS.TypeNode): { params: string; result: string; paramNodes: TS.TypeNode[] } | undefined => {
     const resolved = resolveAlias(ann);
     const arms = ts.isUnionTypeNode(resolved) ? [...resolved.types] : [resolved];
-    const params: string[] = [], results: string[] = [];
+    const params: string[] = [], results: string[] = [], paramNodes: TS.TypeNode[] = [];
     for (const raw of arms) {
       const a = resolveAlias(raw);
       if (!ts.isTypeReferenceNode(a) || a.typeName.getText() !== 'ToolContract' || a.typeArguments?.length !== 2) return undefined;
       results.push(expandNamed(a.typeArguments[0]!, new Set(), 0));
       params.push(expandNamed(a.typeArguments[1]!, new Set(), 0));
+      paramNodes.push(a.typeArguments[1]!);
     }
-    return { result: results.join(' | '), params: params.join(' | ') };
+    return { result: results.join(' | '), params: params.join(' | '), paramNodes };
   };
   const contracts: Record<string, { params: string; result: string }> = {};
+  const validators: Record<string, ToolValidator> = {};
   const toolContractsSym = findCanonicalSymbol('ToolContracts');
   if (toolContractsSym) {
     for (const prop of checker.getPropertiesOfType(checker.getDeclaredTypeOfSymbol(toolContractsSym))) {
@@ -576,9 +716,26 @@ export async function buildMatbotToolsDts(
       const ann  = decl && ts.isPropertySignature(decl) ? decl.type : undefined;
       if (!ann) continue;
       const c = extractArms(ann);
-      if (c) contracts[prop.name] = c;
+      if (!c) continue;
+      contracts[prop.name] = { params: c.params, result: c.result };
+      // Excess properties are REJECTED, matching TypeScript's own treatment of a fresh object literal —
+      // which is exactly what a model-authored params object is. An invented or misspelled key otherwise
+      // fails silently: it is dropped, and the tool runs with a parameter the caller believes it passed
+      // (`sessionId` mis-sent as `session_id` reads as "no session given"). Rejecting turns the single
+      // most common tool-call hallucination into an error the model can repair. It also makes `NoParams`
+      // consistent rather than accidentally special: `Record<string, never>` already refuses every key,
+      // via its index signature's `never`, so without this a closed contract was the LOOSER of the two.
+      validators[prop.name] = buildToolValidator(
+        ts, checker, c.paramNodes.map(nd => checker.getTypeFromTypeNode(nd)), ann,
+        { excessProperties: 'reject' },
+      );
     }
   }
+
+  // Source-declared arms WIN: a scanned augmentation is the tool's own compiled contract, whereas a
+  // `toolContract` string is a runtime assertion about it. They only collide if a plugin ships source
+  // for a tool it also registers dynamically, and then the compiler-checked one is the truth.
+  for (const [name, v] of Object.entries(syntheticValidators())) validators[name] ??= v;
 
   const block = (name: string, lines: string[]): string =>
     lines.length ? `  interface ${name} {\n${lines.join('\n')}\n  }\n` : '';
@@ -595,6 +752,7 @@ ${block('ToolContracts', tools.lines)}${block('MatbotServices', services.lines)}
     services: { emitted: services.emitted, unknown: services.unknown },
     conflicts,
     contracts,
+    validators,
     apiExports: [...apiTypeNames],
   };
 }

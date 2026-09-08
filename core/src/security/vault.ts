@@ -1,5 +1,5 @@
 import type { Vault } from '@matatbread/matbot-plugin-api';
-import { missingSecretError, applyCreateSecret } from '@matatbread/matbot-plugin-api';
+import { missingSecretError, applyCreateSecret, assertStorableKey, unreferenceableKey } from '@matatbread/matbot-plugin-api';
 
 const REF_RE = /\$\{([^}]+)\}/g;
 
@@ -37,8 +37,16 @@ export class VaultImpl implements Vault {
   }
 
   async writeSecret(name: string, value: string): Promise<void> {
-    if (value === '') this.store.delete(name);
-    else this.store.set(name, value);
+    if (value === '') { this.store.delete(name); return; }
+    // `this`, not the base policy directly, so a subclass narrowing the rule (EnvFileVault) is
+    // enforced through the inherited write rather than having to re-implement it.
+    assertStorableKey(this, name);
+    this.store.set(name, value);
+  }
+
+  /** A plain map stores anything that can be referenced; subclasses narrowing this call `super`. */
+  unstorableKey(name: string): string | undefined {
+    return unreferenceableKey(name);
   }
 
   hasKey(name: string): boolean {

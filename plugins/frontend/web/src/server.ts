@@ -841,7 +841,11 @@ export function createWebServer(deps: WebServerDeps) {
       catch (e) { json(res, 400, { error: String(e) }); return; }
 
       let input: unknown;
-      try { input = raw ? JSON.parse(raw) : null; }
+      // An absent body means "no arguments", which is an empty object — NOT null. `null` was a lossy
+      // choice made when nothing validated the input: every tool reads its params as an object, the
+      // model's path always sends one, and this server's own `about_matbot` probe passes `{}` (above).
+      // A client that explicitly posts `null` still gets `null`, and is still refused.
+      try { input = raw ? JSON.parse(raw) : {}; }
       catch { json(res, 400, { error: 'Invalid JSON' }); return; }
 
       const ac = new AbortController();
@@ -859,7 +863,12 @@ export function createWebServer(deps: WebServerDeps) {
           if (ev.type === 'stdout') { stdout += ev.chunk; }
           if (ev.type === 'stderr') { stderr += ev.chunk; }
           if (ev.type === 'error')  {
-            json(res, 500, {
+            // A tool that reports a 4xx code is naming a CLIENT error, so answer with it rather than
+            // 500 — input rejected by the executor's validator arrives this way (TOOL_INPUT_INVALID).
+            // Safe to read as a status: a process exit code cannot exceed 255, so `bash` and friends
+            // can never land in this range.
+            const status = ev.code !== undefined && ev.code >= 400 && ev.code <= 499 ? ev.code : 500;
+            json(res, status, {
               error: ev.message,
               ...(ev.code !== undefined ? { code: ev.code } : {}),
               ...(stdout               ? { stdout }         : {}),
@@ -885,7 +894,7 @@ export function createWebServer(deps: WebServerDeps) {
       catch (e) { json(res, 400, { error: String(e) }); return; }
 
       let input: unknown;
-      try { input = raw ? JSON.parse(raw) : null; }
+      try { input = raw ? JSON.parse(raw) : {}; }
       catch { json(res, 400, { error: 'Invalid JSON' }); return; }
 
       const ac = new AbortController();

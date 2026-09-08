@@ -27,12 +27,12 @@
  * Silent for now — the durable trace is a `marker` (yielded below); a frontend may surface it.
  */
 
-import type { MatbotMachine, Tool, ToolExecutor, ToolContract, ToolContext, ToolEvent, Message } from '@matatbread/matbot-plugin-api';
+import type { MatbotMachine, Tool, ToolExecutor, ToolContract, NoParams, ToolContext, ToolEvent, Message } from '@matatbread/matbot-plugin-api';
 import type { RememberedFact } from '../dream/types.js';
 
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
-    remember_fact: ToolContract<void, Record<string, never>>;  // silent side-effect: extracts + persists, yields nothing
+    remember_fact: ToolContract<void, NoParams>;  // silent side-effect: extracts + persists, yields nothing
   }
 }
 

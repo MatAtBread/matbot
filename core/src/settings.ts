@@ -1,4 +1,5 @@
-import type { PluginSettings, Store } from '@matatbread/matbot-plugin-api';
+import type { Notifier, PluginSettings, Store } from '@matatbread/matbot-plugin-api';
+import { notifyingStore } from '@matatbread/matbot-plugin-api';
 
 export interface SettingsDoc {
   id:      string;
@@ -45,6 +46,38 @@ export function settingsDefaultNamespaces(): readonly string[] {
   return [...installDefaults.keys()];
 }
 
+/** The routing namespace settings changes are announced under — the store namespace they live in. A
+ *  consumer filters `kind === ItemChangeKind && namespace === SETTINGS_NAMESPACE && id === slug(mine)`. */
+export const SETTINGS_NAMESPACE = 'settings';
+
+/**
+ * The bus settings writes announce on, installed by the host at boot alongside {@link installSettingsDefaults}.
+ *
+ * Module state consulted inside {@link makePluginSettings} for the same reason the defaults are, and it
+ * is the same call site that proves it: `plugins/browser` builds its own settings facade over a concrete
+ * backend, and a notifier passed as a parameter is one that facade silently omits — the symptom being a
+ * setting that quietly stops being observable, which nothing distinguishes from one that never changed.
+ *
+ * Hosts pass their capture-safe `Notifier` proxy, so a later `register('Notifier', …)` swap carries
+ * settings traffic with everything else. Absent (a test, an embedder that installed nothing) a write
+ * publishes nothing — settings still work, they are just unobservable.
+ */
+let settingsNotifier: Notifier | undefined;
+
+/** Host boot assembly: announce settings writes on this bus. Call before any plugin loads. */
+export function installSettingsNotifier(notifier: Notifier | undefined): void {
+  settingsNotifier = notifier;
+}
+
+/** Read per publish, not captured at facade construction — a facade built before the host installs the
+ *  bus (core's own reserved-namespace settings, a test) would otherwise be permanently silent. Only
+ *  `notify` is ever reached: `notifyingStore` publishes and never subscribes. */
+const lateBoundNotifier: Notifier = {
+  notify:    n => settingsNotifier?.notify(n),
+  subscribe: async function *(signal, filter) { yield* settingsNotifier?.subscribe(signal, filter) ?? []; },
+  consume:   (handler, signal, filter) => settingsNotifier?.consume(handler, signal, filter),
+};
+
 /**
  * Build a PluginSettings facade over the shared settings store, scoped to one document id.
  *
@@ -60,8 +93,19 @@ export function settingsDefaultNamespaces(): readonly string[] {
  * key's default. Seeding on write would make a later config edit work or not work depending on
  * unrelated write history, which is unexplainable to whoever edits the yaml.
  */
-export function makePluginSettings(store: Store<SettingsDoc>, namespace: string): PluginSettings {
+export function makePluginSettings(rawStore: Store<SettingsDoc>, namespace: string): PluginSettings {
   const id = slugSettingsNamespace(namespace);
+  // Wrapped here, not at the call sites, for the reason installDefaults is consulted here: the writers
+  // are `set` and `delete` below and nowhere else, so one wrapper covers every plugin's settings and
+  // cannot be forgotten by a host building its own facade.
+  //
+  // The announcement carries the UNSLUGGED namespace as `key`, because `id` is the slug — a shape the
+  // filesystem store's id rule imposed, which another backend could impose differently. A consumer
+  // asking "are these my settings?" compares `key` against its own `services.self.name` and never
+  // reproduces `slugSettingsNamespace`, which would keep compiling after that rule changed and simply
+  // stop matching. It also carries the ambient principal, an override being per-principal: a change to
+  // someone else's settings is not a change to yours.
+  const store = notifyingStore(rawStore, lateBoundNotifier, SETTINGS_NAMESPACE, 'settings', () => namespace);
 
   const getDoc = async (): Promise<SettingsDoc | null> => {
     const raw = await store.get(id);

@@ -1,5 +1,5 @@
 import type { Vault } from '@matatbread/matbot-core';
-import { missingSecretError, applyCreateSecret } from '@matatbread/matbot-core';
+import { missingSecretError, applyCreateSecret, assertStorableKey, unreferenceableKey } from '@matatbread/matbot-core';
 
 const REF_RE = /\$\{([^}]+)\}/g;
 
@@ -29,8 +29,13 @@ export class WebCryptoVault implements Vault {
   }
 
   async writeSecret(name: string, value: string): Promise<void> {
-    if (value === '') this.plain.delete(name);
-    else this.plain.set(name, value);
+    if (value === '') { this.plain.delete(name); return; }
+    assertStorableKey(this, name);
+    this.plain.set(name, value);
+  }
+
+  unstorableKey(name: string): string | undefined {
+    return unreferenceableKey(name);
   }
 
   hasKey(name: string): boolean {

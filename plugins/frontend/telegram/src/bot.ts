@@ -57,6 +57,58 @@ export async function sendMessage(
   }
 }
 
+/** What a bot may upload in one call. A larger file has to be linked, not sent. */
+export const TELEGRAM_UPLOAD_LIMIT = 50 * 1024 * 1024;
+/** Beyond this Telegram refuses `sendPhoto`, so an image goes as a document instead of failing. */
+const PHOTO_LIMIT = 10 * 1024 * 1024;
+/** Telegram truncates a caption at 1024 UTF-16 units and errors past it, unlike `text`. */
+const CAPTION_LIMIT = 1024;
+
+export interface OutgoingFile {
+  name:     string;
+  mimeType: string;
+  bytes:    Uint8Array;
+}
+
+/** The method that renders this file best, and the form field it wants the bytes under. */
+function methodFor(file: OutgoingFile): readonly [string, string] {
+  const mime = file.mimeType;
+  if (mime.startsWith('image/') && file.bytes.byteLength <= PHOTO_LIMIT) return ['sendPhoto', 'photo'] as const;
+  if (mime.startsWith('audio/')) return ['sendAudio', 'audio'] as const;
+  if (mime.startsWith('video/')) return ['sendVideo', 'video'] as const;
+  return ['sendDocument', 'document'] as const;
+}
+
+async function postFile(
+  botToken: string, chatId: number, method: string, field: string, file: OutgoingFile, caption?: string,
+): Promise<string | null> {
+  const form = new FormData();
+  form.set('chat_id', String(chatId));
+  if (caption) form.set('caption', caption.slice(0, CAPTION_LIMIT));
+  form.set(field, new Blob([file.bytes as BlobPart], { type: file.mimeType }), file.name);
+  const res = await fetch(`${API}/bot${botToken}/${method}`, { method: 'POST', body: form });
+  return res.ok ? null : `${res.status} ${await res.text()}`;
+}
+
+/**
+ * Upload a file to a chat, rendered by what it is: an image inline, audio as a playable clip, anything
+ * else as a document.
+ *
+ * A rejected `sendPhoto`/`sendAudio`/`sendVideo` retries as a document, because the constraints those
+ * methods add are ones nothing here can check in advance — a photo's width+height sum, a container
+ * Telegram will not transcode — and a file that arrives is worth more than one that renders inline.
+ */
+export async function sendFile(
+  botToken: string, chatId: number, file: OutgoingFile, caption?: string,
+): Promise<void> {
+  const [method, field] = methodFor(file);
+  const err = await postFile(botToken, chatId, method, field, file, caption);
+  if (err === null) return;
+  if (method === 'sendDocument') throw new Error(`sendDocument failed: ${err}`);
+  const docErr = await postFile(botToken, chatId, 'sendDocument', 'document', file, caption);
+  if (docErr !== null) throw new Error(`${method} failed: ${err}; sendDocument failed: ${docErr}`);
+}
+
 export async function sendChatAction(
   botToken: string,
   chatId: number,

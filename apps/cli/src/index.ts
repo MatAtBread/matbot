@@ -17,12 +17,13 @@ import { appendMessage, createMessage,
          unloadPlugin as unloadPluginFn,
          getPluginNameForSpecifier, getRegisteredPlugins, recordServiceKey,
          installPrincipalCarrier, installUsageCarrier, recordUsage, usageByProvider, addUsage, enterPrincipal, currentPrincipal,
-         installSettingsDefaults, settingsDefaultNamespaces,
+         installSettingsDefaults, settingsDefaultNamespaces, installSettingsNotifier,
          unifyServices, forwardingProxy, makeSwappable, singleTurnRequest,
          createMountTable, scheduleAtEdge,
          createSingleTurnTool, createAboutMatbotTool,
          isMissingSecretError, createNotifier, notifyingStore,
          wireDescription}            from '@matatbread/matbot-core';
+import type { ToolInputValidator } from '@matatbread/matbot-core';
 import type { MatbotMachine, MatbotServices, PluginSettings, Vault, SessionRunner, Notifier,
               MatbotPlugin, StorageBackend, KnowledgeIndex, PromptFn, FormField, SwapFn } from '@matatbread/matbot-core';
 import { systemPrincipal }                 from '@matatbread/matbot-core';
@@ -881,6 +882,9 @@ async function main(): Promise<void> {
   // `core`. Swappable like the vault — register('Notifier', …) points this at a distributed impl.
   let activeNotifier: Notifier = createNotifier('core');
   const notifierProxy       = forwardingProxy<Notifier>(() => activeNotifier);
+  // Settings writes announce on the same bus, so a reader can cache one instead of re-reading it on
+  // every use. The proxy, not the impl, so a registered distributed Notifier relays them too.
+  installSettingsNotifier(notifierProxy);
   // Capture-safe service handles (see forwardingProxy): a captured reference — including a destructure
   // like `const { KnowledgeIndex, StorageBackend } = services` — keeps resolving to the live impl across
   // a register()-driven swap, instead of pinning whatever was current at capture time.
@@ -1043,14 +1047,20 @@ async function main(): Promise<void> {
     if (prev.entries !== undefined) for (const e of prev.entries()) void next.index(e);
   };
 
-  // toolReg is shared: plugins register into it via services, runSession reads it
-  const toolReg = new ToolRegistryImpl(createBuiltinTools(), notifierProxy);
+  const serviceRegistry     = new Map<string, unknown>();
+
+  // toolReg is shared: plugins register into it via services, runSession reads it. The validator lookup
+  // is late-bound and read per call: a `ToolCallValidator` is registered by a plugin (tool-types) long
+  // after these builtins are seeded, and may be unloaded again. Absent one, every call passes straight
+  // through — core mandates no validation, it only honours a registered validator, and it does so at the
+  // executor so that EVERY door (the runner, `POST /tools/:name`, `invokeTool`) is covered by one wrapper
+  // rather than by a hook that only guards the model's path.
+  const toolReg = new ToolRegistryImpl(createBuiltinTools(), notifierProxy,
+    () => serviceRegistry.get('ToolCallValidator') as ToolInputValidator | undefined);
 
   // hookReg is shared: plugins register hooks via services, runSession fires them
   const hookReg = new HookRegistry();
   const systemContextReg = new SystemContextRegistryImpl();
-
-  const serviceRegistry     = new Map<string, unknown>();
 
   // The host's own file area doubles as the media store, so attachments work out of the box rather than
   // needing a plugin to switch them on. Seeded into the registry (not put on `baseServices`) precisely so

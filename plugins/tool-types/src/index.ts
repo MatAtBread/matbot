@@ -6,9 +6,43 @@ import type { MatbotMachine, MatbotPluginSpec, ToolTypeIndex } from '@matatbread
 import { getRegisteredPlugins } from '@matatbread/matbot-core';
 import { buildMatbotToolsDts } from './build-dts.js';
 import { checkSnippetAgainst } from './checker.js';
+import type { ToolValidator } from './validator.js';
 
 export { buildMatbotToolsDts, type MatbotToolsDts } from './build-dts.js';
 export { checkProjectDir, checkSnippetAgainst, type CheckResult } from './checker.js';
+export {
+  generateValidator, buildToolValidator, compileValidator,
+  type ValidationError, type Validator, type ValidatorSource, type ToolValidator,
+} from './validator.js';
+
+/**
+ * What tool-types SUPPLIES: the generated validator for each live tool, keyed by name. This package does
+ * type formation and analysis — it derives the dts, the wire contracts and the JSON Schemas from each
+ * tool's `ToolContract`, and emits a validator from the checker's resolved params type — but it is not
+ * itself a validator and registers no validator service. Enforcement is a consumer's:
+ * `@matatbread/matbot-tool-ts-validation` calls this, applies a policy, and registers the
+ * `ToolCallValidator` that core consults at the executor.
+ *
+ * That separation is the point. A code generator (`skills_compiler`, `function-tools`) loads this package
+ * for `dts()`/`check()` alone; if loading it also switched input enforcement on, adopting typed codegen
+ * would silently start rejecting tool calls.
+ *
+ * Reached by duck-typing `services.ToolTypeIndex` (the same structural check `asProfileDirectory` uses),
+ * so plugin-api's `ToolTypeIndex` need not learn about validation at all.
+ */
+export interface ToolValidatorSupplier {
+  /** Per live tool: its compiled params validator, or the stated reason none could be generated.
+   *  Rebuilt with the dts and cached, so this costs nothing after the first call. */
+  toolValidators(): Promise<Record<string, ToolValidator>>;
+}
+
+/** Structural recovery of the supplier from whatever is registered as `ToolTypeIndex` — method presence,
+ *  never `instanceof`, so it survives hot reload and follows a swap. */
+export function asToolValidatorSupplier(index: unknown): ToolValidatorSupplier | undefined {
+  return typeof (index as ToolValidatorSupplier | undefined)?.toolValidators === 'function'
+    ? index as ToolValidatorSupplier
+    : undefined;
+}
 
 // Split a string on `sep` at bracket-depth 0 only (respecting `<> {} () []`), so a top-level `|` or `,`
 // inside a nested type isn't mistaken for a separator.
@@ -109,6 +143,7 @@ class ToolTypeIndexImpl implements ToolTypeIndex {
   private covered = new Set<string>();   // tool names the source scan already declares (registry-block dedup)
   private cache: string | null = null;   // null ⇒ (re)build needed
   private contracts: Record<string, { params: string; result: string }> = {};   // per-tool wire contract
+  private validators: Record<string, ToolValidator> = {};                       // per-tool compiled validator
   private apiExports: string[] = [];     // plugin-api type export names (for importing those a toolContract names)
   private dirty = true;
 
@@ -135,10 +170,19 @@ class ToolTypeIndexImpl implements ToolTypeIndex {
       // registered" at runtime. What the scan CAN'T settle is two roots declaring one live name; that stays
       // Program-order and audible via `conflicts`.
       const urls   = getRegisteredPlugins().map(p => p.resolvedUrl).filter((u): u is string => u !== undefined);
-      const built  = await buildMatbotToolsDts(root, urls, this.machine.tools.list().map(t => t.name));
+      // A tool built at runtime declares its contract as a string, having no source to augment from. The
+      // scan cannot see those, so they are handed over to be typed from a virtual augmentation — without
+      // which they were described to the model in full and then enforced only by their loose
+      // `inputSchema`, which is backwards: their params were authored by an LLM, not a compiler.
+      const live      = this.machine.tools.list();
+      const synthetic = Object.fromEntries(
+        live.flatMap(t => (t.toolContract !== undefined ? [[t.name, t.toolContract] as const] : [])),
+      );
+      const built  = await buildMatbotToolsDts(root, urls, live.map(t => t.name), synthetic);
       this.cache      = built?.dts ?? '';
       this.covered    = new Set([...(built?.tools.emitted ?? []), ...(built?.tools.unknown ?? [])]);
       this.contracts  = built?.contracts ?? {};
+      this.validators = built?.validators ?? {};
       this.apiExports = built?.apiExports ?? [];
       this.dirty      = false;
     }
@@ -223,6 +267,11 @@ class ToolTypeIndexImpl implements ToolTypeIndex {
       ? `${derived === '' ? "import '@matatbread/matbot-plugin-api';\n" : ''}import type { ${needed.join(', ')} } from '@matatbread/matbot-plugin-api';\n`
       : '';
     return `${head}${derived}\ndeclare module '@matatbread/matbot-plugin-api' {\n  interface ToolContracts {\n${body}\n  }\n}\n`;
+  }
+
+  async toolValidators(): Promise<Record<string, ToolValidator>> {
+    await this.ensureBuilt();
+    return this.validators;
   }
 }
 

@@ -4,14 +4,14 @@
     "node",
     "browser"
   ],
-  "version": "0.4.7",
+  "version": "0.4.12",
   "engines": {
     "node": ">=24.0.0"
   },
   "files": [
     "src"
   ],
-  "description": "Validates tool-call inputs against each tool's JSON Schema, returning an error result on mismatch so the model can self-correct.",
+  "description": "Validates tool-call inputs against each tool's JSON Schema, registered as core's ToolCallValidator so EVERY invocation door (the runner, HTTP tool routes, invokeTool) is checked at the executor rather than only the model's path.",
   "keywords": [
     "matbot",
     "matbot-plugin",
@@ -36,10 +36,12 @@
     "access": "public"
   },
   "peerDependencies": {
-    "@matatbread/matbot-plugin-api": "workspace:^"
+    "@matatbread/matbot-plugin-api": "workspace:^",
+    "@matatbread/matbot-core": "workspace:^"
   },
   "devDependencies": {
     "typescript": "catalog:",
-    "@matatbread/matbot-plugin-api": "workspace:^"
+    "@matatbread/matbot-plugin-api": "workspace:^",
+    "@matatbread/matbot-core": "workspace:^"
   }
 }

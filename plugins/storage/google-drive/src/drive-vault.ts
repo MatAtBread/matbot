@@ -1,5 +1,5 @@
 import type { Store, Vault } from '@matatbread/matbot-core';
-import { missingSecretError, applyCreateSecret } from '@matatbread/matbot-core';
+import { missingSecretError, applyCreateSecret, assertStorableKey, unreferenceableKey } from '@matatbread/matbot-core';
 
 const REF_RE  = /\$\{([^}]+)\}/g;
 const DOC_ID  = 'secrets';
@@ -49,9 +49,14 @@ export class DriveVault implements Vault {
     if (value === '') {
       if (!this.secrets.delete(name)) return;
     } else {
+      assertStorableKey(this, name);
       this.secrets.set(name, value);
     }
     await this.persist();
+  }
+
+  unstorableKey(name: string): string | undefined {
+    return unreferenceableKey(name);
   }
 
   hasKey(name: string): boolean {

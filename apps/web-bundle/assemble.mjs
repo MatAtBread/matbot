@@ -299,6 +299,13 @@ async function main() {
     for (const src of Object.values(rawSources)) Object.assign(aliases, collectContractAliases(src));
     for (const src of Object.values(rawSources)) Object.assign(toolContracts, extractToolContracts(src, aliases));
 
+    // The CLI's resolve hook, registered before the compiler pass is imported and not at the top of
+    // this file: it remaps `*.js` specifiers onto the `*.ts` files matbot actually ships, which node's
+    // native stripper does not do. build-dts.ts had exactly one import for most of its life — a
+    // type-only one, therefore erased — so this call site had never resolved anything at runtime and
+    // the missing hook was invisible until it grew a real import. Reusing register.js rather than
+    // registering ts-hooks.js directly keeps its `exclude` plumbing in one place.
+    await import('../../apps/cli/register.js');
     const { buildMatbotToolsDts } = await import('../../plugins/tool-types/src/build-dts.ts');
     const compiled = (await buildMatbotToolsDts(repoRoot))?.contracts ?? {};
     let upgraded = 0;
@@ -309,7 +316,16 @@ async function main() {
     }
     console.log(`[assemble] baked ${Object.keys(toolContracts).length} tool contracts (${upgraded} from the compiler)`);
   } catch (e) {
-    console.warn(`[assemble] could not extract tool contracts (${e?.message ?? e}) — browser TS contracts limited to toolContract-string tools.`);
+    // A missing TypeScript compiler is an environment this bake tolerates — the regex scanner above has
+    // already produced call shapes, and an install without the compiler can still assemble. ANY OTHER
+    // failure is a bug in this pass, and warning about it shipped a bundle whose contracts had quietly
+    // fallen back to `toolContract`-string tools only: nothing was red, and the loss was visible only
+    // to whoever diffed the output. So the tolerated case stays a warning and the rest fails the build.
+    const missingCompiler = e?.code === 'ERR_MODULE_NOT_FOUND' && /(package|module) 'typescript'/.test(e?.message ?? '');
+    if (!missingCompiler) {
+      throw new Error(`[assemble] tool-contract extraction failed — the browser bundle would ship with source-derived contracts missing: ${e?.message ?? e}`, { cause: e });
+    }
+    console.warn(`[assemble] no TypeScript compiler available (${e.message}) — browser TS contracts limited to toolContract-string tools.`);
   }
 
   const payload = {

@@ -9,6 +9,193 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## 0.4.12
+
+**Tool inputs are typechecked, whoever the caller is.** A tool declares its call contract as a
+`ToolContract` arm — a real TypeScript type — and until now nothing enforced it: the model's arguments
+were checked against `inputSchema`, a lossy *projection* of that type, and only on the model's path.
+0.4.12 makes the type itself the thing enforced, at the one seam every caller passes through.
+
+### Breaking changes
+
+- **Validation moved off the `toolcall` hook and onto the executor, so it covers every door.** The hook
+  channel is unchanged and still supported — `toolcall` remains the place to *reject* a call, and
+  triggers still use it — but it is a **runner** channel, so a validator installed there guarded the
+  model's path while `POST /tools/:name` and `invokeTool` called `tool.executor.execute` directly and
+  fired no hooks at all. Core now consults an optional **`ToolCallValidator`** service (`MatbotServices`,
+  declared by core because core is what reads it) at the executor, wrapped once per tool at
+  registration. One check instead of one per door, and nothing to drift.
+
+  Core's own contract is therefore additive: with no validator registered nothing changes, since core
+  mandates no validation and only honours one that is registered. What breaks is the **behaviour of an
+  install that loads a validator plugin**, in two deliberate ways:
+
+  - **An unknown property is rejected**, as TypeScript rejects one on a fresh object literal, which is
+    exactly what a model-authored params object is. Accepting it silently is the commonest tool-call
+    hallucination made invisible: `sessionId` mis-sent as `session_id` was dropped, and the tool then
+    ran believing no session was given rather than reporting a typo. Callers that got away with a loose
+    payload now fail; `enforce: 'warn'` logs one release of "Would reject" to find them first.
+  - **Internal calls are validated too.** A statically-typed call site should already be sound, so this
+    is partly waste — but `invokeTool` with a dynamic name, a trigger's `invoke.params` (typed
+    `object`) and a compiled skill's payload are all internal callers no compiler has checked.
+
+  A rejected call yields an `error` event carrying the offending field paths and `TOOL_INPUT_INVALID`
+  (422 — the body parsed, its *shape* is wrong; and a process exit code cannot exceed 255, so it can
+  never be mistaken for one). The web tool routes answer with a 4xx code rather than 500.
+
+### API gaps filled
+
+- **`ToolContract` params types are compiled to validators.** `tool-types` emits a pure-JS validator per
+  tool from the **checker's resolved type**, inside the pass that already builds the dts — so
+  conditionals, generics, `Omit`/`Pick`/`Record`, `keyof` and indexed access all arrive already
+  evaluated, and the workspace is not scanned twice. A multi-action tool gets one validator that
+  dispatches on its discriminant, so a missing field is reported against the arm the caller actually
+  selected, which is what `inputSchema` cannot express: `session_action`'s schema requires only
+  `action`, and every per-arm requirement is lost in the projection.
+
+  It targets the JSON *projection* of the type rather than the type: a `toJSON` return wins, a class
+  instance is its own enumerable data properties, and methods, function-valued and `undefined`
+  properties cannot reach the wire at all. So only `bigint` is refused outright — the one thing
+  `JSON.stringify` itself throws on. A contract that cannot be honestly validated yields a stated
+  refusal, never a permissive validator.
+
+- **Errors name the field as a caller would write it, and show what was sent.**
+
+  ```
+  Invalid input for tool "about_matbot": .x: never (no value is valid), actual value `{"x":8}`
+  ```
+
+  Paths are dotted (`.items[0].name`) rather than JSON Pointer, because the reader is either a model
+  repairing its own call or a developer looking at a 422, and both write dots. The value is rendered
+  wrapped in its own field name, so it is a fragment the caller can compare against what it sent; an
+  array element or the root renders alone, having no name to wrap it in. A missing property shows no
+  value — JSON carries no `undefined`, so there is nothing to show beyond saying it is absent. The
+  rendering is capped, so a rejected attachment cannot turn one bad field into the bulk of a turn's
+  context, and it cannot throw: an internal caller may arrive with a bigint or a cycle, and a throw
+  while *reporting* an error would replace the diagnosis with a stack trace.
+
+- **Settings changes are observable** ([#58](https://github.com/MatAtBread/matbot/issues/58)). A
+  settings write announced nothing, so no consumer could know a setting had changed: every reader had a
+  choice between re-reading the store on each use — on the filesystem backend, a disk read — and caching
+  with unbounded staleness. `ts-validation` made that concrete, reading its `enforce` setting on every
+  tool call through every door to re-learn a value that changes approximately never; there was no correct
+  cache to write, event invalidation being impossible and a TTL being a guess.
+
+  `makePluginSettings` now wraps its store in `notifyingStore`, so `set`/`delete` publish an `ItemChange`
+  with `namespace: 'settings'`, the settings namespace, and the writing **principal** (an override is
+  per-principal, so a cache must be keyed by one). `ItemChange` already means "the thing at
+  `(namespace, id)` is stale, re-read it, whatever holds it".
+
+- **`ItemChange` carries the caller's `key`, where the medium derives `id` from it.** A settings
+  document's id is its plugin package name slugged to satisfy the filesystem store's `/^[\w-]+$/`, and
+  another backend could legitimately hash or truncate — so a consumer asking "are these MY settings?"
+  had to reproduce a transformation it does not own. That copy keeps compiling after the rule changes and
+  simply stops matching, leaving a filter that never fires again: silent, and indistinguishable from
+  "nothing changed", which is the opposite of what an invalidation is for. The producer now states the
+  key it was addressed by (`notifyingStore` takes a `keyOf`), and a consumer compares it against its own
+  `services.self.name`. Absent means the id IS the key — every other namespace today — so a consumer
+  finding none invalidates rather than assuming a mismatch.
+
+  The bus is installed by the host as module state (`installSettingsNotifier`, beside
+  `installSettingsDefaults`) rather than passed in, for the reason already recorded for the defaults: a
+  parameter is a thing a call site forgets with no error and no symptom, and `plugins/browser` builds its
+  own facade over a concrete backend on purpose. It is read per publish rather than captured, so a facade
+  built before the host installs the bus is not silenced forever. Hosts pass their capture-safe `Notifier`
+  proxy, so a registered distributed notifier relays settings too.
+
+- **`NoParams`** (`plugin-api`) — `Record<string, never>` for a tool that takes no arguments. `{}` was
+  the obvious spelling and is wrong: in TypeScript it means "any non-nullish value", and omitting the
+  type argument is looser still (`unknown`). Adopted by the no-argument tools, which consequently now
+  reject stray properties.
+
+### Bug fixes
+
+- **`POST /tools/:name` with no body handed the executor `null`, not `{}`.** Nothing noticed until the
+  input was actually validated, at which point the web UI's own no-argument calls 422'd on page load.
+  An absent body means "no arguments"; an explicitly posted `null` still reaches the executor unchanged,
+  since a client that says `null` said something and hiding that would hide a real client bug. Fixed in
+  the HTTP route and both in-process transports.
+
+- **A vault write refuses a name the backend cannot store**
+  ([#57](https://github.com/MatAtBread/matbot/issues/57)). A secret stored under a name the medium
+  cannot hold was accepted and then quietly lost — the default vault persists to a `.env` file, so
+  `email:70de70:password=…` is written, dropped by whatever reads the file back (`Ignoring invalid
+  environment assignment`), and the failure surfaces a boot later as a secret that has ceased to exist.
+  Most such names come from an LLM inventing one, which is precisely the caller with no way to know
+  the rule.
+
+  `VaultSpec` gains an optional **`unstorableKey(name)`**, answering *why* this backend cannot hold a
+  name — what is storable is the backend's business and nothing above it can know: an in-memory map
+  takes anything referenceable, the `.env`-backed one takes environment-variable names. Every backend's
+  `writeSecret` asserts it (so `createSecret` is covered too, ending as it does in a write) and throws
+  the new branded **`InvalidSecretNameError`**, carrying the rejected `key` and the backend's `rule` —
+  phrased as what IS storable, since the reader's next act is to choose another name. Removal
+  (`writeSecret(name, '')`) deliberately skips the check, so a name that predates the rule, or arrived
+  from an environment snapshot, stays deletable. Backends that omit the method accept any name; the
+  base rule every vault shares is that a name must be referenceable as `${NAME}` at all.
+
+- **A tool's own `teardown` is not responsible for unregistering its services**, and never was — the
+  loader unregisters a plugin's registered keys *before* awaiting its teardown, so a consumer sees
+  absence (which it can handle) rather than a closed service that looks present and throws on use. Now
+  pinned by a test, since a validator on the executor turns that particular failure into every tool
+  failing at once.
+
+### Optional
+
+- **`ts-validation`** (new, node) — consumes tool-types' supply, applies `enforce: off | warn | reject`
+  (default **reject**, since loading the plugin is the opt-in; cached per principal and invalidated by
+  the settings `ItemChange` above — matched on its `key`, never on the slugged `id` — since validation at
+  the executor otherwise re-reads it from the store on every tool call through every door) and registers the `ToolCallValidator`
+  core consults. Its dependency on tool-types is hard and direct — a `dependencies` entry and a plain
+  import, the relationship `mcp` has to `mcp-http` — so it **installs the service itself** when nothing
+  else has: there is no load-order requirement and no mount-table latch. Listing `tool-types` as well
+  is still the better setup, since it then owns the service and other consumers (`function-tools`,
+  `skills_compiler`) get one too. Presence is duck-typed rather than `instanceof`-tested, so a reloaded
+  tool-types is recognised instead of duplicated.
+
+- **`tool-types`** — supplies validation and registers no validator service, so a code generator loading
+  it for `dts()` alone never silently starts having its tool calls rejected. Tools built at **runtime**
+  are covered as well: a `toolContract` string is not a `ts.Type`, so those are rendered into a virtual
+  augmentation and typed by a small second Program (that file plus plugin-api — no second workspace
+  scan). Those were the tools described to the model in full and enforced least, which is backwards,
+  their parameters having been authored by an LLM rather than a compiler. Each string is screened alone
+  before the batch is rendered — they become properties of one interface, where a stray brace would
+  swallow every arm after it — and the file must then typecheck cleanly, because an unresolved type
+  reference is `any`, which validates everything. A fault becomes a stated refusal rather than a
+  validator that reports success and checks nothing.
+
+- **`json-validation`** — moves onto the same seam and is no longer a hook, so schema checking covers
+  every door too, and still works in the browser where tool-types cannot run. A validator that displaces
+  another captures and defers to it when it has no opinion, so the typed and schema validators compose
+  along the line the type system already draws — typed contracts first, loose `inputSchema` behind —
+  rather than shadowing each other by load order. Its paths and values are reported identically, so
+  which validator rejected a call is invisible to the caller.
+
+- **`triggers`** — `trigger_action update` accepts `cooldown: null` to clear the stored limits. The
+  executor has always honoured it, its own error message documents it, and the web UI has always sent
+  it, but the arm declared `cooldown?: TriggerCooldown` — so a documented call was untypeable, which
+  went unnoticed until the params type was enforced. `add` still refuses `null`: there is no prior limit
+  to clear. The tool description now says so, rather than only the error path.
+
+- **`frontend-telegram`** — files a turn produces are rendered as attachments
+  ([#59](https://github.com/MatAtBread/matbot/issues/59)). The `file` pipeline event was swallowed, so
+  every file-producing tool looked like it had done nothing: the model says "here is the chart" and the
+  chat shows only that sentence. A file event is a durable handle, not bytes on the wire, so the
+  frontend pulls it and uploads it — an image inline, audio as a clip, anything else as a document —
+  captioned with its name, ahead of the turn's prose (a file lands while a tool is still running, and
+  the assistant's text is only flushed when the turn completes). `telegram_send` takes a `files` list
+  too, each entry a file id or name, for a notification with an attachment outside any session.
+
+  A method Telegram rejects retries as `sendDocument`, because the constraints those methods add — a
+  photo's width+height sum, a container it will not transcode — are not checkable in advance, and a file
+  that arrives beats one that renders inline. An oversized file (Telegram accepts 50MB, 10MB as a photo)
+  is reported in the chat rather than read at all, and a failed upload never propagates: a file that
+  would not send must not lose the answer it came with.
+
+- **`frontend-web`** — the empty-body fix above, plus a 4xx `code` from a tool error becomes that HTTP
+  status instead of 500. Only 400–499 is treated as a client error, so a process exit code (`bash` and
+  friends put theirs in the same field) still reports 500.
+
 ## 0.4.11
 
 ### Bug fixes

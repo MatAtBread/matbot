@@ -1,6 +1,6 @@
 import type {
-  MatbotPluginSpec, MatbotMachine, Principal, Session, PromptFn, FormField,
-  ToolExecutor, ToolContract, ToolResultOf, UserContent, MimeType,
+  MatbotPluginSpec, MatbotMachine, Principal, Session, PromptFn, FormField, FileHandle,
+  ToolExecutor, ToolContract, NoParams, ToolResultOf, UserContent, MimeType,
 } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION, isMediaRejectedError, encodeBase64 } from '@matatbread/matbot-plugin-api';
 
@@ -10,14 +10,16 @@ declare module '@matatbread/matbot-plugin-api' {
     telegram_provider:
       | ToolContract<{ provider: string | null }, { action: 'get' }>
       | ToolContract<{ provider: string | null }, { action: 'set'; provider: string }>;
-    telegram_open_door: ToolContract<{ open_until: string }, Record<string, never>>;  // ISO time the join window stays open until
-    telegram_send:      ToolContract<{ sent: number }, { text: string; chatId?: number }>;  // how many chats the notification reached
+    telegram_open_door: ToolContract<{ open_until: string }, NoParams>;  // ISO time the join window stays open until
+    // `sent` counts the chats the notification reached; `attached` the file uploads that succeeded
+    // across them (files × chats), so a partial delivery is visible rather than reported as success.
+    telegram_send:      ToolContract<{ sent: number; attached: number }, { text: string; chatId?: number; files?: string[] }>;
   }
 }
 import {
   createSession, runAs,
 } from '@matatbread/matbot-core';
-import { downloadFile, getUpdates, sendChatAction, sendMessage } from './bot.js';
+import { downloadFile, getUpdates, sendChatAction, sendFile, sendMessage, TELEGRAM_UPLOAD_LIMIT } from './bot.js';
 import type { TelegramMessage } from './bot.js';
 
 const PLUGIN_NAME = 'frontend-telegram';
@@ -69,6 +71,48 @@ export async function messageContent(
   }
   return { content, failed };
 }
+
+/**
+ * Render a file a turn produced as a Telegram attachment.
+ *
+ * The `file` pipeline event was swallowed here, which made every file-producing tool look like it had
+ * done nothing: the model says "here is the chart" and the chat shows only that sentence. A file event
+ * is a durable handle, not bytes on the wire, so this is a pull — read it, upload it, and let the
+ * caption say what it is.
+ *
+ * Failure is reported in the chat and never propagated — a file that would not upload must not lose the
+ * answer it came with — and reported back as `false` for a caller that counts deliveries. `size` is
+ * checked before the read, so an oversized file costs nothing.
+ */
+async function sendAttachment(
+  botToken: string, chatId: number, handle: FileHandle, signal: AbortSignal,
+): Promise<boolean> {
+  try {
+    if (handle.size > TELEGRAM_UPLOAD_LIMIT) {
+      await sendMessage(botToken, chatId,
+        `📎 ${handle.name} (${Math.round(handle.size / 1_048_576)} MB) is too large for Telegram to accept; it is saved in the workspace.`);
+      return false;
+    }
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    for await (const chunk of handle.stream(signal)) { chunks.push(chunk); total += chunk.byteLength; }
+    const bytes = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+
+    await sendFile(botToken, chatId, { name: handle.name, mimeType: handle.mimeType, bytes }, handle.name);
+    return true;
+  } catch (e) {
+    if (signal.aborted) return false;
+    console.warn(`[frontend-telegram] Could not send "${handle.name}" to chat ${chatId}: ${e}\n`);
+    try { await sendMessage(botToken, chatId, `📎 I couldn't attach ${handle.name}.`); } catch { /* ignore */ }
+    return false;
+  }
+}
+
+/** The `telegram_send` tool has no turn to be aborted with; its uploads run to completion or fail. */
+const NEVER_ABORTED = new AbortController().signal;
+
 const SETTINGS_KEY_PROVIDER = 'provider';
 const SETTINGS_KEY_KNOWN = 'knownChats';
 
@@ -146,12 +190,17 @@ export const plugin: MatbotPluginSpec = {
     },
     {
       name:        'telegram_send',
-      description: 'Send an out-of-band notification to Telegram, outside of any session. The message is prepended with 🔔. Sends to all chats that have previously contacted the bot, or to a specific chat if chatId is given.',
+      description: 'Send an out-of-band notification to Telegram, outside of any session. The message is prepended with 🔔. Sends to all chats that have previously contacted the bot, or to a specific chat if chatId is given. Files named in `files` are uploaded after the text — an image inline, audio as a clip, anything else as a document.',
       inputSchema: {
         type: 'object',
         properties: {
           text:   { type: 'string',  description: 'Notification text' },
           chatId: { type: 'integer', description: 'Target chat ID. Omit to broadcast to all known chats.' },
+          files:  {
+            type:        'array',
+            items:       { type: 'string' },
+            description: 'Files to attach, each named by its file id or its name (a file another tool produced or stored). A file Telegram will not accept is reported and the text is still sent.',
+          },
         },
         required: ['text'],
       },
@@ -160,25 +209,46 @@ export const plugin: MatbotPluginSpec = {
           const token = botTokenRef;
           if (!token) { yield { type: 'error' as const, message: 'Telegram plugin not active' }; return; }
 
-          const { text, chatId } = input as { text: string; chatId?: number };
+          const { text, chatId, files } = input as { text: string; chatId?: number; files?: string[] };
           const message = `🔔 ${text}`;
           const targets = chatId !== undefined ? [chatId] : [...knownChats];
 
+          // Resolved BEFORE anything is sent, and by id or name because the model holds whichever the
+          // tool that produced the file handed back. A name that resolves to nothing is an error, not a
+          // silent text-only send: the attachment is usually the point of the notification.
+          const store   = servicesRef?.files;
+          const handles: FileHandle[] = [];
+          for (const ref of files ?? []) {
+            const handle = store === undefined ? null : (await store.get(ref) ?? await store.getByName(ref));
+            if (!handle) {
+              yield { type: 'error' as const, message: store === undefined
+                ? 'No file store is registered, so files cannot be attached.'
+                : `No file named "${ref}".` };
+              return;
+            }
+            handles.push(handle);
+          }
+
           if (targets.length === 0) {
-            yield { type: 'result' as const, value: { sent: 0 } };
+            yield { type: 'result' as const, value: { sent: 0, attached: 0 } };
             return;
           }
 
-          let sent = 0;
+          let sent = 0, attached = 0;
           for (const id of targets) {
             try {
               await sendMessage(token, id, message);
               sent++;
             } catch (e) {
               yield { type: 'stderr' as const, chunk: `Failed to send to chat ${id}: ${e}\n` };
+              continue;
+            }
+            for (const handle of handles) {
+              if (await sendAttachment(token, id, handle, NEVER_ABORTED)) attached++;
+              else yield { type: 'stderr' as const, chunk: `Failed to attach "${handle.name}" to chat ${id}\n` };
             }
           }
-          yield { type: 'result' as const, value: { sent } };
+          yield { type: 'result' as const, value: { sent, attached } };
         },
       } satisfies ToolExecutor<ToolResultOf<'telegram_send'>>,
     },
@@ -333,12 +403,15 @@ export const plugin: MatbotPluginSpec = {
             }
             if (!owned.has(event.traceId)) continue;
             if (event.type === 'text-delta') responseText += event.delta;
+            // Sent as it arrives, ahead of the turn's prose: a file event lands while a tool is still
+            // running, and the assistant's own text is only flushed once the turn completes.
+            else if (event.type === 'file') await sendAttachment(botToken, chatId, event.handle, ac.signal);
             else if (event.type === 'done' || event.type === 'aborted'
                      || event.type === 'error' || event.type === 'cancelled') {
               if (responseText.trim()) await sendMessage(botToken, chatId, responseText);
               responseText = '';
             }
-            // Swallow: thinking, usage, tool:start/stdout/stderr/end, file
+            // Swallow: thinking, usage, tool:start/stdout/stderr/end
           }
         } finally {
           clearInterval(typingInterval);

@@ -232,6 +232,19 @@ const dump = JSON.parse(readFileSync(dumpPath, 'utf8'));
 const withContract = dump.filter(t => t.wireContract !== undefined);
 const report = dump.map(t => ({ name: t.name, found: compare(t) })).filter(t => t.found.length > 0);
 
+// A wireContract reaches the dump only if `tool-types` is LOADED to fold it on, and this script takes
+// whatever config it is pointed at — so "0 of 38 carry a contract" was previously reported as
+// agreement and exited 0. That is a check verifying nothing while claiming to pass, which is worse
+// than no check: it read as green twice while the plugin was simply missing from the config.
+if (withContract.length === 0) {
+  console.error(
+    `\nNo tool in the dump carries a contract (${dump.length} tools), so nothing was compared.\n`
+    + `A \`wireContract\` is folded on by @matatbread/matbot-tool-types, which must therefore be in\n`
+    + `\`plugins:\` in the config being used (${config}).\n`,
+  );
+  process.exit(1);
+}
+
 if (report.length === 0) {
   console.log(`Tool contracts agree with their inputSchemas (${withContract.length} of ${dump.length} tools carry a contract).`);
   process.exit(0);

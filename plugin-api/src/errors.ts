@@ -16,7 +16,7 @@
 
 const BRAND = 'matbot';
 
-export type MatbotErrorKind = 'MissingSecret' | 'IncompatibleRuntime' | 'NotAPlugin' | 'PromptCancelled' | 'ReadOnly' | 'MediaRejected';
+export type MatbotErrorKind = 'MissingSecret' | 'InvalidSecretName' | 'IncompatibleRuntime' | 'NotAPlugin' | 'PromptCancelled' | 'ReadOnly' | 'MediaRejected';
 
 function isKind(e: unknown, kind: MatbotErrorKind): boolean {
   return typeof e === 'object' && e !== null && (e as Record<string, unknown>)[BRAND] === kind;
@@ -38,6 +38,33 @@ export function missingSecretError(missingKeys: readonly string[]): MissingSecre
 }
 export function isMissingSecretError(e: unknown): e is MissingSecretError {
   return isKind(e, 'MissingSecret');
+}
+
+/**
+ * Thrown by a vault write when the backend cannot store a secret under the requested name — the
+ * name is the caller's, and most callers are an LLM inventing one, so it is regularly unstorable
+ * (a `.env`-backed vault takes environment-variable names; `email:abc:password` is silently
+ * dropped by systemd on the next boot). Refusing at the write is the only point that still knows
+ * which name was asked for.
+ *
+ * `rule` states what IS storable, not what went wrong: it is written for whoever must pick another
+ * name, and the caller that surfaces this — a prompt, a tool error — has no other source for it.
+ * Which names qualify is the backend's own business (`VaultSpec.unstorableKey`), so `rule` comes
+ * from there verbatim.
+ */
+export interface InvalidSecretNameError extends Error {
+  matbot: 'InvalidSecretName';
+  /** The rejected name. `key`, not `name` — `Error.name` is already the error's own type name. */
+  readonly key:  string;
+  readonly rule: string;
+}
+export function invalidSecretNameError(key: string, rule: string): InvalidSecretNameError {
+  const e = new Error(`Vault: cannot store a secret named "${key}" — ${rule}`);
+  e.name = 'InvalidSecretNameError';
+  return Object.assign(e, { matbot: 'InvalidSecretName' as const, key, rule });
+}
+export function isInvalidSecretNameError(e: unknown): e is InvalidSecretNameError {
+  return isKind(e, 'InvalidSecretName');
 }
 
 /**

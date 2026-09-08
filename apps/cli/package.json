@@ -3,7 +3,7 @@
   "matbotRuntime": [
     "node"
   ],
-  "version": "0.4.11",
+  "version": "0.4.12",
   "engines": {
     "node": ">=24.0.0"
   },
@@ -58,6 +58,7 @@
     "typescript": "catalog:",
     "@matatbread/matbot-function-tools": "workspace:^",
     "@matatbread/matbot-tool-types": "workspace:^",
+    "@matatbread/matbot-tool-ts-validation": "workspace:^",
     "@matatbread/matbot-storage-profiles": "workspace:^",
     "@matatbread/matbot-sessions": "workspace:^",
     "@matatbread/matbot-tool-skill-compiler": "workspace:^"
