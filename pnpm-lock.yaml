@@ -69,6 +69,9 @@ importers:
       '@matatbread/matbot-tool-skill-compiler':
         specifier: workspace:^
         version: link:../../plugins/skills_compiler
+      '@matatbread/matbot-tool-ts-validation':
+        specifier: workspace:^
+        version: link:../../plugins/ts-validation
       '@matatbread/matbot-tool-types':
         specifier: workspace:^
         version: link:../../plugins/tool-types
@@ -306,6 +309,9 @@ importers:
 
   plugins/json-validation:
     devDependencies:
+      '@matatbread/matbot-core':
+        specifier: workspace:^
+        version: link:../../core
       '@matatbread/matbot-plugin-api':
         specifier: workspace:^
         version: link:../../plugin-api
@@ -614,6 +620,25 @@ importers:
       '@matatbread/matbot-plugin-api':
         specifier: workspace:^
         version: link:../../plugin-api
+      typescript:
+        specifier: 'catalog:'
+        version: 6.0.3
+
+  plugins/ts-validation:
+    dependencies:
+      '@matatbread/matbot-tool-types':
+        specifier: workspace:^
+        version: link:../tool-types
+    devDependencies:
+      '@matatbread/matbot-core':
+        specifier: workspace:^
+        version: link:../../core
+      '@matatbread/matbot-plugin-api':
+        specifier: workspace:^
+        version: link:../../plugin-api
+      '@types/node':
+        specifier: 'catalog:'
+        version: 22.19.19
       typescript:
         specifier: 'catalog:'
         version: 6.0.3

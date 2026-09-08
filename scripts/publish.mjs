@@ -158,6 +158,46 @@ function checkGit(problems, advisories) {
   else console.log(`   ${c.green('✓')} no unconsumed changesets`);
 }
 
+// A clean tree only says the checkout matches the commit; it says nothing about whether the
+// lockfile *inside* that commit agrees with the manifests beside it. v0.4.12 shipped exactly that
+// combination — four packages' dependencies absent from the lock, tree clean, every package
+// correct on npm — so `pnpm install` succeeded only on the machine the release was cut on and
+// failed for every consumer, CI defaulting --frozen-lockfile to true. Nothing in a publish run
+// looks wrong when this happens, because nothing in the publish PATH reads the lockfile: `pnpm
+// pack` rewrites `workspace:` ranges from each manifest. So the artefact that breaks is the git
+// tag, which this script never validates and cannot repair after the fact — npm forbids
+// re-publishing a version, so the only fix is a new one.
+//
+// It pairs with the clean-tree gate to give the guarantee actually wanted: correct on disk AND
+// nothing uncommitted means the lockfile in the commit about to be tagged is the one checked.
+// Under --no-git that second half is the caller's.
+//
+// pnpm is the authority rather than a hand-rolled importer/manifest diff, for the reason stated
+// above about probing publish rights: a reimplementation of someone else's comparison passes
+// confidently right when it has drifted. `--lockfile-only` stops it writing and `--offline` keeps
+// it off the network and out of the store — measured hermetic against a cold store, ~300ms — so a
+// release can never be slowed or flaked by this.
+function checkLockfile(problems) {
+  try {
+    run('pnpm', ['install', '--frozen-lockfile', '--lockfile-only', '--offline'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    console.log(`   ${c.green('✓')} pnpm-lock.yaml matches every workspace manifest`);
+  } catch (err) {
+    const output = `${err.stdout ?? ''}${err.stderr ?? ''}`;
+    const detail = output.split('\n')
+      .filter(l => l.trim() && !/^\s*(Scope:|Note that in CI|Progress:)/.test(l))
+      .slice(0, 6)
+      .map(l => `       ${l.trim()}`)
+      .join('\n');
+    problems.push(
+      'pnpm-lock.yaml is out of date with the workspace manifests. This would tag a tree that cannot\n' +
+      '     be built by `pnpm install` anywhere but here — in CI --frozen-lockfile is the default:\n' +
+      `${detail}\n` +
+      '     pnpm stops at the first manifest that disagrees, so more may be stale than it names.\n' +
+      '     Fix: `pnpm install --lockfile-only` (regenerates all of them), commit pnpm-lock.yaml, re-run.',
+    );
+  }
+}
+
 // Everything in `problems` is a whole-run killer that npm only reports once it is already
 // mid-batch. Everything in `advisories` ships fine but is worth seeing — kept out of the blocking
 // set so packaging tidiness can never hold up a release.
@@ -297,6 +337,7 @@ const pkgs = workspacePackages();
 step(1, 'Preflight');
 const who = checkAuth(problems);
 checkGit(problems, advisories);
+checkLockfile(problems);
 checkManifests(pkgs, problems, advisories);
 
 let state = await registryState(pkgs);
