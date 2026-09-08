@@ -42,8 +42,9 @@ function isEnforcement(v: unknown): v is Enforcement {
   return v === 'off' || v === 'warn' || v === 'reject';
 }
 
-// The routing namespace core announces settings writes under. Not imported from core, which is not a
-// dependency of this plugin (only its types are, and those are erased).
+// The routing namespace core announces settings writes under. A literal rather than a core import:
+// only core's TYPES are a dependency here (and those are erased), and the announcement is now
+// self-describing enough that nothing else about the medium needs importing — see the filter below.
 const SETTINGS_NAMESPACE = 'settings';
 
 /**
@@ -103,12 +104,19 @@ function makeValidator(services: MatbotMachine, signal: AbortSignal): ToolInputV
   // operator's change appears not to work.
   //
   // Keyed by principal, because a settings override is per-principal — one user's `warn` must not become
-  // everyone's. Any settings write clears the writer's entry, not only a write to THIS plugin's document:
-  // telling them apart means re-deriving core's namespace slug here, where it would drift silently, and
-  // the cost of being loose is one extra store read after an unrelated setting changes.
+  // everyone's.
+  //
+  // Matched on `key`, the settings namespace the write was addressed by, against this plugin's own name.
+  // NOT on `id`, which is that name slugged to a legal document id by whatever the medium requires: a
+  // copy of that rule here would keep compiling after core's changed and silently never match again,
+  // leaving a cache that never invalidates — worse than the store read it replaced. An announcement with
+  // no `key` (a producer older than the field) invalidates everything, since failing loose costs one
+  // extra read and failing tight costs a setting that appears not to work.
+  const self   = services.self?.name;
   const cached = new Map<string, Enforcement>();
   services.Notifier.consume(n => {
     if (n.kind !== ItemChangeKind || n.namespace !== SETTINGS_NAMESPACE) return;
+    if (n.key !== undefined && self !== undefined && n.key !== self) return;
     const owner = n.principal?.id;
     if (owner === undefined) cached.clear();
     else cached.delete(owner);

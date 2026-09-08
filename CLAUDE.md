@@ -599,6 +599,15 @@ advisory (a cosmetic in-place UI update at most). Events are queued per subscrib
 the moment a concurrent writer lands, so a consumer re-reads through the store. A sink attaching
 mid-flight has missed what preceded it — **re-query on attach**; never put current state on the bus.
 
+**`id` is the medium's address; `key` is the caller's.** Where a namespace derives its document ids
+— settings slugs a plugin package name to satisfy the filesystem store's `/^[\w-]+$/`, and another
+backend could hash or truncate — the producer also states the **`key`** it was addressed by, and a
+consumer routing on identity compares that. Never re-derive the transformation in the consumer: a
+copy keeps compiling after the rule changes and simply stops matching, and a filter that silently
+never fires again is indistinguishable from "nothing changed" — the opposite of what an invalidation
+is for. Absent `key` means the id IS the key (`sessions`, `files`), so a consumer that finds none
+invalidates rather than assuming a mismatch.
+
 **Emit where the change happens**, not where a tool call happens: a detached child's completion and
 an HTTP-created session are both real changes with no tool executor in scope.
 

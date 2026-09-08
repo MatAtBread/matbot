@@ -34,7 +34,7 @@ function harness(opts: {
   warnings: string[];
   reg: Record<string, unknown>;
   reads(): number;
-  write(enforce: string, principal?: string): void;
+  write(enforce: string, principal?: string, key?: string): void;
 } {
   const warnings: string[] = [];
   const store = new Map<string, unknown>();
@@ -59,6 +59,8 @@ function harness(opts: {
   };
 
   const services = {
+    // The plugin compares an announcement's `key` against its own name, so the harness must have one.
+    self: { name: PLUGIN_NAME, specifier: PLUGIN_NAME },
     settings: () => ({
       get: async <T,>(k: string): Promise<T | undefined> => { reads++; return store.get(k) as T | undefined; },
       set: async () => {}, delete: async () => {},
@@ -85,11 +87,13 @@ function harness(opts: {
   return {
     warnings, services, reg,
     reads: () => reads,
-    write(enforce: string, principal?: string) {
+    write(enforce: string, principal?: string, key = PLUGIN_NAME) {
       store.set('enforce', enforce);
       for (const sink of sinks) {
+        // `key` is the settings namespace as core was addressed by it; `id` is that name slugged to a
+        // legal document id. The plugin must match on the former — see the filter it installs.
         sink({ kind: ItemChangeKind, plugin: 'core', source: 'settings', namespace: 'settings',
-               id: 'settings_doc', operation: 'saved',
+               id: key.replace(/[^\w-]+/g, '_'), key, operation: 'saved',
                ...(principal !== undefined ? { principal: { id: principal, type: 'user' } } : {}) });
       }
     },
@@ -102,6 +106,9 @@ function harness(opts: {
     },
   };
 }
+
+/** The loader-derived name of the plugin under test — the string its settings are namespaced by. */
+const PLUGIN_NAME = '@matatbread/matbot-tool-ts-validation';
 
 const FAILS: ToolValidator = {
   warnings: [],
@@ -248,5 +255,32 @@ test('the cache is keyed by principal, and a write clears only that one', async 
   assert.equal(await asUser('a'), undefined, "a's write must take effect for a");
   assert.ok((await asUser('b'))?.length, "and must not disturb b's cached value");
   assert.equal(h.reads(), before + 1, 'exactly one entry was invalidated');
+  await tsValidation.teardown?.();
+});
+
+test("another plugin's settings write does not invalidate this one's cache", async () => {
+  // The reason `key` exists on ItemChange. Matching on `id` instead would mean copying core's namespace
+  // slug into this plugin, where it would keep compiling after core's rule changed and silently stop
+  // matching — a cache that never invalidates, which is worse than the read it replaced.
+  const h = harness({ enforce: 'reject', entry: FAILS });
+  await h.validate({ action: 'rename' });
+  const before = h.reads();
+
+  h.write('off', undefined, '@matatbread/matbot-telegram');
+  assert.ok((await h.validate({ action: 'rename' }))?.length, 'an unrelated write must not change policy');
+  assert.equal(h.reads(), before, 'and must not even cost a read');
+
+  h.write('off');
+  assert.equal(await h.validate({ action: 'rename' }), undefined, 'this plugin\'s own write still lands');
+  await tsValidation.teardown?.();
+});
+
+test('an announcement with no `key` invalidates everything, failing loose', async () => {
+  // A producer older than the field, or a bridged remote. Failing loose costs one read; failing tight
+  // costs a setting that appears not to work.
+  const h = harness({ enforce: 'warn', entry: FAILS });
+  assert.deepEqual(await h.validate({ action: 'rename' }), []);
+  h.write('reject', undefined, undefined as unknown as string);
+  assert.ok((await h.validate({ action: 'rename' }))?.length, 'an unkeyed write must still invalidate');
   await tsValidation.teardown?.();
 });

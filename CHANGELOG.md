@@ -82,9 +82,19 @@ were checked against `inputSchema`, a lossy *projection* of that type, and only 
   cache to write, event invalidation being impossible and a TTL being a guess.
 
   `makePluginSettings` now wraps its store in `notifyingStore`, so `set`/`delete` publish an `ItemChange`
-  with `namespace: 'settings'`, `id` = the slugged plugin namespace, and the writing **principal** (an
-  override is per-principal, so a cache must be keyed by one). No contract is extended — `ItemChange`
-  already means "the thing at `(namespace, id)` is stale, re-read it, whatever holds it".
+  with `namespace: 'settings'`, the settings namespace, and the writing **principal** (an override is
+  per-principal, so a cache must be keyed by one). `ItemChange` already means "the thing at
+  `(namespace, id)` is stale, re-read it, whatever holds it".
+
+- **`ItemChange` carries the caller's `key`, where the medium derives `id` from it.** A settings
+  document's id is its plugin package name slugged to satisfy the filesystem store's `/^[\w-]+$/`, and
+  another backend could legitimately hash or truncate — so a consumer asking "are these MY settings?"
+  had to reproduce a transformation it does not own. That copy keeps compiling after the rule changes and
+  simply stops matching, leaving a filter that never fires again: silent, and indistinguishable from
+  "nothing changed", which is the opposite of what an invalidation is for. The producer now states the
+  key it was addressed by (`notifyingStore` takes a `keyOf`), and a consumer compares it against its own
+  `services.self.name`. Absent means the id IS the key — every other namespace today — so a consumer
+  finding none invalidates rather than assuming a mismatch.
 
   The bus is installed by the host as module state (`installSettingsNotifier`, beside
   `installSettingsDefaults`) rather than passed in, for the reason already recorded for the defaults: a
@@ -134,8 +144,8 @@ were checked against `inputSchema`, a lossy *projection* of that type, and only 
 
 - **`ts-validation`** (new, node) — consumes tool-types' supply, applies `enforce: off | warn | reject`
   (default **reject**, since loading the plugin is the opt-in; cached per principal and invalidated by
-  the settings `ItemChange` above, since validation at the executor otherwise re-reads it from the store
-  on every tool call through every door) and registers the `ToolCallValidator`
+  the settings `ItemChange` above — matched on its `key`, never on the slugged `id` — since validation at
+  the executor otherwise re-reads it from the store on every tool call through every door) and registers the `ToolCallValidator`
   core consults. Its dependency on tool-types is hard and direct — a `dependencies` entry and a plain
   import, the relationship `mcp` has to `mcp-http` — so it **installs the service itself** when nothing
   else has: there is no load-order requirement and no mount-table latch. Listing `tool-types` as well

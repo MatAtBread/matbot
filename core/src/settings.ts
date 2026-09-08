@@ -97,10 +97,15 @@ export function makePluginSettings(rawStore: Store<SettingsDoc>, namespace: stri
   const id = slugSettingsNamespace(namespace);
   // Wrapped here, not at the call sites, for the reason installDefaults is consulted here: the writers
   // are `set` and `delete` below and nowhere else, so one wrapper covers every plugin's settings and
-  // cannot be forgotten by a host building its own facade. Announcing carries `id` — the slugged
-  // namespace — so a consumer filters to its own settings, and the ambient principal, since an override
-  // is per-principal and a change to someone else's is not a change to yours.
-  const store = notifyingStore(rawStore, lateBoundNotifier, SETTINGS_NAMESPACE, 'settings');
+  // cannot be forgotten by a host building its own facade.
+  //
+  // The announcement carries the UNSLUGGED namespace as `key`, because `id` is the slug — a shape the
+  // filesystem store's id rule imposed, which another backend could impose differently. A consumer
+  // asking "are these my settings?" compares `key` against its own `services.self.name` and never
+  // reproduces `slugSettingsNamespace`, which would keep compiling after that rule changed and simply
+  // stop matching. It also carries the ambient principal, an override being per-principal: a change to
+  // someone else's settings is not a change to yours.
+  const store = notifyingStore(rawStore, lateBoundNotifier, SETTINGS_NAMESPACE, 'settings', () => namespace);
 
   const getDoc = async (): Promise<SettingsDoc | null> => {
     const raw = await store.get(id);

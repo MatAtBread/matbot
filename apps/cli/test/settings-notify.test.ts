@@ -56,8 +56,27 @@ test('a settings write announces an ItemChange addressing that plugin\'s documen
   assert.deepEqual(
     { ...n, kind: undefined },
     { kind: undefined, plugin: 'core', source: 'settings', namespace: SETTINGS_NAMESPACE,
-      id: slugSettingsNamespace(NAME), operation: 'saved', principal: { id: 'matt', type: 'user' } },
+      id: slugSettingsNamespace(NAME), key: NAME, operation: 'saved',
+      principal: { id: 'matt', type: 'user' } },
   );
+});
+
+test('`key` is the namespace as the caller wrote it, so no consumer re-derives the slug', async () => {
+  // `id` is the medium's address — the package name slugged to satisfy the filesystem store's id rule,
+  // and another backend could shape it differently. A consumer asking "are these my settings?" compares
+  // `key` against its own `services.self.name`; a copy of the slug rule would keep compiling after that
+  // rule changed and simply stop matching, which is silent.
+  const notifier = createNotifier('core');
+  const seen     = collect(notifier);
+  installSettingsNotifier(notifier);
+
+  await makePluginSettings(memStore(), NAME).set('enforce', 'warn');
+  await new Promise(r => setTimeout(r, 0));
+
+  const n = seen[0] as { id: string; key?: string };
+  assert.equal(n.key, NAME);
+  assert.notEqual(n.id, n.key, 'this name is one the medium had to mangle — the case the field exists for');
+  assert.equal(n.id, slugSettingsNamespace(NAME));
 });
 
 test('the announcement carries the writing principal, since an override is per-principal', async () => {

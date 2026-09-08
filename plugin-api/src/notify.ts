@@ -54,6 +54,21 @@ export interface NotificationBase {
 export interface ItemChange extends NotificationBase {
   readonly namespace: string;
   readonly id:        string;
+  /**
+   * The **caller's** key for this item, where `id` is derived from it rather than equal to it.
+   *
+   * `id` is the medium's address, and a medium is entitled to shape it: settings namespaces are plugin
+   * package names slugged to satisfy the filesystem store's `/^[\w-]+$/`, and another backend could
+   * legitimately hash or truncate. A consumer routing on identity — "is this MY document?" — otherwise
+   * has to reproduce a transformation it does not own, in a copy that keeps compiling after the rule
+   * changes and simply stops matching. That failure is silent and indistinguishable from "nothing
+   * changed", which is the opposite of what an invalidation is for.
+   *
+   * So the producer states the key it was addressed by, and a consumer compares names. Present only
+   * where the two genuinely differ — `sessions` and `files` address items by the id they were given,
+   * and an absent `key` means exactly that.
+   */
+  readonly key?:      string;
   readonly operation: 'saved' | 'deleted';
   readonly detail?:   unknown;
 }
@@ -221,14 +236,22 @@ export function scopedNotifier(notifier: Notifier, plugin: string): Notifier {
  * partition for visibility filtering). It observes writes made THROUGH it — a second process, or a
  * writer that bypassed this store, is not seen; that is what a backend's own watch, where one exists,
  * is for.
+ *
+ * `keyOf` supplies {@link ItemChange.key} for a namespace whose document ids are DERIVED from the
+ * caller's key (settings: a plugin name slugged to a legal id) — a function of the id rather than a
+ * constant, because this wraps a whole store and a per-document answer is the only honest shape.
+ * Omit it where the id IS the key, which is every other namespace today.
  */
 export function notifyingStore<T extends { id: string; version: string }>(
   store: Store<T>, notifier: Notifier, namespace: string, source: string,
+  keyOf?: (id: string) => string | undefined,
 ): Store<T> {
   const announce = (operation: 'saved' | 'deleted', id: string): void => {
     const principal = tryCurrentPrincipal();
+    const key       = keyOf?.(id);
     notifier.notify({
       kind: ItemChangeKind, source, operation, namespace, id,
+      ...(key !== undefined ? { key } : {}),
       ...(principal !== undefined ? { principal } : {}),
     });
   };
