@@ -1,5 +1,20 @@
 # @matatbread/matbot-storage-google-drive
 
+## 0.4.13
+
+### Patch Changes
+
+- 31bae3c: `provider update`: change `model`, `endpoint`, `parameters` or `maxRounds` on an existing profile
+  without touching its credentials. Adds `ProviderPatch` to the `provider` tool contract and the
+  `applyProviderPatch`/`patchedFields` policy to plugin-api (re-exported by core). Also fixes the block
+  remover swallowing the top-level section that follows the last provider — a pre-existing
+  `provider remove` bug.
+- Updated dependencies [5e95597]
+- Updated dependencies [31bae3c]
+  - @matatbread/matbot-core@0.4.13
+  - @matatbread/matbot-plugin-api@0.4.13
+  - @matatbread/matbot-browser@0.4.13
+
 ## 0.4.7
 
 ### Patch Changes

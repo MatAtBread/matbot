@@ -1,5 +1,16 @@
 # @matatbread/matbot-frontend-web
 
+## 0.4.13
+
+### Patch Changes
+
+- a09b28d: Indent bulleted lists in a confirm prompt's question. A prompt that lists items — the plugin installer's
+  approval names one package per line — rendered them flush against the text with no visible bullet gutter.
+- Updated dependencies [5e95597]
+- Updated dependencies [31bae3c]
+  - @matatbread/matbot-core@0.4.13
+  - @matatbread/matbot-plugin-api@0.4.13
+
 ## 0.4.8
 
 ### Patch Changes

@@ -1,5 +1,41 @@
 # @matatbread/matbot-tool-plugin
 
+## 0.4.13
+
+### Patch Changes
+
+- 5e95597: `plugin add` over http: offer to install the dependencies a source-fetch cannot bring. A URL-fetched
+  plugin copies one package's own files, not a dependency graph, so one with registry dependencies failed
+  to activate on its first unresolved import. It now resolves what the plugin declares, asks once with the
+  full transitive list, installs into the plugin's own cache root under `.plugins/` (the same
+  plan/apply path a local plugin takes — not the user's project, where `pnpm add` refuses at a workspace
+  root and otherwise writes a fetched plugin's dependencies into a tracked manifest), and retries
+  activation.
+
+  Also fixes the missing-package remedy being unreachable for that route, which it was for two reasons:
+  it was matched off Node's `Cannot find package 'x'` where a bare import from inside `.plugins/` is
+  answered by ts-hooks' own `Cannot resolve "x"`, and `loadPlugins` rethrew a bare `new Error(message)`
+  that dropped the `ERR_MODULE_NOT_FOUND` code the remedy keys on. The rethrow now carries the original
+  as `cause` and copies its `code`.
+
+- 8cd085b: Link a local plugin's host singletons whether or not it has registry dependencies to install. The link
+  loop was behind an early return in `applyProvision`, so a plugin whose only dependency is the
+  `@matatbread/matbot-plugin-api` peer got no `node_modules` and no link at all.
+
+  Also asks the right question for the link target (`hostOwnPackageDir`, not `hostPackageDirFrom(name,
+pluginDir)`, which answers with the author's own devDependency copy when one is installed), and replaces
+  a path that does not lead to the host's copy rather than accepting any path that exists.
+
+- 31bae3c: `provider update`: change `model`, `endpoint`, `parameters` or `maxRounds` on an existing profile
+  without touching its credentials. Adds `ProviderPatch` to the `provider` tool contract and the
+  `applyProviderPatch`/`patchedFields` policy to plugin-api (re-exported by core). Also fixes the block
+  remover swallowing the top-level section that follows the last provider — a pre-existing
+  `provider remove` bug.
+- Updated dependencies [5e95597]
+- Updated dependencies [31bae3c]
+  - @matatbread/matbot-core@0.4.13
+  - @matatbread/matbot-plugin-api@0.4.13
+
 ## 0.4.7
 
 ### Patch Changes
