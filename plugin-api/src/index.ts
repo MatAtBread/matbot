@@ -16,6 +16,7 @@ export * from './bytes.js';
 export * from './store-query.js';
 export * from './errors.js';
 export * from './vault.js';
+export * from './provider-patch.js';
 export * from './session.js';
 export * from './invoke-tool.js';
 

@@ -1,6 +1,10 @@
 import type { Tool } from '@matatbread/matbot-plugin-api';
 export { pluginTool }           from './tools/plugin.js';
 export { createProviderTool }   from './tools/provider.js';
+// `provider update`'s write half, split from the executor so the block round-trip can be driven directly
+// by a test — the executor's own half is a confirmation prompt over `applyProviderPatch` (plugin-api,
+// which is where the patch semantics live, shared with the browser host).
+export { writeProviderBlock } from './tools/provider.js';
 export { classifySpecifier, canonicalLocalSpecifier, fetchRemoteManifest, materializeRemote, remoteDependencyNotes } from './remote-cache.js';
 export type { Classified, RemoteManifest, MaterializedRemote } from './remote-cache.js';
 // Provisioning a local plugin's dependencies: the `plugin` tool drives it, and its tests drive it directly

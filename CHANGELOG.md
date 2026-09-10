@@ -9,6 +9,49 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## Unreleased
+
+### API gaps filled
+
+- **`ProviderPatch`, and one patch policy for every host that applies one.** `provider update`'s input
+  shape lives on `plugin-api`'s shared `ProviderToolContract` (so the node and browser tools cannot
+  drift), and its *semantics* live in `applyProviderPatch` beside `applyCreateSecret`, for the same
+  reason: three hosts now apply a patch — the node tool against matbot.yaml, the browser bootstrap
+  against localStorage, the Drive backend against its manifest — and what a patch **means** must not be
+  one of the things they differ on. `null` clears a field, absent leaves it alone. `patchedFields`
+  reports what a patch actually names. Both re-exported by core, so an app needs no direct plugin-api
+  dependency.
+
+### Bug fixes
+
+- **Removing a provider profile no longer swallows the section after it.** The block remover matched
+  every following line that did not begin `  <non-space>` — which a *top-level* key does not. Deleting
+  the last profile in `providers:` therefore also deleted the header of whatever came next and left that
+  section's children indented under `providers:`, so `default_settings:` ceased to exist and a settings
+  namespace became a provider profile. The file still parsed, so nothing said a word. Indentation is
+  what delimits the block, so that is what it now reads.
+
+### Optional
+
+- **`provider` tool: an `update` action** (node, browser, and the Drive-backed provider admin). Changes
+  `model`, `endpoint`, `parameters` or `maxRounds` on an existing profile — `null` to clear one — where
+  previously the only route was `remove` + `add`. That route could not work for the case that prompted
+  this: `provider list` reports `hasCredentials`, never the `${NAME}` reference, so an LLM re-adding a
+  profile had nothing to write back and had to re-prompt for a key that had never been lost. A model
+  rename (DeepSeek's) is now one call, and the credential is the one field `update` will not touch.
+
+  Two things it deliberately cannot change. **Credentials** — that is `plugin store-key`, which writes
+  the new value to the vault under the name the profile already references, so nothing about the profile
+  changes to rotate a key; folding it into `update` would have meant guessing between rewriting a
+  reference and replacing a literal. And **`module`** — changing the adapter re-opens every resolution
+  question `add` answers, so that stays `remove` + `add`.
+
+  `parameters` is replaced wholesale rather than merged per key: the values are forwarded to the
+  endpoint unmodified and so have no shape to merge against, and `list` reports them in full, which is
+  what makes read-modify-write something a caller can carry out. The profile's yaml block is
+  regenerated, so comments inside that one block are lost — stated in the confirmation prompt before it
+  happens. A profile contributed at runtime rather than by matbot.yaml is reported rather than appended.
+
 ## 0.4.12
 
 **Tool inputs are typechecked, whoever the caller is.** A tool declares its call contract as a

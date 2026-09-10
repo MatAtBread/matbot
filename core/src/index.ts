@@ -19,6 +19,10 @@ export type {
   MediaRejectedError, InvalidSecretNameError, MatbotErrorKind,
 } from '@matatbread/matbot-plugin-api';
 export { applyCreateSecret, assertStorableKey, unreferenceableKey, REFERENCEABLE_KEY_RULE } from '@matatbread/matbot-plugin-api';
+// The `provider update` patch policy, alongside the vault's: written once in plugin-api so the hosts
+// that apply one cannot differ on what a patch MEANS, and re-exported here so an app needs no direct
+// plugin-api dependency to get it.
+export { applyProviderPatch, patchedFields } from '@matatbread/matbot-plugin-api';
 export { isTruncatedToolResult, notifyingStore, ItemChangeKind, RegistryChangeKind } from '@matatbread/matbot-plugin-api';
 // Ambient security principal: the interface is a type (carried by `export type *`); these are the values.
 export { currentPrincipal, tryCurrentPrincipal, runAs, lastActivityAt } from '@matatbread/matbot-plugin-api';

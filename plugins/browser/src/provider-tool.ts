@@ -1,5 +1,6 @@
 import type { Tool, ToolExecutor, ToolResultOf, ToolContext, ModelParameters,
-              ProviderToolContract, ProviderSummary, AvailableProvider } from '@matatbread/matbot-plugin-api';
+              ProviderToolContract, ProviderSummary, AvailableProvider,
+              ProviderPatch } from '@matatbread/matbot-plugin-api';
 
 export type { AvailableProvider, ProviderSummary };
 
@@ -36,12 +37,16 @@ export interface ProviderAdmin {
   available: AvailableProvider[];
   list(): ProviderSummary[];
   add(draft: ProviderDraft): Promise<string>;   // persist + load adapter + register
+  /** Apply a patch to an existing profile — never its credentials (see {@link ProviderPatch}). `false`
+   *  ⇒ no such profile. The adapter is unchanged by construction, so nothing needs loading. */
+  update(name: string, patch: ProviderPatch): Promise<boolean>;
   remove(name: string): Promise<boolean>;
 }
 
 type ProviderInput =
   | { action: 'list' }
   | { action: 'add'; name: string; module: string; endpoint?: string; model?: string; parameters?: ModelParameters }
+  | ({ action: 'update'; name: string } & ProviderPatch)
   | { action: 'remove'; name: string };
 
 /**
@@ -113,6 +118,32 @@ export function createBrowserProviderTool(admin: ProviderAdmin): Tool<ToolResult
         return;
       }
 
+      if (act.action === 'update') {
+        const { action: _a, name, ...patch } = act;
+        if (!name) { yield { type: 'error', message: 'update requires a "name".' }; return; }
+
+        const supplied = (['model', 'endpoint', 'parameters', 'maxRounds'] as const).filter(f => patch[f] !== undefined);
+        if (supplied.length === 0) {
+          yield {
+            type:  'result',
+            value: { message: 'Nothing to update. Supply at least one of model, endpoint, parameters, maxRounds — null to clear a field. The API key and the adapter module are not updatable.' },
+          };
+          return;
+        }
+
+        // No confirmation prompt and no endpoint probe, unlike the node tool: there is no YAML block to
+        // rewrite (and so no comment to lose), and a browser cannot HEAD a third-party endpoint without
+        // tripping CORS — a failed probe here would mean nothing about reachability.
+        const ok = await admin.update(name, patch);
+        yield {
+          type:  'result',
+          value: ok
+            ? { message: `Provider "${name}" updated: ${supplied.join(', ')}. Takes effect on the next turn.` }
+            : { message: `No provider named "${name}".` },
+        };
+        return;
+      }
+
       if (act.action === 'remove') {
         if (!act.name) { yield { type: 'error', message: 'remove requires a "name".' }; return; }
 
@@ -147,7 +178,7 @@ export function createBrowserProviderTool(admin: ProviderAdmin): Tool<ToolResult
     description:
       'Manage LLM provider profiles — the named model configurations matbot can talk to (each is an ' +
       'adapter + endpoint + model + key + optional generation parameters). List them, add one, or ' +
-      'remove one. This is the browser build: profiles persist in browser storage and the key in the ' +
+      'update one, or remove one. This is the browser build: profiles persist in browser storage and the key in the ' +
       'vault (no matbot.yaml; there is no separate `credentialEnvVar` concept since there are no ' +
       'process env vars to reference).\n\n' +
       'The API key is never passed here — `add` requests it out-of-band so it stays out of the ' +
@@ -158,6 +189,11 @@ export function createBrowserProviderTool(admin: ProviderAdmin): Tool<ToolResult
       'them and the tool will not prompt for a key either. `remove` refuses to delete the only ' +
       'configured profile or the one powering the current turn — add a replacement first or switch ' +
       'providers.\n\n' +
+      'UPDATE changes `model`, `endpoint`, `parameters` or `maxRounds` on an existing profile: supply ' +
+      'the name plus only the fields to change, an explicit `null` to clear one (not `model` — a ' +
+      'profile must keep one). `parameters` is replaced WHOLESALE, not merged, so `list` first and send ' +
+      'back everything you want to keep. It cannot change the API key (use `plugin store-key`) or the ' +
+      'adapter `module` (remove and add again). Effective from the next turn.\n\n' +
       'PARAMETERS  (pass as the `parameters` object on add). NB: This is an example - the parameters are passed to the LLM endpoint with no modification and are model/provider specific\n' +
       '  maxTokens   — integer, maximum output tokens\n' +
       '  temperature — float 0.0–1.0\n' +
@@ -168,15 +204,22 @@ export function createBrowserProviderTool(admin: ProviderAdmin): Tool<ToolResult
       type:     'object',
       required: ['action'],
       properties: {
-        action:   { type: 'string', enum: ['list', 'add', 'remove'] },
-        name:     { type: 'string', description: 'Profile name (add/remove).' },
-        module:   { type: 'string', description: 'Adapter type — label, module, or index from `list` (add).' },
-        endpoint: { type: 'string', description: 'Endpoint URL (add; omit for a selfContained adapter).' },
-        model:    { type: 'string', description: 'Model name (add; omit for a selfContained adapter — its modelHint/label is used).' },
+        action:   { type: 'string', enum: ['list', 'add', 'update', 'remove'] },
+        name:     { type: 'string', description: 'Profile name (add/update/remove).' },
+        module:   { type: 'string', description: 'Adapter type — label, module, or index from `list` (add only; update cannot change it).' },
+        // `['string','null']` here and below: null is update's clear signal, and inputSchema is an
+        // enforcement point (json-validation) as well as documentation.
+        endpoint: { type: ['string', 'null'], description: 'Endpoint URL (add; omit for a selfContained adapter. update: null clears it).' },
+        model:    { type: 'string', description: 'Model name (add; omit for a selfContained adapter — its modelHint/label is used. update: the renamed model).' },
         parameters: {
-          type:                 'object',
+          type:                 ['object', 'null'],
           additionalProperties: true,
-          description:          'Generation parameters: maxTokens, temperature, topP, thinking, etc. (add only).',
+          description:          'Generation parameters: maxTokens, temperature, topP, thinking, etc. (add/update). On update this REPLACES the whole object — list first and send back everything you want to keep; null clears it.',
+        },
+        maxRounds: {
+          type:        ['integer', 'null'],
+          minimum:     1,
+          description: 'Per-turn ceiling on agentic rounds (one model call plus its tool batch). Not a generation parameter — never sent to the endpoint (update; null clears it).',
         },
       },
     },
