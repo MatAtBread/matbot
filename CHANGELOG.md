@@ -9,7 +9,7 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
-## Unreleased
+## 0.4.13
 
 ### API gaps filled
 
@@ -32,6 +32,23 @@ churn and less likely to affect a consumer who doesn't use them.
   what delimits the block, so that is what it now reads.
 
 ### Optional
+
+- **`plugin add` over http now offers to install the dependencies it cannot bring.** A source-fetch
+  copies one package's own files, not a dependency graph, so a plugin with registry dependencies fetched
+  from a URL failed to activate on its first unresolved import. It now names every dependency the
+  project cannot already resolve — the declarations, not just the one import that happened to fail
+  first, since activation stops at the first — asks once, installs them with the project's own package
+  manager, and retries activation in process. Declining leaves the previous advice unchanged. The
+  approval is the same out-of-band human confirm as the install itself, so a fetched plugin cannot
+  install anything by asserting it needs it.
+
+- **`plugin add` states the missing package again, instead of the raw resolver error.** The tailored
+  remedy ("it depends on X, which a raw github/URL fetch does not bring in… do not retry name
+  variations") was matched off Node's `Cannot find package 'x'`, but a bare import from inside
+  `.plugins/` never reaches Node's error: ts-hooks retries it against the host's graph and throws its
+  own `Cannot resolve "x"` carrying the same code. So the branch was unreachable for the http route it
+  was written for, and the generic "activation failed: <error>" fell out instead. Both wordings are read
+  now, pinned by a test against the error a real unresolved import throws.
 
 - **`provider` tool: an `update` action** (node, browser, and the Drive-backed provider admin). Changes
   `model`, `endpoint`, `parameters` or `maxRounds` on an existing profile — `null` to clear one — where

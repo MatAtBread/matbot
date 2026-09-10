@@ -8,8 +8,8 @@ import { readFile, writeFile, access, readdir } from 'node:fs/promises';
 import { pathToFileURL, fileURLToPath }       from 'node:url';
 import { createRequire }                     from 'node:module';
 import path                                  from 'node:path';
-import { classifySpecifier, fetchRemoteManifest, canonicalLocalSpecifier } from '../remote-cache.js';
-import { planProvision, applyProvision, discardProvision, runCommand, type ProvisionPlan } from '../provision.js';
+import { classifySpecifier, fetchRemoteManifest, canonicalLocalSpecifier, hostPackageDirFrom } from '../remote-cache.js';
+import { planProvision, applyProvision, discardProvision, runCommand, isRegistryRange, type ProvisionPlan } from '../provision.js';
 import { findDuplicateSingletons } from '../singletons.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -356,10 +356,16 @@ function describeInstallFailure(specifier: string, pm: string, e: unknown): stri
  *  A raw github/URL fetch copies one plugin's own files, not its dependency graph, so a plugin with a
  *  runtime dependency on another package fails here with the package unresolved. We surface the package
  *  name so the caller can give one readable instruction instead of an opaque ERR_MODULE_NOT_FOUND that
- *  sends the model hunting for name variations. */
-function missingPackageOf(e: unknown): string | undefined {
+ *  sends the model hunting for name variations.
+ *
+ *  BOTH wordings must match, and the second is the one that matters. Node's own message is
+ *  `Cannot find package 'x' imported from …`, but a bare import from inside the `.plugins/` cache never
+ *  reaches it: ts-hooks' `resolveAsHost` retries against the host's graph first and, when that also fails,
+ *  throws its own `Cannot resolve "x" imported by …` carrying the same ERR_MODULE_NOT_FOUND code. Matching
+ *  only Node's phrasing therefore missed every http plugin — precisely the route this exists for. */
+export function missingPackageOf(e: unknown): string | undefined {
   if (!(e instanceof Error) || (e as NodeJS.ErrnoException).code !== 'ERR_MODULE_NOT_FOUND') return undefined;
-  const m = /Cannot find (?:package|module) '([^']+)'/.exec(e.message);
+  const m = /Cannot (?:find (?:package|module)|resolve) ['"]([^'"]+)['"]/.exec(e.message);
   const pkg = m?.[1];
   // A bare package specifier (not a relative/absolute path): that's a missing dependency, not a
   // broken internal import.
@@ -549,6 +555,10 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
       // loader's runtime gate + the post-import shape check.)
       let description: string | undefined;
       let remoteName: string | undefined;
+      // What an http plugin DECLARES it needs. This route brings one package's own files and no
+      // dependency graph, so the declarations are the only statement of what is missing — and they name
+      // every one, where an activation failure names only the first import that could not resolve.
+      let remoteDeps: readonly string[] = [];
       if (classified.kind === 'http') {
         if (classified.advice !== undefined) yield { type: 'stdout', chunk: `${classified.advice}\n` };
         try {
@@ -568,6 +578,12 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
           const d = manifest.pkg['description'];
           if (typeof d === 'string') description = d;
           if (typeof manifest.pkg['name'] === 'string') remoteName = manifest.pkg['name'];
+          const deps = manifest.pkg['dependencies'];
+          if (deps !== null && typeof deps === 'object') {
+            remoteDeps = Object.entries(deps as Record<string, unknown>)
+              .filter((en): en is [string, string] => typeof en[1] === 'string' && isRegistryRange(en[1]))
+              .map(([n]) => n);
+          }
         } catch (e) {
           yield { type: 'error', message: `Could not install "${specifier}": ${e instanceof Error ? e.message : String(e)}.` };
           return;
@@ -726,6 +742,55 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
         // once the dependency is present), like any other fixable activation failure.
         const missing = classified.kind === 'http' ? missingPackageOf(e) : undefined;
         if (missing !== undefined) {
+          // Offer to install them, rather than only naming them. The local route already folds its
+          // plugin's dependencies into the single install approval; this route could not, having had
+          // nothing on disk to ask npm about at that point. Asking here is the same bargain one step
+          // later: the packages are named by a package.json the user has already agreed to install, and
+          // the approval is still an out-of-band human one, so a fetched plugin cannot install anything
+          // by asserting it needs it.
+          //
+          // Every declared dependency is offered, not just the one that failed: activation stops at the
+          // FIRST unresolved import, so one-at-a-time would mean a fetch/prompt/retry cycle per package.
+          // Filtered by what actually resolves from the project, which also drops the host singletons
+          // (they resolve through the link farm) with no list to keep in step.
+          const wanted = [...new Set([missing, ...remoteDeps])]
+            .filter(n => hostPackageDirFrom(n, projectDir) === undefined);
+          const pm = await detectPackageManager(projectDir);
+          const offer = await confirmAction(ctx,
+            `**"${configSpecifier}"** was fetched, but it needs ${wanted.length} package(s) a source-fetch does not ` +
+            `bring in (it copies a plugin's own files, not its dependency graph):\n${wanted.map(n => `- ${n}`).join('\n')}` +
+            `\n\nInstall them with ${pm} into ${path.basename(projectDir)} (their own dependencies come too)?`);
+
+          if (offer) {
+            yield { type: 'stdout', chunk: `Installing ${wanted.length} package(s) with ${pm}...\n` };
+            try {
+              const out = await runCommand(pm, ['add', ...wanted], projectDir);
+              if (out) yield { type: 'stdout', chunk: out };
+            } catch (err) {
+              yield { type: 'result', value: { message:
+                `Could not install the dependencies of "${configSpecifier}": ${describeInstallFailure(wanted.join(', '), pm, err)} ` +
+                `It has been left in ${path.basename(configPath)} and activates once they are present.` } };
+              return;
+            }
+            // Retried in-process: the plugin's files are already cached, so this is a resolution retry,
+            // not a second fetch. A failure here is reported as-is — the dependencies asked for are now
+            // installed, so whatever remains is a different problem and guessing at it would mislead.
+            yield { type: 'stdout', chunk: `Activating "${configSpecifier}"...\n` };
+            try {
+              const loaded  = await ctx.loadPlugin(configSpecifier);
+              const welcome = await loaded.installationMessage?.();
+              yield { type: 'result', value: {
+                message: `"${configSpecifier}" installed and is now active (${wanted.length} dependency package(s) installed with ${pm}).`,
+                ...(welcome !== undefined ? { installationMessage: welcome } : {}),
+              } };
+            } catch (err) {
+              yield { type: 'result', value: { message:
+                `Installed ${wanted.join(', ')}, but "${configSpecifier}" still did not activate: ${String(err)}. ` +
+                `It has been left in ${path.basename(configPath)}.` } };
+            }
+            return;
+          }
+
           const fromNpm = missing.startsWith('@matatbread/')
             ? `Installing it from npm is simplest — \`${missing}\` — because npm resolves ITS dependencies too.`
             : `Install \`${missing}\` (e.g. from npm) so it is present.`;

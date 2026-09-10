@@ -1,7 +1,7 @@
 ---
-'@matatbread/matbot-plugin-api': minor
-'@matatbread/matbot-tool-plugin': minor
-'@matatbread/matbot-browser': minor
+'@matatbread/matbot-plugin-api': patch
+'@matatbread/matbot-tool-plugin': patch
+'@matatbread/matbot-browser': patch
 '@matatbread/matbot-storage-google-drive': patch
 ---
 

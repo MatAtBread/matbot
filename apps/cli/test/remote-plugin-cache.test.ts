@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import http from 'node:http';
-import { materializeRemote, remoteDependencyNotes } from '@matatbread/matbot-tool-plugin';
+import { materializeRemote, remoteDependencyNotes, missingPackageOf } from '@matatbread/matbot-tool-plugin';
 
 // A remote plugin is fetched over HTTP and mirrored into `.plugins/`, and the mirrored tree IS the
 // cache. Two properties of that were absent while it was write-only: a warm boot re-downloaded every
@@ -260,10 +260,33 @@ test('an unresolvable bare import names the plugin file that imported it', async
       assert.match(msg, /Cannot resolve "left-pad-that-nothing-has"/);
       assert.match(msg, /imported by .*index\.ts/, `the importer must be the plugin's file, not the hook: ${msg}`);
       assert.equal(/ts-hooks\.js/.test(msg), false, `the hook is not the importer: ${msg}`);
+      // The `plugin` tool reads this message to name the package it should OFFER to install. The two
+      // live in different packages with nothing but a regex between them, and they silently disagreed:
+      // the tool matched Node's `Cannot find package 'x'`, while every http plugin — the only route the
+      // branch exists for — arrives here with the hook's `Cannot resolve "x"` instead, so the tailored
+      // remedy was unreachable and the raw error was surfaced in its place.
+      assert.equal(missingPackageOf(e), 'left-pad-that-nothing-has',
+        `the plugin tool must recover the package name from this exact error: ${msg}`);
       return true;
     });
   } finally {
     await srv.stop();
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+// The other wording, and the exclusion. Node's own phrasing reaches the tool whenever the importer is
+// NOT in the cache tree (`resolveAsHost` rethrows the original), so both must be read; a relative
+// specifier is a broken internal import, which no amount of installing fixes.
+test('a missing package is recovered from either wording, and a relative import is not one', () => {
+  const nodeOwn = Object.assign(new Error(`Cannot find package 'imapflow' imported from /p/index.ts`),
+    { code: 'ERR_MODULE_NOT_FOUND' });
+  const hook = Object.assign(new Error(`Cannot resolve "imapflow" imported by file:///p/.plugins/h/x/index.ts: a plugin fetched over http brings its own files only`),
+    { code: 'ERR_MODULE_NOT_FOUND' });
+  const relative = Object.assign(new Error(`Cannot find module './helpers.js'`), { code: 'ERR_MODULE_NOT_FOUND' });
+
+  assert.equal(missingPackageOf(nodeOwn), 'imapflow');
+  assert.equal(missingPackageOf(hook), 'imapflow');
+  assert.equal(missingPackageOf(relative), undefined);
+  assert.equal(missingPackageOf(new Error('something else entirely')), undefined);
 });
