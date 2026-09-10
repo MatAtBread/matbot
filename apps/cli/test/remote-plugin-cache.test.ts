@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import http from 'node:http';
-import { materializeRemote, remoteDependencyNotes } from '@matatbread/matbot-tool-plugin';
+import { materializeRemote, remoteDependencyNotes, missingPackageOf,
+         planProvision, applyProvision } from '@matatbread/matbot-tool-plugin';
 
 // A remote plugin is fetched over HTTP and mirrored into `.plugins/`, and the mirrored tree IS the
 // cache. Two properties of that were absent while it was write-only: a warm boot re-downloaded every
@@ -260,8 +261,77 @@ test('an unresolvable bare import names the plugin file that imported it', async
       assert.match(msg, /Cannot resolve "left-pad-that-nothing-has"/);
       assert.match(msg, /imported by .*index\.ts/, `the importer must be the plugin's file, not the hook: ${msg}`);
       assert.equal(/ts-hooks\.js/.test(msg), false, `the hook is not the importer: ${msg}`);
+      // The `plugin` tool reads this message to name the package it should OFFER to install. The two
+      // live in different packages with nothing but a regex between them, and they silently disagreed:
+      // the tool matched Node's `Cannot find package 'x'`, while every http plugin — the only route the
+      // branch exists for — arrives here with the hook's `Cannot resolve "x"` instead, so the tailored
+      // remedy was unreachable and the raw error was surfaced in its place.
+      assert.equal(missingPackageOf(e), 'left-pad-that-nothing-has',
+        `the plugin tool must recover the package name from this exact error: ${msg}`);
       return true;
     });
+  } finally {
+    await srv.stop();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// The other wording, and the exclusion. Node's own phrasing reaches the tool whenever the importer is
+// NOT in the cache tree (`resolveAsHost` rethrows the original), so both must be read; a relative
+// specifier is a broken internal import, which no amount of installing fixes.
+test('a missing package is recovered from either wording, and a relative import is not one', () => {
+  const nodeOwn = Object.assign(new Error(`Cannot find package 'imapflow' imported from /p/index.ts`),
+    { code: 'ERR_MODULE_NOT_FOUND' });
+  const hook = Object.assign(new Error(`Cannot resolve "imapflow" imported by file:///p/.plugins/h/x/index.ts: a plugin fetched over http brings its own files only`),
+    { code: 'ERR_MODULE_NOT_FOUND' });
+  const relative = Object.assign(new Error(`Cannot find module './helpers.js'`), { code: 'ERR_MODULE_NOT_FOUND' });
+
+  assert.equal(missingPackageOf(nodeOwn), 'imapflow');
+  assert.equal(missingPackageOf(hook), 'imapflow');
+  assert.equal(missingPackageOf(relative), undefined);
+  assert.equal(missingPackageOf(new Error('something else entirely')), undefined);
+});
+
+// The whole point of the route, end to end: a fetched plugin declaring a registry dependency could not
+// activate, because a source-fetch brings one package's files and no dependency graph. The dependencies
+// are installed into the plugin's OWN cache root — not the user's project, where `pnpm add` refuses at a
+// workspace root outright and otherwise writes a fetched plugin's dependencies into a tracked manifest,
+// and not the shared link farm, where an install would prune the host singletons as extraneous. The cache
+// root sits earlier in the resolution walk-up than the farm, so what lands there is reachable from this
+// plugin and invisible to everything else, and `rm -rf` on it takes the dependencies with it.
+test('a fetched plugin\'s dependencies install into its cache root and make it load', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'matbot-remote-deps-'));
+  const dotPlugins = join(dir, '.plugins');
+  const srv = await serve({
+    '/p/package.json': JSON.stringify({
+      name: '@fixture/matbot-needs-ms', version: '1.0.0', type: 'module',
+      matbotRuntime: ['node'], exports: { '.': './index.ts' },
+      dependencies: { ms: '2.1.3' },
+      peerDependencies: { '@matatbread/matbot-plugin-api': '^0.4.0' },
+    }),
+    '/p/index.ts':
+      `import ms from 'ms';\n` +
+      `import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';\n` +
+      `export const plugin = { apiVersion: PLUGIN_API_VERSION, ms: ms('1h') };\n`,
+  });
+  try {
+    const m = await materializeRemote(`${srv.origin}/p/`, dotPlugins, dir);
+
+    // The failure being fixed, asserted rather than assumed — and it is what `plugin add` reads to decide
+    // to offer the install at all.
+    await assert.rejects(import(pathToFileURL(m.entry).href), (e: unknown) => {
+      assert.equal(missingPackageOf(e), 'ms');
+      return true;
+    });
+
+    const plan = await planProvision(m.pkgRoot);
+    assert.deepEqual(plan.packages, ['ms@2.1.3']);
+    const { linked } = await applyProvision(plan);
+    assert.ok(linked.includes('@matatbread/matbot-plugin-api'));
+
+    // A fresh URL: the earlier failed resolution must not be what this re-reads.
+    const mod = await import(`${pathToFileURL(m.entry).href}?installed=1`) as { plugin: { ms: number } };
+    assert.equal(mod.plugin.ms, 3600000, 'the dependency resolves from the cache root');
   } finally {
     await srv.stop();
     await rm(dir, { recursive: true, force: true });

@@ -1,5 +1,5 @@
 import type { Tool, ToolExecutor, ToolResultOf, ToolContext, ProviderRegistry, MatbotPlugin,
-              ProviderToolContract } from '@matatbread/matbot-plugin-api';
+              ProviderToolContract, ProviderPatch, ProviderConfig } from '@matatbread/matbot-plugin-api';
 
 // Shared with the browser implementation of this same tool name — see plugin-api/src/types/builtin-tools.ts.
 declare module '@matatbread/matbot-plugin-api' {
@@ -7,6 +7,7 @@ declare module '@matatbread/matbot-plugin-api' {
     provider: ProviderToolContract;
   }
 }
+import { applyProviderPatch, patchedFields }                 from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins, getSpecifierForPlugin }       from '@matatbread/matbot-core';
 import { readFile, writeFile }                               from 'node:fs/promises';
 import { fileURLToPath }                                     from 'node:url';
@@ -32,13 +33,10 @@ type ProviderInput =
       parameters?:       Record<string, unknown>;
       maxRounds?:        number;
     }
+  | ({ action: 'update'; name: string } & ProviderPatch)
   | { action: 'remove'; name: string };
 
 // ── YAML helpers (read/write only — runtime state comes from liveProviders) ───
-
-function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
 
 // ── Module resolution (write-time) ──────────────────────────────────────────────
 //
@@ -121,15 +119,18 @@ function appendYamlFields(obj: Record<string, unknown>, indent: string, lines: s
   }
 }
 
+// `credentials` is written verbatim as the map it already is, rather than reconstructed from an env-var
+// name and a key. `update` regenerates a whole block from the stored profile, and the credential is the
+// one field it is not allowed to touch — a map in, the same map out, with nothing in between that could
+// mangle a `${NAME}` reference or (a config may hold one) a literal key.
 function buildProviderBlock(opts: {
-  name:           string;
-  module:         string;
-  model:          string;
-  endpoint?:      string;
-  envVarName?:    string;
-  credentialKey?: string;
-  parameters?:    Record<string, unknown>;
-  maxRounds?:     number;
+  name:         string;
+  module:       string;
+  model:        string;
+  endpoint?:    string;
+  credentials?: Record<string, string>;
+  parameters?:  Record<string, unknown>;
+  maxRounds?:   number;
 }): string {
   const lines = [
     `  ${opts.name}:`,
@@ -137,9 +138,9 @@ function buildProviderBlock(opts: {
     ...(opts.endpoint !== undefined ? [`    endpoint: ${opts.endpoint}`] : []),
     `    model: ${opts.model}`,
   ];
-  if (opts.envVarName) {
+  if (opts.credentials !== undefined && Object.keys(opts.credentials).length > 0) {
     lines.push(`    credentials:`);
-    lines.push(`      ${opts.credentialKey ?? 'apiKey'}: \${${opts.envVarName}}`);
+    for (const [k, v] of Object.entries(opts.credentials)) lines.push(`      ${k}: ${v}`);
   }
   if (opts.maxRounds !== undefined) {
     lines.push(`    maxRounds: ${opts.maxRounds}`);
@@ -149,6 +150,59 @@ function buildProviderBlock(opts: {
     appendYamlFields(opts.parameters, '      ', lines);
   }
   return lines.join('\n') + '\n';
+}
+
+/**
+ * Why this config cannot be written to matbot.yaml and read back as itself — `undefined` when it can.
+ * The `unstorableKey` idiom: return the rule, for whoever must now pick another value.
+ *
+ * The config parser strips `#` to end-of-line before it tokenises, quotes included, so a value carrying
+ * one is not representable at all and no amount of escaping here would make it so. That matters because
+ * `update` regenerates a block from values that already round-tripped once: writing the truncation would
+ * change a value the caller never asked to change, and the next read would report the mangled version as
+ * the truth. A refusal naming the field is the only honest answer.
+ */
+function unrepresentableYamlValue(cfg: ProviderConfig): string | undefined {
+  const walk = (v: unknown, path: string): string | undefined => {
+    if (typeof v === 'string' && v.includes('#')) {
+      return `${path} contains "#", which matbot.yaml cannot represent — the config parser treats it as the start of a comment, in quotes or out`;
+    }
+    if (Array.isArray(v)) {
+      for (const [i, item] of v.entries()) { const r = walk(item, `${path}[${i}]`); if (r !== undefined) return r; }
+      return undefined;
+    }
+    if (typeof v === 'object' && v !== null) {
+      for (const [k, item] of Object.entries(v)) { const r = walk(item, `${path}.${k}`); if (r !== undefined) return r; }
+      return undefined;
+    }
+    return undefined;
+  };
+  const { name: _name, ...rest } = cfg;
+  return walk(rest, 'provider');
+}
+
+/**
+ * Replace a profile's block in matbot.yaml with one generated from `cfg`. `false` ⇒ the profile is not in
+ * the file (a runtime-contributed profile — one a storage backend replayed from its own medium), and
+ * nothing was written: there is no block to replace, and appending one would persist into matbot.yaml a
+ * profile whose source of truth is somewhere else.
+ *
+ * Regenerating rather than editing in place means any comment or formatting inside that one block is
+ * lost, and the block moves to the end of `providers:`. That is the accepted cost of not carrying a
+ * round-tripping YAML editor; every other block in the file is untouched.
+ */
+export async function writeProviderBlock(configPath: string, cfg: ProviderConfig): Promise<boolean> {
+  if (!await removeProviderFromConfig(configPath, cfg.name)) return false;
+  await addProviderToConfig(configPath, buildProviderBlock({
+    name:   cfg.name,
+    module: cfg.module,
+    model:  cfg.model,
+    ...(cfg.endpoint    !== undefined ? { endpoint:    cfg.endpoint    } : {}),
+    ...(cfg.credentials !== undefined ? { credentials: cfg.credentials } : {}),
+    ...(cfg.parameters  !== undefined ? { parameters:  cfg.parameters  } : {}),
+    ...(cfg.maxRounds   !== undefined ? { maxRounds:   cfg.maxRounds   } : {}),
+  }));
+  return true;
 }
 
 async function addProviderToConfig(configPath: string, block: string): Promise<void> {
@@ -176,19 +230,36 @@ async function addProviderToConfig(configPath: string, block: string): Promise<v
   await writeFile(configPath, updated, 'utf8');
 }
 
+/**
+ * Delete `  name:` and the block indented beneath it. `false` ⇒ no such key, and nothing written.
+ *
+ * A line walk rather than the regex it replaces. That regex consumed every following line which did not
+ * begin `  <non-space>` — a sibling key stopped it, but a TOP-LEVEL one did not, so removing the last
+ * profile in `providers:` also deleted the header of whatever section came next and promoted that
+ * section's children into `providers:`. Silent: the file still parsed, `default_settings:` had simply
+ * ceased to exist and a settings namespace had become a provider profile. Indentation is what actually
+ * delimits the block, so that is what this reads.
+ *
+ * Trailing blank lines are left in place: they separate the block from what follows, and the following
+ * section is not this function's to reformat.
+ */
 async function removeProviderFromConfig(configPath: string, name: string): Promise<boolean> {
-  const text = await readFile(configPath, 'utf8');
+  const text  = await readFile(configPath, 'utf8');
+  const lines = text.split('\n');
 
-  // Match '  name:\n' plus every following line that does NOT start with '  <non-space>'
-  // (deeply-indented children and blank lines are included; sibling keys are not).
-  const pattern = new RegExp(
-    `^  ${escapeRegex(name)}:\\n(?:(?!  \\S)[^\\n]*\\n)*`,
-    'm',
-  );
+  const start = lines.findIndex(l => l.trimEnd() === `  ${name}:`);
+  if (start === -1) return false;
 
-  const updated = text.replace(pattern, '');
-  if (updated === text) return false;
-  await writeFile(configPath, updated, 'utf8');
+  let last = start;
+  for (let i = start + 1; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (line.trim() === '') continue;
+    if (line.length - line.trimStart().length <= 2) break;   // a sibling (2) or a top-level key (0)
+    last = i;
+  }
+
+  lines.splice(start, last - start + 1);
+  await writeFile(configPath, lines.join('\n'), 'utf8');
   return true;
 }
 
@@ -342,15 +413,18 @@ function makeExecutor(
           return;
         }
 
+        const credentials = envVarName !== undefined
+          ? { [credentialKey ?? 'apiKey']: `\${${envVarName}}` }
+          : undefined;
+
         const block = buildProviderBlock({
           name,
           module: yamlModule,
           model,
-          ...(endpoint      !== undefined ? { endpoint      } : {}),
-          ...(envVarName    !== undefined ? { envVarName    } : {}),
-          ...(credentialKey !== undefined ? { credentialKey } : {}),
-          ...(parameters    !== undefined ? { parameters    } : {}),
-          ...(maxRounds     !== undefined ? { maxRounds     } : {}),
+          ...(endpoint    !== undefined ? { endpoint    } : {}),
+          ...(credentials !== undefined ? { credentials } : {}),
+          ...(parameters  !== undefined ? { parameters  } : {}),
+          ...(maxRounds   !== undefined ? { maxRounds   } : {}),
         });
 
         await addProviderToConfig(configPath, block);
@@ -361,17 +435,99 @@ function makeExecutor(
           name,
           module: yamlModule,
           model,
-          ...(endpoint   !== undefined ? { endpoint } : {}),
-          ...(envVarName !== undefined
-            ? { credentials: { [credentialKey ?? 'apiKey']: `\${${envVarName}}` } }
-            : {}),
-          ...(parameters !== undefined ? { parameters } : {}),
-          ...(maxRounds  !== undefined ? { maxRounds  } : {}),
+          ...(endpoint    !== undefined ? { endpoint    } : {}),
+          ...(credentials !== undefined ? { credentials } : {}),
+          ...(parameters  !== undefined ? { parameters  } : {}),
+          ...(maxRounds   !== undefined ? { maxRounds   } : {}),
         });
 
         yield {
           type:  'result',
           value: { message: `Profile "${name}" added and active.` },
+        };
+        return;
+      }
+
+      // ── update ─────────────────────────────────────────────────────────────
+      if (action === 'update') {
+        const { name, ...patch } = input as Extract<ProviderInput, { action: 'update' }>;
+
+        const cur = providers.get(name);
+        if (cur === undefined) {
+          yield {
+            type:  'result',
+            value: { message: `No profile named "${name}" found. Configured profiles: ${[...providers.keys()].map(n => `"${n}"`).join(', ')}.` },
+          };
+          return;
+        }
+
+        const supplied = patchedFields(patch);
+        if (supplied.length === 0) {
+          yield {
+            type:  'result',
+            value: { message: `Nothing to update. Supply at least one of model, endpoint, parameters, maxRounds — null to clear a field. To change the API key use "plugin store-key"; to change the adapter module, remove the profile and add it again.` },
+          };
+          return;
+        }
+
+        const next = applyProviderPatch(cur, patch);
+
+        const unwritable = unrepresentableYamlValue(next);
+        if (unwritable !== undefined) {
+          yield { type: 'error', message: `Cannot update "${name}": ${unwritable}.` };
+          return;
+        }
+
+        // The same reachability courtesy `add` extends, for the same reason: a typo'd endpoint is
+        // otherwise found by the next turn failing.
+        if (patch.endpoint !== undefined && patch.endpoint !== null) {
+          yield { type: 'stdout', chunk: `Testing ${patch.endpoint} …\n` };
+          const err = await checkEndpoint(patch.endpoint);
+          if (err) {
+            const cont = await ctx.prompt(`Endpoint check failed: ${err}. Update anyway? [y/N]`, 'N');
+            if (!/^y(es)?$/i.test(cont.trim())) {
+              yield { type: 'result', value: { message: 'Cancelled.' } };
+              return;
+            }
+          } else {
+            yield { type: 'stdout', chunk: `Endpoint reachable.\n` };
+          }
+        }
+
+        const show = (v: unknown): string => v === undefined ? '(unset)' : typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v);
+        const diff = supplied.map(f => `  ${f}: ${show(cur[f])} → ${show(next[f])}`).join('\n');
+
+        // Confirmed like add/remove, and for a reason particular to update: the block is regenerated,
+        // so any comment inside it does not survive. The caller sees that before it happens.
+        const confirm = await ctx.prompt(
+          `Update provider profile "${name}"?\n${diff}\n(the profile's block in matbot.yaml is rewritten; comments inside it are lost) [y/N]`,
+          'N',
+        );
+        if (!/^y(es)?$/i.test(confirm.trim())) {
+          yield { type: 'result', value: { message: 'Cancelled.' } };
+          return;
+        }
+
+        if (!await writeProviderBlock(configPath, next)) {
+          yield {
+            type:    'error',
+            message: `Profile "${name}" is not defined in ${path.basename(configPath)} — it was contributed at runtime (e.g. replayed by a storage backend), so its definition lives elsewhere and cannot be edited here.`,
+          };
+          return;
+        }
+
+        providers.register(next);
+
+        // Deliberately not refused when it is the profile powering this turn: the resolution that
+        // produced the running adapter already happened, so nothing about the current turn changes and
+        // there is nothing to be inconsistent with. Say when it takes effect rather than saying no.
+        const isCurrent = currentProviderName(ctx) === name;
+        yield {
+          type:  'result',
+          value: {
+            message: `Profile "${name}" updated: ${supplied.join(', ')}.`
+              + (isCurrent ? ' It is the profile running this turn, so the change takes effect on the next one.' : ''),
+          },
         };
         return;
       }
@@ -456,8 +612,29 @@ ACTIONS
   list   — Show all configured profiles.
   add    — Create a new named profile. The API key (if required) is prompted
            out-of-band for security and never stored in session history.
+  update — Change model, endpoint, parameters or maxRounds on an existing
+           profile, leaving its credentials untouched. See UPDATE below.
   remove — Delete a profile by name. Refuses if it is the only profile or
            the one powering the current turn.
+
+UPDATE  (for a renamed model, a moved endpoint, a parameter change)
+  Supply the profile name plus only the fields to change. An omitted field is
+  left alone; an explicit null CLEARS it (endpoint, parameters and maxRounds
+  only — a profile must keep a model).
+
+  parameters is replaced WHOLESALE, not merged key by key: to change one
+  parameter, "list" first, then send the whole object back with your edit
+  applied. Anything you omit from it is gone.
+
+  Two things update CANNOT change:
+    credentials — use "plugin store-key" with the key name from matbot.yaml,
+                  which writes the new value to the vault under the name the
+                  profile already references. Nothing about the profile needs
+                  to change to rotate a key.
+    module      — changing the adapter is remove + add.
+
+  Takes effect on the next turn. The profile's block in matbot.yaml is
+  regenerated, so comments inside that one block are not preserved.
 
 AVAILABLE ADAPTER MODULES  (use one of these as the module value when adding)
 ${adapterSection}
@@ -495,42 +672,44 @@ When a user asks to add a new LLM or provider, ask for:
       properties: {
         action: {
           type:        'string',
-          enum:        ['list', 'add', 'remove'],
-          description: 'list: show all profiles. add: create a new profile. remove: delete a profile.',
+          enum:        ['list', 'add', 'update', 'remove'],
+          description: 'list: show all profiles. add: create a new profile. update: change fields on an existing profile. remove: delete a profile.',
         },
         name: {
           type:        'string',
-          description: 'Unique profile name used as the provider key (add/remove).',
+          description: 'Unique profile name used as the provider key (add/update/remove).',
         },
         module: {
           type:        'string',
-          description: 'Adapter module specifier (add only).',
+          description: 'Adapter module specifier (add only — update cannot change it; remove and re-add instead).',
         },
         model: {
           type:        'string',
-          description: 'Model identifier passed to the adapter, e.g. "claude-sonnet-4-6" (add only).',
+          description: 'Model identifier passed to the adapter, e.g. "claude-sonnet-4-6" (add/update).',
         },
         endpoint: {
-          type:        'string',
-          description: 'Base URL of the provider API. Required for openai-compat; omit to use the adapter default (add only).',
+          // `['string','null']`, and likewise for parameters/maxRounds below: null is update's clear
+          // signal, and inputSchema is an enforcement point (json-validation) as well as documentation.
+          type:        ['string', 'null'],
+          description: 'Base URL of the provider API. Required for openai-compat; omit to use the adapter default (add/update; null on update clears it).',
         },
         credentialKey: {
           type:        'string',
-          description: 'Credential field name, default "apiKey" (add only).',
+          description: 'Credential field name, default "apiKey" (add only — update never touches credentials; use "plugin store-key").',
         },
         credentialEnvVar: {
           type:        'string',
           description: 'Existing env var name to use as the credential value. If omitted the tool prompts the user (add only).',
         },
         parameters: {
-          type:                 'object',
+          type:                 ['object', 'null'],
           additionalProperties: true,
-          description:          'Generation parameters: maxTokens, temperature, topP, thinking, etc. (add only).',
+          description:          'Generation parameters: maxTokens, temperature, topP, thinking, etc. (add/update). On update this REPLACES the whole object — list first and send back everything you want to keep; null clears it.',
         },
         maxRounds: {
-          type:        'integer',
+          type:        ['integer', 'null'],
           minimum:     1,
-          description: 'Optional per-turn ceiling on agentic rounds (one model call plus its tool batch) for this profile. Omit for no ceiling. Not a generation parameter — never sent to the endpoint (add only).',
+          description: 'Optional per-turn ceiling on agentic rounds (one model call plus its tool batch) for this profile. Omit for no ceiling. Not a generation parameter — never sent to the endpoint (add/update; null on update clears it).',
         },
       },
     },

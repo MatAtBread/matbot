@@ -23,11 +23,11 @@
 //     install, transitives included" without writing a single package to disk; the caller folds that list
 //     into the approval it was already asking for, and `npm ci` then installs exactly what was approved.
 
-import { readFile, rm, mkdir, symlink, access } from 'node:fs/promises';
+import { readFile, rm, mkdir, symlink, access, realpath } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import process from 'node:process';
 import path from 'node:path';
-import { hostPackageDirFrom } from './remote-cache.js';
+import { hostOwnPackageDir } from './remote-cache.js';
 
 /** Run a command to completion, resolving its combined output. Lives here because this module is the
  *  package-manager plumbing; the `plugin` tool's own installs use it too. */
@@ -129,27 +129,54 @@ export async function planProvision(dir: string): Promise<ProvisionPlan> {
  * `npm ci` is deliberate: it installs the lockfile the plan was read from, so what is approved is what
  * lands. It also DELETES node_modules first, which is why the links come after — a link written before
  * would simply be gone.
+ *
+ * The links are NOT conditional on there being something to install. They were, behind an early return,
+ * which meant the simplest plugin there is — one whose only dependency is the peer singleton — got no
+ * node_modules and no link at all, and resolved `@matatbread/matbot-plugin-api` by whatever happened to
+ * sit above it on disk. Whether an unrelated third-party dependency is present cannot be what decides
+ * if the host's singleton is reachable.
  */
 export async function applyProvision(plan: ProvisionPlan): Promise<{ linked: readonly string[]; output: string }> {
-  if (plan.packages.length === 0) return { linked: [], output: '' };
+  const output = plan.packages.length > 0 ? await runCommand('npm', ['ci', ...NPM_FLAGS], plan.dir) : '';
+  return { linked: await linkHostSingletons(plan.dir), output };
+}
 
-  const output = await runCommand('npm', ['ci', ...NPM_FLAGS], plan.dir);
-
+/**
+ * Point `<dir>/node_modules/<singleton>` at the copy the HOST loaded, replacing anything that leads
+ * elsewhere.
+ *
+ * `hostOwnPackageDir`, never `hostPackageDirFrom(name, dir)`: that chain tries `dir` first and so answers
+ * "what would a plugin here get" — which, when the author has a devDependency copy installed beside their
+ * source, is that copy. Linking it to itself is not the question being asked. (It went unnoticed because
+ * the old "already exists, first writer wins" test skipped exactly the case that would have exposed it.)
+ *
+ * A path that already leads to the host's copy is left alone; anything else is replaced, because "there is
+ * something here" was never the property worth having — "it resolves to the host's copy" is, and a second
+ * physical copy of a singleton is precisely what this exists to prevent. That is also what `npm ci` does
+ * on the path where it runs at all: it deletes node_modules and the link is written onto empty ground, so
+ * this only makes the two paths agree. An author who reinstalls their devDependencies afterwards gets
+ * their copy back and `plugin list` reports it, which is the documented, survivable state.
+ */
+async function linkHostSingletons(dir: string): Promise<readonly string[]> {
   const linked: string[] = [];
   for (const name of HOST_SINGLETONS) {
-    const target = hostPackageDirFrom(name, plan.dir);
+    const target = hostOwnPackageDir(name);
     if (target === undefined) continue;                    // not present on this host — nothing to link
-    const linkPath = path.join(plan.dir, 'node_modules', name);
-    if (await exists(linkPath)) continue;                   // already resolvable here — first writer wins
+    const linkPath = path.join(dir, 'node_modules', name);
+    if (await sameDir(linkPath, target)) continue;          // already the host's copy
     await mkdir(path.dirname(linkPath), { recursive: true });
-    try {
-      await symlink(target, linkPath, process.platform === 'win32' ? 'junction' : 'dir');
-      linked.push(name);
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
-    }
+    // `symlink` succeeds against a nonexistent target, so an existing link proves nothing about where it
+    // leads; remove first rather than trust it.
+    await rm(linkPath, { recursive: true, force: true });
+    await symlink(target, linkPath, process.platform === 'win32' ? 'junction' : 'dir');
+    linked.push(name);
   }
-  return { linked, output };
+  return linked;
+}
+
+/** Whether `linkPath` resolves to the same real directory as `target`. */
+async function sameDir(linkPath: string, target: string): Promise<boolean> {
+  try { return await realpath(linkPath) === await realpath(target); } catch { return false; }
 }
 
 /** Undo what planning wrote. A declined install must not leave a lockfile in someone's plugin. */

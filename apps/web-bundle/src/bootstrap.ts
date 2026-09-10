@@ -8,11 +8,13 @@ import {
   forwardingProxy, makeSwappable, singleTurnRequest, createSingleTurnTool, createAboutMatbotTool, createNotifier, notifyingStore,
   createMountTable, scheduleAtEdge,
   installSettingsDefaults, settingsDefaultNamespaces, installSettingsNotifier,
+  applyProviderPatch,
 } from '@matatbread/matbot-core';
 import type {
   MatbotMachine, MatbotServices, Store, Session, ProviderConfig, ProviderAdapter,
   PluginSettings, Vault, SessionRunner, KnowledgeIndex, Notifier,
   PluginResolver, StorageBackend, FileStore, PromptFn, MatbotPlugin, Principal, Runtime, Usage,
+  ProviderPatch,
 } from '@matatbread/matbot-plugin-api';
 // Boot assembly, so from plugin-api's `/host` half — via core, which re-exports it for exactly this.
 import type { SwapFn, ToolInputValidator } from '@matatbread/matbot-core';
@@ -547,6 +549,20 @@ export async function boot(env: BootEnv): Promise<void> {
     providers.register(name !== undefined ? { ...cfg, module: name } : cfg);
     return cfg.name;
   };
+  // Patch an existing profile: merge, persist, re-register. No draft and no vault call — `update`
+  // carries no credential, so the stored `${ref}` (or its absence) rides through untouched, and the
+  // adapter cannot change, so nothing needs loading. A *baked* provider gets persisted to localStorage
+  // by this, which is right: the seed overlay reads persisted profiles over baked ones, so the edit is
+  // an override that survives a reload rather than one the next boot silently discards.
+  const updateProvider = async (name: string, patch: ProviderPatch): Promise<boolean> => {
+    const cur = providers.get(name);
+    if (cur === undefined) return false;
+    const next = applyProviderPatch(cur, patch);
+    savePersistedProvider(next);
+    providers.register(next);
+    return true;
+  };
+
   const removeProvider = async (name: string): Promise<boolean> => {
     if (!providers.has(name)) return false;
     providers.remove(name);
@@ -561,9 +577,13 @@ export async function boot(env: BootEnv): Promise<void> {
       name: p.name, module: p.module, model: p.model,
       ...(p.endpoint   !== undefined ? { endpoint:   p.endpoint   } : {}),
       ...(p.parameters !== undefined ? { parameters: p.parameters } : {}),
+      // Reported because `update` can set it: a field a caller can change but not read back is one it
+      // cannot reason about, which is the whole reason `update` refuses to touch credentials.
+      ...(p.maxRounds  !== undefined ? { maxRounds:  p.maxRounds  } : {}),
       hasCredentials: p.credentials?.['apiKey'] !== undefined,
     })),
     add:    applyDraft,
+    update: updateProvider,
     remove: removeProvider,
   }));
 

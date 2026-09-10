@@ -8,7 +8,7 @@ import { readFile, writeFile, access, readdir } from 'node:fs/promises';
 import { pathToFileURL, fileURLToPath }       from 'node:url';
 import { createRequire }                     from 'node:module';
 import path                                  from 'node:path';
-import { classifySpecifier, fetchRemoteManifest, canonicalLocalSpecifier } from '../remote-cache.js';
+import { classifySpecifier, fetchRemoteManifest, canonicalLocalSpecifier, materializeRemote } from '../remote-cache.js';
 import { planProvision, applyProvision, discardProvision, runCommand, type ProvisionPlan } from '../provision.js';
 import { findDuplicateSingletons } from '../singletons.js';
 
@@ -356,10 +356,26 @@ function describeInstallFailure(specifier: string, pm: string, e: unknown): stri
  *  A raw github/URL fetch copies one plugin's own files, not its dependency graph, so a plugin with a
  *  runtime dependency on another package fails here with the package unresolved. We surface the package
  *  name so the caller can give one readable instruction instead of an opaque ERR_MODULE_NOT_FOUND that
- *  sends the model hunting for name variations. */
-function missingPackageOf(e: unknown): string | undefined {
-  if (!(e instanceof Error) || (e as NodeJS.ErrnoException).code !== 'ERR_MODULE_NOT_FOUND') return undefined;
-  const m = /Cannot find (?:package|module) '([^']+)'/.exec(e.message);
+ *  sends the model hunting for name variations.
+ *
+ *  BOTH wordings must match, and the second is the one that matters. Node's own message is
+ *  `Cannot find package 'x' imported from …`, but a bare import from inside the `.plugins/` cache never
+ *  reaches it: ts-hooks' `resolveAsHost` retries against the host's graph first and, when that also fails,
+ *  throws its own `Cannot resolve "x" imported by …` carrying the same ERR_MODULE_NOT_FOUND code. Matching
+ *  only Node's phrasing therefore missed every http plugin — precisely the route this exists for. */
+export function missingPackageOf(e: unknown): string | undefined {
+  // Walk the cause chain. The error reaching here is the loader's wrapper, not the import rejection, and
+  // one layer forgetting to carry `code` made this return undefined for every http plugin — the failure
+  // this exists to explain. Reading through the chain does not depend on every future wrapper
+  // remembering.
+  let cur: unknown = e;
+  let found = false;
+  for (let depth = 0; cur instanceof Error && depth < 8; depth++) {
+    if ((cur as NodeJS.ErrnoException).code === 'ERR_MODULE_NOT_FOUND') { found = true; break; }
+    cur = (cur as { cause?: unknown }).cause;
+  }
+  if (!found || !(e instanceof Error)) return undefined;
+  const m = /Cannot (?:find (?:package|module)|resolve) ['"]([^'"]+)['"]/.exec(e.message);
   const pkg = m?.[1];
   // A bare package specifier (not a relative/absolute path): that's a missing dependency, not a
   // broken internal import.
@@ -726,6 +742,76 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
         // once the dependency is present), like any other fixable activation failure.
         const missing = classified.kind === 'http' ? missingPackageOf(e) : undefined;
         if (missing !== undefined) {
+          // Offer to install them, rather than only naming them — into the plugin's OWN cached
+          // directory under `.plugins/`, which is the same place the local route installs into and for
+          // the same reasons.
+          //
+          // NOT the project. `pnpm add` at a workspace root refuses outright (ERR_PNPM_ADDING_TO_ROOT,
+          // wanting `-w`), and where it succeeds it writes a fetched plugin's dependencies into the
+          // user's own manifest and lockfile — permanent, tracked, and nothing to do with their project.
+          // The cache directory has none of that: it is matbot's to write, gitignored, per-plugin, and
+          // it sits EARLIER in the resolution walk-up than the shared link farm, so what lands there is
+          // reachable from this plugin and invisible to everything else. Not the farm itself either,
+          // which holds the host singletons and the plugin self-links — an install there would prune
+          // them as extraneous.
+          //
+          // Reusing plan/apply rather than shelling out gets the rest for free: npm unconditionally (the
+          // cache dir is not in anyone's workspace, so pnpm's walk-up problem cannot arise), the full
+          // transitive set in the approval instead of just the direct names, and the host singletons
+          // linked afterwards. The approval is still an out-of-band human one, so a fetched plugin
+          // cannot install anything by asserting that it needs it.
+          //
+          // Every declared dependency is planned, not just the one that failed: activation stops at the
+          // FIRST unresolved import, so one-at-a-time would be a prompt-and-retry cycle per package.
+          const m = await materializeRemote(specifier, path.join(projectDir, '.plugins'), projectDir);
+          let depPlan: ProvisionPlan | undefined;
+          try {
+            depPlan = await planProvision(m.pkgRoot);
+          } catch (err) {
+            yield { type: 'stdout', chunk:
+              `Could not resolve "${configSpecifier}"'s dependencies: ${err instanceof Error ? err.message : String(err)}\n` };
+          }
+
+          if (depPlan !== undefined && depPlan.packages.length > 0) {
+            const offer = await confirmAction(ctx,
+              `**"${configSpecifier}"** was fetched, but it needs packages a source-fetch does not bring in ` +
+              `(it copies a plugin's own files, not its dependency graph). Install ${depPlan.packages.length} ` +
+              `package(s) into its cache directory?\n${depPlan.packages.map(pkg => `- ${pkg}`).join('\n')}`);
+
+            if (!offer) {
+              await discardProvision(depPlan);
+            } else {
+              yield { type: 'stdout', chunk: `Installing ${depPlan.packages.length} package(s) with npm...\n` };
+              try {
+                const { linked, output } = await applyProvision(depPlan);
+                if (output) yield { type: 'stdout', chunk: output };
+                if (linked.length > 0) yield { type: 'stdout', chunk: `Linked the host's ${linked.join(', ')}.\n` };
+              } catch (err) {
+                yield { type: 'result', value: { message:
+                  `Could not install the dependencies of "${configSpecifier}": ${err instanceof Error ? err.message : String(err)}. ` +
+                  `It has been left in ${path.basename(configPath)} and activates once they are present.` } };
+                return;
+              }
+              // Retried in process: the files are already cached, so this is a resolution retry and not a
+              // second fetch. A failure here is reported as-is — what was asked for is now installed, so
+              // whatever remains is a different problem and guessing at it would mislead.
+              yield { type: 'stdout', chunk: `Activating "${configSpecifier}"...\n` };
+              try {
+                const loaded  = await ctx.loadPlugin(configSpecifier);
+                const welcome = await loaded.installationMessage?.();
+                yield { type: 'result', value: {
+                  message: `"${configSpecifier}" installed and is now active (${depPlan.packages.length} dependency package(s) installed).`,
+                  ...(welcome !== undefined ? { installationMessage: welcome } : {}),
+                } };
+              } catch (err) {
+                yield { type: 'result', value: { message:
+                  `Installed its dependencies, but "${configSpecifier}" still did not activate: ${String(err)}. ` +
+                  `It has been left in ${path.basename(configPath)}.` } };
+              }
+              return;
+            }
+          }
+
           const fromNpm = missing.startsWith('@matatbread/')
             ? `Installing it from npm is simplest — \`${missing}\` — because npm resolves ITS dependencies too.`
             : `Install \`${missing}\` (e.g. from npm) so it is present.`;

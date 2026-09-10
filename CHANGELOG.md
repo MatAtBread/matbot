@@ -9,6 +9,96 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## 0.4.13
+
+### API gaps filled
+
+- **`ProviderPatch`, and one patch policy for every host that applies one.** `provider update`'s input
+  shape lives on `plugin-api`'s shared `ProviderToolContract` (so the node and browser tools cannot
+  drift), and its *semantics* live in `applyProviderPatch` beside `applyCreateSecret`, for the same
+  reason: three hosts now apply a patch — the node tool against matbot.yaml, the browser bootstrap
+  against localStorage, the Drive backend against its manifest — and what a patch **means** must not be
+  one of the things they differ on. `null` clears a field, absent leaves it alone. `patchedFields`
+  reports what a patch actually names. Both re-exported by core, so an app needs no direct plugin-api
+  dependency.
+
+### Bug fixes
+
+- **A local plugin's host singleton is linked even when it has nothing to install.** The link loop sat
+  behind an early return that skipped the whole of `applyProvision` when there were no registry
+  dependencies to `npm ci` — so the simplest plugin there is, one whose only dependency is the
+  `@matatbread/matbot-plugin-api` peer, got no `node_modules` and no link, and resolved the singleton by
+  whatever happened to sit above it on disk. Whether an unrelated third-party dependency is present
+  cannot be what decides if the host's copy is reachable. Every plugin in this repo has dependencies,
+  which is why nothing caught it.
+
+  Two things behind it are fixed with it. The target came from `hostPackageDirFrom(name, pluginDir)`,
+  which resolves from the plugin's own directory first and so answers "what would a plugin here get" —
+  an author's `devDependencies` copy, if one is installed — rather than "what does the host have"; it now
+  asks `hostOwnPackageDir`. And a path that already exists is no longer taken as good enough: what
+  matters is that it leads to the host's copy, so a second physical copy of a singleton is replaced. That
+  is what `npm ci` already does on the path where it runs (it deletes `node_modules` first), so the two
+  paths now agree instead of differing on whether a dependency happened to be declared.
+
+- **A rethrown plugin-load failure keeps its identity.** `loadPlugins` with `onLoadError: 'throw'` built a
+  bare `new Error(message)`, so everything but the text was lost — including the `ERR_MODULE_NOT_FOUND`
+  code that `plugin add` reads to name a missing dependency and offer to install it. That branch was
+  therefore dead for every http plugin, and dead *silently*: the fallback still printed the underlying
+  message, so the output looked like a considered answer rather than a missed one. The wrapper now carries
+  the original as `cause` and copies its `code`, and the reader walks the cause chain rather than trusting
+  one layer to remember.
+
+- **Removing a provider profile no longer swallows the section after it.** The block remover matched
+  every following line that did not begin `  <non-space>` — which a *top-level* key does not. Deleting
+  the last profile in `providers:` therefore also deleted the header of whatever came next and left that
+  section's children indented under `providers:`, so `default_settings:` ceased to exist and a settings
+  namespace became a provider profile. The file still parsed, so nothing said a word. Indentation is
+  what delimits the block, so that is what it now reads.
+
+- **`plugin add` over http now offers to install the dependencies it cannot bring.** A source-fetch
+  copies one package's own files, not a dependency graph, so a plugin with registry dependencies fetched
+  from a URL failed to activate on its first unresolved import. It now resolves what the plugin declares,
+  asks once with the full transitive list, installs, and retries activation in process. Declining leaves
+  the previous advice unchanged. The approval is the same out-of-band human confirm as the install
+  itself, so a fetched plugin cannot install anything by asserting it needs it.
+
+  They install into the plugin's **own cache root** under `.plugins/`, which is the same `planProvision`/
+  `applyProvision` path a local plugin takes. Not the user's project: `pnpm add` refuses outright at a
+  workspace root (`ERR_PNPM_ADDING_TO_ROOT`), and where it succeeds it writes a fetched plugin's
+  dependencies into a tracked manifest and lockfile that have nothing to do with them. Not the
+  `.plugins/node_modules` link farm either, where an install would prune the host singletons and plugin
+  self-links as extraneous. The cache root sits earlier in the resolution walk-up than the farm, so what
+  lands there is reachable from that plugin and invisible to everything else — which also means each
+  plugin's dependencies are removed with it, and `rm -rf .plugins/` clears the lot without touching
+  matbot's own `node_modules`.
+
+- **`plugin add` states the missing package again, instead of the raw resolver error.** The tailored
+  remedy ("it depends on X, which a raw github/URL fetch does not bring in… do not retry name
+  variations") was matched off Node's `Cannot find package 'x'`, but a bare import from inside
+  `.plugins/` never reaches Node's error: ts-hooks retries it against the host's graph and throws its
+  own `Cannot resolve "x"` carrying the same code. So the branch was unreachable for the http route it
+  was written for, and the generic "activation failed: <error>" fell out instead. Both wordings are read
+  now, pinned by a test against the error a real unresolved import throws.
+
+- **`provider` tool: an `update` action** (node, browser, and the Drive-backed provider admin). Changes
+  `model`, `endpoint`, `parameters` or `maxRounds` on an existing profile — `null` to clear one — where
+  previously the only route was `remove` + `add`. That route could not work for the case that prompted
+  this: `provider list` reports `hasCredentials`, never the `${NAME}` reference, so an LLM re-adding a
+  profile had nothing to write back and had to re-prompt for a key that had never been lost. A model
+  rename (DeepSeek's) is now one call, and the credential is the one field `update` will not touch.
+
+  Two things it deliberately cannot change. **Credentials** — that is `plugin store-key`, which writes
+  the new value to the vault under the name the profile already references, so nothing about the profile
+  changes to rotate a key; folding it into `update` would have meant guessing between rewriting a
+  reference and replacing a literal. And **`module`** — changing the adapter re-opens every resolution
+  question `add` answers, so that stays `remove` + `add`.
+
+  `parameters` is replaced wholesale rather than merged per key: the values are forwarded to the
+  endpoint unmodified and so have no shape to merge against, and `list` reports them in full, which is
+  what makes read-modify-write something a caller can carry out. The profile's yaml block is
+  regenerated, so comments inside that one block are lost — stated in the confirmation prompt before it
+  happens. A profile contributed at runtime rather than by matbot.yaml is reported rather than appended.
+
 ## 0.4.12
 
 **Tool inputs are typechecked, whoever the caller is.** A tool declares its call contract as a

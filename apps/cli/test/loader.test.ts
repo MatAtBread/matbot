@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadPlugins, isNotAPluginError, getFailedPlugins, recordFailedPlugin } from '@matatbread/matbot-core';
 import type { MatbotMachine } from '@matatbread/matbot-core';
+import { missingPackageOf } from '@matatbread/matbot-tool-plugin';
 
 // Regression guard for the boot crash-loop: a non-plugin entry in matbot.yaml (a bare library
 // mistaken for a plugin) once threw out of the startup batch, exiting the process — which, under
@@ -132,4 +133,27 @@ test('a successful load clears a prior recorded failure for the same specifier',
   const loaded = await loadPlugins([{ spec: validPlugin, importSpec: validPlugin }], noopServices, false, undefined, 'skip');
   assert.equal(loaded.length, 1);
   assert.equal(getFailedPlugins().some(f => f.specifier === validPlugin), false, 'a successful load must clear the stale failure');
+});
+
+// A plugin whose own bare import cannot be resolved: the failure the `plugin` tool has to EXPLAIN, since
+// an http-fetched plugin brings no dependency graph. The tool reads ERR_MODULE_NOT_FOUND off the error to
+// name the missing package and offer to install it — and the rethrow used to build a bare
+// `new Error(message)`, dropping the code, so that branch was dead for every http plugin. It failed
+// silently, because the branch it fell through to still printed the underlying message.
+const missingDep = new URL('./fixtures/imports-missing-dep.ts', import.meta.url).href;
+
+test('an unresolvable import rethrows with the original code and cause intact', async () => {
+  await assert.rejects(
+    loadPlugins([{ spec: missingDep, importSpec: missingDep }], stubServices, false, undefined, 'throw'),
+    (e: unknown) => {
+      assert.ok(e instanceof Error);
+      assert.equal((e as NodeJS.ErrnoException).code, 'ERR_MODULE_NOT_FOUND',
+        'the code must survive the wrapper: the plugin tool keys its remedy on it');
+      assert.ok((e as { cause?: unknown }).cause instanceof Error, 'the original error must be the cause');
+      assert.match(e.message, /no-such-package-anywhere/);
+      // The seam itself, end to end: what the loader throws must be what the tool can read.
+      assert.equal(missingPackageOf(e), 'no-such-package-anywhere');
+      return true;
+    },
+  );
 });

@@ -1,4 +1,5 @@
-import type { Store, MatbotMachine, ProviderConfig } from '@matatbread/matbot-plugin-api';
+import type { Store, MatbotMachine, ProviderConfig, ProviderPatch } from '@matatbread/matbot-plugin-api';
+import { applyProviderPatch } from '@matatbread/matbot-plugin-api';
 import type { ProviderDraft, ProviderSummary, ProviderAdmin, AvailableProvider } from '@matatbread/matbot-browser';
 
 const DOC_ID = 'manifest';
@@ -54,6 +55,7 @@ function toRow(p: ProviderConfig): ProviderSummary {
     model:  p.model,
     ...(p.endpoint   !== undefined ? { endpoint:   p.endpoint   } : {}),
     ...(p.parameters !== undefined ? { parameters: p.parameters } : {}),
+    ...(p.maxRounds  !== undefined ? { maxRounds:  p.maxRounds  } : {}),
     hasCredentials: p.credentials?.['apiKey'] !== undefined,
   };
 }
@@ -62,8 +64,9 @@ function toRow(p: ProviderConfig): ProviderSummary {
  * A {@link ProviderAdmin} backed by Drive, so the browser `provider` tool ({@link createBrowserProviderTool})
  * syncs profiles across machines. `add` stores the API key in the (already Drive-swapped) vault, persists
  * the profile — with a `${NAME}` placeholder, never the secret — to the Drive manifest, and registers it
- * live; `remove` drops it from both the manifest and the live registry; `list` reports the live set. The
- * adapter catalogue comes from the baked `__MB__.config`, exactly as the browser plugin tool reads its own.
+ * live; `update` patches a stored profile (never its credentials — see `ProviderPatch`); `remove` drops it
+ * from both the manifest and the live registry; `list` reports the live set. The adapter catalogue comes
+ * from the baked `__MB__.config`, exactly as the browser plugin tool reads its own.
  */
 export function driveProviderAdmin(driveSet: DriveProviderSet, services: MatbotMachine): ProviderAdmin {
   return {
@@ -86,6 +89,17 @@ export function driveProviderAdmin(driveSet: DriveProviderSet, services: MatbotM
       await driveSet.add(config);
       services.providers.register(config);
       return config.name;
+    },
+    // `driveSet.add` is an upsert keyed on name, so persisting a patched profile is the same write as
+    // adding one. The credential placeholder rides through untouched with everything else the patch
+    // does not name, which is the point: nothing here goes near the vault.
+    async update(name: string, patch: ProviderPatch): Promise<boolean> {
+      const cur = services.providers.get(name);
+      if (cur === undefined) return false;
+      const next = applyProviderPatch(cur, patch);
+      await driveSet.add(next);
+      services.providers.register(next);
+      return true;
     },
     async remove(name: string): Promise<boolean> {
       await driveSet.remove(name);

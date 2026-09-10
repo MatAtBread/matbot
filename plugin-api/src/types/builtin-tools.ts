@@ -175,12 +175,39 @@ export interface ProviderActionResult {
 }
 
 /**
+ * The fields `provider update` can change on an existing profile, and the whole of them.
+ *
+ * `null` clears a field, absent leaves it alone — `undefined` cannot mean "clear", since it is already
+ * what an unsupplied optional looks like. `model` takes no `null`: a profile without one is unrunnable.
+ *
+ * Two fields are deliberately absent. **`credentials`**, because it is the one member of a profile that
+ * `provider list` does not report back (it projects to `hasCredentials`, and a secret must not ride the
+ * transcript) — so a caller cannot read-modify-write it, and an `update` that accepted it would have to
+ * guess between rewriting a `${NAME}` reference and replacing a literal. Credentials are
+ * `plugin store-key`'s, which addresses the vault name directly. And **`module`**, because changing the
+ * adapter re-opens every resolution question `add` answers (is it loaded, does it resolve by package
+ * name, is it even a provider adapter); `remove` + `add` is the honest route for that.
+ *
+ * A named shape rather than an inline arm because the browser's `ProviderAdmin.update` takes the same
+ * patch, and because it is the augmentable half — a host whose profiles carry an extra field adds it
+ * here without touching `ToolContracts`.
+ */
+export interface ProviderPatch {
+  model?:      string;
+  endpoint?:   string | null;
+  parameters?: ModelParameters | null;
+  maxRounds?:  number | null;
+}
+
+/**
  * The `provider` tool's contract. Both implementations declare `provider: ProviderToolContract`.
  *
  * `add` is the superset of the two: `model` is optional because a self-contained browser adapter
  * supplies its own, while node's executor requires one; `credentialKey`/`credentialEnvVar` name where
  * node's vault should hold the secret, and the browser (which prompts and stores under its own key)
  * ignores them.
+ *
+ * `update` carries no credential of any kind — see {@link ProviderPatch}.
  */
 export type ProviderToolContract =
   | ToolContract<ProviderListResult,   { action: 'list' }>
@@ -195,4 +222,5 @@ export type ProviderToolContract =
       parameters?:       ModelParameters;
       maxRounds?:        number;
     }>
+  | ToolContract<ProviderActionResult, { action: 'update'; name: string } & ProviderPatch>
   | ToolContract<ProviderActionResult, { action: 'remove'; name: string }>;
