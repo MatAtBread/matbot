@@ -5,8 +5,11 @@
 
 `plugin add` over http: offer to install the dependencies a source-fetch cannot bring. A URL-fetched
 plugin copies one package's own files, not a dependency graph, so one with registry dependencies failed
-to activate on its first unresolved import. It now names every dependency the project cannot already
-resolve, asks once, installs them with the project's own package manager, and retries activation.
+to activate on its first unresolved import. It now resolves what the plugin declares, asks once with the
+full transitive list, installs into the plugin's own cache root under `.plugins/` (the same
+plan/apply path a local plugin takes — not the user's project, where `pnpm add` refuses at a workspace
+root and otherwise writes a fetched plugin's dependencies into a tracked manifest), and retries
+activation.
 
 Also fixes the missing-package remedy being unreachable for that route, which it was for two reasons:
 it was matched off Node's `Cannot find package 'x'` where a bare import from inside `.plugins/` is

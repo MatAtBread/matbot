@@ -8,7 +8,8 @@ export { createProviderTool }   from './tools/provider.js';
 // by a test — the executor's own half is a confirmation prompt over `applyProviderPatch` (plugin-api,
 // which is where the patch semantics live, shared with the browser host).
 export { writeProviderBlock } from './tools/provider.js';
-export { classifySpecifier, canonicalLocalSpecifier, fetchRemoteManifest, materializeRemote, remoteDependencyNotes } from './remote-cache.js';
+export { classifySpecifier, canonicalLocalSpecifier, fetchRemoteManifest, materializeRemote, remoteDependencyNotes,
+         hostOwnPackageDir } from './remote-cache.js';
 export type { Classified, RemoteManifest, MaterializedRemote } from './remote-cache.js';
 // Provisioning a local plugin's dependencies: the `plugin` tool drives it, and its tests drive it directly
 // — the plan/apply split exists so a caller can fold the resolved set into an approval it already asks for.

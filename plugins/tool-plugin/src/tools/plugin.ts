@@ -8,8 +8,8 @@ import { readFile, writeFile, access, readdir } from 'node:fs/promises';
 import { pathToFileURL, fileURLToPath }       from 'node:url';
 import { createRequire }                     from 'node:module';
 import path                                  from 'node:path';
-import { classifySpecifier, fetchRemoteManifest, canonicalLocalSpecifier, hostPackageDirFrom } from '../remote-cache.js';
-import { planProvision, applyProvision, discardProvision, runCommand, isRegistryRange, type ProvisionPlan } from '../provision.js';
+import { classifySpecifier, fetchRemoteManifest, canonicalLocalSpecifier, materializeRemote } from '../remote-cache.js';
+import { planProvision, applyProvision, discardProvision, runCommand, type ProvisionPlan } from '../provision.js';
 import { findDuplicateSingletons } from '../singletons.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -565,10 +565,6 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
       // loader's runtime gate + the post-import shape check.)
       let description: string | undefined;
       let remoteName: string | undefined;
-      // What an http plugin DECLARES it needs. This route brings one package's own files and no
-      // dependency graph, so the declarations are the only statement of what is missing — and they name
-      // every one, where an activation failure names only the first import that could not resolve.
-      let remoteDeps: readonly string[] = [];
       if (classified.kind === 'http') {
         if (classified.advice !== undefined) yield { type: 'stdout', chunk: `${classified.advice}\n` };
         try {
@@ -588,12 +584,6 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
           const d = manifest.pkg['description'];
           if (typeof d === 'string') description = d;
           if (typeof manifest.pkg['name'] === 'string') remoteName = manifest.pkg['name'];
-          const deps = manifest.pkg['dependencies'];
-          if (deps !== null && typeof deps === 'object') {
-            remoteDeps = Object.entries(deps as Record<string, unknown>)
-              .filter((en): en is [string, string] => typeof en[1] === 'string' && isRegistryRange(en[1]))
-              .map(([n]) => n);
-          }
         } catch (e) {
           yield { type: 'error', message: `Could not install "${specifier}": ${e instanceof Error ? e.message : String(e)}.` };
           return;
@@ -752,53 +742,74 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
         // once the dependency is present), like any other fixable activation failure.
         const missing = classified.kind === 'http' ? missingPackageOf(e) : undefined;
         if (missing !== undefined) {
-          // Offer to install them, rather than only naming them. The local route already folds its
-          // plugin's dependencies into the single install approval; this route could not, having had
-          // nothing on disk to ask npm about at that point. Asking here is the same bargain one step
-          // later: the packages are named by a package.json the user has already agreed to install, and
-          // the approval is still an out-of-band human one, so a fetched plugin cannot install anything
-          // by asserting it needs it.
+          // Offer to install them, rather than only naming them — into the plugin's OWN cached
+          // directory under `.plugins/`, which is the same place the local route installs into and for
+          // the same reasons.
           //
-          // Every declared dependency is offered, not just the one that failed: activation stops at the
-          // FIRST unresolved import, so one-at-a-time would mean a fetch/prompt/retry cycle per package.
-          // Filtered by what actually resolves from the project, which also drops the host singletons
-          // (they resolve through the link farm) with no list to keep in step.
-          const wanted = [...new Set([missing, ...remoteDeps])]
-            .filter(n => hostPackageDirFrom(n, projectDir) === undefined);
-          const pm = await detectPackageManager(projectDir);
-          const offer = await confirmAction(ctx,
-            `**"${configSpecifier}"** was fetched, but it needs ${wanted.length} package(s) a source-fetch does not ` +
-            `bring in (it copies a plugin's own files, not its dependency graph):\n${wanted.map(n => `- ${n}`).join('\n')}` +
-            `\n\nInstall them with ${pm} into ${path.basename(projectDir)} (their own dependencies come too)?`);
+          // NOT the project. `pnpm add` at a workspace root refuses outright (ERR_PNPM_ADDING_TO_ROOT,
+          // wanting `-w`), and where it succeeds it writes a fetched plugin's dependencies into the
+          // user's own manifest and lockfile — permanent, tracked, and nothing to do with their project.
+          // The cache directory has none of that: it is matbot's to write, gitignored, per-plugin, and
+          // it sits EARLIER in the resolution walk-up than the shared link farm, so what lands there is
+          // reachable from this plugin and invisible to everything else. Not the farm itself either,
+          // which holds the host singletons and the plugin self-links — an install there would prune
+          // them as extraneous.
+          //
+          // Reusing plan/apply rather than shelling out gets the rest for free: npm unconditionally (the
+          // cache dir is not in anyone's workspace, so pnpm's walk-up problem cannot arise), the full
+          // transitive set in the approval instead of just the direct names, and the host singletons
+          // linked afterwards. The approval is still an out-of-band human one, so a fetched plugin
+          // cannot install anything by asserting that it needs it.
+          //
+          // Every declared dependency is planned, not just the one that failed: activation stops at the
+          // FIRST unresolved import, so one-at-a-time would be a prompt-and-retry cycle per package.
+          const m = await materializeRemote(specifier, path.join(projectDir, '.plugins'), projectDir);
+          let depPlan: ProvisionPlan | undefined;
+          try {
+            depPlan = await planProvision(m.pkgRoot);
+          } catch (err) {
+            yield { type: 'stdout', chunk:
+              `Could not resolve "${configSpecifier}"'s dependencies: ${err instanceof Error ? err.message : String(err)}\n` };
+          }
 
-          if (offer) {
-            yield { type: 'stdout', chunk: `Installing ${wanted.length} package(s) with ${pm}...\n` };
-            try {
-              const out = await runCommand(pm, ['add', ...wanted], projectDir);
-              if (out) yield { type: 'stdout', chunk: out };
-            } catch (err) {
-              yield { type: 'result', value: { message:
-                `Could not install the dependencies of "${configSpecifier}": ${describeInstallFailure(wanted.join(', '), pm, err)} ` +
-                `It has been left in ${path.basename(configPath)} and activates once they are present.` } };
+          if (depPlan !== undefined && depPlan.packages.length > 0) {
+            const offer = await confirmAction(ctx,
+              `**"${configSpecifier}"** was fetched, but it needs packages a source-fetch does not bring in ` +
+              `(it copies a plugin's own files, not its dependency graph). Install ${depPlan.packages.length} ` +
+              `package(s) into its cache directory?\n${depPlan.packages.map(pkg => `- ${pkg}`).join('\n')}`);
+
+            if (!offer) {
+              await discardProvision(depPlan);
+            } else {
+              yield { type: 'stdout', chunk: `Installing ${depPlan.packages.length} package(s) with npm...\n` };
+              try {
+                const { linked, output } = await applyProvision(depPlan);
+                if (output) yield { type: 'stdout', chunk: output };
+                if (linked.length > 0) yield { type: 'stdout', chunk: `Linked the host's ${linked.join(', ')}.\n` };
+              } catch (err) {
+                yield { type: 'result', value: { message:
+                  `Could not install the dependencies of "${configSpecifier}": ${err instanceof Error ? err.message : String(err)}. ` +
+                  `It has been left in ${path.basename(configPath)} and activates once they are present.` } };
+                return;
+              }
+              // Retried in process: the files are already cached, so this is a resolution retry and not a
+              // second fetch. A failure here is reported as-is — what was asked for is now installed, so
+              // whatever remains is a different problem and guessing at it would mislead.
+              yield { type: 'stdout', chunk: `Activating "${configSpecifier}"...\n` };
+              try {
+                const loaded  = await ctx.loadPlugin(configSpecifier);
+                const welcome = await loaded.installationMessage?.();
+                yield { type: 'result', value: {
+                  message: `"${configSpecifier}" installed and is now active (${depPlan.packages.length} dependency package(s) installed).`,
+                  ...(welcome !== undefined ? { installationMessage: welcome } : {}),
+                } };
+              } catch (err) {
+                yield { type: 'result', value: { message:
+                  `Installed its dependencies, but "${configSpecifier}" still did not activate: ${String(err)}. ` +
+                  `It has been left in ${path.basename(configPath)}.` } };
+              }
               return;
             }
-            // Retried in-process: the plugin's files are already cached, so this is a resolution retry,
-            // not a second fetch. A failure here is reported as-is — the dependencies asked for are now
-            // installed, so whatever remains is a different problem and guessing at it would mislead.
-            yield { type: 'stdout', chunk: `Activating "${configSpecifier}"...\n` };
-            try {
-              const loaded  = await ctx.loadPlugin(configSpecifier);
-              const welcome = await loaded.installationMessage?.();
-              yield { type: 'result', value: {
-                message: `"${configSpecifier}" installed and is now active (${wanted.length} dependency package(s) installed with ${pm}).`,
-                ...(welcome !== undefined ? { installationMessage: welcome } : {}),
-              } };
-            } catch (err) {
-              yield { type: 'result', value: { message:
-                `Installed ${wanted.join(', ')}, but "${configSpecifier}" still did not activate: ${String(err)}. ` +
-                `It has been left in ${path.basename(configPath)}.` } };
-            }
-            return;
           }
 
           const fromNpm = missing.startsWith('@matatbread/')
