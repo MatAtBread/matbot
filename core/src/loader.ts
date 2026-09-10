@@ -176,9 +176,20 @@ export async function loadPlugins(
   // from a `'load'` failure (import rejection — a bad path, a syntax error). Only the former is
   // permanently-not-a-plugin: it throws NotAPluginError so the `add` flow can roll back the config
   // write, where an import failure may be a fixable typo and is left in config.
-  const failLoad = (spec: string, rawReason: string, kind: 'load' | 'shape' = 'load'): void => {
+  const failLoad = (spec: string, rawReason: string, kind: 'load' | 'shape' = 'load', cause?: unknown): void => {
     const reason = withNotes(spec, rawReason);
-    if (onLoadError === 'throw') throw kind === 'shape' ? notAPluginError(spec, reason) : new Error(reason);
+    if (onLoadError === 'throw') {
+      if (kind === 'shape') throw notAPluginError(spec, reason);
+      // The wrapper carries the original's `cause` AND its `code`. A caller that recognises the failure
+      // is asking about what went wrong, not about this frame: the `plugin` tool reads
+      // ERR_MODULE_NOT_FOUND to name the package an http plugin is missing and offer to install it, and a
+      // bare `new Error(message)` dropped the code, so that branch was unreachable — silently, because
+      // the wording it also matches on was still in the message.
+      const err = new Error(reason, cause !== undefined ? { cause } : undefined);
+      const code = (cause as { code?: unknown } | undefined)?.code;
+      if (typeof code === 'string') (err as { code?: string }).code = code;
+      throw err;
+    }
     console.warn(`[matbot] Skipping plugin "${spec}": ${reason}`);
     recordFailedPlugin({ specifier: spec, error: reason });
   };
@@ -196,7 +207,7 @@ export async function loadPlugins(
         continue;
       }
       console.error(`[matbot] Failed to load plugin "${spec}":`, result.reason);
-      failLoad(spec, `Could not load plugin "${spec}": ${reason}`);
+      failLoad(spec, `Could not load plugin "${spec}": ${reason}`, 'load', result.reason);
       continue;
     }
 

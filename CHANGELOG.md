@@ -24,6 +24,14 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Bug fixes
 
+- **A rethrown plugin-load failure keeps its identity.** `loadPlugins` with `onLoadError: 'throw'` built a
+  bare `new Error(message)`, so everything but the text was lost — including the `ERR_MODULE_NOT_FOUND`
+  code that `plugin add` reads to name a missing dependency and offer to install it. That branch was
+  therefore dead for every http plugin, and dead *silently*: the fallback still printed the underlying
+  message, so the output looked like a considered answer rather than a missed one. The wrapper now carries
+  the original as `cause` and copies its `code`, and the reader walks the cause chain rather than trusting
+  one layer to remember.
+
 - **Removing a provider profile no longer swallows the section after it.** The block remover matched
   every following line that did not begin `  <non-space>` — which a *top-level* key does not. Deleting
   the last profile in `providers:` therefore also deleted the header of whatever came next and left that

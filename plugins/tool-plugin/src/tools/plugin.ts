@@ -364,7 +364,17 @@ function describeInstallFailure(specifier: string, pm: string, e: unknown): stri
  *  throws its own `Cannot resolve "x" imported by …` carrying the same ERR_MODULE_NOT_FOUND code. Matching
  *  only Node's phrasing therefore missed every http plugin — precisely the route this exists for. */
 export function missingPackageOf(e: unknown): string | undefined {
-  if (!(e instanceof Error) || (e as NodeJS.ErrnoException).code !== 'ERR_MODULE_NOT_FOUND') return undefined;
+  // Walk the cause chain. The error reaching here is the loader's wrapper, not the import rejection, and
+  // one layer forgetting to carry `code` made this return undefined for every http plugin — the failure
+  // this exists to explain. Reading through the chain does not depend on every future wrapper
+  // remembering.
+  let cur: unknown = e;
+  let found = false;
+  for (let depth = 0; cur instanceof Error && depth < 8; depth++) {
+    if ((cur as NodeJS.ErrnoException).code === 'ERR_MODULE_NOT_FOUND') { found = true; break; }
+    cur = (cur as { cause?: unknown }).cause;
+  }
+  if (!found || !(e instanceof Error)) return undefined;
   const m = /Cannot (?:find (?:package|module)|resolve) ['"]([^'"]+)['"]/.exec(e.message);
   const pkg = m?.[1];
   // A bare package specifier (not a relative/absolute path): that's a missing dependency, not a
