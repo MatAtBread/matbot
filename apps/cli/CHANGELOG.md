@@ -1,5 +1,15 @@
 # @matatbread/matbot-cli
 
+## 0.4.14
+
+### Patch Changes
+
+- tool-store: read a store's `shape` as TypeScript rather than matching it against an end-anchored
+  pattern — comments are stripped (string literals intact) and the interface body is brace-matched, so a
+  comment inside the declaration can no longer comment out the emitted one-line `toolContract`, and one
+  after it no longer degrades the document type to `Record<string, unknown>`.
+  - @matatbread/matbot-core@0.4.14
+
 ## 0.4.13
 
 ### Patch Changes
