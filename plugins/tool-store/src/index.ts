@@ -3,6 +3,7 @@ import type {
   MatbotPluginSpec, MatbotMachine, Tool, ToolEvent, ToolContract, ToolResultOf, Store, StoreQuery,
 } from '@matatbread/matbot-plugin-api';
 import type { StoreDef, StoreRecord } from './types.js';
+import { shapeName, shapeType } from './shape.js';
 
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
@@ -115,26 +116,12 @@ interface ActionInput {
   query?:    StoreQuery;
 }
 
-// The store's declared `shape` as an INLINE structural type, so the synthesised `toolContract` references
-// no external name (the shape type is defined only in this string, not in any scannable source). An
-// `interface X { … }` → `{ … }`; a `type X = T` → `T`; anything else → `Record<string, unknown>`.
-// Whitespace is collapsed to keep the emitted contract on one line. A shape that itself references a named
-// type would leave that name dangling — the fix there is to export that type (so the dts can import it),
-// not to inline it here.
-function shapeType(shape: string): string {
-  const iface = shape.match(/interface\s+\w+\s*(\{[\s\S]*\})\s*$/);
-  if (iface) return iface[1]!.replace(/\s+/g, ' ').trim();
-  const alias = shape.match(/type\s+\w+\s*=\s*([\s\S]+?);?\s*$/);
-  if (alias) return alias[1]!.replace(/\s+/g, ' ').trim();
-  return 'Record<string, unknown>';
-}
-
 // A tool over one managed store whose verbs are the Store<T> interface (get/set/cas/delete/query),
 // with set doubling as upsert. Loose schema (action + the union of every action's optional fields);
 // the executor enforces per-action requirements, matching the multi-action convention in CLAUDE.md.
 function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Store<StoreRecord>): Tool {
-  const typeGuess = def.shape.match(/(interface|type\s*=)\s+(\w+)/)?.[2] ?? 'Record<string, unknown>';  // the shape's NAME, for prose
-  const doc       = shapeType(def.shape);                                                               // the shape as an inline type, for the toolContract
+  const typeGuess = shapeName(def.shape) ?? 'Record<string, unknown>';   // the shape's NAME, for prose
+  const doc       = shapeType(def.shape);                                // the shape as an inline type, for the toolContract
   return {
     name: actionToolName(def.namespace),
     ...(pluginName !== undefined ? { pluginName } : {}),
