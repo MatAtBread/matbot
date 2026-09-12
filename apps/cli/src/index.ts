@@ -50,16 +50,36 @@ const isBackground = process.env.IS_SUB_AGENT === '1';
 for (const level of ['log', 'warn', 'error'] as const) {
   const orig = console[level].bind(console) as (...a: unknown[]) => void;
   console[level] = (label, ...args: unknown[]) => {
-    if (!isBackground || level === 'error')
-      orig(`[${new Date().toISOString()} ${_pid}] ${label}`, ...args);
+    if (isBackground && level !== 'error') return;
+    // Diagnostics are harness chatter: open yellow on the prefix and close it as a trailing argument,
+    // so any object args in between are still coloured rather than only the first one.
+    const on = level === 'log' ? ttyOut : ttyErr;
+    if (on) orig(`\x1b[33m[${new Date().toISOString()} ${_pid}] ${label}`, ...args, '\x1b[0m');
+    else    orig(`[${new Date().toISOString()} ${_pid}] ${label}`, ...args);
   };
 }
-const write = isBackground ? (text: string) => {} : (text: string) => process.stderr.write(text);
+// Colour only when writing to an interactive terminal — piped/background output stays clean. The two
+// streams are asked separately because they carry different things: the assistant's answer is the only
+// thing on stdout (so it survives a pipe uncoloured), everything else is stderr.
+const ttyErr = !isBackground && process.stderr.isTTY === true;
+const ttyOut = !isBackground && process.stdout.isTTY === true;
+// Whitespace-only text is left alone so a bare newline doesn't carry a pair of escapes.
+const paint = (on: boolean, code: string) => (s: string): string =>
+  (on && s.trim() !== '' ? `\x1b[${code}m${s}\x1b[0m` : s);
 
-// Colour only when writing to an interactive terminal — piped/background output stays clean.
-const useColor = !isBackground && process.stderr.isTTY === true;
-const yellow = (s: string): string => (useColor ? `\x1b[33m${s}\x1b[0m` : s);
-const dim    = (s: string): string => (useColor ? `\x1b[2m${s}\x1b[0m`  : s);
+const yellow  = paint(ttyErr, '33');   // tools, thinking, markers, accounting — the machinery
+const dim     = paint(ttyErr, '2');
+const cyanErr = paint(ttyErr, '36');   // the assistant, on the stderr side (its label)
+const cyanOut = paint(ttyOut, '36');   // the assistant's own words
+
+// Everything written through `write` is harness chatter, hence yellow.
+const write = isBackground ? (_text: string) => {} : (text: string) => process.stderr.write(yellow(text));
+
+// A prompt is chatter, but the line the user types back is theirs: leave the colour OPEN past the
+// prompt so readline's echo is white, and close it once the answer is in. Node measures prompt width
+// with ANSI stripped, so the trailing escape doesn't upset wrapping.
+const askPrompt = (prompt: string): string => (ttyErr ? `\x1b[33m${prompt}\x1b[0m\x1b[37m` : prompt);
+const endInput  = (): void => { if (ttyErr) process.stderr.write('\x1b[0m'); };
 
 // One marker block → a human-facing line. The dispatcher's hook-failure marker is a warning
 // (amber); any other marker is shown dimmed and generic.
@@ -243,7 +263,7 @@ async function resolveCredentialsInteractive(
       const rl = createInterface({ input: process.stdin, output: process.stderr });
       try {
         for (const name of e.missingKeys) {
-          const value = await rl.question(`Secret required — ${name}: `);
+          const value = await rl.question(askPrompt(`Secret required — ${name}: `)).finally(endInput);
           if (!value.trim()) throw new Error(`No value provided for required secret "${name}".`);
           // writeSecret, not createSecret: the placeholder named this exact key, so store verbatim.
           await vault.writeSecret(name, value.trim());
@@ -492,7 +512,9 @@ async function runTurn(
       switch (ev.type) {
         case 'text-delta':
           clearThinking();
-          process.stdout.write(ev.delta);
+          // Per delta rather than one span opened at the turn's start: tool output interleaves, and
+          // each of those ends with a reset that would otherwise drop the assistant back to default.
+          process.stdout.write(cyanOut(ev.delta));
           break;
         case 'thinking':
           thinkingTicks++;
@@ -513,7 +535,7 @@ async function runTurn(
           const text = ev.content
             .filter((c): c is Extract<MessageContent, { type: 'text' }> => c.type === 'text')
             .map(c => c.text).join('');
-          if (text) write(`[context] ${text}\nassistant: `);
+          if (text) { write(`[context] ${text}\n`); process.stderr.write(cyanErr('assistant: ')); }
           break;
         }
         case 'aborted': {
@@ -538,7 +560,7 @@ async function runTurn(
               return await runTurn(ev.session, [{ type: 'form-response', values }], run, providerName, principal, promptFn);
             }
           } else {
-            process.stderr.write(`\n[aborted: ${ev.reason}]\n`);
+            process.stderr.write(yellow(`\n[aborted: ${ev.reason}]\n`));
           }
           break;
         }
@@ -549,7 +571,7 @@ async function runTurn(
           }
           break;
         }
-        case 'error': clearThinking(); process.stderr.write(`\n[error: ${ev.error}]\n`); break;
+        case 'error': clearThinking(); process.stderr.write(yellow(`\n[error: ${ev.error}]\n`)); break;
         default: break;
       }
       // One submission == one turn here; the per-session stream would otherwise keep yielding.
@@ -626,59 +648,58 @@ async function testEndpointReachable(url: string): Promise<string | false> {
 async function runSetupWizard(configPath: string): Promise<import('./config.js').MatbotConfig> {
   const rl  = createInterface({ input: process.stdin, output: process.stderr });
   const ask = async (question: string): Promise<string> => {
-    const answer = await rl.question(`${question}: `);
-    return answer.trim();
+    try { return (await rl.question(askPrompt(`${question}: `))).trim(); } finally { endInput(); }
   };
 
   try {
-    process.stderr.write('\nNo providers configured. Let\'s set one up.\n\n');
+    process.stderr.write(yellow('\nNo providers configured. Let\'s set one up.\n\n'));
 
     const discovered = await discoverProviders();
     if (discovered.length === 0) {
       throw new Error('No provider packages found. Cannot continue setup.');
     }
 
-    process.stderr.write('Available provider types:\n');
+    process.stderr.write(yellow('Available provider types:\n'));
     for (let i = 0; i < discovered.length; i++) {
-      process.stderr.write(`  ${i + 1}. ${discovered[i]!.type}  (${discovered[i]!.name})\n`);
+      process.stderr.write(yellow(`  ${i + 1}. ${discovered[i]!.type}  (${discovered[i]!.name})\n`));
     }
-    process.stderr.write('\n');
+    process.stderr.write(yellow('\n'));
 
     let chosen!: ProviderPackage;
     for (;;) {
       const choice = await ask(`Choose a type [1-${discovered.length}]`);
       const n = parseInt(choice, 10);
       if (n >= 1 && n <= discovered.length) { chosen = discovered[n - 1]!; break; }
-      process.stderr.write(`Please enter a number between 1 and ${discovered.length}.\n`);
+      process.stderr.write(yellow(`Please enter a number between 1 and ${discovered.length}.\n`));
     }
 
     let providerName = '';
     for (;;) {
       providerName = await ask(`Provider name (how this LLM key is named in ${configPath} and presented to you)`);
       if (providerName) break;
-      process.stderr.write('Provider name is required.\n');
+      process.stderr.write(yellow('Provider name is required.\n'));
     }
 
     let model = '';
     for (;;) {
       model = await ask('Model name');
       if (model) break;
-      process.stderr.write('Model name is required.\n');
+      process.stderr.write(yellow('Model name is required.\n'));
     }
 
     let endpoint = await ask('Endpoint URL');
     let apiKey = await ask('API key');
 
     if (endpoint && !endpoint.startsWith('http')) {
-      process.stderr.write(`\nTesting ${endpoint}… `);
+      process.stderr.write(yellow(`\nTesting ${endpoint}… `));
       const reachable = await testEndpointReachable(endpoint);
       if (!reachable) {
-        process.stderr.write('reachable\n');
+        process.stderr.write(yellow('reachable\n'));
       } else {
-        process.stderr.write(reachable + '\n');
+        process.stderr.write(yellow(reachable + '\n'));
         const cont = await ask('Continue with this endpoint anyway? [y/N]');
         if (cont.toLowerCase() !== 'y') {
-          process.stderr.write('Setup cancelled.\n');
+          process.stderr.write(yellow('Setup cancelled.\n'));
           process.exit(1);
         }
       }
@@ -717,7 +738,7 @@ async function runSetupWizard(configPath: string): Promise<import('./config.js')
 
     await mkdir(configDir, { recursive: true });
     await writeFile(configPath, yaml, 'utf8');
-    process.stderr.write(`\nConfiguration written to ${configPath}\n\n`);
+    process.stderr.write(yellow(`\nConfiguration written to ${configPath}\n\n`));
 
     return {
       plugins:   [],
@@ -743,7 +764,7 @@ async function main(): Promise<void> {
   if (process.argv[2] === 'install') {
     const specifier = process.argv.slice(3).find(a => !a.startsWith('-'));
     if (!specifier) {
-      process.stderr.write('Usage: matbot install <package>\n');
+      process.stderr.write(yellow('Usage: matbot install <package>\n'));
       process.exit(1);
     }
     const configFlag = process.argv.indexOf('--config');
@@ -836,7 +857,7 @@ async function main(): Promise<void> {
   // (a seeded document could only ever have landed under the one that booted).
   installSettingsDefaults(matbotConfig.defaultSettings);
 
-  process.stderr.write(`[${new Date().toISOString()} ${_pid}] [matbot] ${versionBanner()}\n`);
+  process.stderr.write(yellow(`[${new Date().toISOString()} ${_pid}] [matbot] ${versionBanner()}\n`));
 
   // The vault is a capture-safe forwarding proxy over a swappable backend (mirrors StorageBackend):
   // EnvFileVault by default, replaced when a plugin calls register('Vault', impl). References to
@@ -1351,16 +1372,16 @@ async function main(): Promise<void> {
     });
     const outPath = path.resolve(opts.dumpTools);
     await writeFile(outPath, JSON.stringify(dump, null, 2), 'utf8');
-    process.stderr.write(`[matbot] dumped ${dump.length} tools → ${outPath}\n`);
+    process.stderr.write(yellow(`[matbot] dumped ${dump.length} tools → ${outPath}\n`));
     process.exit(0);
   }
 
   // ── Server mode ───────────────────────────────────────────────────────────────
 
   if (serverMode) {
-    process.stderr.write(`[${new Date().toISOString()} ${_pid}] [matbot] server running — press Ctrl+C to stop\n`);
+    process.stderr.write(yellow(`[${new Date().toISOString()} ${_pid}] [matbot] server running — press Ctrl+C to stop\n`));
     const shutdown = (): void => {
-      process.stderr.write('\n[matbot] shutting down…\n');
+      process.stderr.write(yellow('\n[matbot] shutting down…\n'));
       teardownPlugins()
       .then(async () => { await activeStorageBackend?.close?.(); process.exit(0); })
       .catch(() => process.exit(1));
@@ -1416,9 +1437,9 @@ async function main(): Promise<void> {
   }
 
   if (isEphemeral) {
-    process.stderr.write(`[${new Date().toISOString()} ${_pid}] provider: ${providerName}  (ephemeral)\n\n`);
+    process.stderr.write(yellow(`[${new Date().toISOString()} ${_pid}] provider: ${providerName}  (ephemeral)\n\n`));
   } else {
-    process.stderr.write(`[${new Date().toISOString()} ${_pid}] provider: ${providerName}  session: ${session.id}\n\n`);
+    process.stderr.write(yellow(`[${new Date().toISOString()} ${_pid}] provider: ${providerName}  session: ${session.id}\n\n`));
   }
 
   const runStore: Store<Session> = isEphemeral ? new MemoryStore<Session>() : store;
@@ -1431,7 +1452,12 @@ async function main(): Promise<void> {
 
   // ── Readline (shared by single-turn and REPL for tool prompts) ──────────────
   const rl = createInterface({ input: process.stdin, output: process.stderr });
-  rl.on('SIGINT', () => { process.stderr.write('\n'); rl.close(); });
+  rl.on('SIGINT', () => { endInput(); process.stderr.write('\n'); rl.close(); });
+
+  // Every read goes through here so the answer's colour is always closed, including on a throw.
+  const ask = async (prompt: string): Promise<string> => {
+    try { return await rl.question(askPrompt(prompt)); } finally { endInput(); }
+  };
 
   const stdinPrompt = (async (p: string | FormField, defaultValue?: string): Promise<string> => {
     if (typeof p !== 'string') {
@@ -1439,15 +1465,15 @@ async function main(): Promise<void> {
       if (p.type === 'select' || p.type === 'confirm') {
         const opts = p.type === 'confirm' ? ['yes', 'no'] : (p.options ?? []);
         const hint = opts.map(o => def !== undefined && o.toLowerCase() === def.toLowerCase() ? o.toUpperCase() : o).join('/');
-        const raw  = (await rl.question(`${p.label} [${hint}] `)).trim();
+        const raw  = (await ask(`${p.label} [${hint}] `)).trim();
         if (!raw) return def ?? '';
         return opts.find(o => o.toLowerCase().startsWith(raw.toLowerCase())) ?? def ?? raw;
       }
       const suffix = def !== undefined ? ` [${def}] ` : ' ';
-      return (await rl.question(`${p.label}${suffix}`)).trim() || def || '';
+      return (await ask(`${p.label}${suffix}`)).trim() || def || '';
     }
     const suffix = defaultValue !== undefined ? ` [${defaultValue}] ` : ' ';
-    const answer = await rl.question(`${p}${suffix}`);
+    const answer = await ask(`${p}${suffix}`);
     return answer.trim() || defaultValue || '';
   }) as PromptFn;
 
@@ -1468,12 +1494,14 @@ async function main(): Promise<void> {
     for (;;) {
       let line: string;
       try {
-        line = await rl.question('you: ');
+        line = await rl.question(askPrompt('you: '));
       } catch {
+        endInput();
         break;  // Ctrl+D / EOF
       }
+      endInput();
       if (!line.trim()) continue;
-      process.stderr.write('assistant: ');
+      process.stderr.write(cyanErr('assistant: '));
       session = await runTurn(session, line, cliRun, providerConfig.name, principal, stdinPrompt);
     }
   } finally {
@@ -1483,13 +1511,13 @@ async function main(): Promise<void> {
   }
 
   if (!isEphemeral) {
-    process.stderr.write(
+    process.stderr.write(yellow(
       `\nTo resume: matbot --provider ${providerName} --session ${session.id}\n`
-    );
+    ));
   }
 }
 
 main().catch(e => {
-  process.stderr.write(`Fatal: ${String(e)}\n`);
+  process.stderr.write(yellow(`Fatal: ${String(e)}\n`));
   process.exit(1);
 });
