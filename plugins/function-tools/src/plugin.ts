@@ -10,17 +10,25 @@ const TOOL_NAME   = 'tool_function';
 const PLUGIN_NAME = 'function-tools';
 const NAMESPACE   = 'functions';
 
-interface FunctionRecord { name: string; definition: string; description?: string }
+interface FunctionRecord { name: string; definition: string; description?: string; definedUnchecked?: true }
 
-interface CheckResult { name: string; ok: boolean; diagnostics: string[] }
+interface CheckResult { name: string; ok: boolean; diagnostics: string[]; definedUnchecked?: true }
 
 /** A stored function. Its `id` IS its name — names are already unique (they are tool-registry keys),
  *  so there is no second identity to keep in step, and a rename is a delete plus an add. */
-interface FunctionDoc { id: string; version: string; definition: string; description?: string }
+interface FunctionDoc {
+  id: string; version: string; definition: string; description?: string;
+  /** This source was registered without ever being type-checked — `noTypeCheck`, or no checker present.
+   *  Provenance of the DEFINITION, not a verdict on it: a `check` that passes later does not clear it
+   *  (check registers and persists nothing, and the fact it records stays true), which is what keeps the
+   *  flag from ever becoming a lie people learn to ignore. */
+  definedUnchecked?: true;
+}
 
 const recordOf = (doc: FunctionDoc): FunctionRecord => ({
   name: doc.id, definition: doc.definition,
   ...(doc.description !== undefined ? { description: doc.description } : {}),
+  ...(doc.definedUnchecked === true ? { definedUnchecked: true } : {}),
 });
 
 // Placeholder used as a defined tool's description when the caller supplies none — fill in as desired.
@@ -123,7 +131,8 @@ class FunctionStore {
     // is sound before it becomes a callable tool. Skipped when the ToolTypeIndex service is absent (e.g. the
     // browser — the function still compiles and runs), or when the caller opts out with noTypeCheck.
     const index = this.machine.ToolTypeIndex;
-    if (index !== undefined && !noTypeCheck) {
+    const checked = index !== undefined && !noTypeCheck;
+    if (checked) {
       const diags = await index.check(checkSnippet(sig));
       if (diags.length > 0) throw new Error(`type error(s) — fix and re-define, or pass noTypeCheck to bypass:\n${diags.join('\n')}`);
     }
@@ -132,6 +141,11 @@ class FunctionStore {
       version: Date.now().toString(),
       definition,
       ...(description !== undefined && description.trim() !== '' ? { description: description.trim() } : {}),
+      // Persisted, because a bypass that leaves no trace is indistinguishable from a pass: `noTypeCheck`
+      // made a real failure go away without resolving it, and the errors surfaced only much later, when
+      // an unrelated contract change made them impossible to ignore. Both bypass routes are recorded —
+      // the explicit flag and the implicit "no checker here" — since the function is equally unverified.
+      ...(checked ? {} : { definedUnchecked: true as const }),
     };
     await this.registerTool(recordOf(doc));   // compiles; throws on bad source before anything is persisted
     // No CAS: a define is an unconditional "this name now means this source", not a read-modify-write,
@@ -167,7 +181,10 @@ class FunctionStore {
       // sweep over every function still reports on the rest.
       try { diagnostics = await index.check(checkSnippet(parseSignature(doc.definition))); }
       catch (e) { diagnostics = [e instanceof Error ? e.message : String(e)]; }
-      results.push({ name: doc.id, ok: diagnostics.length === 0, diagnostics });
+      results.push({
+        name: doc.id, ok: diagnostics.length === 0, diagnostics,
+        ...(doc.definedUnchecked === true ? { definedUnchecked: true as const } : {}),
+      });
     }
     return results;
   }
@@ -302,8 +319,11 @@ ACTIONS
            could move a contract a function was written against — a tool changing its parameters or result,
            a plugin loading or unloading — since a defined function is compiled but NOT re-checked on
            reload, so it keeps working until the moment it doesn't. Returns a row per function with its
-           diagnostics; fix a failure by re-defining that function.
-  list   — Show the functions you've defined, with their source.
+           diagnostics; fix a failure by re-defining that function. A row also carries
+           \`definedUnchecked: true\` if that function was never type-checked when it was defined.
+  list   — Show the functions you've defined, with their source. \`definedUnchecked: true\` marks one that
+           was registered without a type-check (it was defined with \`noTypeCheck\`, or no checker was
+           available) — run \`check\` on it, since a bypass hides errors that are still there.
   types  — Return TypeScript declarations (a .d.ts) of what the available tools' calls resolve to, so you
            can compose against real return types. Node only; \`available: false\` with an empty dts where
            type info can't be derived (e.g. the browser) — fall back to inferring shapes and testing.
@@ -338,7 +358,7 @@ const INPUT_SCHEMA: JSONSchema = {
     definition:  { type: 'string', description: 'define/lambda: the function source (method-shorthand TypeScript, no arrow).' },
     description: { type: 'string', description: 'define only (optional): Describe the intent of the function from the context used to create it. Include a clause describing the use-cases for the function tool. Becomes the defined tool\'s description, and therefore it is important to make the description both specific in terms of intent and use-cases. Do not describe the mechanism or execution as this is already clear from the code.' },
     params:      { type: 'object', description: 'lambda only: the single argument object passed to the function.' },
-    noTypeCheck: { type: 'boolean', description: 'define/lambda (optional, default false): skip the TypeScript type-check of the body against the live tool types. The check is a strong signal the composition is sound before it is registered/run — leave it on unless you must bypass a spurious error (e.g. composing a tool whose result type is `unknown`). No effect where no type-checker is available (e.g. the browser).' },
+    noTypeCheck: { type: 'boolean', description: 'define/lambda (optional, default false): skip the TypeScript type-check of the body against the live tool types. The check is a strong signal the composition is sound before it is registered/run — leave it on unless you must bypass a spurious error (e.g. composing a tool whose result type is `unknown`). A bypassed error does not go away: it is still there, and will surface later when something unrelated moves, so a function defined this way is marked `definedUnchecked` in `list` and `check` and should be checked again once the obstacle is gone. No effect where no type-checker is available (e.g. the browser) — a definition made there is marked the same way, being equally unverified.' },
     name:       { type: 'string', description: 'remove: the defined function/tool name to delete. check (optional): the one function to check — omit it to check every defined function.' },
   },
 };
