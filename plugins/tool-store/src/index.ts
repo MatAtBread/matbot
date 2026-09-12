@@ -132,8 +132,11 @@ function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Sto
   // Accepted and ignored rather than honoured: the executor mints a fresh `version` on every write and
   // takes `id` from the parameter, so neither can be set from `data` (`expected` is the concurrency
   // control, and it is its own parameter).
-  const stored    = `(${doc}) & { id: string; version: string }`;
-  const writable  = `(${doc}) & { id?: string; version?: string }`;
+  // Both are wrapped whole, not just around `${doc}`: the shape may be a union and `&` binds tighter
+  // than `|`, while `[]` binds tighter than `&` — so an unwrapped `stored[]` reads as
+  // `doc & ({id;version}[])`, an intersection with an array whose ELEMENT type is missing the document.
+  const stored    = `((${doc}) & { id: string; version: string })`;
+  const writable  = `((${doc}) & { id?: string; version?: string })`;
   return {
     name: actionToolName(def.namespace),
     ...(pluginName !== undefined ? { pluginName } : {}),
@@ -198,15 +201,23 @@ function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Sto
     // to an augmentation arm (result, params) — which the tool-types index splices into the dts and flattens
     // for the wire. The result/data shape is inlined structurally (`doc`) so it references no name the dts
     // lacks; `StoreQuery` stays a name — it's a plugin-api export, so the dts imports it.
-    toolContract:
-      "ToolContract<" +
-        stored + " | null | { ok: true; doc: " + stored + " } | { ok: false; current: " + stored + " | null }" +
-        " | { deleted: boolean } | { items: " + stored + "[]; total?: number; cursor?: string }" +
-      ", " +
-        "{ action: 'get'; id: string } | { action: 'set'; id?: string; data: " + writable + " }" +
-        " | { action: 'cas'; id: string; expected: string; data: " + writable + " }" +
-        " | { action: 'delete'; id: string; expected?: string } | { action: 'query'; query?: StoreQuery }" +
-      ">",
+    // ONE ARM PER ACTION, not one arm carrying two unions. `ToolProxy` turns a multi-arm entry into an
+    // overload set, which is what makes `await tool.x_action({ action: 'query' })` narrow to the query
+    // result; a single arm is a single signature, so the declared result was the union across all five
+    // actions and NO action's own fields were reachable without a guard. Since a cast is barred by the
+    // check gate, a caller could not write correct code against a store tool at all — the workaround
+    // was to flatten the document shape, which is the modelling the contract exists to carry.
+    //   Keep the arms `|`-joined and literal: build-dts reads them as a union type node and the wire
+    // projection splits on a top-level `|`, so neither tolerates an alias standing in for the union.
+    toolContract: [
+      "ToolContract<" + stored + " | null, { action: 'get'; id: string }>",
+      "ToolContract<" + stored + ", { action: 'set'; id?: string; data: " + writable + " }>",
+      "ToolContract<{ ok: true; doc: " + stored + " } | { ok: false; current: " + stored + " | null }" +
+        ", { action: 'cas'; id: string; expected: string; data: " + writable + " }>",
+      "ToolContract<{ deleted: boolean }, { action: 'delete'; id: string; expected?: string }>",
+      "ToolContract<{ items: " + stored + "[]; total?: number; cursor?: string }" +
+        ", { action: 'query'; query?: StoreQuery }>",
+    ].join(' | '),
     executor: {
       async *execute(rawInput: unknown): AsyncIterable<ToolEvent> {
         const input = (rawInput ?? {}) as ActionInput;
