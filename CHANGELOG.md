@@ -38,7 +38,25 @@ churn and less likely to affect a consumer who doesn't use them.
   putting it in front of whoever wrote the code — and the overflow line is precisely the part worth
   having in one place.
 
+- **`core` re-exports `CONFIRM_YES` / `CONFIRM_NO`.** It already re-exports every other cross-boundary
+  runtime value so an app needs no direct `plugin-api` dependency; these were missed, and an app
+  implementing a `PromptFn` is exactly who needs them — the tokens a `type: 'confirm'` prompt resolves
+  to, which a consumer must branch on rather than on the rendered (and potentially localised) label.
+
 ### Optional
+
+#### tool-plugin, mcp, mcp-http
+
+- **Every privileged confirmation is a structured `confirm` field, and connecting an MCP server asks.**
+  `mcp_action add` was ungated in both plugins — only `remove` asked, which is backwards: connecting
+  registers a remote party's tools for the rest of the session, and the local (stdio) variant spawns a
+  child process on the host. Both now confirm, and the local prompt names the command line. The eight
+  remaining free-text `[y/N]` prompts (five in `provider`, three across `mcp`/`mcp-http`) are now
+  `confirm` fields compared against the canonical tokens, instead of a regex over a rendered label —
+  so rich frontends draw real buttons, while the CLI still renders `[yes/NO]` and prefix-matches `y`.
+  Every non-interactive caller keeps declining, the `CONFIRM_NO` default being what they already
+  resolved to. `confirmAction` goes from three copies to one per dependency edge: shared within
+  `tool-plugin`, and exported from `mcp-http` for the node `mcp` plugin that already hard-depends on it.
 
 #### tool-store
 

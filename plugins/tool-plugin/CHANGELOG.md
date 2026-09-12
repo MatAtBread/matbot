@@ -1,5 +1,22 @@
 # @matatbread/matbot-tool-plugin
 
+## 0.4.14
+
+### Patch Changes
+
+- Every privileged confirmation is now a structured `confirm` field, and connecting an MCP server asks.
+
+  - `mcp_action add` was ungated in both the node and http plugins — only `remove` asked, which is backwards:
+    connecting registers a remote party's tools for the rest of the session, and the local (stdio) variant
+    spawns a child process on the host. Both now confirm, and the local prompt names the command line.
+  - The eight remaining free-text `[y/N]` prompts (five in `provider`, three across `mcp`/`mcp-http`) are
+    `type: 'confirm'` fields answered with the canonical `CONFIRM_YES`/`CONFIRM_NO` tokens, instead of a regex
+    over a rendered — and potentially localised — label. Rich frontends render real buttons for these; the CLI
+    renders `[yes/NO]` and prefix-matches, so `y` still works. Every non-interactive caller keeps declining, as
+    the `CONFIRM_NO` default is what it always resolved to.
+  - `confirmAction` went from three copies to one per dependency edge: shared within `tool-plugin`, and
+    exported from `mcp-http` for the node `mcp` plugin that already hard-depends on it.
+
 ## 0.4.13
 
 ### Patch Changes

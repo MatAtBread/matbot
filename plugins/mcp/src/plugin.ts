@@ -10,7 +10,7 @@ declare module '@matatbread/matbot-plugin-api' {
   }
 }
 import type { MCPClient, MCPToolDef, MCPRemoteConfig } from '@matatbread/matbot-mcp-http';
-import { makeProxyTool, proxyToolName, RemoteMcpManager } from '@matatbread/matbot-mcp-http';
+import { makeProxyTool, proxyToolName, RemoteMcpManager, confirmAction } from '@matatbread/matbot-mcp-http';
 import process from 'node:process';
 import type { MCPServerConfigLocal, MCPPersistedLocal } from './types.js';
 import { createStdioClient } from './client.js';
@@ -112,7 +112,7 @@ export function createMCPPlugin(): MatbotPluginSpec {
     | { action: 'list' }
     | { action: 'remove'; name: string };
 
-  async function* doAdd(raw: Extract<McpAction, { action: 'add' }>): AsyncIterable<ToolEvent<ToolResultOf<'mcp_action'>>> {
+  async function* doAdd(raw: Extract<McpAction, { action: 'add' }>, ctx: ToolContext): AsyncIterable<ToolEvent<ToolResultOf<'mcp_action'>>> {
     if (localActive.has(raw.name) || remote!.has(raw.name)) {
       yield { type: 'error', message: `An MCP server named "${raw.name}" is already connected. Remove it first.` };
       return;
@@ -120,6 +120,11 @@ export function createMCPPlugin(): MatbotPluginSpec {
 
     if (raw.type === 'remote') {
       if (!raw.endpoint) { yield { type: 'error', message: 'Remote MCP servers require an "endpoint".' }; return; }
+      if (!await confirmAction(ctx,
+        `Connect to MCP server **"${raw.name}"** at ${raw.endpoint}?\n\n_Its tools are registered and callable for the rest of the session._`)) {
+        yield { type: 'result', value: { message: 'Cancelled.' } };
+        return;
+      }
       yield { type: 'stdout', chunk: `Connecting to remote MCP server "${raw.name}"...\n` };
       try {
         const r = await remote!.add({ name: raw.name, endpoint: raw.endpoint, ...(raw.headers !== undefined ? { headers: raw.headers } : {}), ...(raw.proxyToolName !== undefined ? { proxyToolName: raw.proxyToolName } : {}) });
@@ -129,6 +134,14 @@ export function createMCPPlugin(): MatbotPluginSpec {
     }
 
     if (!raw.command) { yield { type: 'error', message: 'Local MCP servers require a "command".' }; return; }
+    // Sharper than the remote case: this spawns a child process on the host, and (see #65) that child
+    // currently inherits the full environment. Name the command line so the answer is an informed one.
+    const cmdline = [raw.command, ...(raw.args ?? [])].join(' ');
+    if (!await confirmAction(ctx,
+      `Spawn local MCP server **"${raw.name}"**?\n\n\`${cmdline}\`\n\n_It runs as a child process, and its tools are registered and callable for the rest of the session._`)) {
+      yield { type: 'result', value: { message: 'Cancelled.' } };
+      return;
+    }
     const config: MCPServerConfigLocal = {
       type: 'local', name: raw.name, command: raw.command,
       ...(raw.args !== undefined ? { args: raw.args } : {}),
@@ -165,8 +178,7 @@ export function createMCPPlugin(): MatbotPluginSpec {
   async function* doRemove(name: string, ctx: ToolContext): AsyncIterable<ToolEvent<ToolResultOf<'mcp_action'>>> {
     // Remote servers belong to the delegated service; everything else is local.
     if (remote!.has(name)) {
-      const confirm = await ctx.prompt(`Remove MCP server "${name}"? [y/N]`, 'N');
-      if (!/^y(es)?$/i.test(confirm.trim())) { yield { type: 'result', value: { message: 'Cancelled.' } }; return; }
+      if (!await confirmAction(ctx, `Remove MCP server **"${name}"**?`)) { yield { type: 'result', value: { message: 'Cancelled.' } }; return; }
       const ok = await remote!.remove(name);
       yield { type: 'result', value: { message: ok ? `"${name}" disconnected and removed.` : `No MCP server named "${name}".` } };
       return;
@@ -176,8 +188,7 @@ export function createMCPPlugin(): MatbotPluginSpec {
     const inConfig  = persisted?.servers.some(s => s.name === name) ?? false;
     if (!localActive.has(name) && !inConfig) { yield { type: 'error', message: `No MCP server named "${name}".` }; return; }
 
-    const confirm = await ctx.prompt(`Remove MCP server "${name}"? [y/N]`, 'N');
-    if (!/^y(es)?$/i.test(confirm.trim())) { yield { type: 'result', value: { message: 'Cancelled.' } }; return; }
+    if (!await confirmAction(ctx, `Remove MCP server **"${name}"**?`)) { yield { type: 'result', value: { message: 'Cancelled.' } }; return; }
 
     const server = localActive.get(name);
     if (server) {
@@ -224,7 +235,7 @@ ACTIONS
       async *execute(input: unknown, ctx: ToolContext) {
         const act = input as McpAction;
         switch (act.action) {
-          case 'add':    yield* doAdd(act); return;
+          case 'add':    yield* doAdd(act, ctx); return;
           case 'list':   yield { type: 'result', value: { servers: [...listLocal(), ...remote!.list().map(s => ({ ...s, type: 'remote' }))] } }; return;
           case 'remove': yield* doRemove(act.name, ctx); return;
           default:       yield { type: 'error', message: `Unknown mcp_action "${(act as { action: string }).action}".` };

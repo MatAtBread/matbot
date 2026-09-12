@@ -1,6 +1,6 @@
-import type { Tool, ToolExecutor, ToolResultOf, ToolContext, MatbotPlugin, FormField, Runtime, PluginSource,
+import type { Tool, ToolExecutor, ToolResultOf, ToolContext, MatbotPlugin, Runtime, PluginSource,
               PluginToolContract, DiscoveredPlugin } from '@matatbread/matbot-plugin-api';
-import { CONFIRM_YES, CONFIRM_NO, isIncompatibleRuntimeError, isNotAPluginError } from '@matatbread/matbot-plugin-api';
+import { isIncompatibleRuntimeError, isNotAPluginError } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins, getRegisteredTools, getRegisteredFrontendPlugins,
          getRegisteredServiceKeys, getHookPlugins, getSystemContextPlugins,
          getSpecifierForPlugin, getPluginNameForSpecifier, getFailedPlugins, clearFailedPlugin } from '@matatbread/matbot-core';
@@ -8,6 +8,7 @@ import { readFile, writeFile, access, readdir } from 'node:fs/promises';
 import { pathToFileURL, fileURLToPath }       from 'node:url';
 import { createRequire }                     from 'node:module';
 import path                                  from 'node:path';
+import { confirmAction }                     from './confirm.js';
 import { classifySpecifier, fetchRemoteManifest, canonicalLocalSpecifier, materializeRemote } from '../remote-cache.js';
 import { planProvision, applyProvision, discardProvision, runCommand, type ProvisionPlan } from '../provision.js';
 import { findDuplicateSingletons } from '../singletons.js';
@@ -55,15 +56,6 @@ async function removePlugin(configPath: string, specifier: string): Promise<bool
 
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-// Privileged actions (install/remove/first-time load) gate on an out-of-band yes/no. Use a
-// structured `confirm` field so rich frontends render real buttons and the affirmative is the
-// canonical CONFIRM_YES token — never a parse of the rendered (and potentially localised) label.
-async function confirmAction(ctx: ToolContext, label: string): Promise<boolean> {
-  const field: FormField = { name: 'confirm', label, type: 'confirm', default: CONFIRM_NO };
-  const answer = await ctx.prompt(field);
-  return answer.trim().toLowerCase() === CONFIRM_YES;
 }
 
 // Resolve package.json `exports["."]` to a node-importable entry. Discovery imports under node, so we
