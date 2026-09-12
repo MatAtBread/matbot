@@ -9,7 +9,7 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
-## Unreleased
+## 0.4.14
 
 ### Breaking changes
 
@@ -35,6 +35,16 @@ churn and less likely to affect a consumer who doesn't use them.
 
 #### tool-store
 
+- **A store's `shape` is read as TypeScript, not matched against an end-anchored pattern.** The shape is
+  model-authored source, and comments are the normal thing to find in it. A comment *inside* the
+  declaration survived into the `toolContract`, which is emitted as one line — so `// the note body`
+  commented out every arm after it and the tool's whole contract became unparseable (a stated refusal).
+  A comment or blank line *after* the declaration missed the `}\s*$` anchor entirely and the document
+  type degraded to `Record<string, unknown>`, silently. Comments are now stripped (string literals
+  intact) and the body is brace-matched, so `extends`, a union alias, a trailing note and a `//` inside
+  a string literal type all read correctly; an unparseable shape still degrades to the permissive type.
+  The shape's NAME is read by the same path — its old regex (`type\s*=\s+(\w+)`) never matched a type
+  alias at all, so an aliased shape was described as `Store<Record<string, unknown>>` in prose.
 - **A store tool declares one contract arm per action, so a call narrows its result.** It emitted one
   arm carrying two unions, which `ToolProxy` turns into a single call signature with nothing to
   overload: the declared result was the union across all five actions, and no action's own fields were
@@ -57,6 +67,12 @@ churn and less likely to affect a consumer who doesn't use them.
   unmatched `{`, an alias with nothing after `=`, and an empty body (`interface X extends Y {}` matches
   but only the braces are inlined, so the base's members are lost). An already-persisted def warns
   instead, so an existing store never loses its tool at boot.
+- **A store may hold several kinds of document.** Write the shape as a discriminated union and each kind
+  keeps its own fields: a read narrows on the discriminant, and a write mixing one arm with another's
+  fields is rejected against the arm the caller meant. This follows from the per-action arms above — the
+  document type is parenthesised before the intersection, so the union survives into the contract and the
+  validator's discriminant dispatch reaches it. Previously the only workable modelling was one flat record
+  with every field optional. Now stated in `store_action`'s description, which said nothing about it.
 
 #### tool-types
 
@@ -75,23 +91,6 @@ churn and less likely to affect a consumer who doesn't use them.
   surfaced much later as failures that had been latent all along. Both bypass routes set it, the
   explicit flag and the implicit "no checker available here". It records the provenance of the
   definition, so a later passing `check` deliberately does not clear it.
-
-## 0.4.14
-
-### Optional
-
-#### tool-store
-
-- **A store's `shape` is read as TypeScript, not matched against an end-anchored pattern.** The shape is
-  model-authored source, and comments are the normal thing to find in it. A comment *inside* the
-  declaration survived into the `toolContract`, which is emitted as one line — so `// the note body`
-  commented out every arm after it and the tool's whole contract became unparseable (a stated refusal).
-  A comment or blank line *after* the declaration missed the `}\s*$` anchor entirely and the document
-  type degraded to `Record<string, unknown>`, silently. Comments are now stripped (string literals
-  intact) and the body is brace-matched, so `extends`, a union alias, a trailing note and a `//` inside
-  a string literal type all read correctly; an unparseable shape still degrades to the permissive type.
-  The shape's NAME is read by the same path — its old regex (`type\s*=\s+(\w+)`) never matched a type
-  alias at all, so an aliased shape was described as `Store<Record<string, unknown>>` in prose.
 
 ## 0.4.13
 

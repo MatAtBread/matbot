@@ -344,6 +344,17 @@ function makeStoreActionTool(services: MatbotMachine, meta: Store<StoreDef>): To
       'Both `create` and `expose` require a plain-English `description` of what the store holds and ' +
       'a `shape` — the document type written as a flattened TypeScript type/interface — which is ' +
       'shown to the model in the generated tool.\n\n' +
+      'ONE store may hold SEVERAL KINDS of document: write the shape as a discriminated union and each ' +
+      'kind keeps its own fields, rather than flattening them into one record with everything optional.\n' +
+      '```ts\n' +
+      "type PresenceDoc =\n" +
+      "  | { kind: 'site';  endpoint: string; windowHours: number }\n" +
+      "  | { kind: 'state'; where: string };\n" +
+      '```\n' +
+      'A read narrows on the discriminant (`if (doc.kind === \'site\') doc.endpoint`), and a write of one ' +
+      'arm mixed with another\u2019s fields is rejected against the arm you meant. The shape must be one ' +
+      'declaration and inline its members: `extends` is not resolved and a type declared elsewhere ' +
+      'cannot be referenced by name.\n\n' +
       '`create` mints a new store + tool and fails if one already exists; `expose` mints a tool over an ' +
       'EXISTING store (including one created elsewhere) and fails if absent; `remove` drops the ' +
       "definition and its tool but leaves the store's data intact; `get` reads one definition; `list` " +
