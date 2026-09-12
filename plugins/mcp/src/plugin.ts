@@ -121,7 +121,7 @@ export function createMCPPlugin(): MatbotPluginSpec {
     if (raw.type === 'remote') {
       if (!raw.endpoint) { yield { type: 'error', message: 'Remote MCP servers require an "endpoint".' }; return; }
       if (!await confirmAction(ctx,
-        `Connect to MCP server **"${raw.name}"** at ${raw.endpoint}?\n\n_Its tools are registered and callable for the rest of the session._`)) {
+        `Connect to MCP server **"${raw.name}"** at ${raw.endpoint}?\n\n_Its tools will registered and callable until you remove it._`)) {
         yield { type: 'result', value: { message: 'Cancelled.' } };
         return;
       }
@@ -138,7 +138,7 @@ export function createMCPPlugin(): MatbotPluginSpec {
     // currently inherits the full environment. Name the command line so the answer is an informed one.
     const cmdline = [raw.command, ...(raw.args ?? [])].join(' ');
     if (!await confirmAction(ctx,
-      `Spawn local MCP server **"${raw.name}"**?\n\n\`${cmdline}\`\n\n_It runs as a child process, and its tools are registered and callable for the rest of the session._`)) {
+      `Spawn local MCP server **"${raw.name}"**?\n\n\`${cmdline}\`\n\n_It runs as a child process, and its tools are registered and callable until you remove it._`)) {
       yield { type: 'result', value: { message: 'Cancelled.' } };
       return;
     }
@@ -204,8 +204,8 @@ export function createMCPPlugin(): MatbotPluginSpec {
     name: 'mcp_action',
     description: `Manage MCP (Model Context Protocol) server connections. An MCP server exposes a set
 of tools over a transport; once connected, each is registered under \`mcp__<server>__<tool>\` (the
-\`mcp__<server>__\` prefix is overridable per server via \`proxyToolName\`) and is callable for the
-rest of the session.
+\`mcp__<server>__\` prefix is overridable per server via \`proxyToolName\`) and is callable
+until you remove it.
 
 Two transport types:
 - **local** — spawns a process on this machine speaking JSON-RPC over stdio

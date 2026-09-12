@@ -34,8 +34,8 @@ function remoteMcpActionTool(manager: RemoteMcpManager): Tool<ToolResultOf<'mcp_
     name: 'mcp_action',
     description: `Manage remote MCP (Model Context Protocol) server connections over HTTP. An MCP server
 exposes a set of tools; once connected, each is registered under \`mcp__<server>__<tool>\` (the
-\`mcp__<server>__\` prefix is overridable per server via \`proxyToolName\`) and is callable for the
-rest of the session.
+\`mcp__<server>__\` prefix is overridable per server via \`proxyToolName\`) and is callable
+until you remove it.
 
 This is the cross-platform (browser + Node) build: it speaks JSON-RPC over HTTP POST (with optional
 SSE response streaming). Local stdio servers are not available here — they need the Node mcp plugin.
@@ -63,7 +63,7 @@ ACTIONS
           case 'add': {
             if (!act.name || !act.endpoint) { yield { type: 'error', message: 'add requires "name" and "endpoint".' }; return; }
             if (!await confirmAction(ctx,
-              `Connect to MCP server **"${act.name}"** at ${act.endpoint}?\n\n_Its tools are registered and callable for the rest of the session._`)) {
+              `Connect to MCP server **"${act.name}"** at ${act.endpoint}?\n\n_Its tools are registered and callable for the until you remove it._`)) {
               yield { type: 'result', value: { message: 'Cancelled.' } };
               return;
             }
