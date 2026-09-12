@@ -204,9 +204,10 @@ class BrowserToolTypeIndex implements ToolTypeIndex {
       + `declare const context: import('@matatbread/matbot-plugin-api').ComposedCallContext;\n`;
   }
 
-  // No TypeScript program here, so nothing can be checked — reported as a clean, empty report rather
-  // than as a refusal, matching the rest of this index's degrade-don't-fail behaviour in the browser.
-  async check(): Promise<ToolCheckReport> { return { ok: true, total: 0, diagnostics: [] }; }
+  // No TypeScript program here, so nothing can be checked. `checked: false` is what says so: reporting
+  // `ok: true` alone would be a checker that passes everything while claiming success, and a caller
+  // recording "this was verified" off the back of it would be recording something false.
+  async check(): Promise<ToolCheckReport> { return { ok: true, checked: false, total: 0, diagnostics: [] }; }
 
   async wireContracts(): Promise<Record<string, { params: string; result: string }>> {
     const out: Record<string, { params: string; result: string }> = {};

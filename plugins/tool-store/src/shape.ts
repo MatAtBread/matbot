@@ -19,8 +19,14 @@ function inertEnd(s: string, i: number): number {
     for (let j = i + 1; j < s.length; j++) {
       if (s[j] === '\\') { j++; continue; }
       if (s[j] === c) return j;
+      // An apostrophe and a quote are the same character, so prose around a model-authored shape
+      // ("Note's fields:") opens a literal that never closes. Treating the rest as inert copies its
+      // comments verbatim into the collapsed one-line contract — precisely the failure this module
+      // exists to prevent, and silently. A real `'`/`"` literal cannot span a newline, so one that
+      // reaches the end of its line is not a string; nor is a run that reaches the end of the input.
+      if (s[j] === '\n' && c !== '`') return -1;
     }
-    return s.length - 1;
+    return -1;
   }
   return -1;
 }
@@ -50,6 +56,26 @@ function matchBrace(s: string, open: number): number {
   return -1;
 }
 
+/**
+ * Index of the `{` that opens an interface body: the first brace at angle-bracket depth 0 after the
+ * declaration. Scanned rather than matched, because `extends Base<{ a: string }>` puts a brace inside the
+ * heritage clause — a `[^{]+` pattern stops there and hands back the base's TYPE ARGUMENT as the body,
+ * which is a wrong document type reported as a good one.
+ */
+function interfaceBodyStart(s: string, from: number): number {
+  let depth = 0;
+  for (let i = from; i < s.length; i++) {
+    const inert = inertEnd(s, i);
+    if (inert >= 0) { i = inert; continue; }
+    const c = s[i];
+    if (c === '=' && s[i + 1] === '>') { i++; continue; }   // an arrow, not a closing angle
+    if (c === '<') depth++;
+    else if (c === '>') { if (depth > 0) depth--; }
+    else if (c === '{' && depth === 0) return i;
+  }
+  return -1;
+}
+
 /** Index of the first `;` at bracket depth 0 — a type alias's terminator, not a member separator. */
 function aliasEnd(s: string): number {
   let depth = 0;
@@ -57,6 +83,10 @@ function aliasEnd(s: string): number {
     const inert = inertEnd(s, i);
     if (inert >= 0) { i = inert; continue; }
     const c = s[i];
+    // `=>` is a function type's arrow. Counting its `>` as a closing bracket drops the depth a level
+    // early, so the next `;` inside the braces reads as the alias terminator and the type is truncated
+    // mid-member — emitted unbalanced, with no fault, which the contract then refuses to parse.
+    if (c === '=' && s[i + 1] === '>') { i++; continue; }
     if (c === '{' || c === '(' || c === '[' || c === '<') depth++;
     else if (c === '}' || c === ')' || c === ']' || c === '>') { if (depth > 0) depth--; }
     else if (c === ';' && depth === 0) return i;
@@ -104,9 +134,10 @@ export function parseShape(shape: string): ShapeParse {
   const s = withoutComments(shape);
   const fallback = 'Record<string, unknown>';
 
-  const iface = s.match(/\binterface\s+\w+\s*(?:extends\s+[^{]+)?\{/);
+  const iface = s.match(/\binterface\s+\w+/);
   if (iface !== null) {
-    const open  = (iface.index ?? 0) + iface[0].length - 1;
+    const open = interfaceBodyStart(s, (iface.index ?? 0) + iface[0].length);
+    if (open === -1) return { type: fallback, fault: 'the interface declaration is not followed by a `{ … }` body.' };
     const close = matchBrace(s, open);
     if (close === -1) return { type: fallback, fault: 'the interface body opens with `{` that has no matching `}`.' };
     const body = collapse(s.slice(open, close + 1));
@@ -116,7 +147,7 @@ export function parseShape(shape: string): ShapeParse {
     if (/^\{\s*\}$/.test(body)) {
       return {
         type: fallback,
-        fault: iface[0].includes('extends')
+        fault: /\bextends\b/.test(s.slice((iface.index ?? 0), open))
           ? 'the interface body is empty and `extends` is not resolved — only the braces are inlined, so the base type’s members are lost. Declare the members literally in this shape, or export the base type so it can be referenced by name.'
           : 'the interface declares no members, so it describes no document.',
       };

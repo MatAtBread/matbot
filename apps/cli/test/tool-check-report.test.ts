@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { renderToolCheck } from '../../../plugin-api/src/index.ts';
+import { renderToolCheck, renderToolCheckOmitted } from '../../../plugin-api/src/index.ts';
 import type { ToolCheckDiagnostic, ToolCheckReport } from '../../../plugin-api/src/index.ts';
 
 const d = (label: string, syn?: true): ToolCheckDiagnostic => ({
@@ -12,7 +12,7 @@ test('the overflow summary is data, never an element of the findings', () => {
   // It used to be appended to the array, so `diagnostics.length` counted a prose line as a finding —
   // 9 reported for a function with 10 — and any per-code breakdown taken by iterating was unreliable.
   const report: ToolCheckReport = {
-    ok: false, total: 10,
+    ok: false, checked: true, total: 10,
     diagnostics: [d('TS2339'), d('TS2339')],
     omitted: { count: 8, byLabel: { 'TS2352': 5, 'CAST-GATE': 3 } },
   };
@@ -29,7 +29,7 @@ test('a cast-gate finding keeps its label in the overflow tally', () => {
   // The detail renderer honoured `syn`; the summary did not, so the same rule was CAST-GATE in the
   // first eight slots and TS90003 from the ninth — a code tsc has no error for at all.
   const text = renderToolCheck({
-    ok: false, total: 9, diagnostics: [d('CAST-GATE', true)],
+    ok: false, checked: true, total: 9, diagnostics: [d('CAST-GATE', true)],
     omitted: { count: 8, byLabel: { 'CAST-GATE': 8 } },
   });
   assert.ok(text.includes('CAST-GATE×8'), text);
@@ -40,18 +40,35 @@ test('the cascade advice is dropped when every hidden finding is structural', ()
   // A cast-gate finding fires at one site and cascades from nothing; telling a reader to expect it to
   // vanish with the first fix is what would get it ignored.
   const structural = renderToolCheck({
-    ok: false, total: 9, diagnostics: [d('CAST-GATE', true)],
+    ok: false, checked: true, total: 9, diagnostics: [d('CAST-GATE', true)],
     omitted: { count: 8, byLabel: { 'CAST-GATE': 8 } },
   });
   assert.ok(!structural.includes('cascading'), structural);
 
   const mixed = renderToolCheck({
-    ok: false, total: 9, diagnostics: [d('TS2339')],
+    ok: false, checked: true, total: 9, diagnostics: [d('TS2339')],
     omitted: { count: 8, byLabel: { 'CAST-GATE': 4, 'TS2352': 4 } },
   });
   assert.ok(mixed.includes('cascading'), mixed);
 });
 
 test('a clean report renders as nothing', () => {
-  assert.equal(renderToolCheck({ ok: true, total: 0, diagnostics: [] }), '');
+  assert.equal(renderToolCheck({ ok: true, checked: true, total: 0, diagnostics: [] }), '');
+});
+
+test('the overflow summary can be had without rendering every finding', () => {
+  // checkProjectDir lays the findings out itself and wants only the trailing line; recovering it by
+  // rendering the whole report and taking the last line is correct only while the summary never wraps.
+  const omitted = { count: 8, byLabel: { 'TS2352': 5, 'CAST-GATE': 3 } };
+  const line = renderToolCheckOmitted(omitted);
+  assert.equal(line, renderToolCheck({ ok: false, checked: true, total: 10, diagnostics: [], omitted }));
+  assert.ok(!line.includes('\n'), 'one line');
+});
+
+test('a report from an index that cannot check says so', () => {
+  // `ok: true` alone would be a checker that passes everything while claiming success — the thing a
+  // caller must not record as "verified".
+  const nothingRan = { ok: true, checked: false, total: 0, diagnostics: [] };
+  assert.equal(nothingRan.ok, true);
+  assert.equal(nothingRan.checked, false, 'ok is qualified by checked, never read alone');
 });

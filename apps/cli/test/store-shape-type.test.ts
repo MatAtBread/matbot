@@ -76,3 +76,37 @@ test('a readable shape reports no fault', () => {
   assert.equal(parseShape('interface Note { text: string }\n// trailing prose').fault, undefined);
   assert.equal(parseShape('type Note = { text: string };').fault, undefined);
 });
+
+// Three ways a shape that looks fine emitted a wrong type with no fault reported. Each is a silent-emit
+// path, which is the failure class this module exists to close.
+
+test('an unterminated quote does not defeat comment stripping', () => {
+  // An apostrophe in prose and a string delimiter are the same character, so `Note's` opens a literal
+  // that never closes. Treating the rest as inert copied its `//` into the collapsed one-line contract.
+  const doc = shapeType("Note's fields:\ninterface Note { text: string; // the body\n done: boolean }");
+  assert.equal(doc, '{ text: string; done: boolean }');
+  assert.ok(!doc.includes('//'), 'a line comment must not reach the collapsed one-line contract');
+});
+
+test('`extends` with a generic type argument does not yield the argument as the body', () => {
+  // `[^{]+` stopped at the brace INSIDE the heritage clause, so the base's type argument became the
+  // document type — wrong, and reported as good.
+  const { type, fault } = parseShape('interface Site extends Base<{ a: string }> { b: number }');
+  assert.equal(type, '{ b: number }');
+  assert.equal(fault, undefined);
+});
+
+test('a function type in an alias is not truncated at its arrow', () => {
+  // `=>`'s `>` counted as a closing bracket, dropping the depth a level early, so the next member `;`
+  // read as the alias terminator and the type was emitted unbalanced.
+  assert.equal(shapeType('type Doc = { f: (x: number) => void; g: string };'),
+               '{ f: (x: number) => void; g: string }');
+});
+
+test('a string literal type containing // still survives', () => {
+  assert.equal(shapeType('interface N { sep: "a//b"; x: string }'), '{ sep: "a//b"; x: string }');
+});
+
+test('an interface with no body at all reports a fault', () => {
+  assert.match(parseShape('interface Note').fault ?? '', /not followed by a `\{ … \}` body/);
+});

@@ -133,10 +133,14 @@ class FunctionStore {
     // is sound before it becomes a callable tool. Skipped when the ToolTypeIndex service is absent (e.g. the
     // browser — the function still compiles and runs), or when the caller opts out with noTypeCheck.
     const index = this.machine.ToolTypeIndex;
-    const checked = index !== undefined && !noTypeCheck;
-    if (checked) {
+    let checked = false;
+    if (index !== undefined && !noTypeCheck) {
       const report = await index.check(checkSnippet(sig));
       if (!report.ok) throw new Error(`type error(s) — fix and re-define, or pass noTypeCheck to bypass:\n${renderCheck(report)}`);
+      // An index that cannot check says so, and a clean report from one proves nothing. The browser
+      // registers such an index (for `dts()`), so trusting "an index was present" marked its definitions
+      // verified when nothing had read them.
+      checked = report.checked;
     }
     const doc: FunctionDoc = {
       id:      sig.name,
@@ -185,7 +189,7 @@ class FunctionStore {
       try { report = await index.check(checkSnippet(parseSignature(doc.definition))); }
       catch (e) {
         const message = e instanceof Error ? e.message : String(e);
-        report = { ok: false, total: 1, diagnostics: [{ label: 'PARSE', code: 0, message, rendered: message }] };
+        report = { ok: false, checked: false, total: 1, diagnostics: [{ label: 'PARSE', code: 0, message, rendered: message }] };
       }
       results.push({
         name: doc.id, ...report,

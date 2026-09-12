@@ -255,7 +255,13 @@ function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Sto
           }
           case 'set': {
             if (!input.data) { yield { type: 'error', message: 'set requires "data".' }; return; }
-            const id  = input.id ?? crypto.randomUUID();
+            // An `id` INSIDE `data` is the round-trip idiom's doing — `{ ...doc }` carries the id the
+            // document was read with — so minting a fresh one when the top-level `id` is omitted turns
+            // "replace this document" into "create a second copy under a new id", silently, and leaves
+            // the original behind. `cas` needs no equivalent: it already errors when `id` is absent
+            // rather than inventing one, so there is nothing there to do quietly.
+            const carried = typeof input.data['id'] === 'string' ? input.data['id'] : undefined;
+            const id  = input.id ?? carried ?? crypto.randomUUID();
             const rec: StoreRecord = { ...input.data, id, version: crypto.randomUUID() };
             await store.set(id, rec);
             yield { type: 'result', value: rec };

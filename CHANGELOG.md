@@ -23,10 +23,17 @@ churn and less likely to affect a consumer who doesn't use them.
   made every consumer do. The typed record existed upstream all along and was discarded at render
   time.
 
+  The report also carries a required `checked: boolean`, which qualifies `ok`: an index that cannot
+  type-check (the browser, which has no TypeScript program) reports `ok: true, checked: false` — nothing
+  was examined, rather than nothing was wrong. Required rather than optional for the reason stated
+  elsewhere in this path: a checker that reports success while checking nothing is indistinguishable from
+  one that works, and `function-tools` was recording such a definition as verified.
+
 ### API gaps filled
 
-- **`ToolCheckReport` / `ToolCheckDiagnostic` and `renderToolCheck`.** The report shape above, plus
-  the one renderer that turns it into the text a model repairs from. The renderer is in `plugin-api`
+- **`ToolCheckReport` / `ToolCheckDiagnostic`, `renderToolCheck` and `renderToolCheckOmitted`.** The
+  report shape above, plus the one renderer that turns it into the text a model repairs from (and the
+  overflow summary alone, for a consumer laying the findings out itself). The renderer is in `plugin-api`
   because two packages render one report — the node checker that produces it, and any consumer
   putting it in front of whoever wrote the code — and the overflow line is precisely the part worth
   having in one place.
@@ -45,6 +52,12 @@ churn and less likely to affect a consumer who doesn't use them.
   a string literal type all read correctly; an unparseable shape still degrades to the permissive type.
   The shape's NAME is read by the same path — its old regex (`type\s*=\s+(\w+)`) never matched a type
   alias at all, so an aliased shape was described as `Store<Record<string, unknown>>` in prose.
+  Three further silent-emit paths are closed: an UNTERMINATED quote (an apostrophe in prose — `Note's
+  fields:`) no longer makes the rest of the shape inert, which had re-opened the very comment leak above;
+  `extends Base<{ … }>` no longer hands back the base's type ARGUMENT as the document body (the brace is
+  now found by scanning at angle-depth 0, not by a `[^{]+` pattern that stops inside the heritage clause);
+  and `=>` in a function type no longer counts as a closing angle bracket, which had truncated an alias
+  mid-member and emitted it unbalanced. Each produced a wrong document type and reported no fault.
 - **A store tool declares one contract arm per action, so a call narrows its result.** It emitted one
   arm carrying two unions, which `ToolProxy` turns into a single call signature with nothing to
   overload: the declared result was the union across all five actions, and no action's own fields were
@@ -55,8 +68,11 @@ churn and less likely to affect a consumer who doesn't use them.
 - **`set` accepts and ignores `id`/`version`.** `get` handed back a document carrying `version` and
   sending it straight to `set` was rejected as an unexpected property, so every update had to be
   rebuilt field by field — and `set` replaces, so whatever the rebuild forgot was silently deleted. The
-  document type is now emitted twice: present on results, optional on `data`. The executor already
-  minted a fresh version and took `id` from the parameter, so nothing about a write changed.
+  document type is now emitted twice: present on results, optional on `data`. `set` also honours an `id`
+  carried INSIDE `data`, which is what the round-trip idiom produces: minting a fresh one when the
+  top-level `id` was omitted turned "replace this document" into "create a second copy under a new id",
+  silently, leaving the original behind. `cas` needs no equivalent — it errors when `id` is absent rather
+  than inventing one.
 - **`set` is described as create-or-replace, not "upsert".** The executor never read the existing
   document, so a partial `set` deleted every field it omitted. Merging stays out of the store —
   JS merge semantics are underdetermined, so it is a policy of the consumer — and the description names

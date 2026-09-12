@@ -55,6 +55,16 @@ export interface ToolCheckDiagnostic {
  */
 export interface ToolCheckReport {
   ok:           boolean;
+  /**
+   * Whether a check actually RAN. It qualifies `ok`: `ok: true` with `checked: false` means nothing was
+   * examined, not that the source is sound — an index that cannot type-check (the browser, which has no
+   * TypeScript program) reports exactly that.
+   *
+   * Required, not optional, because the alternative is the failure this whole path is built to avoid: a
+   * checker that reports success while checking nothing is indistinguishable from one that works, and a
+   * caller recording "verified" off the back of it records something false.
+   */
+  checked:      boolean;
   /** Every finding, including those not detailed below — the number to report. */
   total:        number;
   /** The detailed findings, capped. */
@@ -74,16 +84,20 @@ export interface ToolCheckReport {
  */
 export function renderToolCheck(report: ToolCheckReport): string {
   const parts = report.diagnostics.map(d => d.rendered);
-  if (report.omitted !== undefined) {
-    const tally = Object.entries(report.omitted.byLabel).map(([l, n]) => `${l}×${n}`).join(', ');
-    // The cascade advice is about tsc's own errors: a cast-gate finding is a structural rule fired at
-    // one site, cascades from nothing, and inviting a reader to expect it to vanish with the first fix
-    // is what would get it ignored.
-    const cascade = Object.keys(report.omitted.byLabel).some(l => l.startsWith('TS'))
-      ? ' — likely cascading from the errors above.' : '';
-    parts.push(`…plus ${report.omitted.count} more: ${tally}${cascade}`);
-  }
+  if (report.omitted !== undefined) parts.push(renderToolCheckOmitted(report.omitted));
   return parts.join('\n');
+}
+
+/** The overflow summary alone — one line, for a consumer laying the findings out itself. Separate so it
+ *  can be had without rendering every finding in order to keep the last line of the result. */
+export function renderToolCheckOmitted(omitted: NonNullable<ToolCheckReport['omitted']>): string {
+  const tally = Object.entries(omitted.byLabel).map(([l, n]) => `${l}×${n}`).join(', ');
+  // The cascade advice is about tsc's own errors: a cast-gate finding is a structural rule fired at one
+  // site, cascades from nothing, and inviting a reader to expect it to vanish with the first fix is what
+  // would get it ignored.
+  const cascade = Object.keys(omitted.byLabel).some(l => l.startsWith('TS'))
+    ? ' — likely cascading from the errors above.' : '';
+  return `…plus ${omitted.count} more: ${tally}${cascade}`;
 }
 
 /**

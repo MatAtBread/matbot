@@ -9,7 +9,7 @@
 // own virtual file, the same resolved typescript module), so a checker failure is a plumbing bug
 // that must surface as the caller's error, not be absorbed by a quieter path.
 
-import { renderToolCheck } from '@matatbread/matbot-plugin-api';
+import { renderToolCheckOmitted } from '@matatbread/matbot-plugin-api';
 import type { ToolCheckDiagnostic, ToolCheckReport } from '@matatbread/matbot-plugin-api';
 
 export interface CheckResult { ok: boolean; output: string }
@@ -137,8 +137,9 @@ function reportOf(diags: DiagnosticRecord[]): ToolCheckReport {
     rendered: formatOne(d),
   }));
   return {
-    ok:    diags.length === 0,
-    total: diags.length,
+    ok:      diags.length === 0,
+    checked: true,
+    total:   diags.length,
     diagnostics: detailed,
     ...(omitted !== undefined ? { omitted } : {}),
   };
@@ -182,7 +183,7 @@ export async function checkProjectDir(
   const parts: string[] = [];
   if (report.total > 1) parts.push(`${report.total} errors. Fix the FIRST error first — later errors often cascade from it.\n`);
   for (const d of report.diagnostics) { parts.push(d.rendered); parts.push(''); }
-  if (report.omitted !== undefined) parts.push(renderToolCheck(report).split('\n').at(-1)!);
+  if (report.omitted !== undefined) parts.push(renderToolCheckOmitted(report.omitted));
   return { ok: false, output: parts.join('\n').trim() };
 }
 
