@@ -1,5 +1,13 @@
 # @matatbread/matbot-tool-router
 
+## 0.4.8
+
+### Patch Changes
+
+- tool-router: the unpopulated `derivedHidden` set is removed. It was declared and read by three filters but
+  never added to, so it changed no behaviour while presenting an extension point that looked wired.
+  - @matatbread/matbot-plugin-api@0.4.14
+
 ## 0.4.7
 
 ### Patch Changes

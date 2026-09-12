@@ -1,5 +1,15 @@
 # @matatbread/matbot-browser
 
+## 0.4.14
+
+### Patch Changes
+
+- browser: the browser `ToolTypeIndex` reports `checked: false` from `check()`. It has no TypeScript
+  program, and returning a clean report without saying so had callers recording definitions as verified
+  when nothing had read them.
+  - @matatbread/matbot-core@0.4.14
+  - @matatbread/matbot-plugin-api@0.4.14
+
 ## 0.4.13
 
 ### Patch Changes
