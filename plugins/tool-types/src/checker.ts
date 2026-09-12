@@ -20,7 +20,7 @@ interface DiagnosticRecord {
   frame?:      string;
   sourceLine?: string;
   related?:    string[];
-  /** True for a cast-gate finding (a structural rule, not a tsc error) — rendered as CAST, not TSnnnn. */
+  /** True for a cast-gate finding (a structural rule, not a tsc error) — labelled CAST-GATE, not TSnnnn. */
   syn?:        boolean;
 }
 
@@ -82,10 +82,16 @@ function hintFor(d: DiagnosticRecord): string | undefined {
 
 const MAX_FULL = 8;
 
+// One rule, one name, in every renderer: a per-rule label read off the record rather than spelled at
+// each render site, so a summary can never call a finding something its own entry did not.
+function label(d: DiagnosticRecord): string {
+  return d.syn ? 'CAST-GATE' : `TS${d.code}`;
+}
+
 function formatOne(d: DiagnosticRecord): string {
   const loc = d.file !== undefined ? `${d.file}(${d.line},${d.col})`
     : d.line !== undefined ? `line ${d.line}` : '(project)';
-  const parts = [`${loc} ${d.syn ? 'CAST-GATE' : `TS${d.code}`}: ${d.message}`];
+  const parts = [`${loc} ${label(d)}: ${d.message}`];
   if (d.frame !== undefined) parts.push(d.frame);
   if (d.related) for (const r of d.related) parts.push(`  related: ${r}`);
   const hint = hintFor(d);
@@ -94,9 +100,15 @@ function formatOne(d: DiagnosticRecord): string {
 }
 
 function overflowNote(diags: DiagnosticRecord[]): string {
-  const byCode = new Map<number, number>();
-  for (const d of diags.slice(MAX_FULL)) byCode.set(d.code, (byCode.get(d.code) ?? 0) + 1);
-  return `…plus ${diags.length - MAX_FULL} more: ${[...byCode.entries()].map(([c, n]) => `TS${c}×${n}`).join(', ')} — likely cascading from the errors above.`;
+  const hidden  = diags.slice(MAX_FULL);
+  const byLabel = new Map<string, number>();
+  for (const d of hidden) byLabel.set(label(d), (byLabel.get(label(d)) ?? 0) + 1);
+  const tally = [...byLabel.entries()].map(([l, n]) => `${l}×${n}`).join(', ');
+  // The cascade advice is about tsc's own errors. A cast-gate finding is a structural rule fired at one
+  // site: it cascades from nothing, and telling a reader to expect it to vanish with the first fix is
+  // the one thing that would make it be ignored.
+  const cascade = hidden.some(d => d.syn !== true) ? ' — likely cascading from the errors above.' : '';
+  return `…plus ${hidden.length} more: ${tally}${cascade}`;
 }
 
 async function runWorker(data: Record<string, unknown>): Promise<DiagnosticRecord[] | null> {
