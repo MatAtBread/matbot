@@ -122,6 +122,18 @@ interface ActionInput {
 function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Store<StoreRecord>): Tool {
   const typeGuess = shapeName(def.shape) ?? 'Record<string, unknown>';   // the shape's NAME, for prose
   const doc       = shapeType(def.shape);                                // the shape as an inline type, for the toolContract
+  // `id` and `version` are the `Store` contract's, not the author's, so the declared shape usually
+  // omits them — but a read hands both back. Parenthesised because the shape may itself be a union and
+  // `&` binds tighter than `|`.
+  //   `stored`   — what a read returns: both present, so a caller can read `version` to pass as `expected`.
+  //   `writable` — what a write accepts: both OPTIONAL, so the document just read goes straight back in.
+  // Without the second, `get` returned the very field `set` rejected, and every update had to be
+  // rebuilt field by field — which, `set` being a replace, silently dropped whatever was forgotten.
+  // Accepted and ignored rather than honoured: the executor mints a fresh `version` on every write and
+  // takes `id` from the parameter, so neither can be set from `data` (`expected` is the concurrency
+  // control, and it is its own parameter).
+  const stored    = `(${doc}) & { id: string; version: string }`;
+  const writable  = `(${doc}) & { id?: string; version?: string }`;
   return {
     name: actionToolName(def.namespace),
     ...(pluginName !== undefined ? { pluginName } : {}),
@@ -162,8 +174,14 @@ function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Sto
       '`query` returns `{ items, cursor?, total? }`. To COUNT matches without fetching them, use a ' +
       'limit of 0 — the filter still runs and `total` is the answer, but no document is returned: ' +
       '`{ "action": "query", "query": { "limit": 0 } }`.\n\n' +
-      '`version` is managed for you (a fresh one is minted on every set/cas) — never set it yourself; ' +
-      'pass the value you last read as `expected` to cas/delete for safe concurrent updates.',
+      '`version` is managed for you: a fresh one is minted on every set/cas, so a `version` (or `id`) ' +
+      'in `data` is accepted and IGNORED — send a document you just read straight back without ' +
+      'stripping anything. Pass the value you last read as `expected` to cas/delete for safe ' +
+      'concurrent updates:\n' +
+      '```ts\n' +
+      "const doc = await tool." + actionToolName(def.namespace) + "({ action: 'get', id });\n" +
+      "if (doc !== null) await tool." + actionToolName(def.namespace) + "({ action: 'set', id, data: { ...doc, someField: next } });\n" +
+      '```\n',
     inputSchema: {
       type: 'object',
       properties: {
@@ -182,11 +200,11 @@ function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Sto
     // lacks; `StoreQuery` stays a name — it's a plugin-api export, so the dts imports it.
     toolContract:
       "ToolContract<" +
-        doc + " | null | { ok: true; doc: " + doc + " } | { ok: false; current: " + doc + " | null }" +
-        " | { deleted: boolean } | { items: " + doc + "[]; total?: number; cursor?: string }" +
+        stored + " | null | { ok: true; doc: " + stored + " } | { ok: false; current: " + stored + " | null }" +
+        " | { deleted: boolean } | { items: " + stored + "[]; total?: number; cursor?: string }" +
       ", " +
-        "{ action: 'get'; id: string } | { action: 'set'; id?: string; data: " + doc + " }" +
-        " | { action: 'cas'; id: string; expected: string; data: " + doc + " }" +
+        "{ action: 'get'; id: string } | { action: 'set'; id?: string; data: " + writable + " }" +
+        " | { action: 'cas'; id: string; expected: string; data: " + writable + " }" +
         " | { action: 'delete'; id: string; expected?: string } | { action: 'query'; query?: StoreQuery }" +
       ">",
     executor: {
