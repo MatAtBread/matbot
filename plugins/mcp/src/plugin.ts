@@ -121,7 +121,7 @@ export function createMCPPlugin(): MatbotPluginSpec {
     if (raw.type === 'remote') {
       if (!raw.endpoint) { yield { type: 'error', message: 'Remote MCP servers require an "endpoint".' }; return; }
       if (!await confirmAction(ctx,
-        `Connect to MCP server **"${raw.name}"** at ${raw.endpoint}?\n\n_Its tools will registered and callable until you remove it._`)) {
+        `Connect to MCP server **"${raw.name}"** at ${raw.endpoint}?\n\n_Its tools will be registered and callable until you remove it._`)) {
         yield { type: 'result', value: { message: 'Cancelled.' } };
         return;
       }
