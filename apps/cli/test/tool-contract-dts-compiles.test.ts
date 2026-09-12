@@ -22,8 +22,11 @@ import { buildMatbotToolsDts, checkSnippetAgainst } from '@matatbread/matbot-too
 const root         = join(import.meta.dirname, '..', '..', '..');
 const apiIndexPath = join(root, 'plugin-api', 'src', 'index.ts');
 
-const compile = (dts: string): Promise<string[]> =>
-  checkSnippetAgainst({ root, source: dts, prefixLen: 0, prefixLines: 0, apiIndexPath });
+// `check` returns a structured report; each finding carries its own annotated text, so a test reads
+// the findings rather than parsing them back out of one joined string.
+const compile = async (dts: string): Promise<string[]> =>
+  (await checkSnippetAgainst({ root, source: dts, prefixLen: 0, prefixLines: 0, apiIndexPath }))
+    .diagnostics.map(d => d.rendered);
 
 test('the emitted dts compiles', async () => {
   // Unfiltered on purpose: the roots are a superset of the loaded set, so this covers every plugin on disk.
@@ -76,12 +79,12 @@ test('two plugins may declare the same local type name, and each keeps its own',
     assert.deepEqual(await compile(built.dts), [], 'a duplicated local type name must not break the dts');
 
     const prefix = `${built.dts}\ndeclare const tool: import('@matatbread/matbot-plugin-api').ToolProxy;\n`;
-    const check  = (snippet: string): Promise<string[]> => checkSnippetAgainst({
+    const check = async (snippet: string): Promise<string[]> => (await checkSnippetAgainst({
       root, apiIndexPath,
       source:      `${prefix}${snippet}\nexport {};\n`,
       prefixLen:   prefix.length,
       prefixLines: prefix.split('\n').length - 1,
-    });
+    })).diagnostics.map(d => d.rendered);
     const assignToA = (n: string): string =>
       `async function f() { const r = await tool.dup_local_${n}({ action: '${n}' }); const x: ${SHAPES.a} = r.outcome; return x; }`;
 
