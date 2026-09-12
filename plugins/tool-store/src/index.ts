@@ -3,6 +3,7 @@ import type {
   MatbotPluginSpec, MatbotMachine, Tool, ToolEvent, ToolContract, ToolResultOf, Store, StoreQuery,
 } from '@matatbread/matbot-plugin-api';
 import type { StoreDef, StoreRecord } from './types.js';
+import { parseShape, shapeName, shapeType } from './shape.js';
 
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
@@ -32,6 +33,12 @@ async function listDefs(meta: Store<StoreDef>): Promise<StoreDef[]> {
 }
 
 function registerStoreTool(services: MatbotMachine, def: StoreDef): void {
+  // A def persisted before the shape was checked — or seeded programmatically — still registers, since
+  // refusing here would take an existing store's tool away at boot. It says so once instead.
+  const { fault } = parseShape(def.shape);
+  if (fault !== undefined) {
+    console.warn(`[tool-store] Store "${def.namespace}" has an unreadable shape, so its documents are typed \`Record<string, unknown>\` and nothing about them is checked: ${fault}\n`);
+  }
   services.tools.remove(actionToolName(def.namespace));
   services.tools.register(makeStoreTool(services.self?.name, def, services.createStore<StoreRecord>(def.namespace)));
 }
@@ -73,6 +80,20 @@ export async function defineStore(
 const NAMESPACE_RE  = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 const NAMESPACE_MAX = 64;
 
+/**
+ * The shape is LLM-authored TypeScript and this is where it arrives, so it is read here rather than
+ * left to degrade later. A shape that does not parse yields `Record<string, unknown>`: a document of
+ * anything, which validates anything — a store that appears to work and checks nothing, whose only
+ * symptom is types that are quietly useless. Refused at the boundary, where the author is present and
+ * the message can name the fix; an already-persisted def only warns (see `registerStoreTool`).
+ */
+function shapeFault(shape: unknown): string | undefined {
+  if (typeof shape !== 'string' || shape.trim() === '') return 'a "shape" is required — the document type as TypeScript, e.g. `interface Note { title: string; body?: string }`.';
+  const { fault } = parseShape(shape);
+  return fault === undefined ? undefined
+    : `The "shape" could not be read as a document type: ${fault}`;
+}
+
 function namespaceError(namespace: string): string | undefined {
   if (namespace.length > NAMESPACE_MAX)
     return `"${namespace}" is too long — a namespace is at most ${NAMESPACE_MAX} characters.`;
@@ -105,6 +126,32 @@ async function storeHasData(services: MatbotMachine, namespace: string): Promise
   return res.items.length > 0;
 }
 
+/**
+ * The key a write addresses, or why it cannot be answered.
+ *
+ * ONE invariant: an `id` inside `data` must not contradict the key. The key is always the top-level
+ * `id` (minted when absent), and `{ ...data, id }` writes it into the body, so the two can never
+ * disagree in storage — which is exactly why a disagreement in the CALL has to be refused rather than
+ * resolved. Both ways of resolving it are silent and lossy: discarding `data.id` writes the caller's
+ * edit to a document they did not name, and honouring it writes to one they did not name either.
+ *
+ * `{ ...doc }` carries the id it was read with, so both refusals are reachable from the natural
+ * round-trip, and both name the two repairs: pass the id as the key, or blank it in `data`. An absent
+ * or `undefined` `data.id` states no opinion — which is what makes `{ ...doc, id: undefined }` the way
+ * to say "copy this".
+ */
+export function writeDestination(
+  inputId: string | undefined, data: Record<string, unknown>,
+): { id: string } | { error: string } {
+  const carried = typeof data['id'] === 'string' ? data['id'] : undefined;
+  const id      = inputId ?? crypto.randomUUID();
+  if (carried === undefined || carried === id) return { id };
+  const q = (v: string): string => JSON.stringify(v);
+  return { error: inputId === undefined
+    ? `"data" carries id ${q(carried)} but no top-level "id" was given, so this would create a NEW document under a minted id and leave ${q(carried)} untouched. Pass "id": ${q(carried)} to write that document, or set "id" to undefined in "data" to copy it into a new one.`
+    : `"data" carries id ${q(carried)} but this write addresses ${q(id)} — they must agree. Pass "id": ${q(carried)} to write that document, or set "id" to undefined in "data" to write to ${q(id)}.` };
+}
+
 // ── generated per-store tool: actions map directly onto Store<T> ─────────────────
 
 interface ActionInput {
@@ -115,26 +162,49 @@ interface ActionInput {
   query?:    StoreQuery;
 }
 
-// The store's declared `shape` as an INLINE structural type, so the synthesised `toolContract` references
-// no external name (the shape type is defined only in this string, not in any scannable source). An
-// `interface X { … }` → `{ … }`; a `type X = T` → `T`; anything else → `Record<string, unknown>`.
-// Whitespace is collapsed to keep the emitted contract on one line. A shape that itself references a named
-// type would leave that name dangling — the fix there is to export that type (so the dts can import it),
-// not to inline it here.
-function shapeType(shape: string): string {
-  const iface = shape.match(/interface\s+\w+\s*(\{[\s\S]*\})\s*$/);
-  if (iface) return iface[1]!.replace(/\s+/g, ' ').trim();
-  const alias = shape.match(/type\s+\w+\s*=\s*([\s\S]+?);?\s*$/);
-  if (alias) return alias[1]!.replace(/\s+/g, ' ').trim();
-  return 'Record<string, unknown>';
+/**
+ * The generated tool's `toolContract` — ONE ARM PER ACTION, not one arm carrying two unions.
+ *
+ * `ToolProxy` turns a multi-arm entry into an overload set, which is what makes
+ * `await tool.x_action({ action: 'query' })` narrow to the query result. A single arm is a single
+ * signature, so the declared result was the union across all five actions and no action's own fields
+ * were reachable without a guard — and since a cast is barred by the check gate, a caller could not
+ * write correct code against a store tool at all. The workaround was to flatten the document shape into
+ * one record with every field optional, losing the modelling the contract exists to carry.
+ *
+ * Keep the arms `|`-joined and literal: build-dts reads them as a union type node and the wire
+ * projection splits on a top-level `|`, so neither tolerates an alias standing in for the union.
+ *
+ * `id` and `version` are the `Store` contract's, not the author's, so a declared shape usually omits
+ * them — but a read hands both back. Hence two forms of the document type: `stored` for results (both
+ * present, so `version` can be read to pass as `expected`) and `writable` for `data` (both optional, so
+ * a document just read goes straight back in). Accepted and IGNORED rather than honoured — the executor
+ * mints a fresh `version` on every write and takes `id` from the parameter.
+ *
+ * Each is wrapped WHOLE, not just around the shape: `&` binds tighter than `|` (a union shape) and `[]`
+ * binds tighter than `&`, so an unwrapped `stored[]` reads as `doc & ({ id; version }[])` — an
+ * intersection with an array whose element type has lost the document. It typechecks, and is wrong.
+ */
+export function storeToolContract(shape: string): string {
+  const doc      = shapeType(shape);
+  const stored   = `((${doc}) & { id: string; version: string })`;
+  const writable = `((${doc}) & { id?: string; version?: string })`;
+  return [
+    `ToolContract<${stored} | null, { action: 'get'; id: string }>`,
+    `ToolContract<${stored}, { action: 'set'; id?: string; data: ${writable} }>`,
+    `ToolContract<{ ok: true; doc: ${stored} } | { ok: false; current: ${stored} | null }`
+      + `, { action: 'cas'; id: string; expected: string; data: ${writable} }>`,
+    "ToolContract<{ deleted: boolean }, { action: 'delete'; id: string; expected?: string }>",
+    `ToolContract<{ items: ${stored}[]; total?: number; cursor?: string }`
+      + `, { action: 'query'; query?: StoreQuery }>`,
+  ].join(' | ');
 }
 
 // A tool over one managed store whose verbs are the Store<T> interface (get/set/cas/delete/query),
-// with set doubling as upsert. Loose schema (action + the union of every action's optional fields);
+// with set creating or replacing. Loose schema (action + the union of every action's optional fields);
 // the executor enforces per-action requirements, matching the multi-action convention in CLAUDE.md.
 function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Store<StoreRecord>): Tool {
-  const typeGuess = def.shape.match(/(interface|type\s*=)\s+(\w+)/)?.[2] ?? 'Record<string, unknown>';  // the shape's NAME, for prose
-  const doc       = shapeType(def.shape);                                                               // the shape as an inline type, for the toolContract
+  const typeGuess = shapeName(def.shape) ?? 'Record<string, unknown>';   // the shape's NAME, for prose
   return {
     name: actionToolName(def.namespace),
     ...(pluginName !== undefined ? { pluginName } : {}),
@@ -142,8 +212,22 @@ function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Sto
       `Access the "${def.namespace}" store — ${def.description}\n\n` +
       'Documents have this shape:\n' +
       '```ts\n' + def.shape + '\n```\n\n' +
-      'Actions map onto the matbot `Store<' + typeGuess + '>` interface (get/set/cas/delete/query), with ' +
-      '`set` doubling as upsert (omit `id` to create) and `query` matching all when omitted.\n\n' +
+      'Actions map onto the matbot `Store<' + typeGuess + '>` interface (get/set/cas/delete/query); ' +
+      '`query` matches all when omitted.\n\n' +
+      '`set` CREATES OR REPLACES — it is never a merge. The document you send becomes the whole ' +
+      'document, and every field you omit is deleted. The TOP-LEVEL `id` decides which document is ' +
+      'written: give one to create or replace at that id, and omit it to create a new one under a ' +
+      'minted id. To change one field of an existing document, `get` it first and send the whole thing ' +
+      'back with that field changed.\n\n' +
+      'An `id` inside `data` must AGREE with that key — a document you read back carries its own `id`, ' +
+      'so sending it straight to `set` states which document it is. A disagreement is refused rather ' +
+      'than guessed at, because both ways of resolving it are silent and lossy. To REPLACE the document ' +
+      'you read, pass its `id` as the top-level `id`. To COPY it — to a new document, or to another id ' +
+      '— blank the one it carries:\n' +
+      '```ts\n' +
+      "await tool." + actionToolName(def.namespace) + "({ action: 'set', data: { ...doc, id: undefined } });          // copy to a new id\n" +
+      "await tool." + actionToolName(def.namespace) + "({ action: 'set', id: 'other', data: { ...doc, id: undefined } });  // copy to \"other\"\n" +
+      '```\n\n' +
       'The `query` action takes the entire grammar in ONE `query` parameter. Every key below nests ' +
       'inside it and never sits beside `action`:\n' +
       '```json\n' +
@@ -171,8 +255,14 @@ function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Sto
       '`query` returns `{ items, cursor?, total? }`. To COUNT matches without fetching them, use a ' +
       'limit of 0 — the filter still runs and `total` is the answer, but no document is returned: ' +
       '`{ "action": "query", "query": { "limit": 0 } }`.\n\n' +
-      '`version` is managed for you (a fresh one is minted on every set/cas) — never set it yourself; ' +
-      'pass the value you last read as `expected` to cas/delete for safe concurrent updates.',
+      '`version` is managed for you: a fresh one is minted on every set/cas, so a `version` (or `id`) ' +
+      'in `data` is accepted and IGNORED — send a document you just read straight back without ' +
+      'stripping anything. Pass the value you last read as `expected` to cas/delete for safe ' +
+      'concurrent updates:\n' +
+      '```ts\n' +
+      "const doc = await tool." + actionToolName(def.namespace) + "({ action: 'get', id });\n" +
+      "if (doc !== null) await tool." + actionToolName(def.namespace) + "({ action: 'set', id, data: { ...doc, someField: next } });\n" +
+      '```\n',
     inputSchema: {
       type: 'object',
       properties: {
@@ -189,15 +279,7 @@ function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Sto
     // to an augmentation arm (result, params) — which the tool-types index splices into the dts and flattens
     // for the wire. The result/data shape is inlined structurally (`doc`) so it references no name the dts
     // lacks; `StoreQuery` stays a name — it's a plugin-api export, so the dts imports it.
-    toolContract:
-      "ToolContract<" +
-        doc + " | null | { ok: true; doc: " + doc + " } | { ok: false; current: " + doc + " | null }" +
-        " | { deleted: boolean } | { items: " + doc + "[]; total?: number; cursor?: string }" +
-      ", " +
-        "{ action: 'get'; id: string } | { action: 'set'; id?: string; data: " + doc + " }" +
-        " | { action: 'cas'; id: string; expected: string; data: " + doc + " }" +
-        " | { action: 'delete'; id: string; expected?: string } | { action: 'query'; query?: StoreQuery }" +
-      ">",
+    toolContract: storeToolContract(def.shape),
     executor: {
       async *execute(rawInput: unknown): AsyncIterable<ToolEvent> {
         const input = (rawInput ?? {}) as ActionInput;
@@ -209,7 +291,9 @@ function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Sto
           }
           case 'set': {
             if (!input.data) { yield { type: 'error', message: 'set requires "data".' }; return; }
-            const id  = input.id ?? crypto.randomUUID();
+            const dest = writeDestination(input.id, input.data);
+            if ('error' in dest) { yield { type: 'error', message: `set: ${dest.error}` }; return; }
+            const id = dest.id;
             const rec: StoreRecord = { ...input.data, id, version: crypto.randomUUID() };
             await store.set(id, rec);
             yield { type: 'result', value: rec };
@@ -219,6 +303,10 @@ function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Sto
             if (!input.id)       { yield { type: 'error', message: 'cas requires "id".' }; return; }
             if (!input.expected) { yield { type: 'error', message: 'cas requires "expected" (the version you last read).' }; return; }
             if (!input.data)     { yield { type: 'error', message: 'cas requires "data".' }; return; }
+            // Same invariant as `set` — `cas` takes the identical `data`, and leaving it to discard a
+            // contradicting `data.id` silently would restore the asymmetry that removal just closed.
+            const casDest = writeDestination(input.id, input.data);
+            if ('error' in casDest) { yield { type: 'error', message: `cas: ${casDest.error}` }; return; }
             const next: StoreRecord = { ...input.data, id: input.id, version: crypto.randomUUID() };
             const res = await store.cas(input.id, input.expected, next);
             yield { type: 'result', value: res };
@@ -298,6 +386,17 @@ function makeStoreActionTool(services: MatbotMachine, meta: Store<StoreDef>): To
       'Both `create` and `expose` require a plain-English `description` of what the store holds and ' +
       'a `shape` — the document type written as a flattened TypeScript type/interface — which is ' +
       'shown to the model in the generated tool.\n\n' +
+      'ONE store may hold SEVERAL KINDS of document: write the shape as a discriminated union and each ' +
+      'kind keeps its own fields, rather than flattening them into one record with everything optional.\n' +
+      '```ts\n' +
+      "type PresenceDoc =\n" +
+      "  | { kind: 'site';  endpoint: string; windowHours: number }\n" +
+      "  | { kind: 'state'; where: string };\n" +
+      '```\n' +
+      'A read narrows on the discriminant (`if (doc.kind === \'site\') doc.endpoint`), and a write of one ' +
+      'arm mixed with another\u2019s fields is rejected against the arm you meant. The shape must be one ' +
+      'declaration and inline its members: `extends` is not resolved and a type declared elsewhere ' +
+      'cannot be referenced by name.\n\n' +
       '`create` mints a new store + tool and fails if one already exists; `expose` mints a tool over an ' +
       'EXISTING store (including one created elsewhere) and fails if absent; `remove` drops the ' +
       "definition and its tool but leaves the store's data intact; `get` reads one definition; `list` " +
@@ -321,6 +420,8 @@ function makeStoreActionTool(services: MatbotMachine, meta: Store<StoreDef>): To
             if (!input.namespace) { yield { type: 'error', message: 'create requires "namespace".' }; return; }
             const invalid = namespaceError(input.namespace);
             if (invalid !== undefined) { yield { type: 'error', message: invalid }; return; }
+            const badShape = shapeFault(input.shape);
+            if (badShape !== undefined) { yield { type: 'error', message: badShape }; return; }
             if (input.namespace === META_NAMESPACE) { yield { type: 'error', message: `"${META_NAMESPACE}" is reserved.` }; return; }
             if (await meta.get(input.namespace) || await storeHasData(services, input.namespace)) {
               yield { type: 'error', message: `Store "${input.namespace}" already exists. Use action "expose".` };
@@ -344,6 +445,8 @@ function makeStoreActionTool(services: MatbotMachine, meta: Store<StoreDef>): To
             if (!input.namespace) { yield { type: 'error', message: 'expose requires "namespace".' }; return; }
             const badExpose = namespaceError(input.namespace);
             if (badExpose !== undefined) { yield { type: 'error', message: badExpose }; return; }
+            const badExposeShape = shapeFault(input.shape);
+            if (badExposeShape !== undefined) { yield { type: 'error', message: badExposeShape }; return; }
             if (input.namespace === META_NAMESPACE) { yield { type: 'error', message: `"${META_NAMESPACE}" is reserved.` }; return; }
             if (!(await meta.get(input.namespace)) && !(await storeHasData(services, input.namespace))) {
               yield { type: 'error', message: `No store "${input.namespace}" found. Use action "create" to make a new one.` };

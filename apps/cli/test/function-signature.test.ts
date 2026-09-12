@@ -256,13 +256,15 @@ test('progress percentages are rounded and clamped, and an empty message is omit
 test('a body calling context.progress passes the type-check gate', async () => {
   const root   = join(import.meta.dirname, '..', '..', '..');
   const PREFIX = `declare const context: import('@matatbread/matbot-plugin-api').ComposedCallContext;\n`;
-  const check  = (snippet: string): Promise<string[]> => checkSnippetAgainst({
+  // `check` returns a structured report; each finding carries its own annotated text, so a test reads
+  // the findings rather than parsing them back out of one joined string.
+  const check = async (snippet: string): Promise<string[]> => (await checkSnippetAgainst({
     root,
     source:       `${PREFIX}${snippet}\nexport {};\n`,
     prefixLen:    PREFIX.length,
     prefixLines:  PREFIX.split('\n').length - 1,
     apiIndexPath: join(root, 'plugin-api', 'src', 'index.ts'),
-  });
+  })).diagnostics.map(d => d.rendered);
 
   assert.deepEqual(await check(`
     async function __fn(names: string[]): Promise<number> {

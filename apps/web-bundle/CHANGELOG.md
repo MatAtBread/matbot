@@ -1,5 +1,12 @@
 # @matatbread/matbot-web-bundle
 
+## 0.4.14
+
+### Patch Changes
+
+- @matatbread/matbot-core@0.4.14
+- @matatbread/matbot-plugin-api@0.4.14
+
 ## 0.4.13
 
 ### Patch Changes

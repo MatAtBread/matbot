@@ -2,7 +2,7 @@ import { dirname, join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { PLUGIN_API_VERSION, RegistryChangeKind } from '@matatbread/matbot-plugin-api';
-import type { MatbotMachine, MatbotPluginSpec, ToolTypeIndex } from '@matatbread/matbot-plugin-api';
+import type { MatbotMachine, MatbotPluginSpec, ToolCheckReport, ToolTypeIndex } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins } from '@matatbread/matbot-core';
 import { buildMatbotToolsDts } from './build-dts.js';
 import { checkSnippetAgainst } from './checker.js';
@@ -211,7 +211,7 @@ class ToolTypeIndexImpl implements ToolTypeIndex {
     return out;
   }
 
-  async check(snippet: string): Promise<string[]> {
+  async check(snippet: string): Promise<ToolCheckReport> {
     const root = this.machine.configPath !== undefined ? dirname(this.machine.configPath) : '.';
     const prefix = `${await this.dts()}\n`;
     const source = `${prefix}${snippet}\nexport {};\n`;           // trailing export ⇒ this file is a module

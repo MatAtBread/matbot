@@ -1,5 +1,15 @@
 # @matatbread/matbot-function-tools
 
+## 0.4.10
+
+### Patch Changes
+
+- function-tools: a function registered without a type-check is marked `definedUnchecked` in `list` and on
+  each `check` row — set when `noTypeCheck` is passed AND when the available index cannot check at all, so
+  a bypass no longer looks like a pass. `check` rows carry the structured report (`total`, `diagnostics`,
+  `omitted`).
+  - @matatbread/matbot-plugin-api@0.4.14
+
 ## 0.4.9
 
 ### Patch Changes

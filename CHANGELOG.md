@@ -9,6 +9,123 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## 0.4.14
+
+### Breaking changes
+
+- **`ToolTypeIndex.check` returns a `ToolCheckReport`, not `string[]`.** It returned formatted
+  multi-line blocks with the overflow summary appended as a further ELEMENT, so `diagnostics.length`
+  counted prose as a finding and any per-code breakdown taken by iterating the array was unreliable
+  wherever an overflow had occurred. The report states `total` separately from the capped
+  `diagnostics`, and puts the cap in `omitted: { count, byLabel }` where it is data. Each finding
+  carries its own `rendered` block, so a consumer displays that and counts, groups or routes on the
+  fields — rather than regexing `line \d+ TS\d+` back out of prose, which is what the flattened form
+  made every consumer do. The typed record existed upstream all along and was discarded at render
+  time.
+
+  The report also carries a required `checked: boolean`, which qualifies `ok`: an index that cannot
+  type-check (the browser, which has no TypeScript program) reports `ok: true, checked: false` — nothing
+  was examined, rather than nothing was wrong. Required rather than optional for the reason stated
+  elsewhere in this path: a checker that reports success while checking nothing is indistinguishable from
+  one that works, and `function-tools` was recording such a definition as verified.
+
+### API gaps filled
+
+- **`ToolCheckReport` / `ToolCheckDiagnostic`, `renderToolCheck` and `renderToolCheckOmitted`.** The
+  report shape above, plus the one renderer that turns it into the text a model repairs from (and the
+  overflow summary alone, for a consumer laying the findings out itself). The renderer is in `plugin-api`
+  because two packages render one report — the node checker that produces it, and any consumer
+  putting it in front of whoever wrote the code — and the overflow line is precisely the part worth
+  having in one place.
+
+### Optional
+
+#### tool-store
+
+- **A store's `shape` is read as TypeScript, not matched against an end-anchored pattern.** The shape is
+  model-authored source, and comments are the normal thing to find in it. A comment *inside* the
+  declaration survived into the `toolContract`, which is emitted as one line — so `// the note body`
+  commented out every arm after it and the tool's whole contract became unparseable (a stated refusal).
+  A comment or blank line *after* the declaration missed the `}\s*$` anchor entirely and the document
+  type degraded to `Record<string, unknown>`, silently. Comments are now stripped (string literals
+  intact) and the body is brace-matched, so `extends`, a union alias, a trailing note and a `//` inside
+  a string literal type all read correctly; an unparseable shape still degrades to the permissive type.
+  The shape's NAME is read by the same path — its old regex (`type\s*=\s+(\w+)`) never matched a type
+  alias at all, so an aliased shape was described as `Store<Record<string, unknown>>` in prose.
+  Three further silent-emit paths are closed: an UNTERMINATED quote (an apostrophe in prose — `Note's
+  fields:`) no longer makes the rest of the shape inert, which had re-opened the very comment leak above;
+  `extends Base<{ … }>` no longer hands back the base's type ARGUMENT as the document body (the brace is
+  now found by scanning at angle-depth 0, not by a `[^{]+` pattern that stops inside the heritage clause);
+  and `=>` in a function type no longer counts as a closing angle bracket, which had truncated an alias
+  mid-member and emitted it unbalanced. Each produced a wrong document type and reported no fault.
+- **A shape must be ONE declaration with nothing after it, and says so when it isn't.** Both halves were
+  silently violable and each emitted a confident wrong contract: a second declaration was ignored with the
+  FIRST winning (`type Id = string; type Note = { id: Id }` emitted `string` — the helper type as the
+  document), and an unterminated alias read to end-of-input, so trailing prose became part of the type
+  (`{ text: string } Stored per user.`) — accepted at create, unparseable by the time anything downstream
+  read it. The alias's end is now found by scanning the type expression (units joined by `|`/`&`, with
+  `<…>`/`[…]` suffixes) rather than by reading to the next `;` or the end.
+- **An `id` inside `data` must agree with the key, on `set` and `cas`.** The key is the top-level `id`
+  (minted when absent) and is written into the body, so the two can never disagree in storage — which is
+  why a disagreement in the CALL is refused rather than resolved: discarding `data.id` writes the edit to
+  a document the caller did not name, and honouring it writes to one they did not name either. Both were
+  reachable from the natural round-trip, since `{ ...doc }` carries the id it was read with, and one of
+  them was previously silent. The error names the two repairs — pass the id as the key, or blank it in
+  `data` — and an absent or `undefined` `data.id` states no opinion, which makes
+  `{ ...doc, id: undefined }` the way to say "copy this".
+- **A store tool declares one contract arm per action, so a call narrows its result.** It emitted one
+  arm carrying two unions, which `ToolProxy` turns into a single call signature with nothing to
+  overload: the declared result was the union across all five actions, and no action's own fields were
+  reachable without a guard. Since a cast is barred by the check gate, a caller could not write correct
+  code against a store tool at all — the workaround was to flatten the document shape into one record
+  with every field optional, losing the modelling the contract exists to carry. Compile-time only; the
+  runtime validator discriminated on `action` either way.
+- **`set` accepts and ignores `id`/`version`.** `get` handed back a document carrying `version` and
+  sending it straight to `set` was rejected as an unexpected property, so every update had to be
+  rebuilt field by field — and `set` replaces, so whatever the rebuild forgot was silently deleted. The
+  document type is now emitted twice: present on results, optional on `data`. `set` also honours an `id`
+  carried INSIDE `data`, which is what the round-trip idiom produces: minting a fresh one when the
+  top-level `id` was omitted turned "replace this document" into "create a second copy under a new id",
+  silently, leaving the original behind. `cas` needs no equivalent — it errors when `id` is absent rather
+  than inventing one.
+- **`set` is described as create-or-replace, not "upsert".** The executor never read the existing
+  document, so a partial `set` deleted every field it omitted. Merging stays out of the store —
+  JS merge semantics are underdetermined, so it is a policy of the consumer — and the description names
+  the read-modify-write instead.
+- **A shape that yields no document type is refused at create/expose, rather than degrading silently.**
+  It fell back to `Record<string, unknown>`: a document of anything, which validates anything, so the
+  store appeared to work and checked nothing. Four faults are named separately — no declaration, an
+  unmatched `{`, an alias with nothing after `=`, and an empty body (`interface X extends Y {}` matches
+  but only the braces are inlined, so the base's members are lost). An already-persisted def warns
+  instead, so an existing store never loses its tool at boot.
+- **A store may hold several kinds of document.** Write the shape as a discriminated union and each kind
+  keeps its own fields: a read narrows on the discriminant, and a write mixing one arm with another's
+  fields is rejected against the arm the caller meant. This follows from the per-action arms above — the
+  document type is parenthesised before the intersection, so the union survives into the contract and the
+  validator's discriminant dispatch reaches it. Previously the only workable modelling was one flat record
+  with every field optional. Now stated in `store_action`'s description, which said nothing about it.
+
+#### tool-types
+
+- **A cast-gate finding is labelled `CAST-GATE` wherever it is rendered.** The detail renderer honoured
+  the synthetic flag and the overflow summary did not, so one rule had two names decided only by
+  position in the list — and the second, `TS90003`, is not a tsc error code at all, so a reader who
+  looked it up concluded the compiler had no such code. The "likely cascading" advice is now dropped
+  when every hidden finding is structural: a cast-gate rule fires at one site and cascades from
+  nothing.
+
+#### function-tools
+
+- **`check` reports `checked` alongside `ok`, on the result as well as on each row.** Where no
+  type-checker can run, every row comes back clean, and a bare `ok: true` reported success for work
+  nothing did.
+- **A function defined without a type-check is marked `definedUnchecked`** in `list` and on each
+  `check` row. `define` said "(type-check skipped)" once, in the moment, and nothing afterwards knew —
+  so a `noTypeCheck` definition was indistinguishable from one that passed, and the errors it hid
+  surfaced much later as failures that had been latent all along. Both bypass routes set it, the
+  explicit flag and the implicit "no checker available here". It records the provenance of the
+  definition, so a later passing `check` deliberately does not clear it.
+
 ## 0.4.13
 
 ### API gaps filled

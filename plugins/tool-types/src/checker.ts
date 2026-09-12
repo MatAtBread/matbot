@@ -9,6 +9,9 @@
 // own virtual file, the same resolved typescript module), so a checker failure is a plumbing bug
 // that must surface as the caller's error, not be absorbed by a quieter path.
 
+import { renderToolCheckOmitted } from '@matatbread/matbot-plugin-api';
+import type { ToolCheckDiagnostic, ToolCheckReport } from '@matatbread/matbot-plugin-api';
+
 export interface CheckResult { ok: boolean; output: string }
 
 interface DiagnosticRecord {
@@ -20,7 +23,7 @@ interface DiagnosticRecord {
   frame?:      string;
   sourceLine?: string;
   related?:    string[];
-  /** True for a cast-gate finding (a structural rule, not a tsc error) — rendered as CAST, not TSnnnn. */
+  /** True for a cast-gate finding (a structural rule, not a tsc error) — labelled CAST-GATE, not TSnnnn. */
   syn?:        boolean;
 }
 
@@ -82,10 +85,16 @@ function hintFor(d: DiagnosticRecord): string | undefined {
 
 const MAX_FULL = 8;
 
+// One rule, one name, in every renderer: a per-rule label read off the record rather than spelled at
+// each render site, so a summary can never call a finding something its own entry did not.
+function label(d: DiagnosticRecord): string {
+  return d.syn ? 'CAST-GATE' : `TS${d.code}`;
+}
+
 function formatOne(d: DiagnosticRecord): string {
   const loc = d.file !== undefined ? `${d.file}(${d.line},${d.col})`
     : d.line !== undefined ? `line ${d.line}` : '(project)';
-  const parts = [`${loc} ${d.syn ? 'CAST-GATE' : `TS${d.code}`}: ${d.message}`];
+  const parts = [`${loc} ${label(d)}: ${d.message}`];
   if (d.frame !== undefined) parts.push(d.frame);
   if (d.related) for (const r of d.related) parts.push(`  related: ${r}`);
   const hint = hintFor(d);
@@ -93,10 +102,47 @@ function formatOne(d: DiagnosticRecord): string {
   return parts.join('\n');
 }
 
-function overflowNote(diags: DiagnosticRecord[]): string {
-  const byCode = new Map<number, number>();
-  for (const d of diags.slice(MAX_FULL)) byCode.set(d.code, (byCode.get(d.code) ?? 0) + 1);
-  return `…plus ${diags.length - MAX_FULL} more: ${[...byCode.entries()].map(([c, n]) => `TS${c}×${n}`).join(', ')} — likely cascading from the errors above.`;
+// The findings the cap hides, tallied by the same `label` the detailed ones carry.
+function omittedOf(diags: DiagnosticRecord[]): { count: number; byLabel: Record<string, number> } | undefined {
+  const hidden = diags.slice(MAX_FULL);
+  if (hidden.length === 0) return undefined;
+  const byLabel: Record<string, number> = {};
+  for (const d of hidden) byLabel[label(d)] = (byLabel[label(d)] ?? 0) + 1;
+  return { count: hidden.length, byLabel };
+}
+
+/**
+ * The worker's records as the service's {@link ToolCheckReport}: structured findings, the cap expressed
+ * as `omitted` data, and each finding's annotated rendering carried on the record itself.
+ *
+ * The rendering used to be the WHOLE return value — one `string[]` of formatted blocks with the overflow
+ * summary appended as a further element. So `diagnostics.length` counted prose as a finding, and any
+ * per-code breakdown taken by iterating the array was unreliable wherever an overflow had occurred.
+ * The typed record existed upstream all along and was discarded at render time; it is kept now, and the
+ * text is one field of it.
+ */
+function reportOf(diags: DiagnosticRecord[]): ToolCheckReport {
+  const omitted = omittedOf(diags);
+  const detailed: ToolCheckDiagnostic[] = diags.slice(0, MAX_FULL).map(d => ({
+    label:   label(d),
+    code:    d.code,
+    message: d.message,
+    ...(d.file    !== undefined ? { file:    d.file    } : {}),
+    ...(d.line    !== undefined ? { line:    d.line    } : {}),
+    ...(d.col     !== undefined ? { col:     d.col     } : {}),
+    ...(d.frame   !== undefined ? { frame:   d.frame   } : {}),
+    ...(d.related !== undefined ? { related: d.related } : {}),
+    ...(hintFor(d) !== undefined ? { hint: hintFor(d)! } : {}),
+    ...(d.syn === true ? { syn: true as const } : {}),
+    rendered: formatOne(d),
+  }));
+  return {
+    ok:      diags.length === 0,
+    checked: true,
+    total:   diags.length,
+    diagnostics: detailed,
+    ...(omitted !== undefined ? { omitted } : {}),
+  };
 }
 
 async function runWorker(data: Record<string, unknown>): Promise<DiagnosticRecord[] | null> {
@@ -133,10 +179,11 @@ export async function checkProjectDir(
     ...(opts?.ownContracts !== undefined ? { ownContracts: [...opts.ownContracts] } : {}),
   });
   if (diags === null) return { ok: true, output: '' };
+  const report = reportOf(diags);
   const parts: string[] = [];
-  if (diags.length > 1) parts.push(`${diags.length} errors. Fix the FIRST error first — later errors often cascade from it.\n`);
-  for (const d of diags.slice(0, MAX_FULL)) { parts.push(formatOne(d)); parts.push(''); }
-  if (diags.length > MAX_FULL) parts.push(overflowNote(diags));
+  if (report.total > 1) parts.push(`${report.total} errors. Fix the FIRST error first — later errors often cascade from it.\n`);
+  for (const d of report.diagnostics) { parts.push(d.rendered); parts.push(''); }
+  if (report.omitted !== undefined) parts.push(renderToolCheckOmitted(report.omitted));
   return { ok: false, output: parts.join('\n').trim() };
 }
 
@@ -149,7 +196,7 @@ export async function checkSnippetAgainst(opts: {
   prefixLen:     number;
   prefixLines:   number;
   apiIndexPath?: string;
-}): Promise<string[]> {
+}): Promise<ToolCheckReport> {
   const diags = await runWorker({
     mode: 'snippet',
     root: opts.root,
@@ -159,10 +206,7 @@ export async function checkSnippetAgainst(opts: {
     virtualPath: `${opts.root}/__mb_toolcheck_${crypto.randomUUID()}.ts`,
     ...(opts.apiIndexPath !== undefined ? { apiIndexPath: opts.apiIndexPath } : {}),
   });
-  if (diags === null) return [];
-  const out = diags.slice(0, MAX_FULL).map(formatOne);
-  if (diags.length > MAX_FULL) out.push(overflowNote(diags));
-  return out;
+  return reportOf(diags ?? []);
 }
 
 // The worker body: plain CommonJS (Worker eval mode is CJS, so `require` exists and no loader hooks

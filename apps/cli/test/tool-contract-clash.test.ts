@@ -37,14 +37,16 @@ test('the emitted contract describes what the node tools return, not the browser
   assert.ok(built);
   const prefix = `${built.dts}\ndeclare const tool: import('@matatbread/matbot-plugin-api').ToolProxy;\n`;
 
+  // `check` returns a structured report; each finding carries its own annotated text, so a test reads
+  // the findings rather than parsing them back out of one joined string.
   const check = async (snippet: string): Promise<string[]> =>
-    checkSnippetAgainst({
+    (await checkSnippetAgainst({
       root,
       source:      `${prefix}${snippet}\nexport {};\n`,
       prefixLen:   prefix.length,
       prefixLines: prefix.split('\n').length - 1,
       apiIndexPath: join(root, 'plugin-api', 'src', 'index.ts'),
-    });
+    })).diagnostics.map(d => d.rendered);
 
   const list = (expr: string): string =>
     `async function f() { const r = await tool.provider({ action: 'list' }); return r.providers[0]!.${expr}; }`;

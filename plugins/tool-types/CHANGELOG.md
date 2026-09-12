@@ -1,5 +1,17 @@
 # @matatbread/matbot-tool-types
 
+## 0.4.13
+
+### Patch Changes
+
+- tool-types: `checkProjectDir`/`checkSnippetAgainst` return a structured `ToolCheckReport` — findings
+  as records (each carrying its own annotated `rendered` text), `total` stated separately from the capped
+  `diagnostics`, and the overflow as `omitted` data rather than a prose element of the findings array. A
+  cast-gate finding is labelled `CAST-GATE` in every renderer, including the overflow tally, which
+  previously called it `TS90003` — a code tsc has no error for.
+  - @matatbread/matbot-core@0.4.14
+  - @matatbread/matbot-plugin-api@0.4.14
+
 ## 0.4.7
 
 ### Patch Changes

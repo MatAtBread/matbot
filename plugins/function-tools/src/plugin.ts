@@ -1,7 +1,7 @@
-import { PLUGIN_API_VERSION, notifyingStore } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, notifyingStore, renderToolCheck as renderCheck } from '@matatbread/matbot-plugin-api';
 import type {
   JSONSchema, MatbotMachine, MatbotPluginSpec, Store,
-  Tool, ToolContext, ToolEvent, ToolContract, ToolResultOf,
+  Tool, ToolContext, ToolEvent, ToolContract, ToolResultOf, ToolCheckReport,
 } from '@matatbread/matbot-plugin-api';
 import { buildAsyncFn, runFunction, INJECTED, type CompiledFn } from './compile.js';
 import { parseSignature, paramsSchema, type ParsedParam, type ParsedSignature } from './signature.js';
@@ -10,17 +10,27 @@ const TOOL_NAME   = 'tool_function';
 const PLUGIN_NAME = 'function-tools';
 const NAMESPACE   = 'functions';
 
-interface FunctionRecord { name: string; definition: string; description?: string }
+interface FunctionRecord { name: string; definition: string; description?: string; definedUnchecked?: true }
 
-interface CheckResult { name: string; ok: boolean; diagnostics: string[] }
+/** One function's row in a `check` sweep: the service's report, plus who it is about. `diagnostics`
+ *  carries each finding's own `rendered` text, so a reader displays that and counts on `total`. */
+interface CheckResult extends ToolCheckReport { name: string; definedUnchecked?: true }
 
 /** A stored function. Its `id` IS its name — names are already unique (they are tool-registry keys),
  *  so there is no second identity to keep in step, and a rename is a delete plus an add. */
-interface FunctionDoc { id: string; version: string; definition: string; description?: string }
+interface FunctionDoc {
+  id: string; version: string; definition: string; description?: string;
+  /** This source was registered without ever being type-checked — `noTypeCheck`, or no checker present.
+   *  Provenance of the DEFINITION, not a verdict on it: a `check` that passes later does not clear it
+   *  (check registers and persists nothing, and the fact it records stays true), which is what keeps the
+   *  flag from ever becoming a lie people learn to ignore. */
+  definedUnchecked?: true;
+}
 
 const recordOf = (doc: FunctionDoc): FunctionRecord => ({
   name: doc.id, definition: doc.definition,
   ...(doc.description !== undefined ? { description: doc.description } : {}),
+  ...(doc.definedUnchecked === true ? { definedUnchecked: true } : {}),
 });
 
 // Placeholder used as a defined tool's description when the caller supplies none — fill in as desired.
@@ -56,7 +66,7 @@ declare module '@matatbread/matbot-plugin-api' {
     tool_function:
       | ToolContract<{ message: string; tool: string; parameters: ParsedParam[] }, { action: 'define'; definition: string; description?: string; noTypeCheck?: boolean }>
       | ToolContract<unknown,                                                      { action: 'lambda'; definition: string; params?: object; noTypeCheck?: boolean }>
-      | ToolContract<{ ok: boolean; results: CheckResult[] },                      { action: 'check';  name?: string }>
+      | ToolContract<{ ok: boolean; checked: boolean; results: CheckResult[] },    { action: 'check';  name?: string }>
       | ToolContract<{ functions: FunctionRecord[] },                             { action: 'list'   }>
       | ToolContract<{ available: boolean; dts: string },                         { action: 'types'  }>
       | ToolContract<{ message: string },                                         { action: 'remove'; name: string }>;
@@ -123,15 +133,25 @@ class FunctionStore {
     // is sound before it becomes a callable tool. Skipped when the ToolTypeIndex service is absent (e.g. the
     // browser — the function still compiles and runs), or when the caller opts out with noTypeCheck.
     const index = this.machine.ToolTypeIndex;
+    let checked = false;
     if (index !== undefined && !noTypeCheck) {
-      const diags = await index.check(checkSnippet(sig));
-      if (diags.length > 0) throw new Error(`type error(s) — fix and re-define, or pass noTypeCheck to bypass:\n${diags.join('\n')}`);
+      const report = await index.check(checkSnippet(sig));
+      if (!report.ok) throw new Error(`type error(s) — fix and re-define, or pass noTypeCheck to bypass:\n${renderCheck(report)}`);
+      // An index that cannot check says so, and a clean report from one proves nothing. The browser
+      // registers such an index (for `dts()`), so trusting "an index was present" marked its definitions
+      // verified when nothing had read them.
+      checked = report.checked;
     }
     const doc: FunctionDoc = {
       id:      sig.name,
       version: Date.now().toString(),
       definition,
       ...(description !== undefined && description.trim() !== '' ? { description: description.trim() } : {}),
+      // Persisted, because a bypass that leaves no trace is indistinguishable from a pass: `noTypeCheck`
+      // made a real failure go away without resolving it, and the errors surfaced only much later, when
+      // an unrelated contract change made them impossible to ignore. Both bypass routes are recorded —
+      // the explicit flag and the implicit "no checker here" — since the function is equally unverified.
+      ...(checked ? {} : { definedUnchecked: true as const }),
     };
     await this.registerTool(recordOf(doc));   // compiles; throws on bad source before anything is persisted
     // No CAS: a define is an unconditional "this name now means this source", not a read-modify-write,
@@ -162,12 +182,19 @@ class FunctionStore {
 
     const results: CheckResult[] = [];
     for (const doc of docs) {
-      let diagnostics: string[];
-      // An unparseable head is this function's own failure, not the run's — report it as its row so a
-      // sweep over every function still reports on the rest.
-      try { diagnostics = await index.check(checkSnippet(parseSignature(doc.definition))); }
-      catch (e) { diagnostics = [e instanceof Error ? e.message : String(e)]; }
-      results.push({ name: doc.id, ok: diagnostics.length === 0, diagnostics });
+      let report: ToolCheckReport;
+      // An unparseable head is this function's own failure, not the run's — reported as its row so a
+      // sweep over every function still reports on the rest. It is not a tsc finding, so it gets the
+      // same treatment as one rather than a shape of its own: one row type, countable the same way.
+      try { report = await index.check(checkSnippet(parseSignature(doc.definition))); }
+      catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        report = { ok: false, checked: false, total: 1, diagnostics: [{ label: 'PARSE', code: 0, message, rendered: message }] };
+      }
+      results.push({
+        name: doc.id, ...report,
+        ...(doc.definedUnchecked === true ? { definedUnchecked: true as const } : {}),
+      });
     }
     return results;
   }
@@ -301,9 +328,16 @@ ACTIONS
            it. Pass \`name\` for one, or omit it to check every defined function. Use this after anything that
            could move a contract a function was written against — a tool changing its parameters or result,
            a plugin loading or unloading — since a defined function is compiled but NOT re-checked on
-           reload, so it keeps working until the moment it doesn't. Returns a row per function with its
-           diagnostics; fix a failure by re-defining that function.
-  list   — Show the functions you've defined, with their source.
+           reload, so it keeps working until the moment it doesn't. Returns a row per function: \`total\` is
+           every finding, \`diagnostics\` the detailed ones (each with a \`rendered\` block to read and a
+           \`label\` such as \`TS2339\` or \`CAST-GATE\` to group on), and \`omitted\` the tally of any the
+           detail cap hid. Fix a failure by re-defining that function. A row also carries
+           \`definedUnchecked: true\` if that function was never type-checked when it was defined.
+           READ \`ok\` TOGETHER WITH \`checked\`, on the result and on each row: \`checked: false\` means
+           no type-checker could run here, so \`ok: true\` says only that nothing was examined.
+  list   — Show the functions you've defined, with their source. \`definedUnchecked: true\` marks one that
+           was registered without a type-check (it was defined with \`noTypeCheck\`, or no checker was
+           available) — run \`check\` on it, since a bypass hides errors that are still there.
   types  — Return TypeScript declarations (a .d.ts) of what the available tools' calls resolve to, so you
            can compose against real return types. Node only; \`available: false\` with an empty dts where
            type info can't be derived (e.g. the browser) — fall back to inferring shapes and testing.
@@ -338,7 +372,7 @@ const INPUT_SCHEMA: JSONSchema = {
     definition:  { type: 'string', description: 'define/lambda: the function source (method-shorthand TypeScript, no arrow).' },
     description: { type: 'string', description: 'define only (optional): Describe the intent of the function from the context used to create it. Include a clause describing the use-cases for the function tool. Becomes the defined tool\'s description, and therefore it is important to make the description both specific in terms of intent and use-cases. Do not describe the mechanism or execution as this is already clear from the code.' },
     params:      { type: 'object', description: 'lambda only: the single argument object passed to the function.' },
-    noTypeCheck: { type: 'boolean', description: 'define/lambda (optional, default false): skip the TypeScript type-check of the body against the live tool types. The check is a strong signal the composition is sound before it is registered/run — leave it on unless you must bypass a spurious error (e.g. composing a tool whose result type is `unknown`). No effect where no type-checker is available (e.g. the browser).' },
+    noTypeCheck: { type: 'boolean', description: 'define/lambda (optional, default false): skip the TypeScript type-check of the body against the live tool types. The check is a strong signal the composition is sound before it is registered/run — leave it on unless you must bypass a spurious error (e.g. composing a tool whose result type is `unknown`). A bypassed error does not go away: it is still there, and will surface later when something unrelated moves, so a function defined this way is marked `definedUnchecked` in `list` and `check` and should be checked again once the obstacle is gone. No effect where no type-checker is available (e.g. the browser) — a definition made there is marked the same way, being equally unverified.' },
     name:       { type: 'string', description: 'remove: the defined function/tool name to delete. check (optional): the one function to check — omit it to check every defined function.' },
   },
 };
@@ -410,8 +444,8 @@ function functionTool(machine: MatbotMachine, store: FunctionStore): Tool<ToolRe
             // noTypeCheck). Syntax was already gated by buildAsyncFn above.
             const index = machine.ToolTypeIndex;
             if (index !== undefined && act.noTypeCheck !== true && sig !== undefined) {
-              const diags = await index.check(checkSnippet(sig));
-              if (diags.length > 0) { yield errorEvent(`type error(s) — fix and re-run, or pass noTypeCheck to bypass:\n${diags.join('\n')}`); return; }
+              const report = await index.check(checkSnippet(sig));
+              if (!report.ok) { yield errorEvent(`type error(s) — fix and re-run, or pass noTypeCheck to bypass:\n${renderCheck(report)}`); return; }
             }
             yield* runFunction(machine, ctx, fn, [act.params ?? {}]);
             return;
@@ -423,7 +457,14 @@ function functionTool(machine: MatbotMachine, store: FunctionStore): Tool<ToolRe
             }
             try {
               const results = await store.check(act.name);
-              yield { type: 'result', value: { ok: results.every(r => r.ok), results } };
+              // `ok` is qualified by `checked` here exactly as it is on a row: where no type-checker can
+              // run (the browser registers an index that supplies types but checks nothing), every row
+              // comes back clean and a bare `ok: true` would report success for work nothing did.
+              yield { type: 'result', value: {
+                ok:      results.every(r => r.ok),
+                checked: results.every(r => r.checked),
+                results,
+              } };
             } catch (e) { yield errorEvent(e instanceof Error ? e.message : String(e)); }
             return;
           }
