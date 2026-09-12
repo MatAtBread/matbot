@@ -1,7 +1,7 @@
-import { PLUGIN_API_VERSION, notifyingStore } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, notifyingStore, renderToolCheck as renderCheck } from '@matatbread/matbot-plugin-api';
 import type {
   JSONSchema, MatbotMachine, MatbotPluginSpec, Store,
-  Tool, ToolContext, ToolEvent, ToolContract, ToolResultOf,
+  Tool, ToolContext, ToolEvent, ToolContract, ToolResultOf, ToolCheckReport,
 } from '@matatbread/matbot-plugin-api';
 import { buildAsyncFn, runFunction, INJECTED, type CompiledFn } from './compile.js';
 import { parseSignature, paramsSchema, type ParsedParam, type ParsedSignature } from './signature.js';
@@ -12,7 +12,9 @@ const NAMESPACE   = 'functions';
 
 interface FunctionRecord { name: string; definition: string; description?: string; definedUnchecked?: true }
 
-interface CheckResult { name: string; ok: boolean; diagnostics: string[]; definedUnchecked?: true }
+/** One function's row in a `check` sweep: the service's report, plus who it is about. `diagnostics`
+ *  carries each finding's own `rendered` text, so a reader displays that and counts on `total`. */
+interface CheckResult extends ToolCheckReport { name: string; definedUnchecked?: true }
 
 /** A stored function. Its `id` IS its name — names are already unique (they are tool-registry keys),
  *  so there is no second identity to keep in step, and a rename is a delete plus an add. */
@@ -133,8 +135,8 @@ class FunctionStore {
     const index = this.machine.ToolTypeIndex;
     const checked = index !== undefined && !noTypeCheck;
     if (checked) {
-      const diags = await index.check(checkSnippet(sig));
-      if (diags.length > 0) throw new Error(`type error(s) — fix and re-define, or pass noTypeCheck to bypass:\n${diags.join('\n')}`);
+      const report = await index.check(checkSnippet(sig));
+      if (!report.ok) throw new Error(`type error(s) — fix and re-define, or pass noTypeCheck to bypass:\n${renderCheck(report)}`);
     }
     const doc: FunctionDoc = {
       id:      sig.name,
@@ -176,13 +178,17 @@ class FunctionStore {
 
     const results: CheckResult[] = [];
     for (const doc of docs) {
-      let diagnostics: string[];
-      // An unparseable head is this function's own failure, not the run's — report it as its row so a
-      // sweep over every function still reports on the rest.
-      try { diagnostics = await index.check(checkSnippet(parseSignature(doc.definition))); }
-      catch (e) { diagnostics = [e instanceof Error ? e.message : String(e)]; }
+      let report: ToolCheckReport;
+      // An unparseable head is this function's own failure, not the run's — reported as its row so a
+      // sweep over every function still reports on the rest. It is not a tsc finding, so it gets the
+      // same treatment as one rather than a shape of its own: one row type, countable the same way.
+      try { report = await index.check(checkSnippet(parseSignature(doc.definition))); }
+      catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        report = { ok: false, total: 1, diagnostics: [{ label: 'PARSE', code: 0, message, rendered: message }] };
+      }
       results.push({
-        name: doc.id, ok: diagnostics.length === 0, diagnostics,
+        name: doc.id, ...report,
         ...(doc.definedUnchecked === true ? { definedUnchecked: true as const } : {}),
       });
     }
@@ -318,8 +324,10 @@ ACTIONS
            it. Pass \`name\` for one, or omit it to check every defined function. Use this after anything that
            could move a contract a function was written against — a tool changing its parameters or result,
            a plugin loading or unloading — since a defined function is compiled but NOT re-checked on
-           reload, so it keeps working until the moment it doesn't. Returns a row per function with its
-           diagnostics; fix a failure by re-defining that function. A row also carries
+           reload, so it keeps working until the moment it doesn't. Returns a row per function: \`total\` is
+           every finding, \`diagnostics\` the detailed ones (each with a \`rendered\` block to read and a
+           \`label\` such as \`TS2339\` or \`CAST-GATE\` to group on), and \`omitted\` the tally of any the
+           detail cap hid. Fix a failure by re-defining that function. A row also carries
            \`definedUnchecked: true\` if that function was never type-checked when it was defined.
   list   — Show the functions you've defined, with their source. \`definedUnchecked: true\` marks one that
            was registered without a type-check (it was defined with \`noTypeCheck\`, or no checker was
@@ -430,8 +438,8 @@ function functionTool(machine: MatbotMachine, store: FunctionStore): Tool<ToolRe
             // noTypeCheck). Syntax was already gated by buildAsyncFn above.
             const index = machine.ToolTypeIndex;
             if (index !== undefined && act.noTypeCheck !== true && sig !== undefined) {
-              const diags = await index.check(checkSnippet(sig));
-              if (diags.length > 0) { yield errorEvent(`type error(s) — fix and re-run, or pass noTypeCheck to bypass:\n${diags.join('\n')}`); return; }
+              const report = await index.check(checkSnippet(sig));
+              if (!report.ok) { yield errorEvent(`type error(s) — fix and re-run, or pass noTypeCheck to bypass:\n${renderCheck(report)}`); return; }
             }
             yield* runFunction(machine, ctx, fn, [act.params ?? {}]);
             return;

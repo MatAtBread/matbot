@@ -25,15 +25,19 @@ declare module '@matatbread/matbot-plugin-api' {
 declare const tool: import('@matatbread/matbot-plugin-api').ToolProxy;
 `;
 
+// The rendered blocks of a check — `check` returns a structured report, and each finding carries its own
+// annotated text, so a test reads the findings rather than parsing them back out of one joined string.
 async function check(snippet: string): Promise<string[]> {
   const source = `${PREFIX}${snippet}\nexport {};\n`;
-  return checkSnippetAgainst({
+  const report = await checkSnippetAgainst({
     root,
     source,
     prefixLen:   PREFIX.length,
     prefixLines: PREFIX.split('\n').length - 1,
     apiIndexPath: join(root, 'plugin-api', 'src', 'index.ts'),
   });
+  assert.equal(report.ok, report.total === 0);
+  return report.diagnostics.map(d => d.rendered);
 }
 
 test('a params-matched arm narrows to that arm\'s result', async () => {

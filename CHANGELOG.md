@@ -9,6 +9,73 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## Unreleased
+
+### Breaking changes
+
+- **`ToolTypeIndex.check` returns a `ToolCheckReport`, not `string[]`.** It returned formatted
+  multi-line blocks with the overflow summary appended as a further ELEMENT, so `diagnostics.length`
+  counted prose as a finding and any per-code breakdown taken by iterating the array was unreliable
+  wherever an overflow had occurred. The report states `total` separately from the capped
+  `diagnostics`, and puts the cap in `omitted: { count, byLabel }` where it is data. Each finding
+  carries its own `rendered` block, so a consumer displays that and counts, groups or routes on the
+  fields — rather than regexing `line \d+ TS\d+` back out of prose, which is what the flattened form
+  made every consumer do. The typed record existed upstream all along and was discarded at render
+  time.
+
+### API gaps filled
+
+- **`ToolCheckReport` / `ToolCheckDiagnostic` and `renderToolCheck`.** The report shape above, plus
+  the one renderer that turns it into the text a model repairs from. The renderer is in `plugin-api`
+  because two packages render one report — the node checker that produces it, and any consumer
+  putting it in front of whoever wrote the code — and the overflow line is precisely the part worth
+  having in one place.
+
+### Optional
+
+#### tool-store
+
+- **A store tool declares one contract arm per action, so a call narrows its result.** It emitted one
+  arm carrying two unions, which `ToolProxy` turns into a single call signature with nothing to
+  overload: the declared result was the union across all five actions, and no action's own fields were
+  reachable without a guard. Since a cast is barred by the check gate, a caller could not write correct
+  code against a store tool at all — the workaround was to flatten the document shape into one record
+  with every field optional, losing the modelling the contract exists to carry. Compile-time only; the
+  runtime validator discriminated on `action` either way.
+- **`set` accepts and ignores `id`/`version`.** `get` handed back a document carrying `version` and
+  sending it straight to `set` was rejected as an unexpected property, so every update had to be
+  rebuilt field by field — and `set` replaces, so whatever the rebuild forgot was silently deleted. The
+  document type is now emitted twice: present on results, optional on `data`. The executor already
+  minted a fresh version and took `id` from the parameter, so nothing about a write changed.
+- **`set` is described as create-or-replace, not "upsert".** The executor never read the existing
+  document, so a partial `set` deleted every field it omitted. Merging stays out of the store —
+  JS merge semantics are underdetermined, so it is a policy of the consumer — and the description names
+  the read-modify-write instead.
+- **A shape that yields no document type is refused at create/expose, rather than degrading silently.**
+  It fell back to `Record<string, unknown>`: a document of anything, which validates anything, so the
+  store appeared to work and checked nothing. Four faults are named separately — no declaration, an
+  unmatched `{`, an alias with nothing after `=`, and an empty body (`interface X extends Y {}` matches
+  but only the braces are inlined, so the base's members are lost). An already-persisted def warns
+  instead, so an existing store never loses its tool at boot.
+
+#### tool-types
+
+- **A cast-gate finding is labelled `CAST-GATE` wherever it is rendered.** The detail renderer honoured
+  the synthetic flag and the overflow summary did not, so one rule had two names decided only by
+  position in the list — and the second, `TS90003`, is not a tsc error code at all, so a reader who
+  looked it up concluded the compiler had no such code. The "likely cascading" advice is now dropped
+  when every hidden finding is structural: a cast-gate rule fires at one site and cascades from
+  nothing.
+
+#### function-tools
+
+- **A function defined without a type-check is marked `definedUnchecked`** in `list` and on each
+  `check` row. `define` said "(type-check skipped)" once, in the moment, and nothing afterwards knew —
+  so a `noTypeCheck` definition was indistinguishable from one that passed, and the errors it hid
+  surfaced much later as failures that had been latent all along. Both bypass routes set it, the
+  explicit flag and the implicit "no checker available here". It records the provenance of the
+  definition, so a later passing `check` deliberately does not clear it.
+
 ## 0.4.14
 
 ### Optional

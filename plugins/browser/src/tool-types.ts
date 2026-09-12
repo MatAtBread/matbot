@@ -1,4 +1,4 @@
-import type { MatbotMachine, ToolTypeIndex } from '@matatbread/matbot-plugin-api';
+import type { MatbotMachine, ToolCheckReport, ToolTypeIndex } from '@matatbread/matbot-plugin-api';
 
 // A browser ToolTypeIndex. The node one (@matatbread/matbot-tool-types) runs the real TypeScript compiler
 // over each tool's on-disk source to recover its `ToolContracts` augmentation; the browser has neither the
@@ -204,7 +204,9 @@ class BrowserToolTypeIndex implements ToolTypeIndex {
       + `declare const context: import('@matatbread/matbot-plugin-api').ComposedCallContext;\n`;
   }
 
-  async check(): Promise<string[]> { return []; }
+  // No TypeScript program here, so nothing can be checked — reported as a clean, empty report rather
+  // than as a refusal, matching the rest of this index's degrade-don't-fail behaviour in the browser.
+  async check(): Promise<ToolCheckReport> { return { ok: true, total: 0, diagnostics: [] }; }
 
   async wireContracts(): Promise<Record<string, { params: string; result: string }>> {
     const out: Record<string, { params: string; result: string }> = {};
