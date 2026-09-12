@@ -126,6 +126,32 @@ async function storeHasData(services: MatbotMachine, namespace: string): Promise
   return res.items.length > 0;
 }
 
+/**
+ * The key a write addresses, or why it cannot be answered.
+ *
+ * ONE invariant: an `id` inside `data` must not contradict the key. The key is always the top-level
+ * `id` (minted when absent), and `{ ...data, id }` writes it into the body, so the two can never
+ * disagree in storage — which is exactly why a disagreement in the CALL has to be refused rather than
+ * resolved. Both ways of resolving it are silent and lossy: discarding `data.id` writes the caller's
+ * edit to a document they did not name, and honouring it writes to one they did not name either.
+ *
+ * `{ ...doc }` carries the id it was read with, so both refusals are reachable from the natural
+ * round-trip, and both name the two repairs: pass the id as the key, or blank it in `data`. An absent
+ * or `undefined` `data.id` states no opinion — which is what makes `{ ...doc, id: undefined }` the way
+ * to say "copy this".
+ */
+export function writeDestination(
+  inputId: string | undefined, data: Record<string, unknown>,
+): { id: string } | { error: string } {
+  const carried = typeof data['id'] === 'string' ? data['id'] : undefined;
+  const id      = inputId ?? crypto.randomUUID();
+  if (carried === undefined || carried === id) return { id };
+  const q = (v: string): string => JSON.stringify(v);
+  return { error: inputId === undefined
+    ? `"data" carries id ${q(carried)} but no top-level "id" was given, so this would create a NEW document under a minted id and leave ${q(carried)} untouched. Pass "id": ${q(carried)} to write that document, or set "id" to undefined in "data" to copy it into a new one.`
+    : `"data" carries id ${q(carried)} but this write addresses ${q(id)} — they must agree. Pass "id": ${q(carried)} to write that document, or set "id" to undefined in "data" to write to ${q(id)}.` };
+}
+
 // ── generated per-store tool: actions map directly onto Store<T> ─────────────────
 
 interface ActionInput {
@@ -193,11 +219,15 @@ function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Sto
       'written: give one to create or replace at that id, and omit it to create a new one under a ' +
       'minted id. To change one field of an existing document, `get` it first and send the whole thing ' +
       'back with that field changed.\n\n' +
-      'A document you read back carries its own `id`, so sending it as `data` with NO top-level `id` is ' +
-      'refused rather than guessed at — it reads equally as "replace this" and "copy it". Pass the ' +
-      "document's `id` as the top-level `id` to replace it, or remove `id` from `data` to copy it. A " +
-      'top-level `id` that differs from the one in `data` is not ambiguous: it copies the document to ' +
-      'that id.\n\n' +
+      'An `id` inside `data` must AGREE with that key — a document you read back carries its own `id`, ' +
+      'so sending it straight to `set` states which document it is. A disagreement is refused rather ' +
+      'than guessed at, because both ways of resolving it are silent and lossy. To REPLACE the document ' +
+      'you read, pass its `id` as the top-level `id`. To COPY it — to a new document, or to another id ' +
+      '— blank the one it carries:\n' +
+      '```ts\n' +
+      "await tool." + actionToolName(def.namespace) + "({ action: 'set', data: { ...doc, id: undefined } });          // copy to a new id\n" +
+      "await tool." + actionToolName(def.namespace) + "({ action: 'set', id: 'other', data: { ...doc, id: undefined } });  // copy to \"other\"\n" +
+      '```\n\n' +
       'The `query` action takes the entire grammar in ONE `query` parameter. Every key below nests ' +
       'inside it and never sits beside `action`:\n' +
       '```json\n' +
@@ -261,20 +291,9 @@ function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Sto
           }
           case 'set': {
             if (!input.data) { yield { type: 'error', message: 'set requires "data".' }; return; }
-            // `{ ...doc }` carries the id the document was read with, so a `set` with an id in `data`
-            // and none beside `action` reads two ways — "replace that document" and "copy it to a new
-            // one" — and NEITHER can be picked safely. Minting a fresh id loses the edit (a silent
-            // duplicate, the original untouched); honouring the carried one loses the original (a
-            // silent overwrite where a copy was meant). So it is refused, naming both repairs. A
-            // top-level `id` that DIFFERS from the carried one is not ambiguous — it is the explicit
-            // "copy this document to that id" — and wins, as the description says.
-            //   `cas` needs no equivalent: it errors when `id` is absent rather than inventing one.
-            const carried = typeof input.data['id'] === 'string' ? input.data['id'] : undefined;
-            if (input.id === undefined && carried !== undefined) {
-              yield { type: 'error', message: `set: "data" carries id ${JSON.stringify(carried)} but no top-level "id" was given, and the two readings differ. To REPLACE that document pass "id": ${JSON.stringify(carried)}; to CREATE a new one remove "id" from "data".` };
-              return;
-            }
-            const id  = input.id ?? crypto.randomUUID();
+            const dest = writeDestination(input.id, input.data);
+            if ('error' in dest) { yield { type: 'error', message: `set: ${dest.error}` }; return; }
+            const id = dest.id;
             const rec: StoreRecord = { ...input.data, id, version: crypto.randomUUID() };
             await store.set(id, rec);
             yield { type: 'result', value: rec };
@@ -284,6 +303,10 @@ function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Sto
             if (!input.id)       { yield { type: 'error', message: 'cas requires "id".' }; return; }
             if (!input.expected) { yield { type: 'error', message: 'cas requires "expected" (the version you last read).' }; return; }
             if (!input.data)     { yield { type: 'error', message: 'cas requires "data".' }; return; }
+            // Same invariant as `set` — `cas` takes the identical `data`, and leaving it to discard a
+            // contradicting `data.id` silently would restore the asymmetry that removal just closed.
+            const casDest = writeDestination(input.id, input.data);
+            if ('error' in casDest) { yield { type: 'error', message: `cas: ${casDest.error}` }; return; }
             const next: StoreRecord = { ...input.data, id: input.id, version: crypto.randomUUID() };
             const res = await store.cas(input.id, input.expected, next);
             yield { type: 'result', value: res };

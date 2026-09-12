@@ -65,10 +65,14 @@ churn and less likely to affect a consumer who doesn't use them.
   (`{ text: string } Stored per user.`) — accepted at create, unparseable by the time anything downstream
   read it. The alias's end is now found by scanning the type expression (units joined by `|`/`&`, with
   `<…>`/`[…]` suffixes) rather than by reading to the next `;` or the end.
-- **`set` refuses a document whose `data` carries an `id` when no top-level `id` is given.** It reads
-  equally as "replace that document" and "copy it", and neither can be picked safely — minting a fresh id
-  loses the edit, honouring the carried one loses the original. Both repairs are named in the error. A
-  top-level `id` that differs is not ambiguous and still copies to that id.
+- **An `id` inside `data` must agree with the key, on `set` and `cas`.** The key is the top-level `id`
+  (minted when absent) and is written into the body, so the two can never disagree in storage — which is
+  why a disagreement in the CALL is refused rather than resolved: discarding `data.id` writes the edit to
+  a document the caller did not name, and honouring it writes to one they did not name either. Both were
+  reachable from the natural round-trip, since `{ ...doc }` carries the id it was read with, and one of
+  them was previously silent. The error names the two repairs — pass the id as the key, or blank it in
+  `data` — and an absent or `undefined` `data.id` states no opinion, which makes
+  `{ ...doc, id: undefined }` the way to say "copy this".
 - **A store tool declares one contract arm per action, so a call narrows its result.** It emitted one
   arm carrying two unions, which `ToolProxy` turns into a single call signature with nothing to
   overload: the declared result was the union across all five actions, and no action's own fields were
