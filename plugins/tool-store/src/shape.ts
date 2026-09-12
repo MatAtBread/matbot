@@ -80,13 +80,48 @@ export function shapeName(shape: string): string | undefined {
  * type (so the dts can import it), not to inline it here.
  */
 export function shapeType(shape: string): string {
+  return parseShape(shape).type;
+}
+
+/** The outcome of reading a shape: the inline type, plus why it is not the author's if it isn't. */
+export interface ShapeParse {
+  /** The shape as an inline structural type — `Record<string, unknown>` when nothing usable was read. */
+  type:   string;
+  /** Why no usable type was read; `undefined` when one was. The caller decides whether that is fatal. */
+  fault?: string;
+}
+
+/**
+ * As {@link shapeType}, but saying why when the answer is not the author's type.
+ *
+ * The fallback is a plausible-looking contract — a document of anything, which validates everything —
+ * so a shape that failed to parse produces a store that works and checks nothing, and the only symptom
+ * is types that are quietly useless. Silence here cost an hour of someone's debugging. Nothing in this
+ * module decides what to do about a fault: a boundary that has an author present refuses, and a
+ * restart reading an already-persisted def warns.
+ */
+export function parseShape(shape: string): ShapeParse {
   const s = withoutComments(shape);
+  const fallback = 'Record<string, unknown>';
 
   const iface = s.match(/\binterface\s+\w+\s*(?:extends\s+[^{]+)?\{/);
   if (iface !== null) {
     const open  = (iface.index ?? 0) + iface[0].length - 1;
     const close = matchBrace(s, open);
-    if (close !== -1) return collapse(s.slice(open, close + 1));
+    if (close === -1) return { type: fallback, fault: 'the interface body opens with `{` that has no matching `}`.' };
+    const body = collapse(s.slice(open, close + 1));
+    // An empty body is a parse that SUCCEEDED and still carries nothing. The form that reaches here is
+    // `interface X extends Y {}`: the base is matched but not resolved — only the braces are inlined —
+    // so the emitted document type is `{}`, which describes no document at all.
+    if (/^\{\s*\}$/.test(body)) {
+      return {
+        type: fallback,
+        fault: iface[0].includes('extends')
+          ? 'the interface body is empty and `extends` is not resolved — only the braces are inlined, so the base type’s members are lost. Declare the members literally in this shape, or export the base type so it can be referenced by name.'
+          : 'the interface declares no members, so it describes no document.',
+      };
+    }
+    return { type: body };
   }
 
   const alias = s.match(/\btype\s+\w+\s*=\s*/);
@@ -94,8 +129,9 @@ export function shapeType(shape: string): string {
     const rest = s.slice((alias.index ?? 0) + alias[0].length);
     const end  = aliasEnd(rest);
     const text = collapse(end === -1 ? rest : rest.slice(0, end));
-    if (text !== '') return text;
+    if (text !== '') return { type: text };
+    return { type: fallback, fault: 'the type alias has nothing on the right of `=`.' };
   }
 
-  return 'Record<string, unknown>';
+  return { type: fallback, fault: 'no `interface X { … }` or `type X = …` declaration was found. Give one, with its members written out — they are inlined into the store’s tool contract, so a type declared elsewhere cannot be referenced by name.' };
 }

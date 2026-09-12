@@ -3,7 +3,7 @@ import type {
   MatbotPluginSpec, MatbotMachine, Tool, ToolEvent, ToolContract, ToolResultOf, Store, StoreQuery,
 } from '@matatbread/matbot-plugin-api';
 import type { StoreDef, StoreRecord } from './types.js';
-import { shapeName, shapeType } from './shape.js';
+import { parseShape, shapeName, shapeType } from './shape.js';
 
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
@@ -33,6 +33,12 @@ async function listDefs(meta: Store<StoreDef>): Promise<StoreDef[]> {
 }
 
 function registerStoreTool(services: MatbotMachine, def: StoreDef): void {
+  // A def persisted before the shape was checked — or seeded programmatically — still registers, since
+  // refusing here would take an existing store's tool away at boot. It says so once instead.
+  const { fault } = parseShape(def.shape);
+  if (fault !== undefined) {
+    console.warn(`[tool-store] Store "${def.namespace}" has an unreadable shape, so its documents are typed \`Record<string, unknown>\` and nothing about them is checked: ${fault}\n`);
+  }
   services.tools.remove(actionToolName(def.namespace));
   services.tools.register(makeStoreTool(services.self?.name, def, services.createStore<StoreRecord>(def.namespace)));
 }
@@ -73,6 +79,20 @@ export async function defineStore(
 // (`profile-registry`, `plugin-manifest`, `remembered_facts`).
 const NAMESPACE_RE  = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 const NAMESPACE_MAX = 64;
+
+/**
+ * The shape is LLM-authored TypeScript and this is where it arrives, so it is read here rather than
+ * left to degrade later. A shape that does not parse yields `Record<string, unknown>`: a document of
+ * anything, which validates anything — a store that appears to work and checks nothing, whose only
+ * symptom is types that are quietly useless. Refused at the boundary, where the author is present and
+ * the message can name the fix; an already-persisted def only warns (see `registerStoreTool`).
+ */
+function shapeFault(shape: unknown): string | undefined {
+  if (typeof shape !== 'string' || shape.trim() === '') return 'a "shape" is required — the document type as TypeScript, e.g. `interface Note { title: string; body?: string }`.';
+  const { fault } = parseShape(shape);
+  return fault === undefined ? undefined
+    : `The "shape" could not be read as a document type: ${fault}`;
+}
 
 function namespaceError(namespace: string): string | undefined {
   if (namespace.length > NAMESPACE_MAX)
@@ -341,6 +361,8 @@ function makeStoreActionTool(services: MatbotMachine, meta: Store<StoreDef>): To
             if (!input.namespace) { yield { type: 'error', message: 'create requires "namespace".' }; return; }
             const invalid = namespaceError(input.namespace);
             if (invalid !== undefined) { yield { type: 'error', message: invalid }; return; }
+            const badShape = shapeFault(input.shape);
+            if (badShape !== undefined) { yield { type: 'error', message: badShape }; return; }
             if (input.namespace === META_NAMESPACE) { yield { type: 'error', message: `"${META_NAMESPACE}" is reserved.` }; return; }
             if (await meta.get(input.namespace) || await storeHasData(services, input.namespace)) {
               yield { type: 'error', message: `Store "${input.namespace}" already exists. Use action "expose".` };
@@ -364,6 +386,8 @@ function makeStoreActionTool(services: MatbotMachine, meta: Store<StoreDef>): To
             if (!input.namespace) { yield { type: 'error', message: 'expose requires "namespace".' }; return; }
             const badExpose = namespaceError(input.namespace);
             if (badExpose !== undefined) { yield { type: 'error', message: badExpose }; return; }
+            const badExposeShape = shapeFault(input.shape);
+            if (badExposeShape !== undefined) { yield { type: 'error', message: badExposeShape }; return; }
             if (input.namespace === META_NAMESPACE) { yield { type: 'error', message: `"${META_NAMESPACE}" is reserved.` }; return; }
             if (!(await meta.get(input.namespace)) && !(await storeHasData(services, input.namespace))) {
               yield { type: 'error', message: `No store "${input.namespace}" found. Use action "create" to make a new one.` };
