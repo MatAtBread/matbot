@@ -117,7 +117,7 @@ interface ActionInput {
 }
 
 // A tool over one managed store whose verbs are the Store<T> interface (get/set/cas/delete/query),
-// with set doubling as upsert. Loose schema (action + the union of every action's optional fields);
+// with set creating or replacing. Loose schema (action + the union of every action's optional fields);
 // the executor enforces per-action requirements, matching the multi-action convention in CLAUDE.md.
 function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Store<StoreRecord>): Tool {
   const typeGuess = shapeName(def.shape) ?? 'Record<string, unknown>';   // the shape's NAME, for prose
@@ -129,8 +129,12 @@ function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Sto
       `Access the "${def.namespace}" store — ${def.description}\n\n` +
       'Documents have this shape:\n' +
       '```ts\n' + def.shape + '\n```\n\n' +
-      'Actions map onto the matbot `Store<' + typeGuess + '>` interface (get/set/cas/delete/query), with ' +
-      '`set` doubling as upsert (omit `id` to create) and `query` matching all when omitted.\n\n' +
+      'Actions map onto the matbot `Store<' + typeGuess + '>` interface (get/set/cas/delete/query); ' +
+      '`query` matches all when omitted.\n\n' +
+      '`set` CREATES OR REPLACES — it is never a merge. The document you send becomes the whole ' +
+      'document, and every field you omit is deleted (omit `id` to create a new one). To change one ' +
+      'field of an existing document, `get` it first and send the whole thing back with that field ' +
+      'changed.\n\n' +
       'The `query` action takes the entire grammar in ONE `query` parameter. Every key below nests ' +
       'inside it and never sits beside `action`:\n' +
       '```json\n' +
