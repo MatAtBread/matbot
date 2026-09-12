@@ -43,18 +43,24 @@ function withoutComments(s: string): string {
   return out;
 }
 
-/** Walk from the `{` at `open` to its matching `}`, skipping strings; -1 if unbalanced. */
-function matchBrace(s: string, open: number): number {
+const CLOSER: Record<string, string> = { '{': '}', '(': ')', '[': ']', '<': '>' };
+
+/** Walk from the opener at `open` to its match, skipping comments and strings; -1 if unbalanced. */
+function matchBracket(s: string, open: number): number {
+  const o = s[open];
+  const c = o === undefined ? undefined : CLOSER[o];
+  if (c === undefined) return -1;
   let depth = 0;
   for (let i = open; i < s.length; i++) {
     const inert = inertEnd(s, i);
     if (inert >= 0) { i = inert; continue; }
-    const c = s[i];
-    if (c === '{') depth++;
-    else if (c === '}') { depth--; if (depth === 0) return i; }
+    if (s[i] === '=' && s[i + 1] === '>') { i++; continue; }   // an arrow, not a closing angle
+    if (s[i] === o) depth++;
+    else if (s[i] === c) { depth--; if (depth === 0) return i; }
   }
   return -1;
 }
+
 
 /**
  * Index of the `{` that opens an interface body: the first brace at angle-bracket depth 0 after the
@@ -76,22 +82,73 @@ function interfaceBodyStart(s: string, from: number): number {
   return -1;
 }
 
-/** Index of the first `;` at bracket depth 0 — a type alias's terminator, not a member separator. */
-function aliasEnd(s: string): number {
+const WORD = /[A-Za-z0-9_$.]/;
+
+/**
+ * Index just past the type expression starting at `from` — units (`{…}`, `(…)`, a name, a string literal)
+ * joined by `|`/`&`, with `<…>`/`[…]` suffixes. It STOPS at the first thing that cannot continue a type,
+ * which is what lets the caller see that something follows.
+ *
+ * Reading to the end of the input instead is how `type Note = { text: string }` followed by a line of
+ * prose became the document type `{ text: string } Stored per user.` — emitted with no fault, accepted at
+ * create, and unparseable by the time anything downstream read it.
+ */
+function typeExprEnd(s: string, from: number): number {
+  let i = from;
+  const skipWs = (): void => { while (i < s.length && /\s/.test(s[i] ?? '')) i++; };
+  for (;;) {
+    skipWs();
+    if (i >= s.length) return i;
+    const c = s[i] ?? '';
+    if (c === '|' || c === '&') { i++; continue; }            // a leading or joining connector
+    if (c in CLOSER) {
+      const close = matchBracket(s, i);
+      if (close === -1) return s.length;                      // unbalanced: the caller's own check reports it
+      i = close + 1;
+    } else {
+      const inert = inertEnd(s, i);
+      if (inert >= 0) i = inert + 1;                          // a string-literal type
+      else if (WORD.test(c)) { while (i < s.length && WORD.test(s[i] ?? '')) i++; }
+      else return i;                                          // not something a type can start with
+    }
+    for (;;) {                                                // `<…>` / `[…]` suffixes bind to the unit
+      const mark = i;
+      skipWs();
+      const n = s[i] ?? '';
+      if ((n === '<' || n === '[') && matchBracket(s, i) !== -1) { i = matchBracket(s, i) + 1; continue; }
+      i = mark; break;
+    }
+    const mark = i;                                           // only a connector continues the expression
+    skipWs();
+    const n = s[i] ?? '';
+    if (n === '|' || n === '&') { i++; continue; }
+    i = mark;
+    return i;
+  }
+}
+
+/**
+ * Where each `interface X` / `type X` declaration starts, at depth 0 and outside comments and strings.
+ *
+ * A shape is ONE document type, not a module, and this is what enforces it. Taking the first declaration
+ * and ignoring the rest is silent and confidently wrong: two interfaces emitted the first one's body, and
+ * `type Id = string; type Note = { id: Id }` emitted `string` — the HELPER type as the document.
+ */
+function declarationStarts(s: string): number[] {
+  const out: number[] = [];
   let depth = 0;
   for (let i = 0; i < s.length; i++) {
     const inert = inertEnd(s, i);
     if (inert >= 0) { i = inert; continue; }
-    const c = s[i];
-    // `=>` is a function type's arrow. Counting its `>` as a closing bracket drops the depth a level
-    // early, so the next `;` inside the braces reads as the alias terminator and the type is truncated
-    // mid-member — emitted unbalanced, with no fault, which the contract then refuses to parse.
-    if (c === '=' && s[i + 1] === '>') { i++; continue; }
-    if (c === '{' || c === '(' || c === '[' || c === '<') depth++;
-    else if (c === '}' || c === ')' || c === ']' || c === '>') { if (depth > 0) depth--; }
-    else if (c === ';' && depth === 0) return i;
+    const c = s[i] ?? '';
+    if (c === '{' || c === '(' || c === '[') depth++;
+    else if (c === '}' || c === ')' || c === ']') { if (depth > 0) depth--; }
+    else if (depth === 0 && /[A-Za-z_$]/.test(c) && !WORD.test(s[i - 1] ?? ' ')) {
+      const m = /^(?:interface|type)\s+\w+/.exec(s.slice(i));
+      if (m !== null) { out.push(i); i += m[0].length - 1; }
+    }
   }
-  return -1;
+  return out;
 }
 
 const collapse = (s: string): string => s.replace(/\s+/g, ' ').trim();
@@ -134,11 +191,32 @@ export function parseShape(shape: string): ShapeParse {
   const s = withoutComments(shape);
   const fallback = 'Record<string, unknown>';
 
+  // ONE declaration, and nothing after it. Both halves are the same rule — the shape is the document
+  // type, not a module — and both were silently violable: a second declaration was ignored (the FIRST
+  // won, so `type Id = string; type Note = { id: Id }` emitted `string`), and trailing prose was swept
+  // into the type. Each produced a confident, wrong contract with no fault.
+  const decls = declarationStarts(s);
+  if (decls.length > 1) {
+    const names = decls.map(i => /^(?:interface|type)\s+(\w+)/.exec(s.slice(i))?.[1] ?? '?');
+    return {
+      type: fallback,
+      fault: `the shape declares ${decls.length} types (${names.join(', ')}) — it must be exactly ONE. `
+        + 'Its members are inlined into the store\u2019s tool contract, so a type declared alongside cannot be '
+        + `referenced by name: write ${names[names.length - 1] ?? 'the document type'}'s members out in full.`,
+    };
+  }
+  const trailing = (from: number): string | undefined => {
+    const rest = s.slice(from).trim();
+    return rest === '' ? undefined
+      : `the declaration is followed by text that is not part of it (${JSON.stringify(collapse(rest).slice(0, 40))}). `
+        + 'A shape is one type declaration and nothing else; put any note in a `//` comment.';
+  };
+
   const iface = s.match(/\binterface\s+\w+/);
   if (iface !== null) {
     const open = interfaceBodyStart(s, (iface.index ?? 0) + iface[0].length);
     if (open === -1) return { type: fallback, fault: 'the interface declaration is not followed by a `{ … }` body.' };
-    const close = matchBrace(s, open);
+    const close = matchBracket(s, open);
     if (close === -1) return { type: fallback, fault: 'the interface body opens with `{` that has no matching `}`.' };
     const body = collapse(s.slice(open, close + 1));
     // An empty body is a parse that SUCCEEDED and still carries nothing. The form that reaches here is
@@ -152,16 +230,21 @@ export function parseShape(shape: string): ShapeParse {
           : 'the interface declares no members, so it describes no document.',
       };
     }
+    const after = trailing(close + 1);
+    if (after !== undefined) return { type: fallback, fault: after };
     return { type: body };
   }
 
   const alias = s.match(/\btype\s+\w+\s*=\s*/);
   if (alias !== null) {
-    const rest = s.slice((alias.index ?? 0) + alias[0].length);
-    const end  = aliasEnd(rest);
-    const text = collapse(end === -1 ? rest : rest.slice(0, end));
-    if (text !== '') return { type: text };
-    return { type: fallback, fault: 'the type alias has nothing on the right of `=`.' };
+    const from = (alias.index ?? 0) + alias[0].length;
+    const end  = typeExprEnd(s, from);
+    const text = collapse(s.slice(from, end));
+    if (text === '') return { type: fallback, fault: 'the type alias has nothing on the right of `=`.' };
+    const rest  = s.slice(end).trimStart();
+    const after = trailing(end + (rest.startsWith(';') ? s.slice(end).indexOf(';') + 1 : 0));
+    if (after !== undefined) return { type: fallback, fault: after };
+    return { type: text };
   }
 
   return { type: fallback, fault: 'no `interface X { … }` or `type X = …` declaration was found. Give one, with its members written out — they are inlined into the store’s tool contract, so a type declared elsewhere cannot be referenced by name.' };

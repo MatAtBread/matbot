@@ -110,3 +110,43 @@ test('a string literal type containing // still survives', () => {
 test('an interface with no body at all reports a fault', () => {
   assert.match(parseShape('interface Note').fault ?? '', /not followed by a `\{ … \}` body/);
 });
+
+// A shape is ONE document type, not a module. Both halves of that rule were silently violable, and each
+// produced a confident wrong contract rather than a refusal.
+
+test('a second declaration is refused, not ignored', () => {
+  // The FIRST won, so `type Id = string; type Note = { id: Id }` emitted `string` — the helper type as
+  // the document — and two interfaces emitted the wrong one's body.
+  const helper = parseShape('type Id = string;\ntype Note = { id: Id }');
+  assert.equal(helper.type, 'Record<string, unknown>');
+  assert.match(helper.fault ?? '', /declares 2 types \(Id, Note\)/);
+
+  assert.match(parseShape('interface Address { street: string }\ninterface Note { text: string }').fault ?? '',
+               /declares 2 types \(Address, Note\)/);
+});
+
+test('text after the declaration is refused, not swept into the type', () => {
+  // An un-terminated alias read to end-of-input, so trailing prose became part of the document type —
+  // accepted at create, then unparseable downstream with nothing said to the author.
+  const a = parseShape('type Note = { text: string }\nStored per user.');
+  assert.equal(a.type, 'Record<string, unknown>');
+  assert.match(a.fault ?? '', /followed by text that is not part of it/);
+
+  assert.match(parseShape('type Note = string\nStored per user.').fault ?? '', /followed by text/);
+  assert.match(parseShape('interface Note { text: string }\nStored per user.').fault ?? '', /followed by text/);
+});
+
+test('the type-expression scanner accepts every legal shape it must', () => {
+  // The scanner decides where a type ENDS, so each of these is a way it could stop too early.
+  const ok = (shape: string, want: string): void => {
+    const r = parseShape(shape);
+    assert.equal(r.fault, undefined, `${shape} → ${r.fault ?? ''}`);
+    assert.equal(r.type, want);
+  };
+  ok('type Note = { text: string }',                      '{ text: string }');          // no terminator
+  ok('type D = { a: string }[];',                         '{ a: string }[]');           // array suffix
+  ok('type D = Record<string, number>;',                  'Record<string, number>');    // generic suffix
+  ok('type D = { k: "a" } | { k: "b" };',                  '{ k: "a" } | { k: "b" }');   // union
+  ok('type D = { f: (x: number) => void; g: string };',   '{ f: (x: number) => void; g: string }');
+  ok('interface Site extends Base<{ a: string }> { b: number }', '{ b: number }');
+});

@@ -58,6 +58,17 @@ churn and less likely to affect a consumer who doesn't use them.
   now found by scanning at angle-depth 0, not by a `[^{]+` pattern that stops inside the heritage clause);
   and `=>` in a function type no longer counts as a closing angle bracket, which had truncated an alias
   mid-member and emitted it unbalanced. Each produced a wrong document type and reported no fault.
+- **A shape must be ONE declaration with nothing after it, and says so when it isn't.** Both halves were
+  silently violable and each emitted a confident wrong contract: a second declaration was ignored with the
+  FIRST winning (`type Id = string; type Note = { id: Id }` emitted `string` — the helper type as the
+  document), and an unterminated alias read to end-of-input, so trailing prose became part of the type
+  (`{ text: string } Stored per user.`) — accepted at create, unparseable by the time anything downstream
+  read it. The alias's end is now found by scanning the type expression (units joined by `|`/`&`, with
+  `<…>`/`[…]` suffixes) rather than by reading to the next `;` or the end.
+- **`set` refuses a document whose `data` carries an `id` when no top-level `id` is given.** It reads
+  equally as "replace that document" and "copy it", and neither can be picked safely — minting a fresh id
+  loses the edit, honouring the carried one loses the original. Both repairs are named in the error. A
+  top-level `id` that differs is not ambiguous and still copies to that id.
 - **A store tool declares one contract arm per action, so a call narrows its result.** It emitted one
   arm carrying two unions, which `ToolProxy` turns into a single call signature with nothing to
   overload: the declared result was the union across all five actions, and no action's own fields were
@@ -101,6 +112,9 @@ churn and less likely to affect a consumer who doesn't use them.
 
 #### function-tools
 
+- **`check` reports `checked` alongside `ok`, on the result as well as on each row.** Where no
+  type-checker can run, every row comes back clean, and a bare `ok: true` reported success for work
+  nothing did.
 - **A function defined without a type-check is marked `definedUnchecked`** in `list` and on each
   `check` row. `define` said "(type-check skipped)" once, in the moment, and nothing afterwards knew —
   so a `noTypeCheck` definition was indistinguishable from one that passed, and the errors it hid

@@ -66,7 +66,7 @@ declare module '@matatbread/matbot-plugin-api' {
     tool_function:
       | ToolContract<{ message: string; tool: string; parameters: ParsedParam[] }, { action: 'define'; definition: string; description?: string; noTypeCheck?: boolean }>
       | ToolContract<unknown,                                                      { action: 'lambda'; definition: string; params?: object; noTypeCheck?: boolean }>
-      | ToolContract<{ ok: boolean; results: CheckResult[] },                      { action: 'check';  name?: string }>
+      | ToolContract<{ ok: boolean; checked: boolean; results: CheckResult[] },    { action: 'check';  name?: string }>
       | ToolContract<{ functions: FunctionRecord[] },                             { action: 'list'   }>
       | ToolContract<{ available: boolean; dts: string },                         { action: 'types'  }>
       | ToolContract<{ message: string },                                         { action: 'remove'; name: string }>;
@@ -333,6 +333,8 @@ ACTIONS
            \`label\` such as \`TS2339\` or \`CAST-GATE\` to group on), and \`omitted\` the tally of any the
            detail cap hid. Fix a failure by re-defining that function. A row also carries
            \`definedUnchecked: true\` if that function was never type-checked when it was defined.
+           READ \`ok\` TOGETHER WITH \`checked\`, on the result and on each row: \`checked: false\` means
+           no type-checker could run here, so \`ok: true\` says only that nothing was examined.
   list   — Show the functions you've defined, with their source. \`definedUnchecked: true\` marks one that
            was registered without a type-check (it was defined with \`noTypeCheck\`, or no checker was
            available) — run \`check\` on it, since a bypass hides errors that are still there.
@@ -455,7 +457,14 @@ function functionTool(machine: MatbotMachine, store: FunctionStore): Tool<ToolRe
             }
             try {
               const results = await store.check(act.name);
-              yield { type: 'result', value: { ok: results.every(r => r.ok), results } };
+              // `ok` is qualified by `checked` here exactly as it is on a row: where no type-checker can
+              // run (the browser registers an index that supplies types but checks nothing), every row
+              // comes back clean and a bare `ok: true` would report success for work nothing did.
+              yield { type: 'result', value: {
+                ok:      results.every(r => r.ok),
+                checked: results.every(r => r.checked),
+                results,
+              } };
             } catch (e) { yield errorEvent(e instanceof Error ? e.message : String(e)); }
             return;
           }
