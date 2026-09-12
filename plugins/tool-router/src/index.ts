@@ -13,13 +13,13 @@ import type { MatbotPluginSpec, Message, MessageContent, Tool, ToolPresenter, Pr
 // byte-stable between search/call events so the tools prefix caches. EAGER_FILL additionally pre-ranks the
 // current message into the working set (A/B). "Pins" are wide/low-Q fallbacks a ranker can't surface; they
 // ride along in every tool_search result as a floor, DERIVED per tool from description + inputSchema, never
-// name-listed. Hidden tools (trigger-driven, not model-facing) are never presented.
+// name-listed.
 
 const TAG = '[tool-router]';
 const SEARCH = 'tool_search';
 
 // ── Windowing config (tweak with experience) ────────────────────────────────────────
-// If the WHOLE library (minus hidden) plus tool_search fits in this many, present all of it — no windowing.
+// If the WHOLE library plus tool_search fits in this many, present all of it — no windowing.
 // Above it we window: tool_search + the working set. Raise/lower freely as the library grows.
 const TARGET_WINDOW = 20;
 // Threshold cull (priority 2 — bound the AVAILABLE set, not total context). The working set accumulates
@@ -38,12 +38,16 @@ const CULL_TARGET  = 12;
 // registry, so it composes with lean search). Annotated `boolean` (not the literal) so the checker keeps
 // both branches live. Flip to A/B the two.
 const EAGER_FILL: boolean = false;
-// There is deliberately NO hard-coded list of "wide"/pinned or "hidden" tool NAMES. A name like `http` or
-// `find_fact` is not a stable identifier of function — the implementing plugin may be absent, or another
-// plugin may register the same name with a different meaning. So which tools are "wide" (pinned) is DERIVED
-// per tool from its description + inputSchema (the only universal, plugin-agnostic surface — see the width
-// derivation in the extraction pass below), and `hidden` is a creation-time declaration of the synthetic-tool
-// generators (tool_function / skill_compiler), never a name list here.
+// There is deliberately NO hard-coded list of "wide"/pinned tool NAMES. A name like `http` or `find_fact`
+// is not a stable identifier of function — the implementing plugin may be absent, or another plugin may
+// register the same name with a different meaning. So which tools are "wide" (pinned) is DERIVED per tool
+// from its description + inputSchema (the only universal, plugin-agnostic surface — see the width
+// derivation in the extraction pass below), never a name list here.
+//
+// The same reasoning is why there is no set of tools declared internal. Presentation is this presenter's
+// judgement, made from what a tool says about itself; a name handed in from outside is a fact this file
+// cannot re-derive, check, or keep in step with a registry that changes under it. A function with only
+// internal value is better not registered as a tool at all than registered and then suppressed here.
 
 function textOf(content: readonly MessageContent[]): string {
   return content
@@ -237,15 +241,12 @@ export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,
 
   async setup(services) {
-    // Pin/hidden sets, DERIVED (never name-listed). `derivedWide` = tools the width derivation judged "open"
-    // (wide/low-Q — capability exceeds lexical footprint, so a ranker can't surface them → always present).
-    // `derivedHidden` = tools declared hidden at creation by tool_function/skill_compiler (trigger-driven,
-    // not model-facing). Populated from the per-tool judgement below and from its cache, so they are live
-    // even in sub-agents that skip the LLM warm-up.
-    const derivedWide   = new Set<string>();
-    const derivedHidden = new Set<string>();
-    const isPin    = (name: string): boolean => derivedWide.has(name);
-    const isHidden = (name: string): boolean => derivedHidden.has(name);
+    // Pin set, DERIVED (never name-listed): tools the width derivation judged "open" (wide/low-Q —
+    // capability exceeds lexical footprint, so a ranker can't surface them → always present). Populated
+    // from the per-tool judgement below and from its cache, so it is live even in sub-agents that skip the
+    // LLM warm-up.
+    const derivedWide = new Set<string>();
+    const isPin = (name: string): boolean => derivedWide.has(name);
 
     // BM25 index over the live registry; rebuilt lazily and invalidated when the tool set changes.
     interface Idx { df: Map<string, number>; avgdl: number; docs: Map<string, string[]>; n: number }
@@ -277,14 +278,14 @@ export const plugin: MatbotPluginSpec = {
 
     console.warn(`${TAG} active — windowed (target ${TARGET_WINDOW}); pins derived per-tool from descriptions.`);
 
-    // Nouns of every non-pinned, non-hidden tool, de-duped, form the tool_search catalogue line — priming
+    // Nouns of every non-pinned tool, de-duped, form the tool_search catalogue line — priming
     // the model on what the (possibly deferred) tail can be searched for. Rebuilt as extraction fills in.
     const nounsByTool = new Map<string, string>();
     let catalogLine = '';
     const rebuildCatalog = (): void => {
       const uniq = new Map<string, string>();
       for (const [name, nouns] of nounsByTool) {
-        if (name === SEARCH || isPin(name) || isHidden(name)) continue;
+        if (name === SEARCH || isPin(name)) continue;
         for (const raw of nouns.split(',')) {
           const n = raw.trim();
           if (n && !uniq.has(n.toLowerCase())) uniq.set(n.toLowerCase(), n);
@@ -316,7 +317,7 @@ searching over declining or improvising.`,
       executor: {
         async *execute(input) {
           const query   = queryOf(input);
-          const all     = services.tools.list().filter(t => t.name !== SEARCH && !isHidden(t.name));
+          const all     = services.tools.list().filter(t => t.name !== SEARCH);
           // Rank the whole library; keep the specialists that actually matched (score > 0 — drop the duds),
           // then ALWAYS append the derived-wide pins as a fallback floor. A pin has near-zero lexical overlap
           // with a specific query (bash won't match "convert video to gif"), so ranking alone can't surface
@@ -345,7 +346,7 @@ searching over declining or improvising.`,
     // Presenter — build the per-iteration window: `tool_search` + the WORKING SET (full specs, TS already
     // folded by session-runner). The working set = {tools called this session} ∪ {the latest search's
     // candidates}, both read back from the transcript. Hidden tools never appear. When the whole library
-    // fits the budget, present all of it (minus hidden).
+    // fits the budget, present all of it.
     const presenter: ToolPresenter = {
       present(tools: readonly Tool[], ctx: PresentContext): readonly Tool[] {
         try {
@@ -353,7 +354,7 @@ searching over declining or improvising.`,
           const byName = new Map(tools.map(t => [t.name, t]));
           const searchRaw = byName.get(SEARCH);
           const searchTool = searchRaw && catalogLine ? { ...searchRaw, description: `${searchRaw.description}\n\n${catalogLine}` } : searchRaw;
-          const candidates = tools.filter(t => t.name !== SEARCH && !isHidden(t.name));
+          const candidates = tools.filter(t => t.name !== SEARCH);
 
           let window: Tool[];
           if (candidates.length + (searchTool ? 1 : 0) <= TARGET_WINDOW) {
