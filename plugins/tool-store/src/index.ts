@@ -136,27 +136,49 @@ interface ActionInput {
   query?:    StoreQuery;
 }
 
+/**
+ * The generated tool's `toolContract` — ONE ARM PER ACTION, not one arm carrying two unions.
+ *
+ * `ToolProxy` turns a multi-arm entry into an overload set, which is what makes
+ * `await tool.x_action({ action: 'query' })` narrow to the query result. A single arm is a single
+ * signature, so the declared result was the union across all five actions and no action's own fields
+ * were reachable without a guard — and since a cast is barred by the check gate, a caller could not
+ * write correct code against a store tool at all. The workaround was to flatten the document shape into
+ * one record with every field optional, losing the modelling the contract exists to carry.
+ *
+ * Keep the arms `|`-joined and literal: build-dts reads them as a union type node and the wire
+ * projection splits on a top-level `|`, so neither tolerates an alias standing in for the union.
+ *
+ * `id` and `version` are the `Store` contract's, not the author's, so a declared shape usually omits
+ * them — but a read hands both back. Hence two forms of the document type: `stored` for results (both
+ * present, so `version` can be read to pass as `expected`) and `writable` for `data` (both optional, so
+ * a document just read goes straight back in). Accepted and IGNORED rather than honoured — the executor
+ * mints a fresh `version` on every write and takes `id` from the parameter.
+ *
+ * Each is wrapped WHOLE, not just around the shape: `&` binds tighter than `|` (a union shape) and `[]`
+ * binds tighter than `&`, so an unwrapped `stored[]` reads as `doc & ({ id; version }[])` — an
+ * intersection with an array whose element type has lost the document. It typechecks, and is wrong.
+ */
+export function storeToolContract(shape: string): string {
+  const doc      = shapeType(shape);
+  const stored   = `((${doc}) & { id: string; version: string })`;
+  const writable = `((${doc}) & { id?: string; version?: string })`;
+  return [
+    `ToolContract<${stored} | null, { action: 'get'; id: string }>`,
+    `ToolContract<${stored}, { action: 'set'; id?: string; data: ${writable} }>`,
+    `ToolContract<{ ok: true; doc: ${stored} } | { ok: false; current: ${stored} | null }`
+      + `, { action: 'cas'; id: string; expected: string; data: ${writable} }>`,
+    "ToolContract<{ deleted: boolean }, { action: 'delete'; id: string; expected?: string }>",
+    `ToolContract<{ items: ${stored}[]; total?: number; cursor?: string }`
+      + `, { action: 'query'; query?: StoreQuery }>`,
+  ].join(' | ');
+}
+
 // A tool over one managed store whose verbs are the Store<T> interface (get/set/cas/delete/query),
 // with set creating or replacing. Loose schema (action + the union of every action's optional fields);
 // the executor enforces per-action requirements, matching the multi-action convention in CLAUDE.md.
 function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Store<StoreRecord>): Tool {
   const typeGuess = shapeName(def.shape) ?? 'Record<string, unknown>';   // the shape's NAME, for prose
-  const doc       = shapeType(def.shape);                                // the shape as an inline type, for the toolContract
-  // `id` and `version` are the `Store` contract's, not the author's, so the declared shape usually
-  // omits them — but a read hands both back. Parenthesised because the shape may itself be a union and
-  // `&` binds tighter than `|`.
-  //   `stored`   — what a read returns: both present, so a caller can read `version` to pass as `expected`.
-  //   `writable` — what a write accepts: both OPTIONAL, so the document just read goes straight back in.
-  // Without the second, `get` returned the very field `set` rejected, and every update had to be
-  // rebuilt field by field — which, `set` being a replace, silently dropped whatever was forgotten.
-  // Accepted and ignored rather than honoured: the executor mints a fresh `version` on every write and
-  // takes `id` from the parameter, so neither can be set from `data` (`expected` is the concurrency
-  // control, and it is its own parameter).
-  // Both are wrapped whole, not just around `${doc}`: the shape may be a union and `&` binds tighter
-  // than `|`, while `[]` binds tighter than `&` — so an unwrapped `stored[]` reads as
-  // `doc & ({id;version}[])`, an intersection with an array whose ELEMENT type is missing the document.
-  const stored    = `((${doc}) & { id: string; version: string })`;
-  const writable  = `((${doc}) & { id?: string; version?: string })`;
   return {
     name: actionToolName(def.namespace),
     ...(pluginName !== undefined ? { pluginName } : {}),
@@ -221,23 +243,7 @@ function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Sto
     // to an augmentation arm (result, params) — which the tool-types index splices into the dts and flattens
     // for the wire. The result/data shape is inlined structurally (`doc`) so it references no name the dts
     // lacks; `StoreQuery` stays a name — it's a plugin-api export, so the dts imports it.
-    // ONE ARM PER ACTION, not one arm carrying two unions. `ToolProxy` turns a multi-arm entry into an
-    // overload set, which is what makes `await tool.x_action({ action: 'query' })` narrow to the query
-    // result; a single arm is a single signature, so the declared result was the union across all five
-    // actions and NO action's own fields were reachable without a guard. Since a cast is barred by the
-    // check gate, a caller could not write correct code against a store tool at all — the workaround
-    // was to flatten the document shape, which is the modelling the contract exists to carry.
-    //   Keep the arms `|`-joined and literal: build-dts reads them as a union type node and the wire
-    // projection splits on a top-level `|`, so neither tolerates an alias standing in for the union.
-    toolContract: [
-      "ToolContract<" + stored + " | null, { action: 'get'; id: string }>",
-      "ToolContract<" + stored + ", { action: 'set'; id?: string; data: " + writable + " }>",
-      "ToolContract<{ ok: true; doc: " + stored + " } | { ok: false; current: " + stored + " | null }" +
-        ", { action: 'cas'; id: string; expected: string; data: " + writable + " }>",
-      "ToolContract<{ deleted: boolean }, { action: 'delete'; id: string; expected?: string }>",
-      "ToolContract<{ items: " + stored + "[]; total?: number; cursor?: string }" +
-        ", { action: 'query'; query?: StoreQuery }>",
-    ].join(' | '),
+    toolContract: storeToolContract(def.shape),
     executor: {
       async *execute(rawInput: unknown): AsyncIterable<ToolEvent> {
         const input = (rawInput ?? {}) as ActionInput;
