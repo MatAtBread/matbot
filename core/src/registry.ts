@@ -61,14 +61,23 @@ async function resolveToolCollision(
   prompt:        PromptFn | undefined,
 ): Promise<boolean> {
   const owner = existingOwner !== undefined ? `"${existingOwner}"` : 'a built-in';
-  return (services.PermissionGate ?? askPermissionGate).decide({
+  const label = `Tool \`"${toolName}"\` is already registered by **${owner}**. Overwrite it with the one from **"${incomingOwner}"**?`;
+  const allowed = await (services.PermissionGate ?? askPermissionGate).decide({
     gate:     'tools.overwrite',
     subject:  toolName,
     // The incoming OWNER rides in the label rather than in a field of its own: a single `subject`
     // cannot also express "trust everything plugin foo registers", and no policy wants that yet.
-    label:    `Tool \`"${toolName}"\` is already registered by **${owner}**. Overwrite it with the one from **"${incomingOwner}"**?`,
+    label,
     fallback: true,
   }, prompt);
+  // Said out loud when nobody could be asked, as it was before the gate existed: a boot-time overwrite
+  // is the one decision here that proceeds with no human and no record of itself, and "my tool silently
+  // changed hands" is exactly the report this line answers. A policy that overwrites after ASKING
+  // needs no warning — the user just saw the question.
+  if (prompt === undefined) {
+    console.warn(`[matbot] ${label} — non-interactive, ${allowed ? 'overwriting' : 'keeping the existing tool'}.`);
+  }
+  return allowed;
 }
 
 // ── Version check ─────────────────────────────────────────────────────────────

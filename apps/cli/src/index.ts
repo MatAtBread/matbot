@@ -996,16 +996,21 @@ async function main(): Promise<void> {
   // now-gone impl. (bootBackend/bootFileStore are captured above, before the pre-scan, so a
   // config-supplied backend never poses as the host base.)
   // The installation's permission policy — consulted by every privileged call site (`ctx.gate`, and
-  // core's tool-collision decision). The boot default is the DEFAULT-GATE PLUGIN's own implementation
+  // core's tool-collision decision). The boot default is the default-gate package's own implementation
   // over its own settings namespace, not the bare asking gate plugin-api ships: the app decides its own
-  // base services, and this is the one that makes standing answers work out of the box — before the
-  // plugin's setup() has run, and on an install that never lists it. Loading the plugin registers the
-  // same policy over the same settings, and adds `gate_action`; unloading it reverts here, which is why
-  // this must be captured before anything can register over it.
+  // base services, and this is the one that makes standing answers work out of the box.
+  //
+  // Deliberately NOT behind a forwardingProxy, unlike every other swap-member. The documented way to
+  // replace a policy is to capture the one you displace and delegate to it, and a capture-safe proxy
+  // makes that capture a reference to *whatever is current* — which, one line later, is the capturing
+  // plugin's own gate. It then calls itself until the stack overflows, and the pattern the docs
+  // recommend is the pattern that breaks. Exposed as a getter so a member read is still late-bound;
+  // every in-repo consumer resolves it per call (the runner per turn, `invokeTool` and the registry per
+  // decision), so nothing wants the proxy and one thing very much does not. `ToolCallValidator`, which
+  // composes the same way, is a plain registry value for the same reason.
   const gateSettings = makePluginSettings(createStore<SettingsDoc>('settings'), DEFAULT_GATE_SETTINGS_NS);
   let activeGate: PermissionGate = createDefaultGate(gateSettings);
-  const gateProxy: PermissionGate = forwardingProxy<PermissionGate>(() => activeGate);
-  const bootGate                   = activeGate;
+  const bootGate                 = activeGate;
   const bootVault                  = activeVault;
   const bootKnowledge              = knowledgeImpl;
   const bootNotifier               = activeNotifier;
@@ -1229,7 +1234,7 @@ async function main(): Promise<void> {
     files:     fileStore,
     Vault:     vault,
     Notifier:  notifierProxy,
-    PermissionGate: gateProxy,
+    get PermissionGate() { return activeGate; },
     hooks:          hookReg,
     tools:          toolReg,
     systemContext:  systemContextReg,

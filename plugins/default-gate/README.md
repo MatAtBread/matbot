@@ -42,9 +42,16 @@ match `https://…/foo.ts`. That is correct — different trust root, different 
 policy keys on the spelling.
 
 **A gate that auto-approves `plugin.add` has granted everything.** A loaded plugin has full Node
-capability and there is no in-process sandbox. The honest statement of what any of this buys is *"the
-LLM cannot change this without a human answering a host-authored prompt that names the change"* — not
-that it cannot be changed.
+capability and there is no in-process sandbox. And a standing answer is a *decision, not a channel*:
+it applies at every door, including `POST /tools/:name`, `invokeTool` and a trigger — so *Always allow
+every `plugin.add`* lets anything that can reach the HTTP endpoint install anything, with nobody asked.
+Prefer the per-subject form.
+
+**These answers are not out of the model's reach.** They live in `.data/settings/`, which `bash` can
+write and `docker-bash` mounts read-write, so on an install with a shell tool the model can author its
+own standing answer and every later prompt is skipped. This policy is therefore a *record of decisions*,
+not a security boundary; a deployment that needs one ships a gate with its rules compiled in — which is
+what the replaceable seam is for.
 
 ## `gate_action`
 

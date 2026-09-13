@@ -62,6 +62,12 @@ churn and less likely to affect a consumer who doesn't use them.
   address a gate it does not own. A swap-member, not an optional service: the host boots a default and
   `unregister` reverts to it, so unloading a policy means "back to asking". 20 call sites, 13 gate ids.
 
+  What it buys is that a privileged operation is **decided somewhere replaceable**, and by default that
+  means a human is asked. It is not out of the model's reach: the default policy stores its answers in
+  `.data/settings/`, which any shell tool can write, and a standing answer is a decision rather than a
+  channel — so it applies at doors with no human behind them (`POST /tools/:name`, `invokeTool`, a
+  trigger). A deployment that needs a real boundary ships a gate with its rules compiled in.
+
 - **`ToolContext.gate`, `PermissionRequest` / `PermissionGate`, `bindGate`, and the host default
   `askPermissionGate`** (`plugin-api/host`, re-exported by core).
 
@@ -99,6 +105,30 @@ churn and less likely to affect a consumer who doesn't use them.
   once wrote an allow-list entry nobody gave, and every later privileged act on that subject proceeded
   silently. Options now carry values and the answer is matched against those; an answer matching no
   option is a refusal, since permission is what has to be given.
+
+- **A tool collision resolved with nobody to ask says so again.** The pre-gate code warned when it
+  overwrote non-interactively; routing the decision through a gate dropped the line, leaving the one
+  decision here that proceeds with no human and no record. Core logs it at the call site (it knows
+  whether a prompt existed; the policy's answer is its own business).
+
+- **The telegram frontend supplies no `PromptFn` rather than a stub that answers with each field's
+  default.** The stub was a worse lie than the absence: to a tool it resolved silently — the model
+  proceeding as if answered while the chat saw no question — and to a permission gate it looked like a
+  reachable human, since "no PromptFn at all" is the one signal for *nobody is here*. Outcomes are
+  unchanged (the runner's own stand-in still answers a tool's `prompt` with the default); what changes
+  is that a privileged operation now gets the call site's stated non-interactive answer.
+
+- **A policy that displaces another can delegate to it.** `PermissionGate` was a capture-safe
+  `forwardingProxy` like the other swap-members, so the documented composition — capture
+  `services.PermissionGate`, register your own, defer to what you displaced — captured a reference that
+  resolved to *whatever is current*, i.e. the capturing gate: it called itself until the stack
+  overflowed. The hosts expose the member as a getter instead, so a read yields the concrete impl;
+  every consumer already resolves it per call. (`ToolCallValidator`, which composes the same way, was
+  never proxied, which is why that idiom worked.)
+
+- **Two "Always allow" answers at once no longer drop one.** Appending a subject is a read-modify-write
+  and `PluginSettings` has no CAS on a value, so both reads saw the same list and the second write won.
+  The policy serialises its writes and re-reads inside the queue.
 
 - **The CLI's abort-time form path resolves select answers.** It passed a synthesised label + hint
   string to `prompt()`, which took the free-text branch, so a form's select answer came back as

@@ -309,10 +309,15 @@ name it is *registered* under, so one answer covers both the node and browser im
 tool. The list is open: a plugin can declare ids of its own, and an id the policy does not recognise
 is asked about rather than allowed.
 
-Be clear-eyed about what a standing answer buys and costs: **a policy that auto-approves
+Be clear-eyed about what a standing answer buys and costs. **A policy that auto-approves
 `plugin.add` has granted everything**, because a loaded plugin has full Node capability and there is
-no in-process sandbox. The honest property is *"the LLM cannot change this without a human answering
-a prompt that names the change"* — not that it cannot be changed.
+no in-process sandbox. A standing answer is a **decision, not a channel** — it applies at every door,
+including `POST /tools/:name` and anything the model reaches through its own `http` or `bash` tool —
+so prefer the per-subject form to *Always allow every …*. And the answers live in `.data/settings/`,
+which a shell tool can write: on an install that loads one, the model can author its own standing
+answer. What the gate guarantees is that a privileged operation is *decided somewhere replaceable*,
+and by default that means a human is asked — not that it cannot be changed. A deployment that needs a
+real boundary ships a gate with its rules compiled in.
 
 An installation that wants different rules — approve from a console, consult a roster, refuse
 outright — ships a plugin registering its own `PermissionGate` instead of undoing this one. See

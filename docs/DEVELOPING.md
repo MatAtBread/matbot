@@ -754,7 +754,7 @@ register a `PermissionGate`, capturing the one you displace so the pair composes
 order:
 
 ```ts
-const previous = services.PermissionGate;
+const previous = services.PermissionGate;        // the CONCRETE gate you are displacing
 await services.register('PermissionGate', {
   async decide(req, ask) {
     if (req.gate === 'plugin.add') return roster.allows(req.subject);
@@ -763,9 +763,20 @@ await services.register('PermissionGate', {
 });
 ```
 
+Capturing works because this is the one registry key a host does **not** hide behind a capture-safe
+proxy: read it and you hold the impl that was current, not a reference that follows the next swap —
+which would be your own gate, delegating to itself for ever. Read it *before* you register, and don't
+stash it anywhere that outlives your plugin.
+
 `ask` is the prompt channel in scope for that call, or `undefined` when **no human is reachable** (a
-boot load, a background task, `POST /tools/:name`). Unloading your plugin reverts to the host's boot
-default, which asks.
+boot load, a background task, `POST /tools/:name`, a frontend that cannot ask). Unloading your plugin
+reverts to the host's boot default, which asks.
+
+Two things to know before you write one. A standing answer is a *decision, not a channel*: it applies
+at every door, so allowing a gate outright also allows it for callers with no human behind them. And
+the boundary is only as strong as the tools the install grants — the default policy keeps its answers
+in `.data/settings/`, which any shell tool can write, so a deployment that needs a real boundary
+compiles its rules in rather than storing them where the model can reach.
 
 ---
 

@@ -172,6 +172,70 @@ test('with nobody to ask, the policy delegates to the gate it displaced', async 
   assert.equal(await alone.gate.decide(req({ fallback: false }), undefined), false);
 });
 
+// ── Composition against a host-shaped registry ────────────────────────────────
+
+/**
+ * The two lines every host writes for this key: a mutable current impl, and a MEMBER that reads it.
+ * A getter, deliberately not `forwardingProxy` — which is what every other swap-member uses, and what
+ * this one must not, because the documented way to replace a policy is to capture the one you displace
+ * and delegate to it. Through a capture-safe proxy that capture resolves to whatever is current, which
+ * one line later is the capturing gate itself: it calls itself until the stack overflows, and the
+ * recommended pattern is the pattern that breaks. Mirrors apps/cli and apps/web-bundle.
+ */
+function hostRegistry(boot: PermissionGate) {
+  let active = boot;
+  return {
+    get PermissionGate(): PermissionGate { return active; },
+    register:   (gate: PermissionGate) => { active = gate; },
+    unregister: () => { active = boot; },
+  };
+}
+
+test('a policy that displaces another can delegate to it', async () => {
+  const asked: string[] = [];
+  const boot: PermissionGate = { async decide(r) { asked.push(`boot:${r.gate}`); return r.fallback; } };
+  const host = hostRegistry(boot);
+
+  // Exactly what a policy plugin's setup() does, and what the docblock tells it to do.
+  const previous = host.PermissionGate;
+  host.register({
+    async decide(r, ask) {
+      if (r.gate === 'plugin.add') return false;
+      return previous.decide(r, ask);        // must reach `boot`, not recurse into this gate
+    },
+  });
+
+  assert.equal(await host.PermissionGate.decide(req(), undefined), false);
+  assert.equal(await host.PermissionGate.decide(req({ gate: 'tools.overwrite', fallback: true }), undefined), true);
+  assert.deepEqual(asked, ['boot:tools.overwrite'], 'the displaced gate decided, exactly once');
+
+  // And unloading the policy reverts to the host's boot default rather than dangling on the gone impl.
+  host.unregister();
+  assert.equal(await host.PermissionGate.decide(req({ gate: 'plugin.add', fallback: true }), undefined), true);
+});
+
+test('the shipped policy delegates without recursing when it displaces a live one', async () => {
+  // The same shape with the real policy in the middle: createDefaultGate(settings, previous) is the
+  // documented composition, and `previous` here is captured from the registry the way a plugin does.
+  const host = hostRegistry({ async decide() { return true; } });
+  const { settings } = policy();
+  host.register(createDefaultGate(settings, host.PermissionGate));
+
+  // No channel, nothing stored: the policy defers, and the deferral must terminate.
+  assert.equal(await host.PermissionGate.decide(req({ fallback: false }), undefined), true);
+});
+
+test('two "Always allow" answers at once keep both subjects', async () => {
+  // Appending a subject is a read-modify-write and PluginSettings has no CAS on the value, so the two
+  // writes must be serialised: unguarded, both read the same list and the second drops the first.
+  const { gate, settings } = policy();
+  await Promise.all([
+    gate.decide(req({ subject: '@x/foo' }), recorder('always-subject').ask),
+    gate.decide(req({ subject: '@y/bar' }), recorder('always-subject').ask),
+  ]);
+  assert.deepEqual((await settings.get<string[]>('plugin.add'))?.slice().sort(), ['@x/foo', '@y/bar']);
+});
+
 // ── gate_action ───────────────────────────────────────────────────────────────
 
 async function run<T>(tool: { executor: { execute(i: unknown, c: never): AsyncIterable<{ type: string } & Record<string, unknown>> } }, input: unknown): Promise<T> {

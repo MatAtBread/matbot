@@ -357,9 +357,13 @@ export const plugin: MatbotPluginSpec = {
             principal,
             // ── Interactive prompts: deliberately NOT implemented ───────────────────────────────
             // This telegram frontend is a *demonstrator* that stress-tests the frontend API; it does
-            // not do `prompt`. The stub auto-accepts the default, so an `ask_user` (or tool-collision)
-            // prompt resolves *silently* — the model proceeds as if answered while the chat saw no
-            // question. That desync is the one place this frontend lies, and the obvious next build.
+            // not do `prompt`, and so supplies NONE. It used to pass a stub that auto-accepted each
+            // field's default, which is a worse lie than the absence: to a tool it resolved silently
+            // (the model proceeds as if answered while the chat saw no question), and to a permission
+            // gate it looked like a reachable human, since the one signal for "nobody is here" is that
+            // there is no PromptFn at all. Absent, a privileged operation gets the call site's stated
+            // non-interactive answer and `ask_user` degrades exactly as it does anywhere else with no
+            // channel. Implementing it properly is the obvious next build.
             // Sketch (exercise for the reader):
             //
             //   1. A per-chat pending-prompt slot, module-scoped:
@@ -379,8 +383,6 @@ export const plugin: MatbotPluginSpec = {
             // a timeout (a turn can't hold the pump forever waiting on a human), and FormField `options`
             // as an inline keyboard. This is the inverse of `followup`: there matbot continues a turn
             // on its own; here it pauses one to wait on the human.
-            prompt:    ((p: string | FormField, def?: string) =>
-              Promise.resolve(typeof p === 'string' ? (def ?? '') : (p.default ?? ''))) as PromptFn,
           });
           // Drain to session idle, not just our own turn's `done`: a `followup` resubmission spawned
           // by our turn runs as a *later* turn with its own traceId. We adopt the turns descended from

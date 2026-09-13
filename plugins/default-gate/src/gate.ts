@@ -51,7 +51,19 @@ export function createDefaultGate(settings: PluginSettings, previous?: Permissio
   // there is nothing to index. This used to keep its own list of ids it had written — a second copy of
   // its own keyspace, which could not see a configured default, and which a crash between the two
   // writes left behind as a standing answer in force and invisible to both `get` and `clear`.
-  const remember = (gate: string, answer: StandingAnswer): Promise<void> => settings.set(gate, answer);
+  //
+  // Serialised, because appending a subject is a read-modify-write and `PluginSettings` has no CAS:
+  // `set` guards the document, not the value that was read out of it, so two collisions answered at
+  // once would both read the same list and the second write would drop the first's subject. A silently
+  // lost permission is a prompt that reappears (benign) — but a lost *revocation* would be the mirror,
+  // and neither belongs in this component. One in-process queue closes it; two matbot processes
+  // sharing one medium remain last-write-wins, which is the store's contract to change, not ours.
+  let writes: Promise<unknown> = Promise.resolve();
+  const serialised = <T>(work: () => Promise<T>): Promise<T> => {
+    const next = writes.then(work, work);
+    writes = next.catch(() => {});
+    return next;
+  };
 
   return {
     async decide(req, ask) {
@@ -84,14 +96,18 @@ export function createDefaultGate(settings: PluginSettings, previous?: Permissio
       };
       const answer = (await ask(field)).trim().toLowerCase();
 
-      if (answer === ALWAYS_GATE)    { await remember(req.gate, true); return true; }
+      if (answer === ALWAYS_GATE) { await serialised(() => settings.set(req.gate, true)); return true; }
       if (answer === ALWAYS_SUBJECT) {
-        // Persist the list IN EFFECT plus this subject, never the subject alone: the list in effect may
-        // come from `default_settings`, and a stored key wins over the floor wholesale — writing
-        // `[subject]` would silently start asking again about everything the install had exempted.
-        const current  = await read(req.gate);
-        const subjects = current === undefined || current === true ? [req.subject] : [...new Set([...current, req.subject])];
-        await remember(req.gate, subjects);
+        await serialised(async () => {
+          // Re-read INSIDE the queue: the list may have grown since this prompt was rendered (a
+          // concurrent collision, answered first). Persist the list IN EFFECT plus this subject, never
+          // the subject alone — the list in effect may come from `default_settings`, and a stored key
+          // wins over the floor wholesale, so writing `[subject]` would silently start asking again
+          // about everything the install had exempted.
+          const current  = await read(req.gate);
+          const subjects = current === undefined || current === true ? [req.subject] : [...new Set([...current, req.subject])];
+          await settings.set(req.gate, subjects);
+        });
         return true;
       }
       // Deny, an answer a frontend resolved to no option, or anything unrecognised: permission is what

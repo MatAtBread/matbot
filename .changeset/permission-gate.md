@@ -58,6 +58,10 @@ optional — the behaviour must always exist), `ToolContext.gate`, `bindGate`, a
 default `askPermissionGate` (`plugin-api/host`, re-exported by core). `confirmAction` is gone from
 `@matatbread/matbot-mcp-http` and `@matatbread/matbot-tool-plugin`.
 
-Be clear-eyed about what any of this buys: *"the LLM cannot change this without a human answering a
-host-authored prompt that names the change"* — and a gate that auto-approves `plugin.add` has granted
-everything, a loaded plugin having full Node capability with no in-process sandbox.
+Be clear-eyed about what this buys. A privileged operation is now *decided somewhere replaceable*,
+and by default that means a human is asked — it is **not** out of the model's reach: the default
+policy keeps its answers in `.data/settings/`, which any shell tool can write. A standing answer is
+also a decision rather than a channel, so it applies at doors with no human behind them
+(`POST /tools/:name`, `invokeTool`, a trigger). And a gate that auto-approves `plugin.add` has granted
+everything, a loaded plugin having full Node capability with no in-process sandbox. A deployment that
+needs a real boundary ships a gate with its rules compiled in — which is what the seam is for.

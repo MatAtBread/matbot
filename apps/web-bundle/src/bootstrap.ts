@@ -302,14 +302,12 @@ export async function boot(env: BootEnv): Promise<void> {
   // Boot defaults captured for revert-on-unregister (mirrors the CLI host): a swap-key reverts here
   // when its plugin is unloaded, instead of dangling on the now-gone impl. (bootBackend is captured
   // above, before the pre-scan defaulting, so a config backend never poses as the host base.)
-  // The installation's permission policy. Boot default is the default-gate plugin's own implementation
-  // over its own settings namespace — see the CLI host: the app decides its own base service, and this
-  // is the one that makes standing answers work before (and without) the plugin being loaded. Unloading
-  // a policy plugin reverts here.
+  // The installation's permission policy — see the CLI host, including why this one key is a getter
+  // rather than a capture-safe proxy: a policy that replaces another captures it and delegates, and a
+  // proxy would make that capture resolve to the capturing gate itself, for ever.
   const gateSettings = makePluginSettings(createStore<SettingsDoc>('settings'), DEFAULT_GATE_SETTINGS_NS);
   let activeGate: PermissionGate = createDefaultGate(gateSettings);
-  const gateProxy: PermissionGate = forwardingProxy<PermissionGate>(() => activeGate);
-  const bootGate                    = activeGate;
+  const bootGate                 = activeGate;
   const bootVault                   = activeVault;
   const bootKnowledge               = knowledgeImpl;
   const bootNotifier                = activeNotifier;
@@ -498,7 +496,7 @@ export async function boot(env: BootEnv): Promise<void> {
     files: fileStore,
     Vault: vault,
     Notifier: notifierProxy,
-    PermissionGate: gateProxy,
+    get PermissionGate() { return activeGate; },
     hooks:         hookReg,
     tools:         toolReg,
     systemContext: systemContextReg,

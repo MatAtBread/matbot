@@ -568,8 +568,11 @@ the host captures a boot default and `unregister` reverts to it — "unload the 
 asking", with no revert rule of its own. (A do-nothing always-present default *would* be the
 fail-open shape; a default that *asks* is not.) A gate wanting "my rules, else the previous
 behaviour" captures the gate it displaces and delegates — the `ToolCallValidator` idiom, so a pair
-composes in either load order. Gate ids are open at runtime, and an unknown one must **ask**:
-"unregistered ⇒ loose" cannot mean "⇒ allow" here.
+composes in either load order — and it is the reason this key is the one swap-member the hosts do
+**not** put behind `forwardingProxy`. A capture-safe proxy resolves to whatever is current, so a gate
+that captured `services.PermissionGate` and then registered itself would delegate *to itself*, for
+ever; the hosts expose a getter instead, and every consumer resolves per call. Gate ids are open at
+runtime, and an unknown one must **ask**: "unregistered ⇒ loose" cannot mean "⇒ allow" here.
 
 **Boolean only, one refusal shape.** Every gate in the system is allow-or-not, including
 `tools.overwrite`, whose four options author the *memory*, not the outcome. This holds by
@@ -604,11 +607,24 @@ how you reach one an installation configured (settings have no key listing). `__
 answer is re-offered the first time that collision comes round again, so adopt-once machinery would
 exist to save one keystroke; an install still authoring it is warned, naming where it went.
 
-**Honest statement of the property.** Not "the LLM cannot change this", but *"the LLM cannot change
-this without a human answering a host-authored prompt that names the change"* — and, plainly: **a
-gate that auto-approves `plugin.add` has granted everything**, a loaded plugin having full Node
-capability with no in-process sandbox. A locked-down deployment ships a gate with its rules compiled
-in; config being LLM-writable is then that plugin's problem, not core's. Two other things a policy
+**Honest statement of the property, and its limit.** The gate makes a privileged operation *pass
+through a decision*; it does not put that decision out of the model's reach. Where the standing
+answers live — `.data/settings/`, per the default policy — is read-write to `bash`, and `docker-bash`
+mounts `.data` read-write too, so on any install that loads a shell tool the model can write
+`{"plugin.add": true}` itself and every later install proceeds unasked (reads are not cached, so it
+takes effect at once, not at the next restart). The same was true of the `__matbot_core__` key this
+replaces, over a narrower blast radius. So the property is **"a privileged operation is decided
+somewhere replaceable, and by default that means a human is asked"** — not "the LLM cannot change
+this". A deployment that needs a real boundary ships a gate with its rules compiled in, or keeps them
+somewhere the tools it grants cannot reach; that is the policy plugin's problem by construction, which
+is the point of the seam. And plainly: **a gate that auto-approves `plugin.add` has granted
+everything**, a loaded plugin having full Node capability with no in-process sandbox.
+
+**A standing answer is a decision, not a channel.** It applies at every door, including the ones with
+no human behind them — `invokeTool`, a trigger, `POST /tools/:name`. "Always allow every `plugin.add`"
+therefore means anything that can reach the HTTP endpoint (the model itself, through its own `http`
+or `bash` tool) can install any specifier with nobody asked. That is what the answer *says*, and it is
+why the per-subject form is offered first and is the one to reach for. Two other things a policy
 author should be told rather than discover: the provider path **chains two gates**
 (`add-unverified` → `add`), so one user-visible operation can cost two decisions; and a collision
 raised while a *replacement* policy plugin is itself loading falls to the host's seeded default.
