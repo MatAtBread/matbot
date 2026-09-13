@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadPlugins, installSettingsDefaults, makePluginSettings, slugSettingsNamespace } from '@matatbread/matbot-core';
-import type { PromptFn, SettingsDoc, Store } from '@matatbread/matbot-core';
+import type { FormOption, PromptFn, SettingsDoc, Store } from '@matatbread/matbot-core';
+import { optionLabel, optionValue } from '@matatbread/matbot-core';
 import { createDefaultGate, DEFAULT_GATE_SETTINGS_NS } from '@matatbread/matbot-default-gate';
 import { collider, twinCollider, machine } from './fixtures/collision-harness.ts';
 
@@ -14,11 +15,12 @@ installSettingsDefaults(new Map([[DEFAULT_GATE_SETTINGS_NS, { 'tools.overwrite':
 
 test('"Always allow <subject>" adds it to the list, keeping what the install already exempted', async () => {
   const asked: string[] = [];
-  const prompt = (async (f: { label: string; options?: string[] }) => {
+  const prompt = (async (f: { label: string; options?: FormOption[] }) => {
     asked.push(f.label);
-    const chosen = f.options?.find(o => o.startsWith('Always allow "'));
+    // Picked the way a frontend does: find the option by its LABEL, answer with its VALUE.
+    const chosen = f.options?.find(o => optionLabel(o).startsWith('Always allow "'));
     assert.ok(chosen, 'the prompt offers a per-subject "always" option');
-    return chosen;
+    return optionValue(chosen);
   }) as PromptFn;
   const { services, tools, docs } = machine(settings =>
     createDefaultGate(makePluginSettings(settings as unknown as Store<SettingsDoc>, DEFAULT_GATE_SETTINGS_NS)));

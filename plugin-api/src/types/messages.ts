@@ -95,15 +95,44 @@ export type Marker<K extends string = string> = {
   data:    K extends keyof MarkerData ? MarkerData[K] : unknown;
 };
 
+/**
+ * One choice in a `select`. A bare string is the ordinary form and means "the value IS the label";
+ * the pair form separates what the user *reads* from what the caller gets *back*.
+ *
+ * That separation exists because a rendered label is a cosmetic, host-specific, potentially localised
+ * string, and using it as an identity is a footgun with a proven bite: the permission gate offered
+ * *Allow* and *Always allow "…"*, and matching an answer against prose read the first as the second —
+ * granting standing permission nobody gave. `confirm` already avoided this with {@link CONFIRM_YES} /
+ * {@link CONFIRM_NO}, which are tokens rather than labels; this is the same medicine for `select`.
+ *
+ * A caller that BRANCHES on the answer should use the pair form and compare values. A caller whose
+ * options are themselves the answer — `ask_user`, where the options are the user's own words and
+ * `allowOther` free text arrives on the same channel — keeps bare strings, which is why the string
+ * form is not deprecated.
+ *
+ * Frontends: render {@link optionLabel}, return {@link optionValue}. `default` is matched against the
+ * VALUE, so a default survives a reworded label.
+ */
+export type FormOption = string | { value: string; label: string };
+
+/** The token a picked option resolves to — what a caller branches on. */
+export const optionValue = (option: FormOption): string => typeof option === 'string' ? option : option.value;
+
+/** What the user reads. Never compared against — see {@link FormOption}. */
+export const optionLabel = (option: FormOption): string => typeof option === 'string' ? option : option.label;
+
 export interface FormField {
   name:        string;
   label:       string;
   type:        'text' | 'password' | 'select' | 'confirm';
-  options?:    string[];
+  /** select-only: the choices. See {@link FormOption} — a bare string means value === label. */
+  options?:    FormOption[];
   /** select-only: render an "Other…" affordance that lets the user type a free-form answer instead
    *  of picking an option. The typed value is returned verbatim, on the same channel as a pick —
-   *  callers never learn whether the answer was a preset or free text. Ignored for other types. */
+   *  callers never learn whether the answer was a preset or free text (which is why a picked option
+   *  resolves to a string, never an index). Ignored for other types. */
   allowOther?: boolean;
+  /** select: matched against an option's VALUE, not its label. */
   default?:    string;
   required?:   boolean;
   /** Presentation hint only (default true): whether the frontend offers a cancel affordance (the

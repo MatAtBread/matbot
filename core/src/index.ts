@@ -27,6 +27,9 @@ export { isTruncatedToolResult, notifyingStore, ItemChangeKind, RegistryChangeKi
 // The canonical `type: 'confirm'` answers. Same reason as the patch policy above: an app implementing a
 // PromptFn (or a test standing one in) has to speak them, and must not hard-code the rendered label.
 export { CONFIRM_YES, CONFIRM_NO } from '@matatbread/matbot-plugin-api';
+// A select option's value vs its label. Frontends render the label and return the value; a caller that
+// branches on the answer compares values, never prose (see FormOption).
+export { optionValue, optionLabel } from '@matatbread/matbot-plugin-api';
 // Binds `ctx.gate` for a hand-assembled ToolContext — anything standing a tool-invocation door up
 // outside the runner (frontend-web's `POST /tools/:name`) needs it, and gets it through core.
 export { bindGate, bindPluginOps } from '@matatbread/matbot-plugin-api';

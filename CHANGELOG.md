@@ -13,6 +13,22 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Breaking changes
 
+- **`default_settings.__matbot_core__.overwriteToolsOnCollision` is gone**, in both forms (a stored
+  answer and a configured floor), and is **not migrated**
+  ([#62](https://github.com/MatAtBread/matbot/issues/62)). The tool-collision decision is now a
+  *permission gate*, and standing answers belong to the policy that asks. Re-author it as
+
+  ```yaml
+  default_settings:
+    '@matatbread/matbot-default-gate':
+      'tools.overwrite': [bash, plugin]      # or: true
+  ```
+
+  The standing answer is re-offered the first time that collision comes round again, so restoring it
+  is one click — an adopt-once path would have been migration machinery, and a reserved namespace kept
+  alive, to save a single keystroke. An install still carrying the old key is warned at boot, naming
+  where it went. (The `string[]` form added earlier in this cycle moved with it, unchanged.)
+
 - **`ToolTypeIndex.check` returns a `ToolCheckReport`, not `string[]`.** It returned formatted
   multi-line blocks with the overflow summary appended as a further ELEMENT, so `diagnostics.length`
   counted prose as a finding and any per-code breakdown taken by iterating the array was unreliable
@@ -31,6 +47,29 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### API gaps filled
 
+- **`PermissionGate`: a privileged operation declares, a replaceable policy decides.** A call site
+  that needs acceptance — installing a plugin, adding a provider profile, connecting an MCP server,
+  overwriting a tool another plugin owns — calls `ctx.gate({ gate, subject, label, fallback })`, and
+  the installation's registered `PermissionGate` decides how that acceptance is obtained. It used to
+  do both jobs itself, which is why an alternative installation could only *defeat* a policy, never
+  supply one: core held a settings key, a memo, a per-tool allowlist and two "always" options, and
+  `confirmAction` was implemented three times over.
+
+  `decide(req, ask)` receives the prompt channel in scope for that call, and **`ask === undefined` is
+  "no human is reachable"** — which is when the request's own `fallback` applies, reproducing each
+  site's non-interactive behaviour exactly. `gate` is a suffix the host qualifies with the tool's
+  *registered* name, so one answer covers both runtimes' implementations of a tool and no plugin can
+  address a gate it does not own. A swap-member, not an optional service: the host boots a default and
+  `unregister` reverts to it, so unloading a policy means "back to asking". 20 call sites, 13 gate ids.
+
+- **`ToolContext.gate`, `PermissionRequest` / `PermissionGate`, `bindGate`, and the host default
+  `askPermissionGate`** (`plugin-api/host`, re-exported by core).
+
+- **A `select` option can carry a value distinct from its label.** `FormField.options` takes
+  `string | { value, label }`; a bare string still means "the value is the label". Frontends render
+  `optionLabel(o)` and answer with `optionValue(o)`, and `default` names a value — so a caller that
+  branches on the answer compares a token rather than rendered, rewordable, localisable prose.
+
 - **`ToolCheckReport` / `ToolCheckDiagnostic`, `renderToolCheck` and `renderToolCheckOmitted`.** The
   report shape above, plus the one renderer that turns it into the text a model repairs from (and the
   overflow summary alone, for a consumer laying the findings out itself). The renderer is in `plugin-api`
@@ -43,27 +82,30 @@ churn and less likely to affect a consumer who doesn't use them.
   implementing a `PromptFn` is exactly who needs them — the tokens a `type: 'confirm'` prompt resolves
   to, which a consumer must branch on rather than on the rendered (and potentially localised) label.
 
-- **`overwriteToolsOnCollision` takes a list of tool names, not just a boolean**
-  ([#68](https://github.com/MatAtBread/matbot/issues/68)). The core setting
-  (`default_settings.__matbot_core__.overwriteToolsOnCollision`) was all-or-nothing: prompt about
-  every tool-name collision, or silently overwrite every one of them. An install that deliberately
-  shadows one built-in had to choose between a prompt it answers identically every start and giving
-  up the prompt for collisions it would want to hear about. A `string[]` names the tools not to ask
-  about; anything else still asks. A listed name resolves the way not asking does — to the prompt's
-  own default, the incoming tool — so the list is a granular form of the answer, not a new outcome.
-  `true`/`false` behave exactly as before, and a value that is neither warns and asks rather than
-  reading as `true`: a malformed setting that silently overwrote everything would leave no trace of
-  why.
+### Bug fixes
 
-  The prompt writes the same setting it reads: *Always overwrite* has become two options —
-  **`Always overwrite "<tool>"`**, which appends that name to the list in effect, and **`Always
-  overwrite all tools`**, which stores `true` as the old option did. The per-tool one is offered
-  first, so a typed prefix resolves to the narrower answer. It persists the list *in effect* plus the
-  new name rather than the name alone, because a stored key wins over a `default_settings:` one
-  wholesale — writing `[toolName]` would silently un-exempt every other name the install had
-  configured.
+- **A one-off *Allow* no longer records a standing answer.** The permission gate matched its four
+  options by prefix, and *Allow* shares its first letter with *Always allow …* — so answering Allow
+  once wrote an allow-list entry nobody gave, and every later privileged act on that subject proceeded
+  silently. Options now carry values and the answer is matched against those; an answer matching no
+  option is a refusal, since permission is what has to be given.
+
+- **The CLI's abort-time form path resolves select answers.** It passed a synthesised label + hint
+  string to `prompt()`, which took the free-text branch, so a form's select answer came back as
+  whatever was typed rather than as the option it named.
 
 ### Optional
+
+- **`@matatbread/matbot-default-gate`** (new) — the default permission policy: ask, offer standing
+  answers (*Always allow "<subject>"* / *Always allow every `<gate>`*), honour what was remembered.
+  A library each host *seeds*, in the `tool-plugin` mould — not a configured plugin, because a minimal
+  install's first act is a gated one, so neither the policy nor the means to inspect it may depend on a
+  `plugins:` line. Carries the built-in `gate_action` tool (`get` reports what is in **effect**;
+  `clear` forgets an answer, reverting to whatever the installation configured). There is deliberately
+  no `set`: the write path for a runtime actor is answering a prompt that names the specific act.
+
+- **`tool-plugin`, `mcp`, `mcp-http`, `browser`** — their 19 `confirmAction` calls became `ctx.gate`,
+  and the three copies of `confirmAction` are gone.
 
 #### tool-plugin, mcp, mcp-http
 
@@ -1520,7 +1562,6 @@ where it cannot be forgotten.
   timing, so nothing that honoured it needs changing. Frontend entry points are unaffected: a web
   request or telegram message still uses `runAs` and deliberately does not hold the machine, its scope
   spanning a long-lived stream.
-
 
 - **`workspace_action` speaks of names, not paths.** `path` becomes `name` on read, write and
   delete and in every result; `list` takes `prefix`; `recursive` is gone. A workspace file is an entry

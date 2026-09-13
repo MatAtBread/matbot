@@ -1,6 +1,7 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { askPermissionGate, bindGate, installSettingsDefaults, makePluginSettings } from '@matatbread/matbot-core';
+import { askPermissionGate, bindGate, installSettingsDefaults, makePluginSettings,
+         optionValue, optionLabel } from '@matatbread/matbot-core';
 import type { FormField, PermissionGate, PermissionRequest, PromptFn, SettingsDoc, Store } from '@matatbread/matbot-core';
 import { createDefaultGate, makeGateActionTool, DEFAULT_GATE_SETTINGS_NS } from '@matatbread/matbot-default-gate';
 
@@ -101,7 +102,7 @@ test('a configured subject is allowed; a sibling subject of the same gate is not
 
 test('"Always allow every <gate>" stores true, and every later subject rides on it', async () => {
   const { gate, settings } = policy();
-  const every = recorder('Always allow every plugin.add');
+  const every = recorder('always-gate');
   assert.equal(await gate.decide(req(), every.ask), true);
   assert.equal(await settings.get('plugin.add'), true);
 
@@ -111,11 +112,11 @@ test('"Always allow every <gate>" stores true, and every later subject rides on 
 });
 
 test('a plain "Allow" permits this act and remembers NOTHING', async () => {
-  // The bug this pins: the answer used to be matched by PREFIX, and "Allow" shares its first letter
-  // with "Always allow …" — so clicking Allow once silently wrote a standing answer the user never
-  // gave, and every later add of that subject proceeded with no prompt at all.
+  // The bug this pins: the answer used to be matched by PREFIX against the rendered labels, and
+  // "Allow" shares its first letter with "Always allow …" — so clicking Allow once silently wrote a
+  // standing answer the user never gave, and every later add of that subject proceeded with no prompt.
   const { gate, settings } = policy();
-  const once = recorder('Allow');
+  const once = recorder('allow');
   assert.equal(await gate.decide(req(), once.ask), true);
   assert.equal(await settings.get('plugin.add'), undefined, 'a one-off Allow persists nothing');
   assert.equal(await settings.get('__gates__'),  undefined, 'and indexes nothing');
@@ -130,6 +131,30 @@ test('an answer matching no option is a refusal, not an allow', async () => {
   const { gate } = policy();
   assert.equal(await gate.decide(req({ fallback: true }), recorder('').ask), false);
   assert.equal(await gate.decide(req(), recorder('a').ask), false, 'a bare prefix is not an answer');
+});
+
+test('echoing a rendered "Always allow …" label remembers nothing', async () => {
+  // The labels are prose and nothing compares against them, so a frontend that sent one back instead
+  // of the option's value cannot author a standing answer — the failure mode this whole split exists
+  // to make unreachable. (It reads as "no option matched", i.e. a refusal.)
+  const { gate, settings } = policy();
+  assert.equal(await gate.decide(req(), recorder('Always allow "@x/foo"').ask), false);
+  assert.equal(await settings.get('plugin.add'), undefined);
+});
+
+test('the options separate what is shown from what is answered', async () => {
+  // Every option carries a value distinct from its label, so a reworded (or localised) label cannot
+  // change what the policy stores — the identity is the token, never the prose.
+  const { gate } = policy();
+  const seen = recorder('deny');
+  await gate.decide(req({ gate: 'plugin.add', subject: '@x/foo' }), seen.ask);
+
+  const opts = seen.asked[0]?.options ?? [];
+  assert.deepEqual(opts.map(optionValue), ['deny', 'allow', 'always-subject', 'always-gate']);
+  assert.deepEqual(opts.map(optionLabel), [
+    'Deny', 'Allow', 'Always allow "@x/foo"', 'Always allow every plugin.add',
+  ]);
+  assert.equal(seen.asked[0]?.default, 'deny', 'the default names a value, not a label');
 });
 
 test('with nobody to ask, the policy delegates to the gate it displaced', async () => {
@@ -172,7 +197,7 @@ test('gate_action get reports what is in EFFECT — stored answer and configured
   assert.equal(all.answers.find(a => a.gate === 'plugin.add')?.effect, 'ask');
 
   // An answer given at a prompt reads the same way as one an installation configured.
-  await gate.decide(req(), recorder('Always allow "@x/foo"').ask);
+  await gate.decide(req(), recorder('always-subject').ask);
   const after = await run<{ answers: { gate: string; effect: string; subjects?: string[] }[] }>(
     tool, { action: 'get', gate: 'plugin.add' });
   assert.deepEqual(after.answers, [{ gate: 'plugin.add', effect: 'subjects', subjects: ['@x/foo'] }]);
@@ -182,7 +207,7 @@ test('gate_action clear forgets an answer, reverting to what the installation co
   const { gate, settings } = policy({ 'plugin.add': ['@configured/one'] });
   const tool = makeGateActionTool(settings);
 
-  await gate.decide(req({ subject: '@x/foo' }), recorder('Always allow "@x/foo"').ask);
+  await gate.decide(req({ subject: '@x/foo' }), recorder('always-subject').ask);
   assert.equal(await gate.decide(req({ subject: '@x/foo' }), recorder('Deny').ask), true);
 
   // One subject out of the stored list; the rest of the list stands.
@@ -193,7 +218,7 @@ test('gate_action clear forgets an answer, reverting to what the installation co
   assert.equal(await gate.decide(req({ subject: '@configured/one' }), asked.ask), true);
 
   // The whole gate: delete means "revert to the configured default", so the floor comes back.
-  await gate.decide(req({ subject: '@x/foo' }), recorder('Always allow "@x/foo"').ask);
+  await gate.decide(req({ subject: '@x/foo' }), recorder('always-subject').ask);
   const cleared = await run<{ cleared: string[] }>(tool, { action: 'clear', gate: 'plugin.add' });
   assert.deepEqual(cleared.cleared, ['plugin.add']);
   assert.equal(await gate.decide(req({ subject: '@configured/one' }), asked.ask), true,

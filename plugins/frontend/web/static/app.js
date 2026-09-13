@@ -2554,9 +2554,13 @@ function renderContentParts(wrap, content) {
             const sel = document.createElement('select');
             sel.className = 'form-select';
             sel.name = field.name;
+            // An option is a bare string (value === label) or a { value, label } pair: render the
+            // label, submit the value. A caller that branches on the answer compares values, never the
+            // prose it rendered — see FormOption in plugin-api.
             for (const opt of field.options ?? []) {
               const o = document.createElement('option');
-              o.value = o.textContent = opt;
+              o.value       = typeof opt === 'string' ? opt : opt.value;
+              o.textContent = typeof opt === 'string' ? opt : opt.label;
               sel.appendChild(o);
             }
             if (field.default) sel.value = field.default;
@@ -3298,11 +3302,14 @@ async function renderTurn(sid, traceId) {
           // Buttons come from a structured select/confirm field; failing that, from a
           // legacy trailing [A/B] in the question text. Otherwise it's a free-text input.
           const choiceMatch = field ? null : /\[([^\/\]]+)\/([^\/\]]+)\]\s*$/.exec(rawQ);
+          // { value, label } throughout: the button shows the label and answers with the value. A bare
+          // string option (and a legacy [A/B] question) is both, so nothing else here changes.
+          const asChoice = o => typeof o === 'string' ? { value: o, label: o } : { value: o.value, label: o.label };
           const choices = field
-            ? (field.type === 'select'  ? (field.options ?? [])
-             : field.type === 'confirm' ? ['yes', 'no']
+            ? (field.type === 'select'  ? (field.options ?? []).map(asChoice)
+             : field.type === 'confirm' ? ['yes', 'no'].map(asChoice)
              : null)
-            : (choiceMatch ? [choiceMatch[1], choiceMatch[2]] : null);
+            : (choiceMatch ? [choiceMatch[1], choiceMatch[2]].map(asChoice) : null);
           const questionText = field ? field.label
             : (choiceMatch ? rawQ.slice(0, choiceMatch.index).trimEnd() : rawQ);
           const defaultValue = field ? field.default : ev.defaultValue;
@@ -3347,13 +3354,14 @@ async function renderTurn(sid, traceId) {
               for (const choice of choices) {
                 const btn = document.createElement('button');
                 btn.type = 'button';
-                const isDefault = choice.toLowerCase() === (defaultValue ?? '').toLowerCase();
+                // The default names a VALUE, so a reworded label still highlights the right button.
+                const isDefault = choice.value.toLowerCase() === (defaultValue ?? '').toLowerCase();
                 btn.className = 'prompt-choice-btn' + (isDefault ? ' primary' : '');
-                const cl = choice.toLowerCase();
+                const cl = choice.value.toLowerCase();
                 btn.textContent = cl === 'y' || cl === 'yes' ? 'Yes'
                   : cl === 'n' || cl === 'no' ? 'No'
-                  : choice;
-                btn.onclick = () => { done(); resolve({ answer: choice }); };
+                  : choice.label;
+                btn.onclick = () => { done(); resolve({ answer: choice.value }); };
                 if (isDefault) defaultBtn = btn;
                 row.appendChild(btn);
               }

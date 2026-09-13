@@ -14,11 +14,11 @@ after(() => { installSettingsDefaults(undefined); });
 const gate = (settings: Store<never>) =>
   createDefaultGate(makePluginSettings(settings as unknown as Store<SettingsDoc>, DEFAULT_GATE_SETTINGS_NS));
 
-// Answering "Deny" makes both assertions falsifiable: the listed tool changes hands only if the prompt
+// Answering deny makes both assertions falsifiable: the listed tool changes hands only if the prompt
 // was skipped, and the unlisted one survives only if it was consulted.
 function recordingPrompt(): { asked: string[]; prompt: PromptFn } {
   const asked: string[] = [];
-  const prompt = (async (f: { label: string }) => { asked.push(f.label); return 'Deny'; }) as PromptFn;
+  const prompt = (async (f: { label: string }) => { asked.push(f.label); return 'deny'; }) as PromptFn;
   return { asked, prompt };
 }
 

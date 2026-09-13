@@ -692,6 +692,16 @@ host's readline/form system; use sparingly, only for irreversible actions. There
 `principal` field — the security principal is carried **ambiently**; read it with
 `currentPrincipal()` from `@matatbread/matbot-core` (or the re-export in plugin-api).
 
+**If you branch on a `select`'s answer, give each option a value.** `FormField.options` takes a bare
+string (value === label) or a `{ value, label }` pair; the frontend renders `optionLabel(o)` and
+answers with `optionValue(o)`, and `default` names a *value*. Compare against the value, never the
+rendered prose — a label is cosmetic, rewordable and potentially localised, and treating it as an
+identity is a live footgun: the permission gate offered *Allow* and *Always allow "…"*, and matching
+the answer against prose read the first as the second. `confirm` has always worked this way
+(`CONFIRM_YES` / `CONFIRM_NO` are tokens, not labels). Options whose text IS the answer — `ask_user`,
+where they are the user's own words and `allowOther` free text arrives on the same channel — stay
+bare strings.
+
 ### Declaring a gate
 
 A **privileged** operation — one whose effect a user would want to accept before it happens:

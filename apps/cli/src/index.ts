@@ -21,7 +21,8 @@ import { appendMessage, createMessage,
          unifyServices, forwardingProxy, makeSwappable, singleTurnRequest,
          createMountTable, scheduleAtEdge,
          createSingleTurnTool, createAboutMatbotTool,
-         isMissingSecretError, createNotifier, notifyingStore,
+         isMissingSecretError, createNotifier, notifyingStore, optionValue, optionLabel,
+         CONFIRM_YES, CONFIRM_NO,
          wireDescription}            from '@matatbread/matbot-core';
 import type { ToolInputValidator } from '@matatbread/matbot-core';
 import type { MatbotMachine, MatbotServices, PluginSettings, Vault, SessionRunner, Notifier, PermissionGate,
@@ -553,8 +554,10 @@ async function runTurn(
               write('\n');
               const values: Record<string, string> = {};
               for (const field of formPart.fields) {
-                const hint = field.options ? ` [${field.options.join('/')}]` : '';
-                values[field.name] = await promptFn(`${field.label}${hint}`, field.default);
+                // The FIELD, not a label + a hand-built hint: passing a synthesised string took the
+                // free-text branch of the prompt, so a form's select answer came back as whatever was
+                // typed — unresolved, and never the option's value. One resolver, every path.
+                values[field.name] = await promptFn(field);
               }
               process.removeListener('SIGINT', onSigint);
               ac.abort();
@@ -1487,11 +1490,20 @@ async function main(): Promise<void> {
     if (typeof p !== 'string') {
       const def = p.default;
       if (p.type === 'select' || p.type === 'confirm') {
-        const opts = p.type === 'confirm' ? ['yes', 'no'] : (p.options ?? []);
-        const hint = opts.map(o => def !== undefined && o.toLowerCase() === def.toLowerCase() ? o.toUpperCase() : o).join('/');
+        const opts = p.type === 'confirm' ? [CONFIRM_YES, CONFIRM_NO] : (p.options ?? []);
+        // Typed against the LABEL (it is what was shown), answered with the VALUE (it is what the
+        // caller branches on). For a bare-string option the two are the same, which is every option
+        // in the repo bar the permission gate's — so this is one indirection, not a new mode.
+        const hint = opts.map(o => {
+          const label = optionLabel(o);
+          return def !== undefined && optionValue(o).toLowerCase() === def.toLowerCase() ? label.toUpperCase() : label;
+        }).join('/');
         const raw  = (await ask(`${p.label} [${hint}] `)).trim();
         if (!raw) return def ?? '';
-        return opts.find(o => o.toLowerCase().startsWith(raw.toLowerCase())) ?? def ?? raw;
+        const picked = opts.find(o => optionLabel(o).toLowerCase().startsWith(raw.toLowerCase()));
+        // An unmatched answer falls back to the default rather than being returned verbatim: the caller
+        // is branching on a token it published, and prose it never offered can only be a miss.
+        return picked !== undefined ? optionValue(picked) : def ?? raw;
       }
       const suffix = def !== undefined ? ` [${def}] ` : ' ';
       return (await ask(`${p.label}${suffix}`)).trim() || def || '';
