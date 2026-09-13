@@ -189,6 +189,15 @@ churn and less likely to affect a consumer who doesn't use them.
   The id is qualified by the **tool** name (`mcp_action`), so one key covers both the node `mcp` plugin
   and cross-runtime `mcp-http`, which register the same tool. Every other gate takes the same treatment.
 
+#### docker-bash
+
+- **The default image is `node:24-bookworm`** instead of `ubuntu:24.04`, so Node 24 and npm are
+  preinstalled; still Debian, so `apt` and existing scripts are unaffected. An existing `matbot-bash`
+  container keeps the image it was created from.
+- **`bash_config { action: 'pull' }`** fetches the configured image, streaming its progress, and
+  recreates the container from it — unconditionally, since an up-to-date image says nothing about which
+  image the existing container was built from. It is how an existing install adopts the new default.
+
 #### triggers
 
 - **A trigger with no `params` calls its tool with `{}`**, not `undefined`. Every such trigger — the
