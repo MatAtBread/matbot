@@ -98,6 +98,7 @@ export const plugin: MatbotPluginSpec = {
       watchVisibility: () => services.WatchVisibility,
       filePartition:   () => services.FilePartition,
       mediaStore:      () => services.MediaStore,
+      permissionGate:  () => services.PermissionGate,
       notifier:        services.Notifier,
       ...(services.configPath !== undefined ? { configPath: services.configPath } : {}),
     });

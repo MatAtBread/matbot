@@ -1,6 +1,6 @@
-import type { Tool, ToolRegistry, Hook, PromptFn, FormField, FrontendInfo, ProviderAdapter, ProviderConfig, FailedPlugin } from './types.js';
+import type { Tool, ToolRegistry, Hook, PromptFn, FrontendInfo, ProviderAdapter, ProviderConfig, FailedPlugin } from './types.js';
 import { RegistryChangeKind } from '@matatbread/matbot-plugin-api';
-import { scopedNotifier } from '@matatbread/matbot-plugin-api/host';
+import { scopedNotifier, askPermissionGate } from '@matatbread/matbot-plugin-api/host';
 import type {
   MatbotPlugin, MatbotMachine, MatbotRuntime, Mounted,
   ProviderAdapterFactory, StoreFactory,
@@ -26,7 +26,6 @@ const state = {
   systemContextPlugins: new Set<string>(),       // plugins that registered a system-context contributor
   lifecycles:      new Map<string, AbortController>(),  // pluginName → "this plugin is loaded" signal, aborted on unload
   failedPlugins:   [] as FailedPlugin[],         // plugins the loader skipped, keyed by specifier (last failure wins)
-  overwriteAllTools: undefined as boolean | undefined,  // persisted "overwrite on collision, this install" choice, loaded lazily
 };
 
 // Plugin load/unload is announced on the Notifier as a `RegistryChange` with `registry: 'plugins'`, for
@@ -38,22 +37,21 @@ export function announcePluginLoaded(services: MatbotMachine, name: string): voi
   services.Notifier.notify({ kind: RegistryChangeKind, source: 'plugins', registry: 'plugins', name, operation: 'added' });
 }
 
-// Settings namespace + key under which the user's "overwrite all colliding tools" choice
-// is persisted for the installation. The namespace doubles as a Store document id, so it must
-// satisfy the storage id charset (/^[\w-]+$/) — hence underscores, not '@matbot/core'. The
-// dunder marks it reserved (internal), so it won't collide with a real plugin's settings.
-const CORE_SETTINGS_NS    = '__matbot_core__';
-const OVERWRITE_TOOLS_KEY = 'overwriteToolsOnCollision';
-
 /**
- * Decide whether an incoming tool registration may overwrite an existing tool of the
- * same name owned by a different plugin. Returns true to overwrite, false to keep the
- * existing one and drop the incoming registration.
+ * Decide whether an incoming tool registration may overwrite an existing tool of the same name owned
+ * by a different plugin. Returns true to overwrite, false to keep the existing one and drop the
+ * incoming registration.
  *
- * Resolution order: a persisted "overwrite all (this install)" choice short-circuits to
- * true; otherwise the user is prompted [n / Y / all] with Y (overwrite) as the default.
- * 'all' persists the choice. With no prompt available (non-interactive host) we overwrite —
- * the default — preserving matbot's historical last-registration-wins behaviour.
+ * Core declares that the decision is needed and nothing else: the installation's `PermissionGate`
+ * decides how acceptance is obtained. Core used to own the whole policy here — a settings key in a
+ * reserved `__matbot_core__` namespace, a cached memo, a per-tool allowlist and two "always" options —
+ * which is an installation policy living in core and keyed in an LLM-writable store, and which an
+ * alternative installation could only defeat rather than replace. Remembering answers is now
+ * `@matatbread/matbot-default-gate`'s, out of its own plugin settings namespace.
+ *
+ * `fallback: true` is load-bearing: with no gate and no prompt (a boot load), a collision overwrites,
+ * preserving matbot's last-registration-wins behaviour and the deliberate override documented in
+ * docs/PER-USER-PLUGINS.md.
  */
 async function resolveToolCollision(
   services:      MatbotMachine,
@@ -62,34 +60,24 @@ async function resolveToolCollision(
   incomingOwner: string,
   prompt:        PromptFn | undefined,
 ): Promise<boolean> {
-  const coreSettings = makePluginSettings(services.createStore<SettingsDoc>('settings'), CORE_SETTINGS_NS);
-  if (state.overwriteAllTools === undefined) {
-    state.overwriteAllTools = (await coreSettings.get<boolean>(OVERWRITE_TOOLS_KEY)) ?? false;
-  }
-  if (state.overwriteAllTools) return true;
-
   const owner = existingOwner !== undefined ? `"${existingOwner}"` : 'a built-in';
   const label = `Tool \`"${toolName}"\` is already registered by **${owner}**. Overwrite it with the one from **"${incomingOwner}"**?`;
-
-  if (prompt === undefined) {
-    console.warn(`[matbot] ${label} — non-interactive, overwriting (default).`);
-    return true;
-  }
-
-  const field: FormField = {
-    name:    'overwrite',
+  const allowed = await (services.PermissionGate ?? askPermissionGate).decide({
+    gate:     'tools.overwrite',
+    subject:  toolName,
+    // The incoming OWNER rides in the label rather than in a field of its own: a single `subject`
+    // cannot also express "trust everything plugin foo registers", and no policy wants that yet.
     label,
-    type:    'select',
-    options: ['Keep existing', 'Overwrite', 'Always overwrite'],
-    default: 'Overwrite',
-  };
-  const answer = (await prompt(field)).trim().toLowerCase();
-  if (answer.startsWith('a')) {  // "Always overwrite" — persist for the installation
-    state.overwriteAllTools = true;
-    await coreSettings.set(OVERWRITE_TOOLS_KEY, true);
-    return true;
+    fallback: true,
+  }, prompt);
+  // Said out loud when nobody could be asked, as it was before the gate existed: a boot-time overwrite
+  // is the one decision here that proceeds with no human and no record of itself, and "my tool silently
+  // changed hands" is exactly the report this line answers. A policy that overwrites after ASKING
+  // needs no warning — the user just saw the question.
+  if (prompt === undefined) {
+    console.warn(`[matbot] ${label} — non-interactive, ${allowed ? 'overwriting' : 'keeping the existing tool'}.`);
   }
-  return !answer.startsWith('k');  // "Keep existing" → false; "Overwrite"/default → true
+  return allowed;
 }
 
 // ── Version check ─────────────────────────────────────────────────────────────
@@ -352,6 +340,18 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotMachine,
       specifier: plugin.specifier,
       ...(plugin.source !== undefined ? { source: plugin.source } : {}),
     },
+    // Re-declared as a getter because the spread above COPIES: `{ ...services }` evaluates every
+    // getter on the host object exactly once, at plugin-load time. For the other swap-members that is
+    // harmless — the host's getters hand back capture-safe proxies, so a copied reference still follows
+    // the swap — but `PermissionGate` is deliberately NOT proxied (a policy composes by capturing the
+    // gate it displaces; through a proxy that capture resolves to itself, for ever). Copied, a plugin
+    // would hold whatever policy was active when IT loaded: a policy registered later would never be
+    // consulted by anything reading through this machine (frontend-web's `POST /tools/:name` route did
+    // exactly that), and unloading one would leave the copy pointing at the gone impl instead of
+    // reverting to the host's boot default. Reading through to `services` keeps it live per access,
+    // which is what every consumer here wants; a policy plugin's own `previous` capture is unaffected,
+    // being a deliberate read of the concrete gate at that moment.
+    get PermissionGate() { return services.PermissionGate; },
     // Everything this plugin publishes is attributed to it by default — the notification analogue of
     // stamping `pluginName` on its tools. Reads through the host's swap proxy, so a registered
     // distributed Notifier takes effect for a plugin that captured this in setup().

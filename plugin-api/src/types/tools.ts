@@ -2,6 +2,7 @@ import type { FileHandle, FileStore } from './files.js';
 import type { FormField, MessageContent, Session } from './messages.js';
 import type { MatbotPlugin } from '../plugin.js';
 import type { JSONSchema } from './primitives.js';
+import type { PermissionRequest } from './permission.js';
 import type { Vault } from './vault.js';
 
 // ── Tools ─────────────────────────────────────────────────────────────────────
@@ -213,6 +214,17 @@ export interface ToolContext {
   files?:      FileStore;
   /** Prompt the user for input. The host provides a readline or form implementation. */
   prompt:      PromptFn;
+  /**
+   * Ask permission for a privileged operation — install a plugin, remove a provider profile, add an
+   * MCP server. Resolves `true` to proceed. The call site declares *that* acceptance is needed; the
+   * registered {@link PermissionGate} decides *how* it is obtained (the default asks the user).
+   *
+   * `gate` is the SUFFIX (`'add'`): the host qualifies it with this tool's registered name, so one
+   * policy covers both runtimes' implementations of a tool (node's `plugin` and the browser's) and a
+   * plugin cannot address a gate it does not own. `fallback` is what happens when no human is
+   * reachable and no policy decides.
+   */
+  gate(req: PermissionRequest): Promise<boolean>;
   /** Hot-load a plugin by specifier without restarting the process. Returns the loaded plugin.
    *  `refresh` (default false) forces a remote (github/http) plugin to be re-downloaded rather than
    *  re-loaded from its `.plugins/` cache — pass true to pick up changed upstream source. */

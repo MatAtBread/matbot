@@ -1,5 +1,6 @@
 import type { MatbotMachine, MatbotPlugin } from './plugin.js';
-import type { ToolContext, ToolEvent, ToolResultFor, ToolProxy, PromptFn, FormField } from './types.js';
+import type { ToolContext, ToolEvent, ToolResultFor, ToolProxy, PromptFn, FormField, PermissionGate } from './types.js';
+import { askPermissionGate } from './permission-gate.js';
 
 /** The host's plugin hot-load ops, as both the runner and {@link invokeTool} hold them. */
 export interface PluginOps {
@@ -21,6 +22,29 @@ export function bindPluginOps(host: PluginOps, prompt: PromptFn): Pick<ToolConte
   return {
     loadPlugin:   (specifier, refresh) => host.loadPlugin(specifier, prompt, refresh),
     unloadPlugin: (specifier)          => host.unloadPlugin(specifier),
+  };
+}
+
+/**
+ * Bind {@link ToolContext.gate} for a tool call, qualifying the suffix the tool supplies with the name
+ * it is registered under: `ctx.gate({ gate: 'add', … })` from the `plugin` tool asks `plugin.add`.
+ * Qualifying by TOOL name rather than package is what makes one policy cover both runtimes' versions
+ * of a tool (node's `tool-plugin` and the browser's `plugin-tool` both register `plugin`), and what
+ * stops a plugin addressing a gate it does not own — tool-name collision on `register` is already
+ * resolved, so the name is not something a second plugin can quietly claim.
+ *
+ * `ask` is the RAW per-turn prompt, never a stand-in that answers with a field's default: `undefined`
+ * is how "no human is reachable" reaches the policy, and a substitute would make that undecidable.
+ * `gate` is the registered `PermissionGate`; it is a non-optional service, but a hand-assembled
+ * machine (a test, a minimal embedder) may still have none, so the asking default stands in.
+ */
+export function bindGate(
+  gate:     PermissionGate | undefined,
+  toolName: string,
+  ask:      PromptFn | undefined,
+): Pick<ToolContext, 'gate'> {
+  return {
+    gate: req => (gate ?? askPermissionGate).decide({ ...req, gate: `${toolName}.${req.gate}` }, ask),
   };
 }
 
@@ -65,6 +89,10 @@ export function invokeTool<K extends string, const P>(
     vault:        machine.Vault,
     prompt,
     ...bindPluginOps(machine, prompt),
+    // The raw `opts.prompt`, not the rejecting stand-in above: a gate must be able to tell "nobody is
+    // here" from "a human answered", and `POST /tools/:name` reaching a privileged tool is exactly the
+    // non-interactive case the request's `fallback` exists to answer.
+    ...bindGate(machine.PermissionGate, name, opts.prompt),
     ...(opts.provider      !== undefined ? { provider:   opts.provider      } : {}),
     ...(machine.workdir    !== undefined ? { workdir:    machine.workdir    } : {}),
     ...(machine.configPath !== undefined ? { configPath: machine.configPath } : {}),

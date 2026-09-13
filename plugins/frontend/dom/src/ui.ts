@@ -1,7 +1,7 @@
 import type {
   MatbotMachine, Session, PipelineEvent, MessageContent, FormField, PromptFn, Principal,
 } from '@matatbread/matbot-plugin-api';
-import { createSession, currentPrincipal, promptCancelledError } from '@matatbread/matbot-core';
+import { createSession, currentPrincipal, promptCancelledError, optionValue, optionLabel } from '@matatbread/matbot-core';
 
 const CSS = `
 .mb-app { display:flex; flex-direction:column; height:100vh; font:14px/1.5 system-ui,sans-serif; color:#1a1a1a; background:#fafafa; }
@@ -411,9 +411,10 @@ export class ChatUI {
         box.appendChild(opts);
       } else if (field.type === 'select') {
         const opts = el('div', 'mb-opts');
+        // Label on the button, value on the wire — see FormOption. A bare string is both.
         for (const option of field.options ?? []) {
-          const b = el('button', undefined, option);
-          b.addEventListener('click', () => done(option));
+          const b = el('button', undefined, optionLabel(option));
+          b.addEventListener('click', () => done(optionValue(option)));
           opts.appendChild(b);
         }
         box.appendChild(opts);

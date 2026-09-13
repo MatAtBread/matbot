@@ -17,15 +17,17 @@ import { appendMessage, createMessage,
          unloadPlugin as unloadPluginFn,
          getPluginNameForSpecifier, getRegisteredPlugins, recordServiceKey,
          installPrincipalCarrier, installUsageCarrier, recordUsage, usageByProvider, addUsage, enterPrincipal, currentPrincipal,
-         installSettingsDefaults, settingsDefaultNamespaces, installSettingsNotifier,
+         installSettingsDefaults, settingsDefaultNamespaces, installSettingsNotifier, makePluginSettings,
          unifyServices, forwardingProxy, makeSwappable, singleTurnRequest,
          createMountTable, scheduleAtEdge,
          createSingleTurnTool, createAboutMatbotTool,
-         isMissingSecretError, createNotifier, notifyingStore,
+         isMissingSecretError, createNotifier, notifyingStore, optionValue, optionLabel,
+         CONFIRM_YES, CONFIRM_NO,
          wireDescription}            from '@matatbread/matbot-core';
 import type { ToolInputValidator } from '@matatbread/matbot-core';
-import type { MatbotMachine, MatbotServices, PluginSettings, Vault, SessionRunner, Notifier,
-              MatbotPlugin, StorageBackend, KnowledgeIndex, PromptFn, FormField, SwapFn } from '@matatbread/matbot-core';
+import type { MatbotMachine, MatbotServices, PluginSettings, Vault, SessionRunner, Notifier, PermissionGate,
+              MatbotPlugin, StorageBackend, KnowledgeIndex, PromptFn, FormField, SwapFn, SettingsDoc } from '@matatbread/matbot-core';
+import { createDefaultGate, createGateTools, DEFAULT_GATE_SETTINGS_NS } from '@matatbread/matbot-default-gate';
 import { systemPrincipal }                 from '@matatbread/matbot-core';
 import { createAlsPrincipalCarrier }       from './principal-als.js';
 import { createAlsUsageCarrier }           from './usage-als.js';
@@ -552,8 +554,10 @@ async function runTurn(
               write('\n');
               const values: Record<string, string> = {};
               for (const field of formPart.fields) {
-                const hint = field.options ? ` [${field.options.join('/')}]` : '';
-                values[field.name] = await promptFn(`${field.label}${hint}`, field.default);
+                // The FIELD, not a label + a hand-built hint: passing a synthesised string took the
+                // free-text branch of the prompt, so a form's select answer came back as whatever was
+                // typed — unresolved, and never the option's value. One resolver, every path.
+                values[field.name] = await promptFn(field);
               }
               process.removeListener('SIGINT', onSigint);
               ac.abort();
@@ -991,6 +995,22 @@ async function main(): Promise<void> {
   // register() reverts to these when it is unloaded, instead of leaving a dangling reference to the
   // now-gone impl. (bootBackend/bootFileStore are captured above, before the pre-scan, so a
   // config-supplied backend never poses as the host base.)
+  // The installation's permission policy — consulted by every privileged call site (`ctx.gate`, and
+  // core's tool-collision decision). The boot default is the default-gate package's own implementation
+  // over its own settings namespace, not the bare asking gate plugin-api ships: the app decides its own
+  // base services, and this is the one that makes standing answers work out of the box.
+  //
+  // Deliberately NOT behind a forwardingProxy, unlike every other swap-member. The documented way to
+  // replace a policy is to capture the one you displace and delegate to it, and a capture-safe proxy
+  // makes that capture a reference to *whatever is current* — which, one line later, is the capturing
+  // plugin's own gate. It then calls itself until the stack overflows, and the pattern the docs
+  // recommend is the pattern that breaks. Exposed as a getter so a member read is still late-bound;
+  // every in-repo consumer resolves it per call (the runner per turn, `invokeTool` and the registry per
+  // decision), so nothing wants the proxy and one thing very much does not. `ToolCallValidator`, which
+  // composes the same way, is a plain registry value for the same reason.
+  const gateSettings = makePluginSettings(createStore<SettingsDoc>('settings'), DEFAULT_GATE_SETTINGS_NS);
+  let activeGate: PermissionGate = createDefaultGate(gateSettings);
+  const bootGate                 = activeGate;
   const bootVault                  = activeVault;
   const bootKnowledge              = knowledgeImpl;
   const bootNotifier               = activeNotifier;
@@ -1113,6 +1133,7 @@ async function main(): Promise<void> {
       else if (key === 'KnowledgeIndex') swapKnowledge(value as KnowledgeIndex);
       else if (key === 'Vault')          activeVault = value as Vault;
       else if (key === 'Notifier')       activeNotifier = value as Notifier;
+      else if (key === 'PermissionGate') activeGate     = value as PermissionGate;
       else serviceRegistry.set(key as string, value);
       if (key !== 'StorageBackend') { mountTable.markDirty(key); scheduleEdge(); }
     },
@@ -1124,6 +1145,7 @@ async function main(): Promise<void> {
       else if (key === 'KnowledgeIndex') knowledgeImpl = bootKnowledge;
       else if (key === 'Vault')          activeVault = bootVault;
       else if (key === 'Notifier')       activeNotifier = bootNotifier;
+      else if (key === 'PermissionGate') activeGate     = bootGate;
       // Reverts to the host file area rather than vanishing: unloading a plugin that put media on S3
       // should leave attachments working on disk, not silently turn them off until a restart.
       else if (key === 'MediaStore')     serviceRegistry.set('MediaStore', fileStore);
@@ -1212,6 +1234,7 @@ async function main(): Promise<void> {
     files:     fileStore,
     Vault:     vault,
     Notifier:  notifierProxy,
+    get PermissionGate() { return activeGate; },
     hooks:          hookReg,
     tools:          toolReg,
     systemContext:  systemContextReg,
@@ -1250,6 +1273,7 @@ async function main(): Promise<void> {
     toolPresenter: () => services.ToolPresenter,   // resolved live: a tool-search/deferral plugin registers it after boot
     steeringPolicy: () => services.SteeringPolicy, // resolved live: a steering plugin registers it after boot
     mediaStore:    () => services.MediaStore,      // resolved live: seeded to the host file area, a plugin may swap it
+    permissionGate:() => services.PermissionGate,  // resolved live: the boot policy, or whatever a plugin registered over it
     hooks:         hookReg,
     systemContext: systemContextReg,
     vault,
@@ -1295,7 +1319,9 @@ async function main(): Promise<void> {
   {
     const loaded = new Set(getRegisteredPlugins().map(p => p.name));
     for (const ns of settingsDefaultNamespaces()) {
-      if (loaded.has(ns) || (ns.startsWith('__') && ns.endsWith('__'))) continue;
+      // The gate's namespace is seeded by this host, not by a loaded plugin, so it would otherwise be
+      // reported as naming nothing — the one key an install is most likely to author by hand.
+      if (loaded.has(ns) || ns === DEFAULT_GATE_SETTINGS_NS || (ns.startsWith('__') && ns.endsWith('__'))) continue;
       console.warn(
         `[matbot] default_settings names "${ns}", which is not a loaded plugin — its defaults will ` +
         `never apply. Key it by the plugin's package name (\`plugin list\` reports them).`,
@@ -1340,6 +1366,12 @@ async function main(): Promise<void> {
   // their YAML specifiers are recorded — createProviderTool reads getRegisteredPlugins()
   // and pluginNameToOrigPath to build its description.
   toolReg.register(createProviderTool(providers, pluginNameToOrigPath, providerNameResolves));
+
+  // gate_action: inspect and forget the standing answers the boot policy remembers. Seeded like
+  // `plugin`/`provider` rather than carried by a configured plugin, because the policy itself is: a
+  // minimal install's first act is adding a plugin or a provider, which is gated, so the way to see and
+  // undo an answer cannot depend on a config line being present.
+  for (const tool of createGateTools(gateSettings)) toolReg.register(tool);
 
   // single_turn: the model-facing surface of the core singleTurn service. Registered here beside the
   // other core service-management tools (it needs the live `services` for `singleTurn`/`providers`).
@@ -1463,11 +1495,20 @@ async function main(): Promise<void> {
     if (typeof p !== 'string') {
       const def = p.default;
       if (p.type === 'select' || p.type === 'confirm') {
-        const opts = p.type === 'confirm' ? ['yes', 'no'] : (p.options ?? []);
-        const hint = opts.map(o => def !== undefined && o.toLowerCase() === def.toLowerCase() ? o.toUpperCase() : o).join('/');
+        const opts = p.type === 'confirm' ? [CONFIRM_YES, CONFIRM_NO] : (p.options ?? []);
+        // Typed against the LABEL (it is what was shown), answered with the VALUE (it is what the
+        // caller branches on). For a bare-string option the two are the same, which is every option
+        // in the repo bar the permission gate's — so this is one indirection, not a new mode.
+        const hint = opts.map(o => {
+          const label = optionLabel(o);
+          return def !== undefined && optionValue(o).toLowerCase() === def.toLowerCase() ? label.toUpperCase() : label;
+        }).join('/');
         const raw  = (await ask(`${p.label} [${hint}] `)).trim();
         if (!raw) return def ?? '';
-        return opts.find(o => o.toLowerCase().startsWith(raw.toLowerCase())) ?? def ?? raw;
+        const picked = opts.find(o => optionLabel(o).toLowerCase().startsWith(raw.toLowerCase()));
+        // An unmatched answer falls back to the default rather than being returned verbatim: the caller
+        // is branching on a token it published, and prose it never offered can only be a miss.
+        return picked !== undefined ? optionValue(picked) : def ?? raw;
       }
       const suffix = def !== undefined ? ` [${def}] ` : ' ';
       return (await ask(`${p.label}${suffix}`)).trim() || def || '';

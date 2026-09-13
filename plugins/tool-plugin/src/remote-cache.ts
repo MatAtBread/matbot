@@ -127,7 +127,7 @@ const sameDir = async (a: string, b: string): Promise<boolean> => {
  * alike, and it is the handle `remove`/`reload` address a plugin by — so a config entry should say the
  * name whenever the name works. (The `provider` tool and the setup wizard already write package names
  * for exactly this reason.) It is offered only when it resolves BACK to this very directory: a package
- * under `plugins/` is found by name, one anywhere else (a compiled plugin in `compiled-plugins/`, a
+ * under `plugins/` is found by name, one anywhere else (a compiled plugin in `.compiled-plugins/`, a
  * sibling checkout reached by `../`) is not, and recording a name that resolves elsewhere — or nowhere —
  * would point the config at something other than what was just approved.
  */

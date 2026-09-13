@@ -201,7 +201,7 @@ what a filesystem cannot solve.
 The same fact runs the other way when a plugin is **recorded**: `plugin add` writes the canonical package
 name, not the path it was given, whenever that name resolves back to the directory just approved. The name
 works in a checkout and in an installed deployment; a path works in one working copy. A plugin the name
-cannot reach — under `compiled-plugins/`, in a sibling checkout via `../` — keeps its path.
+cannot reach — under `.compiled-plugins/`, in a sibling checkout via `../` — keeps its path.
 
 Two rules close the model. **A plugin is always a package**: never raw source without a manifest, because
 matbot's own fields (`matbotRuntime`) live there. And **a bare specifier means host-provided** — the
@@ -404,6 +404,7 @@ interface MatbotServices {
   readonly KnowledgeIndex:   KnowledgeIndex;
   readonly Vault:            Vault;
   readonly Notifier:         Notifier;                    // the one change-notification bus; always present
+  readonly PermissionGate:   PermissionGate;              // the installation's policy for privileged operations; always present
   readonly ToolTypeIndex?:   ToolTypeIndex | undefined;    // node-only; provided by the tool-types plugin
   readonly ToolPresenter?:   ToolPresenter | undefined;    // per-turn tool-visibility policy (tool-router)
   readonly WatchVisibility?: WatchVisibility | undefined;  // per-connection notification visibility (a partitioning backend)
@@ -464,9 +465,9 @@ The registry is for **loose negotiation between independent parties** — the co
 knows nor cares who (if anyone) provides the capability, and degrades gracefully when it is
 absent. When one plugin is a *specialization* of another (it depends on it by construction),
 import and construct it directly with a hard `package.json` dependency instead. See CLAUDE.md
-for the full distinction and for the four swap-aware keys (`StorageBackend`, `KnowledgeIndex`,
-`Vault`, `Notifier`) — each carries a host boot default and reverts to it when the plugin that
-registered one is unloaded.
+for the full distinction and for the five swap-aware keys (`StorageBackend`, `KnowledgeIndex`,
+`Vault`, `Notifier`, `PermissionGate`) — each carries a host boot default and reverts to it when the
+plugin that registered one is unloaded.
 
 ### Plugin settings
 
@@ -475,10 +476,21 @@ interface PluginSettings {
   get<T>(key: string): Promise<T | undefined>;
   set<T>(key: string, value: T): Promise<void>;
   delete(key: string): Promise<void>;
+  entries(): Promise<Record<string, unknown>>;   // everything in force, layered like get()
 }
 ```
 
-Keys are scoped per plugin — two plugins can use the same key without collision.
+Keys are scoped per plugin — two plugins can use the same key without collision — and `entries()` is
+scoped the same way: your namespace, never another's.
+
+**Reach for `entries()` rather than tracking your own keys.** A plugin holding per-key state (a
+policy's standing answers, a per-item override) needs to answer "what is set?", and without
+enumeration the only way is to maintain an index key beside the data — which cannot see a value the
+*installation* configured, drifts if the write and the index-write are interrupted (state in force and
+invisible to your own listing), and records what was ever written rather than what is set. `entries()`
+costs exactly one `get`: a settings namespace is one document, so the medium hands over the values
+with the names, which is also why there is no `keys()` — that plus N × `get` would be N+1 reads of the
+document `entries()` returns in one.
 
 The install can supply a **default** for any key, via `default_settings:` in `matbot.yaml`
 (`BrowserConfig.defaultSettings` in the browser), keyed by your package name. It is read-through, so
@@ -679,6 +691,7 @@ interface ToolContext {
   configPath?: string;
   files?:      FileStore;
   prompt:      PromptFn;     // (question, default?) | (field: FormField) => Promise<string>
+  gate(req: PermissionRequest): Promise<boolean>;   // ask permission — see Declaring a gate
   loadPlugin(specifier: string, refresh?: boolean): Promise<MatbotPlugin>;  // refresh: re-download a remote
   unloadPlugin(specifier: string): Promise<boolean>;
 }
@@ -689,6 +702,88 @@ sub-processes, fetch calls, and timers. `ctx.prompt()` asks the user a question 
 host's readline/form system; use sparingly, only for irreversible actions. There is no
 `principal` field — the security principal is carried **ambiently**; read it with
 `currentPrincipal()` from `@matatbread/matbot-core` (or the re-export in plugin-api).
+
+**If you branch on a `select`'s answer, give each option a value.** `FormField.options` takes a bare
+string (value === label) or a `{ value, label }` pair; the frontend renders `optionLabel(o)` and
+answers with `optionValue(o)`, and `default` names a *value*. Compare against the value, never the
+rendered prose — a label is cosmetic, rewordable and potentially localised, and treating it as an
+identity is a live footgun: the permission gate offered *Allow* and *Always allow "…"*, and matching
+the answer against prose read the first as the second. `confirm` has always worked this way
+(`CONFIRM_YES` / `CONFIRM_NO` are tokens, not labels). Options whose text IS the answer — `ask_user`,
+where they are the user's own words and `allowOther` free text arrives on the same channel — stay
+bare strings.
+
+### Declaring a gate
+
+A **privileged** operation — one whose effect a user would want to accept before it happens:
+installing code, rewriting config, connecting a remote party, replacing another plugin's tool —
+does not ask the user itself. It declares what it needs and lets the installation's policy decide:
+
+```ts
+if (!await ctx.gate({
+  gate:     'add',                       // the SUFFIX; the host qualifies it with your tool's name
+  subject:  specifier,                   // what is acted on — the policy keys its memory on this
+  label:    `Install plugin **"${specifier}"**?`,   // the prose naming the act; rendered verbatim
+  fallback: false,                       // what happens with nobody to ask and no policy
+})) {
+  yield { type: 'result', value: { message: 'Cancelled.' } };
+  return;
+}
+```
+
+Four rules, all of which follow from the seam rather than from taste:
+
+- **The gate is the SUFFIX.** `ctx.gate({ gate: 'add' })` from a tool registered as `plugin` asks
+  `plugin.add`. You cannot address another tool's gate, and a same-named tool in the other runtime
+  reaches the same id — which is the point: one policy answer covers both.
+- **`fallback` is your call site's non-interactive answer**, not a preference. `false` for anything
+  that installs, rewrites or connects. `true` only where proceeding with nobody present is the
+  documented behaviour (core's `tools.overwrite` is the one such site in the repo).
+- **Gate only what is allow-or-not.** A gate is boolean by construction. Anything that *elicits a
+  value* — a secret, an API key, a question for the user — is `ctx.prompt` and never a gate; this is
+  what keeps authorization from needing routing rules.
+- **A refusal has one shape.** `false` is "not permitted", whether a human just said so or a stored
+  answer did. Yield your ordinary cancelled result; there is no denial error to catch.
+
+Adding a gate id is adding to a small documented vocabulary — list it in the default policy's README
+(and in GETTING-STARTED's table) so an installation can author an answer for it up front. An id no
+policy recognises is asked about, never allowed.
+
+To supply a *policy* instead — approve from a console, consult a roster, compile the rules in —
+register a `PermissionGate`, capturing the one you displace so the pair composes in either load
+order:
+
+```ts
+const previous = services.PermissionGate;        // the CONCRETE gate you are displacing
+await services.register('PermissionGate', {
+  async decide(req, ask) {
+    if (req.gate === 'plugin.add') return roster.allows(req.subject);
+    return previous.decide(req, ask);            // everything else keeps behaving as it did
+  },
+});
+```
+
+Capturing works because this is the one registry key a host does **not** hide behind a capture-safe
+proxy: read it and you hold the impl that was current, not a reference that follows the next swap —
+which would be your own gate, delegating to itself for ever. Read it *before* you register, and don't
+stash it anywhere that outlives your plugin.
+
+`ask` is the prompt channel in scope for that call, or `undefined` when **no human is reachable** (a
+boot load, a background task, `POST /tools/:name`, a frontend that cannot ask). Unloading your plugin
+reverts to the host's boot default, which asks.
+
+Two things to know before you write one. A standing answer is a *decision, not a channel*: it applies
+at every door, so allowing a gate outright also allows it for callers with no human behind them. And
+the boundary is only as strong as the tools the install grants — the default policy keeps its answers
+in `.data/settings/`, which any shell tool can write, so a deployment that needs a real boundary
+compiles its rules in rather than storing them where the model can reach.
+
+Both are *policy* decisions, and a policy has what it needs to make them differently: `ask ===
+undefined` identifies a caller with no human behind it (`POST /tools/:name`, a trigger, a boot load),
+so refusing there regardless of any stored answer is a four-line gate; and `decide` runs under the
+ambient security principal, so `tryCurrentPrincipal()` names *who* is asking without threading anything
+through. That is why neither is a field on `PermissionRequest` — a request describes the act, and the
+context of the call is already in scope.
 
 ---
 
@@ -1211,6 +1306,7 @@ Store-backed index with optional Cloudflare BGE reranker.
 | `@matatbread/matbot-sessions` | `session_action` | Session lifecycle: list, get, rename, hide |
 | `@matatbread/matbot-edit-session` | `session_edit`, `compact_sessions` | Trim, branch, split, compact and LLM-summarise sessions |
 | `@matatbread/matbot-triggers` | `trigger_action`, `triggers_config` (`screen`/`followup` hooks) | Data-driven hooks: stored conditions that invoke a tool when an LLM classifier judges them matched |
+| `@matatbread/matbot-default-gate` | `PermissionGate` + `gate_action` · always seeded | Built-in: the default permission policy — asks about a privileged operation, offers to remember the answer, honours what was remembered. Register your own `PermissionGate` to supply different rules |
 | `@matatbread/matbot-tool-json-validation` | `toolcall` hook | Validate tool inputs against their schema; the model self-corrects on mismatch |
 | `@matatbread/matbot-skills` | `skill_action`, `skills_config` | Cross-runtime skill CRUD (named markdown playbooks) |
 | `@matatbread/matbot-skills-node` | `skill_action` + file watch | Node specialization of `skills`: adds local `.md` import/watch |

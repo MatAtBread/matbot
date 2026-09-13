@@ -2,7 +2,7 @@ import type {
   FileStore, MediaStore, Principal, Vault, Message, ModelParameters,
   ProviderAdapter, ProviderConfig, ProviderRegistry, Tool, ToolRegistry, FrontendInfo,
   Store, Session, SystemContextRegistry, KnowledgeIndex, PromptFn, SessionRunner, Usage, HookRegistrar,
-  TypeScriptStripper, ToolTypeIndex, ToolPresenter, SteeringPolicy, UserContent,
+  TypeScriptStripper, ToolTypeIndex, ToolPresenter, SteeringPolicy, UserContent, PermissionGate,
 } from './types.js';
 import type { Notifications, Notifier } from './notify.js';
 
@@ -71,6 +71,21 @@ export interface PluginSettings {
   get<T>(key: string): Promise<T | undefined>;
   set<T>(key: string, value: T): Promise<void>;
   delete(key: string): Promise<void>;
+  /**
+   * Everything in force for this plugin, as one map — layered exactly as {@link get} is: a stored key
+   * wins, else the install's configured default. The only way to answer "what is set?", which a plugin
+   * holding per-key state (a policy's standing answers, a per-item override) otherwise has to answer by
+   * maintaining a second copy of its own keyspace — a duplicate that cannot see a configured default,
+   * drifts when a write and its index-write are interrupted, and reports what was *ever* written
+   * rather than what is set.
+   *
+   * A map rather than key/value tuples, and whole rather than a `keys()`: a settings namespace IS one
+   * document, so the medium hands over the values with the names, and `keys()` + N × `get` would be
+   * N+1 reads of the document this returns in one. Cost is therefore exactly one `get`.
+   *
+   * Scoped like every other method — a plugin enumerates its own namespace and cannot name another's.
+   */
+  entries(): Promise<Record<string, unknown>>;
 }
 
 // ── Plugin identity ─────────────────────────────────────────────────────────────
@@ -125,7 +140,7 @@ export interface PluginSelf {
  * The registry bucket: the swappable, registerable services, keyed by interface name. This is the
  * `keyof` domain of {@link MatbotRuntime.register}/`get`, and the surface third-party plugins augment
  * (`declare module '@matatbread/matbot-plugin-api' { interface MatbotServices { Foo?: Foo } }`). The
- * four swap-members (`StorageBackend`, `KnowledgeIndex`, `Vault`, `Notifier`) carry a host boot default
+ * five swap-members (`StorageBackend`, `KnowledgeIndex`, `Vault`, `Notifier`, `PermissionGate`) carry a host boot default
  * and revert to it when unregistered; an augmented service is optional and simply drops. Read each as
  * a member (`services.KnowledgeIndex`); swap with register().
  */
@@ -139,6 +154,13 @@ export interface MatbotServices {
    *  reference held across a swap keeps resolving to the live backend. Always present (boot default). */
   readonly Vault: Vault;
   readonly KnowledgeIndex: KnowledgeIndex;
+  /** The installation's permission policy — consulted by every privileged call site (`ctx.gate`, and
+   *  core's own tool-collision decision) and also the `register('PermissionGate', impl)` swap key.
+   *  NOT optional: absence is not a sensible state, since the behaviour has to exist. The host boots a
+   *  default that asks the user (or answers `req.fallback` when nobody is reachable), and unregistering
+   *  a policy plugin reverts to it — "unload the policy ⇒ back to asking", for free. See
+   *  {@link PermissionGate}. */
+  readonly PermissionGate: PermissionGate;
   /** The notification bus — every "something changed" fact, one fan-out. Also the `register('Notifier',
    *  impl)` swap key: the host boots an in-process broadcaster, a plugin may swap in a distributed one
    *  (and unloading it reverts to the boot default). Capture-safe behind a proxy. Always present.

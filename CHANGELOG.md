@@ -13,6 +13,22 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Breaking changes
 
+- **`default_settings.__matbot_core__.overwriteToolsOnCollision` is gone**, in both forms (a stored
+  answer and a configured floor), and is **not migrated**
+  ([#62](https://github.com/MatAtBread/matbot/issues/62)). The tool-collision decision is now a
+  *permission gate*, and standing answers belong to the policy that asks. Re-author it as
+
+  ```yaml
+  default_settings:
+    '@matatbread/matbot-default-gate':
+      'tools.overwrite': [bash, plugin]      # or: true
+  ```
+
+  The standing answer is re-offered the first time that collision comes round again, so restoring it
+  is one click — an adopt-once path would have been migration machinery, and a reserved namespace kept
+  alive, to save a single keystroke. An install still carrying the old key is warned at boot, naming
+  where it went. (The `string[]` form added earlier in this cycle moved with it, unchanged.)
+
 - **`ToolTypeIndex.check` returns a `ToolCheckReport`, not `string[]`.** It returned formatted
   multi-line blocks with the overflow summary appended as a further ELEMENT, so `diagnostics.length`
   counted prose as a finding and any per-code breakdown taken by iterating the array was unreliable
@@ -29,7 +45,53 @@ churn and less likely to affect a consumer who doesn't use them.
   elsewhere in this path: a checker that reports success while checking nothing is indistinguishable from
   one that works, and `function-tools` was recording such a definition as verified.
 
+- **`ToolContext.gate` is required, and `PluginSettings.entries()` with it.** Both are additive for
+  *callers* and breaking for anyone who **implements** those shapes: code that hand-builds a
+  `ToolContext` (an embedder standing up its own tool-invocation door, a test fixture) or its own
+  `PluginSettings` facade no longer compiles. `bindGate(machine.PermissionGate, toolName, ask)` supplies
+  the first in one line — the same helper the runner, `invokeTool` and frontend-web use — and there is
+  no way to make a gate optional without making "this tool cannot ask permission" a silent state.
+
 ### API gaps filled
+
+- **`PermissionGate`: a privileged operation declares, a replaceable policy decides.** A call site
+  that needs acceptance — installing a plugin, adding a provider profile, connecting an MCP server,
+  overwriting a tool another plugin owns — calls `ctx.gate({ gate, subject, label, fallback })`, and
+  the installation's registered `PermissionGate` decides how that acceptance is obtained. It used to
+  do both jobs itself, which is why an alternative installation could only *defeat* a policy, never
+  supply one: core held a settings key, a memo, a per-tool allowlist and two "always" options, and
+  `confirmAction` was implemented three times over.
+
+  `decide(req, ask)` receives the prompt channel in scope for that call, and **`ask === undefined` is
+  "no human is reachable"** — which is when the request's own `fallback` applies, reproducing each
+  site's non-interactive behaviour exactly. `gate` is a suffix the host qualifies with the tool's
+  *registered* name, so one answer covers both runtimes' implementations of a tool and no plugin can
+  address a gate it does not own. A swap-member, not an optional service: the host boots a default and
+  `unregister` reverts to it, so unloading a policy means "back to asking". 20 call sites, 13 gate ids.
+
+  What it buys is that a privileged operation is **decided somewhere replaceable**, and by default that
+  means a human is asked. It is not out of the model's reach: the default policy stores its answers in
+  `.data/settings/`, which any shell tool can write, and a standing answer is a decision rather than a
+  channel — so it applies at doors with no human behind them (`POST /tools/:name`, `invokeTool`, a
+  trigger). A deployment that needs a real boundary ships a gate with its rules compiled in.
+
+- **`ToolContext.gate`, `PermissionRequest` / `PermissionGate`, `bindGate`, and the host default
+  `askPermissionGate`** (`plugin-api/host`, re-exported by core).
+
+- **`PluginSettings.entries()`** — a plugin can enumerate its own settings. The facade was
+  `get`/`set`/`delete`, so a plugin holding per-key state had to keep an index key beside the data: an
+  index that cannot see a key the *installation* configured (in force, and therefore part of the
+  answer), that drifts if the write and the index-write are interrupted — state in force but invisible
+  to the plugin's own listing — and that records what was *ever* written rather than what is set.
+  `entries()` returns everything in force as one map, layered exactly as `get` is (stored key wins,
+  else the configured default), and costs exactly one `get`, because a settings namespace **is** one
+  document. That is also why there is no `keys()`: it plus N × `get` would be N+1 reads of the document
+  this returns in one.
+
+- **A `select` option can carry a value distinct from its label.** `FormField.options` takes
+  `string | { value, label }`; a bare string still means "the value is the label". Frontends render
+  `optionLabel(o)` and answer with `optionValue(o)`, and `default` names a value — so a caller that
+  branches on the answer compares a token rather than rendered, rewordable, localisable prose.
 
 - **`ToolCheckReport` / `ToolCheckDiagnostic`, `renderToolCheck` and `renderToolCheckOmitted`.** The
   report shape above, plus the one renderer that turns it into the text a model repairs from (and the
@@ -38,7 +100,114 @@ churn and less likely to affect a consumer who doesn't use them.
   putting it in front of whoever wrote the code — and the overflow line is precisely the part worth
   having in one place.
 
+- **`core` re-exports `CONFIRM_YES` / `CONFIRM_NO`.** It already re-exports every other cross-boundary
+  runtime value so an app needs no direct `plugin-api` dependency; these were missed, and an app
+  implementing a `PromptFn` is exactly who needs them — the tokens a `type: 'confirm'` prompt resolves
+  to, which a consumer must branch on rather than on the rendered (and potentially localised) label.
+
+### Bug fixes
+
+- **A one-off *Allow* no longer records a standing answer.** The permission gate matched its four
+  options by prefix, and *Allow* shares its first letter with *Always allow …* — so answering Allow
+  once wrote an allow-list entry nobody gave, and every later privileged act on that subject proceeded
+  silently. Options now carry values and the answer is matched against those; an answer matching no
+  option is a refusal, since permission is what has to be given.
+
+- **A tool collision resolved with nobody to ask says so again.** The pre-gate code warned when it
+  overwrote non-interactively; routing the decision through a gate dropped the line, leaving the one
+  decision here that proceeds with no human and no record. Core logs it at the call site (it knows
+  whether a prompt existed; the policy's answer is its own business).
+
+- **The telegram frontend supplies no `PromptFn` rather than a stub that answers with each field's
+  default.** The stub was a worse lie than the absence: to a tool it resolved silently — the model
+  proceeding as if answered while the chat saw no question — and to a permission gate it looked like a
+  reachable human, since "no PromptFn at all" is the one signal for *nobody is here*. Outcomes are
+  unchanged (the runner's own stand-in still answers a tool's `prompt` with the default); what changes
+  is that a privileged operation now gets the call site's stated non-interactive answer.
+
+- **A plugin's `services.PermissionGate` is the live policy, not a copy taken when it loaded.** The
+  per-plugin machine is built with `{ ...services }`, which evaluates the host's getters once — fine
+  for the swap-members that hand back capture-safe proxies, and not fine for the one that deliberately
+  does not. A plugin therefore consulted whatever policy was active when *it* loaded: one registered
+  afterwards was never reached through that machine (frontend-web's `POST /tools/:name` route reads
+  exactly this way), and unloading one left the copy on the gone impl rather than reverting to the boot
+  default. The scoped block re-declares it as a getter, as it already did for `Notifier`.
+
+- **`gate_action clear` no longer reports a configured default as cleared.** `delete` reverts to what
+  the installation configured, so for a gate answered only in `default_settings:` it changes nothing —
+  and naming it under `cleared` was a success report for a no-op. The outcome is read back and the
+  answers compared: what changed is reported as forgotten, and what is still in force is named
+  separately as coming from config.
+
+- **A policy that displaces another can delegate to it.** `PermissionGate` was a capture-safe
+  `forwardingProxy` like the other swap-members, so the documented composition — capture
+  `services.PermissionGate`, register your own, defer to what you displaced — captured a reference that
+  resolved to *whatever is current*, i.e. the capturing gate: it called itself until the stack
+  overflowed. The hosts expose the member as a getter instead, so a read yields the concrete impl;
+  every consumer already resolves it per call. (`ToolCallValidator`, which composes the same way, was
+  never proxied, which is why that idiom worked.)
+
+- **Two "Always allow" answers at once no longer drop one.** Appending a subject is a read-modify-write
+  and `PluginSettings` has no CAS on a value, so both reads saw the same list and the second write won.
+  The policy serialises its writes and re-reads inside the queue.
+
+- **The CLI's abort-time form path resolves select answers.** It passed a synthesised label + hint
+  string to `prompt()`, which took the free-text branch, so a form's select answer came back as
+  whatever was typed rather than as the option it named.
+
 ### Optional
+
+- **`@matatbread/matbot-default-gate`** (new) — the default permission policy: ask, offer standing
+  answers (*Always allow "<subject>"* / *Always allow every `<gate>`*), honour what was remembered.
+  A library each host *seeds*, in the `tool-plugin` mould — not a configured plugin, because a minimal
+  install's first act is a gated one, so neither the policy nor the means to inspect it may depend on a
+  `plugins:` line. Carries the built-in `gate_action` tool (`get` reports what is in **effect**;
+  `clear` forgets an answer, reverting to whatever the installation configured — and, via
+  `PluginSettings.entries()`, lists the answers an installation *shipped* beside those someone gave at
+  a prompt). There is deliberately no `set`: the write path for a runtime actor is answering a prompt that names the specific act. `get`
+  reports **answers, not a vocabulary** — a gate nobody has answered is absent from the listing rather
+  than described as "will ask", because an absent key says only that nobody answered; what happens then
+  is the call site's `fallback` and whatever policy is registered. Gate ids are open, so a built-in list
+  would be stale as soon as a plugin contributed one.
+
+- **`tool-plugin`, `mcp`, `mcp-http`, `browser`** — their 19 `confirmAction` calls became `ctx.gate`,
+  and the three copies of `confirmAction` are gone. **A different implementation, the same
+  functionality**: each site still asks a human when there is one and still declines when there is not
+  (every gate but `tools.overwrite` declares `fallback: false`, which is what the `CONFIRM_NO` default
+  already resolved to). What changes is *who* answers — the installation's policy rather than a helper
+  hardcoded per plugin — and that an install can now decide for itself. `mcp_action add` is the case to
+  know about, since it is also newly gated in this release: a caller with no prompt channel
+  (`invokeTool`, a trigger, a compiled skill, `POST /tools/:name`) gets `Cancelled.` rather than a
+  connection. To let those through, name the gate in the policy's settings rather than editing a plugin:
+
+  ```yaml
+  default_settings:
+    '@matatbread/matbot-default-gate':
+      'mcp_action.add': true          # or a list of server names
+  ```
+
+  The id is qualified by the **tool** name (`mcp_action`), so one key covers both the node `mcp` plugin
+  and cross-runtime `mcp-http`, which register the same tool. Every other gate takes the same treatment.
+
+#### tool-plugin, mcp, mcp-http
+
+- **Every privileged confirmation is a structured `confirm` field, and connecting an MCP server asks.**
+  `mcp_action add` was ungated in both plugins — only `remove` asked, which is backwards: connecting
+  registers a remote party's tools for the rest of the session, and the local (stdio) variant spawns a
+  child process on the host. Both now confirm, and the local prompt names the command line. The eight
+  remaining free-text `[y/N]` prompts (five in `provider`, three across `mcp`/`mcp-http`) are now
+  `confirm` fields compared against the canonical tokens, instead of a regex over a rendered label —
+  so rich frontends draw real buttons, while the CLI still renders `[yes/NO]` and prefix-matches `y`.
+  Every non-interactive caller keeps declining, the `CONFIRM_NO` default being what they already
+  resolved to. `confirmAction` goes from three copies to one per dependency edge: shared within
+  `tool-plugin`, and exported from `mcp-http` for the node `mcp` plugin that already hard-depends on it.
+
+- **`plugin` / `matbot install`: an npm install into a pnpm workspace root now succeeds.** Both shelled
+  out to `pnpm add <pkg>` in the directory holding `matbot.yaml`; at a workspace root pnpm refuses
+  outright (`ERR_PNPM_ADDING_TO_ROOT`, on the assumption that a member package was meant) and the
+  install failed naming a `-w` flag the user had no way to pass. A member package was never meant — the
+  project directory is the project — so the root is stated explicitly when a `pnpm-workspace.yaml` is
+  present. Other package managers are unaffected.
 
 #### tool-store
 
@@ -113,6 +282,13 @@ churn and less likely to affect a consumer who doesn't use them.
   looked it up concluded the compiler had no such code. The "likely cascading" advice is now dropped
   when every hidden finding is structural: a cast-gate rule fires at one site and cascades from
   nothing.
+- **The `plugins/` scan skips dot-directories, rather than naming `compiled-plugins`.** That was a
+  second spelling of a constant `skills_compiler` owns — now relocatable per installation, so
+  unknowable here — and unreachable besides, the walk rooting at `plugins/` while the build dir is its
+  sibling. The rule it was actually for survives: a build dir sited *inside* the scanned source root
+  would re-root the prior version's `ToolContracts` arm, which `skills_compiler` filters out of its
+  `pluginUrls` for exactly that reason. A compiled plugin's own contract is unaffected either way — it
+  reaches the dts by `resolvedUrl`, which the glob only ever supplemented.
 
 #### function-tools
 
@@ -125,6 +301,39 @@ churn and less likely to affect a consumer who doesn't use them.
   surfaced much later as failures that had been latent all along. Both bypass routes set it, the
   explicit flag and the implicit "no checker available here". It records the provenance of the
   definition, so a later passing `check` deliberately does not clear it.
+
+#### skills_compiler
+
+- **The compiled-plugin build root is `.compiled-plugins/`, renamed from `compiled-plugins/`, and is
+  **not migrated**.** Every other matbot-written, gitignored root beside `matbot.yaml` is dot-prefixed
+  (`.data/`, `.plugins/`, `.env`); this one was the outlier. An install with compiled plugins renames
+  the directory and the matching `./compiled-plugins/<tool>` entries in its config together, or pins
+  the old name through the setting below — a stale entry fails to load, naming itself, at boot.
+
+  It stays out of `.data/` for a second reason now recorded beside the durability one (a compiled
+  plugin has no upstream, so a cache clear would lose it): `docker-bash` mounts the project root
+  read-only and then `.data` read-write over it, so a build dir under there would be writable by the
+  model from inside the container — and a loaded plugin is full Node capability with no sandbox, which
+  is the thing `plugin.add`'s gate exists to decide.
+
+- **An installation can site that directory**, via `compiledPluginsDir` in the plugin's own settings
+  namespace — for a deployment running matbot per user (separate pods, a read-only project root, a
+  per-user volume):
+
+  ```yaml
+  default_settings:
+    '@matatbread/matbot-tool-skill-compiler':
+      compiledPluginsDir: .compiled-plugins
+  ```
+
+  There is deliberately no action to change it at runtime, and the reason is the migration hazard
+  above: `plugin add` records `./<dir>/<tool>` in the config — or in whatever has taken over
+  `plugins:` — so every already-compiled tool's entry is spelled with the name, and a change orphans
+  all of them at once. An installation answering the question at boot is a different act from a
+  running machine moving the goalposts. A configured value is normalised to the spelling `plugin add`
+  will record (leading `./` and trailing `/` stripped), because that specifier is compared against
+  `plugin list`'s `configured` entries to decide add-vs-reload, and two spellings of one directory
+  miss each other as strings.
 
 ## 0.4.13
 
@@ -1475,7 +1684,6 @@ where it cannot be forgotten.
   timing, so nothing that honoured it needs changing. Frontend entry points are unaffected: a web
   request or telegram message still uses `runAs` and deliberately does not hold the machine, its scope
   spanning a long-lived stream.
-
 
 - **`workspace_action` speaks of names, not paths.** `path` becomes `name` on read, write and
   delete and in every result; `list` takes `prefix`; `recursive` is gone. A workspace file is an entry

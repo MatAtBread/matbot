@@ -39,6 +39,26 @@ let installDefaults: ReadonlyMap<string, Readonly<Record<string, unknown>>> = ne
 /** Host boot assembly: install the read-only defaults. Call before any plugin loads. */
 export function installSettingsDefaults(byPlugin: ReadonlyMap<string, Readonly<Record<string, unknown>>> | undefined): void {
   installDefaults = byPlugin ?? new Map();
+  warnRetiredCoreSettings();
+}
+
+/**
+ * The one retired core setting, named where it was authored. `__matbot_core__.overwriteToolsOnCollision`
+ * moved to the permission policy's own namespace and spelling when core stopped holding a policy, and it
+ * is deliberately NOT migrated — the standing answer is re-offered the next time that collision comes
+ * round. What an adopt-once path would have bought is one keystroke; what this buys is that an install
+ * which authored the key is told, rather than finding a prompt it thought it had answered. The dunder
+ * namespace stays reserved (the host's unmatched-namespace warning skips it), so nothing else says this.
+ */
+function warnRetiredCoreSettings(): void {
+  const core = installDefaults.get('__matbot_core__');
+  if (core === undefined || !('overwriteToolsOnCollision' in core)) return;
+  console.warn(
+    '[matbot] default_settings.__matbot_core__.overwriteToolsOnCollision no longer does anything: the ' +
+    'tool-collision decision is now a permission gate, and standing answers belong to the policy plugin. ' +
+    "Re-author it as default_settings.'@matatbread/matbot-default-gate'.'tools.overwrite' — the same list " +
+    'of tool names, or `true`.',
+  );
 }
 
 /** The plugin names the install supplies defaults for — the host checks these against what loaded. */
@@ -144,6 +164,14 @@ export function makePluginSettings(rawStore: Store<SettingsDoc>, namespace: stri
         delete next[key];
         return next;
       });
+    },
+    async entries(): Promise<Record<string, unknown>> {
+      // The same layering `get` applies, in one pass: the stored document over the install default, so
+      // a stored `null` still reads as the override it is (it is a key `in` the document, and a later
+      // spread wins). One document read — the namespace is one document, and this is the same read a
+      // single `get` already makes.
+      const doc = await getDoc();
+      return { ...installDefaults.get(namespace), ...doc?.data };
     },
   };
 }

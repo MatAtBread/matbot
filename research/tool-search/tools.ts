@@ -62,7 +62,7 @@ export const TOOLS: ToolDoc[] = [
     'Open the door for new chats to join the bot channel. The door remains open for 30 seconds or until the first message from a new user is received, whichever comes first.' },
 
   { name: 'mcp_action', description:
-    'Manage remote MCP (Model Context Protocol) server connections. An MCP server exposes a set of tools; once connected, each is registered under mcp__<server>__<tool> and is callable for the rest of the session. Actions: add — connect a server and register its tools; list — show connected servers and their tools; remove — disconnect a server.' },
+    'Manage remote MCP (Model Context Protocol) server connections. An MCP server exposes a set of tools; once connected, each is registered under mcp__<server>__<tool> and is callable until you remove it. Actions: add — connect a server and register its tools; list — show connected servers and their tools; remove — disconnect a server.' },
 
   { name: 'plugin', description:
     'Manage matbot plugins — the units that contribute tools, providers, storage, hooks, and frontends to the running process. List them, install or remove one by specifier, reload one to pick up code changes, or supply a secret a plugin or provider reported missing.' },

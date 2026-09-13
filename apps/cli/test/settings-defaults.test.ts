@@ -124,3 +124,36 @@ test('a config with no default_settings section carries no map', () => {
 `);
   assert.equal(config.defaultSettings, undefined);
 });
+
+// ── entries() ─────────────────────────────────────────────────────────────────
+
+// The layering above, answered whole. It exists because the alternative is a plugin keeping a second
+// copy of its own keyspace to know what it holds — an index that cannot see a configured default, and
+// that a crash between the write and the index-write leaves behind as state in force but invisible.
+
+test('entries() layers exactly as get() does: stored over the configured default', async () => {
+  const { settings } = withDefaults({ [NAME]: { classifierProvider: 'fast-haiku', reranker: 'bge' } });
+  assert.deepEqual(await settings.entries(), { classifierProvider: 'fast-haiku', reranker: 'bge' },
+    'a configured default is in force, so it is listed — nothing had to be written for that');
+
+  await settings.set('reranker', 'none');
+  await settings.set('ownKey', 1);
+  assert.deepEqual(await settings.entries(),
+    { classifierProvider: 'fast-haiku', reranker: 'none', ownKey: 1 },
+    'a stored key wins over the floor, per key, and a key with no default is simply present');
+
+  // Same rule as `get`: a stored null is an override the plugin interprets, not an absence.
+  await settings.set('classifierProvider', null);
+  assert.equal((await settings.entries())['classifierProvider'], null);
+
+  // And `delete` means "revert to the configured default", so the floor reappears rather than vanishing.
+  await settings.delete('reranker');
+  assert.equal((await settings.entries())['reranker'], 'bge');
+  await settings.delete('ownKey');
+  assert.ok(!('ownKey' in await settings.entries()));
+});
+
+test('entries() on an untouched namespace is the floor, and on neither is empty', async () => {
+  const { settings } = withDefaults({});
+  assert.deepEqual(await settings.entries(), {});
+});

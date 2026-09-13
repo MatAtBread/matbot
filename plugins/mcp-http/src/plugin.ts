@@ -2,6 +2,12 @@ import type { Tool, ToolContract, ToolResultOf, ToolContext, MatbotPluginSpec } 
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import { RemoteMcpManager } from './manager.js';
 
+// Connecting a server is privileged — it registers a remote party's tools for the rest of the session —
+// so it declares a gate (`mcp_action.add`), as does disconnecting one (`mcp_action.remove`). How that
+// acceptance is obtained is the installation's `PermissionGate`, not this plugin's: the default asks,
+// and a non-interactive caller gets the `fallback: false` each site declares. Qualified by the TOOL
+// name, so one answer covers this plugin and node's `mcp`, which registers the same tool name.
+
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
     // Declared identically to the node `mcp` plugin (which hard-deps and overrides this tool with a
@@ -25,8 +31,8 @@ function remoteMcpActionTool(manager: RemoteMcpManager): Tool<ToolResultOf<'mcp_
     name: 'mcp_action',
     description: `Manage remote MCP (Model Context Protocol) server connections over HTTP. An MCP server
 exposes a set of tools; once connected, each is registered under \`mcp__<server>__<tool>\` (the
-\`mcp__<server>__\` prefix is overridable per server via \`proxyToolName\`) and is callable for the
-rest of the session.
+\`mcp__<server>__\` prefix is overridable per server via \`proxyToolName\`) and is callable
+until you remove it.
 
 This is the cross-platform (browser + Node) build: it speaks JSON-RPC over HTTP POST (with optional
 SSE response streaming). Local stdio servers are not available here — they need the Node mcp plugin.
@@ -53,6 +59,11 @@ ACTIONS
         switch (act.action) {
           case 'add': {
             if (!act.name || !act.endpoint) { yield { type: 'error', message: 'add requires "name" and "endpoint".' }; return; }
+            if (!await ctx.gate({ gate: 'add', subject: act.name, fallback: false,
+              label: `Connect to MCP server **"${act.name}"** at ${act.endpoint}?\n\n_Its tools are registered and callable until you remove it._` })) {
+              yield { type: 'result', value: { message: 'Cancelled.' } };
+              return;
+            }
             yield { type: 'stdout', chunk: `Connecting to MCP server "${act.name}"...\n` };
             try {
               const r = await manager.add({ name: act.name, endpoint: act.endpoint, ...(act.headers !== undefined ? { headers: act.headers } : {}), ...(act.proxyToolName !== undefined ? { proxyToolName: act.proxyToolName } : {}) });
@@ -65,8 +76,7 @@ ACTIONS
             return;
           case 'remove': {
             if (!act.name) { yield { type: 'error', message: 'remove requires "name".' }; return; }
-            const confirm = await ctx.prompt(`Remove MCP server "${act.name}"? [y/N]`, 'N');
-            if (!/^y(es)?$/i.test(confirm.trim())) { yield { type: 'result', value: { message: 'Cancelled.' } }; return; }
+            if (!await ctx.gate({ gate: 'remove', subject: act.name, fallback: false, label: `Remove MCP server **"${act.name}"**?` })) { yield { type: 'result', value: { message: 'Cancelled.' } }; return; }
             const ok = await manager.remove(act.name);
             yield { type: 'result', value: { message: ok ? `"${act.name}" disconnected and removed.` : `No MCP server named "${act.name}".` } };
             return;

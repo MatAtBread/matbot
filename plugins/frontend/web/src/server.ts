@@ -2,12 +2,13 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import type {
   MatbotPlugin, Principal, Session, Store, Tool, ToolRegistry, FileStore, MediaStore, Vault,
   FormField, PromptFn, SessionRunner, WatchVisibility, VisibilityQuery, FilePartition, SteeringMode,
-  Notifier, Notification, UserContent, MimeType, MediaRejectedError,
+  Notifier, Notification, UserContent, MimeType, MediaRejectedError, PermissionGate,
 } from '@matatbread/matbot-core';
 import {
   createSession, promptCancelledError, runAs, tryCurrentPrincipal, ItemChangeKind, RegistryChangeKind,
   isMediaRejectedError,
 } from '@matatbread/matbot-core';
+import { bindGate } from '@matatbread/matbot-plugin-api';
 import { sseComment, sseEvent } from './sse-writer.js';
 import { makeWebEnvTool } from './web-env.js';
 import { promises } from "node:fs";
@@ -42,6 +43,11 @@ export interface WebServerDeps {
   /** The notification bus this frontend both publishes to (a session created over HTTP) and subscribes
    *  to (the firehose). */
   notifier:       Notifier;
+  /** The installation's permission policy, for the ToolContext this server builds. A thunk for the same
+   *  reason as the stores above — a policy plugin may register after this frontend sets up. This door is
+   *  non-interactive, so a privileged tool reached through it gets whatever the policy decides with no
+   *  `ask` channel: a standing answer, or the call site's own `fallback`. */
+  permissionGate?: () => PermissionGate | undefined;
   configPath?:    string;
   /** Derives the security principal for each request. Defaults to {@link defaultWebPrincipal}. */
   resolvePrincipal?: WebPrincipalResolver;
@@ -401,7 +407,7 @@ export function createWebServer(deps: WebServerDeps) {
     if (!tool) return;
     const ac = new AbortController();
     try {
-      for await (const ev of tool.executor.execute({}, makeToolCtx(ac))) {
+      for await (const ev of tool.executor.execute({}, makeToolCtx(ac, 'about_matbot'))) {
         if (ev.type === 'result') {
           const v = (ev.value as { version?: unknown }).version;
           if (typeof v === 'string') harnessVersion = v;
@@ -457,7 +463,7 @@ export function createWebServer(deps: WebServerDeps) {
     }
   });
 
-  function makeToolCtx(ac: AbortController) {
+  function makeToolCtx(ac: AbortController, toolName: string) {
     const now = new Date().toISOString();
     const stubSession: Session = {
       id: crypto.randomUUID(), version: crypto.randomUUID(),
@@ -472,6 +478,9 @@ export function createWebServer(deps: WebServerDeps) {
       loadPlugin:   deps.loadPlugin,
       unloadPlugin: deps.unloadPlugin,
       prompt:       nonInteractivePrompt,
+      // `undefined`, never `nonInteractivePrompt`: the stand-in answers with a field's own default, so a
+      // gate handed it could not tell "nobody is here" from "a human answered". This route has no human.
+      ...bindGate(deps.permissionGate?.(), toolName, undefined),
       ...(deps.workdir    !== undefined ? { workdir:    deps.workdir    } : {}),
       ...(deps.files      !== undefined ? { files:      deps.files      } : {}),
       ...(deps.configPath !== undefined ? { configPath: deps.configPath } : {}),
@@ -854,7 +863,7 @@ export function createWebServer(deps: WebServerDeps) {
       const tool = await resolveToolReady(toolName, ac.signal);
       if (!tool) { json(res, 404, { error: `Tool "${toolName}" not found` }); return; }
 
-      const toolCtx = makeToolCtx(ac);
+      const toolCtx = makeToolCtx(ac, toolName);
       let stdout = '';
       let stderr = '';
       try {
@@ -911,7 +920,7 @@ export function createWebServer(deps: WebServerDeps) {
       res.write(sseComment('tool stream open'));
 
       try {
-        for await (const ev of tool.executor.execute(input, makeToolCtx(ac))) {
+        for await (const ev of tool.executor.execute(input, makeToolCtx(ac, toolName))) {
           if (!res.writable) break;
           res.write(sseEvent(ev.type, ev));
         }

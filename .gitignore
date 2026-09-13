@@ -10,8 +10,9 @@ dist/
 .data*
 # Fetched remote-plugin cache (matbot-writes / LLM-reads-only); regenerated on demand
 .plugins/
-# Locally-compiled plugins (skill_compiler output); durable source-of-truth, not committed
-compiled-plugins/
+# Locally-compiled plugins (skill_compiler output); durable source-of-truth, not committed.
+# Relocatable per installation via the plugin's `compiledPluginsDir` setting — this is the default.
+.compiled-plugins/
 .claude/settings.local.json
 matbot.yaml
 matbot.*.yaml

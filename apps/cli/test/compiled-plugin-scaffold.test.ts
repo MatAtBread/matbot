@@ -6,14 +6,14 @@ import { join } from 'node:path';
 import { checkProjectDir } from '@matatbread/matbot-tool-types';
 import { writePluginScaffold, hostPluginApiDir } from '@matatbread/matbot-tool-skill-compiler';
 
-// The compiler builds into `<configDir>/compiled-plugins/<tool>`, and used to assume `<configDir>` was
+// The compiler builds into `<configDir>/.compiled-plugins/<tool>`, and used to assume `<configDir>` was
 // the root of a matbot SOURCE CHECKOUT: the tsconfig extended `<configDir>/tsconfig.base.json` and the
 // node_modules link pointed at `<configDir>/plugin-api`. An installed deployment has neither, and both
 // failures were silent — so every test here uses a bare temp dir as the config dir, which is what an
 // installed deployment looks like.
 async function installedDeployment(): Promise<{ configDir: string; buildDir: string; cleanup: () => Promise<void> }> {
   const configDir = await mkdtemp(join(tmpdir(), 'matbot-installed-'));
-  const buildDir  = join(configDir, 'compiled-plugins', 'demo');
+  const buildDir  = join(configDir, '.compiled-plugins', 'demo');
   await mkdir(buildDir, { recursive: true });
   return { configDir, buildDir, cleanup: () => rm(configDir, { recursive: true, force: true }) };
 }

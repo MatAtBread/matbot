@@ -266,6 +266,63 @@ The rules, all of which follow from this being a *default* rather than a setting
 - **It applies to every user.** A default is configuration rather than data, so it is not
   partitioned per principal the way stored settings are.
 
+### Tool-name collisions, and other privileged operations
+
+Two plugins can claim the same tool name — deliberately, when one is meant to replace the
+other's tool, or by accident. That is one of matbot's **gates**: a privileged operation that
+declares it needs acceptance. Installing a plugin, adding or removing a provider profile, and
+connecting an MCP server are the others.
+
+A gate says *what* is being asked and what happens when nobody can be asked; the installation's
+**permission policy** decides how the acceptance is obtained. The one matbot ships
+(`@matatbread/matbot-default-gate`) asks, offers to remember the answer, and honours what it
+remembered. It is built in — like the `plugin` and `provider` tools, it is there on every install,
+including a minimal one with an empty `plugins:` list, and needs no config line. Interactively that is *Deny* / *Allow* / *Always allow "<subject>"* / *Always allow
+every `<gate>`*; non-interactively — a boot, an HTTP install — each call site's own stated answer
+applies, which for a tool collision is "overwrite" (what lets a deliberate override win with nobody
+there to answer) and for everything else is "no".
+
+Standing answers live in that plugin's own settings namespace, one key per gate id, so an
+installation can author them up front — the same thing the two *Always* options write:
+
+```yaml
+default_settings:
+  '@matatbread/matbot-default-gate':
+    'tools.overwrite': [bash, plugin]   # or: true
+    'plugin.add': ['@acme/our-tools']
+```
+
+A **list of subjects** allows exactly those and asks about everything else — the form to reach for
+when one particular override is intended and any *other* collision is a surprise you want to hear
+about. `true` allows every subject of that gate. Anything else asks. As everywhere in
+`default_settings:`, a stored answer then wins over this one;
+`.data/settings/_matatbread_matbot-default-gate.json` is where it lands, and `gate_action`
+(`{ action: 'get' }` / `{ action: 'clear' }`) reports and forgets answers without going near the file.
+`get` lists the answers in force — nothing on a fresh install, since a gate nobody has answered is
+simply not reported; pass a `gate` to ask about one by name.
+
+The gate ids are `tools.overwrite` (subject: the tool name), `plugin.add` /
+`plugin.provision-deps` / `plugin.remove` / `plugin.npm-uninstall` / `plugin.load`,
+`provider.add` / `provider.add-unverified` / `provider.update` / `provider.update-unverified` /
+`provider.remove`, and `mcp_action.add` / `mcp_action.remove`. A tool's ids are qualified with the
+name it is *registered* under, so one answer covers both the node and browser implementations of a
+tool. The list is open: a plugin can declare ids of its own, and an id the policy does not recognise
+is asked about rather than allowed.
+
+Be clear-eyed about what a standing answer buys and costs. **A policy that auto-approves
+`plugin.add` has granted everything**, because a loaded plugin has full Node capability and there is
+no in-process sandbox. A standing answer is a **decision, not a channel** — it applies at every door,
+including `POST /tools/:name` and anything the model reaches through its own `http` or `bash` tool —
+so prefer the per-subject form to *Always allow every …*. And the answers live in `.data/settings/`,
+which a shell tool can write: on an install that loads one, the model can author its own standing
+answer. What the gate guarantees is that a privileged operation is *decided somewhere replaceable*,
+and by default that means a human is asked — not that it cannot be changed. A deployment that needs a
+real boundary ships a gate with its rules compiled in.
+
+An installation that wants different rules — approve from a console, consult a roster, refuse
+outright — ships a plugin registering its own `PermissionGate` instead of undoing this one. See
+[DEVELOPING](DEVELOPING.md) *Declaring a gate*.
+
 ---
 
 ## CLI reference

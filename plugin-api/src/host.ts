@@ -33,6 +33,11 @@ export * from './usage-context.js';
 // The machine half of a context switch: quiescent-edge flushers and the deferred-swap application point.
 export * from './context-switch.js';
 
+// The boot `PermissionGate` a host installs as the base of the swap-member: ask through whatever
+// channel is in scope, else answer the request's own `fallback`. A plugin supplying a *policy* is the
+// author-facing half and needs only the `PermissionGate` type, which the root exports.
+export { askPermissionGate } from './permission-gate.js';
+
 // Hook dispatch implementation. Plugins register hooks through `services.hooks`; only the host constructs
 // the registry that backs it.
 export { HookRegistry } from './hooks.js';

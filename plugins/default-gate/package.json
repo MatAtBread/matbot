@@ -1,0 +1,45 @@
+{
+  "name": "@matatbread/matbot-default-gate",
+  "matbotRuntime": [
+    "node",
+    "browser"
+  ],
+  "version": "0.4.14",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "files": [
+    "src"
+  ],
+  "description": "matbot's default permission policy, seeded by the host rather than loaded as a plugin: asks about a privileged operation, offers to remember the answer, honours what was remembered \u2014 plus the built-in gate_action tool for inspecting and forgetting standing answers.",
+  "keywords": [
+    "matbot",
+    "matbot-plugin",
+    "llm",
+    "ai",
+    "agent"
+  ],
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MatAtBread/matbot.git",
+    "directory": "plugins/default-gate"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "@matatbread/matbot-plugin-api": "workspace:^"
+  },
+  "devDependencies": {
+    "typescript": "catalog:",
+    "@matatbread/matbot-plugin-api": "workspace:^"
+  }
+}
