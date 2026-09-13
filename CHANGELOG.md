@@ -9,6 +9,17 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## Unreleased
+
+### Optional
+
+- **`plugin` / `matbot install`: an npm install into a pnpm workspace root now succeeds.** Both shelled
+  out to `pnpm add <pkg>` in the directory holding `matbot.yaml`; at a workspace root pnpm refuses
+  outright (`ERR_PNPM_ADDING_TO_ROOT`, on the assumption that a member package was meant) and the
+  install failed naming a `-w` flag the user had no way to pass. A member package was never meant — the
+  project directory is the project — so the root is stated explicitly when a `pnpm-workspace.yaml` is
+  present. Other package managers are unaffected.
+
 ## 0.4.14
 
 ### Breaking changes

@@ -310,6 +310,17 @@ async function detectPackageManager(dir: string): Promise<string> {
   return 'npm';
 }
 
+/** Extra `add` flags needed to install into `dir` itself.
+ *
+ *  `pnpm add` refuses at a workspace root (ERR_PNPM_ADDING_TO_ROOT) unless the root is named
+ *  explicitly, on the assumption that a member package was meant. Here it never was: `dir` is where
+ *  matbot.yaml lives, and a plugin is that project's dependency — there is no member package it could
+ *  belong to instead. So say so, rather than failing an install that had nowhere else to go. */
+async function addFlags(pm: string, dir: string): Promise<string[]> {
+  if (pm !== 'pnpm') return [];
+  try { await access(path.join(dir, 'pnpm-workspace.yaml')); return ['-w']; } catch { return []; }
+}
+
 // The dependency names recorded in the project package.json — used to discover what a pnpm/npm
 // install of a tarball/git URL actually added (a URL is not a loadable specifier on restart, but
 // the installed package name is). dependencies + optionalDependencies cover what `add` writes.
@@ -648,7 +659,7 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
         yield { type: 'stdout', chunk: `Installing "${specifier}" with ${pm}...\n` };
         const before = await readDependencyNames(projectDir);
         try {
-          const out = await runCommand(pm, ['add', specifier], projectDir);
+          const out = await runCommand(pm, ['add', ...await addFlags(pm, projectDir), specifier], projectDir);
           if (out) yield { type: 'stdout', chunk: out };
         } catch (e) {
           yield { type: 'error', message: describeInstallFailure(specifier, pm, e) };

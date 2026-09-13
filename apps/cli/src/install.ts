@@ -14,6 +14,17 @@ async function detectPackageManager(dir: string): Promise<string> {
   return 'npm';
 }
 
+/** Extra `add` flags needed to install into `dir` itself.
+ *
+ *  `pnpm add` refuses at a workspace root (ERR_PNPM_ADDING_TO_ROOT) unless the root is named
+ *  explicitly, on the assumption that a member package was meant. Here it never was: `dir` is where
+ *  matbot.yaml lives, and a plugin is that project's dependency — there is no member package it could
+ *  belong to instead. */
+async function addFlags(pm: string, dir: string): Promise<string[]> {
+  if (pm !== 'pnpm') return [];
+  try { await access(path.join(dir, 'pnpm-workspace.yaml')); return ['-w']; } catch { return []; }
+}
+
 // ── Shell runner ───────────────────────��───────────────────────────────���──────
 
 function runCommand(cmd: string, args: string[], cwd: string): Promise<void> {
@@ -66,7 +77,7 @@ export async function installPlugin(specifier: string, configPath: string): Prom
   if (!isLocalPath) {
     const pm = await detectPackageManager(projectDir);
     process.stderr.write(`\nInstalling "${specifier}" with ${pm}...\n`);
-    await runCommand(pm, ['add', specifier], projectDir);
+    await runCommand(pm, ['add', ...await addFlags(pm, projectDir), specifier], projectDir);
   }
 
   // 2. Inspect the plugin manifest
