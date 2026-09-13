@@ -64,29 +64,42 @@ export function createDefaultGate(settings: PluginSettings, previous?: Permissio
       // `req.fallback` — today's non-interactive behaviour at each site, stated by the site itself.
       if (ask === undefined) return previous?.decide(req, ask) ?? req.fallback;
 
-      // The per-subject "always" comes BEFORE the blanket one: a select resolves a typed prefix against
-      // this order (apps/cli), so a bare "a" lands on the narrower choice rather than silencing a whole
-      // gate. The default follows `fallback`, so a site whose non-interactive answer is "proceed"
-      // (tools.overwrite) keeps proceeding for a frontend that can only answer with the default.
+      // Matched EXACTLY against the options offered, never by prefix. A prefix test is what a select
+      // whose labels share a word cannot survive: "Allow" and "Always allow …" both begin with "a", so
+      // `startsWith('a')` read a plain one-off Allow as an instruction to remember it — silently
+      // granting standing permission a user never asked for, which is precisely the thing this policy
+      // must not get wrong. The CLI resolves a typed prefix to the full label before it returns, and a
+      // rich frontend sends the label it rendered, so an exact match is what both actually produce.
+      //
+      // The per-subject "always" is listed BEFORE the blanket one so a CLI user typing "alw" lands on
+      // the narrower choice. The default follows `fallback`, so a site whose non-interactive answer is
+      // "proceed" (tools.overwrite) keeps proceeding for a frontend that can only answer with a default.
+      const allowOnce     = 'Allow';
+      const alwaysSubject = `Always allow "${req.subject}"`;
+      const alwaysGate    = `Always allow every ${req.gate}`;
       const field: FormField = {
         name:    'gate',
         label:   req.label,
         type:    'select',
-        options: ['Deny', 'Allow', `Always allow "${req.subject}"`, `Always allow every ${req.gate}`],
-        default: req.fallback ? 'Allow' : 'Deny',
+        options: ['Deny', allowOnce, alwaysSubject, alwaysGate],
+        default: req.fallback ? allowOnce : 'Deny',
       };
       const answer = (await ask(field)).trim().toLowerCase();
-      if (answer.startsWith('a')) {
-        if (answer.includes('every')) { await remember(req.gate, true); return true; }
+      const is = (option: string): boolean => answer === option.toLowerCase();
+
+      if (is(alwaysGate))    { await remember(req.gate, true); return true; }
+      if (is(alwaysSubject)) {
         // Persist the list IN EFFECT plus this subject, never the subject alone: the list in effect may
         // come from `default_settings`, and a stored key wins over the floor wholesale — writing
         // `[subject]` would silently start asking again about everything the install had exempted.
-        const current = await read(req.gate);
+        const current  = await read(req.gate);
         const subjects = current === undefined || current === true ? [req.subject] : [...new Set([...current, req.subject])];
         await remember(req.gate, subjects);
         return true;
       }
-      return !answer.startsWith('d');   // "Deny" → false; "Allow" → true
+      // Deny, an empty answer a frontend resolved to neither label, or anything unrecognised: permission
+      // is what has to be given, so only the two allow answers grant it — and neither remembers a thing.
+      return is(allowOnce);
     },
   };
 }

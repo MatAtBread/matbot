@@ -110,6 +110,28 @@ test('"Always allow every <gate>" stores true, and every later subject rides on 
   assert.equal(later.asked.length, 0);
 });
 
+test('a plain "Allow" permits this act and remembers NOTHING', async () => {
+  // The bug this pins: the answer used to be matched by PREFIX, and "Allow" shares its first letter
+  // with "Always allow …" — so clicking Allow once silently wrote a standing answer the user never
+  // gave, and every later add of that subject proceeded with no prompt at all.
+  const { gate, settings } = policy();
+  const once = recorder('Allow');
+  assert.equal(await gate.decide(req(), once.ask), true);
+  assert.equal(await settings.get('plugin.add'), undefined, 'a one-off Allow persists nothing');
+  assert.equal(await settings.get('__gates__'),  undefined, 'and indexes nothing');
+
+  // So the same subject is asked about again, and a Deny is still a Deny.
+  const again = recorder('Deny');
+  assert.equal(await gate.decide(req(), again.ask), false);
+  assert.equal(again.asked.length, 1);
+});
+
+test('an answer matching no option is a refusal, not an allow', async () => {
+  const { gate } = policy();
+  assert.equal(await gate.decide(req({ fallback: true }), recorder('').ask), false);
+  assert.equal(await gate.decide(req(), recorder('a').ask), false, 'a bare prefix is not an answer');
+});
+
 test('with nobody to ask, the policy delegates to the gate it displaced', async () => {
   // Composition is the ToolCallValidator idiom: the pair composes in either load order, because the
   // displaced gate is captured rather than shadowed.
