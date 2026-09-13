@@ -183,24 +183,32 @@ async function run<T>(tool: { executor: { execute(i: unknown, c: never): AsyncIt
   throw new Error('no result');
 }
 
-test('gate_action get reports what is in EFFECT — stored answer and configured floor alike', async () => {
+test('gate_action get reports ANSWERS — never a default it cannot know', async () => {
   const { gate, settings } = policy({ 'tools.overwrite': ['bash'] });
   const tool = makeGateActionTool(settings);
 
+  // Nothing has been answered, so the listing is empty — even though this build has a documented gate
+  // vocabulary of its own. An absent key says only "no answer here": what a gate does then is the call
+  // site's `fallback` and whatever policy is registered, neither of which this tool is entitled to
+  // report. Gate ids are open anyway, so any built-in list would be both stale and incomplete.
+  const fresh = await run<{ answers: unknown[] }>(tool, { action: 'get' });
+  assert.deepEqual(fresh.answers, []);
+
+  // Named explicitly, a gate an installation CONFIGURED is visible — which a bare listing cannot
+  // reach, settings having no key enumeration.
   const configured = await run<{ answers: { gate: string; effect: string; subjects?: string[] }[] }>(
     tool, { action: 'get', gate: 'tools.overwrite' });
   assert.deepEqual(configured.answers, [{ gate: 'tools.overwrite', effect: 'subjects', subjects: ['bash'] }]);
 
-  // A gate nobody has answered rests at "ask", and the whole vocabulary is reportable without waiting
-  // for each gate to be reached for the first time.
-  const all = await run<{ answers: { gate: string; effect: string }[] }>(tool, { action: 'get' });
-  assert.equal(all.answers.find(a => a.gate === 'plugin.add')?.effect, 'ask');
-
-  // An answer given at a prompt reads the same way as one an installation configured.
+  // An answer given at a prompt reads the same way as one an installation configured, and now the
+  // listing has something to say.
   await gate.decide(req(), recorder('always-subject').ask);
   const after = await run<{ answers: { gate: string; effect: string; subjects?: string[] }[] }>(
     tool, { action: 'get', gate: 'plugin.add' });
   assert.deepEqual(after.answers, [{ gate: 'plugin.add', effect: 'subjects', subjects: ['@x/foo'] }]);
+
+  const listed = await run<{ answers: { gate: string }[] }>(tool, { action: 'get' });
+  assert.deepEqual(listed.answers.map(a => a.gate), ['plugin.add']);
 });
 
 test('gate_action clear forgets an answer, reverting to what the installation configured', async () => {

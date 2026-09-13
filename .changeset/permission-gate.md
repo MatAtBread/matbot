@@ -47,9 +47,10 @@ mould rather than a configured plugin: `createDefaultGate` becomes the boot `Per
 `gate_action` is registered beside `plugin`/`provider`. A minimal install's first act is adding a
 plugin or a provider, which is gated, so neither the policy nor the means to inspect it may depend on
 a `plugins:` line. It reproduces today's behaviour (ask, offer standing answers, remember them) keyed
-`(gate, subject)` in its own settings namespace; `gate_action` (`get` / `clear`) reports what is in
-effect and forgets an answer — there is deliberately no `set`, because the write path for a runtime
-actor is answering a prompt that names the specific act. Registering a `PermissionGate` of your own
+`(gate, subject)` in its own settings namespace; `gate_action` (`get` / `clear`) reports the standing
+answers in effect and forgets them — there is deliberately no `set`, because the write path for a
+runtime actor is answering a prompt that names the specific act, and no listing of gates that have no
+answer, because an absent key says nothing about what a gate will do. Registering a `PermissionGate` of your own
 replaces the policy, and unregistering reverts to the seeded one, which asks.
 
 **API:** `PermissionRequest` / `PermissionGate` and the `MatbotServices.PermissionGate` key (not

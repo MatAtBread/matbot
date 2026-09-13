@@ -48,8 +48,12 @@ that it cannot be changed.
 
 ## `gate_action`
 
-- `{ action: 'get' }` — what is in effect per gate (optionally one `gate`). A stored answer and a
-  configured default read identically, because the question is whether the prompt appears.
+- `{ action: 'get' }` — the standing answers in effect (optionally one `gate`). A stored answer and a
+  configured default read identically, because the question is whether the prompt appears. A gate with
+  **no** answer is not reported: on a fresh install this returns nothing, and every gate simply behaves
+  as configured. There is no list of "all the gates" — ids are open, and an absent key says only that
+  nobody answered, not what will happen. Name a `gate` to ask about one, which is also the only way to
+  see one an installation configured but nobody has answered (settings cannot enumerate their keys).
 - `{ action: 'clear' }` — forget standing answers so the operation asks again: everything, one
   `gate`, or one `subject` within a gate. Clearing means *revert to the configured default*, so an
   installation's own `default_settings:` floor survives it.

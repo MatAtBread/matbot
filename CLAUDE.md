@@ -593,9 +593,14 @@ It reproduces today's behaviour — ask, offer standing answers, remember them �
 `(gate, subject)`, in its own settings namespace, so an installation authors defaults the ordinary
 way (`default_settings: { '@matatbread/matbot-default-gate': { 'tools.overwrite': [bash, plugin] } }`;
 each host exempts that one key from its "names no loaded plugin" warning, since nothing loads it).
-`gate_action` (`get` / `clear`) reports what is **in effect** and forgets standing answers; there is
+`gate_action` (`get` / `clear`) reports the standing answers **in effect** and forgets them; there is
 deliberately no `set`, because the write path for a runtime actor is answering a prompt that names
-the specific act. `__matbot_core__.overwriteToolsOnCollision` is **not** migrated — the standing
+the specific act. It reports **answers, not a vocabulary**: a gate with no stored answer is absent
+from the listing rather than described as "will ask", since an absent key says only that nobody
+answered — what happens then is the call site's `fallback` and whatever policy is registered. A
+built-in list of matbot's own ids would also be stale the moment a plugin contributes one of its own,
+so there is none; the enumerable set is what the policy has written, and naming a gate explicitly is
+how you reach one an installation configured (settings have no key listing). `__matbot_core__.overwriteToolsOnCollision` is **not** migrated — the standing
 answer is re-offered the first time that collision comes round again, so adopt-once machinery would
 exist to save one keystroke; an install still authoring it is warned, naming where it went.
 

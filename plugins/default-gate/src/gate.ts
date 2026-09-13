@@ -104,18 +104,9 @@ export function createDefaultGate(settings: PluginSettings, previous?: Permissio
   };
 }
 
-/** The gate ids matbot's own privileged call sites declare. Not a closed set — a gate id is open at
- *  runtime, and one this build never compiled against must default to asking — but a vocabulary the
- *  `gate_action` tool can report on without waiting for a gate to be reached for the first time. */
-export const KNOWN_GATES: readonly string[] = [
-  'tools.overwrite',
-  'plugin.add', 'plugin.provision-deps', 'plugin.remove', 'plugin.npm-uninstall', 'plugin.load',
-  'provider.add', 'provider.add-unverified', 'provider.update', 'provider.update-unverified', 'provider.remove',
-  'mcp_action.add', 'mcp_action.remove',
-];
-
-/** Settings key holding the gate ids this policy has written a standing answer for. `PluginSettings`
- *  has no enumeration, and a gate id contributed by a plugin this build never saw is exactly the one
- *  {@link KNOWN_GATES} cannot name — so `gate_action` would otherwise be unable to report, or clear,
- *  an answer the user gave. Dunder-prefixed: it is this policy's bookkeeping, not a gate id. */
+/** Settings key holding the gate ids this policy has written a standing answer for — the only gates
+ *  `gate_action` can enumerate, since `PluginSettings` has no key listing. It records answers, never a
+ *  vocabulary: gate ids are open (a plugin contributes its own), and an id with no stored answer is
+ *  not a known default but an absence, which nothing here is entitled to describe.
+ *  Dunder-prefixed: it is this policy's bookkeeping, not a gate id. */
 export const WRITTEN_GATES_KEY = '__gates__';

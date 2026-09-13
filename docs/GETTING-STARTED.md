@@ -298,6 +298,8 @@ about. `true` allows every subject of that gate. Anything else asks. As everywhe
 `default_settings:`, a stored answer then wins over this one;
 `.data/settings/_matatbread_matbot-default-gate.json` is where it lands, and `gate_action`
 (`{ action: 'get' }` / `{ action: 'clear' }`) reports and forgets answers without going near the file.
+`get` lists the answers in force — nothing on a fresh install, since a gate nobody has answered is
+simply not reported; pass a `gate` to ask about one by name.
 
 The gate ids are `tools.overwrite` (subject: the tool name), `plugin.add` /
 `plugin.provision-deps` / `plugin.remove` / `plugin.npm-uninstall` / `plugin.load`,

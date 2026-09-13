@@ -1,13 +1,18 @@
 import type { PluginSettings, Tool, ToolContract, ToolResultOf } from '@matatbread/matbot-plugin-api';
-import { KNOWN_GATES, WRITTEN_GATES_KEY, toStandingAnswer, type StandingAnswer } from './gate.js';
+import { WRITTEN_GATES_KEY, toStandingAnswer, type StandingAnswer } from './gate.js';
 
-/** One gate id's answer as reported: `ask` is the resting state, `always` allows every subject, and
- *  `subjects` lists the ones allowed. What is *in effect*, never what is pinned — a stored answer and
- *  an installation's `default_settings:` floor read identically here, because that is the question the
- *  caller is asking ("will this prompt appear?") and the two are the same answer to it. */
+/** A standing answer in force for one gate: `always` allows every subject, `subjects` allows exactly
+ *  those. There is no arm for "no answer" — a gate with none simply is not reported, because an absent
+ *  key says nothing about the behaviour. It is not "this will ask": what happens then is the call
+ *  site's `fallback` when nobody is reachable, and whatever policy is registered when someone is.
+ *  Reporting a row there would be inventing a fact.
+ *
+ *  What is *in effect*, never what is pinned — a stored answer and an installation's
+ *  `default_settings:` floor read identically, because the question a caller has is "will this prompt
+ *  appear?" and the two are the same answer to it. */
 export interface GateAnswer {
   gate:      string;
-  effect:    'ask' | 'always' | 'subjects';
+  effect:    'always' | 'subjects';
   subjects?: readonly string[];
 }
 
@@ -23,19 +28,22 @@ type GateInput =
   | { action: 'get';   gate?: string }
   | { action: 'clear'; gate?: string; subject?: string };
 
-const describe = (gate: string, answer: StandingAnswer | undefined): GateAnswer =>
-  answer === true                     ? { gate, effect: 'always' }
-  : answer === undefined              ? { gate, effect: 'ask' }
-  : answer.length === 0               ? { gate, effect: 'ask' }
-  :                                     { gate, effect: 'subjects', subjects: answer };
+// An empty stored list is still an ANSWER — "ask about every subject of this gate" — and is reported
+// as such, because it is a thing someone did (cleared the last subject) and a thing `clear` can undo
+// back to the installation's configured default. Absent is what goes unreported.
+const describe = (gate: string, answer: StandingAnswer | undefined): GateAnswer | undefined =>
+  answer === true      ? { gate, effect: 'always' }
+  : answer === undefined ? undefined
+  :                        { gate, effect: 'subjects', subjects: answer };
 
 export function makeGateActionTool(settings: PluginSettings): Tool<ToolResultOf<'gate_action'>> {
-  // The ids to report on: the documented vocabulary plus anything this policy has actually stored,
-  // which is the only way a gate id from a plugin this build never compiled against can be named.
+  // The gates this policy has actually written an answer for — the only ones it can enumerate, since
+  // `PluginSettings` has no key listing. Deliberately NOT a built-in vocabulary of matbot's own gate
+  // ids: gate ids are open (a plugin contributes its own), a hardcoded list goes stale silently, and
+  // listing an id with no stored answer would report a default nothing here actually knows.
   const gateIds = async (): Promise<string[]> => {
     const written = await settings.get<unknown>(WRITTEN_GATES_KEY);
-    const ids     = Array.isArray(written) ? written.filter((g): g is string => typeof g === 'string') : [];
-    return [...new Set([...KNOWN_GATES, ...ids])];
+    return Array.isArray(written) ? written.filter((g): g is string => typeof g === 'string') : [];
   };
 
   return {
@@ -45,9 +53,13 @@ export function makeGateActionTool(settings: PluginSettings): Tool<ToolResultOf<
       'A privileged operation — installing a plugin, adding a provider profile, overwriting a tool ' +
       'another plugin owns — asks the user to accept it. Answering "Always allow …" at that prompt ' +
       'stores a standing answer, after which the same operation proceeds silently.\n\n' +
-      '"get" reports what is IN EFFECT for each gate, which may come from a stored answer or from the ' +
-      'installation\'s configured defaults — the two are indistinguishable here on purpose, because the ' +
-      'question is whether the prompt will appear. Pass "gate" to report one gate id.\n\n' +
+      '"get" reports the standing answers IN EFFECT — which may come from one of those prompts or from ' +
+      'the installation\'s configured defaults; the two are indistinguishable here on purpose, because ' +
+      'the question is whether the prompt will appear. A gate with no answer is NOT reported: on a ' +
+      'fresh install the list is empty, and every gate simply behaves as configured (normally: it ' +
+      'asks). Gate ids are open — a plugin contributes its own — so there is no vocabulary to list. ' +
+      'Pass "gate" to ask about one id, including one an installation configured but nobody has ' +
+      'answered, which a bare listing cannot reach.\n\n' +
       '"clear" forgets answers, so the operation asks again: with no arguments every gate, with "gate" ' +
       'that gate alone, and with "gate" + "subject" just that subject. Clearing means "revert to the ' +
       'configured default", so a gate an installation configured in its own config keeps that setting.\n\n' +
@@ -69,7 +81,10 @@ export function makeGateActionTool(settings: PluginSettings): Tool<ToolResultOf<
         if (act.action === 'get') {
           const ids = act.gate !== undefined ? [act.gate] : await gateIds();
           const answers: GateAnswer[] = [];
-          for (const gate of ids) answers.push(describe(gate, toStandingAnswer(await settings.get<unknown>(gate))));
+          for (const gate of ids) {
+            const row = describe(gate, toStandingAnswer(await settings.get<unknown>(gate)));
+            if (row !== undefined) answers.push(row);
+          }
           yield { type: 'result', value: { answers } };
           return;
         }

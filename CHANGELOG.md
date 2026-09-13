@@ -102,7 +102,11 @@ churn and less likely to affect a consumer who doesn't use them.
   install's first act is a gated one, so neither the policy nor the means to inspect it may depend on a
   `plugins:` line. Carries the built-in `gate_action` tool (`get` reports what is in **effect**;
   `clear` forgets an answer, reverting to whatever the installation configured). There is deliberately
-  no `set`: the write path for a runtime actor is answering a prompt that names the specific act.
+  no `set`: the write path for a runtime actor is answering a prompt that names the specific act. `get`
+  reports **answers, not a vocabulary** — a gate nobody has answered is absent from the listing rather
+  than described as "will ask", because an absent key says only that nobody answered; what happens then
+  is the call site's `fallback` and whatever policy is registered. Gate ids are open, so a built-in list
+  would be stale as soon as a plugin contributed one.
 
 - **`tool-plugin`, `mcp`, `mcp-http`, `browser`** — their 19 `confirmAction` calls became `ctx.gate`,
   and the three copies of `confirmAction` are gone.
