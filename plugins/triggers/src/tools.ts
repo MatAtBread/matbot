@@ -1,5 +1,6 @@
 import type { Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext, MatbotMachine } from '@matatbread/matbot-plugin-api';
 import type { TriggerManager } from './manager.js';
+import { checkInvocation } from './dispatch.js';
 import type { TriggerCondition, TriggerCooldown, TriggerKind, Trigger } from './types.js';
 
 declare module '@matatbread/matbot-plugin-api' {
@@ -52,7 +53,10 @@ const GUIDANCE =
   'verification, so keep it and add a follow-up turn carrying the output (e.g. critique/verify the ' +
   'existing answer — it must remain in context). Choose retract vs followup by whether a match means ' +
   '"this is wrong" vs "look at this again".\n\n' +
-  '`invoke` names a tool and its params, run verbatim when the trigger fires. If the tool produces ' +
+  '`invoke` names a tool and its params (omitted ⇒ `{}`), run verbatim when the trigger fires. The ' +
+  'params are checked against the tool\'s declared parameters when the trigger is saved, so match them ' +
+  'exactly; a trigger whose call is rejected when it fires is reported on the next turn — fix it with ' +
+  '"update". If the tool produces ' +
   'a result, the model is woken with it; a pure side-effect tool (no result) runs silently. An ' +
   'invoke naming a tool that is not present fails soft — the trigger simply does nothing until it ' +
   'is. To fire a skill on a condition, invoke `skill_action` with `{ action: "use", name }` — `use` ' +
@@ -113,7 +117,7 @@ function validConditions(x: unknown): x is TriggerCondition[] {
     typeof (c as { rule?: unknown }).rule === 'string');
 }
 
-export function createTriggerActionTool(manager: TriggerManager): Tool<ToolResultOf<'trigger_action'>> {
+export function createTriggerActionTool(manager: TriggerManager, services: MatbotMachine): Tool<ToolResultOf<'trigger_action'>> {
   const executor: ToolExecutor<ToolResultOf<'trigger_action'>> = {
     async *execute(input: unknown, _ctx: ToolContext) {
       const args = input as Partial<TriggerActionInput> & { action?: string };
@@ -145,9 +149,12 @@ export function createTriggerActionTool(manager: TriggerManager): Tool<ToolResul
           if (a.conditions.length === 0)      { yield { type: 'error', message: 'action "add" requires at least one condition.' }; return; }
           if (typeof a.tool !== 'string')     { yield { type: 'error', message: 'action "add" requires a string "tool" to invoke.' }; return; }
           if (a.cooldown !== undefined && !validCooldown(a.cooldown)) { yield { type: 'error', message: COOLDOWN_ERR }; return; }
+          const invoke  = { tool: a.tool, ...(a.params !== undefined ? { params: a.params } : {}) };
+          const refused = await checkInvocation(services, invoke);
+          if (refused !== undefined) { yield { type: 'error', message: `Trigger not added — ${refused}.` }; return; }
           const t = await manager.add({
             conditions: a.conditions,
-            invoke:     { tool: a.tool, ...(a.params !== undefined ? { params: a.params } : {}) },
+            invoke,
             ...(a.enabled  !== undefined ? { enabled:  a.enabled            } : {}),
             ...(a.cooldown !== undefined ? { cooldown: a.cooldown as TriggerCooldown } : {}),
           });
@@ -161,14 +168,16 @@ export function createTriggerActionTool(manager: TriggerManager): Tool<ToolResul
           if (a.conditions !== undefined && !validConditions(a.conditions)) { yield { type: 'error', message: '"conditions" must be [{ kind, rule }].' }; return; }
           if (a.tool !== undefined && typeof a.tool !== 'string')           { yield { type: 'error', message: '"tool" must be a string.' }; return; }
           if (a.cooldown !== undefined && a.cooldown !== null && !validCooldown(a.cooldown)) { yield { type: 'error', message: COOLDOWN_ERR + ' Pass null to remove every limit.' }; return; }
-          const priorTool = (a.tool !== undefined || a.params !== undefined)
-            ? (await manager.get(a.id))?.invoke.tool ?? ''
-            : '';
+          const invoke = a.tool !== undefined || a.params !== undefined
+            ? { tool: a.tool ?? (await manager.get(a.id))?.invoke.tool ?? '', ...(a.params !== undefined ? { params: a.params } : {}) }
+            : undefined;
+          // Only an edit to the invocation is checked, so a broken trigger can still be disabled or have
+          // its conditions changed without first being repaired.
+          const refused = invoke !== undefined ? await checkInvocation(services, invoke) : undefined;
+          if (refused !== undefined) { yield { type: 'error', message: `Trigger not updated — ${refused}.` }; return; }
           const t = await manager.update(a.id, {
             ...(a.conditions !== undefined ? { conditions: a.conditions } : {}),
-            ...(a.tool !== undefined || a.params !== undefined
-              ? { invoke: { tool: a.tool ?? priorTool, ...(a.params !== undefined ? { params: a.params } : {}) } }
-              : {}),
+            ...(invoke !== undefined ? { invoke } : {}),
             ...(a.enabled !== undefined ? { enabled: a.enabled } : {}),
             // null clears every limit; an omitted `cooldown` leaves the stored one untouched.
             ...(a.cooldown !== undefined ? { cooldown: (a.cooldown === null ? {} : a.cooldown) as TriggerCooldown } : {}),
@@ -205,6 +214,8 @@ export function createTriggerActionTool(manager: TriggerManager): Tool<ToolResul
           if (typeof a.toTool !== 'string')                  { yield { type: 'error', message: 'action "move" requires a string "toTool" to re-target the selected triggers onto.' }; return; }
           if (a.tool === undefined && a.params === undefined) { yield { type: 'error', message: 'action "move" requires a filter ("tool" and/or "params") selecting which triggers to re-target — refusing to move every trigger.' }; return; }
           const invoke = { tool: a.toTool, ...(a.toParams !== undefined ? { params: a.toParams } : {}) };
+          const refused = await checkInvocation(services, invoke);
+          if (refused !== undefined) { yield { type: 'error', message: `No triggers moved — ${refused}.` }; return; }
           const triggers: Trigger[] = [];
           for (const t of await manager.query(queryFilter(a))) {
             const updated = await manager.update(t.id, { invoke });
@@ -219,6 +230,8 @@ export function createTriggerActionTool(manager: TriggerManager): Tool<ToolResul
           if (typeof a.toTool !== 'string')                  { yield { type: 'error', message: 'action "copy" requires a string "toTool" to point the duplicates at.' }; return; }
           if (a.tool === undefined && a.params === undefined) { yield { type: 'error', message: 'action "copy" requires a filter ("tool" and/or "params") selecting which triggers to duplicate — refusing to duplicate every trigger.' }; return; }
           const invoke = { tool: a.toTool, ...(a.toParams !== undefined ? { params: a.toParams } : {}) };
+          const refused = await checkInvocation(services, invoke);
+          if (refused !== undefined) { yield { type: 'error', message: `No triggers copied — ${refused}.` }; return; }
           const triggers: Trigger[] = [];
           for (const t of await manager.query(queryFilter(a))) {
             triggers.push(await manager.add({
