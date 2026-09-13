@@ -54,8 +54,13 @@ answer, because an absent key says nothing about what a gate will do. Registerin
 replaces the policy, and unregistering reverts to the seeded one, which asks.
 
 **API:** `PermissionRequest` / `PermissionGate` and the `MatbotServices.PermissionGate` key (not
-optional — the behaviour must always exist), `ToolContext.gate`, `bindGate`, and the host boot
-default `askPermissionGate` (`plugin-api/host`, re-exported by core). `confirmAction` is gone from
+optional — the behaviour must always exist), `ToolContext.gate`, `bindGate`, and the bare asking gate
+`askPermissionGate` (`plugin-api/host`, re-exported by core).
+
+`ToolContext.gate` is **required**, so code that hand-builds a `ToolContext` — an embedder standing up
+its own invocation door, a test fixture — must supply it: `bindGate(machine.PermissionGate, toolName,
+ask)`, the same one-liner the runner, `invokeTool` and frontend-web use. Optional was rejected because
+it would make "this tool cannot ask permission" a silent state rather than a compile error. `confirmAction` is gone from
 `@matatbread/matbot-mcp-http` and `@matatbread/matbot-tool-plugin`.
 
 The 19 converted call sites are a **different implementation with the same functionality**: each still

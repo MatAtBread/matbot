@@ -22,6 +22,28 @@ export function toStandingAnswer(value: unknown): StandingAnswer | undefined {
   return undefined;
 }
 
+/**
+ * Serialises every standing-answer write in this module, across gate instances.
+ *
+ * Appending a subject is a read-modify-write and `PluginSettings` has no CAS on a value — `set` guards
+ * the document, not the list that was read out of it — so two answers given at once would both read the
+ * same list and the second would drop the first's subject. Module-scoped rather than per instance
+ * because instances multiply on purpose: the host seeds one, and a policy that displaces it composes by
+ * building another over the same settings (the documented `createDefaultGate(settings, previous)`), at
+ * which point a per-instance queue serialises each against itself and neither against the other.
+ *
+ * One queue for every namespace is the cheap end of the trade — these writes happen when a human
+ * answers a prompt, so contention is measured in single-digit writes per session. What remains outside
+ * it is what a queue cannot reach: a second process over the same medium, and a hot-reloaded second
+ * copy of this module. Both are last-write-wins, which is the store's contract to change, not ours.
+ */
+let writes: Promise<unknown> = Promise.resolve();
+function serialised<T>(work: () => Promise<T>): Promise<T> {
+  const next = writes.then(work, work);
+  writes = next.catch(() => {});
+  return next;
+}
+
 /** Whether a standing answer covers this subject. */
 const allows = (answer: StandingAnswer | undefined, subject: string): boolean =>
   answer === true || (answer !== undefined && answer.includes(subject));
@@ -47,24 +69,10 @@ export function createDefaultGate(settings: PluginSettings, previous?: Permissio
   const read = async (gate: string): Promise<StandingAnswer | undefined> =>
     toStandingAnswer(await settings.get<unknown>(gate));
 
-  // One write, and the store is the only record: `settings.entries()` enumerates the namespace, so
-  // there is nothing to index. This used to keep its own list of ids it had written — a second copy of
-  // its own keyspace, which could not see a configured default, and which a crash between the two
-  // writes left behind as a standing answer in force and invisible to both `get` and `clear`.
-  //
-  // Serialised, because appending a subject is a read-modify-write and `PluginSettings` has no CAS:
-  // `set` guards the document, not the value that was read out of it, so two collisions answered at
-  // once would both read the same list and the second write would drop the first's subject. A silently
-  // lost permission is a prompt that reappears (benign) — but a lost *revocation* would be the mirror,
-  // and neither belongs in this component. One in-process queue closes it; two matbot processes
-  // sharing one medium remain last-write-wins, which is the store's contract to change, not ours.
-  let writes: Promise<unknown> = Promise.resolve();
-  const serialised = <T>(work: () => Promise<T>): Promise<T> => {
-    const next = writes.then(work, work);
-    writes = next.catch(() => {});
-    return next;
-  };
-
+  // A standing answer is one write, and the store is the only record: `settings.entries()` enumerates
+  // the namespace, so there is nothing to index. This used to keep its own list of ids it had written —
+  // a second copy of its own keyspace, which could not see a configured default, and which a crash
+  // between the two writes left behind as an answer in force and invisible to both `get` and `clear`.
   return {
     async decide(req, ask) {
       if (allows(await read(req.gate), req.subject)) return true;

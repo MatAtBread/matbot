@@ -298,8 +298,27 @@ test('gate_action clear forgets an answer, reverting to what the installation co
 
   // The whole gate: delete means "revert to the configured default", so the floor comes back.
   await gate.decide(req({ subject: '@x/foo' }), recorder('always-subject').ask);
-  const cleared = await run<{ cleared: string[] }>(tool, { action: 'clear', gate: 'plugin.add' });
+  const cleared = await run<{ cleared: string[]; message: string }>(tool, { action: 'clear', gate: 'plugin.add' });
   assert.deepEqual(cleared.cleared, ['plugin.add']);
   assert.equal(await gate.decide(req({ subject: '@configured/one' }), asked.ask), true,
     'the installation floor is not a stored answer, so clearing cannot delete it');
+  assert.match(cleared.message, /configured defaults/,
+    'and the result says so, since the gate is still allowed for what config named');
+});
+
+test('clear does not claim to have cleared a configured default', async () => {
+  // `delete` reverts to the configured default, so for a gate answered ONLY in default_settings there
+  // is nothing stored to remove and nothing changes. Listing it as cleared was a success report for a
+  // no-op — the one thing a permissions tool must not do.
+  const { settings } = policy({ 'tools.overwrite': ['bash'] });
+  const tool = makeGateActionTool(settings);
+
+  const result = await run<{ cleared: string[]; message: string }>(tool, { action: 'clear' });
+  assert.deepEqual(result.cleared, [], 'nothing was cleared, because nothing was stored');
+  assert.match(result.message, /configured defaults/);
+  assert.match(result.message, /tools\.overwrite/, 'and it names what is still in force');
+
+  // Still in effect afterwards — the report and the behaviour agree.
+  const still = await run<{ answers: { gate: string }[] }>(tool, { action: 'get' });
+  assert.deepEqual(still.answers.map(a => a.gate), ['tools.overwrite']);
 });

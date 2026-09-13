@@ -778,6 +778,13 @@ the boundary is only as strong as the tools the install grants — the default p
 in `.data/settings/`, which any shell tool can write, so a deployment that needs a real boundary
 compiles its rules in rather than storing them where the model can reach.
 
+Both are *policy* decisions, and a policy has what it needs to make them differently: `ask ===
+undefined` identifies a caller with no human behind it (`POST /tools/:name`, a trigger, a boot load),
+so refusing there regardless of any stored answer is a four-line gate; and `decide` runs under the
+ambient security principal, so `tryCurrentPrincipal()` names *who* is asking without threading anything
+through. That is why neither is a field on `PermissionRequest` — a request describes the act, and the
+context of the call is already in scope.
+
 ---
 
 ## Writing a provider plugin

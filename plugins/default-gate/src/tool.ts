@@ -1,5 +1,5 @@
 import type { PluginSettings, Tool, ToolContract, ToolResultOf } from '@matatbread/matbot-plugin-api';
-import { toStandingAnswer, type StandingAnswer } from './gate.js';
+import { DEFAULT_GATE_SETTINGS_NS, toStandingAnswer, type StandingAnswer } from './gate.js';
 
 /** A standing answer in force for one gate: `always` allows every subject, `subjects` allows exactly
  *  those. There is no arm for "no answer" — a gate with none simply is not reported, because an absent
@@ -112,25 +112,37 @@ export function makeGateActionTool(settings: PluginSettings): Tool<ToolResultOf<
               yield { type: 'result', value: { cleared: [], message: `"${act.subject}" is not a remembered subject of "${act.gate}".` } };
               return;
             }
-            // An empty list is stored rather than deleted: it means "ask about everything", which is a
-            // different fact from "revert to whatever the installation configured".
+            // Stored, not deleted — including when the list came from `default_settings:`: the result
+            // is an override that keeps the rest of the configured list and drops this one subject,
+            // which is what was asked for. An empty list is stored too; it means "ask about every
+            // subject", a different fact from "revert to whatever the installation configured".
             await settings.set(act.gate, remaining);
             yield { type: 'result', value: { cleared: [`${act.gate}:${act.subject}`], message:
               `"${act.gate}" will ask about "${act.subject}" again.` } };
             return;
           }
 
-          const held    = await standing();
-          const ids     = act.gate !== undefined ? [act.gate] : [...held.keys()];
-          const cleared: string[] = [];
+          const before = await standing();
+          const ids    = act.gate !== undefined ? [act.gate] : [...before.keys()];
           for (const gate of ids) {
-            if (!held.has(gate)) continue;
-            await settings.delete(gate);
-            cleared.push(gate);
+            if (before.has(gate)) await settings.delete(gate);
           }
-          yield { type: 'result', value: { cleared, message: cleared.length === 0
-            ? 'No standing answers were stored, so nothing was cleared.'
-            : `Forgot ${cleared.length} standing answer(s): ${cleared.join(', ')}. Each reverts to whatever this installation configured — which may itself allow the operation.` } };
+          // What `delete` does is REVERT to the installation's configured default, which for a gate
+          // answered only in `default_settings:` is no change at all — there was nothing stored to
+          // remove. Reporting those as cleared was a list that looked like a success and wasn't, so the
+          // outcome is read back (one document read) and the answer is compared: what CHANGED is what
+          // was forgotten, and what is still in force afterwards is named separately, because that part
+          // lives in config and this tool cannot touch it.
+          const after   = await standing();
+          const same    = (a: StandingAnswer | undefined, b: StandingAnswer | undefined): boolean =>
+            JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+          const cleared = ids.filter(gate => !same(before.get(gate), after.get(gate)));
+          const stayed  = ids.filter(gate => after.has(gate));
+          const parts: string[] = [];
+          if (cleared.length > 0) parts.push(`Forgot ${cleared.length} standing answer(s): ${cleared.join(', ')} — each now behaves as this installation configured it.`);
+          if (stayed.length > 0)  parts.push(`Still allowed by the installation's configured defaults, which this tool cannot change: ${stayed.join(', ')}. Edit \`default_settings\` for '${DEFAULT_GATE_SETTINGS_NS}' to change those.`);
+          if (parts.length === 0) parts.push('No standing answers were stored, so nothing was cleared.');
+          yield { type: 'result', value: { cleared, message: parts.join(' ') } };
           return;
         }
 

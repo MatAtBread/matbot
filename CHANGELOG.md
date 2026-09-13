@@ -45,6 +45,13 @@ churn and less likely to affect a consumer who doesn't use them.
   elsewhere in this path: a checker that reports success while checking nothing is indistinguishable from
   one that works, and `function-tools` was recording such a definition as verified.
 
+- **`ToolContext.gate` is required, and `PluginSettings.entries()` with it.** Both are additive for
+  *callers* and breaking for anyone who **implements** those shapes: code that hand-builds a
+  `ToolContext` (an embedder standing up its own tool-invocation door, a test fixture) or its own
+  `PluginSettings` facade no longer compiles. `bindGate(machine.PermissionGate, toolName, ask)` supplies
+  the first in one line — the same helper the runner, `invokeTool` and frontend-web use — and there is
+  no way to make a gate optional without making "this tool cannot ask permission" a silent state.
+
 ### API gaps filled
 
 - **`PermissionGate`: a privileged operation declares, a replaceable policy decides.** A call site
@@ -117,6 +124,20 @@ churn and less likely to affect a consumer who doesn't use them.
   reachable human, since "no PromptFn at all" is the one signal for *nobody is here*. Outcomes are
   unchanged (the runner's own stand-in still answers a tool's `prompt` with the default); what changes
   is that a privileged operation now gets the call site's stated non-interactive answer.
+
+- **A plugin's `services.PermissionGate` is the live policy, not a copy taken when it loaded.** The
+  per-plugin machine is built with `{ ...services }`, which evaluates the host's getters once — fine
+  for the swap-members that hand back capture-safe proxies, and not fine for the one that deliberately
+  does not. A plugin therefore consulted whatever policy was active when *it* loaded: one registered
+  afterwards was never reached through that machine (frontend-web's `POST /tools/:name` route reads
+  exactly this way), and unloading one left the copy on the gone impl rather than reverting to the boot
+  default. The scoped block re-declares it as a getter, as it already did for `Notifier`.
+
+- **`gate_action clear` no longer reports a configured default as cleared.** `delete` reverts to what
+  the installation configured, so for a gate answered only in `default_settings:` it changes nothing —
+  and naming it under `cleared` was a success report for a no-op. The outcome is read back and the
+  answers compared: what changed is reported as forgotten, and what is still in force is named
+  separately as coming from config.
 
 - **A policy that displaces another can delegate to it.** `PermissionGate` was a capture-safe
   `forwardingProxy` like the other swap-members, so the documented composition — capture

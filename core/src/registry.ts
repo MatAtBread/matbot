@@ -340,6 +340,18 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotMachine,
       specifier: plugin.specifier,
       ...(plugin.source !== undefined ? { source: plugin.source } : {}),
     },
+    // Re-declared as a getter because the spread above COPIES: `{ ...services }` evaluates every
+    // getter on the host object exactly once, at plugin-load time. For the other swap-members that is
+    // harmless — the host's getters hand back capture-safe proxies, so a copied reference still follows
+    // the swap — but `PermissionGate` is deliberately NOT proxied (a policy composes by capturing the
+    // gate it displaces; through a proxy that capture resolves to itself, for ever). Copied, a plugin
+    // would hold whatever policy was active when IT loaded: a policy registered later would never be
+    // consulted by anything reading through this machine (frontend-web's `POST /tools/:name` route did
+    // exactly that), and unloading one would leave the copy pointing at the gone impl instead of
+    // reverting to the host's boot default. Reading through to `services` keeps it live per access,
+    // which is what every consumer here wants; a policy plugin's own `previous` capture is unaffected,
+    // being a deliberate read of the concrete gate at that moment.
+    get PermissionGate() { return services.PermissionGate; },
     // Everything this plugin publishes is attributed to it by default — the notification analogue of
     // stamping `pluginName` on its tools. Reads through the host's swap proxy, so a registered
     // distributed Notifier takes effect for a plugin that captured this in setup().

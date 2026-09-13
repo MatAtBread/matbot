@@ -36,3 +36,21 @@ model's reach, since the default policy stores answers in `.data/settings/` and 
 them. A standing answer is also a decision rather than a channel: it applies at `POST /tools/:name`,
 `invokeTool` and triggers, so *Always allow every `plugin.add`* is a blanket grant to anything that can
 reach the endpoint. Both are now stated where a user and a policy author will meet them.
+
+**A plugin's `services.PermissionGate` is live, not a load-time copy.** `setupPlugin` builds the
+per-plugin machine with `{ ...services }`, which evaluates the host's getters exactly once. For the
+other swap-members that is harmless — they hand back capture-safe proxies — but `PermissionGate` is
+deliberately un-proxied, so a plugin held whatever policy was active when *it* loaded: a policy
+registered afterwards was never consulted through that machine (frontend-web's `POST /tools/:name`
+route reads exactly this way), and unloading one left the copy on the gone impl instead of reverting.
+The scoped block re-declares it as a getter, as it already did for `Notifier`.
+
+**`gate_action clear` no longer claims to have cleared a configured default.** `delete` reverts to what
+the installation configured, so for a gate answered only in `default_settings:` it is a no-op — and
+listing it under `cleared` was a success report for nothing. The result is read back and the answer
+compared: what *changed* is reported as forgotten, and what is still in force is named separately as
+coming from config, which this tool cannot change.
+
+**The write queue is module-scoped**, not per gate instance, since instances multiply by design: a
+policy that displaces the seeded one composes by building another over the same settings, and a
+per-instance queue would serialise each against itself and neither against the other.

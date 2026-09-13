@@ -61,6 +61,14 @@ it applies at every door, including `POST /tools/:name`, `invokeTool` and a trig
 every `plugin.add`* lets anything that can reach the HTTP endpoint install anything, with nobody asked.
 Prefer the per-subject form.
 
+**A policy can refuse where nobody is watching.** `decide(req, ask)` gets `ask === undefined` when no
+human is reachable, so a policy that wants standing answers to apply only to interactive callers is
+four lines — `if (ask === undefined) return req.fallback;` before consulting them. It also runs under
+the ambient security principal, so `tryCurrentPrincipal()` says *who* is asking with no extra plumbing.
+Neither is what the shipped policy does: an installation that configures `'mcp_action.add': true`
+precisely wants the non-interactive caller to succeed, so the default honours an answer wherever the
+operation happens. Write the stricter one if your deployment wants it.
+
 **These answers are not out of the model's reach.** They live in `.data/settings/`, which `bash` can
 write and `docker-bash` mounts read-write, so on an install with a shell tool the model can author its
 own standing answer and every later prompt is skipped. This policy is therefore a *record of decisions*,

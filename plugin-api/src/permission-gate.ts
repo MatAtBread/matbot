@@ -3,10 +3,14 @@ import type { FormField } from './types/messages.js';
 import type { PermissionGate } from './types/permission.js';
 
 /**
- * The host's boot `PermissionGate`: ask through the channel in scope, and answer `req.fallback` when
- * there is no channel at all. Nothing stored — no memory, no allowlist, no settings key. That is what
- * makes it a defensible thing to *revert* to when a policy plugin is unloaded; a policy that remembers
- * standing answers is `@matatbread/matbot-default-gate`, which ships in the default plugin list.
+ * The bare asking `PermissionGate`: ask through the channel in scope, and answer `req.fallback` when
+ * there is no channel at all. Nothing stored — no memory, no allowlist, no settings key.
+ *
+ * The floor under a hand-assembled machine (a test, a minimal embedder) and the fallback `bindGate`
+ * uses when a machine carries no policy at all. matbot's own hosts boot something slightly richer:
+ * `@matatbread/matbot-default-gate`'s policy, which is this behaviour plus remembered standing
+ * answers, seeded by the host rather than loaded as a plugin — so a minimal install still has both a
+ * policy and the `gate_action` tool. Whatever a host seeds is what `unregister` reverts to.
  *
  * A structured `confirm` field, so rich frontends render real buttons and the affirmative is the
  * canonical `CONFIRM_YES` token rather than a parse of a rendered (and possibly localised) label.
