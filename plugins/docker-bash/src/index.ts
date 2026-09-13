@@ -6,10 +6,11 @@ declare module '@matatbread/matbot-plugin-api' {
     // Declared identically to the local `bash` plugin (same tool name ⇒ one merged entry). `cwd` rides in
     // the shared params superset but is ignored by this container variant.
     bash: ToolContract<{ exitCode: number; stdout: string; stderr: string }, { script: string; cwd?: string; env?: Record<string, string>; timeout?: number; maxOutputBytes?: number }>;
-    // result of a get/set/restart action on the container configuration
+    // result of a get/set/restart/pull action on the container configuration
     bash_config:
       | ToolContract<{ message: string; overrides: BashConfigOverrides; restarted: boolean },                  { action: 'set'; dns?: string[]; name?: string; maxOutputBytes?: number }>
       | ToolContract<{ message: string; restarted: boolean },                                                  { action: 'restart' }>
+      | ToolContract<{ message: string; image: string; updated: boolean; restarted: boolean },                 { action: 'pull' }>
       | ToolContract<{ defaults: ResolvedConfigView; overrides: BashConfigOverrides; effective: ResolvedConfigView }, { action: 'get' }>;
   }
 }
@@ -53,7 +54,7 @@ interface ContainerConfig {
  * the container inherits the host's DNS out of the box.
  */
 const CONTAINER: ContainerConfig = {
-  image:          'ubuntu:24.04',
+  image:          'node:24-bookworm',
   name:           'matbot-bash',
   projectRoot:    process.cwd(),
   mountPoint:     '/app',
@@ -145,6 +146,49 @@ function hostResolvers(): string[] {
 function resolveDnsServers(dns: string[] | undefined): string[] {
   if (dns === undefined) return [];
   return dns.flatMap(entry => entry === HOST_DNS_TOKEN ? hostResolvers() : [entry]);
+}
+
+/**
+ * Run a docker CLI command, streaming its output as tool events and returning the accumulated text.
+ * `dockerExec` buffers, which for a pull of an absent image is minutes of silence indistinguishable
+ * from a hang. Throws on a non-zero exit; the caller frames the message.
+ */
+async function* streamDocker(args: string[]): AsyncGenerator<ToolEvent<ToolResultOf<'bash_config'>>, string> {
+  const child = spawn('docker', args, { shell: false });
+  const queue: Array<ToolEvent<ToolResultOf<'bash_config'>>> = [];
+  let wakeup: (() => void) | null = null;
+  let settled: { code: number | null; error?: Error } | undefined;
+  let output = '';
+
+  const push = (ev: ToolEvent<ToolResultOf<'bash_config'>>): void => {
+    queue.push(ev);
+    wakeup?.();
+    wakeup = null;
+  };
+
+  // 'close' fires after both streams have ended, so every chunk is already queued behind it.
+  const exit = new Promise<void>(resolve => {
+    child.on('error', (error: Error) => { settled = { code: null, error }; resolve(); });
+    child.on('close', (code: number | null) => { settled ??= { code }; resolve(); });
+  });
+
+  child.stdout?.on('data', (d: Buffer) => { const chunk = d.toString(); output += chunk; push({ type: 'stdout', chunk }); });
+  child.stderr?.on('data', (d: Buffer) => { const chunk = d.toString(); output += chunk; push({ type: 'stderr', chunk }); });
+
+  for (;;) {
+    while (queue.length > 0) for (const ev of queue.splice(0)) yield ev;
+    if (settled !== undefined) break;
+    await Promise.race([exit, new Promise<void>(resolve => { wakeup = resolve; })]);
+  }
+
+  const error = settled?.error;
+  if (error !== undefined) {
+    throw (error as NodeJS.ErrnoException).code === 'ENOENT'
+      ? new Error('Docker CLI not found — is Docker installed and on PATH?')
+      : error;
+  }
+  if (settled?.code !== 0) throw new Error(`docker ${args.join(' ')} exited with code ${String(settled?.code)}`);
+  return output;
 }
 
 /** Force-remove a container by name — swallow "not found" errors. */
@@ -274,6 +318,37 @@ async function* bashConfigExecutor(
     return;
   }
 
+  if (action === 'pull') {
+    // Pull the image, then recreate unconditionally: an up-to-date image says nothing about which
+    // image the existing container was built from, which is exactly the case after the default moves.
+    const cfg = effectiveConfig(await settings.get<BashConfigOverrides>(SETTINGS_KEY) ?? {});
+    let pullOutput: string;
+    try {
+      pullOutput = yield* streamDocker(['pull', cfg.image]);
+    } catch (e) {
+      yield { type: 'error', message: e instanceof Error ? e.message : String(e) };
+      return;
+    }
+    const updated = !/Image is up to date/i.test(pullOutput);
+    await removeContainer(cfg.name);
+    try {
+      await ensureContainerRunning(cfg);
+    } catch (e) {
+      yield { type: 'error', message: e instanceof Error ? e.message : String(e) };
+      return;
+    }
+    yield {
+      type:  'result',
+      value: {
+        message: `${updated ? 'Pulled' : 'Already up to date:'} ${cfg.image}; container "${cfg.name}" recreated from it.`,
+        image:   cfg.image,
+        updated,
+        restarted: true,
+      },
+    };
+    return;
+  }
+
   if (action === 'get') {
     const saved = await settings.get<BashConfigOverrides>(SETTINGS_KEY);
     yield {
@@ -291,7 +366,7 @@ async function* bashConfigExecutor(
     return;
   }
 
-  yield { type: 'error', message: `Unknown action "${String(action)}" — must be "get", "set", or "restart".` };
+  yield { type: 'error', message: `Unknown action "${String(action)}" — must be "get", "set", "restart", or "pull".` };
 }
 
 // ── Streaming helper ──────────────────────────────────────────────────────────
@@ -510,7 +585,8 @@ function createContainerExecutor(settings: PluginSettings): ToolExecutor<ToolRes
 const TOOL_DESCRIPTION =
   'Run a bash script inside the persistent docker container and stream stdout/stderr in real time. ' +
   'Pass any shell command or multi-line script in the `script` field — it is executed as `bash -c <script>`. ' +
-  'The container runs ubuntu:24.04 with network access; install standard packages with apt freely. ' +
+  'The container runs node:24-bookworm (Debian 12, Node 24 + npm preinstalled) with network access; ' +
+  'install standard packages with apt freely. ' +
   'The project root is mounted read-only at /app; /app/.data is read-write. ' +
   'A non-zero exit code yields an error event with accumulated stdout/stderr attached. ' +
   'The script and every process it spawns are killed once combined stdout+stderr reaches `maxOutputBytes` ' +
@@ -538,13 +614,16 @@ const BASH_CONFIG_DESCRIPTION =
   'A single command can override it by passing `maxOutputBytes` to `bash` directly; set it here only to change the default for every command.\n' +
   'A `set` persists the overrides. Changing `dns`/`name` removes the running container so the next bash ' +
   'command recreates it; `maxOutputBytes` applies to subsequent commands with no restart. ' +
-  'A `restart` force-recreates the container now (e.g. to re-resolve "host" DNS after the host\'s resolvers change).';
+  'A `restart` force-recreates the container now (e.g. to re-resolve "host" DNS after the host\'s resolvers change). ' +
+  'A `pull` fetches the configured image (streaming the pull\'s progress) and then recreates the container from it — ' +
+  'use it to pick up a newer build of the image, or after the image the container was created from has changed. ' +
+  'Neither keeps anything installed inside the old container; the read-only project mount and /app/.data are unaffected.';
 
 const BASH_CONFIG_INPUT_SCHEMA = {
   type:       'object',
   required:   ['action'],
   properties: {
-    action:         { type: 'string', enum: ['get', 'set', 'restart'], description: '"get" returns current config; "set" persists overrides; "restart" force-recreates the container.' },
+    action:         { type: 'string', enum: ['get', 'set', 'restart', 'pull'], description: '"get" returns current config; "set" persists overrides; "restart" force-recreates the container; "pull" re-pulls the image and recreates the container from it.' },
     dns:            { type: 'array', items: { type: 'string' }, description: 'DNS server IPs, or "host" for the host\'s resolvers (set only). [] = inherit host DNS.' },
     name:           { type: 'string', minLength: 1, description: 'Container name (set only).' },
     maxOutputBytes: { type: 'number', minimum: 1, description: 'Max combined stdout+stderr bytes per command (set only).' },
