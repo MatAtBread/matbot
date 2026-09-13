@@ -63,7 +63,7 @@ ACTIONS
           case 'add': {
             if (!act.name || !act.endpoint) { yield { type: 'error', message: 'add requires "name" and "endpoint".' }; return; }
             if (!await confirmAction(ctx,
-              `Connect to MCP server **"${act.name}"** at ${act.endpoint}?\n\n_Its tools are registered and callable for the until you remove it._`)) {
+              `Connect to MCP server **"${act.name}"** at ${act.endpoint}?\n\n_Its tools are registered and callable until you remove it._`)) {
               yield { type: 'result', value: { message: 'Cancelled.' } };
               return;
             }
