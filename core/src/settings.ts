@@ -165,5 +165,13 @@ export function makePluginSettings(rawStore: Store<SettingsDoc>, namespace: stri
         return next;
       });
     },
+    async entries(): Promise<Record<string, unknown>> {
+      // The same layering `get` applies, in one pass: the stored document over the install default, so
+      // a stored `null` still reads as the override it is (it is a key `in` the document, and a later
+      // spread wins). One document read — the namespace is one document, and this is the same read a
+      // single `get` already makes.
+      const doc = await getDoc();
+      return { ...installDefaults.get(namespace), ...doc?.data };
+    },
   };
 }

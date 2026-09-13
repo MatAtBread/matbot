@@ -65,6 +65,16 @@ churn and less likely to affect a consumer who doesn't use them.
 - **`ToolContext.gate`, `PermissionRequest` / `PermissionGate`, `bindGate`, and the host default
   `askPermissionGate`** (`plugin-api/host`, re-exported by core).
 
+- **`PluginSettings.entries()`** — a plugin can enumerate its own settings. The facade was
+  `get`/`set`/`delete`, so a plugin holding per-key state had to keep an index key beside the data: an
+  index that cannot see a key the *installation* configured (in force, and therefore part of the
+  answer), that drifts if the write and the index-write are interrupted — state in force but invisible
+  to the plugin's own listing — and that records what was *ever* written rather than what is set.
+  `entries()` returns everything in force as one map, layered exactly as `get` is (stored key wins,
+  else the configured default), and costs exactly one `get`, because a settings namespace **is** one
+  document. That is also why there is no `keys()`: it plus N × `get` would be N+1 reads of the document
+  this returns in one.
+
 - **A `select` option can carry a value distinct from its label.** `FormField.options` takes
   `string | { value, label }`; a bare string still means "the value is the label". Frontends render
   `optionLabel(o)` and answer with `optionValue(o)`, and `default` names a value — so a caller that
@@ -101,8 +111,9 @@ churn and less likely to affect a consumer who doesn't use them.
   A library each host *seeds*, in the `tool-plugin` mould — not a configured plugin, because a minimal
   install's first act is a gated one, so neither the policy nor the means to inspect it may depend on a
   `plugins:` line. Carries the built-in `gate_action` tool (`get` reports what is in **effect**;
-  `clear` forgets an answer, reverting to whatever the installation configured). There is deliberately
-  no `set`: the write path for a runtime actor is answering a prompt that names the specific act. `get`
+  `clear` forgets an answer, reverting to whatever the installation configured — and, via
+  `PluginSettings.entries()`, lists the answers an installation *shipped* beside those someone gave at
+  a prompt). There is deliberately no `set`: the write path for a runtime actor is answering a prompt that names the specific act. `get`
   reports **answers, not a vocabulary** — a gate nobody has answered is absent from the listing rather
   than described as "will ask", because an absent key says only that nobody answered; what happens then
   is the call site's `fallback` and whatever policy is registered. Gate ids are open, so a built-in list

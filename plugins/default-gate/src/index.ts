@@ -19,7 +19,7 @@
 import type { PluginSettings, Tool } from '@matatbread/matbot-plugin-api';
 import { makeGateActionTool } from './tool.js';
 
-export { createDefaultGate, toStandingAnswer, WRITTEN_GATES_KEY, DEFAULT_GATE_SETTINGS_NS } from './gate.js';
+export { createDefaultGate, toStandingAnswer, DEFAULT_GATE_SETTINGS_NS } from './gate.js';
 export type { StandingAnswer } from './gate.js';
 export { makeGateActionTool } from './tool.js';
 export type { GateAnswer } from './tool.js';

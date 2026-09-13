@@ -118,8 +118,7 @@ test('a plain "Allow" permits this act and remembers NOTHING', async () => {
   const { gate, settings } = policy();
   const once = recorder('allow');
   assert.equal(await gate.decide(req(), once.ask), true);
-  assert.equal(await settings.get('plugin.add'), undefined, 'a one-off Allow persists nothing');
-  assert.equal(await settings.get('__gates__'),  undefined, 'and indexes nothing');
+  assert.deepEqual(await settings.entries(), {}, 'a one-off Allow persists nothing at all');
 
   // So the same subject is asked about again, and a Deny is still a Deny.
   const again = recorder('Deny');
@@ -184,31 +183,39 @@ async function run<T>(tool: { executor: { execute(i: unknown, c: never): AsyncIt
 }
 
 test('gate_action get reports ANSWERS — never a default it cannot know', async () => {
+  // Nothing configured and nothing answered: the listing is empty. An absent key says only "no answer
+  // recorded" — what a gate does then is the call site's `fallback` and whatever policy is registered,
+  // neither of which this tool can know, so there is no row to write. Gate ids are open anyway, so a
+  // built-in vocabulary would be both stale and incomplete.
+  const bare = policy();
+  assert.deepEqual((await run<{ answers: unknown[] }>(makeGateActionTool(bare.settings), { action: 'get' })).answers, []);
+
+  // An answer an installation SHIPPED is in force, so it is listed — the enumeration is the settings
+  // namespace itself (stored over the configured floor), not a record of what this code happened to
+  // write, which is exactly the answer the old index could never see.
   const { gate, settings } = policy({ 'tools.overwrite': ['bash'] });
   const tool = makeGateActionTool(settings);
-
-  // Nothing has been answered, so the listing is empty — even though this build has a documented gate
-  // vocabulary of its own. An absent key says only "no answer here": what a gate does then is the call
-  // site's `fallback` and whatever policy is registered, neither of which this tool is entitled to
-  // report. Gate ids are open anyway, so any built-in list would be both stale and incomplete.
-  const fresh = await run<{ answers: unknown[] }>(tool, { action: 'get' });
-  assert.deepEqual(fresh.answers, []);
-
-  // Named explicitly, a gate an installation CONFIGURED is visible — which a bare listing cannot
-  // reach, settings having no key enumeration.
   const configured = await run<{ answers: { gate: string; effect: string; subjects?: string[] }[] }>(
-    tool, { action: 'get', gate: 'tools.overwrite' });
+    tool, { action: 'get' });
   assert.deepEqual(configured.answers, [{ gate: 'tools.overwrite', effect: 'subjects', subjects: ['bash'] }]);
 
-  // An answer given at a prompt reads the same way as one an installation configured, and now the
-  // listing has something to say.
+  // An answer given at a prompt reads the same way as one an installation configured, and joins it.
   await gate.decide(req(), recorder('always-subject').ask);
   const after = await run<{ answers: { gate: string; effect: string; subjects?: string[] }[] }>(
     tool, { action: 'get', gate: 'plugin.add' });
   assert.deepEqual(after.answers, [{ gate: 'plugin.add', effect: 'subjects', subjects: ['@x/foo'] }]);
 
   const listed = await run<{ answers: { gate: string }[] }>(tool, { action: 'get' });
-  assert.deepEqual(listed.answers.map(a => a.gate), ['plugin.add']);
+  assert.deepEqual(listed.answers.map(a => a.gate).sort(), ['plugin.add', 'tools.overwrite']);
+});
+
+test('a key that is not a standing answer is never reported as one', async () => {
+  // The namespace is enumerated, so anything living in it is seen — and only values this policy can
+  // read as an answer are reported. A permission tool must not turn a stray key into a permission.
+  const { settings } = policy({ 'plugin.add': 'nonsense' });
+  await settings.set('some-other-setting', 42);
+  const got = await run<{ answers: unknown[] }>(makeGateActionTool(settings), { action: 'get' });
+  assert.deepEqual(got.answers, []);
 });
 
 test('gate_action clear forgets an answer, reverting to what the installation configured', async () => {

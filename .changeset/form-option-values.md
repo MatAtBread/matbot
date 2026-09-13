@@ -6,6 +6,7 @@
 '@matatbread/matbot-frontend-web': patch
 '@matatbread/matbot-frontend-dom': patch
 '@matatbread/matbot-default-gate': patch
+'@matatbread/matbot-tool-mcp': patch
 ---
 
 A `select` option can carry a value distinct from its label

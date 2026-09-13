@@ -47,14 +47,11 @@ export function createDefaultGate(settings: PluginSettings, previous?: Permissio
   const read = async (gate: string): Promise<StandingAnswer | undefined> =>
     toStandingAnswer(await settings.get<unknown>(gate));
 
-  // Write the answer and record the gate id in the index, so `gate_action` can report and clear an
-  // answer for a gate id this build never compiled against.
-  const remember = async (gate: string, answer: StandingAnswer): Promise<void> => {
-    await settings.set(gate, answer);
-    const known = await settings.get<unknown>(WRITTEN_GATES_KEY);
-    const ids   = Array.isArray(known) ? known.filter((g): g is string => typeof g === 'string') : [];
-    if (!ids.includes(gate)) await settings.set(WRITTEN_GATES_KEY, [...ids, gate]);
-  };
+  // One write, and the store is the only record: `settings.entries()` enumerates the namespace, so
+  // there is nothing to index. This used to keep its own list of ids it had written — a second copy of
+  // its own keyspace, which could not see a configured default, and which a crash between the two
+  // writes left behind as a standing answer in force and invisible to both `get` and `clear`.
+  const remember = (gate: string, answer: StandingAnswer): Promise<void> => settings.set(gate, answer);
 
   return {
     async decide(req, ask) {
@@ -103,10 +100,3 @@ export function createDefaultGate(settings: PluginSettings, previous?: Permissio
     },
   };
 }
-
-/** Settings key holding the gate ids this policy has written a standing answer for — the only gates
- *  `gate_action` can enumerate, since `PluginSettings` has no key listing. It records answers, never a
- *  vocabulary: gate ids are open (a plugin contributes its own), and an id with no stored answer is
- *  not a known default but an absence, which nothing here is entitled to describe.
- *  Dunder-prefixed: it is this policy's bookkeeping, not a gate id. */
-export const WRITTEN_GATES_KEY = '__gates__';

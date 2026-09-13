@@ -20,11 +20,21 @@ interface ActiveLocal { config: MCPServerConfigLocal; client: MCPClient; tools: 
 // RemoteMcpManager persists under a fixed 'servers' key; scope it beneath ours so the embedded remote
 // store never collides with our local 'servers'. One settings document, two non-overlapping owners.
 function remoteSettings(base: PluginSettings): PluginSettings {
-  const scoped = (key: string): string => `remote:${key}`;
+  const PREFIX = 'remote:';
+  const scoped = (key: string): string => `${PREFIX}${key}`;
   return {
     get:    <T>(key: string) => base.get<T>(scoped(key)),
     set:    <T>(key: string, value: T) => base.set<T>(scoped(key), value),
     delete: (key: string) => base.delete(scoped(key)),
+    // Enumeration respects the same scoping the other three do: the remote half sees its own keys,
+    // unprefixed, and never the local half's — which is the whole point of the prefix.
+    async entries() {
+      return Object.fromEntries(
+        Object.entries(await base.entries())
+          .filter(([key]) => key.startsWith(PREFIX))
+          .map(([key, value]) => [key.slice(PREFIX.length), value]),
+      );
+    },
   };
 }
 

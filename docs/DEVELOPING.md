@@ -476,10 +476,21 @@ interface PluginSettings {
   get<T>(key: string): Promise<T | undefined>;
   set<T>(key: string, value: T): Promise<void>;
   delete(key: string): Promise<void>;
+  entries(): Promise<Record<string, unknown>>;   // everything in force, layered like get()
 }
 ```
 
-Keys are scoped per plugin — two plugins can use the same key without collision.
+Keys are scoped per plugin — two plugins can use the same key without collision — and `entries()` is
+scoped the same way: your namespace, never another's.
+
+**Reach for `entries()` rather than tracking your own keys.** A plugin holding per-key state (a
+policy's standing answers, a per-item override) needs to answer "what is set?", and without
+enumeration the only way is to maintain an index key beside the data — which cannot see a value the
+*installation* configured, drifts if the write and the index-write are interrupted (state in force and
+invisible to your own listing), and records what was ever written rather than what is set. `entries()`
+costs exactly one `get`: a settings namespace is one document, so the medium hands over the values
+with the names, which is also why there is no `keys()` — that plus N × `get` would be N+1 reads of the
+document `entries()` returns in one.
 
 The install can supply a **default** for any key, via `default_settings:` in `matbot.yaml`
 (`BrowserConfig.defaultSettings` in the browser), keyed by your package name. It is read-through, so

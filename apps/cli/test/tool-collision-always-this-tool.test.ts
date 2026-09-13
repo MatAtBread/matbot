@@ -31,10 +31,8 @@ test('"Always allow <subject>" adds it to the list, keeping what the install alr
   assert.equal(asked.length, 1);
   assert.equal(tools.get('contested')?.pluginName, 'collides-tool');
   const stored = docs.get(slugSettingsNamespace(DEFAULT_GATE_SETTINGS_NS)) as { data: Record<string, unknown> } | undefined;
-  assert.deepEqual(stored?.data['tools.overwrite'], ['already-exempt', 'contested'],
-    'the answer is persisted as the list in effect plus this subject, never as this subject alone');
-  assert.deepEqual(stored?.data['__gates__'], ['tools.overwrite'],
-    'and the gate id is indexed, so gate_action can report and clear an answer for an id it never compiled against');
+  assert.deepEqual(stored?.data, { 'tools.overwrite': ['already-exempt', 'contested'] },
+    'the answer is persisted as the list in effect plus this subject — one key, one write, no index');
 
   // And it takes effect: the next plugin to claim that name is not asked about.
   await loadPlugins([{ spec: twinCollider, importSpec: twinCollider }], services, false, prompt, 'skip');

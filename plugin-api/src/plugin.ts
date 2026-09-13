@@ -71,6 +71,21 @@ export interface PluginSettings {
   get<T>(key: string): Promise<T | undefined>;
   set<T>(key: string, value: T): Promise<void>;
   delete(key: string): Promise<void>;
+  /**
+   * Everything in force for this plugin, as one map — layered exactly as {@link get} is: a stored key
+   * wins, else the install's configured default. The only way to answer "what is set?", which a plugin
+   * holding per-key state (a policy's standing answers, a per-item override) otherwise has to answer by
+   * maintaining a second copy of its own keyspace — a duplicate that cannot see a configured default,
+   * drifts when a write and its index-write are interrupted, and reports what was *ever* written
+   * rather than what is set.
+   *
+   * A map rather than key/value tuples, and whole rather than a `keys()`: a settings namespace IS one
+   * document, so the medium hands over the values with the names, and `keys()` + N × `get` would be
+   * N+1 reads of the document this returns in one. Cost is therefore exactly one `get`.
+   *
+   * Scoped like every other method — a plugin enumerates its own namespace and cannot name another's.
+   */
+  entries(): Promise<Record<string, unknown>>;
 }
 
 // ── Plugin identity ─────────────────────────────────────────────────────────────
