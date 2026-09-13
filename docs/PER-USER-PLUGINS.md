@@ -216,8 +216,11 @@ plugin-visibility ceiling is structural.
   plugin loads — you cannot exclude it, only register a same-named tool over it. That triggers
   `resolveToolCollision` ([registry.ts](../core/src/registry.ts)): **non-interactive**
   (boot / HTTP installs, no `prompt`) → overwrites by default, your tool wins; **interactive** →
-  prompts Keep / Overwrite / Always. The registry `Map` is keyed by name, so the later `register()`
-  replaces the earlier entry.
+  prompts Keep / Overwrite / Always-this-tool / Always-all. The registry `Map` is keyed by name, so the later `register()`
+  replaces the earlier entry. An interactive install can skip the prompt for exactly the names it
+  means to shadow by listing them in `default_settings.__matbot_core__.overwriteToolsOnCollision`
+  (see [GETTING-STARTED](GETTING-STARTED.md)) — the same resolution as not being asked, i.e. your
+  tool wins, without blanket-overwriting collisions you would rather hear about.
 - **Shadow, not stack.** Because the `Map` overwrites, the built-in is *gone*, not suspended — if your
   bootstrap plugin is ever unloaded, `removeByPlugin` deletes the `plugin` entry and the built-in is
   **not** restored. This fails **closed** (no plugin tool at all), which is safe but deliberate.

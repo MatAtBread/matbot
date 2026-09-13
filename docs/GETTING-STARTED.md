@@ -266,6 +266,31 @@ The rules, all of which follow from this being a *default* rather than a setting
 - **It applies to every user.** A default is configuration rather than data, so it is not
   partitioned per principal the way stored settings are.
 
+### Tool-name collisions
+
+Two plugins can claim the same tool name — deliberately, when one is meant to replace the
+other's tool, or by accident. Interactively matbot asks (*Keep existing* / *Overwrite* /
+*Always overwrite "<tool>"* / *Always overwrite all tools*); non-interactively — a boot, an
+HTTP install — it overwrites, which is what lets an override win with nobody there to answer.
+Matbot's own settings live under the reserved namespace `__matbot_core__`, and one key holds
+the standing answer — the one the two *Always* options write, and the one to author up front:
+
+```yaml
+default_settings:
+  __matbot_core__:
+    overwriteToolsOnCollision: [bash, plugin]   # or: true / false
+```
+
+`true` overwrites every collision silently, `false` (the default) asks about each one, and a
+**list of tool names** asks about everything except those — which is the form to reach for
+when one particular override is intended and any *other* collision is a surprise you want to
+hear about. Not asking resolves the way the prompt's default does: the incoming tool wins.
+
+*Always overwrite "<tool>"* at the prompt appends that name to the list (keeping whatever this
+file already exempts) and *Always overwrite all tools* stores `true` — so the prompt writes the
+same setting you would author here. As everywhere in `default_settings:`, a stored answer then
+wins over this one; `.data/settings/__matbot_core__.json` is where to undo it.
+
 ---
 
 ## CLI reference

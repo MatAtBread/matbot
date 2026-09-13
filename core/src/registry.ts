@@ -26,7 +26,7 @@ const state = {
   systemContextPlugins: new Set<string>(),       // plugins that registered a system-context contributor
   lifecycles:      new Map<string, AbortController>(),  // pluginName → "this plugin is loaded" signal, aborted on unload
   failedPlugins:   [] as FailedPlugin[],         // plugins the loader skipped, keyed by specifier (last failure wins)
-  overwriteAllTools: undefined as boolean | undefined,  // persisted "overwrite on collision, this install" choice, loaded lazily
+  overwriteTools:  undefined as OverwritePolicy | undefined,  // configured/persisted collision policy, loaded lazily
 };
 
 // Plugin load/unload is announced on the Notifier as a `RegistryChange` with `registry: 'plugins'`, for
@@ -46,13 +46,46 @@ const CORE_SETTINGS_NS    = '__matbot_core__';
 const OVERWRITE_TOOLS_KEY = 'overwriteToolsOnCollision';
 
 /**
+ * What to do when a plugin registers a tool name another plugin already owns: `true` — overwrite every
+ * collision silently; `false` — ask; a list of tool NAMES — overwrite those silently and ask for the
+ * rest. The list is the granular form of the same "don't ask me about this" answer, so it resolves the
+ * way not asking does: to the prompt's default, which is overwrite.
+ *
+ * Authored as `default_settings.__matbot_core__.overwriteToolsOnCollision` (the dunder namespace is
+ * reserved, so the host's unmatched-namespace warning skips it), or persisted by answering one of the
+ * prompt's two "Always overwrite" options — this tool (appended to the list) or all tools (`true`).
+ */
+type OverwritePolicy = boolean | readonly string[];
+
+/**
+ * Boundary check on a value that came from config or a store: neither is typed, and a malformed one
+ * must not silently read as `true` (every collision overwritten, no prompt, no trace of why). Anything
+ * unrecognised warns and resolves to "ask", which is the behaviour with the key unset.
+ */
+function toOverwritePolicy(value: unknown): OverwritePolicy {
+  if (typeof value === 'boolean' || value === undefined || value === null) return value ?? false;
+  if (Array.isArray(value)) {
+    const names = value.filter((n): n is string => typeof n === 'string');
+    if (names.length !== value.length) {
+      console.warn(`[matbot] ${CORE_SETTINGS_NS}.${OVERWRITE_TOOLS_KEY}: ` +
+        `ignoring ${value.length - names.length} entries that are not tool names.`);
+    }
+    return names;
+  }
+  console.warn(`[matbot] ${CORE_SETTINGS_NS}.${OVERWRITE_TOOLS_KEY}: expected a boolean or an array of ` +
+    `tool names, got ${typeof value} — asking on every collision.`);
+  return false;
+}
+
+/**
  * Decide whether an incoming tool registration may overwrite an existing tool of the
  * same name owned by a different plugin. Returns true to overwrite, false to keep the
  * existing one and drop the incoming registration.
  *
- * Resolution order: a persisted "overwrite all (this install)" choice short-circuits to
- * true; otherwise the user is prompted [n / Y / all] with Y (overwrite) as the default.
- * 'all' persists the choice. With no prompt available (non-interactive host) we overwrite —
+ * Resolution order: the configured {@link OverwritePolicy} short-circuits to true when it is `true`
+ * or names this tool; otherwise the user is prompted [keep / Y / always this tool / always all] with Y
+ * (overwrite) as the default. The two "always" answers persist the policy — this tool appended to the
+ * list, or `true`. With no prompt available (non-interactive host) we overwrite —
  * the default — preserving matbot's historical last-registration-wins behaviour.
  */
 async function resolveToolCollision(
@@ -63,10 +96,12 @@ async function resolveToolCollision(
   prompt:        PromptFn | undefined,
 ): Promise<boolean> {
   const coreSettings = makePluginSettings(services.createStore<SettingsDoc>('settings'), CORE_SETTINGS_NS);
-  if (state.overwriteAllTools === undefined) {
-    state.overwriteAllTools = (await coreSettings.get<boolean>(OVERWRITE_TOOLS_KEY)) ?? false;
+  if (state.overwriteTools === undefined) {
+    state.overwriteTools = toOverwritePolicy(await coreSettings.get<unknown>(OVERWRITE_TOOLS_KEY));
   }
-  if (state.overwriteAllTools) return true;
+  const policy = state.overwriteTools;
+  if (policy === true) return true;
+  if (policy !== false && policy.includes(toolName)) return true;
 
   const owner = existingOwner !== undefined ? `"${existingOwner}"` : 'a built-in';
   const label = `Tool \`"${toolName}"\` is already registered by **${owner}**. Overwrite it with the one from **"${incomingOwner}"**?`;
@@ -76,17 +111,28 @@ async function resolveToolCollision(
     return true;
   }
 
+  // The per-tool "always" comes BEFORE the blanket one: a select resolves a typed prefix against this
+  // order (apps/cli), so a bare "a" lands on the narrower choice rather than silencing every collision.
   const field: FormField = {
     name:    'overwrite',
     label,
     type:    'select',
-    options: ['Keep existing', 'Overwrite', 'Always overwrite'],
+    options: ['Keep existing', 'Overwrite', `Always overwrite "${toolName}"`, 'Always overwrite all tools'],
     default: 'Overwrite',
   };
   const answer = (await prompt(field)).trim().toLowerCase();
-  if (answer.startsWith('a')) {  // "Always overwrite" — persist for the installation
-    state.overwriteAllTools = true;
-    await coreSettings.set(OVERWRITE_TOOLS_KEY, true);
+  if (answer.startsWith('a')) {  // one of the two "Always …" options — persist for the installation
+    if (answer.includes('all tools')) {
+      state.overwriteTools = true;
+      await coreSettings.set(OVERWRITE_TOOLS_KEY, true);
+      return true;
+    }
+    // Persist the list IN EFFECT plus this name, not this name alone: the in-effect list may come from
+    // `default_settings`, and a stored key wins over the default wholesale — writing `[toolName]` would
+    // silently start prompting again for every other name the install had already exempted.
+    const names = policy === false ? [toolName] : [...new Set([...policy, toolName])];
+    state.overwriteTools = names;
+    await coreSettings.set(OVERWRITE_TOOLS_KEY, names);
     return true;
   }
   return !answer.startsWith('k');  // "Keep existing" → false; "Overwrite"/default → true

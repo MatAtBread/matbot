@@ -9,17 +9,6 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
-## Unreleased
-
-### Optional
-
-- **`plugin` / `matbot install`: an npm install into a pnpm workspace root now succeeds.** Both shelled
-  out to `pnpm add <pkg>` in the directory holding `matbot.yaml`; at a workspace root pnpm refuses
-  outright (`ERR_PNPM_ADDING_TO_ROOT`, on the assumption that a member package was meant) and the
-  install failed naming a `-w` flag the user had no way to pass. A member package was never meant — the
-  project directory is the project — so the root is stated explicitly when a `pnpm-workspace.yaml` is
-  present. Other package managers are unaffected.
-
 ## 0.4.14
 
 ### Breaking changes
@@ -54,6 +43,26 @@ churn and less likely to affect a consumer who doesn't use them.
   implementing a `PromptFn` is exactly who needs them — the tokens a `type: 'confirm'` prompt resolves
   to, which a consumer must branch on rather than on the rendered (and potentially localised) label.
 
+- **`overwriteToolsOnCollision` takes a list of tool names, not just a boolean**
+  ([#68](https://github.com/MatAtBread/matbot/issues/68)). The core setting
+  (`default_settings.__matbot_core__.overwriteToolsOnCollision`) was all-or-nothing: prompt about
+  every tool-name collision, or silently overwrite every one of them. An install that deliberately
+  shadows one built-in had to choose between a prompt it answers identically every start and giving
+  up the prompt for collisions it would want to hear about. A `string[]` names the tools not to ask
+  about; anything else still asks. A listed name resolves the way not asking does — to the prompt's
+  own default, the incoming tool — so the list is a granular form of the answer, not a new outcome.
+  `true`/`false` behave exactly as before, and a value that is neither warns and asks rather than
+  reading as `true`: a malformed setting that silently overwrote everything would leave no trace of
+  why.
+
+  The prompt writes the same setting it reads: *Always overwrite* has become two options —
+  **`Always overwrite "<tool>"`**, which appends that name to the list in effect, and **`Always
+  overwrite all tools`**, which stores `true` as the old option did. The per-tool one is offered
+  first, so a typed prefix resolves to the narrower answer. It persists the list *in effect* plus the
+  new name rather than the name alone, because a stored key wins over a `default_settings:` one
+  wholesale — writing `[toolName]` would silently un-exempt every other name the install had
+  configured.
+
 ### Optional
 
 #### tool-plugin, mcp, mcp-http
@@ -68,6 +77,13 @@ churn and less likely to affect a consumer who doesn't use them.
   Every non-interactive caller keeps declining, the `CONFIRM_NO` default being what they already
   resolved to. `confirmAction` goes from three copies to one per dependency edge: shared within
   `tool-plugin`, and exported from `mcp-http` for the node `mcp` plugin that already hard-depends on it.
+
+- **`plugin` / `matbot install`: an npm install into a pnpm workspace root now succeeds.** Both shelled
+  out to `pnpm add <pkg>` in the directory holding `matbot.yaml`; at a workspace root pnpm refuses
+  outright (`ERR_PNPM_ADDING_TO_ROOT`, on the assumption that a member package was meant) and the
+  install failed naming a `-w` flag the user had no way to pass. A member package was never meant — the
+  project directory is the project — so the root is stated explicitly when a `pnpm-workspace.yaml` is
+  present. Other package managers are unaffected.
 
 #### tool-store
 
