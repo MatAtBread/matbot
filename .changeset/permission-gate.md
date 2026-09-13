@@ -58,6 +58,18 @@ optional — the behaviour must always exist), `ToolContext.gate`, `bindGate`, a
 default `askPermissionGate` (`plugin-api/host`, re-exported by core). `confirmAction` is gone from
 `@matatbread/matbot-mcp-http` and `@matatbread/matbot-tool-plugin`.
 
+The 19 converted call sites are a **different implementation with the same functionality**: each still
+asks a human when there is one, and still declines when there is not (`fallback: false` everywhere but
+`tools.overwrite`, which is what the old `CONFIRM_NO` default already resolved to). What changes is who
+answers, and that an installation can now decide without editing a plugin — including for the callers
+that have no prompt channel at all:
+
+```yaml
+default_settings:
+  '@matatbread/matbot-default-gate':
+    'mcp_action.add': true          # lets invokeTool / a trigger / POST /tools connect a server
+```
+
 Be clear-eyed about what this buys. A privileged operation is now *decided somewhere replaceable*,
 and by default that means a human is asked — it is **not** out of the model's reach: the default
 policy keeps its answers in `.data/settings/`, which any shell tool can write. A standing answer is

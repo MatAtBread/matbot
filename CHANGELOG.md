@@ -150,7 +150,23 @@ churn and less likely to affect a consumer who doesn't use them.
   would be stale as soon as a plugin contributed one.
 
 - **`tool-plugin`, `mcp`, `mcp-http`, `browser`** — their 19 `confirmAction` calls became `ctx.gate`,
-  and the three copies of `confirmAction` are gone.
+  and the three copies of `confirmAction` are gone. **A different implementation, the same
+  functionality**: each site still asks a human when there is one and still declines when there is not
+  (every gate but `tools.overwrite` declares `fallback: false`, which is what the `CONFIRM_NO` default
+  already resolved to). What changes is *who* answers — the installation's policy rather than a helper
+  hardcoded per plugin — and that an install can now decide for itself. `mcp_action add` is the case to
+  know about, since it is also newly gated in this release: a caller with no prompt channel
+  (`invokeTool`, a trigger, a compiled skill, `POST /tools/:name`) gets `Cancelled.` rather than a
+  connection. To let those through, name the gate in the policy's settings rather than editing a plugin:
+
+  ```yaml
+  default_settings:
+    '@matatbread/matbot-default-gate':
+      'mcp_action.add': true          # or a list of server names
+  ```
+
+  The id is qualified by the **tool** name (`mcp_action`), so one key covers both the node `mcp` plugin
+  and cross-runtime `mcp-http`, which register the same tool. Every other gate takes the same treatment.
 
 #### tool-plugin, mcp, mcp-http
 

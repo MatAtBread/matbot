@@ -36,6 +36,20 @@ default_settings:
 
 A value is `true` (allow every subject), or a list of subjects to allow. Anything else asks.
 
+This is also the supported way to make a gated operation work for callers that have **no prompt
+channel** — `invokeTool`, a trigger, a compiled skill, `POST /tools/:name` — which otherwise get the
+call site's `fallback` (a refusal, for everything but `tools.overwrite`). Connecting an MCP server
+from a script is the usual case:
+
+```yaml
+default_settings:
+  '@matatbread/matbot-default-gate':
+    'mcp_action.add': true
+```
+
+Naming the gate is the whole point of the seam: the alternative is editing the plugin that declares
+it, and an installation should not have to fork a tool to decide its own policy.
+
 **`subject` is the identifier the call site has, not a canonical identity.** At `plugin.add` the
 plugin is not loaded yet, so the subject is the specifier *as typed*: an allow for `@x/foo` does not
 match `https://…/foo.ts`. That is correct — different trust root, different decision — but it means a
