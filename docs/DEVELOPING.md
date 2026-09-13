@@ -201,7 +201,7 @@ what a filesystem cannot solve.
 The same fact runs the other way when a plugin is **recorded**: `plugin add` writes the canonical package
 name, not the path it was given, whenever that name resolves back to the directory just approved. The name
 works in a checkout and in an installed deployment; a path works in one working copy. A plugin the name
-cannot reach — under `compiled-plugins/`, in a sibling checkout via `../` — keeps its path.
+cannot reach — under `.compiled-plugins/`, in a sibling checkout via `../` — keeps its path.
 
 Two rules close the model. **A plugin is always a package**: never raw source without a manifest, because
 matbot's own fields (`matbotRuntime`) live there. And **a bare specifier means host-provided** — the

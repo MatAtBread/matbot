@@ -130,7 +130,7 @@ test('a local plugin is recorded by name only when the name leads back to it', a
 
     // Outside the scanned root the name resolves nowhere, so the path stays: a compiled plugin, or a
     // sibling checkout reached by `../`.
-    const outside = join(dir, 'compiled-plugins', 'thing');
+    const outside = join(dir, '.compiled-plugins', 'thing');
     await mkdir(outside, { recursive: true });
     await writeFile(join(outside, 'package.json'), JSON.stringify({ name: '@local/compiled-thing' }));
     assert.equal(await canonicalLocalSpecifier(outside, dir), undefined);

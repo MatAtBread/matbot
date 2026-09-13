@@ -110,10 +110,36 @@ const STRICT_TS = 'Remember verbatimModuleSyntax (use `import type` for type-onl
 // derived from the live registry and nothing else; when it cannot be derived the compile fails.
 
 // Where compiled plugins are written, installed from, and loaded — relative to the project root (the
-// dir holding matbot.yaml). NOT `.data/` (the LLM's read-write workspace) nor `.plugins/` (the
+// dir holding matbot.yaml). NOT `.data/` (the LLM's read-write workspace): docker-bash mounts the
+// project root read-only and then `.data` read-write over it, so a build dir under there would be
+// writable by the model from inside the container — and a loaded plugin is full Node capability with
+// no sandbox, which is the thing `plugin.add`'s gate exists to decide. Nor `.plugins/` (the
 // re-fetchable remote cache: a compiled plugin has no upstream, so a cache clear would lose it
-// forever). A dedicated, gitignored, durable home of its own. Change here if that decision changes.
-const COMPILED_PLUGINS_DIR = 'compiled-plugins';
+// forever). A dedicated, gitignored, durable home of its own.
+const COMPILED_PLUGINS_DIR = '.compiled-plugins';
+
+// The directory is settings-backed so an INSTALLATION can site it (a read-only project root, a
+// per-user volume) via `default_settings`, which is the only write path offered: there is deliberately
+// no action to change it at runtime. The name is not merely a path — `plugin add` records
+// `./<dir>/<tool>` in the config (or in whatever has taken over `plugins:`), so every already-compiled
+// tool's entry is spelled with it, and a change orphans them all with no migration. An installation
+// answering the question once at boot is a different act from a running machine moving the goalposts.
+const COMPILED_PLUGINS_DIR_KEY = 'compiledPluginsDir';
+
+/**
+ * The configured build root, normalised to the spelling `plugin add` will record.
+ *
+ * Leading `./` and trailing `/` are stripped rather than honoured, because the specifier derived here
+ * is compared against `plugin list`'s `configured` entries to decide add-vs-reload: `.//x` and `./x`
+ * address one directory and miss each other as strings, which silently reinstalls a tool that was
+ * already there. A non-string or empty value falls back to the code default — an installation that
+ * mis-types the key gets matbot's own layout, not a plugin rooted at the project root itself.
+ */
+async function compiledPluginsDir(services: MatbotMachine): Promise<string> {
+  const configured = await services.settings().get<string>(COMPILED_PLUGINS_DIR_KEY);
+  const trimmed = typeof configured === 'string' ? configured.trim().replace(/^\.\//, '').replace(/\/+$/, '') : '';
+  return trimmed === '' ? COMPILED_PLUGINS_DIR : trimmed;
+}
 
 // Render a committed session as an ordered, readable trace: the agent's reasoning, narration, tool
 // calls and their results, interleaved as they happened. Tool results are paired to calls by id and
@@ -158,6 +184,7 @@ export function createSkillCompilerPlugin(): MatbotPluginSpec {
           }
           const { dirname, join } = await import('node:path');
           const projectRoot = dirname(services.configPath);
+          const compiledDir = await compiledPluginsDir(services);
 
           // ── inspect: read back the current compiled version (source + file listing), no mutation ──
           if (action === 'inspect') {
@@ -166,8 +193,8 @@ export function createSkillCompilerPlugin(): MatbotPluginSpec {
               yield { type: 'error', message: 'inspect requires "toolName" (or "skill" to derive it).' };
               return;
             }
-            const relDir    = `${COMPILED_PLUGINS_DIR}/${target}`;
-            const buildDir  = join(projectRoot, COMPILED_PLUGINS_DIR, target);
+            const relDir    = `${compiledDir}/${target}`;
+            const buildDir  = join(projectRoot, compiledDir, target);
             const specifier = `./${relDir}`;
             const { readFile, readdir, stat } = await import('node:fs/promises');
 
@@ -242,8 +269,8 @@ export function createSkillCompilerPlugin(): MatbotPluginSpec {
           const packagePrefix = (typeof inp.packageNamePrefix === 'string' && inp.packageNamePrefix.trim()) ? inp.packageNamePrefix.trim() : '@local/compiled-';
           const pluginPkgName = `${packagePrefix}${toolName}`;
           const pluginDir = toolName;
-          const relDir    = `${COMPILED_PLUGINS_DIR}/${pluginDir}`;
-          const buildDir  = join(projectRoot, COMPILED_PLUGINS_DIR, pluginDir);
+          const relDir    = `${compiledDir}/${pluginDir}`;
+          const buildDir  = join(projectRoot, compiledDir, pluginDir);
           const specifier = `./${relDir}`;
 
           const { readFile, writeFile } = await import('node:fs/promises');
@@ -298,7 +325,7 @@ export function createSkillCompilerPlugin(): MatbotPluginSpec {
                 .filter((u): u is string => typeof u === 'string')
                 // Drop a prior compiled version of THIS tool: its source carries a ToolContracts arm for
                 // `${toolName}`, which would collide with the fresh src/index.ts's own arm in one typecheck.
-                .filter(u => !u.includes(`${COMPILED_PLUGINS_DIR}/${pluginDir}/`));
+                .filter(u => !u.includes(`${compiledDir}/${pluginDir}/`));
               alreadyInstalled = (list.configured ?? []).includes(specifier) || (list.loaded ?? []).some(p => p.name === pluginPkgName);
             } catch { /* `plugin` tool absent → buildMatbotToolsDts falls back to the monorepo glob */ }
             // Live tool names, because the prompt below says "A tool not declared here does not exist" and

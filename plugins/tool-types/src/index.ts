@@ -160,7 +160,7 @@ class ToolTypeIndexImpl implements ToolTypeIndex {
     if (this.dirty || this.cache === null) {
       const root   = this.machine.configPath !== undefined ? dirname(this.machine.configPath) : '.';
       // Scan the source each loaded plugin was actually loaded from (its resolvedUrl) — builtin, compiled
-      // (compiled-plugins/), or installed (.plugins/) alike — so every registered tool's real augmentation
+      // (.compiled-plugins/), or installed (.plugins/) alike — so every registered tool's real augmentation
       // is read. build-dts UNIONs a glob of the monorepo `plugins/` tree onto these roots (not a fallback:
       // it catches host-constructed builtins that have no resolvedUrl), so the scanned set is a SUPERSET of
       // the loaded one — wherever that tree exists, plugins for other runtimes and plugins nobody loaded are

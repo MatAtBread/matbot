@@ -157,12 +157,17 @@ export async function buildMatbotToolsDts(
   // because the name IS live.
   // Generated `matbot-tools.d.ts` files are skipped (don't feed prior output back in).
   if (existsSync(join(projectRoot, 'plugins'))) {
-    const SKIP = new Set(['node_modules', 'dist', '.git', 'compiled-plugins']);
+    // Dot-directories wholesale rather than by name: this used to list `compiled-plugins` explicitly,
+    // which was both a second spelling of a constant skills_compiler owns (now settings-relocatable, so
+    // unknowable here) and unreachable — the walk roots at `plugins/`, and that build dir is its sibling.
+    // A source tree keeps no augmentations under a dot-directory; `.git`, `.plugins` and a build root
+    // sited there are all covered by one rule that cannot go stale.
+    const SKIP = new Set(['node_modules', 'dist']);
     const walk = (dir: string): void => {
       let entries: string[];
       try { entries = readdirSync(dir); } catch { return; }
       for (const name of entries) {
-        if (SKIP.has(name)) continue;
+        if (SKIP.has(name) || name.startsWith('.')) continue;
         const p = join(dir, name);
         let isDir: boolean;
         try { isDir = statSync(p).isDirectory(); } catch { continue; }
