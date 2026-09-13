@@ -282,6 +282,13 @@ churn and less likely to affect a consumer who doesn't use them.
   looked it up concluded the compiler had no such code. The "likely cascading" advice is now dropped
   when every hidden finding is structural: a cast-gate rule fires at one site and cascades from
   nothing.
+- **The `plugins/` scan skips dot-directories, rather than naming `compiled-plugins`.** That was a
+  second spelling of a constant `skills_compiler` owns — now relocatable per installation, so
+  unknowable here — and unreachable besides, the walk rooting at `plugins/` while the build dir is its
+  sibling. The rule it was actually for survives: a build dir sited *inside* the scanned source root
+  would re-root the prior version's `ToolContracts` arm, which `skills_compiler` filters out of its
+  `pluginUrls` for exactly that reason. A compiled plugin's own contract is unaffected either way — it
+  reaches the dts by `resolvedUrl`, which the glob only ever supplemented.
 
 #### function-tools
 
@@ -294,6 +301,39 @@ churn and less likely to affect a consumer who doesn't use them.
   surfaced much later as failures that had been latent all along. Both bypass routes set it, the
   explicit flag and the implicit "no checker available here". It records the provenance of the
   definition, so a later passing `check` deliberately does not clear it.
+
+#### skills_compiler
+
+- **The compiled-plugin build root is `.compiled-plugins/`, renamed from `compiled-plugins/`, and is
+  **not migrated**.** Every other matbot-written, gitignored root beside `matbot.yaml` is dot-prefixed
+  (`.data/`, `.plugins/`, `.env`); this one was the outlier. An install with compiled plugins renames
+  the directory and the matching `./compiled-plugins/<tool>` entries in its config together, or pins
+  the old name through the setting below — a stale entry fails to load, naming itself, at boot.
+
+  It stays out of `.data/` for a second reason now recorded beside the durability one (a compiled
+  plugin has no upstream, so a cache clear would lose it): `docker-bash` mounts the project root
+  read-only and then `.data` read-write over it, so a build dir under there would be writable by the
+  model from inside the container — and a loaded plugin is full Node capability with no sandbox, which
+  is the thing `plugin.add`'s gate exists to decide.
+
+- **An installation can site that directory**, via `compiledPluginsDir` in the plugin's own settings
+  namespace — for a deployment running matbot per user (separate pods, a read-only project root, a
+  per-user volume):
+
+  ```yaml
+  default_settings:
+    '@matatbread/matbot-tool-skill-compiler':
+      compiledPluginsDir: .compiled-plugins
+  ```
+
+  There is deliberately no action to change it at runtime, and the reason is the migration hazard
+  above: `plugin add` records `./<dir>/<tool>` in the config — or in whatever has taken over
+  `plugins:` — so every already-compiled tool's entry is spelled with the name, and a change orphans
+  all of them at once. An installation answering the question at boot is a different act from a
+  running machine moving the goalposts. A configured value is normalised to the spelling `plugin add`
+  will record (leading `./` and trailing `/` stripped), because that specifier is compared against
+  `plugin list`'s `configured` entries to decide add-vs-reload, and two spellings of one directory
+  miss each other as strings.
 
 ## 0.4.13
 
