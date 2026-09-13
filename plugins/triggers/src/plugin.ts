@@ -1,7 +1,7 @@
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import type { MatbotPluginSpec, MatbotMachine, Store, Message, MessageContent, Session, PromptFn, DeferredCorrection } from '@matatbread/matbot-plugin-api';
 import { TriggerManager } from './manager.js';
-import { dispatchTrigger, renderResult } from './dispatch.js';
+import { dispatchTrigger, renderResult, TOOL_INPUT_INVALID } from './dispatch.js';
 import { createTriggerActionTool, createTriggersConfigTool } from './tools.js';
 import type { Trigger, Triggers, FiredCondition, TriggerCooldown } from './types.js';
 
@@ -100,6 +100,36 @@ function fenceCorrection(out: UserPhaseOutcome): DeferredCorrection {
 }
 function hasCorrection(c: DeferredCorrection): boolean {
   return (c.ephemeral?.length ?? 0) > 0 || (c.durable?.length ?? 0) > 0;
+}
+
+/**
+ * The fired triggers whose call the tool REJECTED as malformed, rendered for the model. Such a trigger
+ * is rejected every time it fires — its stored invocation is wrong, not the turn — and the only trace
+ * was an LLM-invisible marker and a server-log warning, so nobody learned of it until someone went
+ * looking. Reported on the next genuine user turn (`from` is that user message's index), where the model
+ * can say so and repair it with `trigger_action update`. The window is the markers since the PREVIOUS
+ * genuine user message, robo resubmits included, so each firing is reported exactly once.
+ */
+export function invalidInvocationReport(messages: readonly Message[], from: number): MessageContent[] | undefined {
+  const lines: string[] = [];
+  for (let i = from - 1; i >= 0; i--) {
+    const m = messages[i]!;
+    if (m.role === 'user' && !m.content.every(c => c.origin === 'robo')) break;
+    for (const c of m.content) {
+      if (c.type !== 'marker' || c.creator !== 'triggers') continue;
+      const d = c.data as { triggerId?: unknown; tool?: unknown; error?: unknown; code?: unknown };
+      if (d.code !== TOOL_INPUT_INVALID || typeof d.triggerId !== 'string') continue;
+      lines.unshift(`- trigger ${d.triggerId} (invokes "${String(d.tool)}"): ${String(d.error)}`);
+    }
+  }
+  if (lines.length === 0) return undefined;
+  return [{ type: 'text', text: fence(
+    'On the previous turn, these triggers fired but their tool rejected the call, so they did nothing. ' +
+    'The stored `invoke.params` do not match what the tool accepts, and will fail the same way every time ' +
+    'the trigger fires:\n' + lines.join('\n') + '\n\n' +
+    'Tell the user. If the correct params are clear from the error and the tool\'s parameters, fix the ' +
+    'trigger with `trigger_action` (action "update", with its id and the corrected "params").',
+  ) }];
 }
 
 // The core retraction marker's creator (core/src/session-runner.ts). Hardcoded as a
@@ -295,7 +325,7 @@ export async function setupTriggers(services: MatbotMachine): Promise<TriggerMan
   // swap-following proxy) on every call, so it always reflects the live backend and current partition.
   await services.register('Triggers', manager);
 
-  services.tools.register(createTriggerActionTool(manager));
+  services.tools.register(createTriggerActionTool(manager, services));
   services.tools.register(createTriggersConfigTool(services));
 
   // In-flight user-phase evaluations, keyed by the turn's traceId. The `screen` hook kicks one off
@@ -375,8 +405,15 @@ export async function setupTriggers(services: MatbotMachine): Promise<TriggerMan
       // No traceId ⇒ can't correlate to the followup hook that consumes the verdict; skip racing (a
       // direct runSession caller without a traceId simply gets no user-phase triggers). In the pump —
       // the only real entry point — traceId is always set.
+      // Rejections from the previous turn ride out ephemerally on whichever return this hook takes.
+      const report = invalidInvocationReport(ctx.session.messages, ctx.session.messages.lastIndexOf(lastUser));
+      const withReport = (eph?: MessageContent[]): { ephemeral?: MessageContent[] } => {
+        const all = [...(report ?? []), ...(eph ?? [])];
+        return all.length > 0 ? { ephemeral: all } : {};
+      };
+
       const traceId = ctx.config.traceId;
-      if (traceId === undefined) return;
+      if (traceId === undefined) return report ? withReport() : undefined;
 
       // Kick off classify+dispatch; do not await. The record's `ready`/`fenced` let the runner poll
       // synchronously; `.catch` neutralises an aborted-turn rejection (the classifier shares the turn's
@@ -397,7 +434,7 @@ export async function setupTriggers(services: MatbotMachine): Promise<TriggerMan
         if (rec.ready && hasCorrection(rec.correction) && !rec.claimed) {
           rec.claimed = true;
           return {
-            ...(rec.correction.ephemeral ? { ephemeral: rec.correction.ephemeral } : {}),
+            ...withReport(rec.correction.ephemeral),
             ...(rec.correction.durable   ? { durable:   rec.correction.durable   } : {}),
           };
         }
@@ -406,6 +443,7 @@ export async function setupTriggers(services: MatbotMachine): Promise<TriggerMan
       // Race path: hand the runner a deferred that claims the correction exactly once for an in-situ
       // restart (or a pre-generation fold). Not settled / no result / already claimed ⇒ undefined.
       return {
+        ...withReport(),
         deferred: {
           claim: (): DeferredCorrection | undefined => {
             if (!rec.ready || rec.claimed || !hasCorrection(rec.correction)) return undefined;

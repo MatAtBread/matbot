@@ -62,7 +62,8 @@ export interface FiredCondition {
   why?:  string;
 }
 
-/** The tool call a matched trigger makes. `params` is passed verbatim as the tool's input. */
+/** The tool call a matched trigger makes. `params` is passed verbatim as the tool's input; absent, the
+ *  tool is called with `{}`, as the model calls a tool that takes no parameters. */
 export interface TriggerInvoke {
   tool:    string;
   params?: unknown;

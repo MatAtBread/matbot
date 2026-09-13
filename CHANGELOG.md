@@ -189,6 +189,17 @@ churn and less likely to affect a consumer who doesn't use them.
   The id is qualified by the **tool** name (`mcp_action`), so one key covers both the node `mcp` plugin
   and cross-runtime `mcp-http`, which register the same tool. Every other gate takes the same treatment.
 
+#### triggers
+
+- **A trigger with no `params` calls its tool with `{}`**, not `undefined`. Every such trigger — the
+  seeded `remember_fact` one among them — was rejected by the tool-call validator each time it fired.
+- **`trigger_action` checks `params` against the tool's declared input** on `add`, `update`, `move`
+  and `copy`, using the registered `ToolCallValidator`, and refuses a trigger that could never run. A
+  tool that is not loaded is still accepted (fails soft, as before).
+- **A fired trigger whose call is rejected is reported to the model on the next turn**, naming the
+  trigger and the rejection, so it can be repaired with `trigger_action update`. Previously the only
+  trace was an LLM-invisible marker and a server-log warning.
+
 #### tool-plugin, mcp, mcp-http
 
 - **Every privileged confirmation is a structured `confirm` field, and connecting an MCP server asks.**
