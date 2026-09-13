@@ -2,13 +2,14 @@ import type {
   Session, Message, MessageContent, ModelContent, Usage, UsageSite, ProviderMeta, TruncatedToolResult,
   TurnEvent, RunConfig, ProviderAdapter, ProviderConfig,
   Tool, ToolRegistry, ToolContext, Store, FileStore, MediaStore, SystemContextRegistry, Vault, PromptFn, FormField,
+  PermissionGate,
 } from './types.js';
 import type { MatbotPlugin } from './plugin.js';
 import type { ToolPresenter } from '@matatbread/matbot-plugin-api';
 import { recordSpan, recordUsage, withUsageSite } from '@matatbread/matbot-plugin-api/host';
 import { HookRegistry } from './hooks.js';
 import { appendMessage, createMessage } from './session.js';
-import { foldOntoUserTurn, bindPluginOps } from '@matatbread/matbot-plugin-api';
+import { foldOntoUserTurn, bindPluginOps, bindGate } from '@matatbread/matbot-plugin-api';
 import { addUsage } from './usage.js';
 import { MEDIA_RESIDENCY_BYTES, resolveSessionMedia } from './media.js';
 
@@ -114,6 +115,11 @@ export interface RunSessionOpts {
   mediaStore?:    MediaStore;
   /** Supply a prompt implementation to allow tools to ask interactive questions. */
   prompt?:        PromptFn;
+  /** The installation's permission policy, consulted by `ctx.gate` at every privileged tool call site.
+   *  The host passes its live `services.PermissionGate` (a capture-safe proxy, so a policy plugin
+   *  registered mid-session takes effect); absent — a direct `runSession` caller or a test — the
+   *  asking default stands in, which is the same behaviour the host boots with. */
+  permissionGate?: PermissionGate;
   /**
    * Turn-scoped context to inject ephemerally, exactly like a `screen` hook's `ephemeral` (tail-folded
    * onto the freshest non-marker message, never persisted) — merged ahead of whatever `screen` adds.
@@ -585,6 +591,11 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
         provider:     config.provider,
         prompt:       promptFn,
         ...bindPluginOps(opts, promptFn),
+        // `opts.prompt`, deliberately NOT `promptFn`: the stand-in above answers with the field's own
+        // default, so a gate handed it could never tell "no human is reachable" from "a human answered
+        // with the default" — and would get the fallback back one layer too late to reason about.
+        // `ToolContext.prompt` keeps the stand-in exactly as before; only the gate sees the truth.
+        ...bindGate(opts.permissionGate, tc.name, opts.prompt),
         ...(opts.workdir     !== undefined ? { workdir:     opts.workdir     } : {}),
         ...(opts.configPath  !== undefined ? { configPath:  opts.configPath  } : {}),
         ...(opts.files       !== undefined ? { files:       opts.files       } : {}),

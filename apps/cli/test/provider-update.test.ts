@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseYaml, applyProviderPatch, patchedFields, ProviderRegistryImpl,
+import { parseYaml, applyProviderPatch, patchedFields, ProviderRegistryImpl, bindGate,
          CONFIRM_YES, CONFIRM_NO } from '@matatbread/matbot-core';
 import { writeProviderBlock, createProviderTool } from '@matatbread/matbot-tool-plugin';
-import type { ProviderConfig, ToolContext, ToolEvent, FormField } from '@matatbread/matbot-plugin-api';
+import type { ProviderConfig, PromptFn, ToolContext, ToolEvent, FormField } from '@matatbread/matbot-plugin-api';
 
 // `provider update` exists because a provider renaming its models (DeepSeek did) left no way to change
 // `model:` on a profile: the only route was remove + add, and `provider list` projects `credentials` down
@@ -167,12 +167,15 @@ async function runUpdate(
     ['other',    stored('other', { module: '@matatbread/matbot-provider-anthropic' })],
   ]);
   const prompts: string[] = [];
+  // Acceptance is structured, so record the label a frontend would render. `ask` is bound through
+  // bindGate with NO registered policy, which is exactly what a host boots with: the asking default.
+  const ask = (async (q: unknown) => { prompts.push(typeof q === 'string' ? q : (q as FormField).label); return answer; }) as PromptFn;
   const ctx = {
     configPath: file,
     session:    { id: 's1', messages: [] },
     signal:     new AbortController().signal,
-    // Confirmations are structured `confirm` fields, so record the label a frontend would render.
-    prompt:     async (q: unknown) => { prompts.push(typeof q === 'string' ? q : (q as FormField).label); return answer; },
+    prompt:     ask,
+    ...bindGate(undefined, 'provider', ask),
   } as unknown as ToolContext;
 
   const events: ToolEvent<unknown>[] = [];

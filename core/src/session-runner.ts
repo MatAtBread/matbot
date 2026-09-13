@@ -2,7 +2,7 @@ import type {
   Session, Message, MessageContent, Principal, PromptFn, PipelineEvent,
   Store, ToolRegistry, SystemContextRegistry, Vault, FileStore, MediaStore, UserContent, Tool,
   ProviderAdapter, ProviderConfig, SessionRunner, SessionView, OpenOpts, SubmitOpenOpts,
-  SteeringPolicy, SteeringDecision, TurnEntry,
+  SteeringPolicy, SteeringDecision, TurnEntry, PermissionGate,
 } from './types.js';
 import type { MatbotPlugin } from './plugin.js';
 import type { HookRegistry } from './hooks.js';
@@ -33,6 +33,10 @@ export interface SessionRunnerDeps {
   // by-value media is written at the boundary, and where the runner reads it back from. Absent ⇒ an
   // attachment is refused with a reason and a stored `file-ref` degrades to the converters' text note.
   mediaStore?:     () => MediaStore | undefined;
+  // Resolved live (the host boots a default, a plugin may replace it): the installation's permission
+  // policy, consulted by `ctx.gate` at every privileged tool call. Absent ⇒ the asking default, which
+  // is what the host boots with anyway.
+  permissionGate?: () => PermissionGate | undefined;
   hooks?:          HookRegistry;
   systemContext?:  SystemContextRegistry;
   vault?:          Vault;
@@ -363,6 +367,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
         const wire = await deps.toolTypeIndex?.()?.wireContracts();
         const toolPresenter = deps.toolPresenter?.();
         const mediaStore    = deps.mediaStore?.();
+        const permissionGate = deps.permissionGate?.();
         const toolMap = deps.tools !== undefined
           ? new Map<string, Tool>(deps.tools.list().map(t => {
               const wc = wire?.[t.name];
@@ -413,6 +418,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
               ...(deps.workdir       !== undefined ? { workdir:       deps.workdir       } : {}),
               ...(deps.files         !== undefined ? { files:         deps.files         } : {}),
               ...(mediaStore         !== undefined ? { mediaStore                        } : {}),
+              ...(permissionGate     !== undefined ? { permissionGate                    } : {}),
               ...(deps.configPath    !== undefined ? { configPath:    deps.configPath    } : {}),
               ...(deps.vault         !== undefined ? { vault:         deps.vault         } : {}),
               ...(head.prompt        !== undefined ? { prompt:        head.prompt        } : {}),

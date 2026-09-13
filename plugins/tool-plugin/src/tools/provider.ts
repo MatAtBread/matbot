@@ -8,7 +8,6 @@ declare module '@matatbread/matbot-plugin-api' {
   }
 }
 import { applyProviderPatch, patchedFields }                 from '@matatbread/matbot-plugin-api';
-import { confirmAction }                                     from './confirm.js';
 import { getRegisteredPlugins, getSpecifierForPlugin }       from '@matatbread/matbot-core';
 import { readFile, writeFile }                               from 'node:fs/promises';
 import { fileURLToPath }                                     from 'node:url';
@@ -395,7 +394,8 @@ function makeExecutor(
           yield { type: 'stdout', chunk: `Testing ${endpoint} …\n` };
           const err = await checkEndpoint(endpoint);
           if (err) {
-            if (!await confirmAction(ctx, `Endpoint check failed: ${err}\n\nAdd **"${name}"** anyway?`)) {
+            if (!await ctx.gate({ gate: 'add-unverified', subject: name, fallback: false,
+                                  label: `Endpoint check failed: ${err}\n\nAdd **"${name}"** anyway?` })) {
               yield { type: 'result', value: { message: 'Cancelled.' } };
               return;
             }
@@ -404,7 +404,8 @@ function makeExecutor(
           }
         }
 
-        if (!await confirmAction(ctx, `Add provider profile **"${name}"** (${model} via ${yamlModule})?`)) {
+        if (!await ctx.gate({ gate: 'add', subject: name, fallback: false,
+                              label: `Add provider profile **"${name}"** (${model} via ${yamlModule})?` })) {
           yield { type: 'result', value: { message: 'Cancelled.' } };
           return;
         }
@@ -480,7 +481,8 @@ function makeExecutor(
           yield { type: 'stdout', chunk: `Testing ${patch.endpoint} …\n` };
           const err = await checkEndpoint(patch.endpoint);
           if (err) {
-            if (!await confirmAction(ctx, `Endpoint check failed: ${err}\n\nUpdate **"${name}"** anyway?`)) {
+            if (!await ctx.gate({ gate: 'update-unverified', subject: name, fallback: false,
+                                  label: `Endpoint check failed: ${err}\n\nUpdate **"${name}"** anyway?` })) {
               yield { type: 'result', value: { message: 'Cancelled.' } };
               return;
             }
@@ -494,8 +496,8 @@ function makeExecutor(
 
         // Confirmed like add/remove, and for a reason particular to update: the block is regenerated,
         // so any comment inside it does not survive. The caller sees that before it happens.
-        if (!await confirmAction(ctx,
-          `Update provider profile **"${name}"**?\n${diff}\n\n_(the profile's block in matbot.yaml is rewritten; comments inside it are lost)_`)) {
+        if (!await ctx.gate({ gate: 'update', subject: name, fallback: false,
+          label: `Update provider profile **"${name}"**?\n${diff}\n\n_(the profile's block in matbot.yaml is rewritten; comments inside it are lost)_` })) {
           yield { type: 'result', value: { message: 'Cancelled.' } };
           return;
         }
@@ -549,7 +551,8 @@ function makeExecutor(
           return;
         }
 
-        if (!await confirmAction(ctx, `Remove provider profile **"${name}"**?`)) {
+        if (!await ctx.gate({ gate: 'remove', subject: name, fallback: false,
+                              label: `Remove provider profile **"${name}"**?` })) {
           yield { type: 'result', value: { message: 'Cancelled.' } };
           return;
         }

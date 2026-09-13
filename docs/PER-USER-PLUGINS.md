@@ -214,26 +214,28 @@ plugin-visibility ceiling is structural.
 - **Shadow, not omit.** The built-in `plugin` tool is hardcoded into `createBuiltinTools()`
   ([tool-plugin/src/index.ts](../plugins/tool-plugin/src/index.ts)) and seeded before any config
   plugin loads — you cannot exclude it, only register a same-named tool over it. That triggers
-  `resolveToolCollision` ([registry.ts](../core/src/registry.ts)): **non-interactive**
-  (boot / HTTP installs, no `prompt`) → overwrites by default, your tool wins; **interactive** →
-  prompts Keep / Overwrite / Always-this-tool / Always-all. The registry `Map` is keyed by name, so the later `register()`
-  replaces the earlier entry. An interactive install can skip the prompt for exactly the names it
-  means to shadow by listing them in `default_settings.__matbot_core__.overwriteToolsOnCollision`
-  (see [GETTING-STARTED](GETTING-STARTED.md)) — the same resolution as not being asked, i.e. your
-  tool wins, without blanket-overwriting collisions you would rather hear about.
+  `resolveToolCollision` ([registry.ts](../core/src/registry.ts)), which declares the
+  `tools.overwrite` gate with `fallback: true`: **non-interactive** (boot / HTTP installs, no
+  `prompt`) → overwrites, your tool wins; **interactive** → the installation's permission policy asks
+  (the default one: Deny / Allow / Always-this-subject / Always-every). The registry `Map` is keyed by
+  name, so the later `register()` replaces the earlier entry. An install can skip the prompt for
+  exactly the names it means to shadow by listing them under the policy plugin's own settings —
+  `default_settings.'@matatbread/matbot-default-gate'.'tools.overwrite'` (see
+  [GETTING-STARTED](GETTING-STARTED.md)) — the same resolution as not being asked, i.e. your tool
+  wins, without blanket-overwriting collisions you would rather hear about.
 - **Shadow, not stack.** Because the `Map` overwrites, the built-in is *gone*, not suspended — if your
   bootstrap plugin is ever unloaded, `removeByPlugin` deletes the `plugin` entry and the built-in is
   **not** restored. This fails **closed** (no plugin tool at all), which is safe but deliberate.
   Self-reload is fine (collision where `existing.pluginName === plugin.name` is skipped).
-- **The non-interactive overwrite default is load-bearing.** It is what lets the override win at boot
-  with no human present. If that ever changed to fail-closed, your override would silently lose and
-  the built-in would stay live — re-opening the seam. Defend with an assertion after load:
+- **The non-interactive overwrite default is load-bearing.** It is the `fallback: true` on that one
+  gate, and it is what lets the override win at boot with no human present. If it ever changed to
+  fail-closed — or a policy plugin denied `tools.overwrite` outright — your override would silently
+  lose and the built-in would stay live, re-opening the seam. Defend with an assertion after load:
   `services.tools.resolve('plugin')?.pluginName === <your plugin>`.
 - **There is one live path to that fail-closed outcome**, so treat the assertion as required, not
-  belt-and-braces: resolving a collision can *throw* — the core-settings read behind
-  `overwriteAllTools`, or a `PromptFn` that rejects rather than defaulting (the documented
-  non-interactive contract) — and `resolveToolCollision`'s caller catches that and **keeps the
-  existing tool** ([registry.ts](../core/src/registry.ts)). Keeping the incumbent is right in general
+  belt-and-braces: resolving a collision can *throw* — a policy's own storage read, or a `PromptFn`
+  that rejects rather than defaulting (the documented non-interactive contract) — and
+  `resolveToolCollision`'s caller catches that and **keeps the existing tool** ([registry.ts](../core/src/registry.ts)). Keeping the incumbent is right in general
   (a throw is no mandate to replace a working tool), and it is exactly wrong for a shadowing
   bootstrap plugin, because the incumbent *is* the built-in `plugin` tool. That same call site also
   re-checks the plugin's load extent before registering, so a collision resolving after an unload —

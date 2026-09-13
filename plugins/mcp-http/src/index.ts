@@ -1,4 +1,4 @@
-export { plugin, createMcpHttpPlugin, confirmAction } from './plugin.js';
+export { plugin, createMcpHttpPlugin } from './plugin.js';
 export { RemoteMcpManager }            from './manager.js';
 export { HttpMCPClient, createHttpClient } from './client.js';
 export { makeProxyTool, proxyToolName } from './proxy-tool.js';

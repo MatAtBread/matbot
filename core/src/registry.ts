@@ -1,6 +1,6 @@
-import type { Tool, ToolRegistry, Hook, PromptFn, FormField, FrontendInfo, ProviderAdapter, ProviderConfig, FailedPlugin } from './types.js';
+import type { Tool, ToolRegistry, Hook, PromptFn, FrontendInfo, ProviderAdapter, ProviderConfig, FailedPlugin } from './types.js';
 import { RegistryChangeKind } from '@matatbread/matbot-plugin-api';
-import { scopedNotifier } from '@matatbread/matbot-plugin-api/host';
+import { scopedNotifier, askPermissionGate } from '@matatbread/matbot-plugin-api/host';
 import type {
   MatbotPlugin, MatbotMachine, MatbotRuntime, Mounted,
   ProviderAdapterFactory, StoreFactory,
@@ -26,7 +26,6 @@ const state = {
   systemContextPlugins: new Set<string>(),       // plugins that registered a system-context contributor
   lifecycles:      new Map<string, AbortController>(),  // pluginName → "this plugin is loaded" signal, aborted on unload
   failedPlugins:   [] as FailedPlugin[],         // plugins the loader skipped, keyed by specifier (last failure wins)
-  overwriteTools:  undefined as OverwritePolicy | undefined,  // configured/persisted collision policy, loaded lazily
 };
 
 // Plugin load/unload is announced on the Notifier as a `RegistryChange` with `registry: 'plugins'`, for
@@ -38,55 +37,21 @@ export function announcePluginLoaded(services: MatbotMachine, name: string): voi
   services.Notifier.notify({ kind: RegistryChangeKind, source: 'plugins', registry: 'plugins', name, operation: 'added' });
 }
 
-// Settings namespace + key under which the user's "overwrite all colliding tools" choice
-// is persisted for the installation. The namespace doubles as a Store document id, so it must
-// satisfy the storage id charset (/^[\w-]+$/) — hence underscores, not '@matbot/core'. The
-// dunder marks it reserved (internal), so it won't collide with a real plugin's settings.
-const CORE_SETTINGS_NS    = '__matbot_core__';
-const OVERWRITE_TOOLS_KEY = 'overwriteToolsOnCollision';
-
 /**
- * What to do when a plugin registers a tool name another plugin already owns: `true` — overwrite every
- * collision silently; `false` — ask; a list of tool NAMES — overwrite those silently and ask for the
- * rest. The list is the granular form of the same "don't ask me about this" answer, so it resolves the
- * way not asking does: to the prompt's default, which is overwrite.
+ * Decide whether an incoming tool registration may overwrite an existing tool of the same name owned
+ * by a different plugin. Returns true to overwrite, false to keep the existing one and drop the
+ * incoming registration.
  *
- * Authored as `default_settings.__matbot_core__.overwriteToolsOnCollision` (the dunder namespace is
- * reserved, so the host's unmatched-namespace warning skips it), or persisted by answering one of the
- * prompt's two "Always overwrite" options — this tool (appended to the list) or all tools (`true`).
- */
-type OverwritePolicy = boolean | readonly string[];
-
-/**
- * Boundary check on a value that came from config or a store: neither is typed, and a malformed one
- * must not silently read as `true` (every collision overwritten, no prompt, no trace of why). Anything
- * unrecognised warns and resolves to "ask", which is the behaviour with the key unset.
- */
-function toOverwritePolicy(value: unknown): OverwritePolicy {
-  if (typeof value === 'boolean' || value === undefined || value === null) return value ?? false;
-  if (Array.isArray(value)) {
-    const names = value.filter((n): n is string => typeof n === 'string');
-    if (names.length !== value.length) {
-      console.warn(`[matbot] ${CORE_SETTINGS_NS}.${OVERWRITE_TOOLS_KEY}: ` +
-        `ignoring ${value.length - names.length} entries that are not tool names.`);
-    }
-    return names;
-  }
-  console.warn(`[matbot] ${CORE_SETTINGS_NS}.${OVERWRITE_TOOLS_KEY}: expected a boolean or an array of ` +
-    `tool names, got ${typeof value} — asking on every collision.`);
-  return false;
-}
-
-/**
- * Decide whether an incoming tool registration may overwrite an existing tool of the
- * same name owned by a different plugin. Returns true to overwrite, false to keep the
- * existing one and drop the incoming registration.
+ * Core declares that the decision is needed and nothing else: the installation's `PermissionGate`
+ * decides how acceptance is obtained. Core used to own the whole policy here — a settings key in a
+ * reserved `__matbot_core__` namespace, a cached memo, a per-tool allowlist and two "always" options —
+ * which is an installation policy living in core and keyed in an LLM-writable store, and which an
+ * alternative installation could only defeat rather than replace. Remembering answers is now
+ * `@matatbread/matbot-default-gate`'s, out of its own plugin settings namespace.
  *
- * Resolution order: the configured {@link OverwritePolicy} short-circuits to true when it is `true`
- * or names this tool; otherwise the user is prompted [keep / Y / always this tool / always all] with Y
- * (overwrite) as the default. The two "always" answers persist the policy — this tool appended to the
- * list, or `true`. With no prompt available (non-interactive host) we overwrite —
- * the default — preserving matbot's historical last-registration-wins behaviour.
+ * `fallback: true` is load-bearing: with no gate and no prompt (a boot load), a collision overwrites,
+ * preserving matbot's last-registration-wins behaviour and the deliberate override documented in
+ * docs/PER-USER-PLUGINS.md.
  */
 async function resolveToolCollision(
   services:      MatbotMachine,
@@ -95,47 +60,15 @@ async function resolveToolCollision(
   incomingOwner: string,
   prompt:        PromptFn | undefined,
 ): Promise<boolean> {
-  const coreSettings = makePluginSettings(services.createStore<SettingsDoc>('settings'), CORE_SETTINGS_NS);
-  if (state.overwriteTools === undefined) {
-    state.overwriteTools = toOverwritePolicy(await coreSettings.get<unknown>(OVERWRITE_TOOLS_KEY));
-  }
-  const policy = state.overwriteTools;
-  if (policy === true) return true;
-  if (policy !== false && policy.includes(toolName)) return true;
-
   const owner = existingOwner !== undefined ? `"${existingOwner}"` : 'a built-in';
-  const label = `Tool \`"${toolName}"\` is already registered by **${owner}**. Overwrite it with the one from **"${incomingOwner}"**?`;
-
-  if (prompt === undefined) {
-    console.warn(`[matbot] ${label} — non-interactive, overwriting (default).`);
-    return true;
-  }
-
-  // The per-tool "always" comes BEFORE the blanket one: a select resolves a typed prefix against this
-  // order (apps/cli), so a bare "a" lands on the narrower choice rather than silencing every collision.
-  const field: FormField = {
-    name:    'overwrite',
-    label,
-    type:    'select',
-    options: ['Keep existing', 'Overwrite', `Always overwrite "${toolName}"`, 'Always overwrite all tools'],
-    default: 'Overwrite',
-  };
-  const answer = (await prompt(field)).trim().toLowerCase();
-  if (answer.startsWith('a')) {  // one of the two "Always …" options — persist for the installation
-    if (answer.includes('all tools')) {
-      state.overwriteTools = true;
-      await coreSettings.set(OVERWRITE_TOOLS_KEY, true);
-      return true;
-    }
-    // Persist the list IN EFFECT plus this name, not this name alone: the in-effect list may come from
-    // `default_settings`, and a stored key wins over the default wholesale — writing `[toolName]` would
-    // silently start prompting again for every other name the install had already exempted.
-    const names = policy === false ? [toolName] : [...new Set([...policy, toolName])];
-    state.overwriteTools = names;
-    await coreSettings.set(OVERWRITE_TOOLS_KEY, names);
-    return true;
-  }
-  return !answer.startsWith('k');  // "Keep existing" → false; "Overwrite"/default → true
+  return (services.PermissionGate ?? askPermissionGate).decide({
+    gate:     'tools.overwrite',
+    subject:  toolName,
+    // The incoming OWNER rides in the label rather than in a field of its own: a single `subject`
+    // cannot also express "trust everything plugin foo registers", and no policy wants that yet.
+    label:    `Tool \`"${toolName}"\` is already registered by **${owner}**. Overwrite it with the one from **"${incomingOwner}"**?`,
+    fallback: true,
+  }, prompt);
 }
 
 // ── Version check ─────────────────────────────────────────────────────────────

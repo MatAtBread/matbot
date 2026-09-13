@@ -58,6 +58,8 @@ plugins/            — one directory per package, flat but for the frontend/pro
     cognition/     — inner voice, remembered facts, dream_time consolidation
     provenance/    — determine_provenance: trace a claim to its evidence
     json-validation/— toolcall hook validating inputs against inputSchema
+    default-gate/  — the default PermissionGate policy (ask, remember, honour) + the gate_action
+                     builtin. A LIBRARY the host seeds, like tool-plugin — never in `plugins:`
     files/         — file codec and producer registry
     hook-logger/   — diagnostic: logs every hook channel
     browser/       — IndexedDB store, OPFS files, WebCrypto vault (browser)
@@ -515,6 +517,96 @@ The contract above is also **enforced**, by an optional `ToolCallValidator` (`Ma
 **An unknown property is rejected**, as TypeScript rejects one on a fresh object literal — which is exactly what a model-authored params object is. Dropping it silently is the commonest tool-call hallucination made invisible: `sessionId` mis-sent as `session_id` reads to the tool as "no session given" rather than as a typo. `enforce: 'warn'` exists for the rollout, not as a resting state.
 
 **The error is written for whoever has to fix the call.** Paths are dotted as the access would be written (`.items[0].name`, not JSON Pointer), and the offending value is shown wrapped in its own field name so it is a fragment the caller can compare against what it sent. A missing property shows no value (JSON carries no `undefined`); the rendering is capped, so a rejected attachment cannot turn one bad field into the bulk of a turn's context; and it cannot throw, since an internal caller may arrive with a `bigint` or a cycle and a throw while *reporting* an error would replace the diagnosis with a stack trace. The `error` event carries `TOOL_INPUT_INVALID` (422 — the body parsed, its *shape* is wrong), which a transport may map onto its own status; the number is safe in that field only because a process exit code cannot exceed 255.
+
+---
+
+## Permission gates
+
+A privileged operation — installing a plugin, adding a provider profile, connecting an MCP server,
+overwriting a tool another plugin owns — **declares** that acceptance is needed; a replaceable
+service **decides** how it is obtained. One boolean question, one answer:
+
+```ts
+await ctx.gate({ gate: 'add', subject: specifier, label: 'Install plugin **"…"**?', fallback: false });
+// → services.PermissionGate.decide({ gate: 'plugin.add', … }, ask)
+```
+
+The call site used to do both jobs, and the *how* had already grown past a prompt: core held a
+settings key, a memo, a per-tool allowlist and two "always" options for tool collisions, and three
+copies of `confirmAction` implemented "ask a human, yes/no, default no". The consequence was the
+thing fixed: an alternative installation could not *supply* a policy, only defeat one.
+
+**The call site's whole contribution is `PermissionRequest`.** `gate` is a small, documented
+vocabulary (`tools.overwrite`, `plugin.add`, `mcp_action.remove`); `subject` is what is acted on;
+`label` is the prose naming the act, which a gate renders and never rewrites; `fallback` is what this
+site does when nothing can be asked and nothing decides — today's non-interactive behaviour, stated
+once per site instead of implied at each.
+
+**`ask === undefined` IS "no human is reachable."** `decide` takes the channel in scope for that call
+(the turn's `PromptFn`, or core's registration-path one) rather than holding one, because it is
+per-turn and frontend-owned. The runner passes the RAW `opts.prompt`, never the stand-in that answers
+with a field's default — that substitute would make "nobody is here" indistinguishable from "a human
+answered with the default". `ToolContext.prompt` keeps the stand-in exactly as before.
+
+**`ctx.gate` takes the SUFFIX; the host qualifies it with the tool's registered name.** So a plugin
+cannot address a gate it does not own (tool-name collision on `register` closes the impersonation
+route), and one policy covers both runtimes' implementations of a tool — node's `tool-plugin` and the
+browser's `plugin-tool` both register `plugin`; `mcp` and `mcp-http` both register `mcp_action`. The
+host reserves `tools.*` for core's own gates.
+
+**`subject` is a field, never folded into `gate`.** A composite id makes the vocabulary unbounded,
+which collides with "an unknown gate id must default to asking" — every newly-named tool would be an
+unknown gate, and "ask about new overwrites, accept the ones already decided" would be unwritable,
+there being no id meaning "overwrites in general". Subjects also contain the separator
+(`@matatbread/matbot-foo`, `./plugins/x`, `https://…/plugin.ts`). And it is the identifier the call
+site *has*, not a canonical identity: at `plugin.add` the plugin is not loaded, so the subject is the
+specifier **as typed**, and a remembered allow for `@x/foo` will not match `https://…/foo.ts` —
+correct (different trust root, different decision), but a policy author is keying on the spelling.
+
+**`PermissionGate` is a swap-member, not an optional service.** Absence is not a sensible state, so
+the host captures a boot default and `unregister` reverts to it — "unload the policy ⇒ back to
+asking", with no revert rule of its own. (A do-nothing always-present default *would* be the
+fail-open shape; a default that *asks* is not.) A gate wanting "my rules, else the previous
+behaviour" captures the gate it displaces and delegates — the `ToolCallValidator` idiom, so a pair
+composes in either load order. Gate ids are open at runtime, and an unknown one must **ask**:
+"unregistered ⇒ loose" cannot mean "⇒ allow" here.
+
+**Boolean only, one refusal shape.** Every gate in the system is allow-or-not, including
+`tools.overwrite`, whose four options author the *memory*, not the outcome. This holds by
+construction rather than by luck, because the value-returning prompts are excluded by construction:
+`ask_user`, `store-key` secret entry and credential entry stay on `ctx.prompt` and are not routed —
+not by an exemption list, but because they do not call a gate. Splitting authorization out of the
+prompt channel is what deletes the routing rules a `gate?:` flag on `FormField` would have needed.
+`false` is "not permitted" whether a human just said so or a stored answer did, so there is nothing
+to branch on and no distinct denial error; call sites yield their existing `Cancelled.` result.
+
+**The default policy is host-seeded, not a configured plugin** — `matbot-default-gate` is a library
+in the `tool-plugin` mould: each host boots `createDefaultGate` as the `PermissionGate` and seeds
+`createGateTools()` beside `plugin`/`provider`. It has to be, because a *minimal* install's first act
+is adding a plugin or a provider, which is gated: making the policy — or the means to inspect and
+undo an answer — depend on a `plugins:` line answers the question at exactly the wrong moment. It
+being seeded rather than registered also keeps `gate_action` from colliding with itself at every boot.
+The bare asking gate (`askPermissionGate`, `plugin-api/host`) remains the floor under a
+hand-assembled machine.
+
+It reproduces today's behaviour — ask, offer standing answers, remember them — keyed
+`(gate, subject)`, in its own settings namespace, so an installation authors defaults the ordinary
+way (`default_settings: { '@matatbread/matbot-default-gate': { 'tools.overwrite': [bash, plugin] } }`;
+each host exempts that one key from its "names no loaded plugin" warning, since nothing loads it).
+`gate_action` (`get` / `clear`) reports what is **in effect** and forgets standing answers; there is
+deliberately no `set`, because the write path for a runtime actor is answering a prompt that names
+the specific act. `__matbot_core__.overwriteToolsOnCollision` is **not** migrated — the standing
+answer is re-offered the first time that collision comes round again, so adopt-once machinery would
+exist to save one keystroke; an install still authoring it is warned, naming where it went.
+
+**Honest statement of the property.** Not "the LLM cannot change this", but *"the LLM cannot change
+this without a human answering a host-authored prompt that names the change"* — and, plainly: **a
+gate that auto-approves `plugin.add` has granted everything**, a loaded plugin having full Node
+capability with no in-process sandbox. A locked-down deployment ships a gate with its rules compiled
+in; config being LLM-writable is then that plugin's problem, not core's. Two other things a policy
+author should be told rather than discover: the provider path **chains two gates**
+(`add-unverified` → `add`), so one user-visible operation can cost two decisions; and a collision
+raised while a *replacement* policy plugin is itself loading falls to the host's seeded default.
 
 ---
 

@@ -27,6 +27,9 @@ export { isTruncatedToolResult, notifyingStore, ItemChangeKind, RegistryChangeKi
 // The canonical `type: 'confirm'` answers. Same reason as the patch policy above: an app implementing a
 // PromptFn (or a test standing one in) has to speak them, and must not hard-code the rendered label.
 export { CONFIRM_YES, CONFIRM_NO } from '@matatbread/matbot-plugin-api';
+// Binds `ctx.gate` for a hand-assembled ToolContext — anything standing a tool-invocation door up
+// outside the runner (frontend-web's `POST /tools/:name`) needs it, and gets it through core.
+export { bindGate, bindPluginOps } from '@matatbread/matbot-plugin-api';
 // Ambient security principal: the interface is a type (carried by `export type *`); these are the values.
 export { currentPrincipal, tryCurrentPrincipal, runAs, lastActivityAt } from '@matatbread/matbot-plugin-api';
 // Host boot assembly, from plugin-api's `/host` subpath. An embedding app gets these through core and

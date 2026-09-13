@@ -1,15 +1,12 @@
-import type { Tool, ToolContract, ToolResultOf, ToolContext, FormField, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
-import { PLUGIN_API_VERSION, CONFIRM_YES, CONFIRM_NO } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolContract, ToolResultOf, ToolContext, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import { RemoteMcpManager } from './manager.js';
 
 // Connecting a server is privileged — it registers a remote party's tools for the rest of the session —
-// so it gates on an out-of-band yes/no, as does disconnecting one. A structured `confirm` field so rich
-// frontends render real buttons and the affirmative is the canonical token, never a parse of the rendered
-// label. The CONFIRM_NO default is what makes a non-interactive caller decline rather than proceed.
-export async function confirmAction(ctx: ToolContext, label: string): Promise<boolean> {
-  const field: FormField = { name: 'confirm', label, type: 'confirm', default: CONFIRM_NO };
-  return (await ctx.prompt(field)).trim().toLowerCase() === CONFIRM_YES;
-}
+// so it declares a gate (`mcp_action.add`), as does disconnecting one (`mcp_action.remove`). How that
+// acceptance is obtained is the installation's `PermissionGate`, not this plugin's: the default asks,
+// and a non-interactive caller gets the `fallback: false` each site declares. Qualified by the TOOL
+// name, so one answer covers this plugin and node's `mcp`, which registers the same tool name.
 
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
@@ -62,8 +59,8 @@ ACTIONS
         switch (act.action) {
           case 'add': {
             if (!act.name || !act.endpoint) { yield { type: 'error', message: 'add requires "name" and "endpoint".' }; return; }
-            if (!await confirmAction(ctx,
-              `Connect to MCP server **"${act.name}"** at ${act.endpoint}?\n\n_Its tools are registered and callable until you remove it._`)) {
+            if (!await ctx.gate({ gate: 'add', subject: act.name, fallback: false,
+              label: `Connect to MCP server **"${act.name}"** at ${act.endpoint}?\n\n_Its tools are registered and callable until you remove it._` })) {
               yield { type: 'result', value: { message: 'Cancelled.' } };
               return;
             }
@@ -79,7 +76,7 @@ ACTIONS
             return;
           case 'remove': {
             if (!act.name) { yield { type: 'error', message: 'remove requires "name".' }; return; }
-            if (!await confirmAction(ctx, `Remove MCP server **"${act.name}"**?`)) { yield { type: 'result', value: { message: 'Cancelled.' } }; return; }
+            if (!await ctx.gate({ gate: 'remove', subject: act.name, fallback: false, label: `Remove MCP server **"${act.name}"**?` })) { yield { type: 'result', value: { message: 'Cancelled.' } }; return; }
             const ok = await manager.remove(act.name);
             yield { type: 'result', value: { message: ok ? `"${act.name}" disconnected and removed.` : `No MCP server named "${act.name}".` } };
             return;

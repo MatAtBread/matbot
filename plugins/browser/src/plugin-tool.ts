@@ -1,6 +1,5 @@
-import type { Tool, ToolExecutor, ToolResultOf, ToolContext, MatbotPlugin, FormField, Runtime,
+import type { Tool, ToolExecutor, ToolResultOf, ToolContext, MatbotPlugin, Runtime,
               PluginToolContract, DiscoveredPlugin } from '@matatbread/matbot-plugin-api';
-import { CONFIRM_YES, CONFIRM_NO } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins, getRegisteredTools, getRegisteredFrontendPlugins,
          getRegisteredServiceKeys, getHookPlugins, getSystemContextPlugins,
          getSpecifierForPlugin, getFailedPlugins, clearFailedPlugin } from '@matatbread/matbot-core';
@@ -43,12 +42,6 @@ declare module '@matatbread/matbot-plugin-api' {
 function bakedAvailablePlugins(): AvailablePlugin[] {
   const mb = (globalThis as unknown as { __MB__?: { config?: { availablePlugins?: AvailablePlugin[] } } }).__MB__;
   return mb?.config?.availablePlugins ?? [];
-}
-
-async function confirmAction(ctx: ToolContext, label: string): Promise<boolean> {
-  const field: FormField = { name: 'confirm', label, type: 'confirm', default: CONFIRM_NO };
-  const answer = await ctx.prompt(field);
-  return answer.trim().toLowerCase() === CONFIRM_YES;
 }
 
 // Reflect every channel a plugin contributes through (mirrors the node plugin tool) so `list` reports
@@ -172,9 +165,12 @@ export function createBrowserPluginTool(extras: ExtraPlugins): Tool<ToolResultOf
           yield { type: 'result', value: { message: `A plugin named "${specifier}" is already active.` } };
           return;
         }
-        // Out-of-band confirmation — same security rationale as the node tool: a privileged action
-        // must break the LLM's execution chain so a malicious prompt cannot self-install plugins.
-        if (!await confirmAction(ctx, `Install plugin **"${specifier}"**?`)) {
+        // Out-of-band acceptance — same security rationale as the node tool: a privileged action must
+        // break the LLM's execution chain so a malicious prompt cannot self-install plugins. The gate id
+        // is qualified by the TOOL name, which is `plugin` here as it is on node, so one policy covers
+        // both runtimes' implementations.
+        if (!await ctx.gate({ gate: 'add', subject: specifier, fallback: false,
+                              label: `Install plugin **"${specifier}"**?` })) {
           yield { type: 'result', value: { message: 'Cancelled.' } };
           return;
         }
@@ -215,7 +211,8 @@ export function createBrowserPluginTool(extras: ExtraPlugins): Tool<ToolResultOf
           yield { type: 'result', value: { message: `"${specifier}" is not an installed plugin — pass its package name or its configured specifier (see \`plugin list\`).` } };
           return;
         }
-        if (!await confirmAction(ctx, `Remove plugin **"${entry}"**?`)) {
+        if (!await ctx.gate({ gate: 'remove', subject: entry, fallback: false,
+                              label: `Remove plugin **"${entry}"**?` })) {
           yield { type: 'result', value: { message: 'Cancelled.' } };
           return;
         }
@@ -242,7 +239,8 @@ export function createBrowserPluginTool(extras: ExtraPlugins): Tool<ToolResultOf
           yield { type: 'stderr', chunk: `${String(e)}\n` };
           wasLoaded = true;
         }
-        if (!wasLoaded && !await confirmAction(ctx, `Plugin **"${entry}"** is not currently loaded — load it now?`)) {
+        if (!wasLoaded && !await ctx.gate({ gate: 'load', subject: entry, fallback: false,
+                                           label: `Plugin **"${entry}"** is not currently loaded — load it now?` })) {
           yield { type: 'result', value: { message: 'Cancelled.' } };
           return;
         }

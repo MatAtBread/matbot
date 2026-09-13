@@ -2,7 +2,7 @@ import type {
   FileStore, MediaStore, Principal, Vault, Message, ModelParameters,
   ProviderAdapter, ProviderConfig, ProviderRegistry, Tool, ToolRegistry, FrontendInfo,
   Store, Session, SystemContextRegistry, KnowledgeIndex, PromptFn, SessionRunner, Usage, HookRegistrar,
-  TypeScriptStripper, ToolTypeIndex, ToolPresenter, SteeringPolicy, UserContent,
+  TypeScriptStripper, ToolTypeIndex, ToolPresenter, SteeringPolicy, UserContent, PermissionGate,
 } from './types.js';
 import type { Notifications, Notifier } from './notify.js';
 
@@ -125,7 +125,7 @@ export interface PluginSelf {
  * The registry bucket: the swappable, registerable services, keyed by interface name. This is the
  * `keyof` domain of {@link MatbotRuntime.register}/`get`, and the surface third-party plugins augment
  * (`declare module '@matatbread/matbot-plugin-api' { interface MatbotServices { Foo?: Foo } }`). The
- * four swap-members (`StorageBackend`, `KnowledgeIndex`, `Vault`, `Notifier`) carry a host boot default
+ * five swap-members (`StorageBackend`, `KnowledgeIndex`, `Vault`, `Notifier`, `PermissionGate`) carry a host boot default
  * and revert to it when unregistered; an augmented service is optional and simply drops. Read each as
  * a member (`services.KnowledgeIndex`); swap with register().
  */
@@ -139,6 +139,13 @@ export interface MatbotServices {
    *  reference held across a swap keeps resolving to the live backend. Always present (boot default). */
   readonly Vault: Vault;
   readonly KnowledgeIndex: KnowledgeIndex;
+  /** The installation's permission policy — consulted by every privileged call site (`ctx.gate`, and
+   *  core's own tool-collision decision) and also the `register('PermissionGate', impl)` swap key.
+   *  NOT optional: absence is not a sensible state, since the behaviour has to exist. The host boots a
+   *  default that asks the user (or answers `req.fallback` when nobody is reachable), and unregistering
+   *  a policy plugin reverts to it — "unload the policy ⇒ back to asking", for free. See
+   *  {@link PermissionGate}. */
+  readonly PermissionGate: PermissionGate;
   /** The notification bus — every "something changed" fact, one fan-out. Also the `register('Notifier',
    *  impl)` swap key: the host boots an in-process broadcaster, a plugin may swap in a distributed one
    *  (and unloading it reverts to the boot default). Capture-safe behind a proxy. Always present.

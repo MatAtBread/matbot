@@ -8,7 +8,6 @@ import { readFile, writeFile, access, readdir } from 'node:fs/promises';
 import { pathToFileURL, fileURLToPath }       from 'node:url';
 import { createRequire }                     from 'node:module';
 import path                                  from 'node:path';
-import { confirmAction }                     from './confirm.js';
 import { classifySpecifier, fetchRemoteManifest, canonicalLocalSpecifier, materializeRemote } from '../remote-cache.js';
 import { planProvision, applyProvision, discardProvision, runCommand, type ProvisionPlan } from '../provision.js';
 import { findDuplicateSingletons } from '../singletons.js';
@@ -619,17 +618,21 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
         }
       }
 
-      // confirmAction rather than a `confirmed` input parameter: plugin installation is a
-      // privileged operation. Breaking the LLM's execution chain and requiring an
-      // out-of-band human response prevents prompt injection or a malicious plugin
-      // from auto-installing further plugins by simply passing confirmed:true.
+      // A gate rather than a `confirmed` input parameter: plugin installation is a privileged
+      // operation. Breaking the LLM's execution chain and requiring an out-of-band human response
+      // prevents prompt injection or a malicious plugin from auto-installing further plugins by simply
+      // passing confirmed:true. The SUBJECT is the specifier as typed — at this point the plugin is not
+      // loaded and its canonical name is unknown, so a policy remembering an answer keys on the
+      // spelling, and `@x/foo` and `https://…/foo.ts` are deliberately different decisions.
       const deps = plan !== undefined && plan.packages.length > 0
         ? `\n\nIt will also install ${plan.packages.length} package(s) from npm:\n${plan.packages.map(p => `- ${p}`).join('\n')}`
         : '';
-      const confirmed = await confirmAction(
-        ctx,
-        `Install plugin **"${specifier}"**?${description !== undefined ? `\n_${description}_` : ''}${deps}`,
-      );
+      const confirmed = await ctx.gate({
+        gate:     'add',
+        subject:  specifier,
+        fallback: false,
+        label:    `Install plugin **"${specifier}"**?${description !== undefined ? `\n_${description}_` : ''}${deps}`,
+      });
       if (!confirmed) {
         if (plan !== undefined) await discardProvision(plan);
         yield { type: 'result', value: { message: 'Cancelled.' } };
@@ -776,10 +779,15 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
           }
 
           if (depPlan !== undefined && depPlan.packages.length > 0) {
-            const offer = await confirmAction(ctx,
-              `**"${configSpecifier}"** was fetched, but it needs packages a source-fetch does not bring in ` +
-              `(it copies a plugin's own files, not its dependency graph). Install ${depPlan.packages.length} ` +
-              `package(s) into its cache directory?\n${depPlan.packages.map(pkg => `- ${pkg}`).join('\n')}`);
+            const offer = await ctx.gate({
+              gate:     'provision-deps',
+              subject:  configSpecifier,
+              fallback: false,
+              label:
+                `**"${configSpecifier}"** was fetched, but it needs packages a source-fetch does not bring in ` +
+                `(it copies a plugin's own files, not its dependency graph). Install ${depPlan.packages.length} ` +
+                `package(s) into its cache directory?\n${depPlan.packages.map(pkg => `- ${pkg}`).join('\n')}`,
+            });
 
             if (!offer) {
               await discardProvision(depPlan);
@@ -841,7 +849,8 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
       }
 
       // Same security rationale as add: out-of-band prompt, not a confirmable parameter.
-      if (!await confirmAction(ctx, `Remove plugin **"${entry}"**?`)) {
+      if (!await ctx.gate({ gate: 'remove', subject: entry, fallback: false,
+                            label: `Remove plugin **"${entry}"**?` })) {
         yield { type: 'result', value: { message: 'Cancelled.' } };
         return;
       }
@@ -874,7 +883,8 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
       // plugins live under .plugins/; neither was `pnpm add`-ed, so `pnpm remove` is a no-op at best.
       // Mirrors the add path, which only shells out for npm / tarball-or-git specifiers.
       if (pkgName !== undefined && (await readDependencyNames(projectDir)).has(pkgName)
-          && await confirmAction(ctx, `Also uninstall the npm package **"${pkgName}"**?`)) {
+          && await ctx.gate({ gate: 'npm-uninstall', subject: pkgName, fallback: false,
+                              label: `Also uninstall the npm package **"${pkgName}"**?` })) {
         const pm = await detectPackageManager(projectDir);
         try {
           const out = await runCommand(pm, ['remove', pkgName], projectDir);
@@ -907,7 +917,8 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
       // Reloading a resident plugin needs no confirmation — the user already trusts it. But if
       // nothing was unloaded, "reload" is really a first-time load of code they haven't consented
       // to, so gate it with the same confirmation as add/remove.
-      if (!wasLoaded && !await confirmAction(ctx, `Plugin **"${entry}"** is not currently loaded — load it now?`)) {
+      if (!wasLoaded && !await ctx.gate({ gate: 'load', subject: entry, fallback: false,
+                                         label: `Plugin **"${entry}"** is not currently loaded — load it now?` })) {
         yield { type: 'result', value: { message: 'Cancelled.' } };
         return;
       }

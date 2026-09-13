@@ -17,15 +17,16 @@ import { appendMessage, createMessage,
          unloadPlugin as unloadPluginFn,
          getPluginNameForSpecifier, getRegisteredPlugins, recordServiceKey,
          installPrincipalCarrier, installUsageCarrier, recordUsage, usageByProvider, addUsage, enterPrincipal, currentPrincipal,
-         installSettingsDefaults, settingsDefaultNamespaces, installSettingsNotifier,
+         installSettingsDefaults, settingsDefaultNamespaces, installSettingsNotifier, makePluginSettings,
          unifyServices, forwardingProxy, makeSwappable, singleTurnRequest,
          createMountTable, scheduleAtEdge,
          createSingleTurnTool, createAboutMatbotTool,
          isMissingSecretError, createNotifier, notifyingStore,
          wireDescription}            from '@matatbread/matbot-core';
 import type { ToolInputValidator } from '@matatbread/matbot-core';
-import type { MatbotMachine, MatbotServices, PluginSettings, Vault, SessionRunner, Notifier,
-              MatbotPlugin, StorageBackend, KnowledgeIndex, PromptFn, FormField, SwapFn } from '@matatbread/matbot-core';
+import type { MatbotMachine, MatbotServices, PluginSettings, Vault, SessionRunner, Notifier, PermissionGate,
+              MatbotPlugin, StorageBackend, KnowledgeIndex, PromptFn, FormField, SwapFn, SettingsDoc } from '@matatbread/matbot-core';
+import { createDefaultGate, createGateTools, DEFAULT_GATE_SETTINGS_NS } from '@matatbread/matbot-default-gate';
 import { systemPrincipal }                 from '@matatbread/matbot-core';
 import { createAlsPrincipalCarrier }       from './principal-als.js';
 import { createAlsUsageCarrier }           from './usage-als.js';
@@ -991,6 +992,17 @@ async function main(): Promise<void> {
   // register() reverts to these when it is unloaded, instead of leaving a dangling reference to the
   // now-gone impl. (bootBackend/bootFileStore are captured above, before the pre-scan, so a
   // config-supplied backend never poses as the host base.)
+  // The installation's permission policy — consulted by every privileged call site (`ctx.gate`, and
+  // core's tool-collision decision). The boot default is the DEFAULT-GATE PLUGIN's own implementation
+  // over its own settings namespace, not the bare asking gate plugin-api ships: the app decides its own
+  // base services, and this is the one that makes standing answers work out of the box — before the
+  // plugin's setup() has run, and on an install that never lists it. Loading the plugin registers the
+  // same policy over the same settings, and adds `gate_action`; unloading it reverts here, which is why
+  // this must be captured before anything can register over it.
+  const gateSettings = makePluginSettings(createStore<SettingsDoc>('settings'), DEFAULT_GATE_SETTINGS_NS);
+  let activeGate: PermissionGate = createDefaultGate(gateSettings);
+  const gateProxy: PermissionGate = forwardingProxy<PermissionGate>(() => activeGate);
+  const bootGate                   = activeGate;
   const bootVault                  = activeVault;
   const bootKnowledge              = knowledgeImpl;
   const bootNotifier               = activeNotifier;
@@ -1113,6 +1125,7 @@ async function main(): Promise<void> {
       else if (key === 'KnowledgeIndex') swapKnowledge(value as KnowledgeIndex);
       else if (key === 'Vault')          activeVault = value as Vault;
       else if (key === 'Notifier')       activeNotifier = value as Notifier;
+      else if (key === 'PermissionGate') activeGate     = value as PermissionGate;
       else serviceRegistry.set(key as string, value);
       if (key !== 'StorageBackend') { mountTable.markDirty(key); scheduleEdge(); }
     },
@@ -1124,6 +1137,7 @@ async function main(): Promise<void> {
       else if (key === 'KnowledgeIndex') knowledgeImpl = bootKnowledge;
       else if (key === 'Vault')          activeVault = bootVault;
       else if (key === 'Notifier')       activeNotifier = bootNotifier;
+      else if (key === 'PermissionGate') activeGate     = bootGate;
       // Reverts to the host file area rather than vanishing: unloading a plugin that put media on S3
       // should leave attachments working on disk, not silently turn them off until a restart.
       else if (key === 'MediaStore')     serviceRegistry.set('MediaStore', fileStore);
@@ -1212,6 +1226,7 @@ async function main(): Promise<void> {
     files:     fileStore,
     Vault:     vault,
     Notifier:  notifierProxy,
+    PermissionGate: gateProxy,
     hooks:          hookReg,
     tools:          toolReg,
     systemContext:  systemContextReg,
@@ -1250,6 +1265,7 @@ async function main(): Promise<void> {
     toolPresenter: () => services.ToolPresenter,   // resolved live: a tool-search/deferral plugin registers it after boot
     steeringPolicy: () => services.SteeringPolicy, // resolved live: a steering plugin registers it after boot
     mediaStore:    () => services.MediaStore,      // resolved live: seeded to the host file area, a plugin may swap it
+    permissionGate:() => services.PermissionGate,  // resolved live: the boot policy, or whatever a plugin registered over it
     hooks:         hookReg,
     systemContext: systemContextReg,
     vault,
@@ -1295,7 +1311,9 @@ async function main(): Promise<void> {
   {
     const loaded = new Set(getRegisteredPlugins().map(p => p.name));
     for (const ns of settingsDefaultNamespaces()) {
-      if (loaded.has(ns) || (ns.startsWith('__') && ns.endsWith('__'))) continue;
+      // The gate's namespace is seeded by this host, not by a loaded plugin, so it would otherwise be
+      // reported as naming nothing — the one key an install is most likely to author by hand.
+      if (loaded.has(ns) || ns === DEFAULT_GATE_SETTINGS_NS || (ns.startsWith('__') && ns.endsWith('__'))) continue;
       console.warn(
         `[matbot] default_settings names "${ns}", which is not a loaded plugin — its defaults will ` +
         `never apply. Key it by the plugin's package name (\`plugin list\` reports them).`,
@@ -1340,6 +1358,12 @@ async function main(): Promise<void> {
   // their YAML specifiers are recorded — createProviderTool reads getRegisteredPlugins()
   // and pluginNameToOrigPath to build its description.
   toolReg.register(createProviderTool(providers, pluginNameToOrigPath, providerNameResolves));
+
+  // gate_action: inspect and forget the standing answers the boot policy remembers. Seeded like
+  // `plugin`/`provider` rather than carried by a configured plugin, because the policy itself is: a
+  // minimal install's first act is adding a plugin or a provider, which is gated, so the way to see and
+  // undo an answer cannot depend on a config line being present.
+  for (const tool of createGateTools(gateSettings)) toolReg.register(tool);
 
   // single_turn: the model-facing surface of the core singleTurn service. Registered here beside the
   // other core service-management tools (it needs the live `services` for `singleTurn`/`providers`).

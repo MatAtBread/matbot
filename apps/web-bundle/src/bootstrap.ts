@@ -7,15 +7,17 @@ import {
   unloadPlugin as unloadPluginFn, unifyServices,
   forwardingProxy, makeSwappable, singleTurnRequest, createSingleTurnTool, createAboutMatbotTool, createNotifier, notifyingStore,
   createMountTable, scheduleAtEdge,
-  installSettingsDefaults, settingsDefaultNamespaces, installSettingsNotifier,
+  installSettingsDefaults, settingsDefaultNamespaces, installSettingsNotifier, makePluginSettings,
   applyProviderPatch,
 } from '@matatbread/matbot-core';
 import type {
   MatbotMachine, MatbotServices, Store, Session, ProviderConfig, ProviderAdapter,
   PluginSettings, Vault, SessionRunner, KnowledgeIndex, Notifier,
   PluginResolver, StorageBackend, FileStore, PromptFn, MatbotPlugin, Principal, Runtime, Usage,
-  ProviderPatch,
+  ProviderPatch, PermissionGate,
 } from '@matatbread/matbot-plugin-api';
+import type { SettingsDoc } from '@matatbread/matbot-core';
+import { createDefaultGate, createGateTools, DEFAULT_GATE_SETTINGS_NS } from '@matatbread/matbot-default-gate';
 // Boot assembly, so from plugin-api's `/host` half — via core, which re-exports it for exactly this.
 import type { SwapFn, ToolInputValidator } from '@matatbread/matbot-core';
 import { LookupKnowledgeIndex } from '@matatbread/matbot-core';
@@ -300,6 +302,14 @@ export async function boot(env: BootEnv): Promise<void> {
   // Boot defaults captured for revert-on-unregister (mirrors the CLI host): a swap-key reverts here
   // when its plugin is unloaded, instead of dangling on the now-gone impl. (bootBackend is captured
   // above, before the pre-scan defaulting, so a config backend never poses as the host base.)
+  // The installation's permission policy. Boot default is the default-gate plugin's own implementation
+  // over its own settings namespace — see the CLI host: the app decides its own base service, and this
+  // is the one that makes standing answers work before (and without) the plugin being loaded. Unloading
+  // a policy plugin reverts here.
+  const gateSettings = makePluginSettings(createStore<SettingsDoc>('settings'), DEFAULT_GATE_SETTINGS_NS);
+  let activeGate: PermissionGate = createDefaultGate(gateSettings);
+  const gateProxy: PermissionGate = forwardingProxy<PermissionGate>(() => activeGate);
+  const bootGate                    = activeGate;
   const bootVault                   = activeVault;
   const bootKnowledge               = knowledgeImpl;
   const bootNotifier                = activeNotifier;
@@ -386,6 +396,7 @@ export async function boot(env: BootEnv): Promise<void> {
       else if (key === 'KnowledgeIndex') swapKnowledge(value as KnowledgeIndex);
       else if (key === 'Vault')          activeVault = value as Vault;
       else if (key === 'Notifier')       activeNotifier = value as Notifier;
+      else if (key === 'PermissionGate') activeGate     = value as PermissionGate;
       else serviceRegistry.set(key as string, value);
       if (key !== 'StorageBackend') { mountTable.markDirty(key); scheduleEdge(); }
     },
@@ -397,6 +408,7 @@ export async function boot(env: BootEnv): Promise<void> {
       else if (key === 'KnowledgeIndex') knowledgeImpl = bootKnowledge;
       else if (key === 'Vault')          activeVault = bootVault;
       else if (key === 'Notifier')       activeNotifier = bootNotifier;
+      else if (key === 'PermissionGate') activeGate     = bootGate;
       else if (key === 'MediaStore')     serviceRegistry.set('MediaStore', fileStore);
       else serviceRegistry.delete(key);
       if (key !== 'StorageBackend') { mountTable.markDirty(key as keyof MatbotServices); scheduleEdge(); }
@@ -486,6 +498,7 @@ export async function boot(env: BootEnv): Promise<void> {
     files: fileStore,
     Vault: vault,
     Notifier: notifierProxy,
+    PermissionGate: gateProxy,
     hooks:         hookReg,
     tools:         toolReg,
     systemContext: systemContextReg,
@@ -528,6 +541,7 @@ export async function boot(env: BootEnv): Promise<void> {
     toolPresenter: () => services.ToolPresenter,   // resolved live: a tool-search/deferral plugin registers it after boot
     steeringPolicy: () => services.SteeringPolicy, // resolved live: a steering plugin registers it after boot
     mediaStore:    () => services.MediaStore,      // resolved live: seeded to the host file area, a plugin may swap it
+    permissionGate:() => services.PermissionGate,  // resolved live: the boot policy, or whatever a plugin registered over it
   });
 
   // Load provider plugins first as a warm-up so the first turn needn't load its adapter mid-response.
@@ -587,6 +601,10 @@ export async function boot(env: BootEnv): Promise<void> {
     remove: removeProvider,
   }));
 
+  // gate_action: inspect and forget the standing answers the boot policy remembers — seeded like the
+  // node host's, and for the same reason (the policy is the host's, not a configured plugin's).
+  for (const tool of createGateTools(gateSettings)) toolReg.register(tool);
+
   // single_turn: the same core tool the node app registers — a one-shot completion against any
   // configured provider (or the current turn's, when omitted). Pure (services only), so it runs
   // identically in the browser realm.
@@ -611,7 +629,8 @@ export async function boot(env: BootEnv): Promise<void> {
   {
     const loaded = new Set(getRegisteredPlugins().map(p => p.name));
     for (const ns of settingsDefaultNamespaces()) {
-      if (loaded.has(ns) || (ns.startsWith('__') && ns.endsWith('__'))) continue;
+      // Seeded by this host rather than by a loaded plugin — see the node host.
+      if (loaded.has(ns) || ns === DEFAULT_GATE_SETTINGS_NS || (ns.startsWith('__') && ns.endsWith('__'))) continue;
       console.warn(`[matbot] defaultSettings names "${ns}", which is not a loaded plugin — its defaults do not apply.`);
     }
   }
