@@ -1445,8 +1445,14 @@ Two things it deliberately does *not* trust:
 
 - **A subprocess's exit code.** `You cannot publish over the previously published versions` is a
   failure to *re*-publish something that already succeeded. Every publish result is confirmed by
-  asking the registry for that exact version, never by matching the error text — which is also why
-  it stays correct when the child inherits the terminal and prints nothing we can capture.
+  asking the registry for that exact version — which is also why it stays correct when the child
+  inherits the terminal and prints nothing we can capture. The one wording it does read is a 409 /
+  `EPUBLISHCONFLICT` ("previously staged"), because npm can only say that once the version is written:
+  it is reported as *landed, npm not yet readable* and left to Verify, and nothing is marked ✗ until
+  Verify has finished.
+- **A version merely existing on npm.** Preflight packs every already-published package with `pnpm pack`
+  and compares it file by file against the tarball npm serves. 0.4.14 reported five packages as published
+  while npm served their pre-edit code, because each had been changed without a bump.
 - **A read taken the instant a write returns.** npm's read path is a CDN that lags its write path;
   a brand-new package's first version has been measured taking over two minutes to appear. Acting
   on that read is what turns a *successful* release into a screen of E403s.
@@ -1457,14 +1463,26 @@ what didn't. There is no manual clean-up path and no need to work out which of ~
 
 Preflight blocks on the things that kill a whole run — an expired npm token (checked against the
 registry, because an expired token looks identical to a good one on disk), a dirty tree, an entry point
-missing from disk or excluded by `files`, a `workspace:` range naming something unpublishable. A spread of
+missing from disk or excluded by `files`, a `workspace:` range naming something unpublishable, a
+**STALE** package (its contents differ from the same version on npm; the report names each file, the commit
+that last touched it, and the next free patch number), and a package **BEHIND** npm (its local version is
+lower than npm's highest). A published package whose only change is newer dependency ranges produces a
+single advisory line, not a block: the code is the same. Each unconsumed changeset is listed as *pending*
+or *redundant* (every package it names is already on npm unchanged), with a loud warning when a redundant
+changeset asks for a `minor`. A spread of
 versions is no longer among them: under `linked` it is the expected state, so it is reported and got out
 of the way. Anything that merely *ships
 imperfectly* — a missing `files` field, changesets accumulated since this version was cut — warns
 and gets out of the way.
 
-`--check` audits without publishing, `--dry-run` runs everything but the publish calls, and
-`--no-git` drops the clean-tree/tag gates for CI.
+`--check` audits without publishing and needs no npm login. `--dry-run` runs everything except the
+publish calls. `--no-git` skips the clean-tree gate and tag pushing. Once Verify passes, the per-package
+tags are pushed to origin, and `--release vX.Y.Z` also moves the umbrella tag to HEAD, pushes it and
+retargets the GitHub release. Every PR runs `node scripts/publish.mjs --check --no-git --allow-unpublished`
+(`.github/workflows/publish-check.yml`), so an edited package that was not bumped fails on that PR
+rather than on release night. `--allow-unpublished` stops a bumped-but-unpublished package from
+counting as a failure there. The script's decision logic lives in `scripts/publish-lib.mjs`, tested
+in `apps/cli/test/publish-lib.test.ts`.
 
 ### The credential must be a granular access token
 

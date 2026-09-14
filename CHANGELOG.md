@@ -16,6 +16,9 @@ churn and less likely to affect a consumer who doesn't use them.
 - **`frontend-web`** — contributes system context describing the relative `POST /tools/<name>` and
   `POST /stream/tools/<name>` entry points, so a model writing a live dashboard or similar script knows
   it can call registered tools over HTTP. Only once the server is listening. (#72)
+- **`ts-validation`** (0.4.13) — the published package now declares `@matatbread/matbot-core` as a peer
+  dependency, which it imports a type from. The fix landed in 0.4.12's source after 0.4.12 was published,
+  so npm never had it. (#71)
 
 ## 0.4.14
 

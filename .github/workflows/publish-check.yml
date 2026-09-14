@@ -1,0 +1,23 @@
+name: publish-check
+
+# An edited package whose version was not bumped is served stale by npm for as long as nobody
+# notices. Catch it on the PR that made the edit, where the bump belongs.
+on:
+  pull_request:
+
+jobs:
+  publish-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: node scripts/publish.mjs --check --no-git --allow-unpublished

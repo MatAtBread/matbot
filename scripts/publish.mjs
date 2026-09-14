@@ -10,6 +10,9 @@
 //
 //   1. PREFLIGHT — every reason a publish can fail *wholesale* is checked before anything is
 //      pushed. Auth is checked first because that is the failure that silently eats a whole run.
+//      A version merely EXISTING on npm is not enough: its contents are compared with what would
+//      be packed now, because an edit without a bump is otherwise skipped silently and npm keeps
+//      serving the old code (0.4.14 shipped five such packages as "published").
 //   2. PUBLISH   — `changeset publish` for the happy path.
 //   3. RECONCILE — anything the registry still doesn't have is retried per-package, treating
 //      "version already exists" as success. This is what makes a re-run safe: the script converges
@@ -21,23 +24,36 @@
 // running it after a partial failure finishes the job. There is no "clean up by hand" path.
 //
 // Usage:
-//   node scripts/publish.mjs             # preflight, publish, reconcile, verify
-//   node scripts/publish.mjs --check     # preflight + report drift only; publishes nothing
+//   node scripts/publish.mjs             # preflight, publish, reconcile, verify, push tags
+//   node scripts/publish.mjs --check     # preflight + report drift only; publishes nothing, needs no npm login
+//   node scripts/publish.mjs --check --no-git --allow-unpublished   # CI: fail only on blocking problems
 //   node scripts/publish.mjs --dry-run   # everything except the actual publish calls
-//   node scripts/publish.mjs --no-git    # skip clean-tree/branch gates (CI already knows)
+//   node scripts/publish.mjs --no-git    # skip clean-tree/branch gates and tag pushing (CI already knows)
 //   node scripts/publish.mjs --otp 123456  # one 2FA code for the whole batch
+//   node scripts/publish.mjs --release v0.4.15  # also move+push the umbrella tag and retarget the GitHub release
 
 import { execFileSync, execFile } from 'node:child_process';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import path from 'node:path';
+import {
+  compareVersions, highestVersion, nextFreePatch, readTree, diffTrees,
+  parseChangeset, classifyChangeset, isPublishConflict, mapLimit,
+} from './publish-lib.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
 const checkOnly = argv.includes('--check');
 const dryRun = argv.includes('--dry-run');
 const skipGit = argv.includes('--no-git');
+const allowUnpublished = argv.includes('--allow-unpublished');
 const otp = argv.includes('--otp') ? argv[argv.indexOf('--otp') + 1] : null;
+const release = argv.includes('--release') ? argv[argv.indexOf('--release') + 1] : null;
+if (argv.includes('--release') && !/^v\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(release ?? '')) {
+  throw new Error(`--release needs a tag like v0.4.15, got ${release ?? 'nothing'}`);
+}
 
 const REGISTRY = 'https://registry.npmjs.org';
 // npm's read path is a CDN; a just-published version can 404 for a while. Long enough to outlast
@@ -47,10 +63,12 @@ const VERIFY_ATTEMPTS = 12;
 const SETTLE_ATTEMPTS = 6;
 const SETTLE_ATTEMPTS_NEW = 14;
 const VERIFY_BASE_MS = 2000;
+const CONTENT_CONCURRENCY = 8;
 
 const c = { red: s => `\x1b[31m${s}\x1b[0m`, green: s => `\x1b[32m${s}\x1b[0m`, yellow: s => `\x1b[33m${s}\x1b[0m`, dim: s => `\x1b[2m${s}\x1b[0m`, bold: s => `\x1b[1m${s}\x1b[0m` };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const run = (cmd, args, opts = {}) => execFileSync(cmd, args, { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, ...opts });
+const runAsync = (cmd, args, opts = {}) => promisify(execFile)(cmd, args, { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, ...opts });
 
 function step(n, title) {
   console.log(`\n${c.bold(`── ${n}. ${title}`)}`);
@@ -102,7 +120,15 @@ async function fetchPackument(name, attempts = 4) {
 async function registryState(pkgs) {
   const entries = await Promise.all(pkgs.map(async p => {
     const { versions, distTags } = await fetchPackument(p.name);
-    return [p.name, { present: Object.hasOwn(versions, p.version), known: Object.keys(versions).length > 0, latest: distTags.latest }];
+    const all = Object.keys(versions);
+    return [p.name, {
+      present: Object.hasOwn(versions, p.version),
+      known: all.length > 0,
+      latest: distTags.latest,
+      highest: highestVersion(all),
+      versions: all,
+      tarball: versions[p.version]?.dist?.tarball,
+    }];
   }));
   return new Map(entries);
 }
@@ -111,13 +137,18 @@ async function registryState(pkgs) {
 
 // Auth is checked against the registry itself rather than by looking for a token in .npmrc: a
 // present-but-expired token is exactly the failure mode this is here to catch, and it looks
-// identical to a good one on disk.
-function checkAuth(problems) {
+// identical to a good one on disk. `--check` only reads the registry, so there it is advisory —
+// which is what lets CI run the check with no credentials at all.
+function checkAuth(problems, advisories) {
   try {
     const who = run('npm', ['whoami', '--registry', REGISTRY], { stdio: ['ignore', 'pipe', 'ignore'] }).trim();
     console.log(`   ${c.green('✓')} authenticated to npm as ${c.bold(who)}`);
     return who;
   } catch {
+    if (checkOnly) {
+      advisories.push('not authenticated to npm — fine for --check, which only reads the registry');
+      return null;
+    }
     problems.push(
       'npm rejected the stored credentials (E401). The token in ~/.npmrc is missing, expired or revoked.\n' +
       '     Fix: `npm login --registry https://registry.npmjs.org` (or refresh the granular token and\n' +
@@ -145,17 +176,27 @@ function otpAdvice(who) {
 // than no check, so instead of predicting, publish ONE package and look: same cost (it had to be
 // published anyway), but the batch stops after one failure rather than forty-five.
 
-function checkGit(problems, advisories) {
+function checkGit(problems) {
   if (skipGit) return;
   const dirty = run('git', ['status', '--porcelain']).trim();
   if (dirty) problems.push(`working tree is dirty — publishing an unrecorded state:\n${dirty.split('\n').map(l => `       ${l}`).join('\n')}`);
   else console.log(`   ${c.green('✓')} working tree clean`);
+}
 
-  // Not an error: changesets accumulate between releases by design. It only means the versions
-  // about to ship are older than the tip, which is worth saying out loud and nothing more.
-  const pending = run('git', ['ls-files', '.changeset']).split('\n').filter(f => f.endsWith('.md') && !f.endsWith('README.md'));
-  if (pending.length) advisories.push(`${pending.length} unconsumed changeset(s) — this release predates them; run \`pnpm version-packages\` to include them`);
-  else console.log(`   ${c.green('✓')} no unconsumed changesets`);
+// A tag created by an earlier run and never pushed is a release the remote does not know about.
+function checkRemoteTags(pkgs, advisories) {
+  if (skipGit) return;
+  let remote;
+  try {
+    remote = new Set(run('git', ['ls-remote', '--tags', 'origin'], { stdio: ['ignore', 'pipe', 'ignore'] })
+      .split('\n').map(l => l.split('\t')[1]?.replace(/^refs\/tags\//, '').replace(/\^\{\}$/, '')).filter(Boolean));
+  } catch {
+    advisories.push('could not list the remote\'s tags — skipped the unpushed-tag check');
+    return;
+  }
+  const local = new Set(run('git', ['tag', '--list', '@matatbread/*']).split('\n').filter(Boolean));
+  const unpushed = pkgs.map(tagOf).filter(t => local.has(t) && !remote.has(t));
+  if (unpushed.length) advisories.push(`${unpushed.length} package tag(s) exist locally but not on origin: ${unpushed.join(', ')} — a successful run pushes them`);
 }
 
 // A clean tree only says the checkout matches the commit; it says nothing about whether the
@@ -221,7 +262,7 @@ function checkManifests(pkgs, problems, advisories) {
     // the dependency's OWN version, so a plugin at 0.4.8 asks for the plugin-api it was built against
     // whatever its siblings are at. A range that cannot be rewritten is still a problem, caught per-package
     // below.
-    advisories.push(`versions span ${[...versions].sort().join(', ')} — expected: the harness (core/plugin-api/cli/web-bundle) moves in lockstep, plugins version independently`);
+    advisories.push(`versions span ${[...versions].sort(compareVersions).join(', ')} — expected: the harness (core/plugin-api/cli/web-bundle) moves in lockstep, plugins version independently`);
   } else console.log(`   ${c.green('✓')} all ${pkgs.length} publishable packages at ${c.bold([...versions][0])}`);
 
   // changesets passes its config-level `access` to every publish, which is what has been carrying
@@ -268,6 +309,120 @@ function exportTargets(exports) {
   return out.filter(t => typeof t === 'string' && t.startsWith('.'));
 }
 
+// Local below npm's highest means someone published from elsewhere, or a version went backwards.
+// Publishing on would put the older number's code under a `latest` that is not the latest.
+function checkBehind(pkgs, state, problems) {
+  let behind = 0;
+  for (const p of pkgs) {
+    const { highest } = state.get(p.name);
+    if (highest && compareVersions(p.version, highest) < 0) {
+      behind++;
+      problems.push(`BEHIND: ${p.name} is ${p.version} locally, npm has ${highest}. Pull the bump, or bump past it.`);
+    }
+  }
+  if (!behind) console.log(`   ${c.green('✓')} no package is behind npm`);
+}
+
+async function fetchTarball(url, dest, attempts = 4) {
+  let lastError;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const res = await fetch(url);
+      if (res.ok) { writeFileSync(dest, Buffer.from(await res.arrayBuffer())); return; }
+      lastError = new Error(`HTTP ${res.status}`);
+    } catch (err) {
+      lastError = err;
+    }
+    await sleep(500 * 2 ** i);
+  }
+  throw new Error(`cannot download ${url}: ${lastError?.message}`);
+}
+
+async function unpack(tgz, dir) {
+  mkdirSync(dir, { recursive: true });
+  // npm tarballs have one top-level folder, conventionally `package/` but not guaranteed.
+  await runAsync('tar', ['-xzf', tgz, '-C', dir, '--strip-components=1']);
+}
+
+function lastCommit(pkg, file) {
+  try {
+    return run('git', ['log', '-1', '--format=%h %s', '--', path.join(pkg.rel, file)], { stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  } catch {
+    return '';
+  }
+}
+
+// Only a version already on npm can be stale; anything missing is about to be published anyway.
+// `pnpm pack` is the local side because it is exactly what `pnpm publish` would upload — `files`,
+// `workspace:` rewrites and LICENSE applied — so pnpm stays the authority rather than a copy of it.
+async function checkContent(pkgs, state, problems, advisories) {
+  const present = pkgs.filter(p => state.get(p.name).present);
+  const tmp = mkdtempSync(path.join(tmpdir(), 'matbot-publish-'));
+  const stale = new Set();
+  try {
+    const results = await mapLimit(present, CONTENT_CONCURRENCY, async (p, i) => {
+      const work = path.join(tmp, String(i));
+      mkdirSync(work);
+      const { stdout } = await runAsync('pnpm', ['pack', '--json', '--pack-destination', work], { cwd: p.dir });
+      const localTgz = JSON.parse(stdout.slice(stdout.indexOf('{'))).filename;
+      const npmTgz = path.join(work, 'npm.tgz');
+      await fetchTarball(state.get(p.name).tarball, npmTgz);
+      await Promise.all([unpack(localTgz, path.join(work, 'local')), unpack(npmTgz, path.join(work, 'npm'))]);
+      return diffTrees(readTree(path.join(work, 'local')), readTree(path.join(work, 'npm')));
+    });
+    const ranges = [];
+    present.forEach((p, i) => {
+      const d = results[i];
+      if (d.status === 'ranges') ranges.push(p);
+      if (d.status !== 'stale') return;
+      stale.add(p.name);
+      const lines = [
+        ...d.changed.map(f => [f === 'package.json' && d.manifestKeys.length ? `changed: ${d.manifestKeys.join(', ')}` : 'changed', f]),
+        ...d.onlyLocal.map(f => ['new, not on npm', f]),
+        ...d.onlyNpm.map(f => ['only on npm (deleted or now excluded by "files")', f]),
+      ].map(([why, f]) => {
+        const commit = why.startsWith('only on npm') ? '' : lastCommit(p, f);
+        return `       ${f}  ${c.dim(`${why}${commit ? ` — last touched by ${commit}` : ''}`)}`;
+      });
+      const next = nextFreePatch(p.version, state.get(p.name).versions);
+      problems.push(`STALE: ${p.name}@${p.version} differs from npm. Bump its version${next ? ` (next free patch: ${next})` : ''}.\n${lines.join('\n')}`);
+    });
+    // One line, not one per package: after any harness bump most plugins land here, and a wall of
+    // advisories is how the one blocking STALE below gets scrolled past.
+    if (ranges.length) {
+      advisories.push(`${ranges.length} package(s) have the same code as npm but newer dependency ranges (a sibling was bumped) — republishing changes what they resolve, not what they run: ${ranges.map(p => p.name.replace('@matatbread/matbot-', '')).join(', ')}`);
+    }
+    const same = present.length - stale.size - ranges.length;
+    console.log(`   ${stale.size ? c.red('✗') : c.green('✓')} contents compared for ${present.length} published version(s): ${same} identical, ${ranges.length} ranges-only, ${stale.size} stale`);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+  return stale;
+}
+
+// A changeset only earns a bump if a package it names has something npm does not. Counting them
+// said nothing about that, and seven redundant ones — one a `minor`, which cascades to 1.0.0 —
+// nearly went into 0.4.14.
+function checkChangesets(pkgs, differs, advisories) {
+  const dir = path.join(root, '.changeset');
+  const files = existsSync(dir) ? readdirSync(dir).filter(f => f.endsWith('.md') && f !== 'README.md').sort() : [];
+  if (!files.length) return console.log(`   ${c.green('✓')} no unconsumed changesets`);
+  const known = new Set(pkgs.map(p => p.name));
+  console.log(`   ${c.yellow('!')} ${files.length} unconsumed changeset(s) — this release predates them; \`pnpm version-packages\` includes them:`);
+  for (const f of files) {
+    const releases = parseChangeset(readFileSync(path.join(dir, f), 'utf8'));
+    const verdict = classifyChangeset(releases, differs);
+    const unknown = [...releases.keys()].filter(n => !known.has(n));
+    console.log(verdict.status === 'pending'
+      ? `       ${c.yellow('pending  ')} ${f}  ${c.dim(`differs from npm: ${verdict.pending.join(', ')}`)}`
+      : `       ${c.dim('redundant')} ${f}  ${c.dim('every package it names is already on npm as-is')}`);
+    if (unknown.length) advisories.push(`${f} names package(s) not in the workspace: ${unknown.join(', ')}`);
+    if (verdict.needlessMinor.length) {
+      advisories.push(c.red(c.bold(`${f} requests a minor/major bump for ${verdict.needlessMinor.join(', ')}, whose contents are already on npm — with peer ranges this cascades to 1.0.0. Use patch, or delete it.`)));
+    }
+  }
+}
+
 // ── publish ──────────────────────────────────────────────────────────────────
 
 function publishBatch() {
@@ -302,30 +457,78 @@ async function publishOne(pkg) {
     run('pnpm', args, { cwd: pkg.dir, stdio });
     return 'published';
   } catch (err) {
-    // A non-zero exit does NOT mean the version isn't there — "you cannot publish over 0.3.5"
-    // is a *failure to re-publish something that already succeeded*. Never classify that from the
-    // child's stderr: with an inherited terminal nothing is captured, and pnpm's wording is not a
-    // contract. Ask the registry; it is the only thing that actually knows.
-    if (await isPublished(pkg, 4)) return 'exists';
     const output = `${err.stdout ?? ''}${err.stderr ?? ''}`;
+    // The one refusal that IS classified from stderr, against the rule below: npm can only say
+    // "previously staged" / "cannot publish over" if the version was written. With an inherited
+    // terminal nothing is captured, so this never fires there and the registry is asked instead.
+    if (isPublishConflict(output)) return 'exists-pending';
+    // Otherwise a non-zero exit does NOT mean the version isn't there, and pnpm's wording is not a
+    // contract. Ask the registry — with the settle budget, since a fresh write is slow to read.
+    if (await isPublished(pkg, SETTLE_ATTEMPTS)) return 'exists';
     if (OTP_REQUIRED.test(output)) return 'otp';
-    console.log(c.red(`   ✗ ${pkg.name}@${pkg.version}`));
+    // Not ✗ yet: the write may still land and become readable. VERIFY is what says it failed.
+    console.log(c.yellow(`   ! ${pkg.name}@${pkg.version} not confirmed — VERIFY will decide`));
     const detail = output.split('\n').filter(l => /error|ERR!/i.test(l) && !/^\s+at /.test(l));
     if (detail.length) console.log(detail.map(l => `       ${l.trim()}`).join('\n'));
     return 'failed';
   }
 }
 
+// ── tags ─────────────────────────────────────────────────────────────────────
+
+const tagOf = pkg => `${pkg.name}@${pkg.version}`;
+
 // Tags are how the repo records what shipped. changeset publish only tags what it published
-// itself, so anything RECONCILE pushed would otherwise go untagged.
-function ensureTag(pkg) {
-  const tag = `${pkg.name}@${pkg.version}`;
+// itself, so anything RECONCILE pushed would otherwise go untagged — and a tag nobody pushed
+// records it only on the machine the release was cut on.
+function ensureTags(pkgs) {
   if (skipGit || dryRun) return;
-  try {
-    run('git', ['rev-parse', '-q', '--verify', `refs/tags/${tag}`], { stdio: ['ignore', 'pipe', 'ignore'] });
-  } catch {
-    try { run('git', ['tag', tag]); } catch { /* tagging is bookkeeping; never fail a release on it */ }
+  for (const pkg of pkgs) {
+    const tag = tagOf(pkg);
+    try {
+      run('git', ['rev-parse', '-q', '--verify', `refs/tags/${tag}`], { stdio: ['ignore', 'pipe', 'ignore'] });
+    } catch {
+      try { run('git', ['tag', tag]); } catch { /* tagging is bookkeeping; never fail a release on it */ }
+    }
   }
+  try {
+    run('git', ['push', 'origin', ...pkgs.map(p => `refs/tags/${tagOf(p)}`)], { stdio: ['ignore', 'pipe', 'pipe'] });
+    console.log(`   ${c.green('✓')} package tags pushed to origin`);
+  } catch (err) {
+    console.log(c.yellow(`   ! could not push package tags: ${`${err.stderr ?? err.message}`.trim().split('\n')[0]}`));
+  }
+}
+
+// The umbrella tag names the whole release, so it moves to wherever the release was actually cut
+// and the GitHub release follows it — the fix-up v0.4.14 needed by hand.
+function moveRelease(tag) {
+  if (dryRun) return console.log(c.dim(`   --dry-run: would move ${tag} to HEAD and retarget its GitHub release`));
+  const sha = run('git', ['rev-parse', 'HEAD']).trim();
+  try {
+    run('git', ['tag', '-f', tag, sha], { stdio: ['ignore', 'pipe', 'pipe'] });
+    run('git', ['push', '-f', 'origin', `refs/tags/${tag}`], { stdio: ['ignore', 'pipe', 'pipe'] });
+    console.log(`   ${c.green('✓')} ${tag} → ${sha.slice(0, 7)}, pushed`);
+  } catch (err) {
+    return console.log(c.yellow(`   ! could not move ${tag}: ${`${err.stderr ?? err.message}`.trim().split('\n')[0]}`));
+  }
+  try {
+    run('gh', ['release', 'edit', tag, '--target', sha], { stdio: ['ignore', 'pipe', 'pipe'] });
+    console.log(`   ${c.green('✓')} GitHub release ${tag} retargeted`);
+  } catch {
+    try {
+      run('gh', ['release', 'create', tag, '--verify-tag', '--generate-notes'], { stdio: ['ignore', 'pipe', 'pipe'] });
+      console.log(`   ${c.green('✓')} GitHub release ${tag} created`);
+    } catch (err) {
+      console.log(c.yellow(`   ! could not update the GitHub release ${tag}: ${`${err.stderr ?? err.message}`.trim().split('\n')[0]}`));
+    }
+  }
+}
+
+function finish(pkgs) {
+  if (skipGit) return;
+  step('✓', 'Tags');
+  ensureTags(pkgs);
+  if (release) moveRelease(release);
 }
 
 // ── main ─────────────────────────────────────────────────────────────────────
@@ -335,8 +538,9 @@ const advisories = [];
 const pkgs = workspacePackages();
 
 step(1, 'Preflight');
-const who = checkAuth(problems);
-checkGit(problems, advisories);
+const who = checkAuth(problems, advisories);
+checkGit(problems);
+checkRemoteTags(pkgs, advisories);
 checkLockfile(problems);
 checkManifests(pkgs, problems, advisories);
 
@@ -346,6 +550,10 @@ const brandNew = pkgs.filter(p => !state.get(p.name).known);
 
 console.log(`   ${c.green('✓')} registry read: ${pkgs.length - missing().length} already published, ${missing().length} to publish` +
   (brandNew.length ? ` (${brandNew.length} first-time: ${brandNew.map(p => p.name).join(', ')})` : ''));
+
+checkBehind(pkgs, state, problems);
+const stale = await checkContent(pkgs, state, problems, advisories);
+checkChangesets(pkgs, new Set([...missing().map(p => p.name), ...stale]), advisories);
 
 for (const a of advisories) console.log(`   ${c.yellow('!')} ${a}`);
 
@@ -361,11 +569,12 @@ if (checkOnly) {
     const s = state.get(p.name);
     console.log(`   ${s.present ? c.green('published') : c.yellow('MISSING  ')}  ${p.name}@${p.version}${s.present || !s.latest ? '' : c.dim(`  (npm latest: ${s.latest})`)}`);
   }
-  process.exit(missing().length ? 1 : 0);
+  process.exit(missing().length && !allowUnpublished ? 1 : 0);
 }
 
 if (!missing().length) {
-  console.log(c.green('\nEverything is already published. Nothing to do.'));
+  console.log(c.green('\nEverything is already published, with matching contents. Nothing to publish.'));
+  finish(pkgs);
   process.exit(0);
 }
 
@@ -382,7 +591,7 @@ if (canaryResult === 'failed') {
   console.log(`\n${c.red(c.bold('Stopped before the batch'))} — the first package failed, so the other ${missing().length - 1} would too.`);
   process.exit(1);
 }
-console.log(`   ${c.green('✓')} canary ${canaryResult === 'exists' ? 'already on npm' : 'published'} — proceeding with the batch`);
+console.log(`   ${c.green('✓')} canary ${{ exists: 'already on npm', 'exists-pending': 'landed, npm not yet readable' }[canaryResult] ?? 'published'} — proceeding with the batch`);
 
 publishBatch();
 
@@ -412,6 +621,7 @@ for (const pkg of outstanding) {
   const result = await publishOne(pkg);
   if (result === 'published') console.log(`   ${c.green('✓')} ${pkg.name}@${pkg.version} ${c.dim('(retried individually)')}`);
   if (result === 'exists') console.log(`   ${c.green('✓')} ${pkg.name}@${pkg.version} ${c.dim('(already on npm)')}`);
+  if (result === 'exists-pending') console.log(`   ${c.green('✓')} ${pkg.name}@${pkg.version} ${c.dim('(landed, npm not yet readable)')}`);
   if (result === 'otp') {
     // Every remaining package will fail identically; 44 more copies of the same error helps nobody.
     console.log(`\n${c.red(c.bold('Stopped: '))}${otpAdvice(who)}`);
@@ -427,8 +637,8 @@ outstanding = await settle(VERIFY_ATTEMPTS, 'retrying');
 const landed = pkgs.length - outstanding.length;
 console.log(`\n${c.bold('── Result')}`);
 if (!outstanding.length) {
-  for (const pkg of pkgs) ensureTag(pkg);
-  console.log(`   ${c.green(c.bold(`✓ all ${pkgs.length} packages are on npm at ${pkgs[0].version}`))}`);
+  console.log(`   ${c.green(c.bold(`✓ all ${pkgs.length} packages are on npm`))}`);
+  finish(pkgs);
   process.exit(0);
 }
 console.log(`   ${c.green(`${landed}/${pkgs.length} published`)} — ${c.red(`${outstanding.length} missing:`)}`);
