@@ -9,6 +9,14 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## Unreleased
+
+### Optional
+
+- **`frontend-web`** — contributes system context describing the relative `POST /tools/<name>` and
+  `POST /stream/tools/<name>` entry points, so a model writing a live dashboard or similar script knows
+  it can call registered tools over HTTP. Only once the server is listening. (#72)
+
 ## 0.4.14
 
 ### Breaking changes
