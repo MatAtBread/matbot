@@ -119,7 +119,7 @@ export const plugin: MatbotPluginSpec = {
         // A model with `bash`/`http` otherwise has no way to learn that every registered tool is reachable
         // over HTTP — it greps for the process to find the port, or never thinks to call a tool from a script.
         services.systemContext.register(() =>
-          'Every registered tool be invoked over HTTP via the relative URL `/tools`. ' +
+          'Every registered tool can be invoked over HTTP via the relative URL `/tools`. ' +
           '`POST /tools/<name>` with the JSON params as the body returns the result as JSON (a tool error is a ' +
           'non-2xx status with `{ error }`); `POST /stream/tools/<name>` streams the tool\'s events as SSE. ' +
           'Use it to call tools from scripts run by a live dashboard or similar.');
