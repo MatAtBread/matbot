@@ -28,9 +28,14 @@ export interface TypeScriptStripper {
  * no way to interrupt synchronous code (the browser) can do. An embedder may register its own.
  */
 export interface FunctionRunner {
-  /** Compile `body` as the body of an async function taking `params`. Throws on a syntax error. */
+  /** Compile `body` as the body of an async function taking `params`. Throws on a syntax error. A call
+   *  stopped at the limit rejects with an error whose `code` is {@link FUNCTION_TIMEOUT}. */
   compile(params: readonly string[], body: string): (...args: unknown[]) => Promise<unknown>;
 }
+
+/** The `code` on the error a {@link FunctionRunner} rejects with when it stops a run at its limit, so a
+ *  consumer can tell a stopped runaway from an ordinary failure without matching message text. */
+export const FUNCTION_TIMEOUT = 'FUNCTION_TIMEOUT';
 
 /**
  * One finding from {@link ToolTypeIndex.check} — the record, not a rendering of it.

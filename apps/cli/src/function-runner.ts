@@ -1,5 +1,5 @@
 import vm from 'node:vm';
-import type { FunctionRunner } from '@matatbread/matbot-core';
+import { FUNCTION_TIMEOUT, type FunctionRunner } from '@matatbread/matbot-core';
 
 // The default, when `function_timeout_ms` is absent from matbot.yaml. Far past any legitimate stretch of
 // computation between two awaits, and short enough that the daemon is back before anyone concludes it died.
@@ -39,7 +39,10 @@ export function createVmFunctionRunner(limitMs = FUNCTION_SYNC_LIMIT_MS): Functi
           pending = invoke.runInThisContext({ timeout: limitMs }) as Promise<unknown>;
         } catch (e) {
           if ((e as { code?: unknown }).code !== 'ERR_SCRIPT_EXECUTION_TIMEOUT') return Promise.reject(e);
-          pending = Promise.reject(new Error(`Stopped after ${limitMs / 1000}s of synchronous work without an await — most likely a loop that never ends. A function may compute between awaits, but not for this long.`));
+          pending = Promise.reject(Object.assign(
+            new Error(`Stopped after ${limitMs / 1000}s of synchronous work without an await — most likely a loop that never ends. A function may compute between awaits, but not for this long.`),
+            { code: FUNCTION_TIMEOUT },
+          ));
         } finally {
           // Stopped code skips its own finally blocks, so a thunk pushed inside it may never have been
           // popped; trimming to this call's depth keeps the next call from running a stale one.

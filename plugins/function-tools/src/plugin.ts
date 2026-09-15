@@ -241,7 +241,7 @@ class FunctionStore {
       executor: {
         execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
           const obj = (input ?? {}) as Record<string, unknown>;
-          return runFunction(machine, ctx, fn, paramNames.map(p => obj[p]));
+          return runFunction(machine, ctx, fn, paramNames.map(p => obj[p]), { tool: rec.name, source: rec.definition });
         },
       },
     };
@@ -379,7 +379,7 @@ class PackageStore {
         pluginName:   PLUGIN_NAME,
         executor: {
           execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
-            return runFunction(machine, ctx, fn, e.param === undefined ? [] : [input ?? {}]);
+            return runFunction(machine, ctx, fn, e.param === undefined ? [] : [input ?? {}], { tool: e.toolName, source: e.source });
           },
         },
       };
@@ -636,7 +636,7 @@ function functionTool(machine: MatbotMachine, store: FunctionStore, packages: Pa
               const report = await index.check(checkSnippet(sig));
               if (!report.ok) { yield errorEvent(`type error(s) — fix and re-run, or pass noTypeCheck to bypass:\n${renderCheck(report)}`); return; }
             }
-            yield* runFunction(machine, ctx, fn, [act.params ?? {}]);
+            yield* runFunction(machine, ctx, fn, [act.params ?? {}], { tool: `${TOOL_NAME} lambda`, source: act.definition });
             return;
           }
           case 'package': {

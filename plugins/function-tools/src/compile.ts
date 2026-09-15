@@ -1,4 +1,4 @@
-import { makeToolBox } from '@matatbread/matbot-plugin-api';
+import { FUNCTION_TIMEOUT, makeToolBox } from '@matatbread/matbot-plugin-api';
 import { stripLeadingTrivia } from './signature.js';
 import type { MatbotMachine, ComposedCallContext, FunctionRunner, ToolContext, ToolEvent, TypeScriptStripper } from '@matatbread/matbot-plugin-api';
 
@@ -51,6 +51,7 @@ export async function* runFunction(
   ctx:       ToolContext,
   fn:        CompiledFn,
   argValues: unknown[],
+  label?:    { tool: string; source: string },
 ): AsyncIterable<ToolEvent> {
   const queue: ToolEvent[] = [];
   let wake: (() => void) | null = null;
@@ -103,7 +104,17 @@ export async function* runFunction(
     ctx.signal.removeEventListener('abort', onAbort);
   }
   if (!done) { yield { type: 'error', message: CANCELLED }; return; }
-  if (errored) { yield { type: 'error', message: msg(error) }; return; }
+  if (errored) {
+    // The caller sees the error; the process log otherwise would not, which left a session's activity
+    // spans as the only trace of a runaway that had frozen everything. Named here because only this layer
+    // knows which function it was.
+    if ((error as { code?: unknown } | null)?.code === FUNCTION_TIMEOUT) {
+      const first = (label?.source.trim().split('\n')[0] ?? '').slice(0, 160);
+      console.warn(`[function-tools] stopped ${label?.tool ?? 'a function'} (session ${ctx.session.id}, call ${ctx.callId}): ${msg(error)}${first !== '' ? ` Definition: \`${first}\`` : ''}`);
+    }
+    yield { type: 'error', message: msg(error) };
+    return;
+  }
   // `undefined` is "no result", not "a result that is undefined": a composition that returns nothing
   // yields no `result` event, exactly like a hand-written tool whose work is a side-effect. This is the
   // difference between a silent verdict and a noisy one — the triggers dispatcher fires only on a

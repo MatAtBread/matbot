@@ -16,7 +16,8 @@ churn and less likely to affect a consumer who doesn't use them.
 - **`FunctionRunner`** — an optional `MatbotServices` member: a host-supplied compiler for model-authored
   code whose *synchronous* execution is bounded, since a loop that never awaits otherwise freezes every
   session sharing the event loop. Only stretches between awaits are bounded, so slow tool calls are
-  unaffected. Absent ⇒ unbounded, as before (and as the browser must be).
+  unaffected. Absent ⇒ unbounded, as before (and as the browser must be). A run stopped at the limit
+  rejects with `code: FUNCTION_TIMEOUT`.
 
 ### Bug fixes
 
@@ -27,7 +28,8 @@ churn and less likely to affect a consumer who doesn't use them.
 
 - **`function-tools`** — lambdas, defined functions and packages compile through `services.FunctionRunner`
   when present; a package export is now called inside that bounded run. `runFunction` stops waiting when
-  its call is aborted and reports it cancelled.
+  its call is aborted and reports it cancelled. A run stopped at the limit is logged, naming the tool
+  (`tool_function lambda` for a lambda), session, call and the definition's first line.
 - **`cli`** — registers a `node:vm` `FunctionRunner`: a `tool_function` doing more than 10s of synchronous
   work before its first await is stopped with an error naming the likely runaway loop, instead of freezing
   the daemon. The limit is `function_timeout_ms` in `matbot.yaml`; `0` registers no runner at all (bodies

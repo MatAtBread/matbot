@@ -132,3 +132,20 @@ test('function_timeout_ms comes from matbot.yaml: absent is the default, 0 is a 
     assert.throws(() => parseConfig(`function_timeout_ms: ${bad}\n`), /function_timeout_ms/, bad);
   }
 });
+
+test('a stopped run is logged, naming the tool, session, call and definition; an ordinary failure is not', async (t) => {
+  // The error reaches only the caller. Without this line the process log shows nothing, and a runaway
+  // that froze every session is found only by reading one session's activity spans.
+  const warn = t.mock.method(console, 'warn', () => { /* captured */ });
+  const src = '(args: {}): Promise<number> { let d = 1; while (d > 0) { d = d; } return d; }';
+  assert.match(message(await last(runFunction(machineWith(), ctxFor(), await lambda(src), [{}], { tool: 'tool_function lambda', source: src }))), LIMIT);
+  assert.equal(warn.mock.callCount(), 1);
+  const line = String(warn.mock.calls[0]?.arguments[0]);
+  for (const part of ['[function-tools] stopped tool_function lambda', 'session s1', 'call c1', 'Stopped after', '(args: {}): Promise<number>']) {
+    assert.ok(line.includes(part), `the log line should name ${part}: ${line}`);
+  }
+
+  const failing = await lambda("(args: {}): Promise<number> { throw new Error('ordinary'); }");
+  assert.match(message(await last(runFunction(machineWith(), ctxFor(), failing, [{}], { tool: 'x', source: 'y' }))), /ordinary/);
+  assert.equal(warn.mock.callCount(), 1, 'an ordinary failure is left to the caller');
+});
