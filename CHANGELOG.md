@@ -34,6 +34,10 @@ churn and less likely to affect a consumer who doesn't use them.
   the typed validator now reports `.action`/`.id: unexpected property` on a union with no discriminant,
   and the schema validator names undeclared keys first when it is refusing a call anyway (it still never
   refuses one for an undeclared key alone, the schema admitting them).
+- **`cli`** — the boot banner's "version skew" warning compared version NUMBERS, so it fired on every
+  release that bumped the CLI without core (packages are versioned independently) while missing two
+  copies carrying the same version. It now compares the resolved package directories of core and
+  plugin-api, as reached from the CLI and each of its dependencies, and names the duplicate copies.
 - **`ts-validation`** (0.4.13) — the published package now declares `@matatbread/matbot-core` as a peer
   dependency, which it imports a type from. The fix landed in 0.4.12's source after 0.4.12 was published,
   so npm never had it. (#71)
