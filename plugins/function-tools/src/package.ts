@@ -73,40 +73,134 @@ function assertStatement(source: string, at: number): void {
  * reads the source as a module is told so instead of silently losing state. `const` stays: documenting a
  * magic value is its common use, and `const state = {}` is a knowingly accepted escape.
  *
- * A scan, not a parse — this runs where there is no TypeScript compiler. A statement start is the top of
- * the source, anything after a top-level `;`, or a line opening after a top-level `}`; a line opening with
- * anything but a word or a quote there is a continuation (`.then(…)`, `| 'b'`), which is what ASI would say.
+ * A scan, not a parse — this runs where there is no TypeScript compiler. It does not look for where a
+ * statement STARTS: with optional semicolons, punctuation cannot say (`const a = 1\nlet n = 0` has none to
+ * find). Instead each allowed declaration is walked to where it ENDS and the next thing must be another. A
+ * `function` or `interface` ends at its body's `}`, so whatever follows is a new statement, `(` included. A
+ * `const` or `type` ends at a top-level `;`, or at a line break where ASI would end it: the token before
+ * can end an expression and the token after cannot continue one.
  */
 function assertStatelessTopLevel(source: string): void {
+  let at = nextSignificant(source, 0);
+  while (at !== -1) at = nextSignificant(source, declarationEnd(source, at) + 1);
+}
+
+const headLine = (s: string, at: number): string => (s.slice(at, at + 80).split('\n')[0] ?? '').trim();
+
+function declarationEnd(s: string, at: number): number {
+  assertStatement(s, at);
+  const head = /^export\b/.test(s.slice(at, at + 7)) ? nextSignificant(s, at + 6) : at;
+  if (head === -1) return s.length - 1;
+  const rest = s.slice(head, head + 20);
+  const end = /^(?:async\s+)?function\b/.test(rest) ? functionDeclarationEnd(s, head)
+    : /^interface\b/.test(rest) ? interfaceEnd(s, head)
+    : initializerEnd(s, head, /^type\b/.test(rest));
+  if (end === -1) throw new Error(`could not find the end of \`${headLine(s, at)}\` — check that its brackets balance.`);
+  return end;
+}
+
+/** Past a `<…>` type-parameter list starting at `i`, to the next significant character; `i` if there is none. */
+function skipTypeParams(s: string, i: number): number {
+  if (s[i] !== '<') return i;
   let depth = 0;
-  let last = '';
-  let lineHasCode = false;
-  let arrow = false;
-  for (let i = 0; i < source.length; i++) {
-    const c = source[i] as string;
-    if (c === '\n') { lineHasCode = false; continue; }
-    if (/\s/.test(c)) continue;
-    if (c === '/' && (source[i + 1] === '/' || source[i + 1] === '*')) { i = inertEnd(source, i); continue; }
-    if (depth === 0) {
-      const word = /[A-Za-z_$]/.test(c) && !IDENT_CHAR.test(source[i - 1] ?? '');
-      const quote = c === '"' || c === "'" || c === '`';
-      if (last === '' || last === ';' || (last === '}' && !lineHasCode && (word || quote))) {
-        arrow = false;
-        assertStatement(source, i);
-      }
-      // An expression-bodied arrow's `await` belongs to the arrow, not the top level.
-      if (word && !arrow && /^await\b/.test(source.slice(i, i + 6))) {
-        throw new Error(`top-level \`await\` is not allowed in a package (\`${(source.slice(i, i + 80).split('\n')[0] ?? '').trim()}\`) — it would repeat on every tool call rather than load once. Await inside the function that needs the value. ${STATELESS}`);
-      }
-      if (c === '=' && source[i + 1] === '>') arrow = true;
-    }
-    lineHasCode = true;
-    const inert = inertEnd(source, i);
-    if (inert >= 0) { if (depth === 0) last = source[inert] as string; i = inert; continue; }
-    if (c === '{' || c === '(' || c === '[') depth++;
-    else if ((c === '}' || c === ')' || c === ']') && depth > 0) depth--;
-    if (depth === 0) last = c;
+  for (let k = i; k < s.length; k++) {
+    const inert = inertEnd(s, k);
+    if (inert >= 0) { k = inert; continue; }
+    if (s[k] === '=' && s[k + 1] === '>') { k++; continue; }
+    if (s[k] === '<') depth++;
+    else if (s[k] === '>' && --depth === 0) return nextSignificant(s, k + 1);
   }
+  return -1;
+}
+
+function functionDeclarationEnd(s: string, head: number): number {
+  const name = /^(?:async\s+)?function\s*\*?\s*(?:[A-Za-z_$][\w$]*)?\s*/.exec(s.slice(head));
+  if (name === null) return -1;
+  const open = skipTypeParams(s, head + name[0].length);
+  return s[open] === '(' ? functionEnd(s, open, true) : -1;
+}
+
+function interfaceEnd(s: string, head: number): number {
+  let angle = 0;
+  for (let i = head; i < s.length; i++) {
+    const inert = inertEnd(s, i);
+    if (inert >= 0) { i = inert; continue; }
+    const c = s[i];
+    if (c === '=' && s[i + 1] === '>') { i++; continue; }
+    if (c === '<') angle++;
+    else if (c === '>') angle--;
+    else if (c === '{') {
+      const end = matchBrace(s, i);
+      if (angle === 0 || end === -1) return end;
+      i = end;
+    }
+  }
+  return -1;
+}
+
+// Words that carry an expression or type onto the next line when they open it…
+const CONTINUES_LINE = new Set(['as', 'satisfies', 'in', 'instanceof', 'extends', 'is']);
+// …and those that leave one unfinished when they end a line. `new` is only the second: a line opening with
+// it after a complete expression is a new statement, which is exactly the case to catch.
+const UNFINISHED_AT_EOL = new Set([...CONTINUES_LINE, 'keyof', 'typeof', 'infer', 'readonly', 'unique', 'new', 'void', 'delete', 'await']);
+
+function continuesLine(s: string, i: number): boolean {
+  if (/[.,([`+\-*/%&|^<>=?:]/.test(s[i] as string)) return true;
+  const word = /^[A-Za-z_$][\w$]*/.exec(s.slice(i))?.[0];
+  return word !== undefined && CONTINUES_LINE.has(word);
+}
+
+/** The last character of a `const`/`type` (or other non-function) declaration starting at `head`. */
+function initializerEnd(s: string, head: number, isType: boolean): number {
+  let depth = 0;
+  let angle = 0;
+  // `<`/`>` are brackets in a type — a whole `type`, or a `const`'s annotation — and operators in an initializer.
+  let typed = isType;
+  let assigned = false;
+  // An expression-bodied arrow's `await` belongs to the arrow, not the top level.
+  let arrow = false;
+  let ended = false;
+  let broke = false;
+  let last = head;
+  for (let i = head; i < s.length; i++) {
+    const c = s[i] as string;
+    if (c === '\n') { if (depth === 0 && angle === 0) broke = true; continue; }
+    if (/\s/.test(c)) continue;
+    const inert = inertEnd(s, i);
+    if (inert >= 0 && c === '/' && (s[i + 1] === '/' || s[i + 1] === '*')) {
+      if (depth === 0 && angle === 0 && s.slice(i, inert + 1).includes('\n')) broke = true;
+      i = inert;
+      continue;
+    }
+    if (depth === 0 && angle === 0) {
+      if (broke && ended && !continuesLine(s, i)) return last;
+      if (c === ';') return i;
+      if (!arrow && /^await\b/.test(s.slice(i, i + 6)) && !IDENT_CHAR.test(s[i - 1] ?? '')) {
+        throw new Error(`top-level \`await\` is not allowed in a package (\`${headLine(s, i)}\`) — it would repeat on every tool call rather than load once. Await inside the function that needs the value. ${STATELESS}`);
+      }
+    }
+    broke = false;
+    if (inert >= 0) { i = last = inert; ended = true; continue; }
+    if (IDENT_CHAR.test(c)) {
+      const word = /^[\w$]+/.exec(s.slice(i))?.[0] ?? c;
+      i = last = i + word.length - 1;
+      ended = !UNFINISHED_AT_EOL.has(word);
+      continue;
+    }
+    last = i;
+    if (c === '=' && s[i + 1] === '>') { if (depth === 0 && angle === 0) arrow = true; i = last = i + 1; ended = false; continue; }
+    if (depth === 0 && angle === 0 && !isType && !assigned) {
+      if (c === ':') typed = true;
+      else if (c === '=') { assigned = true; typed = false; }
+    }
+    if (c === '{' || c === '(' || c === '[') { depth++; ended = false; continue; }
+    if (c === '}' || c === ')' || c === ']') { if (depth > 0) depth--; ended = true; continue; }
+    if (typed && depth === 0 && c === '<') { angle++; ended = false; continue; }
+    if (typed && depth === 0 && c === '>' && angle > 0) { angle--; ended = true; continue; }
+    // Postfix `++`/`--` and a non-null `!` leave an expression complete; every other punctuator does not.
+    ended = ((c === '+' || c === '-') && s[i - 1] === c) || (c === '!' && ended);
+  }
+  return last;
 }
 const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
@@ -127,8 +221,9 @@ function nextSignificant(s: string, from: number): number {
 }
 
 /** The index of the `}` closing a function whose parameter list opens at `open`. A brace-bearing return
- *  type (`: { a: number }`) is recognised by what follows its `}` — the body's `{`, or more type. */
-function functionEnd(s: string, open: number): number {
+ *  type (`: { a: number }`) is recognised by what follows its `}` — the body's `{`, or more type. With
+ *  `overload`, a top-level `;` before any body ends a bodiless overload signature there. */
+function functionEnd(s: string, open: number, overload = false): number {
   const close = matchParen(s, open);
   if (close === -1) return -1;
   let depth = 0;
@@ -139,6 +234,7 @@ function functionEnd(s: string, open: number): number {
     if (c === '=' && s[i + 1] === '>') { i++; continue; }
     if (c === '(' || c === '[' || c === '<') depth++;
     else if (c === ')' || c === ']' || c === '>') { if (depth > 0) depth--; }
+    else if (c === ';' && depth === 0 && overload) return i;
     else if (c === '{' && depth === 0) {
       const end = matchBrace(s, i);
       if (end === -1) return -1;
@@ -197,12 +293,15 @@ export function parsePackage(packageName: string, source: string): ParsedPackage
     if (i > 0 && IDENT_CHAR.test(source[i - 1] as string)) continue;
     if (IDENT_CHAR.test(source[i + 6] ?? '')) continue;
 
-    const head = source.slice(i + 6).match(/^\s+((?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)\s*)\(/);
+    const head = source.slice(i + 6).match(/^\s+((?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)\s*)([(<])/);
     if (head === null) {
       const what = source.slice(i, i + 40).split('\n')[0];
       throw new Error(`only functions can be exported from a package — found \`${what}\`. Types, constants and helpers are private to the package; drop their \`export\`.`);
     }
     if (/\*/.test(head[1] as string)) throw new Error(`exported function "${head[2]}" is a generator — a tool returns one result.`);
+    if (head[3] === '<') {
+      throw new Error(`exported function "${head[2]}" is generic — a tool's input and result contracts must be concrete types. Keep the generic function private (drop its \`export\`) and export a non-generic wrapper that calls it.`);
+    }
     const fnStart = i + 6 + (head[0].length - head[1]!.length - 1);
     const open    = i + 6 + head[0].length - 1;
     const end     = functionEnd(source, open);

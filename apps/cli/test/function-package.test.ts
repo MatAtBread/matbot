@@ -61,6 +61,8 @@ test('malformed packages are refused with the reason', () => {
     ['P',    'export function _f(a: {}): void {}',                  /start with a letter/],
     ['P',    'export function f(a: {}): void {}\nexport function f(a: {}): void {}', /exported twice/],
     ['P'.repeat(40), `export function ${'f'.repeat(30)}(a: {}): void {}`, /longer than 64/],
+    // The <T> is what fails, not the export being a function.
+    ['P',    'export function f<T>(a: { v: T }): T { return a.v; }', /"f" is generic/],
   ];
   for (const [name, src, re] of cases) assert.throws(() => parsePackage(name, src), re, `${name}: ${src}`);
 });
@@ -120,6 +122,14 @@ test('top-level forms that would behave differently if run once are refused, nam
     ['const cfg = await tool.x({});',               /top-level `await`/],
     ["import { x } from 'y';",                      /cannot `import`/],
     ['(async () => { })();',                        /top-level statement/],
+    // No semicolons: a statement start is where the previous declaration ENDS, not after `;`.
+    ['const LIMIT = 10\nlet count = 0',              /top-level `let`/],
+    ['type A = Array<string>\nlet count = 0',       /top-level `let`/],
+    ['const d = b!\nnew Date()',                    /top-level statement `new Date\(\)`/],
+    // A line opening with `(` after a function or interface body is a new statement, not a call.
+    ['function f(): void {}\n(async () => { })()',  /top-level statement `\(async/],
+    ['interface I { a: number }\n(async () => { })()', /top-level statement `\(async/],
+    ['function over(a: string): void;\nfunction over(a: string): void {}\nlet z = 1', /top-level `let`/],
   ];
   for (const [top, re] of refused) {
     const src = `${top}\nexport async function f(args: {}): Promise<void> {}`;
@@ -136,6 +146,12 @@ test('top-level forms that would behave differently if run once are refused, nam
     'async function helper(): Promise<number> { let n = 0; await tool.x({}); return n; }',
     'function sync(a: number): number { return a; }',
     'export function syncExport(args: { a: number }): number { return args.a; }',
+    'const n = 1\n  + 2',
+    'const big = 10 as\n  number',
+    'type Pair<T> = [T, T]\ntype Box = { v: Pair<number> }',
+    'function over(a: string): void;\nfunction over(a: string): void {}',
+    'function g<T extends { a: 1 }>(x: T): T { return x; }',
+    'const count: Map<string, number> = new Map()',
   ];
   for (const top of allowed) {
     assert.doesNotThrow(() => parsePackage('P', `${top}\nexport async function f(args: {}): Promise<void> {}`), top);
