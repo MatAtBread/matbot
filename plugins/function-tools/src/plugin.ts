@@ -5,16 +5,24 @@ import type {
 } from '@matatbread/matbot-plugin-api';
 import { buildAsyncFn, runFunction, INJECTED, type CompiledFn } from './compile.js';
 import { parseSignature, paramsSchema, type ParsedParam, type ParsedSignature } from './signature.js';
+import { parsePackage, buildPackageFn, exportFn, type ParsedPackage } from './package.js';
 
-const TOOL_NAME   = 'tool_function';
-const PLUGIN_NAME = 'function-tools';
-const NAMESPACE   = 'functions';
+const TOOL_NAME         = 'tool_function';
+const PLUGIN_NAME       = 'function-tools';
+const NAMESPACE         = 'functions';
+const PACKAGE_NAMESPACE = 'function-packages';
 
 interface FunctionRecord { name: string; definition: string; description?: string; definedUnchecked?: true }
 
 /** One function's row in a `check` sweep: the service's report, plus who it is about. `diagnostics`
  *  carries each finding's own `rendered` text, so a reader displays that and counts on `total`. */
-interface CheckResult extends ToolCheckReport { name: string; definedUnchecked?: true }
+interface CheckResult extends ToolCheckReport { name: string; package?: true; definedUnchecked?: true }
+
+interface PackageRecord { name: string; tools: string[]; definition: string; definedUnchecked?: true }
+
+/** A stored package, keyed by package name: the unit of declaration AND of removal, so an internal helper
+ *  can never outlive the exports calling it, nor an export the helper it calls. */
+interface PackageDoc { id: string; version: string; definition: string; definedUnchecked?: true }
 
 /** A stored function. Its `id` IS its name — names are already unique (they are tool-registry keys),
  *  so there is no second identity to keep in step, and a rename is a delete plus an add. */
@@ -66,20 +74,22 @@ declare module '@matatbread/matbot-plugin-api' {
     tool_function:
       | ToolContract<{ message: string; tool: string; parameters: ParsedParam[] }, { action: 'define'; definition: string; description?: string; noTypeCheck?: boolean }>
       | ToolContract<unknown,                                                      { action: 'lambda'; definition: string; params?: object; noTypeCheck?: boolean }>
-      | ToolContract<{ ok: boolean; checked: boolean; results: CheckResult[] },    { action: 'check';  name?: string }>
-      | ToolContract<{ functions: FunctionRecord[] },                             { action: 'list'   }>
+      | ToolContract<{ message: string; package: string; tools: string[] },         { action: 'package'; name: string; definition: string; noTypeCheck?: boolean }>
+      | ToolContract<{ ok: boolean; checked: boolean; results: CheckResult[] },    { action: 'check';  name?: string; package?: string }>
+      | ToolContract<{ functions: FunctionRecord[]; packages: PackageRecord[] },  { action: 'list'   }>
       | ToolContract<{ available: boolean; dts: string },                         { action: 'types'  }>
-      | ToolContract<{ message: string },                                         { action: 'remove'; name: string }>;
+      | ToolContract<{ message: string },                                         { action: 'remove'; name: string } | { action: 'remove'; package: string }>;
   }
 }
 
 type ToolFunctionAction =
   | { action: 'define'; definition: string; description?: string; noTypeCheck?: boolean }
   | { action: 'lambda'; definition: string; params?: unknown; noTypeCheck?: boolean }
-  | { action: 'check'; name?: string }
+  | { action: 'package'; name: string; definition: string; noTypeCheck?: boolean }
+  | { action: 'check'; name?: string; package?: string }
   | { action: 'list' }
   | { action: 'types' }
-  | { action: 'remove'; name: string };
+  | { action: 'remove'; name?: string; package?: string };
 
 /**
  * Owns the defined functions: derives+compiles each into a registered tool, and persists the sources
@@ -240,6 +250,146 @@ class FunctionStore {
   }
 }
 
+/**
+ * Owns the defined packages: one document per package in `function-packages`, each registering a tool per
+ * exported function. Like {@link FunctionStore} it holds no copy of the documents — only `owned`, the
+ * tool names each package has put into the registry, which is what a redefinition or removal unregisters.
+ */
+class PackageStore {
+  private readonly machine: MatbotMachine;
+  private readonly store:   Store<PackageDoc>;
+  private readonly owned = new Map<string, Set<string>>();
+
+  constructor(machine: MatbotMachine, store: Store<PackageDoc>) {
+    this.machine = machine;
+    this.store   = store;
+  }
+
+  async reload(): Promise<void> {
+    const { items } = await this.store.query({ immutable: true });
+    const seen = new Set<string>();
+    for (const doc of items) {
+      try { await this.install(doc.id, parsePackage(doc.id, doc.definition), doc.definition); seen.add(doc.id); }
+      catch (e) { console.warn(`[${PLUGIN_NAME}] skipping package "${doc.id}": ${e instanceof Error ? e.message : String(e)}`); }
+    }
+    for (const name of [...this.owned.keys()]) if (!seen.has(name)) this.unregister(name);
+  }
+
+  async list(): Promise<PackageRecord[]> {
+    const { items } = await this.store.query({ sort: [{ field: 'id', dir: 'asc' }], immutable: true });
+    return items.map(doc => {
+      let tools: string[] = [];
+      try { tools = parsePackage(doc.id, doc.definition).exports.map(e => e.toolName); } catch { /* reported by check */ }
+      return {
+        name: doc.id, tools, definition: doc.definition,
+        ...(doc.definedUnchecked === true ? { definedUnchecked: true as const } : {}),
+      };
+    });
+  }
+
+  /** The package that registered `toolName`, if one did — so a remove by tool name can say where it lives. */
+  ownerOf(toolName: string): string | undefined {
+    for (const [name, tools] of this.owned) if (tools.has(toolName)) return name;
+    return undefined;
+  }
+
+  async define(name: string, definition: string, noTypeCheck = false): Promise<string[]> {
+    const parsed = parsePackage(name, definition);
+    // The whole module is the snippet, so a private helper's signature is checked against its callers too.
+    const index = this.machine.ToolTypeIndex;
+    let checked = false;
+    if (index !== undefined && !noTypeCheck) {
+      const report = await index.check(definition);
+      if (!report.ok) throw new Error(`type error(s) — fix and re-define, or pass noTypeCheck to bypass:\n${renderCheck(report)}`);
+      checked = report.checked;
+    }
+    await this.install(name, parsed, definition);
+    const doc: PackageDoc = {
+      id: name, version: Date.now().toString(), definition,
+      ...(checked ? {} : { definedUnchecked: true as const }),
+    };
+    await this.store.set(doc.id, doc);
+    return parsed.exports.map(e => e.toolName);
+  }
+
+  async check(name?: string): Promise<CheckResult[]> {
+    const index = this.machine.ToolTypeIndex;
+    if (index === undefined) throw new Error('No type-checker is available here (e.g. the browser), so nothing can be checked.');
+    let docs: PackageDoc[];
+    if (name === undefined) {
+      ({ items: docs } = await this.store.query({ sort: [{ field: 'id', dir: 'asc' }], immutable: true }));
+    } else {
+      const doc = await this.store.get(name);
+      if (doc === null) throw new Error(`No package named "${name}" was defined here.`);
+      docs = [doc];
+    }
+    const results: CheckResult[] = [];
+    for (const doc of docs) {
+      let report: ToolCheckReport;
+      try { parsePackage(doc.id, doc.definition); report = await index.check(doc.definition); }
+      catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        report = { ok: false, checked: false, total: 1, diagnostics: [{ label: 'PARSE', code: 0, message, rendered: message }] };
+      }
+      results.push({
+        name: doc.id, package: true, ...report,
+        ...(doc.definedUnchecked === true ? { definedUnchecked: true as const } : {}),
+      });
+    }
+    return results;
+  }
+
+  async remove(name: string): Promise<boolean> {
+    const doc = await this.store.get(name);
+    if (doc === null) return false;
+    await this.store.delete(name, doc.version);
+    this.unregister(name);
+    return true;
+  }
+
+  removeAll(): void {
+    for (const name of [...this.owned.keys()]) this.unregister(name);
+  }
+
+  private unregister(name: string): void {
+    for (const tool of this.owned.get(name) ?? []) this.machine.tools.remove(tool);
+    this.owned.delete(name);
+  }
+
+  /** Compile, then check every exported name, then swap the group in — so a failure at any step leaves
+   *  the previous definition (or nothing) registered, never half of the new one. */
+  private async install(name: string, parsed: ParsedPackage, definition: string): Promise<void> {
+    const pkg  = await buildPackageFn(this.machine.TypeScriptStripper, definition, parsed);
+    const mine = this.owned.get(name) ?? new Set<string>();
+    for (const e of parsed.exports) {
+      if (this.machine.tools.resolve(e.toolName) !== null && !mine.has(e.toolName)) {
+        throw new Error(`A tool named "${e.toolName}" already exists and wasn't defined by package "${name}" — rename the package or the function. Nothing was registered.`);
+      }
+    }
+    const machine = this.machine;
+    const next = new Set(parsed.exports.map(e => e.toolName));
+    for (const old of mine) if (!next.has(old)) machine.tools.remove(old);
+    for (const e of parsed.exports) {
+      const fn = exportFn(pkg, e.name);
+      const tool: Tool = {
+        name:         e.toolName,
+        description:  `${e.description ?? `${PLACEHOLDER_DESCRIPTION}\n\nSource:\n${e.source}`}\n\nExported by package "${name}", defined via ${TOOL_NAME}.`,
+        inputSchema:  e.inputSchema,
+        toolContract: e.toolContract,
+        pluginName:   PLUGIN_NAME,
+        executor: {
+          execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
+            return runFunction(machine, ctx, fn, e.param === undefined ? [] : [input ?? {}]);
+          },
+        },
+      };
+      machine.tools.remove(e.toolName);
+      machine.tools.register(tool);
+    }
+    this.owned.set(name, next);
+  }
+}
+
 const DESCRIPTION = `WHEN TO USE THIS — judge it by the SIZE and SHAPE of the work, not by the number of calls:
 
   1. A VERBOSE result you need a fraction of. A listing, a table, a file body, a search dump — where what
@@ -324,8 +474,34 @@ ACTIONS
            just its answer — but NOT a wrapper for a single call (see NOT FOR THIS above). If the same
            chain is worth repeating later, define it instead. Type-checked against the live tool types before running (like define),
            so a bad composition is caught before it runs; pass \`noTypeCheck: true\` to bypass.
+  package — Persist a PACKAGE: several tools plus private helpers they share, written as one TypeScript
+           module. Pass \`name\` (the package name) and \`definition\` (the module source). Every \`export\`ed
+           function becomes a tool named \`<package>__<function>\` — that exact name, with the double
+           underscore, is how you, other functions and HTTP call it: \`await tool.<package>__<function>(params)\`.
+           Everything NOT exported (helper functions, types, constants) is private to the package and is never
+           a tool. Use this instead of defining a helper as a tool of its own. An exported function takes ONE
+           object parameter (or none) and declares a return type, like a lambda, so calling it from inside the
+           package (directly — \`await my_helper(args)\`, never through \`tool\`) looks the same as calling it
+           from outside. A comment directly above an \`export\` becomes that tool's description. Type-checked
+           as a whole before registering (\`noTypeCheck\` bypasses). Re-defining a package replaces the whole
+           group — a function no longer exported stops being a tool — and \`remove { package }\` deletes it.
+
+           A PACKAGE IS NOT A MODULE INSTANCE, and it has NO STATE. It looks like a Node module but does not
+           behave like one: its whole top level is evaluated afresh on EVERY tool call, so nothing there
+           persists between calls and nothing there runs once. Two calls to \`<package>__inc\` share nothing,
+           and neither does a call through \`tool.<package>__x\` from inside the package. ONLY these may
+           appear at the top level: \`function\`, \`async function\`, \`export function\`, \`export async
+           function\`, \`const\` (for fixed values), \`interface\` and \`type\`. Anything else is REFUSED —
+           including \`let\`/\`var\`, \`class\`, \`enum\`, \`declare\`, \`import\`, a bare statement (\`n++\`,
+           \`await tool.x(...)\`) and a top-level \`await\` (\`const cfg = await ...\`).
+           WHAT A PACKAGE IS FOR: not polluting the global tool scope. Every tool is one entry in a single,
+           shared list that the model chooses from; a helper registered as a tool competes with the tools that
+           use it. A package lets related tools share private helpers without adding them to that list — and
+           that is ALL it does. It is NOT a substitute for a plugin. If what you are building needs to REMEMBER
+           anything between calls — a counter, a cache, a connection, one-time setup — or needs hooks,
+           services or background work, write a matbot PLUGIN, which has all of those capabilities.
   check  — Re-run define's type-check over a function you already defined, without running or re-registering
-           it. Pass \`name\` for one, or omit it to check every defined function. Use this after anything that
+           it. Pass \`name\` for one function or \`package\` for one package, or omit both to check everything. Use this after anything that
            could move a contract a function was written against — a tool changing its parameters or result,
            a plugin loading or unloading — since a defined function is compiled but NOT re-checked on
            reload, so it keeps working until the moment it doesn't. Returns a row per function: \`total\` is
@@ -335,13 +511,14 @@ ACTIONS
            \`definedUnchecked: true\` if that function was never type-checked when it was defined.
            READ \`ok\` TOGETHER WITH \`checked\`, on the result and on each row: \`checked: false\` means
            no type-checker could run here, so \`ok: true\` says only that nothing was examined.
-  list   — Show the functions you've defined, with their source. \`definedUnchecked: true\` marks one that
+  list   — Show the functions and packages you've defined, with their source. \`definedUnchecked: true\` marks one that
            was registered without a type-check (it was defined with \`noTypeCheck\`, or no checker was
            available) — run \`check\` on it, since a bypass hides errors that are still there.
   types  — Return TypeScript declarations (a .d.ts) of what the available tools' calls resolve to, so you
            can compose against real return types. Node only; \`available: false\` with an empty dts where
            type info can't be derived (e.g. the browser) — fall back to inferring shapes and testing.
-  remove — Delete a defined function and unregister its tool.
+  remove — Delete a defined function (\`name\`) and unregister its tool, or a whole package (\`package\`)
+           and every tool it exports.
 
 Functions use method-shorthand syntax — NOT arrow functions:
 
@@ -362,18 +539,30 @@ Functions use method-shorthand syntax — NOT arrow functions:
 
   lambda (definition + params):
     definition: (args: { names: string[] }): string[] { return args.names.map(n => n.toUpperCase()); }
-    params:     { "names": ["a", "b"] }`;
+    params:     { "names": ["a", "b"] }
+
+  package (name + definition):
+    name:       Presence
+    definition:
+      interface Report { home: boolean; room?: string }
+      async function report(): Promise<Report> { … one private helper, shared below … }
+      // Whether Mat is at home, in one word.
+      export async function where(args: {}): Promise<string> { return (await report()).home ? 'home' : 'out'; }
+      // The room Mat was last seen in.
+      export async function room(args: {}): Promise<string> { return (await report()).room ?? 'unknown'; }
+  → registers tools "Presence__where" and "Presence__room"; \`report\` is not a tool.`;
 
 const INPUT_SCHEMA: JSONSchema = {
   type: 'object',
   required: ['action'],
   properties: {
-    action:     { type: 'string', enum: ['define', 'lambda', 'check', 'list', 'types', 'remove'], description: 'define: persist a named function as a tool. lambda: run an anonymous function once. check: re-type-check already-defined functions against the current tool types. types: get TypeScript declarations of tool return types. list / remove: manage defined functions.' },
-    definition:  { type: 'string', description: 'define/lambda: the function source (method-shorthand TypeScript, no arrow).' },
+    action:     { type: 'string', enum: ['define', 'lambda', 'package', 'check', 'list', 'types', 'remove'], description: 'define: persist a named function as a tool. lambda: run an anonymous function once. package: persist a TypeScript module whose exported functions become tools <package>__<function>. check: re-type-check already-defined functions/packages against the current tool types. types: get TypeScript declarations of tool return types. list / remove: manage defined functions and packages.' },
+    definition:  { type: 'string', description: 'define/lambda: the function source (method-shorthand TypeScript, no arrow). package: the module source — exported functions become tools, the rest is private. Stateless: only declarations at the top level (no let/var, statements or top-level await).' },
+    package:     { type: 'string', description: 'remove / check (optional): the package to delete or check.' },
     description: { type: 'string', description: 'define only (optional): Describe the intent of the function from the context used to create it. Include a clause describing the use-cases for the function tool. Becomes the defined tool\'s description, and therefore it is important to make the description both specific in terms of intent and use-cases. Do not describe the mechanism or execution as this is already clear from the code.' },
     params:      { type: 'object', description: 'lambda only: the single argument object passed to the function.' },
     noTypeCheck: { type: 'boolean', description: 'define/lambda (optional, default false): skip the TypeScript type-check of the body against the live tool types. The check is a strong signal the composition is sound before it is registered/run — leave it on unless you must bypass a spurious error (e.g. composing a tool whose result type is `unknown`). A bypassed error does not go away: it is still there, and will surface later when something unrelated moves, so a function defined this way is marked `definedUnchecked` in `list` and `check` and should be checked again once the obstacle is gone. No effect where no type-checker is available (e.g. the browser) — a definition made there is marked the same way, being equally unverified.' },
-    name:       { type: 'string', description: 'remove: the defined function/tool name to delete. check (optional): the one function to check — omit it to check every defined function.' },
+    name:       { type: 'string', description: 'package: the package name (an identifier, no "__"). remove: the defined function/tool name to delete. check (optional): the one function to check.' },
   },
 };
 
@@ -403,7 +592,7 @@ const MULTI_STAGE_ADVICE =
 
 const errorEvent = (message: string): ToolEvent => ({ type: 'error', message });
 
-function functionTool(machine: MatbotMachine, store: FunctionStore): Tool<ToolResultOf<'tool_function'>> {
+function functionTool(machine: MatbotMachine, store: FunctionStore, packages: PackageStore): Tool<ToolResultOf<'tool_function'>> {
   return {
     name:        TOOL_NAME,
     description: DESCRIPTION,
@@ -450,13 +639,25 @@ function functionTool(machine: MatbotMachine, store: FunctionStore): Tool<ToolRe
             yield* runFunction(machine, ctx, fn, [act.params ?? {}]);
             return;
           }
+          case 'package': {
+            if (typeof act.name !== 'string' || act.name === '') { yield errorEvent('package requires a "name" (the package name).'); return; }
+            if (typeof act.definition !== 'string' || act.definition.trim() === '') { yield errorEvent('package requires a "definition" (the module source).'); return; }
+            try {
+              const tools = await packages.define(act.name, act.definition, act.noTypeCheck === true);
+              const note = act.noTypeCheck === true ? ' (type-check skipped)' : '';
+              yield { type: 'result', value: { message: `Defined package "${act.name}" exporting ${tools.map(t => `"${t}"`).join(', ')}.${note} Call them by those names.`, package: act.name, tools } };
+            } catch (e) { yield errorEvent(e instanceof Error ? e.message : String(e)); }
+            return;
+          }
           case 'check': {
             if (act.name !== undefined && (typeof act.name !== 'string' || act.name === '')) {
               yield errorEvent('check: "name" must be the name of a defined function — omit it to check every one.');
               return;
             }
             try {
-              const results = await store.check(act.name);
+              const results = act.package !== undefined ? await packages.check(act.package)
+                : act.name !== undefined ? await store.check(act.name)
+                : [...await store.check(), ...await packages.check()];
               // `ok` is qualified by `checked` here exactly as it is on a row: where no type-checker can
               // run (the browser registers an index that supplies types but checks nothing), every row
               // comes back clean and a bare `ok: true` would report success for work nothing did.
@@ -469,7 +670,7 @@ function functionTool(machine: MatbotMachine, store: FunctionStore): Tool<ToolRe
             return;
           }
           case 'list':
-            yield { type: 'result', value: { functions: await store.list() } };
+            yield { type: 'result', value: { functions: await store.list(), packages: await packages.list() } };
             return;
           case 'types': {
             const index = machine.ToolTypeIndex;
@@ -481,9 +682,19 @@ function functionTool(machine: MatbotMachine, store: FunctionStore): Tool<ToolRe
             return;
           }
           case 'remove': {
-            if (typeof act.name !== 'string' || act.name === '') { yield errorEvent('remove requires a "name".'); return; }
+            if (typeof act.package === 'string' && act.package !== '') {
+              const ok = await packages.remove(act.package);
+              yield { type: 'result', value: { message: ok ? `Removed package "${act.package}" and its tools.` : `No package named "${act.package}" was defined here.` } };
+              return;
+            }
+            if (typeof act.name !== 'string' || act.name === '') { yield errorEvent('remove requires a "name" (a function) or a "package".'); return; }
             const ok = await store.remove(act.name);
-            yield { type: 'result', value: { message: ok ? `Removed "${act.name}".` : `No function named "${act.name}" was defined here.` } };
+            const owner = ok ? undefined : packages.ownerOf(act.name);
+            // A package is removed as a group, so one export cannot be removed from under its siblings.
+            const miss = owner !== undefined
+              ? `"${act.name}" is exported by package "${owner}" — remove { package: "${owner}" } removes the group, or re-define the package without it.`
+              : `No function named "${act.name}" was defined here.`;
+            yield { type: 'result', value: { message: ok ? `Removed "${act.name}".` : miss } };
             return;
           }
           default:
@@ -496,6 +707,7 @@ function functionTool(machine: MatbotMachine, store: FunctionStore): Tool<ToolRe
 
 export function createFunctionToolsPlugin(): MatbotPluginSpec {
   let store:     FunctionStore | undefined;
+  let packages:  PackageStore | undefined;
   let lifecycle: AbortController | undefined;
   return {
     apiVersion: PLUGIN_API_VERSION,
@@ -508,16 +720,21 @@ export function createFunctionToolsPlugin(): MatbotPluginSpec {
       );
       const fns = new FunctionStore(services, docs);
       store = fns;
+      const pkgs = new PackageStore(services, notifyingStore(
+        services.createStore<PackageDoc>(PACKAGE_NAMESPACE), services.Notifier, PACKAGE_NAMESPACE, 'function-package',
+      ));
+      packages = pkgs;
       await fns.reload();
+      await pkgs.reload();
       // The registered tools are state derived from the store at setup time, so they must be rebuilt
       // when a deferred StorageBackend swap lands on a different `functions` set. No `replay` — the
       // boot load is above; this reacts only to future swaps.
-      services.mounted.observe({ key: 'StorageBackend', signal: lifecycle.signal }, () => void fns.reload());
-      services.tools.register(functionTool(services, fns));
+      services.mounted.observe({ key: 'StorageBackend', signal: lifecycle.signal }, () => void fns.reload().then(() => pkgs.reload()));
+      services.tools.register(functionTool(services, fns, pkgs));
       services.systemContext.register(() => MULTI_STAGE_ADVICE);
     },
 
-    async teardown() { lifecycle?.abort(); store?.removeAll(); },
+    async teardown() { lifecycle?.abort(); store?.removeAll(); packages?.removeAll(); },
   };
 }
 

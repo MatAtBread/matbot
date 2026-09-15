@@ -13,6 +13,18 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Optional
 
+- **`function-tools`** — `tool_function { action: 'package', name, definition }` defines a **package**: one
+  TypeScript module whose `export`ed functions become tools named `<package>__<function>`, and whose other
+  declarations (helpers, types, constants) are private and never registered — so an internal helper no
+  longer has to be a tool competing for the presented window. `__` rather than `.`, which Anthropic and
+  OpenAI reject in a tool name; the name the model sees is the one code calls as
+  `tool.<package>__<function>(…)`. Exports take one object parameter; the module is type-checked as a
+  whole and defined, replaced and removed as a group, failing the whole definition on any name clash. A
+  package is **stateless** and not a substitute for a plugin: its top level is evaluated afresh per tool
+  call and may hold only `function`/`async function` (exported or not), `const`, `interface` and `type`
+  — a `let`/`var`, `class`, `enum`, `declare`, `import`, bare statement or top-level `await` is refused,
+  pointing the author at a plugin for anything that must persist. `list` gains `packages`; `check` and `remove` take
+  `package`. (#63)
 - **`frontend-web`** — contributes system context describing the relative `POST /tools/<name>` and
   `POST /stream/tools/<name>` entry points, so a model writing a live dashboard or similar script knows
   it can call registered tools over HTTP. Only once the server is listening. (#72)

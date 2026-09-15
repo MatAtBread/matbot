@@ -26,7 +26,7 @@ export interface ParsedSignature {
  * definition: the body was then never located and `define` reported a missing return type — a misleading
  * error about a line the author had written correctly.
  */
-function inertEnd(s: string, i: number): number {
+export function inertEnd(s: string, i: number): number {
   const c = s[i];
   if (c === '/' && s[i + 1] === '/') { const nl = s.indexOf('\n', i + 2); return nl === -1 ? s.length - 1 : nl - 1; }
   if (c === '/' && s[i + 1] === '*') { const close = s.indexOf('*/', i + 2); return close === -1 ? s.length - 1 : close + 1; }
@@ -68,7 +68,7 @@ const REGEX_PRECEDING_KEYWORDS = new Set([
 ]);
 
 /** Walk from the `(` at `open` to its matching `)`, skipping strings and comments; -1 if unbalanced. */
-function matchParen(s: string, open: number): number {
+export function matchParen(s: string, open: number): number {
   let depth = 0;
   for (let i = open; i < s.length; i++) {
     const inert = inertEnd(s, i);
@@ -81,7 +81,7 @@ function matchParen(s: string, open: number): number {
 }
 
 /** Walk from the `{` at `open` to its matching `}`, skipping strings and comments; -1 if unbalanced. */
-function matchBrace(s: string, open: number): number {
+export function matchBrace(s: string, open: number): number {
   let depth = 0;
   for (let i = open; i < s.length; i++) {
     const inert = inertEnd(s, i);
@@ -303,7 +303,7 @@ function objectSchema(body: string, depth: number): JSONSchema {
  * and what `json-validation` enforces. Recovering structure therefore rejects calls that used to pass —
  * a missing member of an object param, a value outside a literal union — which is the point of it.
  */
-function tsTypeToSchema(type: string | undefined, depth = 0): JSONSchema {
+export function tsTypeToSchema(type: string | undefined, depth = 0): JSONSchema {
   const t = bareType(type ?? '');
   if (t === '' || depth > 6) return {};
 
