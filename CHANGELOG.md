@@ -9,6 +9,61 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## 0.4.15
+
+### API gaps filled
+
+- **`FunctionRunner`** — an optional `MatbotServices` member: a host-supplied compiler for model-authored
+  code whose *synchronous* execution is bounded, since a loop that never awaits otherwise freezes every
+  session sharing the event loop. Only stretches between awaits are bounded, so slow tool calls are
+  unaffected. Absent ⇒ unbounded, as before (and as the browser must be). A run stopped at the limit
+  rejects with `code: FUNCTION_TIMEOUT`.
+
+### Bug fixes
+
+- **`invokeTool`** refuses to start a tool once `opts.signal` has aborted, so a composed body looping over
+  `await tool.x()` stops calling tools when its turn is cancelled rather than leaving each callee to decide.
+
+### Optional
+
+- **`function-tools`** — lambdas, defined functions and packages compile through `services.FunctionRunner`
+  when present; a package export is now called inside that bounded run. `runFunction` stops waiting when
+  its call is aborted and reports it cancelled. A run stopped at the limit is logged, naming the tool
+  (`tool_function lambda` for a lambda), session, call and the definition's first line.
+- **`cli`** — registers a `node:vm` `FunctionRunner`: a `tool_function` doing more than 10s of synchronous
+  work before its first await is stopped with an error naming the likely runaway loop, instead of freezing
+  the daemon. The limit is `function_timeout_ms` in `matbot.yaml`; `0` registers no runner at all (bodies
+  run unbounded, as before), for testing, and warns at boot. A loop after an await is not covered: the
+  design that covers it aborts the process when async hooks are enabled (nodejs/node#38503).
+- **`function-tools`** — `tool_function { action: 'package', name, definition }` defines a **package**: one
+  TypeScript module whose `export`ed functions become tools named `<package>__<function>`, and whose other
+  declarations (helpers, types, constants) are private and never registered — so an internal helper no
+  longer has to be a tool competing for the presented window. `__` rather than `.`, which Anthropic and
+  OpenAI reject in a tool name; the name the model sees is the one code calls as
+  `tool.<package>__<function>(…)`. Exports take one object parameter; the module is type-checked as a
+  whole and defined, replaced and removed as a group, failing the whole definition on any name clash. A
+  package is **stateless** and not a substitute for a plugin: its top level is evaluated afresh per tool
+  call and may hold only `function`/`async function` (exported or not), `const`, `interface` and `type`
+  — a `let`/`var`, `class`, `enum`, `declare`, `import`, bare statement or top-level `await` is refused,
+  pointing the author at a plugin for anything that must persist. `list` gains `packages`; `check` and `remove` take
+  `package`. (#63)
+- **`frontend-web`** — contributes system context describing the relative `POST /tools/<name>` and
+  `POST /stream/tools/<name>` entry points, so a model writing a live dashboard or similar script knows
+  it can call registered tools over HTTP. Only once the server is listening. (#72)
+- **`tool-types` / `json-validation`** — a call carrying a key the tool does not declare is now diagnosed
+  as that key rather than as whatever else is missing. `background({ action: 'cancel', id })` (the
+  `every_action` call shape sent to the wrong tool) used to report `.prompt: required property missing`;
+  the typed validator now reports `.action`/`.id: unexpected property` on a union with no discriminant,
+  and the schema validator names undeclared keys first when it is refusing a call anyway (it still never
+  refuses one for an undeclared key alone, the schema admitting them).
+- **`cli`** — the boot banner's "version skew" warning compared version NUMBERS, so it fired on every
+  release that bumped the CLI without core (packages are versioned independently) while missing two
+  copies carrying the same version. It now compares the resolved package directories of core and
+  plugin-api, as reached from the CLI and each of its dependencies, and names the duplicate copies.
+- **`ts-validation`** (0.4.13) — the published package now declares `@matatbread/matbot-core` as a peer
+  dependency, which it imports a type from. The fix landed in 0.4.12's source after 0.4.12 was published,
+  so npm never had it. (#71)
+
 ## 0.4.14
 
 ### Breaking changes

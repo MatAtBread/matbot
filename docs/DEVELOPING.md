@@ -1418,21 +1418,30 @@ in-memory — no service worker, no `fetch` at boot, no in-page stripping for th
 
 ```
 pnpm changeset          # describe the change (one file per change, committed with it)
-pnpm version-packages   # consume changesets: bump versions, fold into CHANGELOGs
+pnpm version-packages   # consume changesets, then align versions and rebuild the web bundle
+pnpm version-align      # just the align + rebuild (after a hand edit, or on a PR)
 pnpm publish-check      # dry audit: what would publish, and what would stop it
 pnpm publish-all        # preflight → publish → reconcile → verify
 ```
 
-Every `@matatbread/*` package is in one **`linked`** group: a release versions only the packages that
-actually changed, and those that do move together to one number. Everything else keeps the version it
-last shipped at, so a release is no longer 45 identical bumps to say four things.
+**One release version.** The harness — `core`, `plugin-api` and the apps, the `fixed` group in
+`.changeset/config.json` — always carries it, and so does every package *being released*: anything whose
+current contents npm does not already have. An unchanged package keeps the version of the release that
+last changed it, so a release is not 45 identical bumps to say four things, and a package's number says
+which release it last moved in.
 
-It was a `fixed` group, which released every package whether or not it had changed. Two measurements
-retired it: a patch drags in no dependents at all (peer ranges are `workspace:^`, rewritten at pack time
-from the dependency's own version, so there is nothing to update), and a *minor* on `plugin-api` escalates
-every peer-dependent to `1.0.0` **whether the group is fixed or not** — at `0.x`, `^0.4.7` does not admit
-`0.5.0`, so changesets treats each peer range as broken. `fixed` was only unifying the numbers; it never
-prevented that, and the escalation stops for good at `>=1.0.0`.
+The release version is what the registry makes necessary: the lowest version every releasing package can
+take — a patch above anything npm has had for a changed package, and at least what npm has for each
+harness member. A patch bump written above that is pulled back down, so consuming a changeset over an
+already-aligned tree cannot skip a release that never shipped; a major or minor jump is kept, being a
+decision rather than an increment. The whole harness moves with it. `changeset version` cannot express
+this (it bumps each package from its own number), so `version-packages` runs it and then `--align`, which
+rewrites the versions — renaming each package CHANGELOG's fresh heading to match — and rebuilds the web
+bundle.
+
+Peer ranges are `workspace:^`, rewritten at pack time from the dependency's own version, so a bump drags
+no dependent along. A *minor* on `plugin-api` still escalates every peer-dependent to `1.0.0` — at `0.x`,
+`^0.4.7` does not admit `0.5.0` — so ordinary releases use `patch`.
 
 `pnpm publish-all` (`scripts/publish.mjs`) treats **the registry, not a command's exit code, as the
 source of truth**: preflight → canary → settle → reconcile → verify. It reads what npm actually
@@ -1445,8 +1454,14 @@ Two things it deliberately does *not* trust:
 
 - **A subprocess's exit code.** `You cannot publish over the previously published versions` is a
   failure to *re*-publish something that already succeeded. Every publish result is confirmed by
-  asking the registry for that exact version, never by matching the error text — which is also why
-  it stays correct when the child inherits the terminal and prints nothing we can capture.
+  asking the registry for that exact version — which is also why it stays correct when the child
+  inherits the terminal and prints nothing we can capture. The one wording it does read is a 409 /
+  `EPUBLISHCONFLICT` ("previously staged"), because npm can only say that once the version is written:
+  it is reported as *landed, npm not yet readable* and left to Verify, and nothing is marked ✗ until
+  Verify has finished.
+- **A version merely existing on npm.** Preflight packs every already-published package with `pnpm pack`
+  and compares it file by file against the tarball npm serves. 0.4.14 reported five packages as published
+  while npm served their pre-edit code, because each had been changed without a bump.
 - **A read taken the instant a write returns.** npm's read path is a CDN that lags its write path;
   a brand-new package's first version has been measured taking over two minutes to appear. Acting
   on that read is what turns a *successful* release into a screen of E403s.
@@ -1457,14 +1472,36 @@ what didn't. There is no manual clean-up path and no need to work out which of ~
 
 Preflight blocks on the things that kill a whole run — an expired npm token (checked against the
 registry, because an expired token looks identical to a good one on disk), a dirty tree, an entry point
-missing from disk or excluded by `files`, a `workspace:` range naming something unpublishable. A spread of
-versions is no longer among them: under `linked` it is the expected state, so it is reported and got out
-of the way. Anything that merely *ships
+missing from disk or excluded by `files`, a `workspace:` range naming something unpublishable, a
+**STALE** package (its contents differ from the same version on npm; the report names each file, the commit
+that last touched it, and the next free patch number), and a package **BEHIND** npm (its local version is
+lower than npm's highest). A published package whose only change is newer dependency ranges produces a
+single advisory line, not a block: the code is the same. Each unconsumed changeset is listed as *pending*
+or *redundant* (every package it names is already on npm unchanged), with a loud warning when a redundant
+changeset asks for a `minor`. It also blocks on **VERSIONS** — a harness member or a releasing package
+not at the release version, listed with the move each needs — and on a **WEB BUNDLE** whose committed
+`dist/` differs from a fresh assemble: the bundle bakes every bundled package's source and version, and
+nothing else notices a forgotten rebuild, since `pnpm pack` just copies the stale file. Both are fixed
+by `pnpm version-align`. A spread of versions across unchanged packages is expected and not reported.
+Anything that merely *ships
 imperfectly* — a missing `files` field, changesets accumulated since this version was cut — warns
 and gets out of the way.
 
-`--check` audits without publishing, `--dry-run` runs everything but the publish calls, and
-`--no-git` drops the clean-tree/tag gates for CI.
+**`publish-all` is the only way to publish.** Every package carries a `prepublishOnly` guard that
+refuses unless `MATBOT_PUBLISH_ALL` is set, which only this script sets — so a bare `pnpm publish` or
+`changeset publish` fails instead of skipping every check above. `prepublishOnly` never runs for a
+consumer installing the tarball, and the content comparison ignores that exact script, so adding it did
+not make every package STALE. A package without it is blocked (**GUARD**); `pnpm version-align` adds it.
+
+`--check` audits without publishing and needs no npm login. `--dry-run` runs everything except the
+publish calls. `--no-git` skips tag pushing, and the clean-tree gate only under `--check` or `--dry-run`:
+a real publish always needs a clean tree, since every other check reads the working tree. Once Verify passes, the per-package
+tags are pushed to origin, and `--release vX.Y.Z` also moves the umbrella tag to HEAD, pushes it and
+retargets the GitHub release. Every PR runs `node scripts/publish.mjs --check --no-git --allow-unpublished`
+(`.github/workflows/publish-check.yml`), so an edited package that was not bumped fails on that PR
+rather than on release night. `--allow-unpublished` stops a bumped-but-unpublished package from
+counting as a failure there. The script's decision logic lives in `scripts/publish-lib.mjs`, tested
+in `apps/cli/test/publish-lib.test.ts`.
 
 ### The credential must be a granular access token
 

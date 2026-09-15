@@ -2,7 +2,7 @@ import type {
   FileStore, MediaStore, Principal, Vault, Message, ModelParameters,
   ProviderAdapter, ProviderConfig, ProviderRegistry, Tool, ToolRegistry, FrontendInfo,
   Store, Session, SystemContextRegistry, KnowledgeIndex, PromptFn, SessionRunner, Usage, HookRegistrar,
-  TypeScriptStripper, ToolTypeIndex, ToolPresenter, SteeringPolicy, UserContent, PermissionGate,
+  TypeScriptStripper, FunctionRunner, ToolTypeIndex, ToolPresenter, SteeringPolicy, UserContent, PermissionGate,
 } from './types.js';
 import type { Notifications, Notifier } from './notify.js';
 
@@ -191,6 +191,10 @@ export interface MatbotServices {
    *  `file-ref` degrades to the converters' `[Attached file: x]` note. A text-only deployment is
    *  unaffected either way. See {@link MediaStore}. */
   readonly MediaStore?: MediaStore | undefined;
+  /** Optional bound on how long model-authored code may run without awaiting. The node host registers
+   *  one; absent ⇒ such code runs unbounded, as it must where synchronous code cannot be interrupted.
+   *  See {@link FunctionRunner}. */
+  readonly FunctionRunner?: FunctionRunner | undefined;
 }
 
 /** The assembled machine: registry services wired to the fixed runtime — what `setup()` receives. */

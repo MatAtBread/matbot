@@ -3,7 +3,7 @@
   "matbotRuntime": [
     "node"
   ],
-  "version": "0.4.13",
+  "version": "0.4.15",
   "engines": {
     "node": ">=24.0.0"
   },
@@ -25,7 +25,8 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "node -e \"process.env.MATBOT_PUBLISH_ALL || (console.error('Refused: publish with pnpm publish-all from the repo root. It checks versions, contents and the web bundle first.'), process.exit(1))\""
   },
   "repository": {
     "type": "git",

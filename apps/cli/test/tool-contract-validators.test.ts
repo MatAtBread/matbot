@@ -107,6 +107,15 @@ test('an unknown property is rejected, at its own path', async () => {
   // `NoParams` reaches the same answer by a different route — `Record<string, never>` is an index
   // signature, so every key fails as `never` rather than as excess. Pinned because it is why a closed
   // contract was, before this, the LOOSER of the two.
+  // With NO discriminant the arms are tried blind, and each fails for its own reason — so a key that no
+  // arm declares must be named up front. `background` has no `action`; sent `every_action`'s call shape
+  // it used to report `.prompt` missing, which points at the arguments rather than the wrong tool.
+  const background = built.validators['background'];
+  assert.ok(background && !('refused' in background));
+  const wrongTool = background.validate({ action: 'cancel', id: 'x' });
+  assert.deepEqual(wrongTool.map(e => `${e.path}: ${e.message}`), ['.action: unexpected property', '.id: unexpected property']);
+  assert.deepEqual(background.validate({ prompt: 'p', interval: '5m' }), [], 'a key declared by only one arm is not excess');
+
   const about = built.validators['about_matbot'];
   assert.ok(about && !('refused' in about));
   assert.deepEqual(about.validate({}), [], 'no arguments is the valid call');

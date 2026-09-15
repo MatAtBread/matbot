@@ -9,7 +9,7 @@
  */
 
 export type * from './types.js';
-export { CONFIRM_YES, CONFIRM_NO, optionValue, optionLabel, isTruncatedToolResult, renderToolCheck, renderToolCheckOmitted } from './types.js';
+export { CONFIRM_YES, CONFIRM_NO, optionValue, optionLabel, isTruncatedToolResult, renderToolCheck, renderToolCheckOmitted, FUNCTION_TIMEOUT } from './types.js';
 
 export * from './base64.js';
 export * from './bytes.js';
