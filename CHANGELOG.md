@@ -35,7 +35,6 @@ churn and less likely to affect a consumer who doesn't use them.
   the daemon. The limit is `function_timeout_ms` in `matbot.yaml`; `0` registers no runner at all (bodies
   run unbounded, as before), for testing, and warns at boot. A loop after an await is not covered: the
   design that covers it aborts the process when async hooks are enabled (nodejs/node#38503).
-
 - **`function-tools`** — `tool_function { action: 'package', name, definition }` defines a **package**: one
   TypeScript module whose `export`ed functions become tools named `<package>__<function>`, and whose other
   declarations (helpers, types, constants) are private and never registered — so an internal helper no
