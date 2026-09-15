@@ -1,5 +1,13 @@
 # @matatbread/matbot-web-bundle
 
+## 0.4.15
+
+### Patch Changes
+
+- Updated dependencies [7f75a37]
+  - @matatbread/matbot-plugin-api@0.4.16
+  - @matatbread/matbot-core@0.4.16
+
 ## 0.4.14
 
 ### Patch Changes

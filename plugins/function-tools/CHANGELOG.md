@@ -1,5 +1,14 @@
 # @matatbread/matbot-function-tools
 
+## 0.4.15
+
+### Patch Changes
+
+- 7f75a37: Bound model-authored code: an optional `FunctionRunner` service (registered by the CLI over `node:vm`) stops a `tool_function` that does more than 10s of synchronous work without awaiting, instead of freezing the daemon. The limit is `function_timeout_ms` in `matbot.yaml`; `0` registers no runner. A stopped run rejects with `code: FUNCTION_TIMEOUT` and is logged by function-tools, naming the tool, session, call and definition. `invokeTool` refuses to start a tool on an aborted signal, and `runFunction` stops waiting when its call is aborted.
+- 578cb47: function-tools: `tool_function { action: 'package' }` defines a package — one TypeScript module whose exported functions become tools named `<package>__<function>`, while its helpers, types and constants stay private and are never registered. Defined, replaced and removed as a group (`remove { package }`); type-checked as a whole; stateless, admitting only `function`, `const`, `interface` and `type` at the top level; listed under `packages` and checked with `check { package }`. (#63)
+- Updated dependencies [7f75a37]
+  - @matatbread/matbot-plugin-api@0.4.16
+
 ## 0.4.10
 
 ### Patch Changes

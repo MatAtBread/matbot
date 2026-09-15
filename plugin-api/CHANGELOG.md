@@ -1,5 +1,11 @@
 # @matatbread/matbot-plugin-api
 
+## 0.4.15
+
+### Patch Changes
+
+- 7f75a37: Bound model-authored code: an optional `FunctionRunner` service (registered by the CLI over `node:vm`) stops a `tool_function` that does more than 10s of synchronous work without awaiting, instead of freezing the daemon. The limit is `function_timeout_ms` in `matbot.yaml`; `0` registers no runner. A stopped run rejects with `code: FUNCTION_TIMEOUT` and is logged by function-tools, naming the tool, session, call and definition. `invokeTool` refuses to start a tool on an aborted signal, and `runFunction` stops waiting when its call is aborted.
+
 ## 0.4.14
 
 ## 0.4.13

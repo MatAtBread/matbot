@@ -1,5 +1,14 @@
 # @matatbread/matbot-tool-json-validation
 
+## 0.4.15
+
+### Patch Changes
+
+- 58149f8: Tool-call validation names an undeclared key instead of reporting what else is missing: the typed validator reports `unexpected property` for a key no union arm declares, and the schema validator lists undeclared keys first when it is already refusing a call.
+- Updated dependencies [7f75a37]
+  - @matatbread/matbot-plugin-api@0.4.16
+  - @matatbread/matbot-core@0.4.16
+
 ## 0.4.7
 
 ### Patch Changes
