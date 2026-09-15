@@ -91,9 +91,19 @@ function validate(schema: JSONSchema, value: unknown, path: string, errs: Valida
     const required = Array.isArray(schema['required']) ? schema['required'] as string[] : [];
     const additional = schema['additionalProperties'];
 
-    for (const key of required) {
+    const missing = required.filter(key => !(key in obj));
+    // A schema that leaves `additionalProperties` unset admits undeclared keys, so they are never a
+    // rejection on their own. But once the call is being refused anyway, an undeclared key is the likelier
+    // cause — an `action` sent to a tool that has none reads as "prompt missing" otherwise — so it is
+    // named first. Reported only alongside a refusal, this can never reject a call the schema admits.
+    if (missing.length && additional === undefined && schema['properties'] !== undefined) {
+      for (const [key, v] of Object.entries(obj)) {
+        if (!props[key]) errs.push({ path: `${path}${propPath(key)}`, message: 'not a declared property', value: v });
+      }
+    }
+    for (const key of missing) {
       // No `value`: a missing property has none, and JSON cannot carry `undefined` to show.
-      if (!(key in obj)) errs.push({ path: `${path}${propPath(key)}`, message: 'required property missing' });
+      errs.push({ path: `${path}${propPath(key)}`, message: 'required property missing' });
     }
     for (const [key, v] of Object.entries(obj)) {
       if (props[key]) validate(props[key], v, `${path}${propPath(key)}`, errs);

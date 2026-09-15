@@ -252,7 +252,21 @@ export function generateValidator(
       const c = check(a, 'v', 'p', `${where}|${i}`);
       return `  if (${c.reports ? c.expr.replace(/, e\)$/, ', scratch)') : c.expr}) return true;`;
     }).join('\n');
-    return `  const scratch = [];\n${attempts}\n  E(p, 'no union member matched', v, e);\n  return false;`;
+    return `${excessAcrossArms(arms)}  const scratch = [];\n${attempts}\n  E(p, 'no union member matched', v, e);\n  return false;`;
+  }
+
+  // A key no arm declares fails EVERY arm, so it can be reported by name before the arms are tried —
+  // exact, not a guess at which arm was meant. Without it, a call that invents a key (an `action` on a
+  // tool that has none) is reported as whatever else that arm lacks, which sends the caller to fix the
+  // arguments it did pass instead of the key it should not have.
+  function excessAcrossArms(arms: readonly TS.Type[]): string {
+    const objectLike = F.Object | F.Intersection;
+    if (!reject || !arms.every(a => (a.flags & objectLike) && !checker.getIndexInfoOfType(a, ts.IndexKind.String))) return '';
+    const known = [...new Set(arms.flatMap(a => checker.getPropertiesOfType(a).map(s => s.name)))];
+    return `  if (typeof v === 'object' && v !== null && !Array.isArray(v)) {\n`
+         + `    let excess = false;\n`
+         + `    for (const k of Object.keys(v)) if (!${lit(known)}.includes(k)) { E(K(p, k), 'unexpected property', v[k], e); excess = true; }\n`
+         + `    if (excess) return false;\n  }\n`;
   }
 
   function bodyOf(t: TS.Type, where: string): string {
