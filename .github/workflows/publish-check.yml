@@ -1,7 +1,8 @@
 name: publish-check
 
 # An edited package whose version was not bumped is served stale by npm for as long as nobody
-# notices. Catch it on the PR that made the edit, where the bump belongs.
+# notices. Catch it on the PR that made the edit, where the bump belongs — along with a harness or
+# changed package off the release version, and a web bundle not rebuilt (`pnpm version-align`).
 on:
   pull_request:
 

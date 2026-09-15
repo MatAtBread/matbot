@@ -51,6 +51,64 @@ export function nextFreePatch(version, taken) {
   return `${major}.${minor}.${patch}`;
 }
 
+// ── release version ──────────────────────────────────────────────────────────
+
+// One version per release. The harness (core, plugin-api and the apps) always sits at it, and every
+// package being released — anything whose current contents npm does not have — is moved to it, so
+// the number a package carries says which release last changed it. Unchanged packages keep theirs.
+//
+// The release version is what the REGISTRY makes necessary, not the highest number anyone wrote: the
+// lowest version every releasing package can take. A changed package needs a patch above anything npm
+// has had for it; an unchanged harness member needs only what npm already has. A patch bump written on
+// top of that is pulled back down — otherwise `changeset version`, run over a tree already aligned to
+// 0.4.15, bumps each named package to 0.4.16 from its own number and drags the whole harness past a
+// release that never shipped. A jump in major or minor is a decision, not an increment, and is kept.
+//
+// `pkgs` are `{ name, version }`; `differs` the names whose contents are not on npm; `taken` maps a
+// name to every version npm has had for it.
+export function planRelease(pkgs, harness, differs, taken) {
+  const releasing = pkgs.filter(p => harness.includes(p.name) || differs.has(p.name));
+  if (!releasing.length) return { version: undefined, moves: [] };
+
+  const lowest = p => {
+    const versions = taken.get(p.name) ?? [];
+    const highest = highestVersion(versions);
+    if (highest === undefined) return p.version;
+    return differs.has(p.name) ? nextFreePatch(highest, versions) : highest;
+  };
+  let version = highestVersion(releasing.map(lowest));
+  const written = highestVersion(releasing.map(p => p.version));
+  const [wm, wn] = parseVersion(written)?.core ?? [];
+  const [vm, vn] = parseVersion(version)?.core ?? [];
+  if (wm > vm || (wm === vm && wn > vn)) version = written;
+
+  const blocks = (p, v) => {
+    const versions = taken.get(p.name) ?? [];
+    if (p.version === v && !differs.has(p.name)) return false;
+    const highest = highestVersion(versions);
+    return versions.includes(v) || (highest !== undefined && compareVersions(v, highest) < 0);
+  };
+  while (releasing.some(p => blocks(p, version))) version = nextFreePatch(version, []);
+
+  const moves = releasing.filter(p => p.version !== version).map(p => ({ name: p.name, from: p.version, to: version }));
+  return { version, moves };
+}
+
+// A changesets CHANGELOG: `# name`, then `## <version>` sections newest first. Only a TOP section headed
+// `from` is touched; anything else is returned unchanged.
+export function renameTopSection(text, from, to) {
+  const headings = [...text.matchAll(/^## (\S+)[ \t]*$/gm)];
+  const top = headings[0];
+  if (!top || top[1] !== from) return text;
+  const existing = headings.find(h => h[1] === to);
+  if (!existing) return text.replace(top[0], `## ${to}`);
+  const bodyEnd = headings[1]?.index ?? text.length;
+  const body = text.slice(top.index + top[0].length, bodyEnd).replace(/^\n+|\n+$/g, '');
+  const without = text.slice(0, top.index) + text.slice(bodyEnd);
+  const at = without.indexOf(existing[0]) + existing[0].length;
+  return `${without.slice(0, at)}\n\n${body}${without.slice(at)}`;
+}
+
 // ── contents ─────────────────────────────────────────────────────────────────
 
 // An unpacked tarball as path → bytes, posix-separated so npm's and pnpm's trees key identically.

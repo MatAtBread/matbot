@@ -1418,21 +1418,30 @@ in-memory — no service worker, no `fetch` at boot, no in-page stripping for th
 
 ```
 pnpm changeset          # describe the change (one file per change, committed with it)
-pnpm version-packages   # consume changesets: bump versions, fold into CHANGELOGs
+pnpm version-packages   # consume changesets, then align versions and rebuild the web bundle
+pnpm version-align      # just the align + rebuild (after a hand edit, or on a PR)
 pnpm publish-check      # dry audit: what would publish, and what would stop it
 pnpm publish-all        # preflight → publish → reconcile → verify
 ```
 
-Every `@matatbread/*` package is in one **`linked`** group: a release versions only the packages that
-actually changed, and those that do move together to one number. Everything else keeps the version it
-last shipped at, so a release is no longer 45 identical bumps to say four things.
+**One release version.** The harness — `core`, `plugin-api` and the apps, the `fixed` group in
+`.changeset/config.json` — always carries it, and so does every package *being released*: anything whose
+current contents npm does not already have. An unchanged package keeps the version of the release that
+last changed it, so a release is not 45 identical bumps to say four things, and a package's number says
+which release it last moved in.
 
-It was a `fixed` group, which released every package whether or not it had changed. Two measurements
-retired it: a patch drags in no dependents at all (peer ranges are `workspace:^`, rewritten at pack time
-from the dependency's own version, so there is nothing to update), and a *minor* on `plugin-api` escalates
-every peer-dependent to `1.0.0` **whether the group is fixed or not** — at `0.x`, `^0.4.7` does not admit
-`0.5.0`, so changesets treats each peer range as broken. `fixed` was only unifying the numbers; it never
-prevented that, and the escalation stops for good at `>=1.0.0`.
+The release version is what the registry makes necessary: the lowest version every releasing package can
+take — a patch above anything npm has had for a changed package, and at least what npm has for each
+harness member. A patch bump written above that is pulled back down, so consuming a changeset over an
+already-aligned tree cannot skip a release that never shipped; a major or minor jump is kept, being a
+decision rather than an increment. The whole harness moves with it. `changeset version` cannot express
+this (it bumps each package from its own number), so `version-packages` runs it and then `--align`, which
+rewrites the versions — renaming each package CHANGELOG's fresh heading to match — and rebuilds the web
+bundle.
+
+Peer ranges are `workspace:^`, rewritten at pack time from the dependency's own version, so a bump drags
+no dependent along. A *minor* on `plugin-api` still escalates every peer-dependent to `1.0.0` — at `0.x`,
+`^0.4.7` does not admit `0.5.0` — so ordinary releases use `patch`.
 
 `pnpm publish-all` (`scripts/publish.mjs`) treats **the registry, not a command's exit code, as the
 source of truth**: preflight → canary → settle → reconcile → verify. It reads what npm actually
@@ -1469,9 +1478,12 @@ that last touched it, and the next free patch number), and a package **BEHIND** 
 lower than npm's highest). A published package whose only change is newer dependency ranges produces a
 single advisory line, not a block: the code is the same. Each unconsumed changeset is listed as *pending*
 or *redundant* (every package it names is already on npm unchanged), with a loud warning when a redundant
-changeset asks for a `minor`. A spread of
-versions is no longer among them: under `linked` it is the expected state, so it is reported and got out
-of the way. Anything that merely *ships
+changeset asks for a `minor`. It also blocks on **VERSIONS** — a harness member or a releasing package
+not at the release version, listed with the move each needs — and on a **WEB BUNDLE** whose committed
+`dist/` differs from a fresh assemble: the bundle bakes every bundled package's source and version, and
+nothing else notices a forgotten rebuild, since `pnpm pack` just copies the stale file. Both are fixed
+by `pnpm version-align`. A spread of versions across unchanged packages is expected and not reported.
+Anything that merely *ships
 imperfectly* — a missing `files` field, changesets accumulated since this version was cut — warns
 and gets out of the way.
 

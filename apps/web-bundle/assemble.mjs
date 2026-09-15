@@ -144,7 +144,10 @@ async function collect(rootIds, nameMap) {
 const guard = (s) => s.replace(/<\/(script)/gi, '<\\/$1');
 
 async function main() {
-  const configFile = process.argv[2] ?? 'matbot.web.json';
+  const args = process.argv.slice(2);
+  const outAt = args.indexOf('--out-dir');
+  const outDirArg = outAt >= 0 ? args.splice(outAt, 2)[1] : undefined;
+  const configFile = args[0] ?? 'matbot.web.json';
   const config = JSON.parse(await readFile(path.join(here, configFile), 'utf8'));
   const outputName = config.output ?? 'matbot.html';
   const nameMap = await buildNameMap();
@@ -359,7 +362,8 @@ async function main() {
     .replace('%%LOADER%%',   () => guard(loader))
     .replace(/%%MODULE_COUNT%%/g, String(moduleCount));
 
-  const outDir = path.join(here, 'dist');
+  // `--out-dir` lets publish.mjs assemble somewhere else and compare with the committed dist/.
+  const outDir = outDirArg ? path.resolve(outDirArg) : path.join(here, 'dist');
   await mkdir(outDir, { recursive: true });
   const outFile = path.join(outDir, outputName);
   await writeFile(outFile, html, 'utf8');

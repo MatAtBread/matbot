@@ -18,7 +18,8 @@
     "web-build": "pnpm --filter @matatbread/matbot-web-bundle assemble && pnpm --filter @matatbread/matbot-web-bundle assemble:demo",
     "web-server": "pnpm --filter @matatbread/matbot-web-bundle serve",
     "changeset": "changeset",
-    "version-packages": "changeset version",
+    "version-packages": "changeset version && node scripts/publish.mjs --align",
+    "version-align": "node scripts/publish.mjs --align",
     "publish-app": "pnpm --filter '@matatbread/matbot-cli...' publish",
     "publish-all": "node scripts/publish.mjs",
     "publish-check": "node scripts/publish.mjs --check"

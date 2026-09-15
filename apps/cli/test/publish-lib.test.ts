@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
-  compareVersions, highestVersion, nextFreePatch, readTree, diffTrees, classifyManifestChange,
+  compareVersions, highestVersion, nextFreePatch, planRelease, renameTopSection, readTree, diffTrees, classifyManifestChange,
   parseChangeset, classifyChangeset, isPublishConflict, mapLimit,
 } from '../../../scripts/publish-lib.mjs';
 
@@ -128,4 +128,78 @@ test('mapLimit keeps order and bounds concurrency', async () => {
   });
   assert.deepEqual(out, [50, 10, 30, 20]);
   assert.equal(peak, 2);
+});
+
+const HARNESS = ['@x/core', '@x/api', '@x/cli'];
+const plan = (pkgs: [string, string][], differs: string[], taken: Record<string, string[]>) =>
+  planRelease(pkgs.map(([name, version]) => ({ name, version })), HARNESS, new Set(differs), new Map(Object.entries(taken)));
+const moves = (r: { moves: { name: string; from: string; to: string }[] }) => r.moves.map(m => `${m.name} ${m.from}→${m.to}`);
+
+test('an aligned release with nothing changed moves nothing', () => {
+  const r = plan([['@x/core', '0.4.15'], ['@x/api', '0.4.15'], ['@x/cli', '0.4.15'], ['@x/p', '0.4.7']], [],
+    { '@x/core': ['0.4.15'], '@x/api': ['0.4.15'], '@x/cli': ['0.4.15'], '@x/p': ['0.4.7'] });
+  assert.equal(r.version, '0.4.15');
+  assert.deepEqual(r.moves, [], 'an unchanged plugin keeps the version it last shipped at');
+});
+
+test('a harness member left behind is moved up to its siblings', () => {
+  // 0.4.15 as cut: the apps bumped by hand, core and plugin-api not.
+  const r = plan([['@x/core', '0.4.14'], ['@x/api', '0.4.14'], ['@x/cli', '0.4.15']], ['@x/cli'],
+    { '@x/core': ['0.4.14'], '@x/api': ['0.4.14'], '@x/cli': ['0.4.14'] });
+  assert.equal(r.version, '0.4.15');
+  assert.deepEqual(moves(r), ['@x/core 0.4.14→0.4.15', '@x/api 0.4.14→0.4.15']);
+});
+
+test('a changed plugin moves to the release version, not its own next patch', () => {
+  const r = plan([['@x/core', '0.4.15'], ['@x/api', '0.4.15'], ['@x/cli', '0.4.15'], ['@x/p', '0.4.12']], ['@x/cli', '@x/p'],
+    { '@x/core': ['0.4.15'], '@x/api': ['0.4.15'], '@x/cli': ['0.4.14'], '@x/p': ['0.4.12'] });
+  assert.equal(r.version, '0.4.15');
+  assert.deepEqual(moves(r), ['@x/p 0.4.12→0.4.15']);
+});
+
+test('the release advances when a changed package already has that version on npm', () => {
+  // Everything at 0.4.15 is published; core is edited again. 0.4.15 is taken for core, so the whole
+  // harness moves on — including the members npm has unchanged at 0.4.15.
+  const r = plan([['@x/core', '0.4.15'], ['@x/api', '0.4.15'], ['@x/cli', '0.4.15']], ['@x/core'],
+    { '@x/core': ['0.4.15'], '@x/api': ['0.4.15'], '@x/cli': ['0.4.15'] });
+  assert.equal(r.version, '0.4.16');
+  assert.deepEqual(moves(r), ['@x/core 0.4.15→0.4.16', '@x/api 0.4.15→0.4.16', '@x/cli 0.4.15→0.4.16']);
+});
+
+test('a version npm had and unpublished is still taken, and a package bumped ahead raises the release', () => {
+  const r = plan([['@x/core', '0.4.15'], ['@x/api', '0.4.15'], ['@x/cli', '0.4.15'], ['@x/p', '0.4.16']], ['@x/p'],
+    { '@x/core': ['0.4.15'], '@x/api': ['0.4.15'], '@x/cli': ['0.4.15'], '@x/p': ['0.4.16'] });
+  assert.equal(r.version, '0.4.17', 'npm never reuses a number, so a changed @x/p cannot ship as 0.4.16 again');
+  assert.equal(r.moves.length, 4);
+});
+
+test('a release never goes below a changed package\'s highest version on npm', () => {
+  const r = plan([['@x/core', '0.4.15'], ['@x/api', '0.4.15'], ['@x/cli', '0.4.15'], ['@x/p', '0.4.9']], ['@x/p'],
+    { '@x/core': ['0.4.15'], '@x/api': ['0.4.15'], '@x/cli': ['0.4.15'], '@x/p': ['0.4.20'] });
+  assert.equal(r.version, '0.4.21');
+});
+
+test('a changeset consumed over an aligned tree does not skip the unshipped release', () => {
+  // Aligned to 0.4.15 (npm has 0.4.14); `changeset version` then bumps @x/p from its own 0.4.15 to 0.4.16.
+  const r = plan([['@x/core', '0.4.15'], ['@x/api', '0.4.15'], ['@x/cli', '0.4.15'], ['@x/p', '0.4.16']], ['@x/core', '@x/api', '@x/cli', '@x/p'],
+    { '@x/core': ['0.4.14'], '@x/api': ['0.4.14'], '@x/cli': ['0.4.14'], '@x/p': ['0.4.12'] });
+  assert.equal(r.version, '0.4.15');
+  assert.deepEqual(moves(r), ['@x/p 0.4.16→0.4.15']);
+});
+
+test('a minor jump is a decision and is kept', () => {
+  const r = plan([['@x/core', '0.5.0'], ['@x/api', '0.4.15'], ['@x/cli', '0.4.15']], ['@x/core'],
+    { '@x/core': ['0.4.15'], '@x/api': ['0.4.15'], '@x/cli': ['0.4.15'] });
+  assert.equal(r.version, '0.5.0');
+  assert.deepEqual(moves(r), ['@x/api 0.4.15→0.5.0', '@x/cli 0.4.15→0.5.0']);
+});
+
+test('a demoted changelog section is renamed, or folded into the one already there', () => {
+  const head = '# @x/p\n\n';
+  assert.equal(renameTopSection(`${head}## 0.4.16\n\n- b\n\n## 0.4.12\n\n- old\n`, '0.4.16', '0.4.15'),
+    `${head}## 0.4.15\n\n- b\n\n## 0.4.12\n\n- old\n`);
+  assert.equal(renameTopSection(`${head}## 0.4.16\n\n- b\n\n## 0.4.15\n\n- a\n\n## 0.4.12\n`, '0.4.16', '0.4.15'),
+    `${head}## 0.4.15\n\n- b\n\n- a\n\n## 0.4.12\n`);
+  const untouched = `${head}## 0.4.12\n\n- old\n`;
+  assert.equal(renameTopSection(untouched, '0.4.16', '0.4.15'), untouched);
 });

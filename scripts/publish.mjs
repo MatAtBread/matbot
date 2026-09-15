@@ -31,6 +31,7 @@
 //   node scripts/publish.mjs --no-git    # skip clean-tree/branch gates and tag pushing (CI already knows)
 //   node scripts/publish.mjs --otp 123456  # one 2FA code for the whole batch
 //   node scripts/publish.mjs --release v0.4.15  # also move+push the umbrella tag and retarget the GitHub release
+//   node scripts/publish.mjs --align     # move the harness and every changed package to the release version, rebuild the web bundle
 
 import { execFileSync, execFile } from 'node:child_process';
 import { readFileSync, existsSync, readdirSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -39,13 +40,14 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import {
-  compareVersions, highestVersion, nextFreePatch, readTree, diffTrees,
+  compareVersions, highestVersion, planRelease, renameTopSection, readTree, diffTrees,
   parseChangeset, classifyChangeset, isPublishConflict, mapLimit,
 } from './publish-lib.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
 const checkOnly = argv.includes('--check');
+const alignOnly = argv.includes('--align');
 const dryRun = argv.includes('--dry-run');
 const skipGit = argv.includes('--no-git');
 const allowUnpublished = argv.includes('--allow-unpublished');
@@ -145,8 +147,8 @@ function checkAuth(problems, advisories) {
     console.log(`   ${c.green('✓')} authenticated to npm as ${c.bold(who)}`);
     return who;
   } catch {
-    if (checkOnly) {
-      advisories.push('not authenticated to npm — fine for --check, which only reads the registry');
+    if (checkOnly || alignOnly) {
+      advisories.push(`not authenticated to npm — fine for ${alignOnly ? '--align' : '--check'}, which only reads the registry`);
       return null;
     }
     problems.push(
@@ -177,7 +179,7 @@ function otpAdvice(who) {
 // published anyway), but the batch stops after one failure rather than forty-five.
 
 function checkGit(problems) {
-  if (skipGit) return;
+  if (skipGit || alignOnly) return;
   const dirty = run('git', ['status', '--porcelain']).trim();
   if (dirty) problems.push(`working tree is dirty — publishing an unrecorded state:\n${dirty.split('\n').map(l => `       ${l}`).join('\n')}`);
   else console.log(`   ${c.green('✓')} working tree clean`);
@@ -243,27 +245,12 @@ function checkLockfile(problems) {
 // mid-batch. Everything in `advisories` ships fine but is worth seeing — kept out of the blocking
 // set so packaging tidiness can never hold up a release.
 function checkManifests(pkgs, problems, advisories) {
-  const versions = new Set(pkgs.map(p => p.version));
-  if (versions.size > 1) {
-    // A spread is now expected rather than broken. Two policies, deliberately different, both in
-    // `.changeset/config.json`: the HARNESS (core, plugin-api, cli, web-bundle) is a `fixed` group and
-    // always moves in lockstep, while plugins are in no group at all and version independently, each
-    // keeping the number it last shipped at until it changes.
-    //
-    // The harness half is not tidiness. `versionBanner()` treats any difference between the CLI's version
-    // and the resolved core/plugin-api versions as evidence of two physical copies of a host singleton and
-    // tells the user to reinstall — so shipping core ahead of the CLI prints a false skew warning on every
-    // boot. And `about_matbot` reports the APP's own package version, so a core-only release would change
-    // behaviour while the version the model states stayed put. Lockstep is what makes both honest.
-    //
-    // A spread was a whole-run blocker while every package moved together — a split could then only mean a
-    // hand-edited version — and the reason it gave ("consumers resolve a peer range with no match") does
-    // not survive independent plugin versioning: the ranges are `workspace:^`, rewritten at pack time from
-    // the dependency's OWN version, so a plugin at 0.4.8 asks for the plugin-api it was built against
-    // whatever its siblings are at. A range that cannot be rewritten is still a problem, caught per-package
-    // below.
-    advisories.push(`versions span ${[...versions].sort(compareVersions).join(', ')} — expected: the harness (core/plugin-api/cli/web-bundle) moves in lockstep, plugins version independently`);
-  } else console.log(`   ${c.green('✓')} all ${pkgs.length} publishable packages at ${c.bold([...versions][0])}`);
+  // A spread of versions across the workspace is expected: an unchanged package keeps the number of the
+  // release that last changed it. What must NOT spread — the harness, and every package being released —
+  // is checked against the registry in checkRelease, since "being released" is a registry question.
+  // The ranges are `workspace:^`, rewritten at pack time from the dependency's OWN version, so a plugin
+  // at 0.4.8 asks for the plugin-api it was built against whatever its siblings are at. A range that
+  // cannot be rewritten is still a problem, caught per-package below.
 
   // changesets passes its config-level `access` to every publish, which is what has been carrying
   // the packages that omit publishConfig. Only the absence of *both* is a real rejection.
@@ -384,8 +371,7 @@ async function checkContent(pkgs, state, problems, advisories) {
         const commit = why.startsWith('only on npm') ? '' : lastCommit(p, f);
         return `       ${f}  ${c.dim(`${why}${commit ? ` — last touched by ${commit}` : ''}`)}`;
       });
-      const next = nextFreePatch(p.version, state.get(p.name).versions);
-      problems.push(`STALE: ${p.name}@${p.version} differs from npm. Bump its version${next ? ` (next free patch: ${next})` : ''}.\n${lines.join('\n')}`);
+      problems.push(`STALE: ${p.name}@${p.version} differs from npm. It must move to the release version (see VERSIONS).\n${lines.join('\n')}`);
     });
     // One line, not one per package: after any harness bump most plugins land here, and a wall of
     // advisories is how the one blocking STALE below gets scrolled past.
@@ -420,6 +406,74 @@ function checkChangesets(pkgs, differs, advisories) {
     if (verdict.needlessMinor.length) {
       advisories.push(c.red(c.bold(`${f} requests a minor/major bump for ${verdict.needlessMinor.join(', ')}, whose contents are already on npm — with peer ranges this cascades to 1.0.0. Use patch, or delete it.`)));
     }
+  }
+}
+
+// ── release version ──────────────────────────────────────────────────────────
+
+// The harness is `.changeset/config.json`'s `fixed` group: one list, which changesets also honours.
+function harnessNames() {
+  return JSON.parse(readFileSync(path.join(root, '.changeset/config.json'), 'utf8')).fixed?.[0] ?? [];
+}
+
+// One release version (see planRelease). Checked here, on every PR and before every publish, rather than
+// left to `changeset version`, which bumps each package from its OWN number and so cannot put a changed
+// plugin at the release version — nor keep the harness in step when it is edited by hand (0.4.15 had the
+// apps bumped and core left behind).
+function checkRelease(pkgs, differs, state, problems) {
+  const harness = harnessNames();
+  const plan = planRelease(pkgs, harness, differs, new Map(pkgs.map(p => [p.name, state.get(p.name).versions])));
+  if (!plan.moves.length) {
+    console.log(`   ${c.green('✓')} release ${c.bold(plan.version)}: the harness and every changed package carry it`);
+    return plan;
+  }
+  const lines = plan.moves.map(m => `       ${m.name}  ${m.from} → ${m.to}${harness.includes(m.name) ? c.dim('  (harness)') : ''}`);
+  problems.push(`VERSIONS: release ${plan.version} — the harness and every package being released must carry it:\n${lines.join('\n')}\n` +
+    '     Fix: `pnpm version-align` (rewrites these versions and rebuilds the web bundle), commit, re-run.');
+  return plan;
+}
+
+// Rewrites only the `version` value, so the manifest's own formatting survives. A package CHANGELOG whose
+// top heading is the unpublished number `changeset version` just wrote is renamed with it — or, when the
+// target already has a section (a changeset consumed over an aligned tree), folded into that section so
+// the version is not headed twice. A heading for a version npm already has is history, and is left alone.
+function applyRelease(plan, pkgs, state) {
+  for (const m of plan.moves) {
+    const p = pkgs.find(x => x.name === m.name);
+    const manifestPath = path.join(p.dir, 'package.json');
+    writeFileSync(manifestPath, readFileSync(manifestPath, 'utf8').replace(/("version"\s*:\s*")[^"]*(")/, `$1${m.to}$2`));
+    const changelog = path.join(p.dir, 'CHANGELOG.md');
+    if (existsSync(changelog) && !state.get(p.name).versions.includes(m.from)) {
+      const text = readFileSync(changelog, 'utf8');
+      writeFileSync(changelog, renameTopSection(text, m.from, m.to));
+    }
+    console.log(`   ${c.green('✓')} ${m.name}  ${m.from} → ${m.to}`);
+  }
+  if (!plan.moves.length) console.log(`   ${c.green('✓')} release ${plan.version}: nothing to move`);
+  run('pnpm', ['web-build'], { stdio: 'inherit' });
+}
+
+// The web bundle bakes every bundled package's source AND version into dist/, which is committed and
+// published. A forgotten rebuild ships a matbot.html running the previous code and reporting the previous
+// number, and nothing else in this script would notice — pnpm pack just copies the stale file. So it is
+// assembled afresh into a scratch directory and compared byte for byte.
+function checkWebBundle(pkgs, problems) {
+  const web = pkgs.find(p => p.name === '@matatbread/matbot-web-bundle');
+  if (!web) return;
+  const configs = readdirSync(web.dir).filter(f => /^matbot\.web.*\.json$/.test(f));
+  const tmp = mkdtempSync(path.join(tmpdir(), 'matbot-web-'));
+  try {
+    for (const cfg of configs) run('node', ['assemble.mjs', cfg, '--out-dir', tmp], { cwd: web.dir, stdio: ['ignore', 'pipe', 'pipe'] });
+    const stale = readdirSync(tmp).filter(f => {
+      const committed = path.join(web.dir, 'dist', f);
+      return !existsSync(committed) || !readFileSync(committed).equals(readFileSync(path.join(tmp, f)));
+    });
+    if (stale.length) {
+      problems.push(`WEB BUNDLE: ${stale.map(f => `dist/${f}`).join(', ')} out of date with the sources and versions it bakes.\n` +
+        '     Fix: `pnpm web-build` (or `pnpm version-align`, which ends with it), commit, re-run.');
+    } else console.log(`   ${c.green('✓')} web bundle dist/ matches a fresh assemble`);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
   }
 }
 
@@ -553,7 +607,17 @@ console.log(`   ${c.green('✓')} registry read: ${pkgs.length - missing().lengt
 
 checkBehind(pkgs, state, problems);
 const stale = await checkContent(pkgs, state, problems, advisories);
-checkChangesets(pkgs, new Set([...missing().map(p => p.name), ...stale]), advisories);
+const differs = new Set([...missing().map(p => p.name), ...stale]);
+checkChangesets(pkgs, differs, advisories);
+const plan = checkRelease(pkgs, differs, state, problems);
+
+if (alignOnly) {
+  step(2, `Align to ${plan.version}`);
+  applyRelease(plan, pkgs, state);
+  console.log(c.dim('\n   Commit the result, then `pnpm publish-check`.'));
+  process.exit(0);
+}
+checkWebBundle(pkgs, problems);
 
 for (const a of advisories) console.log(`   ${c.yellow('!')} ${a}`);
 
