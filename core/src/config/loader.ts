@@ -21,6 +21,12 @@ export interface MatbotConfig {
    * config rather than data. A stored value always wins; `delete` reverts to the default here.
    */
   defaultSettings?:  ReadonlyMap<string, Readonly<Record<string, unknown>>>;
+  /**
+   * Longest a `tool_function` body may run synchronously — without awaiting — before it is stopped
+   * (`function_timeout_ms`). Absent ⇒ the host's default. `0` ⇒ no limit at all, for testing: bodies run
+   * directly, and a loop that never awaits freezes the process.
+   */
+  functionTimeoutMs?: number;
 }
 
 function asString(v: YamlValue | undefined, label: string): string {
@@ -123,6 +129,17 @@ export function parseConfig(
     }
   }
 
+  const functionTimeoutRaw = doc['function_timeout_ms'];
+  let functionTimeoutMs: number | undefined;
+  if (functionTimeoutRaw !== undefined && functionTimeoutRaw !== null) {
+    functionTimeoutMs = asNumber(functionTimeoutRaw, 'function_timeout_ms');
+    // Refused rather than clamped, like maxRounds: a negative or fractional limit is a typo, and `0` already
+    // means something of its own.
+    if (!Number.isInteger(functionTimeoutMs) || functionTimeoutMs < 0) {
+      throw new Error(`Config: "function_timeout_ms" must be a non-negative integer (milliseconds; 0 removes the limit), got ${functionTimeoutMs}`);
+    }
+  }
+
   const prompt           = typeof doc['prompt']            === 'string' ? doc['prompt']            : undefined;
   const ephemeral        = doc['ephemeral'] === true ? true : undefined;
   const defaultProvider  = typeof doc['default_provider'] === 'string' ? doc['default_provider']  : undefined;
@@ -136,6 +153,7 @@ export function parseConfig(
     ...(defaultProvider  !== undefined ? { defaultProvider  } : {}),
     ...(principal        !== undefined ? { principal        } : {}),
     ...(defaultSettings.size > 0       ? { defaultSettings  } : {}),
+    ...(functionTimeoutMs !== undefined ? { functionTimeoutMs } : {}),
   };
 }
 

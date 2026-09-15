@@ -32,6 +32,7 @@ import { systemPrincipal }                 from '@matatbread/matbot-core';
 import { createAlsPrincipalCarrier }       from './principal-als.js';
 import { createAlsUsageCarrier }           from './usage-als.js';
 import { EnvFileVault }                     from './env-vault.js';
+import { createVmFunctionRunner, FUNCTION_SYNC_LIMIT_MS } from './function-runner.js';
 import { FilesystemStore }                 from '@matatbread/matbot-storage-filesystem';
 import { FilesystemFileStore }             from '@matatbread/matbot-files-node';
 import { createBuiltinTools, createProviderTool, classifySpecifier, materializeRemote, remoteDependencyNotes,
@@ -1133,6 +1134,15 @@ async function main(): Promise<void> {
   // proxy, so media follows a StorageBackend swap exactly as every other file does.
   serviceRegistry.set('MediaStore', fileStore);
 
+  // Model-authored code shares the one event loop with every session and frontend, so a loop in a
+  // tool_function that never awaits would freeze the daemon. Seeded, like MediaStore, so a plugin may
+  // replace it and unregistering reverts here. `function_timeout_ms: 0` seeds none: bodies then run directly
+  // and unbounded — what a host with no runner does — which is kept reachable for testing.
+  const functionTimeoutMs = matbotConfig.functionTimeoutMs ?? FUNCTION_SYNC_LIMIT_MS;
+  const functionRunner = functionTimeoutMs > 0 ? createVmFunctionRunner(functionTimeoutMs) : undefined;
+  if (functionRunner !== undefined) serviceRegistry.set('FunctionRunner', functionRunner);
+  else console.warn('[matbot] function_timeout_ms is 0: tool_function bodies run unbounded, and one that loops without awaiting will freeze this process.');
+
   // Constructed just after the services object (it closes over services.loadPlugin); exposed via
   // the `run` getter below so frontends submit/observe through one serialiser instead of each
   // calling runSession directly.
@@ -1172,6 +1182,7 @@ async function main(): Promise<void> {
       // Reverts to the host file area rather than vanishing: unloading a plugin that put media on S3
       // should leave attachments working on disk, not silently turn them off until a restart.
       else if (key === 'MediaStore')     serviceRegistry.set('MediaStore', fileStore);
+      else if (key === 'FunctionRunner' && functionRunner !== undefined) serviceRegistry.set('FunctionRunner', functionRunner);
       else serviceRegistry.delete(key);
       if (key !== 'StorageBackend') { mountTable.markDirty(key as keyof MatbotServices); scheduleEdge(); }
     },

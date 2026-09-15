@@ -68,7 +68,8 @@ export type InvokeToolOptions =
  * calling tool's `ctx` to forward them all (see {@link InvokeToolOptions}); everything else (vault,
  * plugin (un)loading, workdir/configPath/files) is filled from `machine`.
  *
- * Throws synchronously if no tool is registered under `name`. When no `prompt` is supplied the tool
+ * Throws synchronously if no tool is registered under `name`, or if `opts.signal` has already aborted.
+ * When no `prompt` is supplied the tool
  * runs non-interactively: any attempt to prompt rejects, which a tool surfaces as a normal error
  * event. Pair with {@link toolText} to collapse the stream to its result string.
  */
@@ -80,6 +81,9 @@ export function invokeTool<K extends string, const P>(
 ): AsyncIterable<ToolEvent<ToolResultFor<K, P>>> {
   const tool = machine.tools.resolve(name);
   if (tool === null) throw new Error(`Tool "${name}" is not registered`);
+  // A call whose turn was cancelled never starts. Otherwise a composed body looping over `await tool.x()`
+  // goes on calling tools after the abort, each callee deciding for itself whether to honour the signal.
+  if (opts.signal.aborted) throw new Error(`Tool "${name}" was not started: the call was cancelled.`);
 
   const prompt = opts.prompt ?? rejectingPrompt;
   const ctx: ToolContext = {

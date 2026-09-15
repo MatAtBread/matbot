@@ -226,7 +226,7 @@ class FunctionStore {
   private async registerTool(rec: FunctionRecord): Promise<void> {
     const sig        = parseSignature(rec.definition);
     const paramNames = sig.params.map(p => p.name);
-    const fn: CompiledFn = await buildAsyncFn(this.machine.TypeScriptStripper, rec.definition, paramNames);
+    const fn: CompiledFn = await buildAsyncFn(this.machine.TypeScriptStripper, rec.definition, paramNames, this.machine.FunctionRunner);
     const machine = this.machine;
     const tool: Tool = {
       name:        rec.name,
@@ -359,7 +359,7 @@ class PackageStore {
   /** Compile, then check every exported name, then swap the group in — so a failure at any step leaves
    *  the previous definition (or nothing) registered, never half of the new one. */
   private async install(name: string, parsed: ParsedPackage, definition: string): Promise<void> {
-    const pkg  = await buildPackageFn(this.machine.TypeScriptStripper, definition, parsed);
+    const pkg  = await buildPackageFn(this.machine.TypeScriptStripper, definition, parsed, this.machine.FunctionRunner);
     const mine = this.owned.get(name) ?? new Set<string>();
     for (const e of parsed.exports) {
       if (this.machine.tools.resolve(e.toolName) !== null && !mine.has(e.toolName)) {
@@ -614,7 +614,7 @@ function functionTool(machine: MatbotMachine, store: FunctionStore, packages: Pa
           case 'lambda': {
             if (typeof act.definition !== 'string' || act.definition.trim() === '') { yield errorEvent('lambda requires a "definition" (an anonymous function).'); return; }
             let fn: CompiledFn;
-            try { fn = await buildAsyncFn(machine.TypeScriptStripper, act.definition, ['args']); }
+            try { fn = await buildAsyncFn(machine.TypeScriptStripper, act.definition, ['args'], machine.FunctionRunner); }
             catch (e) { yield errorEvent(e instanceof Error ? e.message : String(e)); return; }
             // The lambda calling convention is ONE argument (the params object). Gate it structurally:
             // the typecheck grades the function against its OWN signature, not the convention, so a

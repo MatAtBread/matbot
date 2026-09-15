@@ -9,9 +9,30 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
-## Unreleased
+## 0.4.15
+
+### API gaps filled
+
+- **`FunctionRunner`** — an optional `MatbotServices` member: a host-supplied compiler for model-authored
+  code whose *synchronous* execution is bounded, since a loop that never awaits otherwise freezes every
+  session sharing the event loop. Only stretches between awaits are bounded, so slow tool calls are
+  unaffected. Absent ⇒ unbounded, as before (and as the browser must be).
+
+### Bug fixes
+
+- **`invokeTool`** refuses to start a tool once `opts.signal` has aborted, so a composed body looping over
+  `await tool.x()` stops calling tools when its turn is cancelled rather than leaving each callee to decide.
 
 ### Optional
+
+- **`function-tools`** — lambdas, defined functions and packages compile through `services.FunctionRunner`
+  when present; a package export is now called inside that bounded run. `runFunction` stops waiting when
+  its call is aborted and reports it cancelled.
+- **`cli`** — registers a `node:vm` `FunctionRunner`: a `tool_function` doing more than 10s of synchronous
+  work before its first await is stopped with an error naming the likely runaway loop, instead of freezing
+  the daemon. The limit is `function_timeout_ms` in `matbot.yaml`; `0` registers no runner at all (bodies
+  run unbounded, as before), for testing, and warns at boot. A loop after an await is not covered: the
+  design that covers it aborts the process when async hooks are enabled (nodejs/node#38503).
 
 - **`function-tools`** — `tool_function { action: 'package', name, definition }` defines a **package**: one
   TypeScript module whose `export`ed functions become tools named `<package>__<function>`, and whose other

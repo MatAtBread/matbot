@@ -1,6 +1,6 @@
 import { makeToolBox } from '@matatbread/matbot-plugin-api';
 import { stripLeadingTrivia } from './signature.js';
-import type { MatbotMachine, ComposedCallContext, ToolContext, ToolEvent, TypeScriptStripper } from '@matatbread/matbot-plugin-api';
+import type { MatbotMachine, ComposedCallContext, FunctionRunner, ToolContext, ToolEvent, TypeScriptStripper } from '@matatbread/matbot-plugin-api';
 
 export type CompiledFn = (tool: unknown, toolInContext: unknown, context: ComposedCallContext, ...args: unknown[]) => Promise<unknown>;
 
@@ -12,6 +12,7 @@ const AsyncFunction = Object.getPrototypeOf(async function () { /* */ }).constru
 
 const LEADING = /^\s*(?:async\s+)?(?:function\s+)?/;
 const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+const CANCELLED = 'Cancelled: the call was aborted while the function was still running.';
 
 /**
  * Compile a method-shorthand function definition into a runnable async function. The body is wrapped
@@ -20,8 +21,9 @@ const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e))
  * async so tool calls inside can be awaited; `tool` is the proxy passed as the first argument. Type
  * erasure is delegated to the host-provided {@link TypeScriptStripper} (node's native stripper or the
  * browser's sucrase), so this stays platform-agnostic; because that strip may be async, so is this.
+ * With a host {@link FunctionRunner} the result's synchronous work is bounded; without one it is not.
  */
-export async function buildAsyncFn(stripper: TypeScriptStripper, definition: string, paramNames: string[]): Promise<CompiledFn> {
+export async function buildAsyncFn(stripper: TypeScriptStripper, definition: string, paramNames: string[], runner?: FunctionRunner): Promise<CompiledFn> {
   // Leading trivia goes first: a doc comment ahead of the definition would otherwise land between
   // `function` and the name, which is a syntax error rather than the harmless prose it looks like.
   const wrapped = `(async function ${stripLeadingTrivia(definition).replace(LEADING, '')})`;
@@ -29,7 +31,8 @@ export async function buildAsyncFn(stripper: TypeScriptStripper, definition: str
   try { stripped = await stripper.strip(wrapped); }
   catch (e) { throw new Error(`not valid TypeScript (${msg(e)})`); }
   const body = `return ${stripped}(${paramNames.join(', ')});`;
-  try { return new AsyncFunction(...INJECTED, ...paramNames, body); }
+  const params = [...INJECTED, ...paramNames];
+  try { return runner !== undefined ? runner.compile(params, body) as CompiledFn : new AsyncFunction(...params, body); }
   catch (e) { throw new Error(`could not compile (${msg(e)})`); }
 }
 
@@ -75,19 +78,31 @@ export async function* runFunction(
     ...(ctx.workdir  !== undefined ? { workdir:  ctx.workdir  } : {}),
   };
 
+  if (ctx.signal.aborted) { yield { type: 'error', message: CANCELLED }; return; }
   let done = false;
+  let cancelled = false;
   let errored = false;
   let result: unknown;
   let error: unknown;
+  const settle = (): void => { const w = wake; wake = null; w?.(); };
+  // Stop waiting once the call is aborted. The body itself cannot be stopped from here — a pending await
+  // is not interruptible — but its tool calls now refuse to start, and nothing waits on it any longer.
+  const onAbort = (): void => { cancelled = true; settle(); };
+  ctx.signal.addEventListener('abort', onAbort, { once: true });
   void fn(tool, toolInContext, context, ...argValues)
     .then(v => { result = v; }, e => { errored = true; error = e; })
-    .finally(() => { done = true; const w = wake; wake = null; w?.(); });
+    .finally(() => { done = true; settle(); });
 
-  for (;;) {
-    while (queue.length > 0) { const ev = queue.shift(); if (ev !== undefined) yield ev; }
-    if (done) break;
-    await new Promise<void>(r => { wake = r; });
+  try {
+    for (;;) {
+      while (queue.length > 0) { const ev = queue.shift(); if (ev !== undefined) yield ev; }
+      if (done || cancelled) break;
+      await new Promise<void>(r => { wake = r; });
+    }
+  } finally {
+    ctx.signal.removeEventListener('abort', onAbort);
   }
+  if (!done) { yield { type: 'error', message: CANCELLED }; return; }
   if (errored) { yield { type: 'error', message: msg(error) }; return; }
   // `undefined` is "no result", not "a result that is undefined": a composition that returns nothing
   // yields no `result` event, exactly like a hand-written tool whose work is a side-effect. This is the

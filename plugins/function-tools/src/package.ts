@@ -1,4 +1,4 @@
-import type { JSONSchema, TypeScriptStripper } from '@matatbread/matbot-plugin-api';
+import type { FunctionRunner, JSONSchema, TypeScriptStripper } from '@matatbread/matbot-plugin-api';
 import { INJECTED, type CompiledFn } from './compile.js';
 import { inertEnd, matchBrace, matchParen, parseSignature, tsTypeToSchema, type ParsedParam } from './signature.js';
 
@@ -29,7 +29,7 @@ export interface ParsedPackage {
   exportAt: number[];
 }
 
-export type PackageFn = (tool: unknown, toolInContext: unknown, context: unknown) => Promise<Record<string, (arg?: unknown) => unknown>>;
+export type PackageFn = (tool: unknown, toolInContext: unknown, context: unknown, exportName: string, arg: unknown) => Promise<unknown>;
 
 const AsyncFunction = Object.getPrototypeOf(async function () { /* */ }).constructor as
   new (...names: string[]) => PackageFn;
@@ -352,28 +352,33 @@ function deriveExport(packageName: string, name: string, fnSource: string, descr
   };
 }
 
+// Which export to call, and its argument: reserved parameter names, chosen not to collide with an author's.
+const EXPORT_NAME = '__matbotExport';
+const EXPORT_ARG  = '__matbotExportArg';
+
 /**
- * Compile a package module into a function that evaluates it and returns its exports. The module is
+ * Compile a package module into a function that evaluates it and calls one of its exports. The module is
  * evaluated afresh on every call, closing over that call's `tool`/`toolInContext`/`context`: a package is
  * a namespace, never an object with a lifetime, so interleaved calls, reload, swap and principal scoping
  * ask nothing new of it. {@link parsePackage} refuses the top-level forms that would make that observable.
+ *
+ * The export is called inside the module body, in the same synchronous run as its evaluation, rather than
+ * after awaiting the module: that await would start the export's own work outside any stretch a
+ * {@link FunctionRunner} bounds.
  */
-export async function buildPackageFn(stripper: TypeScriptStripper, source: string, parsed: ParsedPackage): Promise<PackageFn> {
+export async function buildPackageFn(stripper: TypeScriptStripper, source: string, parsed: ParsedPackage, runner?: FunctionRunner): Promise<PackageFn> {
   let blanked = source;
   for (const at of parsed.exportAt) blanked = `${blanked.slice(0, at)}      ${blanked.slice(at + 6)}`;
   let stripped: string;
   try { stripped = await stripper.strip(blanked); }
   catch (e) { throw new Error(`not valid TypeScript (${msg(e)})`); }
-  const body = `${stripped}\n;return { ${parsed.exports.map(e => e.name).join(', ')} };`;
-  try { return new AsyncFunction(...INJECTED, body); }
+  const body = `${stripped}\n;return ({ ${parsed.exports.map(e => e.name).join(', ')} })[${EXPORT_NAME}](${EXPORT_ARG});`;
+  const params = [...INJECTED, EXPORT_NAME, EXPORT_ARG];
+  try { return runner !== undefined ? runner.compile(params, body) as PackageFn : new AsyncFunction(...params, body); }
   catch (e) { throw new Error(`could not compile (${msg(e)})`); }
 }
 
 /** One export of a compiled package, in the calling convention `runFunction` drives. */
 export function exportFn(pkg: PackageFn, name: string): CompiledFn {
-  return async (tool, toolInContext, context, arg) => {
-    const fn = (await pkg(tool, toolInContext, context))[name];
-    if (typeof fn !== 'function') throw new Error(`"${name}" is not a function in this package.`);
-    return fn(arg);
-  };
+  return (tool, toolInContext, context, arg) => pkg(tool, toolInContext, context, name, arg);
 }

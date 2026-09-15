@@ -57,6 +57,20 @@ command. Setting `ephemeral: true` in `matbot.yaml` is a hard override — it ta
 effect even if `--session` is passed on the command line. Background sub-agents use
 this to avoid leaving session traces.
 
+A `tool_function` body runs inside the matbot process, so one that loops without
+awaiting would freeze every session. matbot stops such a body after **10 seconds** of
+synchronous work, reporting the likely runaway loop. Change the limit with
+`function_timeout_ms` in `matbot.yaml`:
+
+```yaml
+function_timeout_ms: 30000   # milliseconds
+```
+
+Awaited work — tool calls, HTTP requests — never counts towards it. A loop that runs
+*after* an `await` is not caught. `function_timeout_ms: 0` removes the limit entirely:
+bodies run unbounded, as they did before the guard existed, and matbot warns at
+startup. Use it only for testing.
+
 ---
 
 ## Auto-configuration
