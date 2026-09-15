@@ -28,7 +28,7 @@
 //   node scripts/publish.mjs --check     # preflight + report drift only; publishes nothing, needs no npm login
 //   node scripts/publish.mjs --check --no-git --allow-unpublished   # CI: fail only on blocking problems
 //   node scripts/publish.mjs --dry-run   # everything except the actual publish calls
-//   node scripts/publish.mjs --no-git    # skip clean-tree/branch gates and tag pushing (CI already knows)
+//   node scripts/publish.mjs --no-git    # skip tag pushing; with --check or --dry-run, also the clean-tree gate
 //   node scripts/publish.mjs --otp 123456  # one 2FA code for the whole batch
 //   node scripts/publish.mjs --release v0.4.15  # also move+push the umbrella tag and retarget the GitHub release
 //   node scripts/publish.mjs --align     # move the harness and every changed package to the release version, rebuild the web bundle
@@ -40,7 +40,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import {
-  compareVersions, highestVersion, planRelease, renameTopSection, readTree, diffTrees,
+  compareVersions, highestVersion, planRelease, renameTopSection, addGuard, PUBLISH_GUARD, PUBLISH_GUARD_ENV, readTree, diffTrees,
   parseChangeset, classifyChangeset, isPublishConflict, mapLimit,
 } from './publish-lib.mjs';
 
@@ -178,8 +178,10 @@ function otpAdvice(who) {
 // than no check, so instead of predicting, publish ONE package and look: same cost (it had to be
 // published anyway), but the batch stops after one failure rather than forty-five.
 
+// A real publish is always gated, --no-git or not: every other check reads the working tree, so an
+// uncommitted edit would pass them and ship code no commit records.
 function checkGit(problems) {
-  if (skipGit || alignOnly) return;
+  if (alignOnly || (skipGit && (checkOnly || dryRun))) return;
   const dirty = run('git', ['status', '--porcelain']).trim();
   if (dirty) problems.push(`working tree is dirty — publishing an unrecorded state:\n${dirty.split('\n').map(l => `       ${l}`).join('\n')}`);
   else console.log(`   ${c.green('✓')} working tree clean`);
@@ -450,7 +452,24 @@ function applyRelease(plan, pkgs, state) {
     console.log(`   ${c.green('✓')} ${m.name}  ${m.from} → ${m.to}`);
   }
   if (!plan.moves.length) console.log(`   ${c.green('✓')} release ${plan.version}: nothing to move`);
+  for (const p of pkgs) {
+    const manifestPath = path.join(p.dir, 'package.json');
+    const text = readFileSync(manifestPath, 'utf8');
+    const guarded = addGuard(text);
+    if (guarded !== text) { writeFileSync(manifestPath, guarded); console.log(`   ${c.green('✓')} ${p.name}  publish guard added`); }
+  }
   run('pnpm', ['web-build'], { stdio: 'inherit' });
+}
+
+// See PUBLISH_GUARD. A new package is born without it, so its absence blocks rather than warns — the
+// hole it closes is only closed if every package has it.
+function checkGuards(pkgs, problems) {
+  const missing = pkgs.filter(p => p.manifest.scripts?.prepublishOnly !== PUBLISH_GUARD);
+  if (!missing.length) return console.log(`   ${c.green('✓')} every package refuses a publish that bypasses this script`);
+  const own = missing.filter(p => p.manifest.scripts?.prepublishOnly !== undefined);
+  problems.push(`GUARD: ${missing.length} package(s) would accept a bare \`pnpm publish\`, skipping every check here: ${missing.map(p => p.name.replace('@matatbread/matbot-', '')).join(', ')}\n` +
+    '     Fix: `pnpm version-align` (adds the prepublishOnly guard), commit, re-run.' +
+    (own.length ? `\n     ${own.map(p => p.name).join(', ')} already define prepublishOnly — prefix it with the guard by hand.` : ''));
 }
 
 // The web bundle bakes every bundled package's source AND version into dist/, which is committed and
@@ -610,6 +629,7 @@ const stale = await checkContent(pkgs, state, problems, advisories);
 const differs = new Set([...missing().map(p => p.name), ...stale]);
 checkChangesets(pkgs, differs, advisories);
 const plan = checkRelease(pkgs, differs, state, problems);
+checkGuards(pkgs, problems);
 
 if (alignOnly) {
   step(2, `Align to ${plan.version}`);
@@ -643,6 +663,8 @@ if (!missing().length) {
 }
 
 step(2, `Publish (${missing().length} package(s))`);
+// Inherited by every pnpm/changeset child below, which is what lets each package's guard through.
+process.env[PUBLISH_GUARD_ENV] = '1';
 
 const canary = missing()[0];
 console.log(`   canary: ${canary.name}@${canary.version}`);

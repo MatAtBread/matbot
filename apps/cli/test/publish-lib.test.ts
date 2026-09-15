@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import {
-  compareVersions, highestVersion, nextFreePatch, planRelease, renameTopSection, readTree, diffTrees, classifyManifestChange,
+  compareVersions, highestVersion, nextFreePatch, planRelease, renameTopSection, addGuard, PUBLISH_GUARD, PUBLISH_GUARD_ENV, readTree, diffTrees, classifyManifestChange,
   parseChangeset, classifyChangeset, isPublishConflict, mapLimit,
 } from '../../../scripts/publish-lib.mjs';
 
@@ -202,4 +203,24 @@ test('a demoted changelog section is renamed, or folded into the one already the
     `${head}## 0.4.15\n\n- b\n\n- a\n\n## 0.4.12\n`);
   const untouched = `${head}## 0.4.12\n\n- old\n`;
   assert.equal(renameTopSection(untouched, '0.4.16', '0.4.15'), untouched);
+});
+
+test('the publish guard refuses a bare publish and admits publish.mjs', () => {
+  const env = { ...process.env };
+  delete env[PUBLISH_GUARD_ENV];
+  const refused = spawnSync('sh', ['-c', PUBLISH_GUARD], { env, encoding: 'utf8' });
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /pnpm publish-all/);
+  assert.equal(spawnSync('sh', ['-c', PUBLISH_GUARD], { env: { ...env, [PUBLISH_GUARD_ENV]: '1' } }).status, 0);
+});
+
+test('installing the guard does not make a package differ from npm, but another prepublishOnly does', () => {
+  const guarded = addGuard(manifest({ scripts: { test: 'x' } }));
+  assert.deepEqual(JSON.parse(guarded).scripts, { test: 'x', prepublishOnly: PUBLISH_GUARD });
+  assert.equal(addGuard(guarded), guarded, 'idempotent');
+  assert.equal(classifyManifestChange(guarded, manifest({ scripts: { test: 'x' } })), 'same');
+  assert.equal(classifyManifestChange(addGuard(manifest()), manifest()), 'same', 'a scripts object it created is invisible too');
+  const own = manifest({ scripts: { prepublishOnly: 'tsc' } });
+  assert.equal(addGuard(own), own, 'a package\'s own prepublishOnly is never replaced');
+  assert.equal(classifyManifestChange(own, manifest()), 'changed');
 });

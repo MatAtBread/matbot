@@ -36,7 +36,8 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit && node scripts/check-ui.mjs",
-    "check:ui": "node scripts/check-ui.mjs"
+    "check:ui": "node scripts/check-ui.mjs",
+    "prepublishOnly": "node -e \"process.env.MATBOT_PUBLISH_ALL || (console.error('Refused: publish with pnpm publish-all from the repo root. It checks versions, contents and the web bundle first.'), process.exit(1))\""
   },
   "repository": {
     "type": "git",

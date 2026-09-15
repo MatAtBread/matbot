@@ -1487,8 +1487,15 @@ Anything that merely *ships
 imperfectly* — a missing `files` field, changesets accumulated since this version was cut — warns
 and gets out of the way.
 
+**`publish-all` is the only way to publish.** Every package carries a `prepublishOnly` guard that
+refuses unless `MATBOT_PUBLISH_ALL` is set, which only this script sets — so a bare `pnpm publish` or
+`changeset publish` fails instead of skipping every check above. `prepublishOnly` never runs for a
+consumer installing the tarball, and the content comparison ignores that exact script, so adding it did
+not make every package STALE. A package without it is blocked (**GUARD**); `pnpm version-align` adds it.
+
 `--check` audits without publishing and needs no npm login. `--dry-run` runs everything except the
-publish calls. `--no-git` skips the clean-tree gate and tag pushing. Once Verify passes, the per-package
+publish calls. `--no-git` skips tag pushing, and the clean-tree gate only under `--check` or `--dry-run`:
+a real publish always needs a clean tree, since every other check reads the working tree. Once Verify passes, the per-package
 tags are pushed to origin, and `--release vX.Y.Z` also moves the umbrella tag to HEAD, pushes it and
 retargets the GitHub release. Every PR runs `node scripts/publish.mjs --check --no-git --allow-unpublished`
 (`.github/workflows/publish-check.yml`), so an edited package that was not bumped fails on that PR

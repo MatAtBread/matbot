@@ -11,7 +11,7 @@
   "files": [
     "src"
   ],
-  "description": "matbot's default permission policy, seeded by the host rather than loaded as a plugin: asks about a privileged operation, offers to remember the answer, honours what was remembered \u2014 plus the built-in gate_action tool for inspecting and forgetting standing answers.",
+  "description": "matbot's default permission policy, seeded by the host rather than loaded as a plugin: asks about a privileged operation, offers to remember the answer, honours what was remembered — plus the built-in gate_action tool for inspecting and forgetting standing answers.",
   "keywords": [
     "matbot",
     "matbot-plugin",
@@ -25,7 +25,8 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "node -e \"process.env.MATBOT_PUBLISH_ALL || (console.error('Refused: publish with pnpm publish-all from the repo root. It checks versions, contents and the web bundle first.'), process.exit(1))\""
   },
   "repository": {
     "type": "git",

@@ -125,6 +125,33 @@ export function readTree(dir) {
   return out;
 }
 
+// ── publish guard ────────────────────────────────────────────────────────────
+
+// Every publishable package refuses `pnpm publish` / `changeset publish` unless publish.mjs is the
+// caller, since those skip every check here. `prepublishOnly` runs only when publishing from source —
+// never for a consumer installing the tarball, and not for `pnpm pack` — so it costs nothing downstream.
+export const PUBLISH_GUARD_ENV = 'MATBOT_PUBLISH_ALL';
+export const PUBLISH_GUARD = `node -e "process.env.${PUBLISH_GUARD_ENV} || (console.error('Refused: publish with pnpm publish-all from the repo root. It checks versions, contents and the web bundle first.'), process.exit(1))"`;
+
+// Adding the guard must not make every package differ from npm, or installing it would force a release
+// of all of them. So this exact script is invisible to the content comparison; any OTHER
+// prepublishOnly is a real change.
+function withoutGuard(manifest) {
+  if (manifest?.scripts?.prepublishOnly !== PUBLISH_GUARD) return manifest;
+  const { prepublishOnly: _, ...scripts } = manifest.scripts;
+  const { scripts: __, ...rest } = manifest;
+  return Object.keys(scripts).length ? { ...rest, scripts } : rest;
+}
+
+// The manifest with the guard installed. A package with its own prepublishOnly is left alone, and so
+// keeps failing the check, rather than having its script silently replaced.
+export function addGuard(text) {
+  const manifest = JSON.parse(text);
+  if (manifest.scripts?.prepublishOnly !== undefined) return text;
+  manifest.scripts = { ...manifest.scripts, prepublishOnly: PUBLISH_GUARD };
+  return `${JSON.stringify(manifest, null, 2)}\n`;
+}
+
 const DEP_FIELDS = ['dependencies', 'peerDependencies', 'optionalDependencies', 'devDependencies'];
 
 function canonical(value) {
@@ -138,7 +165,7 @@ function canonical(value) {
 // what the package can import, not just which copy it resolves.
 export function classifyManifestChange(localText, npmText) {
   let local, npm;
-  try { local = JSON.parse(localText); npm = JSON.parse(npmText); } catch { return localText === npmText ? 'same' : 'changed'; }
+  try { local = withoutGuard(JSON.parse(localText)); npm = withoutGuard(JSON.parse(npmText)); } catch { return localText === npmText ? 'same' : 'changed'; }
   if (JSON.stringify(canonical(local)) === JSON.stringify(canonical(npm))) return 'same';
   const blank = m => {
     const copy = { ...m };
@@ -162,7 +189,7 @@ export function rangeChanges(localText, npmText) {
 // The top-level manifest keys whose values differ, dotted one level into dependency fields so a
 // STALE report says `dependencies.@x/c` rather than just "package.json".
 export function manifestKeysChanged(localText, npmText) {
-  const local = JSON.parse(localText), npm = JSON.parse(npmText), out = [];
+  const local = withoutGuard(JSON.parse(localText)), npm = withoutGuard(JSON.parse(npmText)), out = [];
   for (const key of [...new Set([...Object.keys(local), ...Object.keys(npm)])].sort()) {
     const a = canonical(local[key]), b = canonical(npm[key]);
     if (JSON.stringify(a) === JSON.stringify(b)) continue;
