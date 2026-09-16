@@ -157,3 +157,19 @@ test('entries() on an untouched namespace is the floor, and on neither is empty'
   const { settings } = withDefaults({});
   assert.deepEqual(await settings.entries(), {});
 });
+
+// The CAS retry loop was `for(;;)` with no bound and no backoff, so a backend whose compare can never
+// succeed — one that does not mint the version it is handed, or a medium generation it cannot reconcile
+// — spun hot for ever instead of reporting. A settings namespace is one document with few writers, so
+// real contention resolves in a pass or two; exhausting the budget is a fault to surface.
+test('a write against a backend that always loses the compare fails rather than spinning', async () => {
+  installSettingsDefaults(new Map());
+  const store = memStore();
+  // Present on read, and `cas` rejects whatever it is given — the shape of a version this medium did
+  // not issue. Without a bound, the `set` below never returns.
+  store.docs.set(slugSettingsNamespace(NAME), { id: slugSettingsNamespace(NAME), version: 'v1', data: {} });
+  store.cas = async () => ({ ok: false, current: store.docs.get(slugSettingsNamespace(NAME)) ?? null });
+
+  const settings = makePluginSettings(store, NAME);
+  await assert.rejects(() => settings.set('k', 'v'), /compare-and-swap/);
+});
