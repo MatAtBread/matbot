@@ -1,27 +1,27 @@
 import type { Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext, MatbotMachine } from '@matatbread/matbot-plugin-api';
 import type { TriggerManager } from './manager.js';
 import { checkInvocation } from './dispatch.js';
-import type { TriggerCondition, TriggerCooldown, TriggerKind, Trigger } from './types.js';
+import type { TriggerCondition, TriggerCooldown, TriggerKind, Trigger, ReportedTrigger } from './types.js';
 
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
     // One arm per action: a caller of `invokeTool(machine, 'trigger_action', { action: '…' })` gets the
     // matching result narrowed by the `action` it passed (see ToolContract / the multi-action note on ToolContracts).
     trigger_action:
-      | ToolContract<{ triggers: Trigger[] }, { action: 'list' }>
-      | ToolContract<{ triggers: Trigger[] }, { action: 'query'; tool?: string; params?: object }>
-      | ToolContract<Trigger,                 { action: 'get'; id: string }>
+      | ToolContract<{ triggers: ReportedTrigger[] }, { action: 'list' }>
+      | ToolContract<{ triggers: ReportedTrigger[] }, { action: 'query'; tool?: string; params?: object }>
+      | ToolContract<ReportedTrigger,                 { action: 'get'; id: string }>
       | ToolContract<{ id: string },          { action: 'add'; conditions: TriggerCondition[]; tool: string; params?: object; enabled?: boolean; cooldown?: TriggerCooldown }>
       // `cooldown: null` CLEARS every limit, which an omitted `cooldown` deliberately does not (it
       // leaves the stored one untouched). The executor has always accepted it and the web UI has always
       // sent it; only this arm omitted it, so a documented call was untypeable — invisible until the
       // params type was actually enforced. `add` takes no `null`: there is no prior limit to clear.
-      | ToolContract<Trigger,                 { action: 'update'; id: string; conditions?: TriggerCondition[]; tool?: string; params?: object; enabled?: boolean; cooldown?: TriggerCooldown | null }>
-      | ToolContract<Trigger,                 { action: 'disable'; id: string }>
-      | ToolContract<Trigger,                 { action: 'enable'; id: string }>
-      | ToolContract<{ id: string },          { action: 'remove'; id: string }>
-      | ToolContract<{ triggers: Trigger[] }, { action: 'move'; tool?: string; params?: object; toTool: string; toParams?: object }>
-      | ToolContract<{ triggers: Trigger[] }, { action: 'copy'; tool?: string; params?: object; toTool: string; toParams?: object }>;
+      | ToolContract<ReportedTrigger,                 { action: 'update'; id: string; conditions?: TriggerCondition[]; tool?: string; params?: object; enabled?: boolean; cooldown?: TriggerCooldown | null }>
+      | ToolContract<ReportedTrigger,                 { action: 'disable'; id: string }>
+      | ToolContract<ReportedTrigger,                 { action: 'enable'; id: string }>
+      | ToolContract<{ id: string },                  { action: 'remove'; id: string }>
+      | ToolContract<{ triggers: ReportedTrigger[] }, { action: 'move'; tool?: string; params?: object; toTool: string; toParams?: object }>
+      | ToolContract<{ triggers: ReportedTrigger[] }, { action: 'copy'; tool?: string; params?: object; toTool: string; toParams?: object }>;
     triggers_config:
       | ToolContract<{ classifierProvider: string | null; available: string[] }, { action: 'get' }>
       | ToolContract<{ classifierProvider: string },                             { action: 'set'; provider: string }>
@@ -84,6 +84,11 @@ type TriggerActionInput =
   | { action: 'move';   tool?: string; params?: unknown; toTool: string; toParams?: unknown }
   | { action: 'copy';   tool?: string; params?: unknown; toTool: string; toParams?: unknown };
 
+// `enabled` resolved for reporting (see ReportedTrigger): it is stored only when explicitly written, so
+// a listing otherwise carried it for some triggers and not others, leaving a reader to know "absent ⇒
+// enabled" rather than see it. Applied at the yield sites only — the stored document is untouched.
+const reported = (t: Trigger): ReportedTrigger => ({ ...t, enabled: t.enabled !== false });
+
 // The query selector shared by query/move/copy: `tool`/`params` narrow the set by what a trigger invokes.
 function queryFilter(a: { tool?: unknown; params?: unknown }): { tool?: string; params?: unknown } {
   return {
@@ -124,13 +129,13 @@ export function createTriggerActionTool(manager: TriggerManager, services: Matbo
 
       switch (args.action) {
         case 'list': {
-          yield { type: 'result', value: { triggers: await manager.all() } };
+          yield { type: 'result', value: { triggers: (await manager.all()).map(reported) } };
           return;
         }
 
         case 'query': {
           const a = args as Extract<TriggerActionInput, { action: 'query' }>;
-          yield { type: 'result', value: { triggers: await manager.query(queryFilter(a)) } };
+          yield { type: 'result', value: { triggers: (await manager.query(queryFilter(a))).map(reported) } };
           return;
         }
 
@@ -139,7 +144,7 @@ export function createTriggerActionTool(manager: TriggerManager, services: Matbo
           if (!id) { yield { type: 'error', message: 'action "get" requires "id".' }; return; }
           const t = await manager.get(id);
           if (!t) { yield { type: 'error', message: `Trigger not found: "${id}"` }; return; }
-          yield { type: 'result', value: t };
+          yield { type: 'result', value: reported(t) };
           return;
         }
 
@@ -183,7 +188,7 @@ export function createTriggerActionTool(manager: TriggerManager, services: Matbo
             ...(a.cooldown !== undefined ? { cooldown: (a.cooldown === null ? {} : a.cooldown) as TriggerCooldown } : {}),
           });
           if (t === undefined) { yield { type: 'error', message: `Trigger not found: "${a.id}"` }; return; }
-          yield { type: 'result', value: t };
+          yield { type: 'result', value: reported(t) };
           return;
         }
 
@@ -196,7 +201,7 @@ export function createTriggerActionTool(manager: TriggerManager, services: Matbo
           if (!id) { yield { type: 'error', message: `action "${args.action}" requires "id".` }; return; }
           const t = await manager.update(id, { enabled: args.action === 'enable' });
           if (t === undefined) { yield { type: 'error', message: `Trigger not found: "${id}"` }; return; }
-          yield { type: 'result', value: t };
+          yield { type: 'result', value: reported(t) };
           return;
         }
 
@@ -216,10 +221,10 @@ export function createTriggerActionTool(manager: TriggerManager, services: Matbo
           const invoke = { tool: a.toTool, ...(a.toParams !== undefined ? { params: a.toParams } : {}) };
           const refused = await checkInvocation(services, invoke);
           if (refused !== undefined) { yield { type: 'error', message: `No triggers moved — ${refused}.` }; return; }
-          const triggers: Trigger[] = [];
+          const triggers: ReportedTrigger[] = [];
           for (const t of await manager.query(queryFilter(a))) {
             const updated = await manager.update(t.id, { invoke });
-            if (updated !== undefined) triggers.push(updated);
+            if (updated !== undefined) triggers.push(reported(updated));
           }
           yield { type: 'result', value: { triggers } };
           return;
@@ -232,14 +237,14 @@ export function createTriggerActionTool(manager: TriggerManager, services: Matbo
           const invoke = { tool: a.toTool, ...(a.toParams !== undefined ? { params: a.toParams } : {}) };
           const refused = await checkInvocation(services, invoke);
           if (refused !== undefined) { yield { type: 'error', message: `No triggers copied — ${refused}.` }; return; }
-          const triggers: Trigger[] = [];
+          const triggers: ReportedTrigger[] = [];
           for (const t of await manager.query(queryFilter(a))) {
-            triggers.push(await manager.add({
+            triggers.push(reported(await manager.add({
               conditions: t.conditions,
               invoke,
               ...(t.enabled  !== undefined ? { enabled:  t.enabled  } : {}),
               ...(t.cooldown !== undefined ? { cooldown: t.cooldown } : {}),
-            }));
+            })));
           }
           yield { type: 'result', value: { triggers } };
           return;

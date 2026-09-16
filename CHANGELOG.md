@@ -9,6 +9,32 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## Unreleased
+
+### Bug fixes
+
+- **`ToolProxy`** — `await tool.x(…)` resolves to `undefined` when a tool completes with no `result`
+  event, instead of throwing `Tool produced no result`. A tool whose work is a side effect yields nothing
+  by design (`function-tools` omits the event when a body returns nothing, and the triggers dispatcher
+  fires only on a yielded result), so the one calling surface meant to be silent was the one that failed.
+  That a body declaring a DATA result actually produces one is enforced where the types are, at definition
+  time: the snippet checker compiles it against its declared return type, and `strict` rejects one that can
+  fall through. `toolResult` itself still throws — it remains the low-level contract.
+
+### Optional
+
+- **`provenance`** — `determine_provenance` now states which results are not searchable yet: those from
+  tool calls issued in the same batch, and those made inside a `tool_function`, which never enter the
+  session at all. Both read as `vetoed` for a value just fetched, with previously nothing to say why.
+- **`tool-plugin`** — `provider update` naming a profile that does not exist yields an error rather than
+  a result whose prose says it failed.
+- **`frontend-web`** — `url_for_resource` describes what it actually returns: a URL path relative to this
+  server's origin, not an absolute shareable URL.
+- **`workspace`** — `workspace_action list` accepts a `prefix` that is a complete file name and returns
+  that one file, instead of a silent empty list.
+- **`triggers`** — `trigger_action` reports `enabled` on every trigger it returns, resolved from the
+  stored document (absent ⇒ enabled), rather than omitting it when it was never explicitly written.
+
 ## 0.4.15
 
 ### API gaps filled

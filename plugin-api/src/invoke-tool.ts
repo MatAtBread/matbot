@@ -168,6 +168,30 @@ function compactTrace(v: unknown): string {
  * escape hatch beside the default `tool` proxy — reach for it only when a call needs a different provider,
  * signal, prompt or session.
  */
+/**
+ * The {@link ToolProxy}'s drain. Unlike {@link toolResult}, a stream that ends with no `result` resolves
+ * to `undefined` instead of throwing — a tool whose work is a side effect yields nothing BY DESIGN
+ * (`function-tools` omits the event when a body returns nothing, and the triggers dispatcher fires only
+ * on a yielded result), and this proxy is the surface such a tool is called through. Throwing here made
+ * the one surface meant to be silent the one that shouted.
+ *
+ * A tool that declares a DATA result and yields nothing is still an error — but it is caught where the
+ * types are, not re-derived from a contract string on every call: the checker compiles a body against its
+ * declared return type, and `strict` rejects one that can fall through (TS2355 with no return at all,
+ * TS2366 when only some paths do). A body declaring `T | undefined` is deliberately NOT rejected —
+ * `undefined` IS its contract, and is exactly what this drain hands back. Two paths reach here unchecked
+ * and resolve to `undefined` rather than throwing: an explicit `noTypeCheck`, and the browser, where there
+ * is no `ToolTypeIndex`. Both are opted into.
+ */
+async function drainProxyResult<R>(events: AsyncIterable<ToolEvent<R>>): Promise<R | undefined> {
+  let value: R | undefined;
+  for await (const ev of events) {
+    if      (ev.type === 'result') value = ev.value;
+    else if (ev.type === 'error')  throw new Error(ev.message);
+  }
+  return value;
+}
+
 export type ToolBox = (call?: Partial<InvokeToolOptions>) => ToolProxy;
 
 /**
@@ -195,7 +219,7 @@ export function makeToolBox(
         if (typeof prop !== 'string' || prop === 'then') return undefined;
         return async (params?: unknown): Promise<unknown> => {
           opts?.onEvent?.({ type: 'stdout', chunk: `→ ${prop}(${compactTrace(params)})\n` });
-          const value = await toolResult(invokeTool(machine, prop, params ?? {}, call));
+          const value = await drainProxyResult(invokeTool(machine, prop, params ?? {}, call));
           opts?.onEvent?.({ type: 'stdout', chunk: `← ${prop}: ${compactTrace(value)}\n` });
           return value;
         };
