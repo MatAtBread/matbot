@@ -165,10 +165,16 @@ function createSink(dispose: () => void): Sink {
   };
 }
 
-export function wireDescription(description: string, wc: { params: string; result: string } | undefined) {
-  return wc
-    ? `${description}\n\nTypeScript params:\n\`\`\`\n${wc.params}\n\`\`\`\n\nTypeScript result:\`\`\`${wc.result}\n\`\`\``
-    : description;
+/**
+ * A tool's description with its wire contract appended — the text the model actually reads for every
+ * tool, every turn. Both blocks are fenced identically; the result block used to omit the newline after
+ * its label and before its fence, so the type opened inline against "TypeScript result:```" and the
+ * block never closed where a reader expects it.
+ */
+export function wireDescription(description: string, wc: { params: string; result: string } | undefined): string {
+  if (wc === undefined) return description;
+  const block = (label: string, type: string): string => `${label}:\n\`\`\`\n${type}\n\`\`\``;
+  return `${description}\n\n${block('TypeScript params', wc.params)}\n\n${block('TypeScript result', wc.result)}`;
 }
 
 export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
