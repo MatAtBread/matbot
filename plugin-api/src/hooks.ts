@@ -2,7 +2,7 @@ import type {
   Hook, HookPoint, HookRegistrar, Message, MessageContent, Session, DeferredScreen,
   ScreenContext, ContributeContext, ToolCallContext, ToolCallResult, ToolResultContext, FollowupContext,
 } from './types.js';
-import { foldOntoUserTurn } from './session.js';
+import { foldOntoUserTurn, createMessage } from './session.js';
 import { withUsageSite } from './usage-context.js';
 
 const HOOK_ERROR_CREATOR = 'matbot-hooks';
@@ -87,12 +87,10 @@ export class HookRegistry implements HookRegistrar {
   // fallback path, not the only one).
   private drainFailureMarkers(session: Session): { session: Session; markers: MessageContent[] } {
     if (this.pendingFailureMarkers.length === 0) return { session, markers: [] };
-    const messages: Message[] = this.pendingFailureMarkers.map(f => ({
-      id:        crypto.randomUUID(),
-      role:      'marker',
-      createdAt: new Date().toISOString(),
-      traceId:   '',
-      content:   [{
+    const messages: Message[] = this.pendingFailureMarkers.map(f => createMessage({
+      role:    'marker',
+      traceId: '',
+      content: [{
         type:    'marker',
         creator: HOOK_ERROR_CREATOR,
         data:    { channel: f.channel, ...(f.pluginName !== undefined ? { pluginName: f.pluginName } : {}), message: f.message },
@@ -118,9 +116,8 @@ export class HookRegistry implements HookRegistrar {
     const handlerMarkers: MessageContent[] = [];
     const appendMarkers = (blocks: MessageContent[]): void => {
       handlerMarkers.push(...blocks);
-      session = { ...session, messages: [...session.messages, {
-        id: crypto.randomUUID(), role: 'marker', createdAt: new Date().toISOString(), traceId: '', content: blocks,
-      }] };
+      session = { ...session, messages: [...session.messages,
+        createMessage({ role: 'marker', traceId: '', content: blocks })] };
     };
     // Handler-returned durable context: folded onto the running turn's user message (the last one
     // with role 'user'), so it persists into history AND rides every subsequent provider call — the

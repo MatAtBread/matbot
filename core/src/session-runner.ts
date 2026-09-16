@@ -465,13 +465,8 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
               if (followup.markers.length > 0 && !followup.retract) {
                 await deps.store.set(id, {
                   ...committed,
-                  messages: [...committed.messages, {
-                    id:        crypto.randomUUID(),
-                    role:      'marker',
-                    createdAt: new Date().toISOString(),
-                    traceId:   head.traceId,
-                    content:   followup.markers,
-                  }],
+                  messages: [...committed.messages,
+                    createMessage({ role: 'marker', content: followup.markers, traceId: head.traceId })],
                 });
                 notify(s, { type: 'marker', content: followup.markers, traceId: head.traceId });
               }
@@ -516,20 +511,18 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
                   ? { ...committed, messages: committed.messages.slice(0, lastUserIdx + 1) }
                   : committed;
                 const kept = foldOntoUserTurn(truncated, durable).messages;
-                const retractionMsg: Message = {
-                  id:        crypto.randomUUID(),
-                  role:      'marker',
-                  createdAt: new Date().toISOString(),
-                  traceId:   head.traceId,
+                const retractionMsg: Message = createMessage({
+                  role:    'marker',
+                  traceId: head.traceId,
                   // `retracted` is what was popped (the superseded answer); `injected` is the ephemeral
                   // context fed to the redo — neither is otherwise persisted, so the pair fully traces
                   // the swap for a post-mortem (and a frontend can render the strike-through + the cause).
-                  content:   [{ type: 'marker', creator: RETRACTION_CREATOR, data: { retracted: popped, injected: followup.retract.context ?? [], traceId: head.traceId } }],
-                };
+                  content: [{ type: 'marker', creator: RETRACTION_CREATOR, data: { retracted: popped, injected: followup.retract.context ?? [], traceId: head.traceId } }],
+                });
                 // Any followup markers ride along as a trailing marker message (not folded into the
                 // retraction marker) so each creator's trace stays its own block.
                 const trailing: Message[] = followup.markers.length > 0
-                  ? [{ id: crypto.randomUUID(), role: 'marker', createdAt: new Date().toISOString(), traceId: head.traceId, content: followup.markers }]
+                  ? [createMessage({ role: 'marker', content: followup.markers, traceId: head.traceId })]
                   : [];
                 await deps.store.set(id, { ...committed, messages: [...kept, retractionMsg, ...trailing] });
                 // Emit the durable fold live (as a robo-user on the kept user turn) before the retraction

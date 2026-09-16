@@ -1,4 +1,31 @@
-import type { MessageContent, Session } from './types.js';
+import type { Message, MessageContent, MessageRole, Session } from './types.js';
+
+/**
+ * A `Message` with the fields every one carries minted for it — a fresh id, `createdAt` now — and the
+ * optional ones spread conditionally.
+ *
+ * Lives here rather than in core because a message is not core's to define: the hook registry builds
+ * marker messages in *this* package, and had its own copy of these five lines because core is
+ * downstream of it. There were five such copies in two packages, and every one of them is a place a
+ * message could quietly acquire a different shape.
+ */
+export function createMessage(opts: {
+  role:           MessageRole;
+  content:        MessageContent[];
+  traceId:        string;
+  providerName?:  string;
+  metadata?:      Record<string, unknown>;
+}): Message {
+  return {
+    id:        crypto.randomUUID(),
+    role:      opts.role,
+    content:   opts.content,
+    createdAt: new Date().toISOString(),
+    traceId:   opts.traceId,
+    ...(opts.providerName !== undefined ? { providerName: opts.providerName } : {}),
+    ...(opts.metadata     !== undefined ? { metadata:     opts.metadata     } : {}),
+  };
+}
 
 /**
  * A session's `updatedAt` invariant: the timestamp of its last message, or its own `createdAt` when it
