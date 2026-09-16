@@ -45,6 +45,19 @@ const TRUNCATION_CREATOR = 'matbot-truncation';
 const abortReason = (signal: AbortSignal): string =>
   typeof signal.reason === 'string' ? signal.reason : 'user-abort';
 
+/**
+ * A thrown value as a turn-terminal message, with its `cause` appended when it has one.
+ *
+ * A `throw` carries anything, so this narrows before reaching for `cause`: `'cause' in e` throws
+ * TypeError on a primitive, which made the catch handler ITSELF throw for a provider that rejected
+ * with a string — escaping the generator and skipping the `end()` commit that the branch calling this
+ * exists to perform. The one place in this package that took `any` rather than narrow.
+ */
+const errorText = (e: unknown): string => {
+  const cause = typeof e === 'object' && e !== null && 'cause' in e ? (e as { cause?: unknown }).cause : undefined;
+  return cause ? `${String(e)} (${String(cause)})` : String(e);
+};
+
 /** How long a tool executor may keep the turn alive AFTER the turn was aborted, before the runner stops
  *  reading it. An abort must abort: any executor can fail to end — a child process whose stdout was
  *  inherited by an orphan, a generator awaiting something that never settles, a bridged remote that went
@@ -408,7 +421,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
             break;
         }
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
       // A provider call cancelled by an in-situ restart (callAc, not the turn signal) is expected — fall
       // through to the restart below rather than surfacing it as a turn abort or an error.
       if (restart || (callAc.signal.aborted && !signal.aborted)) {
@@ -436,7 +449,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
         // carries no session (a failure is not a transcript), so this yields the terminal itself rather
         // than the session — but it commits first, exactly like every other exit.
         bookRound();
-        yield* end({ type: 'error', error: String(e) + (('cause' in e && e.cause) ? ' ('+String(e.cause)+')' : '' ), traceId });
+        yield* end({ type: 'error', error: errorText(e), traceId });
         return;
       }
     }

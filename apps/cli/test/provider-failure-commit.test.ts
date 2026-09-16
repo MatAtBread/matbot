@@ -49,7 +49,7 @@ function toolRegistry(tool: Tool): ToolRegistry {
 
 // Round 1 asks for a tool and completes. Round 2 — the call that carries the tool result back — fails
 // the way a real provider does: mid-stream, after the request was accepted.
-function failsOnSecondCall(counter: { calls: number }): ProviderAdapter {
+function failsOnSecondCall(counter: { calls: number }, thrown: unknown = new Error('upstream 500')): ProviderAdapter {
   return {
     name: 'fake',
     async health() { return { ok: true } as never; },
@@ -58,7 +58,7 @@ function failsOnSecondCall(counter: { calls: number }): ProviderAdapter {
       return (async function* () {
         if (n > 0) {
           yield { type: 'text-delta', delta: 'partial' };
-          throw new Error('upstream 500');
+          throw thrown;
         }
         yield { type: 'text-delta', delta: 'calling the tool' };
         yield { type: 'tool-call', id: 'c1', name: 'ok', input: {} };
@@ -107,4 +107,39 @@ test('a provider failure mid-turn still commits the rounds that succeeded', { ti
   const calls   = new Set(saved.messages.flatMap(m => m.content.filter(c => c.type === 'tool-call').map(c => c.id)));
   const results = new Set(saved.messages.flatMap(m => m.content.filter(c => c.type === 'tool-result').map(c => c.id)));
   assert.deepEqual([...calls].filter(id => !results.has(id)), [], 'no unpaired tool_use');
+});
+
+// A `throw` carries anything, and the handler above reached for `e.cause` with `'cause' in e` — which
+// throws TypeError on a primitive. So a provider rejecting with a string made the CATCH throw, which
+// left the generator by the one path that does not commit: the same lost turn as above, reached through
+// the error handling meant to prevent it.
+test('a provider that rejects with a non-Error still commits the turn', { timeout: 15000 }, async () => {
+  const session = createSession();
+  const store   = memStore(session);
+  const counter = { calls: 0 };
+  const config: ProviderConfig = { name: 'fake', module: 'fake', model: 'fake' };
+  const runner = createSessionRunner({
+    store,
+    resolveProvider: async () => ({ adapter: failsOnSecondCall(counter, 'upstream said no'), config }),
+    tools: toolRegistry(okTool),
+    loadPlugin: async () => { throw new Error('loadPlugin unused'); },
+    unloadPlugin: async () => false,
+  });
+
+  const view = await runner.open({
+    sessionId: session.id, signal: new AbortController().signal,
+    content: text('go'), provider: 'fake', principal,
+  });
+  const events: PipelineEvent[] = [];
+  for await (const ev of view.events) { events.push(ev); if (ev.type === 'idle') break; }
+
+  const errors = events.filter(e => e.type === 'error');
+  assert.equal(errors.length, 1, 'exactly one error');
+  // The thrown value itself, not a TypeError raised while trying to describe it.
+  assert.match(errors[0]!.error, /upstream said no/);
+
+  const saved = await store.get(session.id);
+  assert.ok(saved, 'the session survives');
+  assert.equal(saved.messages.filter(m => m.role === 'assistant').length, 1, "round 1's assistant message is not lost");
+  assert.equal(saved.messages.filter(m => m.role === 'tool').length, 1, "round 1's tool result is not lost");
 });
