@@ -374,11 +374,6 @@ export interface Mounted {
 
 export type ProviderAdapterFactory = (config: ProviderConfig) => ProviderAdapter;
 
-export type StoreFactory = (
-  kind:    string,
-  options: Record<string, unknown>,
-) => Store<{ id: string; version: string }>;
-
 // ── Plugin manifest ───────────────────────────────────────────────────────────
 
 export interface PluginManifest {
@@ -518,7 +513,6 @@ export interface MatbotPluginSpec {
   readonly apiVersion:  string;
   readonly manifest?:   PluginManifest;
   readonly provider?:   ProviderAdapterFactory;
-  readonly storage?:    Record<string, StoreFactory>;
   readonly tools?:      readonly Tool[];
   /**
    * When present, the runtime calls open(dotData) before creating the services object and uses the

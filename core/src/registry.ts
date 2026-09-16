@@ -3,7 +3,7 @@ import { RegistryChangeKind } from '@matatbread/matbot-plugin-api';
 import { scopedNotifier, askPermissionGate } from '@matatbread/matbot-plugin-api/host';
 import type {
   MatbotPlugin, MatbotMachine, MatbotRuntime, Mounted,
-  ProviderAdapterFactory, StoreFactory,
+  ProviderAdapterFactory,
 } from './plugin.js';
 import { PLUGIN_API_VERSION, unifyServices } from './plugin.js';
 import { makePluginSettings } from './settings.js';
@@ -18,7 +18,6 @@ import type { SettingsDoc } from './settings.js';
 const state = {
   plugins:         [] as MatbotPlugin[],
   providers:       new Map<string, ProviderAdapterFactory>(),
-  storage:         new Map<string, StoreFactory>(),
   toolRegistry:    undefined as ToolRegistry | undefined,
   frontendPlugins:  new Map<string, FrontendInfo>(),  // pluginName → info, written by services.registerFrontend()
   serviceKeys:     new Map<string, string[]>(),  // pluginName → MatbotMachine keys it registered
@@ -114,23 +113,10 @@ export function registerPlugin(plugin: MatbotPlugin): void {
     throw new Error(`Provider "${plugin.name}" is already registered.`);
   }
 
-  for (const type of Object.keys(plugin.storage ?? {})) {
-    if (state.storage.has(type)) {
-      const owner = state.plugins.find(p => p.storage?.[type] !== undefined)?.name ?? '?';
-      throw new Error(
-        `Storage type "${type}" is already registered by "${owner}". ` +
-        `"${plugin.name}" cannot register it again.`,
-      );
-    }
-  }
-
   state.plugins.push(plugin);
 
   if (plugin.provider !== undefined) {
     state.providers.set(plugin.name, plugin.provider);
-  }
-  for (const [type, factory] of Object.entries(plugin.storage ?? {})) {
-    state.storage.set(type, factory);
   }
 }
 
@@ -420,7 +406,6 @@ export async function unloadPlugin(pluginName: string, services: MatbotMachine):
   state.systemContextPlugins.delete(pluginName);
 
   if (plugin.provider !== undefined) state.providers.delete(plugin.name);
-  for (const type of Object.keys(plugin.storage   ?? {})) state.storage.delete(type);
 
   state.frontendPlugins.delete(pluginName);
 
