@@ -1,7 +1,7 @@
 import type {
   Session, Message, MessageContent, ModelContent, Usage, UsageSite, ProviderMeta, TruncatedToolResult,
   TurnEvent, RunConfig, ProviderAdapter, ProviderConfig,
-  Tool, ToolRegistry, ToolContext, Store, FileStore, MediaStore, SystemContextRegistry, Vault, PromptFn, FormField,
+  Tool, ToolRegistry, ToolContext, Store, FileStore, MediaStore, SystemContextRegistry, Vault, PromptFn,
   PermissionGate,
 } from './types.js';
 import type { MatbotPlugin } from './plugin.js';
@@ -9,7 +9,7 @@ import type { ToolPresenter } from '@matatbread/matbot-plugin-api';
 import { recordSpan, recordUsage, withUsageSite, scopeIterable } from '@matatbread/matbot-plugin-api/host';
 import { HookRegistry } from './hooks.js';
 import { appendMessage, createMessage } from './session.js';
-import { foldOntoUserTurn, bindPluginOps, bindGate } from '@matatbread/matbot-plugin-api';
+import { foldOntoUserTurn, bindPluginOps, bindGate, defaultingPrompt } from '@matatbread/matbot-plugin-api';
 import { addUsage } from './usage.js';
 import { MEDIA_RESIDENCY_BYTES, resolveSessionMedia } from './media.js';
 
@@ -144,12 +144,9 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
   const { config, provider, providerConfig, store, signal } = opts;
   const tools   = opts.tools   ?? new Map<string, Tool>();
   const hookReg = opts.hooks   ?? new HookRegistry();
-  const promptFn: PromptFn = opts.prompt ?? (((p: string | FormField, def?: string): Promise<string> => {
-    const fallback = typeof p === 'string' ? def : p.default;
-    if (fallback !== undefined) return Promise.resolve(fallback);
-    const label = typeof p === 'string' ? p : p.label;
-    return Promise.reject(new Error(`Non-interactive context: cannot prompt for "${label}"`));
-  }) as PromptFn);
+  // The stand-in answers with a field's own default where it has one — which is precisely why the gate
+  // below is handed `opts.prompt` raw instead (see bindGate).
+  const promptFn: PromptFn = opts.prompt ?? defaultingPrompt;
   const vault: Vault = opts.vault ?? {
     async createSecret() { throw new Error('No vault configured'); },
     async writeSecret()  { throw new Error('No vault configured'); },

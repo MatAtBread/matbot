@@ -152,9 +152,28 @@ export async function toolText(events: AsyncIterable<ToolEvent>): Promise<string
   return JSON.stringify(result, null, 2);
 }
 
-const rejectingPrompt: PromptFn = (((p: string | FormField): Promise<string> => {
-  const label = typeof p === 'string' ? p : p.label;
-  return Promise.reject(new Error(`Non-interactive context: cannot prompt for "${label}"`));
+const cannotPrompt = (p: string | FormField): Promise<string> =>
+  Promise.reject(new Error(`Non-interactive context: cannot prompt for "${typeof p === 'string' ? p : p.label}"`));
+
+/**
+ * The stand-in for "there is nobody to ask": every request rejects, naming the field, which a tool's
+ * surrounding try/catch turns into an ordinary error event.
+ *
+ * Deliberately NOT what a gate is handed — see {@link bindGate}. A gate must be able to tell "nobody is
+ * here" (`ask === undefined`) from "a human answered", and a stand-in that answers makes that
+ * undecidable.
+ */
+export const rejectingPrompt: PromptFn = cannotPrompt as PromptFn;
+
+/**
+ * The stand-in that answers with a field's OWN default where it has one, and rejects like
+ * {@link rejectingPrompt} where it does not — what `ToolContext.prompt` is when the host supplied no
+ * channel. The two stand-ins shared one message written out twice, in two packages; what actually
+ * separates them is this one line, so it is the only thing that differs now.
+ */
+export const defaultingPrompt: PromptFn = (((p: string | FormField, def?: string): Promise<string> => {
+  const fallback = typeof p === 'string' ? def : p.default;
+  return fallback !== undefined ? Promise.resolve(fallback) : cannotPrompt(p);
 }) as PromptFn);
 
 /** Compact a value to one trace line. */
