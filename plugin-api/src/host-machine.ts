@@ -50,8 +50,15 @@ export type SwapFn<T extends object> = (next: T) => void;
  * A capture-safe forwarding proxy: every trap routes to whatever `getCurrent()` returns *now*, so a
  * reference captured before a register()-driven swap keeps resolving to the live impl. getPrototypeOf
  * is forwarded so `instanceof` sees the real impl (the StorageBackend identity checks depend on it);
- * ownKeys + getOwnPropertyDescriptor keep object spread faithful. Methods bind to the current impl,
- * not the proxy. A nullish current (an optional service with nothing registered yet) reads as empty.
+ * ownKeys + getOwnPropertyDescriptor keep object spread faithful. A nullish current (an optional service
+ * with nothing registered yet) reads as empty.
+ *
+ * **Method identity is not stable**, and callers do need to know: a `get` binds to the impl current at
+ * that moment, so each read produces a NEW function and `store.get !== store.get`. That is what makes a
+ * captured method follow a swap instead of calling into the displaced impl — the point of the whole
+ * proxy — but it means anything keyed on a method's identity silently never matches: a `Set` of
+ * callbacks it is asked to remove one from, a memo keyed by function, an `===` comparison against a
+ * previously-read method. Capture the SERVICE and call through it; do not capture its methods.
  */
 export function forwardingProxy<T extends object>(getCurrent: () => T | undefined): T {
   return new Proxy({} as T, {
