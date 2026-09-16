@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   createSessionRunner, createSession, installPrincipalCarrier, installUsageCarrier, HookRegistry,
   isMediaRejectedError, MEDIA_NAMESPACE, MAX_MEDIA_BYTES_PER_FILE, MEDIA_RESIDENCY_BYTES,
+  MAX_MEDIA_BYTES_PER_SESSION,
 } from '@matatbread/matbot-core';
 import type {
   Session, Store, MediaStore, FileHandle, FileFilter, ProviderAdapter, ProviderConfig,
@@ -64,6 +65,9 @@ function memMediaStore(): MediaStore & { held: Map<string, Held> } {
     async *list(filter?: FileFilter) {
       for (const h of held.values()) {
         if (filter?.sessionId && h.meta.sessionId !== filter.sessionId) continue;
+        // Honoured as every real store honours it. The fixture used to ignore `namespace`, which is why
+        // the quota reading below could count a workspace file and nothing noticed.
+        if (filter?.namespace && h.meta.namespace !== filter.namespace) continue;
         yield handle(h);
       }
     },
@@ -222,6 +226,28 @@ test('an oversized attachment is refused at the boundary, naming the file', { ti
 
   assert.equal(media.held.size, 0, 'nothing was written');
   assert.equal((await store.get(session.id))!.messages.length, 0, 'and no turn was enqueued to unwind');
+});
+
+// The per-session media quota is derived by listing what the store holds for the session — and the media
+// store is routinely the host's OWN file area, shared with workspace files and detached job output. The
+// listing was filtered by session alone, so a big `sessionId`-tagged workspace file was charged to the
+// media quota and could refuse an attachment on behalf of bytes this path never stored.
+test('the session media quota counts media, not every file tagged with the session', { timeout: 20000 }, async () => {
+  const session = createSession();
+  const store   = memStore(session);
+  const media   = memMediaStore();
+
+  // A workspace file in the same store, tagged with this session, filling the media quota on its own.
+  // Counted, it refuses every subsequent attachment for the life of the session.
+  await media.put('big-output.bin', 'application/octet-stream' as MimeType,
+    (async function *() { yield new Uint8Array(MAX_MEDIA_BYTES_PER_SESSION); })(),
+    { sessionId: session.id, namespace: 'workspace', allowed: true });
+
+  const seen: Message[][] = [];
+  await submit(store, capturingProvider(seen), media, session.id, [image(PNG, 'small.png')]);
+
+  const refs = (await store.get(session.id))!.messages.flatMap(m => m.content).filter(c => c.type === 'file-ref');
+  assert.equal(refs.length, 1, 'the attachment was accepted — the workspace file is not media');
 });
 
 test('a file that is not the type it claims is refused before it can poison the session', { timeout: 20000 }, async () => {
