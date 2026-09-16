@@ -185,13 +185,6 @@ function compactTrace(v: unknown): string {
 }
 
 /**
- * A factory for a context-overridden {@link ToolProxy}: `toolInContext({ provider }).some_tool(params)`
- * runs `some_tool` with the given fields merged over the box's bound context (omitted fields inherited).
- * Keyed on `ToolContracts`, so a hallucinated tool name is a **compile error**. This is the explicit
- * escape hatch beside the default `tool` proxy — reach for it only when a call needs a different provider,
- * signal, prompt or session.
- */
-/**
  * The {@link ToolProxy}'s drain. Unlike {@link toolResult}, a stream that ends with no `result` resolves
  * to `undefined` instead of throwing — a tool whose work is a side effect yields nothing BY DESIGN
  * (`function-tools` omits the event when a body returns nothing, and the triggers dispatcher fires only
@@ -210,6 +203,13 @@ async function drainProxyResult<R>(events: AsyncIterable<ToolEvent<R>>): Promise
   return (await drain(events)).value;
 }
 
+/**
+ * A factory for a context-overridden {@link ToolProxy}: `toolInContext({ provider }).some_tool(params)`
+ * runs `some_tool` with the given fields merged over the box's bound context (omitted fields inherited).
+ * Keyed on `ToolContracts`, so a hallucinated tool name is a **compile error**. This is the explicit
+ * escape hatch beside the default `tool` proxy — reach for it only when a call needs a different provider,
+ * signal, prompt or session.
+ */
 export type ToolBox = (call?: Partial<InvokeToolOptions>) => ToolProxy;
 
 /**

@@ -24,11 +24,6 @@ import { MEDIA_RESIDENCY_BYTES, resolveSessionMedia } from './media.js';
 const siteScoped = <T>(site: UsageSite, src: AsyncIterable<T>): AsyncIterable<T> =>
   scopeIterable(src, f => withUsageSite(site, f));
 
-// Substituted for an errored tool result when the turn was aborted (e.g. a mid-turn steer interrupt):
-// the tool was cut off, not genuinely faulty, and the raw abort reason ("Error: steer") is a leaked
-// internal token that reads as a real failure. A steer's continuation turn is the one place a model
-// reads this, so the wording tells it the call was interrupted and leaves re-running to its judgement —
-// deliberately NOT "re-run it", so a side-effecting tool isn't reflexively repeated.
 // Creator of the marker recording that a provider cut a response short. Marker-role, so it is durable
 // and visible to a reader while elided from every submission: the model's own text is already truncated
 // in the transcript, and a block telling it so invites narrating the cut-off rather than continuing.
@@ -80,6 +75,11 @@ function abandonDeadline(signal: AbortSignal, ms: number): { wait: Promise<typeo
   };
 }
 
+// Substituted for an errored tool result when the turn was aborted (e.g. a mid-turn steer interrupt):
+// the tool was cut off, not genuinely faulty, and the raw abort reason ("Error: steer") is a leaked
+// internal token that reads as a real failure. A steer's continuation turn is the one place a model
+// reads this, so the wording tells it the call was interrupted and leaves re-running to its judgement —
+// deliberately NOT "re-run it", so a side-effecting tool isn't reflexively repeated.
 const INTERRUPTED_TOOL_RESULT = {
   error: 'Tool call interrupted before completion — the turn was interrupted while it was running. It may not have run to completion, and any side effect may or may not have occurred. Re-run it only if you still need its result.',
 } as const;

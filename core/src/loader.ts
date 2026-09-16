@@ -326,19 +326,6 @@ export async function loadPlugins(
 }
 
 /**
- * Stamp a plugin entry URL with a unique `${FRESH_PARAM}` value to force a fresh
- * evaluation (and, with the node resolve hook, a fresh subtree — see FRESH_PARAM).
- *
- * Diagnostics: cache-busting silently degrades in two ways that are
- * indistinguishable from "it worked" at the call site, so both are logged here.
- *   1. import.meta.resolve throws (e.g. a cwd-relative spec that does not resolve
- *      relative to *this* module's URL) — we fall back to the bare spec, which
- *      re-imports the *cached* module. No busting happens at all.
- *   2. Resolution succeeds but no resolve hook is installed: only the entry is
- *      re-evaluated, while everything it statically imports stays cached. We can
- *      detect (1) here; (2) is noted at the call site.
- */
-/**
  * Classify how a specifier resolves to code, from its shape alone (platform-neutral; no fs).
  * github shorthand is only recognised via the explicit `github:` prefix — a bare `owner/repo`
  * is indistinguishable from a scoped npm package and is treated as npm.
@@ -397,6 +384,18 @@ function stampFresh(url: string): string {
   return u.href;
 }
 
+/**
+ * Stamp a plugin entry URL with a unique `${FRESH_PARAM}` value to force a fresh evaluation (and, with
+ * the node resolve hook, a fresh subtree — see FRESH_PARAM).
+ *
+ * Diagnostics: cache-busting silently degrades in two ways that are indistinguishable from "it worked"
+ * at the call site, so both are logged.
+ *   1. import.meta.resolve throws (e.g. a cwd-relative spec that does not resolve relative to *this*
+ *      module's URL) — we fall back to the bare spec, which re-imports the *cached* module. No busting
+ *      happens at all. Detected here.
+ *   2. Resolution succeeds but no resolve hook is installed: only the entry is re-evaluated, while
+ *      everything it statically imports stays cached. Noted at the call site.
+ */
 function toFreshUrl(spec: string): string {
   try {
     const fresh = stampFresh(import.meta.resolve(spec));
