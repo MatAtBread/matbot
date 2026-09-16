@@ -286,288 +286,288 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
     // site, and spelling it here made it something the next caller of `machineBusy` could omit without
     // any symptom — so it moved inside the hold it guards.
     return machineBusy(async () => {
-    try {
-      while (s.queue.length > 0) {
-        // Per-submission concat: the head always runs; if the head is a concat submission it absorbs
-        // the following submissions while they too are concat, stopping at the first non-concat (a turn
-        // boundary). Net effect: maximal runs of consecutive concat submissions merge into one turn,
-        // while every queued/robo submission stays its own ordered turn — concat and queued mix freely.
-        const head  = s.queue.shift()!;
-        const batch = [head];
-        if (head.concatQueue) {
-          while (s.queue.length > 0 && s.queue[0]!.concatQueue) batch.push(s.queue.shift()!);
-        }
-        const content = batch.flatMap(i => i.content);
-        s.runningTraceId = head.traceId;
-        s.replay = [];
-        // Seed replay with the running turn's user message as a single merged `queued`, mirroring the
-        // message persisted just below. notify() (in open()) reaches only subscribers that are live at
-        // enqueue time; a GET /events/sessions/:id that connects after this synchronous preamble — the
-        // common case when the submit POST wins the race against the events stream — would otherwise
-        // find an empty queue and a cleared replay, and never render the user bubble. One merged event
-        // (not one per batch item) matches both stored history on reload and the live fold, so a late
-        // subscriber reconstructs exactly one bubble. A redo carries no new user message (and no
-        // content), so it seeds nothing — its retraction marker already went out at enqueue time.
-        if (head.redo === undefined) {
-          s.replay.push({ type: 'queued', content, queued: 0, concatQueue: false, traceId: head.traceId, rootTraceId: head.rootTraceId });
-        }
-
-        let session = await deps.store.get(id);
-        if (session === null) {
-          emit(s, { type: 'error', error: `Session "${id}" not found`, traceId: head.traceId });
-          continue;
-        }
-
-        // A redo re-runs the existing committed user turn — no title derivation, no new user message.
-        if (head.redo === undefined) {
-          if (!session.title && !session.messages.some(m => m.role === 'user')) {
-            // Falls back to the attachment names when the turn has no words of its own: an image-only
-            // first turn is a real submission, and got no title at all — which reads in the session
-            // list as a session that failed to start.
-            const text = content
-              .filter((c): c is Extract<MessageContent, { type: 'text' }> => c.type === 'text')
-              .map(c => c.text).join(' ').trim()
-              || content
-                .filter((c): c is Extract<MessageContent, { type: 'file-ref' }> => c.type === 'file-ref')
-                .map(c => c.name).join(', ');
-            if (text) {
-              const words = text.split(/\s+/).slice(0, 8).join(' ');
-              session = { ...session, title: words.length > 60 ? `${words.slice(0, 60)}…` : words };
-            }
+      try {
+        while (s.queue.length > 0) {
+          // Per-submission concat: the head always runs; if the head is a concat submission it absorbs
+          // the following submissions while they too are concat, stopping at the first non-concat (a turn
+          // boundary). Net effect: maximal runs of consecutive concat submissions merge into one turn,
+          // while every queued/robo submission stays its own ordered turn — concat and queued mix freely.
+          const head  = s.queue.shift()!;
+          const batch = [head];
+          if (head.concatQueue) {
+            while (s.queue.length > 0 && s.queue[0]!.concatQueue) batch.push(s.queue.shift()!);
+          }
+          const content = batch.flatMap(i => i.content);
+          s.runningTraceId = head.traceId;
+          s.replay = [];
+          // Seed replay with the running turn's user message as a single merged `queued`, mirroring the
+          // message persisted just below. notify() (in open()) reaches only subscribers that are live at
+          // enqueue time; a GET /events/sessions/:id that connects after this synchronous preamble — the
+          // common case when the submit POST wins the race against the events stream — would otherwise
+          // find an empty queue and a cleared replay, and never render the user bubble. One merged event
+          // (not one per batch item) matches both stored history on reload and the live fold, so a late
+          // subscriber reconstructs exactly one bubble. A redo carries no new user message (and no
+          // content), so it seeds nothing — its retraction marker already went out at enqueue time.
+          if (head.redo === undefined) {
+            s.replay.push({ type: 'queued', content, queued: 0, concatQueue: false, traceId: head.traceId, rootTraceId: head.rootTraceId });
           }
 
-          // Persist-at-turn-start: the user message only hits the store when its turn begins, never
-          // while queued. That is what stops a mid-turn submit from clobbering session state. A robo
-          // resubmission's blocks already carry `origin: 'robo'` (stamped where it was enqueued).
-          session = appendMessage(session, createMessage({ role: 'user', content, traceId: head.traceId, providerName: head.provider }));
-          try {
-            await deps.store.set(session.id, session);
-          } catch (e) {
-            // A read-only store rejects the persist-at-turn-start write (e.g. a session shared read-only
-            // from another profile's partition). That is a per-turn condition, not a host fault: surface
-            // it as a turn error and drop this submission rather than let it escape the detached pump and
-            // crash the process. Any other write failure stays fatal.
-            if (!isReadOnlyError(e)) throw e;
-            emit(s, { type: 'error', error: e.message, traceId: head.traceId });
+          let session = await deps.store.get(id);
+          if (session === null) {
+            emit(s, { type: 'error', error: `Session "${id}" not found`, traceId: head.traceId });
             continue;
           }
-        }
 
-        const resolved = await deps.resolveProvider(head.provider);
-        if (resolved === null) {
-          emit(s, { type: 'error', error: `Unknown provider "${head.provider}"`, traceId: head.traceId });
-          continue;
-        }
-
-        // A redo re-runs an existing turn with its ephemeral; a steer carries an interrupt's nudge. The
-        // two never coincide on one item, so either supplies runSession's injectedEphemeral.
-        const inject = head.redo?.ephemeral ?? head.injectEphemeral;
-
-        const ac = new AbortController();
-        s.ac = ac;
-        // Fold each tool's wire contract — the `params`/`result` text flattened from its single contract
-        // (a source tool's ToolContracts arms, or a source-less tool's `toolContract`) — into its description
-        // for this turn, so the model reasons about the real TS shapes, not just the loose inputSchema.
-        // Derived here because `services`/ToolTypeIndex are live at dispatch. Tools with only a loose
-        // inputSchema (no contract) are left as-is; absent ToolTypeIndex (browser) ⇒ plain descriptions.
-        const wire = await deps.toolTypeIndex?.()?.wireContracts();
-        const toolPresenter = deps.toolPresenter?.();
-        const mediaStore    = deps.mediaStore?.();
-        const permissionGate = deps.permissionGate?.();
-        const toolMap = deps.tools !== undefined
-          ? new Map<string, Tool>(deps.tools.list().map(t => {
-              const wc = wire?.[t.name];
-              return [t.name, wc !== undefined
-                ? { ...t, description: wireDescription(t.description, wc) }
-                : t];
-            }))
-          : undefined;
-
-        try {
-          // Establish the submitter's principal for the whole turn here, not inside runSession:
-          // pump runs detached (`void pump`), so this scope — not the request that enqueued — is the
-          // turn's async root. Everything downstream (hooks, tools, and any Store/FileStore/Vault
-          // access they trigger) reads it via currentPrincipal(). The consumption is inside the callback
-          // because the pump owns it, not because it must be: runAs rescopes a returned iterator itself.
-          // runAs, not a context switch of its own: the pump holds the machine across the whole queue
-          // (see above), so a turn declares only its owner. Each item carries its own submitter.
-          // The terminal event this turn ended on. `followup` is post-COMMIT, and only `done` is a
-          // commit: an `aborted` turn was cut short (a steer, a user cancel, a screen/toolcall hook
-          // refusing it, a provider round ceiling) and an `error` turn produced no response at all, so
-          // in both cases a followup hook would judge history with no completed answer in it — and a
-          // `resubmit` would undo the very stop that just happened, handing a round ceiling a fresh
-          // budget. Tracked here rather than inferred from `ac.signal`, which only knows about the two
-          // signal-driven aborts and not the policy ones.
-          let terminal: PipelineEvent['type'] | undefined;
-          // One usage scope per pump ITERATION rather than per turn. `followup` is post-commit by
-          // definition and a detached classifier settles whenever it settles, so a scope that ended at
-          // the turn's commit would drop precisely the spend that is hardest to account for otherwise.
-          // The entries array is registered for flush before any work starts, so a late arrival lands
-          // in something already tracked and needs no coordination of its own.
-          await withUsageScope(async usage => {
-          s.pendingUsage.push(usage.entries);
-          await runAs(head.principal, async () => {
-            for await (const ev of runSession({
-              session,
-              config:         { provider: head.provider, traceId: head.traceId },
-              provider:       resolved.adapter,
-              providerConfig: resolved.config,
-              store:          deps.store,
-              signal:         ac.signal,
-              loadPlugin:     deps.loadPlugin,
-              unloadPlugin:   deps.unloadPlugin,
-              ...(toolMap            !== undefined ? { tools:         toolMap            } : {}),
-              ...(deps.tools         !== undefined ? { toolRegistry:  deps.tools         } : {}),
-              ...(toolPresenter      !== undefined ? { toolPresenter                     } : {}),
-              ...(deps.hooks         !== undefined ? { hooks:         deps.hooks         } : {}),
-              ...(deps.systemContext !== undefined ? { systemContext: deps.systemContext } : {}),
-              ...(deps.workdir       !== undefined ? { workdir:       deps.workdir       } : {}),
-              ...(deps.files         !== undefined ? { files:         deps.files         } : {}),
-              ...(mediaStore         !== undefined ? { mediaStore                        } : {}),
-              ...(permissionGate     !== undefined ? { permissionGate                    } : {}),
-              ...(deps.configPath    !== undefined ? { configPath:    deps.configPath    } : {}),
-              ...(deps.vault         !== undefined ? { vault:         deps.vault         } : {}),
-              ...(head.prompt        !== undefined ? { prompt:        head.prompt        } : {}),
-              ...(inject             !== undefined ? { injectedEphemeral: inject } : {}),
-            })) {
-              if (ev.type === 'done' || ev.type === 'aborted' || ev.type === 'error') terminal = ev.type;
-              emit(s, ev);
+          // A redo re-runs the existing committed user turn — no title derivation, no new user message.
+          if (head.redo === undefined) {
+            if (!session.title && !session.messages.some(m => m.role === 'user')) {
+              // Falls back to the attachment names when the turn has no words of its own: an image-only
+              // first turn is a real submission, and got no title at all — which reads in the session
+              // list as a session that failed to start.
+              const text = content
+                .filter((c): c is Extract<MessageContent, { type: 'text' }> => c.type === 'text')
+                .map(c => c.text).join(' ').trim()
+                || content
+                  .filter((c): c is Extract<MessageContent, { type: 'file-ref' }> => c.type === 'file-ref')
+                  .map(c => c.name).join(', ');
+              if (text) {
+                const words = text.split(/\s+/).slice(0, 8).join(' ');
+                session = { ...session, title: words.length > 60 ? `${words.slice(0, 60)}…` : words };
+              }
             }
-          });
 
-          // followup — post-commit, in the queue owner. A hook reads the just-committed turn and may
-          // head-enqueue a robo follow-up (its own real turn, running next). Runs only for a turn that
-          // committed (see `terminal`), and under the submitter's principal because a reactor may itself
-          // call complete() (a classifier).
-          const hooks = deps.hooks;
-          if (terminal === 'done' && hooks) {
-            const committed = await deps.store.get(id);
-            if (committed && head.resubmitDepth < MAX_RESUBMIT_DEPTH) {
-              let followup: { resubmits: MessageContent[][]; markers: MessageContent[]; retract?: { context: MessageContent[]; durable: MessageContent[] } } = { resubmits: [], markers: [] };
-              await runAs(head.principal, async () => {
-                followup = await hooks.runFollowup({
-                  session:       committed,
-                  resubmitDepth: head.resubmitDepth,
-                  config:        { provider: head.provider, traceId: head.traceId },
-                  signal:        ac.signal,
-                  ...(head.prompt !== undefined ? { prompt: head.prompt } : {}),
-                });
-              });
-              const resubmits = followup.resubmits;
-
-              // Durable markers a followup hook returned (e.g. a fired trigger's silent tool tracing
-              // what it did). Append-only to the just-committed session; the pump is the sole writer
-              // post-commit, so an unconditional set is safe. Emitted live too (post-`done`, like a
-              // `queued` event) so a live draw matches a reload — the engine surfaces everything it
-              // persists; a frontend filters if it wants to. Skipped when retracting: the pop rewrites
-              // the message tail, so these markers are folded into that single write instead (below)
-              // to keep ordering sane (a separate append here would be sliced into the popped region).
-              if (followup.markers.length > 0 && !followup.retract) {
-                await deps.store.set(id, {
-                  ...committed,
-                  messages: [...committed.messages,
-                    createMessage({ role: 'marker', content: followup.markers, traceId: head.traceId })],
-                });
-                notify(s, { type: 'marker', content: followup.markers, traceId: head.traceId });
-              }
-              // unshift in reverse so the hooks' order is preserved at the head of the queue. Stamp
-              // every block `origin: 'robo'` here — once — so it rides into both the live `queued`
-              // event and the persisted user message the pump builds from this item.
-              for (const raw of resubmits.reverse()) {
-                const rt = crypto.randomUUID();
-                // Every block, not just text: `origin` is authorship, orthogonal to what the block
-                // carries, and a resubmission that attached an image was silently presenting it as the
-                // user's own. The arms a stamp would be wrong on don't occur here — a hook returns
-                // content, not a thinking block — so a blanket stamp beats an arm-by-arm list.
-                const content = raw.map(c => ({ ...c, origin: 'robo' as const }));
-                s.queue.unshift({
-                  traceId:       rt,
-                  rootTraceId:   head.rootTraceId,
-                  content,
-                  provider:      head.provider,
-                  principal:     head.principal,
-                  concatQueue:   false,
-                  resubmitDepth: head.resubmitDepth + 1,
-                });
-                notify(s, { type: 'queued', content, queued: 0, concatQueue: false, traceId: rt, rootTraceId: head.rootTraceId });
-              }
-
-              // retract-and-rerun: pop the just-committed turn back to (and excluding) the last user
-              // message, stash the popped messages in a durable retraction marker (LLM-elided like any
-              // marker — so the model never re-reads its superseded answer — but carried in `data` for
-              // a strike-through render and audit), then re-enqueue a redo of that same user turn at the
-              // head, delivering the trigger tool's output as ephemeral context. Unshifted last so it
-              // sits at the very head (runs next) even if a resubmit was also queued above.
-              if (followup.retract) {
-                const lastUserIdx = lastUserIndex(committed);
-                const popped = lastUserIdx >= 0 ? committed.messages.slice(lastUserIdx + 1) : [];
-                // `durable` correction (a contextual fire that landed post-commit) folds onto the user
-                // message we keep — persisted, so the redo AND every later turn see it in history, the
-                // exact durability the clean in-situ path gives. `context` stays ephemeral (redo only).
-                // The fold runs on the *truncated* session, whose last user message is the one we keep,
-                // so it goes through the same helper as the screen and raced-verdict folds.
-                const durable = followup.retract.durable ?? [];
-                const truncated = lastUserIdx >= 0
-                  ? { ...committed, messages: committed.messages.slice(0, lastUserIdx + 1) }
-                  : committed;
-                const kept = foldOntoUserTurn(truncated, durable).messages;
-                const retractionMsg: Message = createMessage({
-                  role:    'marker',
-                  traceId: head.traceId,
-                  // `retracted` is what was popped (the superseded answer); `injected` is the ephemeral
-                  // context fed to the redo — neither is otherwise persisted, so the pair fully traces
-                  // the swap for a post-mortem (and a frontend can render the strike-through + the cause).
-                  content: [{ type: 'marker', creator: RETRACTION_CREATOR, data: { retracted: popped, injected: followup.retract.context ?? [], traceId: head.traceId } }],
-                });
-                // Any followup markers ride along as a trailing marker message (not folded into the
-                // retraction marker) so each creator's trace stays its own block.
-                const trailing: Message[] = followup.markers.length > 0
-                  ? [createMessage({ role: 'marker', content: followup.markers, traceId: head.traceId })]
-                  : [];
-                await deps.store.set(id, { ...committed, messages: [...kept, retractionMsg, ...trailing] });
-                // Emit the durable fold live (as a robo-user on the kept user turn) before the retraction
-                // marker, mirroring the screen-time durable path's ordering.
-                if (durable.length > 0) notify(s, { type: 'robo-user', content: durable, traceId: head.traceId });
-                notify(s, { type: 'marker', content: retractionMsg.content, traceId: head.traceId });
-                if (trailing.length > 0) notify(s, { type: 'marker', content: followup.markers, traceId: head.traceId });
-
-                const rt = crypto.randomUUID();
-                s.queue.unshift({
-                  traceId:       rt,
-                  rootTraceId:   head.rootTraceId,
-                  content:       [],
-                  provider:      head.provider,
-                  principal:     head.principal,
-                  concatQueue:   false,
-                  resubmitDepth: head.resubmitDepth + 1,
-                  redo:          { ephemeral: followup.retract.context ?? [] },
-                  ...(head.prompt !== undefined ? { prompt: head.prompt } : {}),
-                });
-              }
+            // Persist-at-turn-start: the user message only hits the store when its turn begins, never
+            // while queued. That is what stops a mid-turn submit from clobbering session state. A robo
+            // resubmission's blocks already carry `origin: 'robo'` (stamped where it was enqueued).
+            session = appendMessage(session, createMessage({ role: 'user', content, traceId: head.traceId, providerName: head.provider }));
+            try {
+              await deps.store.set(session.id, session);
+            } catch (e) {
+              // A read-only store rejects the persist-at-turn-start write (e.g. a session shared read-only
+              // from another profile's partition). That is a per-turn condition, not a host fault: surface
+              // it as a turn error and drop this submission rather than let it escape the detached pump and
+              // crash the process. Any other write failure stays fatal.
+              if (!isReadOnlyError(e)) throw e;
+              emit(s, { type: 'error', error: e.message, traceId: head.traceId });
+              continue;
             }
           }
-          }, { traceId: head.traceId, rootTraceId: head.rootTraceId });
-        } catch (e) {
-          emit(s, { type: 'error', error: String(e), traceId: head.traceId });
-        } finally {
-          s.ac = undefined;
+
+          const resolved = await deps.resolveProvider(head.provider);
+          if (resolved === null) {
+            emit(s, { type: 'error', error: `Unknown provider "${head.provider}"`, traceId: head.traceId });
+            continue;
+          }
+
+          // A redo re-runs an existing turn with its ephemeral; a steer carries an interrupt's nudge. The
+          // two never coincide on one item, so either supplies runSession's injectedEphemeral.
+          const inject = head.redo?.ephemeral ?? head.injectEphemeral;
+
+          const ac = new AbortController();
+          s.ac = ac;
+          // Fold each tool's wire contract — the `params`/`result` text flattened from its single contract
+          // (a source tool's ToolContracts arms, or a source-less tool's `toolContract`) — into its description
+          // for this turn, so the model reasons about the real TS shapes, not just the loose inputSchema.
+          // Derived here because `services`/ToolTypeIndex are live at dispatch. Tools with only a loose
+          // inputSchema (no contract) are left as-is; absent ToolTypeIndex (browser) ⇒ plain descriptions.
+          const wire = await deps.toolTypeIndex?.()?.wireContracts();
+          const toolPresenter = deps.toolPresenter?.();
+          const mediaStore    = deps.mediaStore?.();
+          const permissionGate = deps.permissionGate?.();
+          const toolMap = deps.tools !== undefined
+            ? new Map<string, Tool>(deps.tools.list().map(t => {
+                const wc = wire?.[t.name];
+                return [t.name, wc !== undefined
+                  ? { ...t, description: wireDescription(t.description, wc) }
+                  : t];
+              }))
+            : undefined;
+
+          try {
+            // Establish the submitter's principal for the whole turn here, not inside runSession:
+            // pump runs detached (`void pump`), so this scope — not the request that enqueued — is the
+            // turn's async root. Everything downstream (hooks, tools, and any Store/FileStore/Vault
+            // access they trigger) reads it via currentPrincipal(). The consumption is inside the callback
+            // because the pump owns it, not because it must be: runAs rescopes a returned iterator itself.
+            // runAs, not a context switch of its own: the pump holds the machine across the whole queue
+            // (see above), so a turn declares only its owner. Each item carries its own submitter.
+            // The terminal event this turn ended on. `followup` is post-COMMIT, and only `done` is a
+            // commit: an `aborted` turn was cut short (a steer, a user cancel, a screen/toolcall hook
+            // refusing it, a provider round ceiling) and an `error` turn produced no response at all, so
+            // in both cases a followup hook would judge history with no completed answer in it — and a
+            // `resubmit` would undo the very stop that just happened, handing a round ceiling a fresh
+            // budget. Tracked here rather than inferred from `ac.signal`, which only knows about the two
+            // signal-driven aborts and not the policy ones.
+            let terminal: PipelineEvent['type'] | undefined;
+            // One usage scope per pump ITERATION rather than per turn. `followup` is post-commit by
+            // definition and a detached classifier settles whenever it settles, so a scope that ended at
+            // the turn's commit would drop precisely the spend that is hardest to account for otherwise.
+            // The entries array is registered for flush before any work starts, so a late arrival lands
+            // in something already tracked and needs no coordination of its own.
+            await withUsageScope(async usage => {
+              s.pendingUsage.push(usage.entries);
+              await runAs(head.principal, async () => {
+                for await (const ev of runSession({
+                  session,
+                  config:         { provider: head.provider, traceId: head.traceId },
+                  provider:       resolved.adapter,
+                  providerConfig: resolved.config,
+                  store:          deps.store,
+                  signal:         ac.signal,
+                  loadPlugin:     deps.loadPlugin,
+                  unloadPlugin:   deps.unloadPlugin,
+                  ...(toolMap            !== undefined ? { tools:         toolMap            } : {}),
+                  ...(deps.tools         !== undefined ? { toolRegistry:  deps.tools         } : {}),
+                  ...(toolPresenter      !== undefined ? { toolPresenter                     } : {}),
+                  ...(deps.hooks         !== undefined ? { hooks:         deps.hooks         } : {}),
+                  ...(deps.systemContext !== undefined ? { systemContext: deps.systemContext } : {}),
+                  ...(deps.workdir       !== undefined ? { workdir:       deps.workdir       } : {}),
+                  ...(deps.files         !== undefined ? { files:         deps.files         } : {}),
+                  ...(mediaStore         !== undefined ? { mediaStore                        } : {}),
+                  ...(permissionGate     !== undefined ? { permissionGate                    } : {}),
+                  ...(deps.configPath    !== undefined ? { configPath:    deps.configPath    } : {}),
+                  ...(deps.vault         !== undefined ? { vault:         deps.vault         } : {}),
+                  ...(head.prompt        !== undefined ? { prompt:        head.prompt        } : {}),
+                  ...(inject             !== undefined ? { injectedEphemeral: inject } : {}),
+                })) {
+                  if (ev.type === 'done' || ev.type === 'aborted' || ev.type === 'error') terminal = ev.type;
+                  emit(s, ev);
+                }
+              });
+
+              // followup — post-commit, in the queue owner. A hook reads the just-committed turn and may
+              // head-enqueue a robo follow-up (its own real turn, running next). Runs only for a turn that
+              // committed (see `terminal`), and under the submitter's principal because a reactor may itself
+              // call complete() (a classifier).
+              const hooks = deps.hooks;
+              if (terminal === 'done' && hooks) {
+                const committed = await deps.store.get(id);
+                if (committed && head.resubmitDepth < MAX_RESUBMIT_DEPTH) {
+                  let followup: { resubmits: MessageContent[][]; markers: MessageContent[]; retract?: { context: MessageContent[]; durable: MessageContent[] } } = { resubmits: [], markers: [] };
+                  await runAs(head.principal, async () => {
+                    followup = await hooks.runFollowup({
+                      session:       committed,
+                      resubmitDepth: head.resubmitDepth,
+                      config:        { provider: head.provider, traceId: head.traceId },
+                      signal:        ac.signal,
+                      ...(head.prompt !== undefined ? { prompt: head.prompt } : {}),
+                    });
+                  });
+                  const resubmits = followup.resubmits;
+
+                  // Durable markers a followup hook returned (e.g. a fired trigger's silent tool tracing
+                  // what it did). Append-only to the just-committed session; the pump is the sole writer
+                  // post-commit, so an unconditional set is safe. Emitted live too (post-`done`, like a
+                  // `queued` event) so a live draw matches a reload — the engine surfaces everything it
+                  // persists; a frontend filters if it wants to. Skipped when retracting: the pop rewrites
+                  // the message tail, so these markers are folded into that single write instead (below)
+                  // to keep ordering sane (a separate append here would be sliced into the popped region).
+                  if (followup.markers.length > 0 && !followup.retract) {
+                    await deps.store.set(id, {
+                      ...committed,
+                      messages: [...committed.messages,
+                        createMessage({ role: 'marker', content: followup.markers, traceId: head.traceId })],
+                    });
+                    notify(s, { type: 'marker', content: followup.markers, traceId: head.traceId });
+                  }
+                  // unshift in reverse so the hooks' order is preserved at the head of the queue. Stamp
+                  // every block `origin: 'robo'` here — once — so it rides into both the live `queued`
+                  // event and the persisted user message the pump builds from this item.
+                  for (const raw of resubmits.reverse()) {
+                    const rt = crypto.randomUUID();
+                    // Every block, not just text: `origin` is authorship, orthogonal to what the block
+                    // carries, and a resubmission that attached an image was silently presenting it as the
+                    // user's own. The arms a stamp would be wrong on don't occur here — a hook returns
+                    // content, not a thinking block — so a blanket stamp beats an arm-by-arm list.
+                    const content = raw.map(c => ({ ...c, origin: 'robo' as const }));
+                    s.queue.unshift({
+                      traceId:       rt,
+                      rootTraceId:   head.rootTraceId,
+                      content,
+                      provider:      head.provider,
+                      principal:     head.principal,
+                      concatQueue:   false,
+                      resubmitDepth: head.resubmitDepth + 1,
+                    });
+                    notify(s, { type: 'queued', content, queued: 0, concatQueue: false, traceId: rt, rootTraceId: head.rootTraceId });
+                  }
+
+                  // retract-and-rerun: pop the just-committed turn back to (and excluding) the last user
+                  // message, stash the popped messages in a durable retraction marker (LLM-elided like any
+                  // marker — so the model never re-reads its superseded answer — but carried in `data` for
+                  // a strike-through render and audit), then re-enqueue a redo of that same user turn at the
+                  // head, delivering the trigger tool's output as ephemeral context. Unshifted last so it
+                  // sits at the very head (runs next) even if a resubmit was also queued above.
+                  if (followup.retract) {
+                    const lastUserIdx = lastUserIndex(committed);
+                    const popped = lastUserIdx >= 0 ? committed.messages.slice(lastUserIdx + 1) : [];
+                    // `durable` correction (a contextual fire that landed post-commit) folds onto the user
+                    // message we keep — persisted, so the redo AND every later turn see it in history, the
+                    // exact durability the clean in-situ path gives. `context` stays ephemeral (redo only).
+                    // The fold runs on the *truncated* session, whose last user message is the one we keep,
+                    // so it goes through the same helper as the screen and raced-verdict folds.
+                    const durable = followup.retract.durable ?? [];
+                    const truncated = lastUserIdx >= 0
+                      ? { ...committed, messages: committed.messages.slice(0, lastUserIdx + 1) }
+                      : committed;
+                    const kept = foldOntoUserTurn(truncated, durable).messages;
+                    const retractionMsg: Message = createMessage({
+                      role:    'marker',
+                      traceId: head.traceId,
+                      // `retracted` is what was popped (the superseded answer); `injected` is the ephemeral
+                      // context fed to the redo — neither is otherwise persisted, so the pair fully traces
+                      // the swap for a post-mortem (and a frontend can render the strike-through + the cause).
+                      content: [{ type: 'marker', creator: RETRACTION_CREATOR, data: { retracted: popped, injected: followup.retract.context ?? [], traceId: head.traceId } }],
+                    });
+                    // Any followup markers ride along as a trailing marker message (not folded into the
+                    // retraction marker) so each creator's trace stays its own block.
+                    const trailing: Message[] = followup.markers.length > 0
+                      ? [createMessage({ role: 'marker', content: followup.markers, traceId: head.traceId })]
+                      : [];
+                    await deps.store.set(id, { ...committed, messages: [...kept, retractionMsg, ...trailing] });
+                    // Emit the durable fold live (as a robo-user on the kept user turn) before the retraction
+                    // marker, mirroring the screen-time durable path's ordering.
+                    if (durable.length > 0) notify(s, { type: 'robo-user', content: durable, traceId: head.traceId });
+                    notify(s, { type: 'marker', content: retractionMsg.content, traceId: head.traceId });
+                    if (trailing.length > 0) notify(s, { type: 'marker', content: followup.markers, traceId: head.traceId });
+
+                    const rt = crypto.randomUUID();
+                    s.queue.unshift({
+                      traceId:       rt,
+                      rootTraceId:   head.rootTraceId,
+                      content:       [],
+                      provider:      head.provider,
+                      principal:     head.principal,
+                      concatQueue:   false,
+                      resubmitDepth: head.resubmitDepth + 1,
+                      redo:          { ephemeral: followup.retract.context ?? [] },
+                      ...(head.prompt !== undefined ? { prompt: head.prompt } : {}),
+                    });
+                  }
+                }
+              }
+            }, { traceId: head.traceId, rootTraceId: head.rootTraceId });
+          } catch (e) {
+            emit(s, { type: 'error', error: String(e), traceId: head.traceId });
+          } finally {
+            s.ac = undefined;
+          }
         }
+      } finally {
+        s.running = false;
+        s.runningTraceId = undefined;
+        s.replay  = [];
+        // Accounting is flushed HERE — at the drained queue, not at a turn boundary. "The end of a turn"
+        // is not a well-defined moment to total anything at: steers terminate and resume, a retract
+        // re-enqueues the turn it just popped, followup enqueues resubmissions, and a detached classifier
+        // settles whenever it settles. The queue draining is unambiguous, and it is after all of them.
+        await flushUsage(id, s);
+        // Deterministic busy→idle signal: running is now false, so any subscriber draining the stream
+        // (a frontend's status tracker) reads an authoritative idle the moment it sees this — no racing
+        // the microtask on which `running` flipped. Not in `replay` (transient lifecycle, not history).
+        notify(s, { type: 'idle', sessionId: id });
+        maybeCleanup(id, s);
       }
-    } finally {
-      s.running = false;
-      s.runningTraceId = undefined;
-      s.replay  = [];
-      // Accounting is flushed HERE — at the drained queue, not at a turn boundary. "The end of a turn"
-      // is not a well-defined moment to total anything at: steers terminate and resume, a retract
-      // re-enqueues the turn it just popped, followup enqueues resubmissions, and a detached classifier
-      // settles whenever it settles. The queue draining is unambiguous, and it is after all of them.
-      await flushUsage(id, s);
-      // Deterministic busy→idle signal: running is now false, so any subscriber draining the stream
-      // (a frontend's status tracker) reads an authoritative idle the moment it sees this — no racing
-      // the microtask on which `running` flipped. Not in `replay` (transient lifecycle, not history).
-      notify(s, { type: 'idle', sessionId: id });
-      maybeCleanup(id, s);
-    }
     });
   };
 
