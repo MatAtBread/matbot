@@ -426,10 +426,20 @@ export async function unloadPlugin(pluginName: string, services: MatbotMachine):
 
   state.plugins.splice(idx, 1);
   services.Notifier.notify({ kind: RegistryChangeKind, source: 'plugins', registry: 'plugins', name: pluginName, operation: 'removed' });
-  await Promise.race([
-    plugin.teardown?.(),
-    new Promise<void>((_, reject) => setTimeout(() => reject(new Error(`Teardown timeout for plugin ${pluginName}`)), 10000))
-  ]);
+  // The timer is cleared however the race settles. Left dangling it outlived every SUCCESSFUL unload,
+  // holding the event loop open for the rest of its 10s — so `plugin unload` followed by exit sat there
+  // with nothing to wait for.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      plugin.teardown?.(),
+      new Promise<void>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`Teardown timeout for plugin ${pluginName}`)), 10_000);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
   return true;
 }
 
