@@ -109,6 +109,21 @@ export function invokeTool<K extends string, const P>(
 }
 
 /**
+ * The one drain: consume a tool event stream, keeping the last `result` and throwing on the first
+ * `error`. Whether a stream that yielded NO result is a failure is the caller's question, and the only
+ * thing the three public drains ever disagreed on — so it is the only thing they pass in.
+ */
+async function drain<R>(events: AsyncIterable<ToolEvent<R>>): Promise<{ value: R | undefined; hadResult: boolean }> {
+  let value: R | undefined;
+  let hadResult = false;
+  for await (const ev of events) {
+    if      (ev.type === 'result') { value = ev.value; hadResult = true; }
+    else if (ev.type === 'error')  { throw new Error(ev.message); }
+  }
+  return { value, hadResult };
+}
+
+/**
  * Drain a tool event stream (e.g. {@link invokeTool}'s return) to its raw `result` *value*, typed:
  * paired with `invokeTool(machine, name, …)` it returns whatever `ToolContracts[name]` declares (or
  * `unknown` for an unregistered tool). This is the structured counterpart to {@link toolText} — use it
@@ -116,14 +131,9 @@ export function invokeTool<K extends string, const P>(
  * Stops and throws on the first `error` event, or if the tool finished without yielding a `result`.
  */
 export async function toolResult<R>(events: AsyncIterable<ToolEvent<R>>): Promise<R> {
-  let value!: R;
-  let hadResult = false;
-  for await (const ev of events) {
-    if      (ev.type === 'result') { value = ev.value; hadResult = true; }
-    else if (ev.type === 'error')  { throw new Error(ev.message); }
-  }
+  const { value, hadResult } = await drain(events);
   if (!hadResult) throw new Error('Tool produced no result');
-  return value;
+  return value as R;
 }
 
 /**
@@ -133,13 +143,7 @@ export async function toolResult<R>(events: AsyncIterable<ToolEvent<R>>): Promis
  * (the shape `skill_action` and other prose tools return) by its `content`, anything else as JSON.
  */
 export async function toolText(events: AsyncIterable<ToolEvent>): Promise<string> {
-  let result: unknown;
-  let hadResult = false;
-  for await (const ev of events) {
-    if      (ev.type === 'result') { result = ev.value; hadResult = true; }
-    else if (ev.type === 'error')  { throw new Error(ev.message); }
-  }
-  if (!hadResult) throw new Error('Tool produced no result');
+  const result = await toolResult(events);
 
   if (typeof result === 'string') return result;
   if (result !== null && typeof result === 'object' && typeof (result as { content?: unknown }).content === 'string') {
@@ -184,12 +188,7 @@ function compactTrace(v: unknown): string {
  * is no `ToolTypeIndex`. Both are opted into.
  */
 async function drainProxyResult<R>(events: AsyncIterable<ToolEvent<R>>): Promise<R | undefined> {
-  let value: R | undefined;
-  for await (const ev of events) {
-    if      (ev.type === 'result') value = ev.value;
-    else if (ev.type === 'error')  throw new Error(ev.message);
-  }
-  return value;
+  return (await drain(events)).value;
 }
 
 export type ToolBox = (call?: Partial<InvokeToolOptions>) => ToolProxy;
