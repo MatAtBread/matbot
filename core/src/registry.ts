@@ -299,6 +299,9 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotMachine,
   // own settings — there is no way to name another's.
   const ownSettings = makePluginSettings(services.createStore<SettingsDoc>('settings'), plugin.name);
 
+  // Plugin-scoped notifier, likewise built once. See the `Notifier` member below.
+  const ownNotifier = scopedNotifier(services.Notifier, plugin.name);
+
   // Per-plugin `mounted`: a thin adapter over the host mount table that delivers *this plugin's* scoped
   // machine (and scoped onUnmount) to handlers. The stable `scoped` object reads through the host's
   // re-pointing proxies/registry, so `scoped[key]` is the host's live service by the time a transition
@@ -339,9 +342,11 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotMachine,
     // being a deliberate read of the concrete gate at that moment.
     get PermissionGate() { return services.PermissionGate; },
     // Everything this plugin publishes is attributed to it by default — the notification analogue of
-    // stamping `pluginName` on its tools. Reads through the host's swap proxy, so a registered
-    // distributed Notifier takes effect for a plugin that captured this in setup().
-    get Notifier() { return scopedNotifier(services.Notifier, plugin.name); },
+    // stamping `pluginName` on its tools. Wrapped ONCE per plugin (below), not per property read: this
+    // was a getter, so every `services.Notifier.notify(...)` minted a fresh three-method object. Swap
+    // safety is unaffected, because what is wrapped is the host's capture-safe proxy — both hosts put
+    // that stable object on the machine — so a registered distributed Notifier still takes effect.
+    Notifier: ownNotifier,
     tools: {
       register:      registerTool,
       remove:        (name: string) => services.tools.remove(name),
