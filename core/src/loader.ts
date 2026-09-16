@@ -32,6 +32,23 @@ const FRESH_PARAM = 'mbfresh';
 let freshSeq = 0;
 
 /**
+ * One entry to load, for a host that has already done its own resolution — the object form of a plain
+ * specifier string. Every field is documented on {@link loadPlugins}, which is the only consumer.
+ *
+ * Named, because it was written out twice: once in the parameter list and once again in the `as` cast
+ * of the line that normalises the strings. Two spellings of one shape, where adding a field to the
+ * wrong one narrows what the loader will read from a host that is already passing it.
+ */
+export interface LoadRequest {
+  spec:        string;
+  importSpec?: string;
+  name?:       string;
+  version?:    string;
+  runtimes?:   readonly Runtime[];
+  notes?:      readonly string[];
+}
+
+/**
  * Load plugins from the given specifiers, register them, then run setup().
  *
  * Node: specifiers are npm package names (e.g. "matbot-anthropic") or
@@ -101,13 +118,13 @@ let freshSeq = 0;
  *   only as a confusing empty-result error downstream — fail loudly with the reason instead.
  */
 export async function loadPlugins(
-  specifiers: readonly (string | { spec: string; importSpec?: string; name?: string; version?: string; runtimes?: readonly Runtime[]; notes?: readonly string[] })[],
+  specifiers: readonly (string | LoadRequest)[],
   services:   MatbotMachine,
   bustCache = false,
   prompt?:    PromptFn,
   onLoadError: 'skip' | 'throw' = 'skip',
 ): Promise<MatbotPlugin[]> {
-  const reqs = specifiers.map(s => (typeof s === 'string' ? { spec: s } : s) as { spec: string; importSpec?: string; name?: string; version?: string; runtimes?: readonly Runtime[]; notes?: readonly string[] });
+  const reqs: LoadRequest[] = specifiers.map(s => (typeof s === 'string' ? { spec: s } : s));
 
   // A reason reaching a user, decorated with what the host noticed while resolving this spec. The
   // failure a load reports is usually downstream of its cause, and the host is the only layer that
