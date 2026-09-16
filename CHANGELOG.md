@@ -9,6 +9,40 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## Unreleased
+
+### Breaking changes
+
+- **`MatbotPluginSpec.storage` / `StoreFactory` are removed.** Write-only machinery superseded by
+  `storageBackend`: registrations were collision-checked, recorded and deleted on unload, but nothing ever
+  read them back, and no plugin declared one. Breaking only for a third-party plugin declaring `storage:`,
+  which could never have had an effect.
+
+### Bug fixes
+
+- **Config** — a `#` inside a YAML value is no longer treated as a comment. The tokenizer ran `/#.*$/`
+  over every line, so `github:owner/repo#path:sub` silently lost its subdirectory and loaded the repo
+  root, and a quoted value lost everything from the `#` on, closing quote included. Now follows YAML's own
+  rule: outside quotes, at a line start or after whitespace.
+- **`runner`** — a provider that rejects with a non-`Error` no longer discards the turn. The failure
+  handler tested `'cause' in e`, which throws on a primitive, so the catch itself threw and left
+  `runSession` by the one path that does not commit — losing every completed round, which is precisely
+  what that branch exists to prevent.
+- **`followup` hooks** — `retractAndRerun: {}` retracts. Whether a retract had been requested was derived
+  from the payload size, so a hook asking to pop and re-run with nothing added got no pop, no redo and no
+  diagnostic.
+- **Session media** — the per-session media quota counts media only. It listed by `sessionId` alone, and
+  the MediaStore is routinely the host's own file area, so a `sessionId`-tagged workspace file or detached
+  job output was charged to the quota and could refuse an attachment on its behalf.
+- **Tool descriptions** — the `TypeScript result` block in a tool's wire contract is now a closed fence.
+  It was emitted without the newline between label and fence, so the type opened inline and the block
+  never closed — in the text every model reads for every tool, every turn.
+- **Plugin settings** — a settings write bounds its compare-and-swap retries (8, then it throws naming the
+  namespace) instead of `for(;;)`. A backend whose compare can never succeed spun hot with no error and no
+  exit.
+- **`plugin unload`** — the 10s teardown-timeout timer is cleared when the race settles. It was left
+  running after every successful unload, holding the event loop open for the remainder of its 10s.
+
 ## 0.4.16
 
 ### Bug fixes
