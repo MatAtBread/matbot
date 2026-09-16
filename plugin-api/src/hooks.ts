@@ -188,17 +188,21 @@ export class HookRegistry implements HookRegistrar {
     const markers:      MessageContent[]   = [];
     const retractCtx:   MessageContent[]   = [];
     const retractDur:   MessageContent[]   = [];
+    // Whether a hook ASKED to retract, not how much it sent with the request. Deriving it from the
+    // payload size dropped a `retractAndRerun: {}` — type-legal, both fields being optional — so a hook
+    // asking to pop and re-run with nothing added was answered by doing nothing at all, silently.
+    let retracting = false;
     for (const hook of this.hooks.get('followup') ?? []) {
       if (hook.on !== 'followup') continue;
       const r = await this.invoke(hook, () => hook.handler({ ...ctx, removeHook: () => this.removeOne('followup', hook) }));
       if (r?.resubmit)        resubmits.push(r.resubmit.content);
       if (r?.retractAndRerun) {
+        retracting = true;
         if (r.retractAndRerun.context) retractCtx.push(...r.retractAndRerun.context);
         if (r.retractAndRerun.durable) retractDur.push(...r.retractAndRerun.durable);
       }
       if (r?.markers)         markers.push(...r.markers);
     }
-    const retracting = retractCtx.length > 0 || retractDur.length > 0;
     return { resubmits, markers, ...(retracting ? { retract: { context: retractCtx, durable: retractDur } } : {}) };
   }
 }
