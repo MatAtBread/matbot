@@ -4,9 +4,10 @@ import { incompatibleRuntimeError, notAPluginError } from '@matatbread/matbot-pl
 import { registerPlugin, setupPlugin, unloadPlugin, recordFailedPlugin, clearFailedPlugin, announcePluginLoaded } from './registry.js';
 
 /**
- * The runtime this process is executing in. Detected the same way the rejected-import branch below
- * already distinguishes platforms (`typeof window`). Used only for the declarative pre-import gate;
- * an absent `matbotRuntime` declaration bypasses the gate entirely.
+ * The runtime this process is executing in — the one place this module decides what platform it is on.
+ * Read by the declarative pre-import gate (an absent `matbotRuntime` declaration bypasses it entirely)
+ * and by the import-rejection branch, which re-derived `typeof window` inline until the two could have
+ * disagreed.
  */
 const CURRENT_RUNTIME: Runtime = typeof window !== 'undefined' ? 'browser' : 'node';
 
@@ -200,7 +201,7 @@ export async function loadPlugins(
 
     if (result.status === 'rejected') {
       const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
-      if (typeof window !== 'undefined') {
+      if (CURRENT_RUNTIME === 'browser') {
         // Browser: warn and skip — browser environments have no node_modules fallback.
         console.warn(`[matbot] Could not load plugin "${spec}" (browser: use a URL path or configure an import map): ${reason}`);
         recordFailedPlugin({ specifier: spec, error: reason });
