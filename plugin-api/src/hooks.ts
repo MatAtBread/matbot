@@ -27,6 +27,14 @@ export class HookRegistry implements HookRegistrar {
     this.hooks.set(hook.on, list);
   }
 
+  // The hooks registered on one channel, narrowed to that channel's arm. The map is keyed BY `on`, so
+  // its members are already the right arm; each run* method used to re-test `if (hook.on !== 'screen')
+  // continue` purely to tell TypeScript so — five guards that could never fire. Narrowing at the lookup
+  // says it once, where it is true by construction.
+  private on<P extends HookPoint>(point: P): Extract<Hook, { on: P }>[] {
+    return (this.hooks.get(point) ?? []) as Extract<Hook, { on: P }>[];
+  }
+
   removeByPlugin(pluginName: string): void {
     for (const [point, list] of this.hooks) {
       this.hooks.set(point, list.filter(h => h.pluginName !== pluginName));
@@ -127,8 +135,7 @@ export class HookRegistry implements HookRegistrar {
       durable.push(...blocks);
       session = folded;
     };
-    for (const hook of this.hooks.get('screen') ?? []) {
-      if (hook.on !== 'screen') continue;
+    for (const hook of this.on('screen')) {
       const r = await this.invoke(hook, () => hook.handler({ ...ctx, session, removeHook: () => this.removeOne('screen', hook) }));
       if (!r) continue;
       if (r.session)                     session = r.session;
@@ -149,8 +156,7 @@ export class HookRegistry implements HookRegistrar {
   // session is never touched.
   async runContribute(ctx: Omit<ContributeContext, 'removeHook'>): Promise<Message[]> {
     let outgoing = ctx.outgoing as Message[];
-    for (const hook of this.hooks.get('contribute') ?? []) {
-      if (hook.on !== 'contribute') continue;
+    for (const hook of this.on('contribute')) {
       const r = await this.invoke(hook, () => hook.handler({ ...ctx, outgoing, removeHook: () => this.removeOne('contribute', hook) }));
       if (r) outgoing = r;
     }
@@ -159,8 +165,7 @@ export class HookRegistry implements HookRegistrar {
 
   // toolcall stops at the first hook that rejects or aborts; the rest don't run.
   async runToolCall(ctx: Omit<ToolCallContext, 'removeHook'>): Promise<ToolCallResult> {
-    for (const hook of this.hooks.get('toolcall') ?? []) {
-      if (hook.on !== 'toolcall') continue;
+    for (const hook of this.on('toolcall')) {
       const r = await this.invoke(hook, () => hook.handler({ ...ctx, removeHook: () => this.removeOne('toolcall', hook) }));
       if (r && (r.rejectTool || r.abort)) return r;
     }
@@ -171,8 +176,7 @@ export class HookRegistry implements HookRegistrar {
   // a hook that returns nothing just observes (auditing). Returns the final result.
   async runToolResult(ctx: Omit<ToolResultContext, 'removeHook'>): Promise<unknown> {
     let result = ctx.result;
-    for (const hook of this.hooks.get('toolresult') ?? []) {
-      if (hook.on !== 'toolresult') continue;
+    for (const hook of this.on('toolresult')) {
       const r = await this.invoke(hook, () => hook.handler({ ...ctx, result, removeHook: () => this.removeOne('toolresult', hook) }));
       if (r) result = r.result;
     }
@@ -192,8 +196,7 @@ export class HookRegistry implements HookRegistrar {
     // payload size dropped a `retractAndRerun: {}` — type-legal, both fields being optional — so a hook
     // asking to pop and re-run with nothing added was answered by doing nothing at all, silently.
     let retracting = false;
-    for (const hook of this.hooks.get('followup') ?? []) {
-      if (hook.on !== 'followup') continue;
+    for (const hook of this.on('followup')) {
       const r = await this.invoke(hook, () => hook.handler({ ...ctx, removeHook: () => this.removeOne('followup', hook) }));
       if (r?.resubmit)        resubmits.push(r.resubmit.content);
       if (r?.retractAndRerun) {
