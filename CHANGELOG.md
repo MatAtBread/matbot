@@ -9,7 +9,7 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
-## Unreleased
+## 0.4.16
 
 ### Breaking changes
 
@@ -20,6 +20,13 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Bug fixes
 
+- **`ToolProxy`** — `await tool.x(…)` resolves to `undefined` when a tool completes with no `result`
+  event, instead of throwing `Tool produced no result`. A tool whose work is a side effect yields nothing
+  by design (`function-tools` omits the event when a body returns nothing, and the triggers dispatcher
+  fires only on a yielded result), so the one calling surface meant to be silent was the one that failed.
+  That a body declaring a DATA result actually produces one is enforced where the types are, at definition
+  time: the snippet checker compiles it against its declared return type, and `strict` rejects one that can
+  fall through. `toolResult` itself still throws — it remains the low-level contract.
 - **Config** — a `#` inside a YAML value is no longer treated as a comment. The tokenizer ran `/#.*$/`
   over every line, so `github:owner/repo#path:sub` silently lost its subdirectory and loaded the repo
   root, and a quoted value lost everything from the `#` on, closing quote included. Now follows YAML's own
@@ -42,18 +49,6 @@ churn and less likely to affect a consumer who doesn't use them.
   exit.
 - **`plugin unload`** — the 10s teardown-timeout timer is cleared when the race settles. It was left
   running after every successful unload, holding the event loop open for the remainder of its 10s.
-
-## 0.4.16
-
-### Bug fixes
-
-- **`ToolProxy`** — `await tool.x(…)` resolves to `undefined` when a tool completes with no `result`
-  event, instead of throwing `Tool produced no result`. A tool whose work is a side effect yields nothing
-  by design (`function-tools` omits the event when a body returns nothing, and the triggers dispatcher
-  fires only on a yielded result), so the one calling surface meant to be silent was the one that failed.
-  That a body declaring a DATA result actually produces one is enforced where the types are, at definition
-  time: the snippet checker compiles it against its declared return type, and `strict` rejects one that can
-  fall through. `toolResult` itself still throws — it remains the low-level contract.
 
 ### Optional
 
