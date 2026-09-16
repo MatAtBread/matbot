@@ -6,7 +6,7 @@
  *   - Block sequences (- item), including an item whose value is an indented block under a bare `-`
  *   - Scalar types: string, number, boolean, null
  *   - Quoted strings (single and double), as values and as keys
- *   - Comments (# ...)
+ *   - Comments (# ...), outside quotes and at a line start or after whitespace (see stripComment)
  *
  * Does NOT support anchors, aliases, flow syntax, or ${NAME} expansion.
  * ${NAME} placeholders are left intact for the Vault to resolve.
@@ -36,11 +36,47 @@ interface Token {
   line:   number;
 }
 
+// Where a `#` opens a comment, per YAML's own rule: outside a quoted scalar, and at the start of a
+// line or after whitespace. Stripping every `#` truncated values that legitimately contain one —
+// `github:owner/repo#path:sub` lost its subdirectory, and a quoted value lost everything from the `#`
+// on, INCLUDING its closing quote, so it then failed to unquote and kept a stray `"`. Both were silent.
+//
+// A quote only opens a quoted scalar where a scalar can start (line start, or after the `:`/`-` that
+// introduces a value); elsewhere it is an apostrophe in a plain scalar (`title: Matt's config`), and
+// treating it as an opening quote would swallow a real trailing comment.
+//
+// Still unhandled, as before: a `#` inside a block scalar (`|`/`>`) body, and a backslash-escaped quote
+// — this parser does not process escapes anywhere (see `unquote`).
+function stripComment(line: string): string {
+  let quote: string | undefined;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]!;
+    if (quote !== undefined) {
+      if (ch === quote) quote = undefined;
+      continue;
+    }
+    if ((ch === '"' || ch === "'") && opensScalar(line, i)) { quote = ch; continue; }
+    if (ch === '#' && (i === 0 || line[i - 1] === ' ' || line[i - 1] === '\t')) return line.slice(0, i);
+  }
+  return line;
+}
+
+// Is position `i` somewhere a scalar can begin — nothing but whitespace before it, or the `:`/`-` that
+// introduces one? Keys count: `'@scope/pkg':` is a quoted scalar at line start.
+function opensScalar(line: string, i: number): boolean {
+  for (let j = i - 1; j >= 0; j--) {
+    const ch = line[j]!;
+    if (ch === ' ' || ch === '\t') continue;
+    return ch === ':' || ch === '-';
+  }
+  return true;
+}
+
 function tokenize(text: string): Token[] {
   const tokens: Token[] = [];
   const lines = text.split('\n');
   for (let n = 0; n < lines.length; n++) {
-    const stripped = lines[n]!.replace(/#.*$/, '').trimEnd();
+    const stripped = stripComment(lines[n]!).trimEnd();
     if (stripped.trim() === '') continue;
     const indent = stripped.length - stripped.trimStart().length;
     tokens.push({ indent, raw: stripped.trimStart(), line: n + 1 });
