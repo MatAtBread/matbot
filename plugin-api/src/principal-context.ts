@@ -1,4 +1,5 @@
 import type { Principal } from './types.js';
+import { scopeIterator } from './scoped-iterator.js';
 
 /**
  * Ambient carrier for the security {@link Principal} — the single mechanism by which any layer
@@ -115,32 +116,14 @@ function isAsyncIterator(value: unknown): value is AsyncIterator<unknown> & Asyn
     && typeof (value as AsyncIterator<unknown>).next === 'function';
 }
 
+// The per-pull re-entry itself is `scopeIterator` (./scoped-iterator.ts) — the usage carrier needs the
+// identical wrap for its call site, and had its own, less faithful copy.
 function scopedIterator<T>(
   carrier:   PrincipalCarrier,
   principal: Principal,
   source:    AsyncIterator<T> & AsyncIterable<T>,
 ): AsyncIterableIterator<T> {
-  const inScope = <R>(f: () => R): R => carrier.run(principal, f);
-  // A Proxy rather than a fresh object literal: the value crossing back out must still BE what it was —
-  // a custom iterator's own methods, its prototype, `instanceof` — so only the pull points are replaced.
-  // Anything else is forwarded bound to the target, which a class-based iterator holding internal state
-  // (or an object with internal slots) requires.
-  const pulls: Record<PropertyKey, unknown> = {
-    [Symbol.asyncIterator]: () => proxy,
-    next:   (...args: [] | [undefined]) => inScope(() => source.next(...args)),
-    ...(source.return !== undefined ? { return: (value?: unknown) => inScope(() => source.return!(value)) } : {}),
-    ...(source.throw  !== undefined ? { throw:  (error?: unknown) => inScope(() => source.throw!(error))  } : {}),
-  };
-  const proxy = new Proxy(source, {
-    // `hasOwn`, not `in`: the latter reaches Object.prototype, which would serve `toString`/`constructor`
-    // off the lookup object instead of the iterator being wrapped.
-    get(target, prop) {
-      if (Object.hasOwn(pulls, prop)) return pulls[prop];
-      const value = Reflect.get(target, prop, target);
-      return typeof value === 'function' ? value.bind(target) : value;
-    },
-  }) as AsyncIterableIterator<T>;
-  return proxy;
+  return scopeIterator(source, f => carrier.run(principal, f));
 }
 
 /** Imperatively establish `principal` for the current flow (entry points only). */

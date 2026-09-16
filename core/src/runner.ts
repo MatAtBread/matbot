@@ -6,7 +6,7 @@ import type {
 } from './types.js';
 import type { MatbotPlugin } from './plugin.js';
 import type { ToolPresenter } from '@matatbread/matbot-plugin-api';
-import { recordSpan, recordUsage, withUsageSite } from '@matatbread/matbot-plugin-api/host';
+import { recordSpan, recordUsage, withUsageSite, scopeIterable } from '@matatbread/matbot-plugin-api/host';
 import { HookRegistry } from './hooks.js';
 import { appendMessage, createMessage } from './session.js';
 import { foldOntoUserTurn, bindPluginOps, bindGate } from '@matatbread/matbot-plugin-api';
@@ -17,18 +17,12 @@ import { MEDIA_RESIDENCY_BYTES, resolveSessionMedia } from './media.js';
 // runner is itself an async generator, so it suspends at every `yield` and resumes under the consumer's
 // context, losing any scope entered around the loop body. Scoping each `next()` instead means the
 // tool's body — and anything it kicks off while running — always resumes under its own site.
-function siteScoped<T>(site: UsageSite, src: AsyncIterable<T>): AsyncIterable<T> {
-  return {
-    [Symbol.asyncIterator]: () => {
-      const it = src[Symbol.asyncIterator]();
-      return {
-        next:  ()  => withUsageSite(site, () => it.next()),
-        ...(it.return ? { return: (v?: never) => withUsageSite(site, () => it.return!(v)) } : {}),
-        ...(it.throw  ? { throw:  (e?: unknown) => withUsageSite(site, () => it.throw!(e))  } : {}),
-      };
-    },
-  };
-}
+//
+// `scopeIterable` is the shared per-pull wrap, as used by `runAs` for the principal: this had its own
+// object-literal copy, which replaced the iterator wholesale and so dropped a class-based tool
+// iterator's own members, prototype and `instanceof`.
+const siteScoped = <T>(site: UsageSite, src: AsyncIterable<T>): AsyncIterable<T> =>
+  scopeIterable(src, f => withUsageSite(site, f));
 
 // Substituted for an errored tool result when the turn was aborted (e.g. a mid-turn steer interrupt):
 // the tool was cut off, not genuinely faulty, and the raw abort reason ("Error: steer") is a leaked
