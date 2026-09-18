@@ -6,6 +6,10 @@
  * procedure the model used to follow in English (fetch session → copy provenance → write a doc, four
  * turns of attention-rent for one fact) is now deterministic TS, with the one irreducibly-judgement
  * step — "what durable fact, if any, is in this message?" — kept as a single low-context `singleTurn`.
+ * Low-context, not context-free: the extractor also sees the few messages before the one it reads,
+ * because a fact's SUBJECT is often only identified there (a pasted transcript whose owner was named a
+ * turn earlier), and one normalised to "the user" in its absence is a confident falsehood nothing
+ * downstream can undo.
  *
  * Where the skill made the model hand-copy provenance it had to go *fetch*, this reads the triggering
  * message and its provenance straight off `ctx.session` (zero round-trips), makes ONE `singleTurn` to
@@ -37,17 +41,33 @@ declare module '@matatbread/matbot-plugin-api' {
 }
 
 const EXTRACT_SYSTEM =
-`You capture durable facts EXPLICITLY asserted about the user or their world, from a single message,
-for recall in future conversations.
+`You capture durable facts EXPLICITLY asserted in a single message, for recall in future
+conversations. A fact may be about the user or about someone or something else in their world; either
+way, its subject must survive capture unchanged.
 
-The message is usually the user's, but may be the ASSISTANT's own — when the assistant promises to
-remember something ("I'll remember the table is pgdwell") or owns a mistake ("I was wrong; the field
-is X"), extract the underlying fact it is committing to (here: "The table is pgdwell" / "The field is
-X"), NOT the meta-statement about remembering or apologising.
+The input names who wrote the message. It is usually the user, but may be the ASSISTANT — when the
+assistant promises to remember something ("I'll remember the table is pgdwell") or owns a mistake ("I
+was wrong; the field is X"), extract the underlying fact it is committing to (here: "The table is
+pgdwell" / "The field is X"), NOT the meta-statement about remembering or apologising.
+
+The input may also carry a few earlier messages as CONTEXT. Use them only to work out who or what the
+message refers to. Never extract a fact that is stated only in the context.
 
 Be conservative. Extract only what the message plainly states — never infer, embellish, or read
 between the lines. Most messages contain nothing durable; an empty array [] is the common, correct
 answer. When in doubt, leave it out.
+
+Who a fact is about:
+- A fact is about the user ONLY when the user states it about themselves in the first person ("my
+  neighbours are X" -> "The user's neighbours are X"), or the assistant is committing to such a
+  statement the user made.
+- Material the message carries rather than asserts in the first person — a pasted document,
+  transcript, record, forwarded email, quoted or reported speech — is about whoever it concerns, which
+  is not the user unless the message or context says so. Name that subject in every fact, keeping how
+  they relate to the user when that is known ("Alex (the user's son) achieved 62% in EDU401"), never a
+  bare "The user…".
+- If the subject of a fact cannot be identified from the message or the context, leave the fact out.
+  Never fill an unknown subject with "the user".
 
 Rules:
 - A correction IS a durable fact — record what the user asserts is actually true. This covers
@@ -61,12 +81,46 @@ Rules:
 - Exclude greetings, questions, opinions without factual content, task instructions ("remember to
   restart the server"), and anything about the assistant or this conversation itself.
 
-Output ONLY a JSON array of strings — each one self-contained fact, normalised to the third person
-about the user where relevant ("my neighbours are X" -> "The user's neighbours are X"). Split
-distinct facts into separate elements. Nothing durable -> [].`;
+Output ONLY a JSON array of strings — each one a self-contained fact in the third person that names its
+subject explicitly. Split distinct facts into separate elements. Nothing durable -> [].`;
+
+/** Earlier messages shown to the extractor so it can tell whose fact it is looking at — a pasted
+ *  document is often only identified by the turn before it. Bounded, because this call runs on the
+ *  turn's own signal. */
+const CONTEXT_MESSAGES     = 3;
+const CONTEXT_MESSAGE_CHARS = 1500;
 
 function textOf(msg: Message | undefined): string {
   return msg?.content.filter(c => c.type === 'text').map(c => c.text).join('\n') ?? '';
+}
+
+function writerOf(msg: Message): string {
+  return msg.role === 'assistant' ? 'ASSISTANT' : 'USER';
+}
+
+// Robo blocks are excluded from the context: they are injected material (a folded-in skill, a trigger's
+// output), not something either party said, and would only give the extractor more to misattribute.
+function contextFor(messages: readonly Message[], msg: Message): string {
+  const idx = messages.indexOf(msg);
+  return messages
+    .slice(Math.max(0, idx - CONTEXT_MESSAGES), Math.max(0, idx))
+    .filter(m => m.role === 'user' || m.role === 'assistant')
+    .map(m => {
+      const text = m.content.flatMap(c => c.type === 'text' && c.origin !== 'robo' ? [c.text] : []).join('\n').trim();
+      if (text === '') return '';
+      const clipped = text.length > CONTEXT_MESSAGE_CHARS ? `${text.slice(0, CONTEXT_MESSAGE_CHARS)}…[truncated]` : text;
+      return `${writerOf(m)}: ${clipped}`;
+    })
+    .filter(t => t !== '')
+    .join('\n\n');
+}
+
+export function extractionPrompt(messages: readonly Message[], msg: Message): string {
+  const context = contextFor(messages, msg);
+  const body    = `[The message to extract from, written by the ${writerOf(msg)}:]\n${textOf(msg)}`;
+  return context === ''
+    ? body
+    : `[Earlier conversation — CONTEXT ONLY, for identifying who or what the message refers to; extract nothing from it:]\n${context}\n\n${body}`;
 }
 
 export function createRememberFactTool(services: MatbotMachine): Tool {
@@ -86,7 +140,7 @@ export function createRememberFactTool(services: MatbotMachine): Tool {
 
       let facts: string[] = [];
       try {
-        const res = await services.singleTurn({ provider: ctx.provider, system: EXTRACT_SYSTEM, prompt: text, signal: ctx.signal });
+        const res = await services.singleTurn({ provider: ctx.provider, system: EXTRACT_SYSTEM, prompt: extractionPrompt(ctx.session.messages, msg), signal: ctx.signal });
         const m = res.text.match(/\[[\s\S]*\]/);
         const parsed = m ? JSON.parse(m[0]) : [];
         facts = Array.isArray(parsed) ? parsed.filter((f): f is string => typeof f === 'string' && f.trim() !== '') : [];

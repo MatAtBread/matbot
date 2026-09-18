@@ -63,6 +63,13 @@ churn and less likely to affect a consumer who doesn't use them.
   that one file, instead of a silent empty list.
 - **`triggers`** — `trigger_action` reports `enabled` on every trigger it returns, resolved from the
   stored document (absent ⇒ enabled), rather than omitting it when it was never explicitly written.
+- **`cognition`** — `remember_fact` no longer records a third party's facts as the user's (#74). The
+  extractor was told to normalise every fact to "the user", and saw one message with no context, so a
+  pasted document about someone else became the user's email, marks and award date, and merged into the
+  user's profile at strong confidence. The extractor is now told who wrote the message and sees up to 3
+  preceding messages to identify subjects. It attributes a fact to the user only when the user states it
+  about themselves, names any other subject, and drops a fact whose subject it cannot identify rather
+  than defaulting to the user. Facts captured before this fix are unchanged.
 
 ## 0.4.15
 
