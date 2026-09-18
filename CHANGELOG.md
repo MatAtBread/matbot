@@ -18,6 +18,22 @@ churn and less likely to affect a consumer who doesn't use them.
   read them back, and no plugin declared one. Breaking only for a third-party plugin declaring `storage:`,
   which could never have had an effect.
 
+### API gaps filled
+
+- **`scopeIterator` / `scopeIterable` (`plugin-api/host`, re-exported by core)** — the per-pull ambient-scope
+  wrap `runAs` already applied to a returned async iterator, named and shared. Both carriers need it, since
+  a generator's body does not begin until the first pull and the tool ABI returns exactly that shape; the
+  usage carrier had its own, less faithful copy. A plugin still gets the behaviour from `runAs` and needs
+  neither.
+- **`createMessage` moves to `plugin-api`** (core re-exports it, so every consumer imports it from where it
+  always did) — the hook registry builds marker messages in that package and had a copy because core is
+  downstream of it. Five hand-written copies of one literal were five places a message could acquire a
+  different shape.
+- **`rejectingPrompt` / `defaultingPrompt`** — the two non-interactive `PromptFn` stand-ins, named once
+  each rather than re-spelled at their call sites. The distinction is load-bearing for the permission gate:
+  `undefined` means no human is reachable, and a stand-in that answers with a field's default must never be
+  handed to `decide`.
+
 ### Bug fixes
 
 - **`ToolProxy`** — `await tool.x(…)` resolves to `undefined` when a tool completes with no `result`
@@ -49,6 +65,10 @@ churn and less likely to affect a consumer who doesn't use them.
   exit.
 - **`plugin unload`** — the 10s teardown-timeout timer is cleared when the race settles. It was left
   running after every successful unload, holding the event loop open for the remainder of its 10s.
+- **Tool execution** — a tool returning a class-based iterator keeps its own members, prototype and
+  `instanceof` under usage-site scoping. The runner wrapped each pull in an object literal that replaced
+  the iterator wholesale, which held only for as long as every tool is a plain async generator; it now
+  shares `runAs`'s Proxy (`scopeIterable`, above).
 - **`KnowledgeIndex`** — `search()` rejects with the signal's reason when called with an already-aborted
   signal, as the persistent index already did when aborted mid-rerank. `LookupKnowledgeIndex` ignored the
   signal and returned normally, so one interface had two abort behaviours (#75).
@@ -64,6 +84,11 @@ churn and less likely to affect a consumer who doesn't use them.
   server's origin, not an absolute shareable URL.
 - **`frontend-web`** — an answered choice prompt highlights the option actually picked, not the default;
   a cancelled or elsewhere-answered one highlights none.
+- **`frontend-web`** — a copy button on every code block and message, and a resend (↻) on a user turn's
+  divider. The glyph is `::before` content so it never lands in the copied text, and a code block's button
+  is spliced into `md()`'s output so it survives a streaming re-render. Resend cuts the session at that
+  user turn and resubmits its human blocks — robo blocks are re-injected by the new turn, and file-refs
+  survive the cut and go back by reference.
 - **`workspace`** — `workspace_action list` accepts a `prefix` that is a complete file name and returns
   that one file, instead of a silent empty list.
 - **`triggers`** — `trigger_action` reports `enabled` on every trigger it returns, resolved from the
