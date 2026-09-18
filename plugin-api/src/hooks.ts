@@ -2,7 +2,7 @@ import type {
   Hook, HookPoint, HookRegistrar, Message, MessageContent, Session, DeferredScreen,
   ScreenContext, ContributeContext, ToolCallContext, ToolCallResult, ToolResultContext, FollowupContext,
 } from './types.js';
-import { foldOntoUserTurn } from './session.js';
+import { foldOntoUserTurn, createMessage } from './session.js';
 import { withUsageSite } from './usage-context.js';
 
 const HOOK_ERROR_CREATOR = 'matbot-hooks';
@@ -25,6 +25,14 @@ export class HookRegistry implements HookRegistrar {
     list.push(hook);
     list.sort((a, b) => (a.priority ?? 50) - (b.priority ?? 50));
     this.hooks.set(hook.on, list);
+  }
+
+  // The hooks registered on one channel, narrowed to that channel's arm. The map is keyed BY `on`, so
+  // its members are already the right arm; each run* method used to re-test `if (hook.on !== 'screen')
+  // continue` purely to tell TypeScript so — five guards that could never fire. Narrowing at the lookup
+  // says it once, where it is true by construction.
+  private on<P extends HookPoint>(point: P): Extract<Hook, { on: P }>[] {
+    return (this.hooks.get(point) ?? []) as Extract<Hook, { on: P }>[];
   }
 
   removeByPlugin(pluginName: string): void {
@@ -79,12 +87,10 @@ export class HookRegistry implements HookRegistrar {
   // fallback path, not the only one).
   private drainFailureMarkers(session: Session): { session: Session; markers: MessageContent[] } {
     if (this.pendingFailureMarkers.length === 0) return { session, markers: [] };
-    const messages: Message[] = this.pendingFailureMarkers.map(f => ({
-      id:        crypto.randomUUID(),
-      role:      'marker',
-      createdAt: new Date().toISOString(),
-      traceId:   '',
-      content:   [{
+    const messages: Message[] = this.pendingFailureMarkers.map(f => createMessage({
+      role:    'marker',
+      traceId: '',
+      content: [{
         type:    'marker',
         creator: HOOK_ERROR_CREATOR,
         data:    { channel: f.channel, ...(f.pluginName !== undefined ? { pluginName: f.pluginName } : {}), message: f.message },
@@ -110,9 +116,8 @@ export class HookRegistry implements HookRegistrar {
     const handlerMarkers: MessageContent[] = [];
     const appendMarkers = (blocks: MessageContent[]): void => {
       handlerMarkers.push(...blocks);
-      session = { ...session, messages: [...session.messages, {
-        id: crypto.randomUUID(), role: 'marker', createdAt: new Date().toISOString(), traceId: '', content: blocks,
-      }] };
+      session = { ...session, messages: [...session.messages,
+        createMessage({ role: 'marker', traceId: '', content: blocks })] };
     };
     // Handler-returned durable context: folded onto the running turn's user message (the last one
     // with role 'user'), so it persists into history AND rides every subsequent provider call — the
@@ -127,8 +132,7 @@ export class HookRegistry implements HookRegistrar {
       durable.push(...blocks);
       session = folded;
     };
-    for (const hook of this.hooks.get('screen') ?? []) {
-      if (hook.on !== 'screen') continue;
+    for (const hook of this.on('screen')) {
       const r = await this.invoke(hook, () => hook.handler({ ...ctx, session, removeHook: () => this.removeOne('screen', hook) }));
       if (!r) continue;
       if (r.session)                     session = r.session;
@@ -149,8 +153,7 @@ export class HookRegistry implements HookRegistrar {
   // session is never touched.
   async runContribute(ctx: Omit<ContributeContext, 'removeHook'>): Promise<Message[]> {
     let outgoing = ctx.outgoing as Message[];
-    for (const hook of this.hooks.get('contribute') ?? []) {
-      if (hook.on !== 'contribute') continue;
+    for (const hook of this.on('contribute')) {
       const r = await this.invoke(hook, () => hook.handler({ ...ctx, outgoing, removeHook: () => this.removeOne('contribute', hook) }));
       if (r) outgoing = r;
     }
@@ -159,8 +162,7 @@ export class HookRegistry implements HookRegistrar {
 
   // toolcall stops at the first hook that rejects or aborts; the rest don't run.
   async runToolCall(ctx: Omit<ToolCallContext, 'removeHook'>): Promise<ToolCallResult> {
-    for (const hook of this.hooks.get('toolcall') ?? []) {
-      if (hook.on !== 'toolcall') continue;
+    for (const hook of this.on('toolcall')) {
       const r = await this.invoke(hook, () => hook.handler({ ...ctx, removeHook: () => this.removeOne('toolcall', hook) }));
       if (r && (r.rejectTool || r.abort)) return r;
     }
@@ -171,8 +173,7 @@ export class HookRegistry implements HookRegistrar {
   // a hook that returns nothing just observes (auditing). Returns the final result.
   async runToolResult(ctx: Omit<ToolResultContext, 'removeHook'>): Promise<unknown> {
     let result = ctx.result;
-    for (const hook of this.hooks.get('toolresult') ?? []) {
-      if (hook.on !== 'toolresult') continue;
+    for (const hook of this.on('toolresult')) {
       const r = await this.invoke(hook, () => hook.handler({ ...ctx, result, removeHook: () => this.removeOne('toolresult', hook) }));
       if (r) result = r.result;
     }
@@ -188,17 +189,20 @@ export class HookRegistry implements HookRegistrar {
     const markers:      MessageContent[]   = [];
     const retractCtx:   MessageContent[]   = [];
     const retractDur:   MessageContent[]   = [];
-    for (const hook of this.hooks.get('followup') ?? []) {
-      if (hook.on !== 'followup') continue;
+    // Whether a hook ASKED to retract, not how much it sent with the request. Deriving it from the
+    // payload size dropped a `retractAndRerun: {}` — type-legal, both fields being optional — so a hook
+    // asking to pop and re-run with nothing added was answered by doing nothing at all, silently.
+    let retracting = false;
+    for (const hook of this.on('followup')) {
       const r = await this.invoke(hook, () => hook.handler({ ...ctx, removeHook: () => this.removeOne('followup', hook) }));
       if (r?.resubmit)        resubmits.push(r.resubmit.content);
       if (r?.retractAndRerun) {
+        retracting = true;
         if (r.retractAndRerun.context) retractCtx.push(...r.retractAndRerun.context);
         if (r.retractAndRerun.durable) retractDur.push(...r.retractAndRerun.durable);
       }
       if (r?.markers)         markers.push(...r.markers);
     }
-    const retracting = retractCtx.length > 0 || retractDur.length > 0;
     return { resubmits, markers, ...(retracting ? { retract: { context: retractCtx, durable: retractDur } } : {}) };
   }
 }

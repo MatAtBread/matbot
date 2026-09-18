@@ -4,9 +4,10 @@ import { incompatibleRuntimeError, notAPluginError } from '@matatbread/matbot-pl
 import { registerPlugin, setupPlugin, unloadPlugin, recordFailedPlugin, clearFailedPlugin, announcePluginLoaded } from './registry.js';
 
 /**
- * The runtime this process is executing in. Detected the same way the rejected-import branch below
- * already distinguishes platforms (`typeof window`). Used only for the declarative pre-import gate;
- * an absent `matbotRuntime` declaration bypasses the gate entirely.
+ * The runtime this process is executing in — the one place this module decides what platform it is on.
+ * Read by the declarative pre-import gate (an absent `matbotRuntime` declaration bypasses it entirely)
+ * and by the import-rejection branch, which re-derived `typeof window` inline until the two could have
+ * disagreed.
  */
 const CURRENT_RUNTIME: Runtime = typeof window !== 'undefined' ? 'browser' : 'node';
 
@@ -29,6 +30,23 @@ const FRESH_PARAM = 'mbfresh';
 // Monotonic tie-breaker: two reloads inside the same millisecond would otherwise
 // produce the same stamp and re-hit the cache.
 let freshSeq = 0;
+
+/**
+ * One entry to load, for a host that has already done its own resolution — the object form of a plain
+ * specifier string. Every field is documented on {@link loadPlugins}, which is the only consumer.
+ *
+ * Named, because it was written out twice: once in the parameter list and once again in the `as` cast
+ * of the line that normalises the strings. Two spellings of one shape, where adding a field to the
+ * wrong one narrows what the loader will read from a host that is already passing it.
+ */
+export interface LoadRequest {
+  spec:        string;
+  importSpec?: string;
+  name?:       string;
+  version?:    string;
+  runtimes?:   readonly Runtime[];
+  notes?:      readonly string[];
+}
 
 /**
  * Load plugins from the given specifiers, register them, then run setup().
@@ -100,13 +118,13 @@ let freshSeq = 0;
  *   only as a confusing empty-result error downstream — fail loudly with the reason instead.
  */
 export async function loadPlugins(
-  specifiers: readonly (string | { spec: string; importSpec?: string; name?: string; version?: string; runtimes?: readonly Runtime[]; notes?: readonly string[] })[],
+  specifiers: readonly (string | LoadRequest)[],
   services:   MatbotMachine,
   bustCache = false,
   prompt?:    PromptFn,
   onLoadError: 'skip' | 'throw' = 'skip',
 ): Promise<MatbotPlugin[]> {
-  const reqs = specifiers.map(s => (typeof s === 'string' ? { spec: s } : s) as { spec: string; importSpec?: string; name?: string; version?: string; runtimes?: readonly Runtime[]; notes?: readonly string[] });
+  const reqs: LoadRequest[] = specifiers.map(s => (typeof s === 'string' ? { spec: s } : s));
 
   // A reason reaching a user, decorated with what the host noticed while resolving this spec. The
   // failure a load reports is usually downstream of its cause, and the host is the only layer that
@@ -200,7 +218,7 @@ export async function loadPlugins(
 
     if (result.status === 'rejected') {
       const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
-      if (typeof window !== 'undefined') {
+      if (CURRENT_RUNTIME === 'browser') {
         // Browser: warn and skip — browser environments have no node_modules fallback.
         console.warn(`[matbot] Could not load plugin "${spec}" (browser: use a URL path or configure an import map): ${reason}`);
         recordFailedPlugin({ specifier: spec, error: reason });
@@ -308,19 +326,6 @@ export async function loadPlugins(
 }
 
 /**
- * Stamp a plugin entry URL with a unique `${FRESH_PARAM}` value to force a fresh
- * evaluation (and, with the node resolve hook, a fresh subtree — see FRESH_PARAM).
- *
- * Diagnostics: cache-busting silently degrades in two ways that are
- * indistinguishable from "it worked" at the call site, so both are logged here.
- *   1. import.meta.resolve throws (e.g. a cwd-relative spec that does not resolve
- *      relative to *this* module's URL) — we fall back to the bare spec, which
- *      re-imports the *cached* module. No busting happens at all.
- *   2. Resolution succeeds but no resolve hook is installed: only the entry is
- *      re-evaluated, while everything it statically imports stays cached. We can
- *      detect (1) here; (2) is noted at the call site.
- */
-/**
  * Classify how a specifier resolves to code, from its shape alone (platform-neutral; no fs).
  * github shorthand is only recognised via the explicit `github:` prefix — a bare `owner/repo`
  * is indistinguishable from a scoped npm package and is treated as npm.
@@ -379,6 +384,18 @@ function stampFresh(url: string): string {
   return u.href;
 }
 
+/**
+ * Stamp a plugin entry URL with a unique `${FRESH_PARAM}` value to force a fresh evaluation (and, with
+ * the node resolve hook, a fresh subtree — see FRESH_PARAM).
+ *
+ * Diagnostics: cache-busting silently degrades in two ways that are indistinguishable from "it worked"
+ * at the call site, so both are logged.
+ *   1. import.meta.resolve throws (e.g. a cwd-relative spec that does not resolve relative to *this*
+ *      module's URL) — we fall back to the bare spec, which re-imports the *cached* module. No busting
+ *      happens at all. Detected here.
+ *   2. Resolution succeeds but no resolve hook is installed: only the entry is re-evaluated, while
+ *      everything it statically imports stays cached. Noted at the call site.
+ */
 function toFreshUrl(spec: string): string {
   try {
     const fresh = stampFresh(import.meta.resolve(spec));

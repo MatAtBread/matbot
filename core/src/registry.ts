@@ -3,7 +3,7 @@ import { RegistryChangeKind } from '@matatbread/matbot-plugin-api';
 import { scopedNotifier, askPermissionGate } from '@matatbread/matbot-plugin-api/host';
 import type {
   MatbotPlugin, MatbotMachine, MatbotRuntime, Mounted,
-  ProviderAdapterFactory, StoreFactory,
+  ProviderAdapterFactory,
 } from './plugin.js';
 import { PLUGIN_API_VERSION, unifyServices } from './plugin.js';
 import { makePluginSettings } from './settings.js';
@@ -18,7 +18,6 @@ import type { SettingsDoc } from './settings.js';
 const state = {
   plugins:         [] as MatbotPlugin[],
   providers:       new Map<string, ProviderAdapterFactory>(),
-  storage:         new Map<string, StoreFactory>(),
   toolRegistry:    undefined as ToolRegistry | undefined,
   frontendPlugins:  new Map<string, FrontendInfo>(),  // pluginName → info, written by services.registerFrontend()
   serviceKeys:     new Map<string, string[]>(),  // pluginName → MatbotMachine keys it registered
@@ -114,23 +113,10 @@ export function registerPlugin(plugin: MatbotPlugin): void {
     throw new Error(`Provider "${plugin.name}" is already registered.`);
   }
 
-  for (const type of Object.keys(plugin.storage ?? {})) {
-    if (state.storage.has(type)) {
-      const owner = state.plugins.find(p => p.storage?.[type] !== undefined)?.name ?? '?';
-      throw new Error(
-        `Storage type "${type}" is already registered by "${owner}". ` +
-        `"${plugin.name}" cannot register it again.`,
-      );
-    }
-  }
-
   state.plugins.push(plugin);
 
   if (plugin.provider !== undefined) {
     state.providers.set(plugin.name, plugin.provider);
-  }
-  for (const [type, factory] of Object.entries(plugin.storage ?? {})) {
-    state.storage.set(type, factory);
   }
 }
 
@@ -313,6 +299,9 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotMachine,
   // own settings — there is no way to name another's.
   const ownSettings = makePluginSettings(services.createStore<SettingsDoc>('settings'), plugin.name);
 
+  // Plugin-scoped notifier, likewise built once. See the `Notifier` member below.
+  const ownNotifier = scopedNotifier(services.Notifier, plugin.name);
+
   // Per-plugin `mounted`: a thin adapter over the host mount table that delivers *this plugin's* scoped
   // machine (and scoped onUnmount) to handlers. The stable `scoped` object reads through the host's
   // re-pointing proxies/registry, so `scoped[key]` is the host's live service by the time a transition
@@ -353,9 +342,11 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotMachine,
     // being a deliberate read of the concrete gate at that moment.
     get PermissionGate() { return services.PermissionGate; },
     // Everything this plugin publishes is attributed to it by default — the notification analogue of
-    // stamping `pluginName` on its tools. Reads through the host's swap proxy, so a registered
-    // distributed Notifier takes effect for a plugin that captured this in setup().
-    get Notifier() { return scopedNotifier(services.Notifier, plugin.name); },
+    // stamping `pluginName` on its tools. Wrapped ONCE per plugin (below), not per property read: this
+    // was a getter, so every `services.Notifier.notify(...)` minted a fresh three-method object. Swap
+    // safety is unaffected, because what is wrapped is the host's capture-safe proxy — both hosts put
+    // that stable object on the machine — so a registered distributed Notifier still takes effect.
+    Notifier: ownNotifier,
     tools: {
       register:      registerTool,
       remove:        (name: string) => services.tools.remove(name),
@@ -420,16 +411,25 @@ export async function unloadPlugin(pluginName: string, services: MatbotMachine):
   state.systemContextPlugins.delete(pluginName);
 
   if (plugin.provider !== undefined) state.providers.delete(plugin.name);
-  for (const type of Object.keys(plugin.storage   ?? {})) state.storage.delete(type);
 
   state.frontendPlugins.delete(pluginName);
 
   state.plugins.splice(idx, 1);
   services.Notifier.notify({ kind: RegistryChangeKind, source: 'plugins', registry: 'plugins', name: pluginName, operation: 'removed' });
-  await Promise.race([
-    plugin.teardown?.(),
-    new Promise<void>((_, reject) => setTimeout(() => reject(new Error(`Teardown timeout for plugin ${pluginName}`)), 10000))
-  ]);
+  // The timer is cleared however the race settles. Left dangling it outlived every SUCCESSFUL unload,
+  // holding the event loop open for the rest of its 10s — so `plugin unload` followed by exit sat there
+  // with nothing to wait for.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      plugin.teardown?.(),
+      new Promise<void>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`Teardown timeout for plugin ${pluginName}`)), 10_000);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
   return true;
 }
 

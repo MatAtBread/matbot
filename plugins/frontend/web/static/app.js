@@ -251,9 +251,63 @@ function md(text) {
   if (!text) return '';
   if (typeof marked === 'undefined') return '<p>' + escHtml(text) + '</p>';
   const result = marked.parse(text);
-  // Open all links in new tab
-  return result.replace(/<a /g, '<a target=\"_blank\" rel=\"noopener noreferrer\" ');
+  // Open all links in new tab. The code-block copy button is spliced in here rather than via a
+  // `renderer.code` override: marked is loaded unpinned from the CDN and that hook's signature changed at
+  // v13, whereas `<pre>` in the output has not. Being part of the HTML, it also survives the streaming
+  // path re-setting innerHTML on every delta.
+  return result
+    .replace(/<a /g, '<a target=\"_blank\" rel=\"noopener noreferrer\" ')
+    .replace(/<pre>/g, '<pre>' + COPY_BTN_HTML);
 }
+
+// The glyph is CSS `::before` content, never a text node, so a message's innerText — which includes its
+// code blocks' buttons — copies clean.
+const COPY_BTN_HTML = '<button type="button" class="copy-btn" title="Copy" aria-label="Copy"></button>';
+
+function makeCopyBtn() {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'copy-btn msg-copy-btn';
+  btn.title = 'Copy message';
+  btn.setAttribute('aria-label', 'Copy message');
+  return btn;
+}
+
+async function copyText(text) {
+  if (navigator.clipboard?.writeText) {
+    try { await navigator.clipboard.writeText(text); return true; } catch { /* denied */ }
+  }
+  // Fallback for plain-HTTP contexts where the clipboard API is unavailable.
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.cssText = 'position:fixed;opacity:0';
+  document.body.appendChild(ta);
+  ta.select();
+  let copied = false;
+  try { copied = document.execCommand('copy'); } catch { /* */ }
+  ta.remove();
+  return copied;
+}
+
+// What a copy button copies: a code block's code, or a message's prose. For an assistant turn that is its
+// text parts only — thinking and tool blocks are chrome, not the answer.
+function copySource(btn) {
+  const pre = btn.closest('pre');
+  if (pre) return pre.querySelector('code')?.innerText ?? pre.innerText;
+  const msg = btn.parentElement;
+  if (!msg) return '';
+  const parts = msg.classList.contains('assistant') ? msg.querySelectorAll('.msg-text') : msg.querySelectorAll('.md-body');
+  return [...parts].map(p => p.innerText.trim()).filter(Boolean).join('\n\n');
+}
+
+document.addEventListener('click', async (e) => {
+  const btn = e.target instanceof Element ? e.target.closest('.copy-btn') : null;
+  if (!btn) return;
+  e.stopPropagation();
+  const ok = await copyText(copySource(btn));
+  btn.classList.add(ok ? 'copied' : 'copy-failed');
+  setTimeout(() => btn.classList.remove('copied', 'copy-failed'), 1000);
+});
 
 // ── Transport ───────────────────────────────────────────────────────────────
 //
@@ -2030,6 +2084,7 @@ function makeBubble(className, text, media) {
   inner.className = 'md-body';
   inner.innerHTML = md(text);
   div.appendChild(inner);
+  div.appendChild(makeCopyBtn());
   return div;
 }
 
@@ -2204,6 +2259,7 @@ function createMsgDivider(msgIdx) {
   for (const [icon, label, action, danger] of /** @type {[string, string, string, boolean][]} */ ([
     ['🔗', 'Copy link', 'copy-link', false],
     ['✂',  'Cut',             'cut',       true],
+    ['↻',  'Resend',          'resend',    true],
     ['⎇',  'Fork',            'fork',      false],
     ['🗜', 'Compact',   'compact',   true],
     ['📝', 'Summarise', 'summarise', true],
@@ -2241,21 +2297,7 @@ async function handleDividerAction(divider, action) {
   if (action === 'copy-link') {
     const hash = currentSessionId + (msgIdx !== undefined ? '~' + JSON.stringify({ msg: msgIdx }) : '');
     const url = location.origin + location.pathname + '#' + hash;
-    let copied = false;
-    if (navigator.clipboard?.writeText) {
-      try { await navigator.clipboard.writeText(url); copied = true; } catch { /* denied */ }
-    }
-    if (!copied) {
-      // Fallback for plain-HTTP contexts where clipboard API is unavailable.
-      const ta = document.createElement('textarea');
-      ta.value = url;
-      ta.style.cssText = 'position:fixed;opacity:0';
-      document.body.appendChild(ta);
-      ta.select();
-      try { copied = document.execCommand('copy'); } catch { /* */ }
-      ta.remove();
-    }
-    if (copied) {
+    if (await copyText(url)) {
       const line = divider.querySelector('.msg-divider-line');
       if (line) {
         line.style.cssText = 'background:#6366f1;transition:none';
@@ -2281,6 +2323,8 @@ async function handleDividerAction(divider, action) {
       await callTool('session_edit', { action: 'cut', sessionId: currentSessionId, msgIndex: msgIdx });
       const session = await apiGetSession(currentSessionId);
       if (session) renderSession(session);
+    } else if (action === 'resend') {
+      await resendFrom(msgIdx);
     } else if (action === 'split') {
       if (!confirm('Split session at this point? Messages before will be moved to a new session.')) return;
       const result = await callTool('session_edit', { action: 'split', sessionId: currentSessionId, msgIndex: msgIdx });
@@ -2328,6 +2372,25 @@ async function handleDividerAction(divider, action) {
   }
 }
 
+// Cut the session at a user turn and submit that turn again — "try that again" without retyping it. Only
+// the human blocks are resent: robo blocks were injected by hooks (a `contextual` trigger) and will be
+// injected afresh by the new turn, so resending them would double them. A `file-ref` survives the cut —
+// session media is scoped to the session, not the message — so attachments go back by reference.
+async function resendFrom(msgIdx) {
+  if (sending) { alert('Wait for the running turn to finish (or stop it) before resending.'); return; }
+  const session = await apiGetSession(currentSessionId);
+  const msg = session?.messages[msgIdx];
+  const content = msg?.role === 'user'
+    ? msg.content.filter(c => c.origin !== 'robo' && ((c.type === 'text' && c.text) || c.type === 'file-ref'))
+    : [];
+  if (!content.length) { alert('There is no user message here to resend.'); return; }
+  if (!confirm('Delete this message and everything after it, then send it again?')) return;
+  await callTool('session_edit', { action: 'cut', sessionId: currentSessionId, msgIndex: msgIdx });
+  const cut = await apiGetSession(currentSessionId);
+  if (cut) renderSession(cut);
+  await submit(content, false);
+}
+
 function showEditSessionBanner() {
   if (document.getElementById('edit-session-banner')) return;
   const banner = document.createElement('div');
@@ -2335,7 +2398,7 @@ function showEditSessionBanner() {
   banner.className = 'plugin-prompt-banner';
   banner.style.display = 'flex';
   const span = document.createElement('span');
-  span.textContent = 'edit-session plugin not loaded — Cut, Fork, Split, Compact and Summarise are unavailable.';
+  span.textContent = 'edit-session plugin not loaded — Cut, Resend, Fork, Split, Compact and Summarise are unavailable.';
   banner.appendChild(span);
   const btn = document.createElement('button');
   btn.textContent = 'Install edit-session';
@@ -2382,6 +2445,7 @@ function createAssistantWrap(labelText, anchorAfter) {
   // label.className = 'msg-label';
   // label.textContent = labelText || 'assistant';
   // wrap.appendChild(label);
+  wrap.appendChild(makeCopyBtn());
   if (anchorAfter && anchorAfter.parentNode === messagesEl) {
     messagesEl.insertBefore(wrap, anchorAfter.nextSibling);
   } else {
@@ -3322,9 +3386,12 @@ async function renderTurn(sid, traceId) {
             block.className = 'prompt-block';
             // Settle the dialog: disable every control (incl. the cancel ×) once answered or cancelled.
             const done = () => block.querySelectorAll('button, input').forEach(el => { el.disabled = true; });
+            // Settled with no choice made (cancelled, or answered elsewhere): the default wasn't picked either.
+            const unmark = () => block.querySelectorAll('.prompt-choice-btn.primary').forEach(b => b.classList.remove('primary'));
             // Retire the dialog without answering — someone else got there first. Resolving with
             // `dismissed` keeps the single settle path below from POSTing an answer nobody asked for.
             livePrompt = { dismiss: () => {
+              unmark();
               done();
               block.classList.add('settled');
               const note = document.createElement('div');
@@ -3340,7 +3407,7 @@ async function renderTurn(sid, traceId) {
               x.title = 'Cancel';
               x.setAttribute('aria-label', 'Cancel');
               x.textContent = '×';
-              x.onclick = () => { done(); resolve({ cancelled: true }); };
+              x.onclick = () => { unmark(); done(); resolve({ cancelled: true }); };
               block.appendChild(x);
             }
             const q = document.createElement('div');
@@ -3351,6 +3418,9 @@ async function renderTurn(sid, traceId) {
               const row = document.createElement('div');
               row.className = 'prompt-choices';
               let defaultBtn = null;
+              // Once answered, the highlight moves from the default to what was actually picked — a
+              // settled dialog left showing the default reads as though the default had been chosen.
+              const markChosen = btn => row.querySelectorAll('button').forEach(b => b.classList.toggle('primary', b === btn));
               for (const choice of choices) {
                 const btn = document.createElement('button');
                 btn.type = 'button';
@@ -3361,7 +3431,7 @@ async function renderTurn(sid, traceId) {
                 btn.textContent = cl === 'y' || cl === 'yes' ? 'Yes'
                   : cl === 'n' || cl === 'no' ? 'No'
                   : choice.label;
-                btn.onclick = () => { done(); resolve({ answer: choice.value }); };
+                btn.onclick = () => { markChosen(btn); done(); resolve({ answer: choice.value }); };
                 if (isDefault) defaultBtn = btn;
                 row.appendChild(btn);
               }
@@ -3384,6 +3454,7 @@ async function renderTurn(sid, traceId) {
                   const submitOther = () => {
                     const v = inp.value.trim();
                     if (field.required && !v) return;
+                    markChosen(otherBtn);
                     done();
                     resolve({ answer: v });
                   };

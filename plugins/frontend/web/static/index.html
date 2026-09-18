@@ -1162,6 +1162,44 @@
       word-break: break-word;
     }
     .md-body pre code { background: none; border: none; padding: 0; font-size: 0.93em; white-space: inherit; }
+
+    /* ── Copy buttons ─────────────────────────────────────────────
+       One class for both kinds; the glyph is ::before content so it never lands in copied text. A code
+       block's sits in its top-right corner; a message's floats just outside the bubble's bottom corner on
+       the gutter side (left of a user bubble, right of an agent-side one), clear of any code block's. */
+    .copy-btn {
+      position: absolute;
+      bottom: 4px;
+      right: 4px;
+      width: 1.9em;
+      height: 1.9em;
+      padding: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.8rem;
+      line-height: 1;
+      color: #fff;
+      background: #6b7280;
+      border: 1px solid #e5e7eb;
+      border-radius: 5px;
+      cursor: pointer;
+      opacity: 0;
+      transition: opacity 0.12s;
+      font-family: inherit;
+      z-index: 9;
+    }
+    .copy-btn::before { content: '⧉'; }
+    .copy-btn.copied::before { content: '✓'; }
+    .copy-btn.copied { background: #16a34a; opacity: 1; }
+    .copy-btn.copy-failed::before { content: '✗'; }
+    .copy-btn.copy-failed { background: #dc2626; opacity: 1; }
+    .md-body pre { position: relative; }
+    .md-body pre:hover > .copy-btn,
+    .message:hover > .msg-copy-btn,
+    .copy-btn:focus-visible { opacity: 1; }
+    .message.assistant { position: relative; }
+    .msg-copy-btn { top: auto; bottom: 0; right: auto; left: calc(100% - 24px); }
     .md-body ul, .md-body ol { padding-left: 1.4em; margin: 0.3em 0 0.65em; }
     .md-body li { margin: 0.2em 0; }
     .md-body blockquote {

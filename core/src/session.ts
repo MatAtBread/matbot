@@ -1,4 +1,8 @@
-import type { Session, Message, MessageContent, MessageRole } from './types.js';
+import type { Session, Message } from './types.js';
+
+// `createMessage` lives in plugin-api, where the hook registry can also reach it (core is downstream of
+// that package). Re-exported here so it stays where every consumer already imports it from.
+export { createMessage } from '@matatbread/matbot-plugin-api';
 
 export interface CreateSessionOpts {
   title?:                string;
@@ -32,20 +36,3 @@ export function appendMessage(session: Session, message: Message): Session {
   };
 }
 
-export function createMessage(opts: {
-  role:           MessageRole;
-  content:        MessageContent[];
-  traceId:        string;
-  providerName?:  string;
-  metadata?:      Record<string, unknown>;
-}): Message {
-  return {
-    id:        crypto.randomUUID(),
-    role:      opts.role,
-    content:   opts.content,
-    createdAt: new Date().toISOString(),
-    traceId:   opts.traceId,
-    ...(opts.providerName !== undefined ? { providerName: opts.providerName } : {}),
-    ...(opts.metadata     !== undefined ? { metadata:     opts.metadata     } : {}),
-  };
-}

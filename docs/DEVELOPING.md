@@ -48,7 +48,6 @@ full rule.
 | `manifest` | `PluginManifest` | Optional metadata: `description?` and the `config?` keys this plugin reads |
 | `tools` | `readonly Tool[]` | Tool implementations to register |
 | `provider` | `ProviderAdapterFactory` | A single LLM adapter factory (`(config) => ProviderAdapter`) |
-| `storage` | `Record<string, StoreFactory>` | Named store factories |
 | `storageBackend` | `{ open(dotData: string): Promise<StorageBackend> }` | Storage backend; `open()` runs before any `setup()` |
 | `setup` | `(services: MatbotMachine) => Promise<void>` | Called once after all plugins are registered. The argument is the whole machine — registry services *and* the fixed runtime; see *Services available in `setup()`* |
 | `teardown` | `() => Promise<void>` | Called on graceful shutdown |

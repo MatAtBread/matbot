@@ -107,6 +107,16 @@ export interface Trigger {
   updatedAt:  string;
 }
 
+/**
+ * A trigger as `trigger_action` REPORTS it: `enabled` resolved rather than omitted.
+ *
+ * Stored documents carry `enabled` only when it was explicitly written, so a listing showed it for some
+ * triggers and not others — and "absent ⇒ enabled" is a rule a reader has to know rather than see. The
+ * resolution happens at the tool boundary only: stored shape and {@link Triggers} consumers are
+ * untouched, so no write can persist a value nobody asked for.
+ */
+export type ReportedTrigger = Omit<Trigger, 'enabled'> & { enabled: boolean };
+
 /** Fields a caller supplies when creating or replacing a trigger; identity/versioning is the store's. */
 export interface TriggerSpec {
   conditions: TriggerCondition[];

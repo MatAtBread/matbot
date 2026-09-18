@@ -102,6 +102,7 @@ export class PersistBGEKnowledgeIndex implements KnowledgeIndex {
     terms:  Array<{ term: string; context?: string }>,
     signal: AbortSignal,
   ): Promise<KnowledgeEntry[]> {
+    signal.throwIfAborted();
     const { items: all } = await this.store.query({});
     if (terms.length === 0 || all.length === 0) return [];
 

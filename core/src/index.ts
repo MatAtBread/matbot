@@ -46,10 +46,11 @@ export {
   contextSwitch, machineBusy, quiesced, onContextQuiesce, scheduleAtEdge,
   installUsageCarrier, createSerialUsageCarrier, recordUsage, recordSpan, currentUsageSink,
   currentUsageScope, currentUsageSite, withUsageScope, withUsageSite,
+  scopeIterator, scopeIterable,
 } from '@matatbread/matbot-plugin-api/host';
 export type {
   Subscribable, Broadcaster, Routed, RoutedFilter, SwapFn, MountTable, PrincipalCarrier, UsageCarrier,
-  UsageScope, Quiescer,
+  UsageScope, Quiescer, ScopeFn,
 } from '@matatbread/matbot-plugin-api/host';
 export * from './session.js';
 export * from './usage.js';

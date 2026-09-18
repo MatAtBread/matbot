@@ -7,18 +7,16 @@ import type {
 import type { Notifications, Notifier } from './notify.js';
 
 /**
- * The plugin API contract version: this package's `major.minor`, and nothing else. It sat at `'0.1'`
- * while the package shipped 0.3.x, so it conveyed no information and could not be reasoned about at a
- * version boundary — the point at which it is the only thing every third-party plugin hardcodes.
+ * The plugin API contract version: this package's `major.minor`, and nothing else — it must track the
+ * package, being the only thing every third-party plugin hardcodes.
  *
  * The gate (`checkApiVersion`, in core's registry) reads it as: **major must match exactly** — a
  * mismatch is a hard load failure — and a plugin declaring a *newer minor* than the runtime warns and
  * loads, since it may reach for something absent. Declare it as `apiVersion: PLUGIN_API_VERSION` and it
  * stays right for free; that is what every plugin in this repo does.
  *
- * Bumping 0.1 → 0.4 breaks nothing: at 0.x the major is `'0'` either way, and an older declared minor
- * does not warn. It matters at 1.0.0, where a plugin still declaring `'0.x'` will fail the major check
- * loudly instead of loading against a contract it was never built for.
+ * It matters at 1.0.0, where a plugin still declaring `'0.x'` fails the major check loudly instead of
+ * loading against a contract it was never built for.
  */
 export const PLUGIN_API_VERSION = '0.4';
 
@@ -247,26 +245,8 @@ export interface MatbotRuntime {
    */
   createStore<T extends { id: string; version: string }>(namespace: string): Store<T>;
 
-  /**
-   * Mount-table notifications: react to a registry service (re)mounting or being unloaded. A plugin
-   * needs this iff its setup() reads another service's *current state* to build cached/derived state —
-   * skills/triggers cache the StorageBackend's documents; cognition seeds from the SkillManager. A pure
-   * map (no setup data; data arrives later as a tool call or hook) needs nothing — resolve the service
-   * per-invocation through its proxy/member instead.
-   *
-   *   // cache the backend's documents; rebuild on every swap (own initial load was in setup())
-   *   services.mounted.observe({ key: 'StorageBackend', signal }, () => this.load());
-   *
-   *   // depend on a peer service that may not be present yet; seed now if it is, and on each (re)mount
-   *   services.mounted.observe({ key: 'SkillManager', replay: true, signal }, m => seed(m));
-   *
-   * Contract guarantees only *eventual, ordered* delivery of each key's net presence transition — it
-   * says nothing about timing: a mount may fire synchronously-ish or batch to a later quiescent edge, so
-   * never assume a register() is observed inline or at a turn boundary. A reload (unregister+register
-   * before the edge) collapses to a single remount; an unregister not replaced by the edge is a
-   * committed unload, delivered to `onUnmount` (drop your captured ref there to let the gone plugin's
-   * working set be collected). Handlers may re-fire on later remounts, so they must be idempotent.
-   */
+  /** Mount-table notifications: react to a registry service (re)mounting or being unloaded. See
+   *  {@link Mounted} for when a plugin needs this, the two idioms, and what the contract guarantees. */
   readonly mounted: Mounted;
 
   /**
@@ -358,9 +338,29 @@ export interface MountConsumeOptions<K extends keyof MatbotServices> {
   readonly onUnmount?: (machine: MatbotMachine) => void | Promise<void>;
 }
 
-/** The mount-table consumer facet exposed on {@link MatbotRuntime.mounted}. `observe` (not `consume`)
- *  so the verb `consume` means exactly one thing repo-wide — the detached stream drain on
- *  {@link Subscribable}; this keyed, replay/onUnmount, edge-batched delivery is its own paradigm. */
+/**
+ * The mount-table consumer facet exposed on {@link MatbotRuntime.mounted}.
+ *
+ * A plugin needs this iff its `setup()` reads another service's *current state* to build cached/derived
+ * state — skills/triggers cache the StorageBackend's documents; cognition seeds from the SkillManager. A
+ * pure map (no setup data; data arrives later as a tool call or hook) needs nothing, and resolves the
+ * service per-invocation through its proxy/member instead.
+ *
+ *   // cache the backend's documents; rebuild on every swap (own initial load was in setup())
+ *   services.mounted.observe({ key: 'StorageBackend' }, () => this.load());
+ *
+ *   // depend on a peer service that may not be present yet; seed now if it is, and on each (re)mount
+ *   services.mounted.observe({ key: 'SkillManager', replay: true }, m => seed(m));
+ *
+ * The contract guarantees only *eventual, ordered* delivery of each key's net presence transition, and
+ * says nothing about timing — never assume a `register()` is observed inline or at a turn boundary. A
+ * reload (unregister+register before the edge) collapses to a single remount; an unregister not replaced
+ * by the edge is a committed unload, delivered to `onUnmount`. Handlers re-fire on a later remount, so
+ * they must be idempotent.
+ *
+ * `observe`, not `consume`, so the verb `consume` means exactly one thing repo-wide — the detached
+ * stream drain on {@link Subscribable}; this keyed, edge-batched delivery is its own paradigm.
+ */
 export interface Mounted {
   observe<K extends keyof MatbotServices>(
     options: MountConsumeOptions<K>,
@@ -373,11 +373,6 @@ export interface Mounted {
 // ── Factory types ─────────────────────────────────────────────────────────────
 
 export type ProviderAdapterFactory = (config: ProviderConfig) => ProviderAdapter;
-
-export type StoreFactory = (
-  kind:    string,
-  options: Record<string, unknown>,
-) => Store<{ id: string; version: string }>;
 
 // ── Plugin manifest ───────────────────────────────────────────────────────────
 
@@ -453,12 +448,11 @@ export interface VisibilityQuery {
  * notification is visible to that connection's principal. Absent ⇒ no partitioning, and every connection
  * sees everything.
  *
- * **The predicate is consulted for EVERY kind, and decides for itself which it filters.** It used to be
- * reached only for an `ItemChange` carrying a principal, because the caller gated on that — which left
- * every plugin-defined kind fanned out unfiltered with no hook capable of stopping it, and made `kind` a
- * constant not worth passing. Moving that judgement here is the point: routing a partitioned namespace and
- * addressing a notification to a recipient are two different policies, and only the implementation knows
- * which of its kinds want which. An implementation that has nothing to say about a kind returns `true`.
+ * **The predicate is consulted for EVERY kind, and decides for itself which it filters** — so a
+ * plugin-defined kind cannot be fanned out unfiltered with no hook capable of stopping it. Routing a
+ * partitioned namespace and addressing a notification to a recipient are two different policies, and only
+ * the implementation knows which of its kinds want which. One with nothing to say about a kind returns
+ * `true`.
  */
 export interface WatchVisibility {
   /**
@@ -488,9 +482,8 @@ export interface WatchVisibility {
  * **The token is a partition, never a principal.** The two are not interchangeable: one principal may
  * hold several profiles, and a profile may alias a namespace onto a third profile's partition, so the
  * partition serving a principal's files is not derivable from the principal id. Minting the token from
- * the identity in force — the bug this replaces — attached an addressable partition to files that were
- * in the shared base area, and would have pointed at an empty partition the moment one was created
- * under that name.
+ * the identity in force instead attaches an addressable partition to files that are in the shared base
+ * area, and points at an empty partition the moment one is created under that name.
  *
  * `current` and `enter` are one round trip and must stay each other's inverse: whatever `current`
  * returns, `enter` puts a reader back into the area those bytes were written to. Both live here rather
@@ -518,7 +511,6 @@ export interface MatbotPluginSpec {
   readonly apiVersion:  string;
   readonly manifest?:   PluginManifest;
   readonly provider?:   ProviderAdapterFactory;
-  readonly storage?:    Record<string, StoreFactory>;
   readonly tools?:      readonly Tool[];
   /**
    * When present, the runtime calls open(dotData) before creating the services object and uses the

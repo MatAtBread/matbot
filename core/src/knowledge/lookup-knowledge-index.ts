@@ -124,9 +124,10 @@ export class LookupKnowledgeIndex implements KnowledgeIndex {
   }
 
   async search(
-    terms:   Array<{ term: string; context?: string }>,
-    _signal: AbortSignal,
+    terms:  Array<{ term: string; context?: string }>,
+    signal: AbortSignal,
   ): Promise<KnowledgeEntry[]> {
+    signal.throwIfAborted();
     if (terms.length === 0) return [];
 
     const scored: Array<{ entry: KnowledgeEntry; score: number }> = [];

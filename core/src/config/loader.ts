@@ -86,6 +86,21 @@ function toProviderConfig(name: string, raw: YamlMap): ProviderConfig {
   return config;
 }
 
+/**
+ * Parse a config document, optionally over a `base` one it `extends:`.
+ *
+ * **The merge is per TOP-LEVEL KEY, and the derived document REPLACES rather than extends.** A child
+ * declaring `plugins:` supplies the whole list — the base's entries are not appended — and the same
+ * holds for `providers:` and `default_settings:`. There is no deep merge and no per-entry merge: the
+ * unit is the section.
+ *
+ * That is deliberately stated rather than deliberately chosen. Section-replacement is what the one-line
+ * spread has always done, and a caller reading "extends" reasonably expects the other reading, so the
+ * semantics are pinned by test (config-extends.test.ts) — change them on purpose, not by editing this
+ * line. Note also that `extends:` does not today give you a shared base: the CLI chdirs to the base's
+ * directory and rewrites `configPath`, so the base becomes the project (`.data`, `.env`, and every yaml
+ * write land there). See CLAUDE.md, *Default plugin settings*.
+ */
 export function parseConfig(
   text:  string,
   base?: string,

@@ -151,8 +151,13 @@ export async function ingestMedia(
   }
 
   // Derived, not counted — see MAX_MEDIA_BYTES_PER_SESSION. One listing for the whole batch.
+  //
+  // Filtered by NAMESPACE as well as session: the media store is routinely the host's own file area, so
+  // a `sessionId`-tagged workspace file or a detached job's output shares the listing and was being
+  // charged to the media quota. The quota is over what THIS path stored, which is what the namespace
+  // names — and it is the same pair the per-ref ownership check below tests against.
   let sessionBytes = 0;
-  for await (const held of store.list({ sessionId })) sessionBytes += held.size;
+  for await (const held of store.list({ sessionId, namespace: MEDIA_NAMESPACE })) sessionBytes += held.size;
 
   const out: MessageContent[] = [];
   for (const c of content) {

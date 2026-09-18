@@ -46,3 +46,17 @@ test('unloading a plugin unregisters the services it registered', async () => {
   assert.equal(registry['ToolTypeIndex'], undefined, 'the loader must unregister the plugin\'s keys');
   assert.equal(state.closed, true, 'and teardown must still have run');
 });
+
+// teardown() races a 10s timeout. The loser of that race used to be left running: a successful unload
+// returned with a live timer, which holds the event loop open for the rest of its 10s — so `plugin
+// unload` followed by exit sat there waiting for nothing. Invisible except as a hang.
+test('unloading a plugin leaves no pending teardown timer behind', async () => {
+  const { services } = machine();
+  const timers = (): number => process.getActiveResourcesInfo().filter(r => r === 'Timeout').length;
+
+  await loadPlugins([{ spec: fixture, importSpec: fixture }], services, false, undefined, 'skip');
+  const before = timers();
+  await unloadPlugin('registers-service', services);
+
+  assert.equal(timers(), before, 'the teardown timeout must be cleared however the race settles');
+});

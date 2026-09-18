@@ -9,6 +9,102 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## 0.4.16
+
+### Breaking changes
+
+- **`MatbotPluginSpec.storage` / `StoreFactory` are removed.** Write-only machinery superseded by
+  `storageBackend`: registrations were collision-checked, recorded and deleted on unload, but nothing ever
+  read them back, and no plugin declared one. Breaking only for a third-party plugin declaring `storage:`,
+  which could never have had an effect.
+
+### API gaps filled
+
+- **`scopeIterator` / `scopeIterable` (`plugin-api/host`, re-exported by core)** — the per-pull ambient-scope
+  wrap `runAs` already applied to a returned async iterator, named and shared. Both carriers need it, since
+  a generator's body does not begin until the first pull and the tool ABI returns exactly that shape; the
+  usage carrier had its own, less faithful copy. A plugin still gets the behaviour from `runAs` and needs
+  neither.
+- **`createMessage` moves to `plugin-api`** (core re-exports it, so every consumer imports it from where it
+  always did) — the hook registry builds marker messages in that package and had a copy because core is
+  downstream of it. Five hand-written copies of one literal were five places a message could acquire a
+  different shape.
+- **`rejectingPrompt` / `defaultingPrompt`** — the two non-interactive `PromptFn` stand-ins, named once
+  each rather than re-spelled at their call sites. The distinction is load-bearing for the permission gate:
+  `undefined` means no human is reachable, and a stand-in that answers with a field's default must never be
+  handed to `decide`.
+
+### Bug fixes
+
+- **`ToolProxy`** — `await tool.x(…)` resolves to `undefined` when a tool completes with no `result`
+  event, instead of throwing `Tool produced no result`. A tool whose work is a side effect yields nothing
+  by design (`function-tools` omits the event when a body returns nothing, and the triggers dispatcher
+  fires only on a yielded result), so the one calling surface meant to be silent was the one that failed.
+  That a body declaring a DATA result actually produces one is enforced where the types are, at definition
+  time: the snippet checker compiles it against its declared return type, and `strict` rejects one that can
+  fall through. `toolResult` itself still throws — it remains the low-level contract.
+- **Config** — a `#` inside a YAML value is no longer treated as a comment. The tokenizer ran `/#.*$/`
+  over every line, so `github:owner/repo#path:sub` silently lost its subdirectory and loaded the repo
+  root, and a quoted value lost everything from the `#` on, closing quote included. Now follows YAML's own
+  rule: outside quotes, at a line start or after whitespace.
+- **`runner`** — a provider that rejects with a non-`Error` no longer discards the turn. The failure
+  handler tested `'cause' in e`, which throws on a primitive, so the catch itself threw and left
+  `runSession` by the one path that does not commit — losing every completed round, which is precisely
+  what that branch exists to prevent.
+- **`followup` hooks** — `retractAndRerun: {}` retracts. Whether a retract had been requested was derived
+  from the payload size, so a hook asking to pop and re-run with nothing added got no pop, no redo and no
+  diagnostic.
+- **Session media** — the per-session media quota counts media only. It listed by `sessionId` alone, and
+  the MediaStore is routinely the host's own file area, so a `sessionId`-tagged workspace file or detached
+  job output was charged to the quota and could refuse an attachment on its behalf.
+- **Tool descriptions** — the `TypeScript result` block in a tool's wire contract is now a closed fence.
+  It was emitted without the newline between label and fence, so the type opened inline and the block
+  never closed — in the text every model reads for every tool, every turn.
+- **Plugin settings** — a settings write bounds its compare-and-swap retries (8, then it throws naming the
+  namespace) instead of `for(;;)`. A backend whose compare can never succeed spun hot with no error and no
+  exit.
+- **`plugin unload`** — the 10s teardown-timeout timer is cleared when the race settles. It was left
+  running after every successful unload, holding the event loop open for the remainder of its 10s.
+- **Tool execution** — a tool returning a class-based iterator keeps its own members, prototype and
+  `instanceof` under usage-site scoping. The runner wrapped each pull in an object literal that replaced
+  the iterator wholesale, which held only for as long as every tool is a plain async generator; it now
+  shares `runAs`'s Proxy (`scopeIterable`, above).
+- **`KnowledgeIndex`** — `search()` rejects with the signal's reason when called with an already-aborted
+  signal, as the persistent index already did when aborted mid-rerank. `LookupKnowledgeIndex` ignored the
+  signal and returned normally, so one interface had two abort behaviours (#75).
+
+### Optional
+
+- **`provenance`** — `determine_provenance` now states which results are not searchable yet: those from
+  tool calls issued in the same batch, and those made inside a `tool_function`, which never enter the
+  session at all. Both read as `vetoed` for a value just fetched, with previously nothing to say why.
+- **`tool-plugin`** — `provider update` naming a profile that does not exist yields an error rather than
+  a result whose prose says it failed.
+- **`frontend-web`** — `url_for_resource` describes what it actually returns: a URL path relative to this
+  server's origin, not an absolute shareable URL.
+- **`frontend-web`** — an answered choice prompt highlights the option actually picked, not the default;
+  a cancelled or elsewhere-answered one highlights none.
+- **`frontend-web`** — a copy button on every code block and message, and a resend (↻) on a user turn's
+  divider. The glyph is `::before` content so it never lands in the copied text, and a code block's button
+  is spliced into `md()`'s output so it survives a streaming re-render. Resend cuts the session at that
+  user turn and resubmits its human blocks — robo blocks are re-injected by the new turn, and file-refs
+  survive the cut and go back by reference.
+- **`workspace`** — `workspace_action list` accepts a `prefix` that is a complete file name and returns
+  that one file, instead of a silent empty list.
+- **`triggers`** — `trigger_action` reports `enabled` on every trigger it returns, resolved from the
+  stored document (absent ⇒ enabled), rather than omitting it when it was never explicitly written.
+- **`cognition`** — `remember_fact` no longer records a third party's facts as the user's (#74). The
+  extractor was told to normalise every fact to "the user", and saw one message with no context, so a
+  pasted document about someone else became the user's email, marks and award date, and merged into the
+  user's profile at strong confidence. The extractor is now told who wrote the message and sees up to 3
+  preceding messages to identify subjects. It attributes a fact to the user only when the user states it
+  about themselves, names any other subject, and drops a fact whose subject it cannot identify rather
+  than defaulting to the user. Facts captured before this fix are unchanged.
+- **`skills`** — skills are re-indexed when the `KnowledgeIndex` is swapped, or reverts to the host default
+  on unload (#75). The host can drain only an index exposing `entries()`, which `persist-ki-bge` does not,
+  so unloading it left search empty until the next restart. `persist-ki-bge` `search()` also checks the
+  signal before reading the whole store.
+
 ## 0.4.15
 
 ### API gaps filled

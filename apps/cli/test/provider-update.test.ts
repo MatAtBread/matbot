@@ -233,6 +233,20 @@ test('a value matbot.yaml cannot represent is refused, naming the field', async 
   assert.equal((await readBack(file, 'deepseek'))['parameters'] !== undefined, true);   // untouched
 });
 
+test('updating a profile that does not exist is an error, not a prose result', async () => {
+  // Every other door into this tool has no human behind it — a trigger, `invokeTool`, `POST
+  // /tools/provider` — and a failure delivered as a `result` whose message happens to say "No profile
+  // named…" is indistinguishable from a successful update to all of them.
+  const file = await fixture();
+  const { events, prompts } = await runUpdate(file, { action: 'update', name: 'nope', model: 'm' });
+
+  assert.deepEqual(prompts, []);                                  // nothing to confirm
+  const r = resultOf(events) as { type: string; message: string };
+  assert.equal(r.type, 'error');
+  assert.match(r.message, /No profile named "nope"/);
+  assert.match(r.message, /"deepseek"/);                          // names what IS configured
+});
+
 test('patchedFields reports only what the caller named', () => {
   assert.deepEqual(patchedFields({ model: 'm' }), ['model']);
   assert.deepEqual(patchedFields({ maxRounds: null, model: 'm' }), ['model', 'maxRounds']);

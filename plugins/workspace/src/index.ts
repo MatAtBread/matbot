@@ -241,7 +241,10 @@ const workspaceExecutor: ToolExecutor<ToolResultOf<'workspace_action'>> = {
         try {
           for await (const handle of ctx.files.list({ namespace: WORKSPACE_NS })) {
             const name = handle.name;
-            if (prefix && !name.startsWith(prefix)) continue;
+            // `name !== dir` too: a prefix naming one complete file selects it. Matching only the
+            // strict-ancestor form made a single file unaddressable through `list` and said so with an
+            // empty array — indistinguishable from "no such file".
+            if (dir && name !== dir && !name.startsWith(prefix)) continue;
             files.push({ name, size: handle.size });
           }
         } catch (e) {
@@ -291,8 +294,9 @@ const workspaceTool: Tool<ToolResultOf<'workspace_action'>> = {
     'there is nothing to create, change into or walk. A "/" inside a name is an ordinary character that ' +
     'names happen to share ("charts/data.csv"), which is why `list` always returns every matching file ' +
     'and its `prefix` selects by whole segments: "charts" matches "charts/data.csv", "char" matches ' +
-    'nothing, and omitting it lists the whole workspace. Listed names are complete names, ready to pass ' +
-    'straight back as `name`.\n\n' +
+    'nothing, and omitting it lists the whole workspace. A prefix that IS a complete name selects that ' +
+    'one file ("charts/data.csv" matches itself), so `list` can confirm a single file exists. Listed ' +
+    'names are complete names, ready to pass straight back as `name`.\n\n' +
     'TO LOOK AT AN IMAGE OR PDF STORED HERE, USE `show` — it puts the file in front of your own eyes, so ' +
     'you can see a photo, a screenshot, a chart or a scanned page and answer questions about what is in ' +
     'it. That is the ONLY way to see one: `read` returns text, so reading an image gives you base64 you ' +
@@ -308,7 +312,7 @@ const workspaceTool: Tool<ToolResultOf<'workspace_action'>> = {
     properties: {
       action:    { type: 'string', enum: ['read', 'show', 'write', 'list', 'delete'], description: 'The operation to perform. "show" displays a stored image, PDF, audio or other binary file to you so you can see/hear it; "read" returns file contents as text.' },
       name:      { type: 'string', description: 'read/show/write/delete only: the whole name of one file (e.g. "report.md", "charts/data.csv").' },
-      prefix:    { type: 'string', description: 'list only: restrict the listing to names beginning with these segments (e.g. "charts"). Omit it to list the whole workspace.' },
+      prefix:    { type: 'string', description: 'list only: restrict the listing to names beginning with these whole segments (e.g. "charts"), or to one file when it is a complete name (e.g. "charts/data.csv"). Omit it to list the whole workspace.' },
       content:   { type: 'string', description: 'File contents — required for action "write".' },
       encoding:  { type: 'string', enum: ['utf8', 'base64'], default: 'utf8', description: "Used by read/write only. 'base64' moves binary bytes in or out; it does NOT let you see an image — use action \"show\" for that. 'utf8' (default) for text." },
     },

@@ -70,6 +70,9 @@ export function settingsDefaultNamespaces(): readonly string[] {
  *  consumer filters `kind === ItemChangeKind && namespace === SETTINGS_NAMESPACE && id === slug(mine)`. */
 export const SETTINGS_NAMESPACE = 'settings';
 
+/** How many times a settings write re-reads and re-compares before giving up. See `update` below. */
+const SETTINGS_CAS_ATTEMPTS = 8;
+
 /**
  * The bus settings writes announce on, installed by the host at boot alongside {@link installSettingsDefaults}.
  *
@@ -134,8 +137,14 @@ export function makePluginSettings(rawStore: Store<SettingsDoc>, namespace: stri
 
   // One CAS retry loop for both writers: read, apply `mutate`, write. A document that vanished between
   // read and write (or never existed) is a plain `set`; otherwise `cas` guards the version we read.
+  //
+  // Bounded, because the loop cannot tell a lost race from a `cas` that will never succeed: a backend
+  // whose compare always fails (a version it does not mint, a medium generation it cannot reconcile)
+  // turned this into a hot spin with no error and no exit. A settings namespace is one document with few
+  // writers, so real contention resolves in one or two passes; exhausting the budget is a fault to
+  // report, not a state to keep retrying.
   const update = async (mutate: (data: Record<string, unknown>) => Record<string, unknown> | undefined): Promise<void> => {
-    for (;;) {
+    for (let attempt = 1; ; attempt++) {
       const doc  = await getDoc();
       const data = mutate(doc?.data ?? {});
       if (data === undefined) return;
@@ -143,6 +152,13 @@ export function makePluginSettings(rawStore: Store<SettingsDoc>, namespace: stri
       if (doc === null) { await store.set(id, next); return; }
       const r = await store.cas(id, doc.version, next);
       if (r.ok) return;
+      if (attempt >= SETTINGS_CAS_ATTEMPTS) {
+        throw new Error(
+          `Settings for "${namespace}" could not be written: ${SETTINGS_CAS_ATTEMPTS} compare-and-swap ` +
+          'attempts all lost. Either something is writing this namespace continuously, or the storage ' +
+          'backend is rejecting every compare.',
+        );
+      }
     }
   };
 

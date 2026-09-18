@@ -195,7 +195,8 @@ export interface FollowupResult {
    * `context` is folded EPHEMERALLY onto the redo (for-this-answer-only). `durable` is instead folded
    * onto the re-run's user message — persisted, visible (mark it `origin: 'robo'`), carried live as a
    * `robo-user` event — so a `contextual`-kind correction updates the conversation durably even when it
-   * lands post-commit. At least one of the two is present.
+   * lands post-commit. Normally at least one is supplied; the RETRACT is driven by the presence of this
+   * object, so `{}` means "pop and re-run with nothing added" rather than being quietly ignored.
    */
   retractAndRerun?: { context?: MessageContent[]; durable?: MessageContent[] };
   /**

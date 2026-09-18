@@ -109,6 +109,21 @@ export function invokeTool<K extends string, const P>(
 }
 
 /**
+ * The one drain: consume a tool event stream, keeping the last `result` and throwing on the first
+ * `error`. Whether a stream that yielded NO result is a failure is the caller's question, and the only
+ * thing the three public drains ever disagreed on — so it is the only thing they pass in.
+ */
+async function drain<R>(events: AsyncIterable<ToolEvent<R>>): Promise<{ value: R | undefined; hadResult: boolean }> {
+  let value: R | undefined;
+  let hadResult = false;
+  for await (const ev of events) {
+    if      (ev.type === 'result') { value = ev.value; hadResult = true; }
+    else if (ev.type === 'error')  { throw new Error(ev.message); }
+  }
+  return { value, hadResult };
+}
+
+/**
  * Drain a tool event stream (e.g. {@link invokeTool}'s return) to its raw `result` *value*, typed:
  * paired with `invokeTool(machine, name, …)` it returns whatever `ToolContracts[name]` declares (or
  * `unknown` for an unregistered tool). This is the structured counterpart to {@link toolText} — use it
@@ -116,14 +131,9 @@ export function invokeTool<K extends string, const P>(
  * Stops and throws on the first `error` event, or if the tool finished without yielding a `result`.
  */
 export async function toolResult<R>(events: AsyncIterable<ToolEvent<R>>): Promise<R> {
-  let value!: R;
-  let hadResult = false;
-  for await (const ev of events) {
-    if      (ev.type === 'result') { value = ev.value; hadResult = true; }
-    else if (ev.type === 'error')  { throw new Error(ev.message); }
-  }
+  const { value, hadResult } = await drain(events);
   if (!hadResult) throw new Error('Tool produced no result');
-  return value;
+  return value as R;
 }
 
 /**
@@ -133,13 +143,7 @@ export async function toolResult<R>(events: AsyncIterable<ToolEvent<R>>): Promis
  * (the shape `skill_action` and other prose tools return) by its `content`, anything else as JSON.
  */
 export async function toolText(events: AsyncIterable<ToolEvent>): Promise<string> {
-  let result: unknown;
-  let hadResult = false;
-  for await (const ev of events) {
-    if      (ev.type === 'result') { result = ev.value; hadResult = true; }
-    else if (ev.type === 'error')  { throw new Error(ev.message); }
-  }
-  if (!hadResult) throw new Error('Tool produced no result');
+  const result = await toolResult(events);
 
   if (typeof result === 'string') return result;
   if (result !== null && typeof result === 'object' && typeof (result as { content?: unknown }).content === 'string') {
@@ -148,9 +152,28 @@ export async function toolText(events: AsyncIterable<ToolEvent>): Promise<string
   return JSON.stringify(result, null, 2);
 }
 
-const rejectingPrompt: PromptFn = (((p: string | FormField): Promise<string> => {
-  const label = typeof p === 'string' ? p : p.label;
-  return Promise.reject(new Error(`Non-interactive context: cannot prompt for "${label}"`));
+const cannotPrompt = (p: string | FormField): Promise<string> =>
+  Promise.reject(new Error(`Non-interactive context: cannot prompt for "${typeof p === 'string' ? p : p.label}"`));
+
+/**
+ * The stand-in for "there is nobody to ask": every request rejects, naming the field, which a tool's
+ * surrounding try/catch turns into an ordinary error event.
+ *
+ * Deliberately NOT what a gate is handed — see {@link bindGate}. A gate must be able to tell "nobody is
+ * here" (`ask === undefined`) from "a human answered", and a stand-in that answers makes that
+ * undecidable.
+ */
+export const rejectingPrompt: PromptFn = cannotPrompt as PromptFn;
+
+/**
+ * The stand-in that answers with a field's OWN default where it has one, and rejects like
+ * {@link rejectingPrompt} where it does not — what `ToolContext.prompt` is when the host supplied no
+ * channel. The two stand-ins shared one message written out twice, in two packages; what actually
+ * separates them is this one line, so it is the only thing that differs now.
+ */
+export const defaultingPrompt: PromptFn = (((p: string | FormField, def?: string): Promise<string> => {
+  const fallback = typeof p === 'string' ? def : p.default;
+  return fallback !== undefined ? Promise.resolve(fallback) : cannotPrompt(p);
 }) as PromptFn);
 
 /** Compact a value to one trace line. */
@@ -159,6 +182,25 @@ function compactTrace(v: unknown): string {
   if (typeof v === 'string') s = v;
   else { try { s = JSON.stringify(v) ?? String(v); } catch { s = String(v); } }
   return s.length > 240 ? `${s.slice(0, 240)}…` : s;
+}
+
+/**
+ * The {@link ToolProxy}'s drain. Unlike {@link toolResult}, a stream that ends with no `result` resolves
+ * to `undefined` instead of throwing — a tool whose work is a side effect yields nothing BY DESIGN
+ * (`function-tools` omits the event when a body returns nothing, and the triggers dispatcher fires only
+ * on a yielded result), and this proxy is the surface such a tool is called through. Throwing here made
+ * the one surface meant to be silent the one that shouted.
+ *
+ * A tool that declares a DATA result and yields nothing is still an error — but it is caught where the
+ * types are, not re-derived from a contract string on every call: the checker compiles a body against its
+ * declared return type, and `strict` rejects one that can fall through (TS2355 with no return at all,
+ * TS2366 when only some paths do). A body declaring `T | undefined` is deliberately NOT rejected —
+ * `undefined` IS its contract, and is exactly what this drain hands back. Two paths reach here unchecked
+ * and resolve to `undefined` rather than throwing: an explicit `noTypeCheck`, and the browser, where there
+ * is no `ToolTypeIndex`. Both are opted into.
+ */
+async function drainProxyResult<R>(events: AsyncIterable<ToolEvent<R>>): Promise<R | undefined> {
+  return (await drain(events)).value;
 }
 
 /**
@@ -195,7 +237,7 @@ export function makeToolBox(
         if (typeof prop !== 'string' || prop === 'then') return undefined;
         return async (params?: unknown): Promise<unknown> => {
           opts?.onEvent?.({ type: 'stdout', chunk: `→ ${prop}(${compactTrace(params)})\n` });
-          const value = await toolResult(invokeTool(machine, prop, params ?? {}, call));
+          const value = await drainProxyResult(invokeTool(machine, prop, params ?? {}, call));
           opts?.onEvent?.({ type: 'stdout', chunk: `← ${prop}: ${compactTrace(value)}\n` });
           return value;
         };

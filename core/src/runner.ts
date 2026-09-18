@@ -1,15 +1,15 @@
 import type {
   Session, Message, MessageContent, ModelContent, Usage, UsageSite, ProviderMeta, TruncatedToolResult,
   TurnEvent, RunConfig, ProviderAdapter, ProviderConfig,
-  Tool, ToolRegistry, ToolContext, Store, FileStore, MediaStore, SystemContextRegistry, Vault, PromptFn, FormField,
+  Tool, ToolRegistry, ToolContext, Store, FileStore, MediaStore, SystemContextRegistry, Vault, PromptFn,
   PermissionGate,
 } from './types.js';
 import type { MatbotPlugin } from './plugin.js';
 import type { ToolPresenter } from '@matatbread/matbot-plugin-api';
-import { recordSpan, recordUsage, withUsageSite } from '@matatbread/matbot-plugin-api/host';
+import { recordSpan, recordUsage, withUsageSite, scopeIterable } from '@matatbread/matbot-plugin-api/host';
 import { HookRegistry } from './hooks.js';
 import { appendMessage, createMessage } from './session.js';
-import { foldOntoUserTurn, bindPluginOps, bindGate } from '@matatbread/matbot-plugin-api';
+import { foldOntoUserTurn, bindPluginOps, bindGate, defaultingPrompt } from '@matatbread/matbot-plugin-api';
 import { addUsage } from './usage.js';
 import { MEDIA_RESIDENCY_BYTES, resolveSessionMedia } from './media.js';
 
@@ -17,24 +17,13 @@ import { MEDIA_RESIDENCY_BYTES, resolveSessionMedia } from './media.js';
 // runner is itself an async generator, so it suspends at every `yield` and resumes under the consumer's
 // context, losing any scope entered around the loop body. Scoping each `next()` instead means the
 // tool's body — and anything it kicks off while running — always resumes under its own site.
-function siteScoped<T>(site: UsageSite, src: AsyncIterable<T>): AsyncIterable<T> {
-  return {
-    [Symbol.asyncIterator]: () => {
-      const it = src[Symbol.asyncIterator]();
-      return {
-        next:  ()  => withUsageSite(site, () => it.next()),
-        ...(it.return ? { return: (v?: never) => withUsageSite(site, () => it.return!(v)) } : {}),
-        ...(it.throw  ? { throw:  (e?: unknown) => withUsageSite(site, () => it.throw!(e))  } : {}),
-      };
-    },
-  };
-}
+//
+// `scopeIterable` is the shared per-pull wrap, as used by `runAs` for the principal: this had its own
+// object-literal copy, which replaced the iterator wholesale and so dropped a class-based tool
+// iterator's own members, prototype and `instanceof`.
+const siteScoped = <T>(site: UsageSite, src: AsyncIterable<T>): AsyncIterable<T> =>
+  scopeIterable(src, f => withUsageSite(site, f));
 
-// Substituted for an errored tool result when the turn was aborted (e.g. a mid-turn steer interrupt):
-// the tool was cut off, not genuinely faulty, and the raw abort reason ("Error: steer") is a leaked
-// internal token that reads as a real failure. A steer's continuation turn is the one place a model
-// reads this, so the wording tells it the call was interrupted and leaves re-running to its judgement —
-// deliberately NOT "re-run it", so a side-effecting tool isn't reflexively repeated.
 // Creator of the marker recording that a provider cut a response short. Marker-role, so it is durable
 // and visible to a reader while elided from every submission: the model's own text is already truncated
 // in the transcript, and a block telling it so invites narrating the cut-off rather than continuing.
@@ -44,6 +33,19 @@ const TRUNCATION_CREATOR = 'matbot-truncation';
  *  anything), so the two abort exits both had to narrow it; they narrowed it identically. */
 const abortReason = (signal: AbortSignal): string =>
   typeof signal.reason === 'string' ? signal.reason : 'user-abort';
+
+/**
+ * A thrown value as a turn-terminal message, with its `cause` appended when it has one.
+ *
+ * A `throw` carries anything, so this narrows before reaching for `cause`: `'cause' in e` throws
+ * TypeError on a primitive, which made the catch handler ITSELF throw for a provider that rejected
+ * with a string — escaping the generator and skipping the `end()` commit that the branch calling this
+ * exists to perform. The one place in this package that took `any` rather than narrow.
+ */
+const errorText = (e: unknown): string => {
+  const cause = typeof e === 'object' && e !== null && 'cause' in e ? (e as { cause?: unknown }).cause : undefined;
+  return cause ? `${String(e)} (${String(cause)})` : String(e);
+};
 
 /** How long a tool executor may keep the turn alive AFTER the turn was aborted, before the runner stops
  *  reading it. An abort must abort: any executor can fail to end — a child process whose stdout was
@@ -73,6 +75,11 @@ function abandonDeadline(signal: AbortSignal, ms: number): { wait: Promise<typeo
   };
 }
 
+// Substituted for an errored tool result when the turn was aborted (e.g. a mid-turn steer interrupt):
+// the tool was cut off, not genuinely faulty, and the raw abort reason ("Error: steer") is a leaked
+// internal token that reads as a real failure. A steer's continuation turn is the one place a model
+// reads this, so the wording tells it the call was interrupted and leaves re-running to its judgement —
+// deliberately NOT "re-run it", so a side-effecting tool isn't reflexively repeated.
 const INTERRUPTED_TOOL_RESULT = {
   error: 'Tool call interrupted before completion — the turn was interrupted while it was running. It may not have run to completion, and any side effect may or may not have occurred. Re-run it only if you still need its result.',
 } as const;
@@ -137,12 +144,9 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
   const { config, provider, providerConfig, store, signal } = opts;
   const tools   = opts.tools   ?? new Map<string, Tool>();
   const hookReg = opts.hooks   ?? new HookRegistry();
-  const promptFn: PromptFn = opts.prompt ?? (((p: string | FormField, def?: string): Promise<string> => {
-    const fallback = typeof p === 'string' ? def : p.default;
-    if (fallback !== undefined) return Promise.resolve(fallback);
-    const label = typeof p === 'string' ? p : p.label;
-    return Promise.reject(new Error(`Non-interactive context: cannot prompt for "${label}"`));
-  }) as PromptFn);
+  // The stand-in answers with a field's own default where it has one — which is precisely why the gate
+  // below is handed `opts.prompt` raw instead (see bindGate).
+  const promptFn: PromptFn = opts.prompt ?? defaultingPrompt;
   const vault: Vault = opts.vault ?? {
     async createSecret() { throw new Error('No vault configured'); },
     async writeSecret()  { throw new Error('No vault configured'); },
@@ -408,7 +412,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
             break;
         }
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
       // A provider call cancelled by an in-situ restart (callAc, not the turn signal) is expected — fall
       // through to the restart below rather than surfacing it as a turn abort or an error.
       if (restart || (callAc.signal.aborted && !signal.aborted)) {
@@ -436,7 +440,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
         // carries no session (a failure is not a transcript), so this yields the terminal itself rather
         // than the session — but it commits first, exactly like every other exit.
         bookRound();
-        yield* end({ type: 'error', error: String(e) + (('cause' in e && e.cause) ? ' ('+String(e.cause)+')' : '' ), traceId });
+        yield* end({ type: 'error', error: errorText(e), traceId });
         return;
       }
     }

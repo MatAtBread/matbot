@@ -3,7 +3,7 @@ import { PLUGIN_API_VERSION }                from '@matatbread/matbot-plugin-api
 
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
-    url_for_resource: ToolContract<{ url: string | null }, { name: string }>;  // a shareable URL for the file, or null if not publicly viewable
+    url_for_resource: ToolContract<{ url: string | null }, { name: string }>;  // a server-relative URL PATH for the file, or null if not publicly viewable
   }
 }
 import { createWebServer, defaultWebPrincipal, headerPrincipal, urlPrincipal } from './server.js';
@@ -25,9 +25,12 @@ function makeUrlForResourceTool(services: MatbotMachine): Tool<ToolResultOf<'url
   return {
     name: 'url_for_resource',
     description:
-      'Return a shareable HTTP URL for a stored file, or null when it is not publicly viewable. Use this ' +
+      'Return the URL PATH a stored file is served at, or null when it is not publicly viewable. Use this ' +
       'to hand the user a link to a file rather than guessing a path. Pass the same path the file was ' +
-      'stored under. Only files marked viewable get a URL.',
+      'stored under. Only files marked viewable get one.\n' +
+      'The result is relative to this server\'s own origin (e.g. "/files/workspace/report.md") — this ' +
+      'server cannot know what host or port a reader reaches it on, so join it to the origin you used ' +
+      'to get here before quoting it to someone.',
     inputSchema: {
       type:     'object',
       required: ['name'],

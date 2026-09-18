@@ -451,9 +451,12 @@ function makeExecutor(
 
         const cur = providers.get(name);
         if (cur === undefined) {
+          // An error, not a result: naming a profile that does not exist is a failed update, and a
+          // programmatic caller (a trigger, `invokeTool`, `POST /tools/provider`) has no way to tell a
+          // prose "no profile named…" apart from a successful one.
           yield {
-            type:  'result',
-            value: { message: `No profile named "${name}" found. Configured profiles: ${[...providers.keys()].map(n => `"${n}"`).join(', ')}.` },
+            type:    'error',
+            message: `No profile named "${name}" found. Configured profiles: ${[...providers.keys()].map(n => `"${n}"`).join(', ')}.`,
           };
           return;
         }

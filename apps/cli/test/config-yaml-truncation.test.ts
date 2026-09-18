@@ -84,6 +84,41 @@ test('a quoted mapping key is unquoted', () => {
 `)['default_settings'], { '@a/b': { k: 'v' }, '@a/c': { k2: 2 } });
 });
 
+// The comment stripper ran `/#.*$/` over every line, so a `#` in a VALUE truncated it: the
+// `github:owner/repo#path:sub` specifier form lost its subdirectory and loaded the repo root, and a
+// quoted value lost its closing quote too, so it came back with a stray `"` still attached. Same
+// silent-subset failure as above, one field down.
+test('a hash inside a value is not a comment', () => {
+  const doc = parseYaml(`plugins:
+  - github:MatAtBread/matbot#path:plugins/storage/sqlite
+  - ./plugins/bash
+providers:
+  p:
+    model: m
+    note: "hash # inside quotes"
+    frag: '#leading-hash'
+`);
+  assert.deepEqual(doc['plugins'], ['github:MatAtBread/matbot#path:plugins/storage/sqlite', './plugins/bash']);
+  assert.deepEqual(doc['providers'], { p: { model: 'm', note: 'hash # inside quotes', frag: '#leading-hash' } });
+});
+
+test('a real comment is still a comment', () => {
+  const doc = parseYaml(`# leading comment
+plugins:
+  - a            # trailing comment
+  - "b"          # after a quoted value
+default_provider: p   # after a bare value
+`);
+  assert.deepEqual(doc['plugins'], ['a', 'b']);
+  assert.equal(doc['default_provider'], 'p');
+});
+
+// An apostrophe in a plain scalar must not be read as an opening quote, or the comment after it
+// would be kept as part of the value.
+test('an apostrophe in a plain scalar does not open a quoted scalar', () => {
+  assert.equal(parseYaml("title: Matt's config   # a comment\n")['title'], "Matt's config");
+});
+
 test('the forms already in use still parse unchanged', () => {
   // Flush-left sequence under a key, and both block scalar styles.
   const doc = parseYaml(`plugins:

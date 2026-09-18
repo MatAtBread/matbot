@@ -104,15 +104,13 @@ export type Quiescer = (unregister: () => void) => void | Promise<void>;
  * onContextQuiesce(() => { if (nothingToDo) return; … });
  * ```
  *
- * **This or {@link scheduleAtEdge}?** They answer different questions, and the difference is what happens
- * when you ask twice.
+ * **This or {@link scheduleAtEdge}?** The difference is what happens when you ask twice.
  *
  * This is a *subscription*: each call adds a callback, and every callback added runs. Ask twice and the work
  * happens twice — correct when each call carries its own work (two deferred session edits are two edits, and
- * both must land). `scheduleAtEdge` is a *dirty flag*: you create one scheduler up front, and however many
- * times you poke it before an edge, the work runs once. Correct when the calls describe a **slot** rather
- * than a queue — three `register('StorageBackend')` calls mean one backend to install, not three to install
- * in turn, and the work reads the slot at fire time so the last writer wins.
+ * both must land). `scheduleAtEdge` is a *dirty flag*: one scheduler, poked any number of times before an
+ * edge, runs once and reads a slot at fire time. Correct when the calls describe a **slot** rather than a
+ * queue — three `register('StorageBackend')` calls mean one backend to install, not three in turn.
  *
  * Picking wrongly is not subtle in either direction: a subscription where you wanted a flag re-applies stale
  * intermediate values, and a flag where you wanted a subscription silently drops work.
@@ -125,36 +123,24 @@ export type Quiescer = (unregister: () => void) => void | Promise<void>;
  *
  * - Flushers are **invoked in registration order**, in one synchronous sweep; one that goes async is
  *   started in that order and then left to settle alongside the rest.
- * - **The synchronous prefix lands within the call.** As long as flushers are synchronous nothing
- *   yields at all, which is what lets the host stage a mutation and land it with a bare
- *   `flushIfQuiescent()` — in effect before the call returns.
+ * - **The synchronous prefix lands within the call.** As long as flushers are synchronous nothing yields at
+ *   all, so a host can stage a mutation and have it in effect before the staging call returns.
  * - **No second sweep begins until the current one has completely settled**, and a mutation staged
  *   meanwhile is turned away rather than applied.
  * - A throwing flusher is isolated, and so is a rejecting one — neither may deny the others their
  *   completion, nor escape into the operation whose release happened to reach the edge.
+ * - **Exclusivity, for a flusher's whole extent**, because {@link machineBusy} bars entry while a flush is
+ *   settling. Flushers still overlap *each other*, deliberately: sequencing them would remove one source of
+ *   concurrent mutation while leaving every other in place, at the price of every flusher waiting on the
+ *   slowest. Keeping a flusher synchronous is still worth it where the work allows.
  *
- * - **Exclusivity, for a flusher's whole extent.** A synchronous flusher has always had it for free —
- *   the runtime is single-threaded — and that remains the argument for keeping one synchronous whenever
- *   the work allows. An asynchronous one now has it too, because {@link machineBusy} bars entry while a
- *   flush is settling. Flushers still overlap *each other*, deliberately: sequencing them would remove
- *   one source of concurrent mutation while leaving every other in place, at the price of every flusher
- *   waiting on the slowest.
- *
- * Exclusivity is a recent acquisition and the reasoning that preceded it is worth keeping, because it
- * says what the barrier is really for. This edge used to be a counter, not a gate: `depth` was 0 while
- * a flush settled, so an HTTP endpoint could accept a request and run a whole tool call inside a single
- * `await`, and the conclusion drawn was that contention over a service is the *service's* to resolve —
- * a `Store` answers it with compare-and-swap — and that the sweep's job was only to make contention
- * rare rather than to pretend the machine stops.
- *
- * That is still true, and `mediumGuard` is the shipped form of it: a write whose read came from another
- * `StorageBackend` fails on the version stamp, so coherence does not depend on this module at all.
- * Which is precisely what makes the barrier safe to add. It is not the correctness mechanism; it is the
- * **liveness** one. A counter cannot force `depth` to reach 0, so under continuously overlapping holds —
- * several sessions on a busy server, each pump holding across its own queue — the edge simply never
- * arrives and staged work waits for an idle moment that never comes. A deferred session edit that never
- * lands, and a staged backend swap that never applies, are both failures with no symptom. Barring entry
- * is the only way to make the drain reachable, and exclusivity falls out of it for free.
+ * **The barrier is for liveness, not coherence.** Coherence does not depend on this module at all:
+ * `mediumGuard` fails a write whose read came from another `StorageBackend` on the version stamp, and
+ * contention over a service is that service's to resolve (a `Store` answers it with compare-and-swap). What
+ * a counter *cannot* do is force `depth` to reach 0 — under continuously overlapping holds (several sessions
+ * on a busy server, each pump holding across its own queue) the edge never arrives, and a deferred session
+ * edit that never lands and a staged swap that never applies are both failures with no symptom. Barring
+ * entry is the only way to make the drain reachable.
  *
  * The keys that repoint *immediately* — `Vault`, `KnowledgeIndex`, `Notifier`, anything a plugin
  * registers — carry no protection here or anywhere: they change under a running turn too, by the
@@ -165,16 +151,13 @@ export function onContextQuiesce(flush: Quiescer): () => void {
   const unregister = (): void => { cs.quiescers.delete(flush); };
   cs.quiescers.add(flush);
 
-  // **Registering IS announcing.** A stager should not have to also remember to ask for an edge: the one
-  // plugin doing this in-tree registered a one-shot and never called `flushIfQuiescent`, so the barrier
-  // never engaged on its behalf and its work depended on someone else happening to release. Two calls that
-  // must be paired, where omitting the second is silent, is the shape this module exists to avoid.
+  // **Registering IS announcing**, because two calls that must be paired, where omitting the second is
+  // silent, is the shape this module exists to avoid: a stager that registered and forgot to ask for an
+  // edge left the barrier disengaged, and its work then depended on someone else happening to release.
   //
   // The barrier is raised synchronously (it invokes nothing) so it engages at once, while the edge ATTEMPT
   // waits for a microtask — a callback must not run before the statement registering it has finished, or a
   // one-shot reading anything initialised on that same line, `unregister` included, would see it missing.
-  // Nothing depends on registration landing synchronously; the host's inline-landing guarantee is attached
-  // to an explicit `flushIfQuiescent()`, which still has it.
   if (cs.depth !== 0 || cs.flushing) cs.wanted = true;
   void Promise.resolve().then(() => { if (cs.quiescers.has(flush)) flushIfQuiescent(); });
 
@@ -183,13 +166,8 @@ export function onContextQuiesce(flush: Quiescer): () => void {
 
 /**
  * Announce registered work and land it if the edge is already here — **private**, and the second half of
- * {@link onContextQuiesce}.
- *
- * It was public, and announcing was then a call a stager had to remember to pair with its registration. The
- * one plugin registering a one-shot never made it, so the barrier never engaged for the very work whose
- * starvation motivated it. Registering announces now, which is the same guarantee with nothing to forget —
- * and once that was true, nothing outside this module had any reason to call this. Exposing "force an edge"
- * only offered a way to reason about firing that a caller should not have to have.
+ * {@link onContextQuiesce}. Private because registering announces, so nothing outside this module has any
+ * reason to force an edge; offering one only invites reasoning about firing that a caller should not need.
  *
  * It stays separate from the opportunistic sweep {@link machineBusy} performs at its own edges: only a
  * registration knows work exists, and a sweep that raised `wanted` merely because it found the machine busy
@@ -277,10 +255,9 @@ function sweep(): Promise<void> | undefined {
  * caller through here — which is all the mount contract has ever promised: eventual and ordered,
  * never timed.
  *
- * **Largely redundant since the barrier.** {@link machineBusy} now waits for staged work before it takes
- * the hold, which is this guarantee delivered where it cannot be forgotten — so the pump, the caller this
- * was written for, no longer calls it. It remains for an operation that needs deferred work complete and
- * does *not* want to hold the machine.
+ * **Largely redundant since the barrier**, which delivers this guarantee inside {@link machineBusy} where
+ * it cannot be forgotten. It remains for an operation that needs deferred work complete and does *not*
+ * want to hold the machine.
  */
 export async function quiesced(): Promise<void> {
   await sweep();
@@ -369,23 +346,21 @@ async function admit(): Promise<void> {
  * off-limits to further ones until `fn` is done. When `fn` is async the hold stays up until its promise
  * settles, so the count tracks the real operation rather than the synchronous call.
  *
- * **Always a promise, because entry can wait** ({@link admit}) — that is the barrier, and it is in here
- * rather than at the call site on purpose. An explicit "wait, then hold" pair reads better and puts the
- * cost in view, but it makes the waiting *optional*, and a second caller who omits it gets no error and
- * no symptom: staged work simply stops landing. That is the failure this whole module exists to prevent,
- * so it is not one to leave to a caller's memory — the same reasoning that makes the principal ambient
- * rather than threaded, and binds a mount interest to its plugin's load extent.
+ * **Always a promise, because entry can wait** ({@link admit}) — the barrier is in here rather than at the
+ * call site on purpose. An explicit "wait, then hold" pair reads better and puts the cost in view, but it
+ * makes the waiting *optional*, and a caller who omits it gets no error and no symptom: staged work simply
+ * stops landing. Same reasoning that makes the principal ambient rather than threaded, and binds a mount
+ * interest to its plugin's load extent.
  *
  * When nothing is staged, `fn` still runs **synchronously** within the call, before the returned promise
  * is handed back: the barrier adds a hold, never a scheduling gap, so nothing can slip between the check
  * and the hold. A synchronous throw becomes a rejection, so the two paths report failure identically.
  *
  * The hold is released on **every** exit — a throw, a rejected promise, a bare `return` from anywhere
- * inside — because the release is bound to the call, not written at the exits. That is the whole reason
- * this is a wrapper and not a `begin()`/`end()` pair: a caller with a dozen early returns (the pump has
- * several per queue item) cannot leave the counter stuck, and a stuck counter is unrecoverable — every
- * later flush would silently no-op forever, and the symptom would be a deferred mutation that simply
- * never happens.
+ * inside — because the release is bound to the call, not written at the exits. That is why this is a
+ * wrapper and not a `begin()`/`end()` pair: a caller with a dozen early returns (the pump has several per
+ * queue item) cannot leave the counter stuck, and a stuck counter is unrecoverable — every later flush
+ * would silently no-op forever, with no symptom but a deferred mutation that never happens.
  */
 export function machineBusy<T>(fn: () => T | Promise<T>): Promise<T> {
   if (!clear()) return admit().then(() => held(fn));

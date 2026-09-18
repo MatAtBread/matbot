@@ -33,6 +33,10 @@ export * from './usage-context.js';
 // The machine half of a context switch: quiescent-edge flushers and the deferred-swap application point.
 export * from './context-switch.js';
 
+// Re-entering an ambient scope on every pull of an async iterator — what both carriers need to cover a
+// tool executor's deferred body. Host-side: a plugin gets this behaviour for free from `runAs`.
+export * from './scoped-iterator.js';
+
 // The boot `PermissionGate` a host installs as the base of the swap-member: ask through whatever
 // channel is in scope, else answer the request's own `fallback`. A plugin supplying a *policy* is the
 // author-facing half and needs only the `PermissionGate` type, which the root exports.
