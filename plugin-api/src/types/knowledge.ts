@@ -21,6 +21,7 @@ export interface KnowledgeIndex {
    *  index never inspects an entry's opaque `source`. The party that indexed an entry owns retracting
    *  it — e.g. a skill manager retracts a hidden/deleted skill rather than the index policing tenants. */
   remove(id: string): Promise<void>;
+  /** Rejects with the signal's reason if it is already aborted; an abort during the search may reject too. */
   search(terms: Array<{ term: string; context?: string }>, signal: AbortSignal): Promise<KnowledgeEntry[]>;
   /** Enumerate all indexed entries. When present, register('KnowledgeIndex', …) drains these into the incoming backend. */
   entries?(): Iterable<KnowledgeEntry>;

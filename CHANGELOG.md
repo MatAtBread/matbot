@@ -49,6 +49,9 @@ churn and less likely to affect a consumer who doesn't use them.
   exit.
 - **`plugin unload`** — the 10s teardown-timeout timer is cleared when the race settles. It was left
   running after every successful unload, holding the event loop open for the remainder of its 10s.
+- **`KnowledgeIndex`** — `search()` rejects with the signal's reason when called with an already-aborted
+  signal, as the persistent index already did when aborted mid-rerank. `LookupKnowledgeIndex` ignored the
+  signal and returned normally, so one interface had two abort behaviours (#75).
 
 ### Optional
 
@@ -72,6 +75,10 @@ churn and less likely to affect a consumer who doesn't use them.
   preceding messages to identify subjects. It attributes a fact to the user only when the user states it
   about themselves, names any other subject, and drops a fact whose subject it cannot identify rather
   than defaulting to the user. Facts captured before this fix are unchanged.
+- **`skills`** — skills are re-indexed when the `KnowledgeIndex` is swapped, or reverts to the host default
+  on unload (#75). The host can drain only an index exposing `entries()`, which `persist-ki-bge` does not,
+  so unloading it left search empty until the next restart. `persist-ki-bge` `search()` also checks the
+  signal before reading the whole store.
 
 ## 0.4.15
 
