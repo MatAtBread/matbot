@@ -59,6 +59,8 @@ churn and less likely to affect a consumer who doesn't use them.
   a result whose prose says it failed.
 - **`frontend-web`** — `url_for_resource` describes what it actually returns: a URL path relative to this
   server's origin, not an absolute shareable URL.
+- **`frontend-web`** — an answered choice prompt highlights the option actually picked, not the default;
+  a cancelled or elsewhere-answered one highlights none.
 - **`workspace`** — `workspace_action list` accepts a `prefix` that is a complete file name and returns
   that one file, instead of a silent empty list.
 - **`triggers`** — `trigger_action` reports `enabled` on every trigger it returns, resolved from the

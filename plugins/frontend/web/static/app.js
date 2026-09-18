@@ -3322,9 +3322,12 @@ async function renderTurn(sid, traceId) {
             block.className = 'prompt-block';
             // Settle the dialog: disable every control (incl. the cancel ×) once answered or cancelled.
             const done = () => block.querySelectorAll('button, input').forEach(el => { el.disabled = true; });
+            // Settled with no choice made (cancelled, or answered elsewhere): the default wasn't picked either.
+            const unmark = () => block.querySelectorAll('.prompt-choice-btn.primary').forEach(b => b.classList.remove('primary'));
             // Retire the dialog without answering — someone else got there first. Resolving with
             // `dismissed` keeps the single settle path below from POSTing an answer nobody asked for.
             livePrompt = { dismiss: () => {
+              unmark();
               done();
               block.classList.add('settled');
               const note = document.createElement('div');
@@ -3340,7 +3343,7 @@ async function renderTurn(sid, traceId) {
               x.title = 'Cancel';
               x.setAttribute('aria-label', 'Cancel');
               x.textContent = '×';
-              x.onclick = () => { done(); resolve({ cancelled: true }); };
+              x.onclick = () => { unmark(); done(); resolve({ cancelled: true }); };
               block.appendChild(x);
             }
             const q = document.createElement('div');
@@ -3351,6 +3354,9 @@ async function renderTurn(sid, traceId) {
               const row = document.createElement('div');
               row.className = 'prompt-choices';
               let defaultBtn = null;
+              // Once answered, the highlight moves from the default to what was actually picked — a
+              // settled dialog left showing the default reads as though the default had been chosen.
+              const markChosen = btn => row.querySelectorAll('button').forEach(b => b.classList.toggle('primary', b === btn));
               for (const choice of choices) {
                 const btn = document.createElement('button');
                 btn.type = 'button';
@@ -3361,7 +3367,7 @@ async function renderTurn(sid, traceId) {
                 btn.textContent = cl === 'y' || cl === 'yes' ? 'Yes'
                   : cl === 'n' || cl === 'no' ? 'No'
                   : choice.label;
-                btn.onclick = () => { done(); resolve({ answer: choice.value }); };
+                btn.onclick = () => { markChosen(btn); done(); resolve({ answer: choice.value }); };
                 if (isDefault) defaultBtn = btn;
                 row.appendChild(btn);
               }
@@ -3384,6 +3390,7 @@ async function renderTurn(sid, traceId) {
                   const submitOther = () => {
                     const v = inp.value.trim();
                     if (field.required && !v) return;
+                    markChosen(otherBtn);
                     done();
                     resolve({ answer: v });
                   };
