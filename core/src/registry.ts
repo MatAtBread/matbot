@@ -370,11 +370,12 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotMachine,
       build:          (ctx)          => services.systemContext.build(ctx),
       parts:          (ctx)          => services.systemContext.parts(ctx),
     },
+    // Attributed only once the registration has succeeded: a key recorded for a register() that threw
+    // would make unload unregister a service this plugin never held — for a swap-member, reverting
+    // someone else's.
     async register(key, svc) {
-      const keys = state.serviceKeys.get(plugin.name) ?? [];
-      keys.push(key as string);
-      state.serviceKeys.set(plugin.name, keys);
       await services.register(key, svc);
+      recordServiceKey(plugin.name, key as string);
     },
     registerFrontend(info) {
       state.frontendPlugins.set(plugin.name, info);
@@ -416,33 +417,46 @@ export async function unloadPlugin(pluginName: string, services: MatbotMachine):
 
   state.plugins.splice(idx, 1);
   services.Notifier.notify({ kind: RegistryChangeKind, source: 'plugins', registry: 'plugins', name: pluginName, operation: 'removed' });
-  // The timer is cleared however the race settles. Left dangling it outlived every SUCCESSFUL unload,
-  // holding the event loop open for the rest of its 10s — so `plugin unload` followed by exit sat there
-  // with nothing to wait for.
+  await boundedTeardown(plugin);
+  return true;
+}
+
+/** How long one plugin's teardown() may take before it is abandoned. */
+const TEARDOWN_TIMEOUT_MS = 10_000;
+
+// The one teardown both paths use, so a runtime unload and process exit cannot drift apart on the budget.
+// The timer is cleared however the race settles: left dangling it outlived every SUCCESSFUL teardown,
+// holding the event loop open for the rest of its budget — so `plugin unload` followed by exit sat there
+// with nothing to wait for.
+async function boundedTeardown(plugin: MatbotPlugin): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     await Promise.race([
       plugin.teardown?.(),
       new Promise<void>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`Teardown timeout for plugin ${pluginName}`)), 10_000);
+        timer = setTimeout(() => reject(new Error(`Teardown timeout for plugin ${plugin.name}`)), TEARDOWN_TIMEOUT_MS);
       }),
     ]);
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
-  return true;
 }
 
-/** Run each plugin's teardown() in reverse-registration order. Errors are logged, not thrown. */
+/**
+ * Run each plugin's teardown() in reverse-registration order, one at a time, each within the same budget
+ * as {@link unloadPlugin}. Errors and timeouts are logged, not thrown, and do not stop the rest.
+ *
+ * Sequential and reversed because a plugin loaded later may depend on a service an earlier one provides,
+ * and must be able to flush through it before it closes. Bounded because a sequential loop is otherwise
+ * held hostage by one teardown that never settles — and this runs on the way to process exit.
+ */
 export async function teardownPlugins(): Promise<void> {
-  // Reverse once and keep it: indexing the *unreversed* array to name a result reported the wrong
-  // plugin for every failure but the middle one.
-  const ordered = [...state.plugins].reverse();
-  const results = await Promise.allSettled(ordered.map(plugin => plugin.teardown?.()));
-  results.forEach((result, i) => {
-    if (result.status === 'rejected') {
-      console.error(`[matbot] teardown error in plugin "${ordered[i]?.name}":`, result.reason);
+  for (const plugin of [...state.plugins].reverse()) {
+    try {
+      await boundedTeardown(plugin);
+    } catch (err) {
+      console.error(`[matbot] teardown error in plugin "${plugin.name}":`, err);
     }
-  });
+  }
 }
 
