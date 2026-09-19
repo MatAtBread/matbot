@@ -11,6 +11,13 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ## 0.4.17
 
+### API gaps filled
+
+- **`assembleMachine` / `preScanStorage`** — the boot graph as one core function: swap-members and their
+  boot defaults, guarded stores, the deferred `StorageBackend` swap, the mount table, `complete`, the
+  session runner and the core tools. Both apps now stand their machine up through it, passing only what
+  is platform-specific; an embedder can do the same instead of copying ~250 lines of an app's boot.
+
 ### Bug fixes
 
 - **Shutdown** — `teardownPlugins` runs teardowns one at a time in reverse load order, each within the
@@ -39,6 +46,14 @@ churn and less likely to affect a consumer who doesn't use them.
 - **`docker-bash`** — a container removal that genuinely fails is reported rather than swallowed, and
   `bash_config set` removes the old container before persisting, so a failure changes nothing instead of
   leaving the old container running beside a new one.
+- **`docker-bash`** — `bash_config pull` streams through the shared streamer and is ended by the turn's
+  abort signal; it previously ran to completion however long the image took.
+- **CLI** — the boot storage is the `FilesystemStorageBackend` whose layout the CLI already used, so
+  `services.StorageBackend` is present by default. `tool-store`'s namespace-collision check, which
+  enumerates it, previously found nothing on a default install.
+- **web bundle** — warns when a plugin's storage backend displaces the one opened at startup, as the CLI
+  already did.
+- **`default-gate`** — exports `defaultGate`, the bundle a host passes to `assembleMachine`.
 - **`skills`, `triggers`, `background`, `cognition`, `function-tools`** — document versions are random,
   not `Date.now()`, for the reason given under *Plugin settings*.
 
