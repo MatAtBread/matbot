@@ -71,12 +71,14 @@ type BashConfigOverrides = Partial<Pick<ContainerConfig, 'dns' | 'name' | 'maxOu
 
 // ── Docker helpers ────────────────────────────────────────────────────────────
 
+const DOCKER_MISSING = 'Docker CLI not found — is Docker installed and on PATH?';
+
 function dockerExec(args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile('docker', args, (err, stdout, stderr) => {
       if (err) {
         const code = (err as NodeJS.ErrnoException).code;
-        if (code === 'ENOENT') reject(new Error('Docker CLI not found — is Docker installed and on PATH?'));
+        if (code === 'ENOENT') reject(new Error(DOCKER_MISSING));
         else reject(new Error(stderr.trim() || err.message));
       } else resolve(stdout.trim());
     });
@@ -151,44 +153,21 @@ function resolveDnsServers(dns: string[] | undefined): string[] {
 /**
  * Run a docker CLI command, streaming its output as tool events and returning the accumulated text.
  * `dockerExec` buffers, which for a pull of an absent image is minutes of silence indistinguishable
- * from a hang. Throws on a non-zero exit; the caller frames the message.
+ * from a hang. Unbounded in time and size — a pull is as slow and as verbose as the image makes it — but
+ * the abort signal ends it, and killing the client cancels the daemon's side. Throws on failure.
  */
-async function* streamDocker(args: string[]): AsyncGenerator<ToolEvent<ToolResultOf<'bash_config'>>, string> {
+async function* streamDocker(args: string[], signal: AbortSignal): AsyncGenerator<ToolEvent<ToolResultOf<'bash_config'>>, string> {
   const child = spawn('docker', args, { shell: false });
-  const queue: Array<ToolEvent<ToolResultOf<'bash_config'>>> = [];
-  let wakeup: (() => void) | null = null;
-  let settled: { code: number | null; error?: Error } | undefined;
-  let output = '';
-
-  const push = (ev: ToolEvent<ToolResultOf<'bash_config'>>): void => {
-    queue.push(ev);
-    wakeup?.();
-    wakeup = null;
-  };
-
-  // 'close' fires after both streams have ended, so every chunk is already queued behind it.
-  const exit = new Promise<void>(resolve => {
-    child.on('error', (error: Error) => { settled = { code: null, error }; resolve(); });
-    child.on('close', (code: number | null) => { settled ??= { code }; resolve(); });
-  });
-
-  child.stdout?.on('data', (d: Buffer) => { const chunk = d.toString(); output += chunk; push({ type: 'stdout', chunk }); });
-  child.stderr?.on('data', (d: Buffer) => { const chunk = d.toString(); output += chunk; push({ type: 'stderr', chunk }); });
-
-  for (;;) {
-    while (queue.length > 0) for (const ev of queue.splice(0)) yield ev;
-    if (settled !== undefined) break;
-    await Promise.race([exit, new Promise<void>(resolve => { wakeup = resolve; })]);
+  for await (const ev of streamProcess(child, { timeout: Infinity, maxBytes: Infinity, signal, kill: sig => { child.kill(sig); } })) {
+    switch (ev.type) {
+      case 'stdout':
+      case 'stderr': yield { type: ev.type, chunk: ev.chunk }; break;
+      case 'result': return ev.value.stdout + ev.value.stderr;
+      case 'error':  throw new Error(/\bENOENT\b/.test(ev.message) ? DOCKER_MISSING : `docker ${args.join(' ')}: ${ev.message}`);
+      default:       break;
+    }
   }
-
-  const error = settled?.error;
-  if (error !== undefined) {
-    throw (error as NodeJS.ErrnoException).code === 'ENOENT'
-      ? new Error('Docker CLI not found — is Docker installed and on PATH?')
-      : error;
-  }
-  if (settled?.code !== 0) throw new Error(`docker ${args.join(' ')} exited with code ${String(settled?.code)}`);
-  return output;
+  throw new Error(`docker ${args.join(' ')} ended without a result`);
 }
 
 /** Force-remove a container by name. A missing one is not an error (current Docker exits 0 for it; older
@@ -254,6 +233,7 @@ type BashConfigInput = { action: string } & BashConfigOverrides;
 async function* bashConfigExecutor(
   input: unknown,
   settings: PluginSettings,
+  signal: AbortSignal,
 ): AsyncIterable<ToolEvent<ToolResultOf<'bash_config'>>> {
   const { action, dns, name, maxOutputBytes } = input as BashConfigInput;
 
@@ -325,7 +305,7 @@ async function* bashConfigExecutor(
     const cfg = effectiveConfig(await settings.get<BashConfigOverrides>(SETTINGS_KEY) ?? {});
     let pullOutput: string;
     try {
-      pullOutput = yield* streamDocker(['pull', cfg.image]);
+      pullOutput = yield* streamDocker(['pull', cfg.image], signal);
     } catch (e) {
       yield { type: 'error', message: e instanceof Error ? e.message : String(e) };
       return;
@@ -530,7 +510,7 @@ export const plugin: MatbotPluginSpec = {
       name:        'bash_config',
       description: BASH_CONFIG_DESCRIPTION,
       inputSchema: BASH_CONFIG_INPUT_SCHEMA,
-      executor:    { execute: (input) => bashConfigExecutor(input, settings) },
+      executor:    { execute: (input, ctx) => bashConfigExecutor(input, settings, ctx.signal) },
     };
     services.tools.register(configTool);
   },

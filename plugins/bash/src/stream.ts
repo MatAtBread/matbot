@@ -35,8 +35,10 @@ const KILL_GRACE_MS = 2_000;
 const EXIT_DRAIN_MS = 250;
 
 export interface StreamOptions {
-  /** Milliseconds before the script is killed. Defaults to {@link DEFAULT_TIMEOUT_MS}. */
+  /** Milliseconds before the script is killed. Defaults to {@link DEFAULT_TIMEOUT_MS}; `Infinity` for
+   *  none, which only a caller can choose — a model's JSON cannot carry it. */
   timeout?: number;
+  /** Combined stdout+stderr bytes before the script is killed; `Infinity` for no limit. */
   maxBytes: number;
   signal:   AbortSignal;
   /** Deliver a signal to the script AND everything it spawned. Called with SIGTERM, then SIGKILL if the
@@ -85,8 +87,7 @@ export function streamProcess(child: ChildProcess, opts: StreamOptions): AsyncIt
   let exit: { code: number | null; sig: NodeJS.Signals | null } | undefined;
   let drainTimer: ReturnType<typeof setTimeout> | undefined;
 
-  const timer = setTimeout(() => stop('timeout'), timeoutMs);
-  timer.unref();
+  const timer = Number.isFinite(timeoutMs) ? setTimeout(() => stop('timeout'), timeoutMs).unref() : undefined;
 
   const release = (): void => {
     clearTimeout(timer);
