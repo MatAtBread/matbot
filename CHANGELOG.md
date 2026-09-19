@@ -53,6 +53,13 @@ churn and less likely to affect a consumer who doesn't use them.
   enumerates it, previously found nothing on a default install.
 - **web bundle** — warns when a plugin's storage backend displaces the one opened at startup, as the CLI
   already did.
+- **`frontend-telegram`** — interactive prompts. A turn's questions, including every permission gate,
+  are sent to the chat: choices as inline buttons (a `select`, a `confirm`, a text field's default),
+  free text as a reply. Only the sender whose message is being served can answer. `/cancel`, sending
+  another message instead of pressing a button, or 10 minutes without an answer each cancel the question
+  and abandon its turn — never answering with the default, which for a gate can mean "allow". A
+  `password` field is refused rather than asked, since the answer would stay in the chat history. The
+  frontend previously supplied no `PromptFn`, so every gate took its site's non-interactive answer.
 - **`default-gate`** — exports `defaultGate`, the bundle a host passes to `assembleMachine`.
 - **`skills`, `triggers`, `background`, `cognition`, `function-tools`** — document versions are random,
   not `Date.now()`, for the reason given under *Plugin settings*.
