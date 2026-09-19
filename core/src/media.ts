@@ -54,8 +54,9 @@ const INLINE_ARMS = new Set(['image', 'document', 'audio']);
  * an arm that will fail: by the time the 400 arrives the `file-ref` is in persisted history, where it
  * resolves into every subsequent outgoing copy and fails the session for good.
  *
- * Same list and same reasoning as `workspace`'s `showArm`. The two stay separate because they answer
- * for separate stores; if a third ever needs it, this is the one to hoist.
+ * `workspace`'s `showArm` deliberately admits more (any `image/*`): its media is wire-only and dies with
+ * the turn, so a type the endpoint rejects costs one turn there, where here it costs the session. Do not
+ * unify the two.
  */
 const DECODABLE_IMAGE: ReadonlySet<string> = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 

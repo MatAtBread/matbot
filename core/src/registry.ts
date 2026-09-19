@@ -14,7 +14,6 @@ import type { SettingsDoc } from './settings.js';
 // `FailedPlugin` now lives in plugin-api: `plugin list` reports it, so it is part of that tool's
 // contract, and the contract has to be declarable from a package this one can reach.
 
-// Mutable arrays/maps held in a single object to make _resetRegistry() simple.
 const state = {
   plugins:         [] as MatbotPlugin[],
   providers:       new Map<string, ProviderAdapterFactory>(),
