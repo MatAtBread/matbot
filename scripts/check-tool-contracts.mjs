@@ -39,6 +39,9 @@ const ACCEPTED = {
     'runs on the `toolcall` hook, which only the model-driven turn loop dispatches — invokeTool (and so ' +
     'the `tool` proxy a composition calls) goes straight to the executor. The schema enum is therefore a ' +
     'guardrail on what the MODEL sends; the executor passes any verb to fetch, and a composition may use one.',
+  'bash.cwd':
+    'One contract serves both `bash` implementations. The local one advertises `cwd`; `docker-bash` runs in ' +
+    'a fixed directory inside the container, so its schema omits it and its executor ignores it.',
 };
 
 // ── Type-text scanning ────────────────────────────────────────────────────────

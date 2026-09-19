@@ -203,6 +203,10 @@ importers:
         version: 6.0.3
 
   plugins/docker-bash:
+    dependencies:
+      '@matatbread/matbot-tool-bash':
+        specifier: workspace:^
+        version: link:../bash
     devDependencies:
       '@matatbread/matbot-plugin-api':
         specifier: workspace:^
