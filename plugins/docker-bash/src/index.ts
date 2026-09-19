@@ -191,13 +191,13 @@ async function* streamDocker(args: string[]): AsyncGenerator<ToolEvent<ToolResul
   return output;
 }
 
-/** Force-remove a container by name — swallow "not found" errors. */
+/** Force-remove a container by name. A missing one is not an error (current Docker exits 0 for it; older
+ *  releases exit 1 saying so). Anything else — a daemon restarting, a permissions fault — throws, since
+ *  the container is then still running. */
 async function removeContainer(name: string): Promise<void> {
-  try {
-    await dockerExec(['rm', '-f', name]);
-  } catch {
-    // container didn't exist — nothing to do
-  }
+  await dockerExec(['rm', '-f', name]).catch((e: unknown) => {
+    if (!(e instanceof Error && /No such container/i.test(e.message))) throw e;
+  });
 }
 
 async function ensureContainerRunning(cfg: ContainerConfig): Promise<void> {
@@ -284,11 +284,12 @@ async function* bashConfigExecutor(
     const newCfg = effectiveConfig(merged);
     const restart = containerAffectingChange(oldCfg, newCfg);
 
-    // Persist first so settings reflect the new truth, then tear the old container
-    // down by the name it ran under (only dns/name need a rebuild — maxOutputBytes is
-    // host-enforced per call). The next bash call reads these settings and recreates it.
-    await settings.set(SETTINGS_KEY, merged);
+    // Tear the old container down by the name it ran under BEFORE persisting (only dns/name need a
+    // rebuild — maxOutputBytes is host-enforced per call). The other order left a container that failed
+    // to go running under the old name while the next bash call created a second one from the new
+    // config. This way a failed removal changes nothing, and the next bash call recreates from settings.
     if (restart) await removeContainer(oldCfg.name);
+    await settings.set(SETTINGS_KEY, merged);
 
     yield {
       type: 'result',
