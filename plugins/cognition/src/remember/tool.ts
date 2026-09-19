@@ -163,7 +163,7 @@ export function createRememberFactTool(services: MatbotMachine): Tool {
       for (const fact of facts) {
         const doc: RememberedFact = {
           id:        crypto.randomUUID(),
-          version:   Date.now().toString(),
+          version:   crypto.randomUUID(),
           fact,
           sessionId: ctx.session.id,
           messageId: msg.id,

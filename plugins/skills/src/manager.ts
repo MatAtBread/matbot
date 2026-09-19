@@ -286,7 +286,7 @@ export class SkillManagerImpl implements SkillManager {
     if (doc === undefined) {
       const newDoc: SkillDoc = {
         id:        crypto.randomUUID(),
-        version:   Date.now().toString(),
+        version:   crypto.randomUUID(),
         name,
         content,
         ...(catalogue !== undefined ? { catalogue } : {}),
@@ -351,7 +351,7 @@ export class SkillManagerImpl implements SkillManager {
     const now = new Date().toISOString();
     const doc: SkillDoc = {
       id:        crypto.randomUUID(),
-      version:   Date.now().toString(),
+      version:   crypto.randomUUID(),
       name,
       content,
       ...(catalogSummary !== undefined ? { catalogSummary } : {}),
@@ -371,7 +371,7 @@ export class SkillManagerImpl implements SkillManager {
   }
 
   private bump(doc: SkillDoc): SkillDoc {
-    return { ...doc, version: Date.now().toString(), updatedAt: new Date().toISOString() };
+    return { ...doc, version: crypto.randomUUID(), updatedAt: new Date().toISOString() };
   }
 
   // Not a cache write any more (there is no in-memory set) — just the single reindex funnel that
@@ -422,7 +422,7 @@ export class SkillManagerImpl implements SkillManager {
       const cur = await this.store.get(id);
       if (cur === null) return;                                   // deleted meanwhile
       if (cur.knowledge?.contentHash === knowledge.contentHash) return; // already current
-      const next: SkillDoc = { ...cur, version: Date.now().toString(), knowledge };
+      const next: SkillDoc = { ...cur, version: crypto.randomUUID(), knowledge };
       const r = await this.store.cas(id, cur.version, next);
       if (r.ok) return;
     }

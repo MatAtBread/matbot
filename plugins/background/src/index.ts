@@ -619,7 +619,7 @@ wanted to see the result, they would have asked for it in the foreground.
 async function setActive(id: string, active: boolean): Promise<boolean> {
   const stored = await scheduleStore?.get(id);
   if (!stored) return false;
-  await scheduleStore?.set(id, { ...stored, active, version: Date.now().toString() });
+  await scheduleStore?.set(id, { ...stored, active, version: crypto.randomUUID() });
   wakeSchedule(id);
   return true;
 }
@@ -631,7 +631,7 @@ async function setActiveAll(active: boolean): Promise<{ ids: string[]; skipped: 
   for (const doc of result?.items ?? []) {
     if ((doc.active !== false) === active) continue; // already in the target state
     try {
-      await scheduleStore?.set(doc.id, { ...doc, active, version: Date.now().toString() });
+      await scheduleStore?.set(doc.id, { ...doc, active, version: crypto.randomUUID() });
     } catch (e) {
       // `*` spans the whole store, and a partitioned one holds schedules this principal may read and not
       // write. One refusal is not a refusal of the request: name it and carry on. Throwing here would
