@@ -9,6 +9,39 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## 0.4.17
+
+### Bug fixes
+
+- **Shutdown** — `teardownPlugins` runs teardowns one at a time in reverse load order, each within the
+  10s budget `plugin unload` already applied. It promised reverse order and ran them all at once with no
+  limit, so a plugin could close a service a later-loaded one was still flushing through, and one
+  teardown that never settled held process exit open.
+- **Hooks** — a hook registered while its channel is running joins the next pass, not the one under way.
+  Registration sorted the array a run loop was iterating, so the new hook could run immediately, or the
+  registering hook could be moved back under the cursor and run again — a hook that registers on every
+  call never finished the pass.
+- **Service attribution** — a plugin is attributed a service key only once `register()` has succeeded,
+  and only once however often it registers it. A failed registration was still recorded, so unloading
+  the plugin reverted a service it never held — for a swap-member, someone else's.
+- **Plugin settings** — document versions are random, not `Date.now()`: two writes in one millisecond
+  minted the same version, letting a compare-and-swap accept a stale read.
+- **Notifications** — the warning for an unqualified notification `kind` is logged once per emitter and
+  kind, rather than on every publish.
+
+### Optional
+
+- **`bash` / `docker-bash`** — one process streamer, exported as `@matatbread/matbot-tool-bash/stream`,
+  which `docker-bash` now depends on. `docker-bash` gains what only the local tool had: a default
+  10-minute `timeout` (a hung command previously ran until the turn was aborted), completion that no
+  longer waits on an output pipe held open by a surviving process, and a description that states both
+  defaults. The `bash` contract is declared once, in that module.
+- **`docker-bash`** — a container removal that genuinely fails is reported rather than swallowed, and
+  `bash_config set` removes the old container before persisting, so a failure changes nothing instead of
+  leaving the old container running beside a new one.
+- **`skills`, `triggers`, `background`, `cognition`, `function-tools`** — document versions are random,
+  not `Date.now()`, for the reason given under *Plugin settings*.
+
 ## 0.4.16
 
 ### Breaking changes
