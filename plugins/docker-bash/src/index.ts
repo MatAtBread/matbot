@@ -188,7 +188,9 @@ async function ensureContainerRunning(cfg: ContainerConfig): Promise<void> {
     const dataPath = `${cfg.projectRoot}/${cfg.dataSubdir}`;
     await mkdir(dataPath, { recursive: true });
 
-    const args = ['run', '-d', '--name', cfg.name];
+    // --init: PID 1 is otherwise `sleep infinity`, which never reaps, so every process killed or orphaned
+    // by an exec stays in the table as a zombie for the container's lifetime.
+    const args = ['run', '-d', '--init', '--name', cfg.name];
     if (cfg.network !== undefined) args.push('--network', cfg.network);
     for (const server of resolveDnsServers(cfg.dns)) {
       args.push('--dns', server);

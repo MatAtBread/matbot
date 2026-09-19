@@ -48,6 +48,10 @@ churn and less likely to affect a consumer who doesn't use them.
   leaving the old container running beside a new one.
 - **`docker-bash`** — `bash_config pull` streams through the shared streamer and is ended by the turn's
   abort signal; it previously ran to completion however long the image took.
+- **`docker-bash`** — the container is created with `--init`. Its PID 1 was `sleep infinity`, which never
+  reaps, so every process a command left behind — killed on timeout or abort, or backgrounded — stayed as
+  a zombie until the container was removed. An existing container keeps the old PID 1 until it is
+  recreated (`bash_config restart`).
 - **CLI** — the boot storage is the `FilesystemStorageBackend` whose layout the CLI already used, so
   `services.StorageBackend` is present by default. `tool-store`'s namespace-collision check, which
   enumerates it, previously found nothing on a default install.
