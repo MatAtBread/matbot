@@ -1,6 +1,7 @@
 import type {
   Tool, ToolExecutor, ToolContract, NoParams, ToolResultOf, ToolContext, MatbotMachine, SystemContextPart,
 } from '@matatbread/matbot-plugin-api';
+import { joinSystemContext } from './system-context.js';
 
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
@@ -36,9 +37,7 @@ export function createAboutMatbotTool(version: string, services: MatbotMachine):
   const executor: ToolExecutor<ToolResultOf<'about_matbot'>> = {
     async *execute(_input: unknown, ctx: ToolContext) {
       const systemContext = await services.systemContext.parts({ session: ctx.session, signal: ctx.signal });
-      // Joined exactly as the registry joins it for the wire — one source, so the reported prompt and the
-      // sent prompt cannot differ in their separators.
-      const systemPrompt = systemContext.length > 0 ? systemContext.map(p => p.text).join('\n\n') : null;
+      const systemPrompt  = joinSystemContext(systemContext);
       yield { type: 'result', value: { version, about: ABOUT, currentProvider: ctx.provider, systemPrompt, systemContext } };
     },
   };

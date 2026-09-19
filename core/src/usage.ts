@@ -12,12 +12,15 @@ export function addUsage(acc: Usage | undefined, next: Usage): Usage {
   const a = acc ?? { inputTokens: 0, outputTokens: 0 };
   const add = (x: number | undefined, y: number | undefined): number | undefined =>
     x === undefined && y === undefined ? undefined : (x ?? 0) + (y ?? 0);
+  const cacheReadTokens     = add(a.cacheReadTokens,     next.cacheReadTokens);
+  const cacheCreationTokens = add(a.cacheCreationTokens, next.cacheCreationTokens);
+  const reported            = addReported(a.reported, next.reported);
   return {
     inputTokens:  a.inputTokens  + next.inputTokens,
     outputTokens: a.outputTokens + next.outputTokens,
-    ...(((c) => c !== undefined ? { cacheReadTokens:     c } : {}))(add(a.cacheReadTokens,     next.cacheReadTokens)),
-    ...(((c) => c !== undefined ? { cacheCreationTokens: c } : {}))(add(a.cacheCreationTokens, next.cacheCreationTokens)),
-    ...(((r) => r !== undefined ? { reported: r } : {}))(addReported(a.reported, next.reported)),
+    ...(cacheReadTokens     !== undefined ? { cacheReadTokens }     : {}),
+    ...(cacheCreationTokens !== undefined ? { cacheCreationTokens } : {}),
+    ...(reported            !== undefined ? { reported }            : {}),
   };
 }
 
