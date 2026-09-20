@@ -1,9 +1,9 @@
 import type { MatbotPluginSpec, Tool, ToolEvent, ToolExecutor, ToolContext, ToolContract, ToolResultOf, PluginSettings } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import { streamProcess, DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_TIMEOUT_MS } from '@matatbread/matbot-tool-bash/stream';
+import type { ChildProcess } from 'node:child_process';
 import { spawn, execFile } from 'node:child_process';
-import { mkdir, readFile, rm } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
+import { mkdir } from 'node:fs/promises';
 import { getServers } from 'node:dns';
 import { isIP } from 'node:net';
 import { networkInterfaces } from 'node:os';
@@ -86,20 +86,43 @@ function dockerExec(args: string[]): Promise<string> {
 }
 
 /**
- * Kill the whole process group of a running command (best-effort). docker exec does not propagate
- * signals to the in-container process, so the host reads the group-leader PID the wrapper recorded
- * and KILLs the negative pid (the process group) — taking the script and every child it spawned.
+ * The in-container command for one `bash` call, and the whole of how a command is killed.
+ *
+ * docker exec propagates no signal to the in-container process, so the kill has to originate inside
+ * the container. The exec's **stdin** is what carries the host's liveness: the daemon closes it as
+ * soon as the host-side `docker` client goes away — for ANY reason, including a SIGKILL or a crash of
+ * matbot itself, which no `finally` and no teardown can reach. So stdin is held as a lease: the
+ * wrapper reads it and nothing ever writes to it, making EOF mean exactly "the host let go".
+ *
+ * `setsid` puts the wrapper in a fresh process group (pgid == its pid), so `$$` IS the group and
+ * `kill -KILL -$$` takes the script and every process it spawned. That replaces the pidfile the host
+ * used to read: the killer now knows the group directly, so there is no pid to record, no shared
+ * mount to record it on, and no race between removing the file and reading it.
+ *
+ * `setsid -w`: -w keeps setsid waiting, so docker exec stays attached for streaming; without it
+ * setsid returns immediately, orphaning the script — the very fault this exists to prevent.
+ *
+ * OUTER_REDIRECT exists only to keep setsid's own stderr off the wire. The group kill reaches the
+ * wrapper too — it leads the group — so setsid always sees its child die by a signal and reports
+ * `setsid: child N did not exit normally: Success`. That landed in the accumulated stderr of every
+ * timed-out or aborted call, attributing a non-error to the user's script. So the real stderr is
+ * parked on fd 4, setsid gets /dev/null, and the wrapper restores fd 2 from fd 4 for the script.
+ * `exec` both times: nothing survives the redirection, so this costs a fork, not a resident process.
+ *
+ * In the wrapper, `3<&0 0</dev/null` is load-bearing twice over. It moves the lease to fd 3 because
+ * bash reassigns a background job's stdin to /dev/null in a non-interactive shell — the reader would
+ * otherwise see EOF immediately and kill the group on the spot. And it hands the script /dev/null, so
+ * a script that reads stdin gets EOF rather than competing with the lease for the same fd. That is
+ * not a new limitation: nothing has ever written to this stdin, so such a script previously hung
+ * until the timeout instead.
  */
-async function killGroup(containerName: string, hostPidfile: string): Promise<void> {
-  let pid: string;
-  try {
-    pid = (await readFile(hostPidfile, 'utf8')).trim();
-  } catch {
-    return; // not written yet, or already cleaned up — nothing to kill
-  }
-  if (!/^\d+$/.test(pid)) return;
-  await dockerExec(['exec', containerName, 'bash', '-c', `kill -KILL -${pid}`]).catch(() => {});
-}
+const OUTER_REDIRECT = 'exec 4>&2 2>/dev/null; exec setsid -w bash -c "$1"';
+
+const LEASE_WRAPPER =
+  'exec 2>&4 4>&- 3<&0 0</dev/null; ' +
+  'bash -c "$MATBOT_SCRIPT" & s=$!; ' +
+  '{ while read -r _; do :; done <&3; kill -KILL -$$; } & r=$!; ' +
+  'wait "$s"; rc=$?; kill "$r" 2>/dev/null; exit "$rc"';
 
 /** The literal `dns` entry that expands to the host's resolvers at container-create time. */
 const HOST_DNS_TOKEN = 'host';
@@ -361,6 +384,15 @@ interface BashInput {
   maxOutputBytes?: number;
 }
 
+/** The docker clients for the `bash` calls in flight — the host half of each lease. Module-scoped, so
+ *  it is per load generation: a hot-reloaded plugin tears down the execs IT started and knows nothing
+ *  about a previous generation's, which is correct, those having gone with their own teardown. */
+const active = new Set<ChildProcess>();
+
+/** How long teardown waits for a released lease to take its exec down, before reporting anyway. Well
+ *  inside core's per-plugin teardown budget, since every exec is released at once. */
+const LEASE_DRAIN_MS = 2_000;
+
 function createContainerExecutor(settings: PluginSettings): ToolExecutor<ToolResultOf<'bash'>> {
   return {
     async *execute(input: unknown, ctx: ToolContext) {
@@ -378,12 +410,7 @@ function createContainerExecutor(settings: PluginSettings): ToolExecutor<ToolRes
 
       // execCwd lives inside the rw .data mount — ensure the host-side path exists.
       const hostExecCwd = cfg.projectRoot + cfg.execCwd.slice(cfg.mountPoint.length);
-      // PID files live alongside .data (not in the LLM's cwd) on the same rw mount, so the host
-      // can read the recorded group-leader PID directly to kill a runaway command.
-      const containerPidDir = `${cfg.mountPoint}/${cfg.dataSubdir}/.matbot-exec`;
-      const hostPidDir      = `${cfg.projectRoot}/${cfg.dataSubdir}/.matbot-exec`;
       await mkdir(hostExecCwd, { recursive: true });
-      await mkdir(hostPidDir,  { recursive: true });
 
       const { script, env, timeout, maxOutputBytes } = input as BashInput;
       if (maxOutputBytes !== undefined && (!Number.isFinite(maxOutputBytes) || maxOutputBytes < 1)) {
@@ -391,35 +418,29 @@ function createContainerExecutor(settings: PluginSettings): ToolExecutor<ToolRes
         return;
       }
 
-      const execId            = randomUUID();
-      const containerPidfile  = `${containerPidDir}/${execId}.pid`;
-      const hostPidfile       = `${hostPidDir}/${execId}.pid`;
-
-      // Pass the script and pidfile path by env to avoid quoting; run under setsid so the script
-      // bash leads a fresh process group (pgid == its pid), record that pid, then exec the script.
-      // On timeout/abort the host kills the negative pid — the whole group, children included.
-      const args = ['exec', '-i', '-w', cfg.execCwd,
-        '-e', `MATBOT_SCRIPT=${script}`,
-        '-e', `MATBOT_PIDFILE=${containerPidfile}`,
-      ];
+      // The script goes by env rather than argv to avoid a quoting layer. `-i` keeps stdin attached,
+      // which is what the lease is made of (see LEASE_WRAPPER) — so stdin belongs to the lease and is
+      // never written to.
+      const args = ['exec', '-i', '-w', cfg.execCwd, '-e', `MATBOT_SCRIPT=${script}`];
       for (const [k, v] of Object.entries(env ?? {})) {
         args.push('-e', `${k}=${v}`);
       }
-      // setsid -w: -w keeps the setsid parent waiting so docker exec stays attached for streaming;
-      // without it setsid detaches and the exec returns immediately, orphaning the script.
-      args.push(cfg.name, 'setsid', '-w', 'bash', '-c', 'echo $$ > "$MATBOT_PIDFILE"; exec bash -c "$MATBOT_SCRIPT"');
+      args.push(cfg.name, 'bash', '-c', OUTER_REDIRECT, 'matbot-bash', LEASE_WRAPPER);
 
-      // docker exec won't forward a signal to the in-container process, so a kill means both killing the
-      // group inside the container and detaching the local client. The group is KILLed at the first
-      // signal rather than escalated: the pidfile that locates it does not outlive the call, which the
-      // grace period would. The promise is kept so cleanup waits for the pid to be read before deleting
-      // the pidfile (otherwise rm could win the race and killGroup reads ENOENT).
       const child = spawn('docker', args, { env: {}, shell: false });
-      let killPromise: Promise<void> | undefined;
-      const kill = (): void => {
-        if (killPromise !== undefined) return;
-        killPromise = killGroup(cfg.name, hostPidfile);
-        child.kill('SIGKILL');
+      // Closing stdin on a client that has already gone raises EPIPE on the pipe, and an unhandled
+      // 'error' on a stream is fatal to the process.
+      child.stdin?.on('error', () => {});
+      active.add(child);
+
+      // Releasing the lease IS the kill: the wrapper answers EOF by KILLing its own process group, so
+      // the script and everything it spawned go without the host addressing them at all. The SIGKILL
+      // step drops the client whose stdin was somehow not the channel we think it is — and since the
+      // client's death closes that stdin too, it is a second way to fire the same lease rather than a
+      // different mechanism.
+      const kill = (sig: 'SIGTERM' | 'SIGKILL'): void => {
+        if (sig === 'SIGTERM') child.stdin?.end();
+        else child.kill('SIGKILL');
       };
       try {
         yield* streamProcess(child, {
@@ -429,8 +450,7 @@ function createContainerExecutor(settings: PluginSettings): ToolExecutor<ToolRes
           overflowHint: 'raise it for one command by passing a larger `maxOutputBytes`, or for every command with bash_config { action: "set", maxOutputBytes }',
         });
       } finally {
-        if (killPromise) await killPromise;
-        await rm(hostPidfile, { force: true }).catch(() => {});
+        active.delete(child);
       }
     },
   };
@@ -515,5 +535,23 @@ export const plugin: MatbotPluginSpec = {
       executor:    { execute: (input, ctx) => bashConfigExecutor(input, settings, ctx.signal) },
     };
     services.tools.register(configTool);
+  },
+
+  /**
+   * Release every lease this generation holds. Only reachable on a graceful path — core runs it from
+   * `teardownPlugins()` on the way to exit and from `unloadPlugin()` on a hot-unload — and only the
+   * unload NEEDS it: on process exit the clients die with us and the daemon closes their stdin anyway,
+   * whereas an unloaded plugin leaves matbot running, so nothing would otherwise let go.
+   */
+  async teardown() {
+    const clients = [...active];
+    active.clear();
+    await Promise.all(clients.map(child => new Promise<void>(resolve => {
+      if (child.exitCode !== null || child.signalCode !== null) return resolve();
+      const timer = setTimeout(() => { child.kill('SIGKILL'); resolve(); }, LEASE_DRAIN_MS);
+      timer.unref();
+      child.once('exit', () => { clearTimeout(timer); resolve(); });
+      child.stdin?.end();
+    })));
   },
 };

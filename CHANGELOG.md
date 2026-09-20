@@ -52,6 +52,17 @@ churn and less likely to affect a consumer who doesn't use them.
   reaps, so every process a command left behind — killed on timeout or abort, or backgrounded — stayed as
   a zombie until the container was removed. An existing container keeps the old PID 1 until it is
   recreated (`bash_config restart`).
+- **`docker-bash`** — a command no longer outlives the matbot that started it. The exec's stdin is held as
+  a lease: nothing ever writes to it, so EOF means the host-side docker client is gone, and the wrapper
+  answers it by KILLing its own process group — the script and everything it spawned. Because the daemon
+  closes that stdin whenever the client dies, this covers the paths no cleanup code can reach (SIGKILL, a
+  crash, an OOM-kill) as well as the graceful ones; `--init` reaped the zombies a leak left behind, but
+  nothing killed a live orphan, and one was observed holding two cores for over four hours. The plugin
+  also implements `teardown()`, which releases every lease it holds — the one case the daemon cannot
+  signal, since a hot-unloaded plugin leaves matbot running. The lease replaces the pidfile the host used
+  to read: the kill now originates inside the container, which knows its own process group, so
+  `.data/.matbot-exec` and the read/remove race around it are gone. A script cannot use stdin, which is
+  not a new limit — nothing ever wrote to it, so such a script hung until the timeout and now gets EOF.
 - **CLI** — the boot storage is the `FilesystemStorageBackend` whose layout the CLI already used, so
   `services.StorageBackend` is present by default. `tool-store`'s namespace-collision check, which
   enumerates it, previously found nothing on a default install.
