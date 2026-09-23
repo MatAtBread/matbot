@@ -163,9 +163,9 @@ A single Node step, no bundler — every module stays a module, wired by an impo
    package name and every synthetic id** to its blob. Bare `@matatbread/*` imports are left untouched
    so host and plugins share one module instance (the singleton boundary the principal carrier,
    registry state and module augmentation depend on — *not* error identity, which is branded).
-3. **[bootstrap.ts](../apps/web-bundle/src/bootstrap.ts)** is just another inlined module: it builds
-   `MatbotServices`, installs the constant principal carrier, and runs the real `loadPlugins` /
-   resolver / `SessionRunner` unchanged.
+3. **[bootstrap.ts](../apps/web-bundle/src/bootstrap.ts)** is just another inlined module: it installs
+   the constant principal carrier, stands the machine up with core's `assembleMachine` — the same one
+   the CLI uses — and runs the real `loadPlugins` / resolver / `SessionRunner` unchanged.
 
 Everything is in-memory (blobs + import map, no service worker, no `fetch`, no in-page stripping),
 so the baseline boots instantly and runs identically from `file://` or any static host. Sucrase is

@@ -193,6 +193,7 @@ export interface Notifier {
  */
 export function createNotifier(defaultPlugin: string): Notifier {
   const events = createBroadcaster<Notification>();
+  const warned = new Set<string>();
   return {
     notify(notification) {
       const plugin = notification.plugin ?? defaultPlugin;
@@ -200,9 +201,12 @@ export function createNotifier(defaultPlugin: string): Notifier {
       // matter most here: a plain-JS plugin, or a bridge injecting another instance's traffic. Warn, don't
       // throw — `notify` is contractually non-throwing, and a badly-named kind is a hygiene fault, not a
       // delivery failure. Only the shape is checkable; that the prefix names the *definer* is not, since
-      // the emitter legitimately differs from it.
-      if (!notification.kind.includes('#')) {
-        console.warn(`[matbot] ${plugin} published unqualified notification kind "${notification.kind}" — expected <package-name>#<InterfaceName>`);
+      // the emitter legitimately differs from it. Once per emitter and kind: the fault is in the source,
+      // so repeating it on every publish only buries the log.
+      const warning = `${plugin} published unqualified notification kind "${notification.kind}"`;
+      if (!notification.kind.includes('#') && !warned.has(warning)) {
+        warned.add(warning);
+        console.warn(`[matbot] ${warning} — expected <package-name>#<InterfaceName>`);
       }
       events.emit({ ...notification, plugin } as Notification);
     },

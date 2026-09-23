@@ -154,7 +154,7 @@ class FunctionStore {
     }
     const doc: FunctionDoc = {
       id:      sig.name,
-      version: Date.now().toString(),
+      version: crypto.randomUUID(),
       definition,
       ...(description !== undefined && description.trim() !== '' ? { description: description.trim() } : {}),
       // Persisted, because a bypass that leaves no trace is indistinguishable from a pass: `noTypeCheck`
@@ -305,7 +305,7 @@ class PackageStore {
     }
     await this.install(name, parsed, definition);
     const doc: PackageDoc = {
-      id: name, version: Date.now().toString(), definition,
+      id: name, version: crypto.randomUUID(), definition,
       ...(checked ? {} : { definedUnchecked: true as const }),
     };
     await this.store.set(doc.id, doc);

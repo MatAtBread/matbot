@@ -2,6 +2,7 @@ import type {
   CompletionRequest, MatbotMachine, MatbotServices, Mounted, MountConsumeOptions, SingleTurnRequest,
 } from './plugin.js';
 import { RegistryChangeKind } from './notify.js';
+import { createMessage } from './session.js';
 
 /*
  * Host-side machine assembly — the wiring an *embedder* does once at boot, not API a plugin author
@@ -205,16 +206,17 @@ export function createMountTable(getMachine: () => MatbotMachine): MountTable {
 
 /**
  * Build the one-message CompletionRequest for a {@link MatbotRuntime.singleTurn} call, hiding the
- * otherwise-mandatory and meaningless Message fields (id/traceId/createdAt) an out-of-band one-shot
- * has no use for. Pure; the host invokes its own complete() with the result.
+ * otherwise-mandatory Message fields an out-of-band one-shot has no use for. The host invokes its own
+ * complete() with the result.
  */
 export function singleTurnRequest(req: SingleTurnRequest): CompletionRequest {
   return {
     provider: req.provider,
-    messages: [{
-      id: '', traceId: '', createdAt: new Date().toISOString(), role: 'user',
+    messages: [createMessage({
+      role:    'user',
+      traceId: '',
       content: typeof req.prompt === 'string' ? [{ type: 'text', text: req.prompt }] : req.prompt,
-    }],
+    })],
     ...(req.system     !== undefined ? { system: req.system } : {}),
     ...(req.parameters !== undefined ? { parameters: req.parameters } : {}),
     ...(req.signal     !== undefined ? { signal: req.signal } : {}),

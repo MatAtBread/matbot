@@ -1,11 +1,18 @@
 import type { MatbotPluginSpec, Tool, ToolEvent, ToolExecutor, ToolContext, ToolContract, ToolResultOf, PluginSettings } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
+import { streamProcess, DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_TIMEOUT_MS } from '@matatbread/matbot-tool-bash/stream';
+import type { ChildProcess } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
+import { mkdir } from 'node:fs/promises';
+import { getServers } from 'node:dns';
+import { isIP } from 'node:net';
+import { networkInterfaces } from 'node:os';
+import process from 'node:process';
 
+// `bash` itself is declared by the local plugin's stream module, imported above: one contract for the
+// tool name both implement.
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
-    // Declared identically to the local `bash` plugin (same tool name ⇒ one merged entry). `cwd` rides in
-    // the shared params superset but is ignored by this container variant.
-    bash: ToolContract<{ exitCode: number; stdout: string; stderr: string }, { script: string; cwd?: string; env?: Record<string, string>; timeout?: number; maxOutputBytes?: number }>;
     // result of a get/set/restart/pull action on the container configuration
     bash_config:
       | ToolContract<{ message: string; overrides: BashConfigOverrides; restarted: boolean },                  { action: 'set'; dns?: string[]; name?: string; maxOutputBytes?: number }>
@@ -16,13 +23,6 @@ declare module '@matatbread/matbot-plugin-api' {
 }
 
 type ResolvedConfigView = { dns: string[] | null; name: string; maxOutputBytes: number };
-import { spawn, execFile } from 'node:child_process';
-import { mkdir, readFile, rm } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
-import { getServers } from 'node:dns';
-import { isIP } from 'node:net';
-import { networkInterfaces } from 'node:os';
-import process from 'node:process';
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -60,7 +60,7 @@ const CONTAINER: ContainerConfig = {
   mountPoint:     '/app',
   dataSubdir:     '.data',
   execCwd:        '/app/.data/bash-cwd',
-  maxOutputBytes: 1_000_000,
+  maxOutputBytes: DEFAULT_MAX_OUTPUT_BYTES,
 };
 
 /** Settings key for user-configurable overrides. */
@@ -71,12 +71,14 @@ type BashConfigOverrides = Partial<Pick<ContainerConfig, 'dns' | 'name' | 'maxOu
 
 // ── Docker helpers ────────────────────────────────────────────────────────────
 
+const DOCKER_MISSING = 'Docker CLI not found — is Docker installed and on PATH?';
+
 function dockerExec(args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile('docker', args, (err, stdout, stderr) => {
       if (err) {
         const code = (err as NodeJS.ErrnoException).code;
-        if (code === 'ENOENT') reject(new Error('Docker CLI not found — is Docker installed and on PATH?'));
+        if (code === 'ENOENT') reject(new Error(DOCKER_MISSING));
         else reject(new Error(stderr.trim() || err.message));
       } else resolve(stdout.trim());
     });
@@ -84,20 +86,43 @@ function dockerExec(args: string[]): Promise<string> {
 }
 
 /**
- * Kill the whole process group of a running command (best-effort). docker exec does not propagate
- * signals to the in-container process, so the host reads the group-leader PID the wrapper recorded
- * and KILLs the negative pid (the process group) — taking the script and every child it spawned.
+ * The in-container command for one `bash` call, and the whole of how a command is killed.
+ *
+ * docker exec propagates no signal to the in-container process, so the kill has to originate inside
+ * the container. The exec's **stdin** is what carries the host's liveness: the daemon closes it as
+ * soon as the host-side `docker` client goes away — for ANY reason, including a SIGKILL or a crash of
+ * matbot itself, which no `finally` and no teardown can reach. So stdin is held as a lease: the
+ * wrapper reads it and nothing ever writes to it, making EOF mean exactly "the host let go".
+ *
+ * `setsid` puts the wrapper in a fresh process group (pgid == its pid), so `$$` IS the group and
+ * `kill -KILL -$$` takes the script and every process it spawned. That replaces the pidfile the host
+ * used to read: the killer now knows the group directly, so there is no pid to record, no shared
+ * mount to record it on, and no race between removing the file and reading it.
+ *
+ * `setsid -w`: -w keeps setsid waiting, so docker exec stays attached for streaming; without it
+ * setsid returns immediately, orphaning the script — the very fault this exists to prevent.
+ *
+ * OUTER_REDIRECT exists only to keep setsid's own stderr off the wire. The group kill reaches the
+ * wrapper too — it leads the group — so setsid always sees its child die by a signal and reports
+ * `setsid: child N did not exit normally: Success`. That landed in the accumulated stderr of every
+ * timed-out or aborted call, attributing a non-error to the user's script. So the real stderr is
+ * parked on fd 4, setsid gets /dev/null, and the wrapper restores fd 2 from fd 4 for the script.
+ * `exec` both times: nothing survives the redirection, so this costs a fork, not a resident process.
+ *
+ * In the wrapper, `3<&0 0</dev/null` is load-bearing twice over. It moves the lease to fd 3 because
+ * bash reassigns a background job's stdin to /dev/null in a non-interactive shell — the reader would
+ * otherwise see EOF immediately and kill the group on the spot. And it hands the script /dev/null, so
+ * a script that reads stdin gets EOF rather than competing with the lease for the same fd. That is
+ * not a new limitation: nothing has ever written to this stdin, so such a script previously hung
+ * until the timeout instead.
  */
-async function killGroup(containerName: string, hostPidfile: string): Promise<void> {
-  let pid: string;
-  try {
-    pid = (await readFile(hostPidfile, 'utf8')).trim();
-  } catch {
-    return; // not written yet, or already cleaned up — nothing to kill
-  }
-  if (!/^\d+$/.test(pid)) return;
-  await dockerExec(['exec', containerName, 'bash', '-c', `kill -KILL -${pid}`]).catch(() => {});
-}
+const OUTER_REDIRECT = 'exec 4>&2 2>/dev/null; exec setsid -w bash -c "$1"';
+
+const LEASE_WRAPPER =
+  'exec 2>&4 4>&- 3<&0 0</dev/null; ' +
+  'bash -c "$MATBOT_SCRIPT" & s=$!; ' +
+  '{ while read -r _; do :; done <&3; kill -KILL -$$; } & r=$!; ' +
+  'wait "$s"; rc=$?; kill "$r" 2>/dev/null; exit "$rc"';
 
 /** The literal `dns` entry that expands to the host's resolvers at container-create time. */
 const HOST_DNS_TOKEN = 'host';
@@ -151,53 +176,30 @@ function resolveDnsServers(dns: string[] | undefined): string[] {
 /**
  * Run a docker CLI command, streaming its output as tool events and returning the accumulated text.
  * `dockerExec` buffers, which for a pull of an absent image is minutes of silence indistinguishable
- * from a hang. Throws on a non-zero exit; the caller frames the message.
+ * from a hang. Unbounded in time and size — a pull is as slow and as verbose as the image makes it — but
+ * the abort signal ends it, and killing the client cancels the daemon's side. Throws on failure.
  */
-async function* streamDocker(args: string[]): AsyncGenerator<ToolEvent<ToolResultOf<'bash_config'>>, string> {
+async function* streamDocker(args: string[], signal: AbortSignal): AsyncGenerator<ToolEvent<ToolResultOf<'bash_config'>>, string> {
   const child = spawn('docker', args, { shell: false });
-  const queue: Array<ToolEvent<ToolResultOf<'bash_config'>>> = [];
-  let wakeup: (() => void) | null = null;
-  let settled: { code: number | null; error?: Error } | undefined;
-  let output = '';
-
-  const push = (ev: ToolEvent<ToolResultOf<'bash_config'>>): void => {
-    queue.push(ev);
-    wakeup?.();
-    wakeup = null;
-  };
-
-  // 'close' fires after both streams have ended, so every chunk is already queued behind it.
-  const exit = new Promise<void>(resolve => {
-    child.on('error', (error: Error) => { settled = { code: null, error }; resolve(); });
-    child.on('close', (code: number | null) => { settled ??= { code }; resolve(); });
-  });
-
-  child.stdout?.on('data', (d: Buffer) => { const chunk = d.toString(); output += chunk; push({ type: 'stdout', chunk }); });
-  child.stderr?.on('data', (d: Buffer) => { const chunk = d.toString(); output += chunk; push({ type: 'stderr', chunk }); });
-
-  for (;;) {
-    while (queue.length > 0) for (const ev of queue.splice(0)) yield ev;
-    if (settled !== undefined) break;
-    await Promise.race([exit, new Promise<void>(resolve => { wakeup = resolve; })]);
+  for await (const ev of streamProcess(child, { timeout: Infinity, maxBytes: Infinity, signal, kill: sig => { child.kill(sig); } })) {
+    switch (ev.type) {
+      case 'stdout':
+      case 'stderr': yield { type: ev.type, chunk: ev.chunk }; break;
+      case 'result': return ev.value.stdout + ev.value.stderr;
+      case 'error':  throw new Error(/\bENOENT\b/.test(ev.message) ? DOCKER_MISSING : `docker ${args.join(' ')}: ${ev.message}`);
+      default:       break;
+    }
   }
-
-  const error = settled?.error;
-  if (error !== undefined) {
-    throw (error as NodeJS.ErrnoException).code === 'ENOENT'
-      ? new Error('Docker CLI not found — is Docker installed and on PATH?')
-      : error;
-  }
-  if (settled?.code !== 0) throw new Error(`docker ${args.join(' ')} exited with code ${String(settled?.code)}`);
-  return output;
+  throw new Error(`docker ${args.join(' ')} ended without a result`);
 }
 
-/** Force-remove a container by name — swallow "not found" errors. */
+/** Force-remove a container by name. A missing one is not an error (current Docker exits 0 for it; older
+ *  releases exit 1 saying so). Anything else — a daemon restarting, a permissions fault — throws, since
+ *  the container is then still running. */
 async function removeContainer(name: string): Promise<void> {
-  try {
-    await dockerExec(['rm', '-f', name]);
-  } catch {
-    // container didn't exist — nothing to do
-  }
+  await dockerExec(['rm', '-f', name]).catch((e: unknown) => {
+    if (!(e instanceof Error && /No such container/i.test(e.message))) throw e;
+  });
 }
 
 async function ensureContainerRunning(cfg: ContainerConfig): Promise<void> {
@@ -209,7 +211,9 @@ async function ensureContainerRunning(cfg: ContainerConfig): Promise<void> {
     const dataPath = `${cfg.projectRoot}/${cfg.dataSubdir}`;
     await mkdir(dataPath, { recursive: true });
 
-    const args = ['run', '-d', '--name', cfg.name];
+    // --init: PID 1 is otherwise `sleep infinity`, which never reaps, so every process killed or orphaned
+    // by an exec stays in the table as a zombie for the container's lifetime.
+    const args = ['run', '-d', '--init', '--name', cfg.name];
     if (cfg.network !== undefined) args.push('--network', cfg.network);
     for (const server of resolveDnsServers(cfg.dns)) {
       args.push('--dns', server);
@@ -254,6 +258,7 @@ type BashConfigInput = { action: string } & BashConfigOverrides;
 async function* bashConfigExecutor(
   input: unknown,
   settings: PluginSettings,
+  signal: AbortSignal,
 ): AsyncIterable<ToolEvent<ToolResultOf<'bash_config'>>> {
   const { action, dns, name, maxOutputBytes } = input as BashConfigInput;
 
@@ -284,11 +289,12 @@ async function* bashConfigExecutor(
     const newCfg = effectiveConfig(merged);
     const restart = containerAffectingChange(oldCfg, newCfg);
 
-    // Persist first so settings reflect the new truth, then tear the old container
-    // down by the name it ran under (only dns/name need a rebuild — maxOutputBytes is
-    // host-enforced per call). The next bash call reads these settings and recreates it.
-    await settings.set(SETTINGS_KEY, merged);
+    // Tear the old container down by the name it ran under BEFORE persisting (only dns/name need a
+    // rebuild — maxOutputBytes is host-enforced per call). The other order left a container that failed
+    // to go running under the old name while the next bash call created a second one from the new
+    // config. This way a failed removal changes nothing, and the next bash call recreates from settings.
     if (restart) await removeContainer(oldCfg.name);
+    await settings.set(SETTINGS_KEY, merged);
 
     yield {
       type: 'result',
@@ -324,7 +330,7 @@ async function* bashConfigExecutor(
     const cfg = effectiveConfig(await settings.get<BashConfigOverrides>(SETTINGS_KEY) ?? {});
     let pullOutput: string;
     try {
-      pullOutput = yield* streamDocker(['pull', cfg.image]);
+      pullOutput = yield* streamDocker(['pull', cfg.image], signal);
     } catch (e) {
       yield { type: 'error', message: e instanceof Error ? e.message : String(e) };
       return;
@@ -369,141 +375,6 @@ async function* bashConfigExecutor(
   yield { type: 'error', message: `Unknown action "${String(action)}" — must be "get", "set", "restart", or "pull".` };
 }
 
-// ── Streaming helper ──────────────────────────────────────────────────────────
-
-function spawnAndStream(
-  command: string,
-  args:    string[],
-  opts:    {
-    env:        Record<string, string>;
-    timeout?:   number;
-    signal:     AbortSignal;
-    maxBytes:   number;
-    /** Best-effort kill of the in-container process group (docker exec won't propagate our kill). */
-    terminate?: () => void;
-  },
-): AsyncIterable<ToolEvent<ToolResultOf<'bash'>>> {
-  type Ev = ToolEvent<ToolResultOf<'bash'>>;
-  const queue: Array<Ev | null> = [];
-  let wakeup: (() => void) | null = null;
-
-  const push = (ev: Ev | null): void => {
-    queue.push(ev);
-    wakeup?.();
-    wakeup = null;
-  };
-
-  const child = spawn(command, args, { env: opts.env, shell: false });
-
-  // docker exec won't forward a signal to the in-container process, so stopping means both killing
-  // the process group inside the container (terminate) and detaching the local client (child.kill).
-  let stopReason: 'timeout' | 'aborted' | 'overflow' | null = null;
-  let stopped = false;
-  const stop = (reason: 'timeout' | 'aborted' | 'overflow'): void => {
-    if (stopped) return;
-    stopped = true;
-    stopReason = reason;
-    opts.terminate?.();
-    child.kill('SIGKILL');
-  };
-
-  const killOnAbort = (): void => { stop('aborted'); };
-  opts.signal.addEventListener('abort', killOnAbort, { once: true });
-
-  let stdoutAcc = '';
-  let stderrAcc = '';
-  let totalBytes = 0;
-  let finalized = false;
-
-  const onData = (d: Buffer, kind: 'stdout' | 'stderr'): void => {
-    if (finalized) return;
-    const remaining = opts.maxBytes - totalBytes;
-    const slice = d.length > remaining ? d.subarray(0, Math.max(0, remaining)) : d;
-    const chunk = slice.toString();
-    if (chunk) {
-      if (kind === 'stdout') stdoutAcc += chunk; else stderrAcc += chunk;
-      totalBytes += slice.length;
-      push({ type: kind, chunk });
-    }
-    if (d.length > remaining) {
-      finalized = true;
-      push({ type: 'error', message: `Output exceeded the ${opts.maxBytes}-byte limit; process killed. Raise it for one command by passing a larger \`maxOutputBytes\`, or for every command with bash_config { action: "set", maxOutputBytes }.`,
-        ...(stdoutAcc ? { stdout: stdoutAcc } : {}),
-        ...(stderrAcc ? { stderr: stderrAcc } : {}),
-      });
-      stop('overflow');
-      push(null);
-    }
-  };
-
-  child.stdout?.on('data', (d: Buffer) => onData(d, 'stdout'));
-  child.stderr?.on('data', (d: Buffer) => onData(d, 'stderr'));
-  child.on('error', (e: Error) => {
-    if (finalized) return;
-    finalized = true;
-    push({ type: 'error', message: e.message });
-    push(null);
-  });
-  child.on('close', (code: number | null, sig: NodeJS.Signals | null) => {
-    if (finalized) return;
-    finalized = true;
-    if (stopReason === 'timeout' || stopReason === 'aborted') {
-      const why = stopReason === 'timeout' ? `timed out after ${opts.timeout}ms` : 'aborted';
-      push({ type: 'error', message: `Process ${why} and was killed.`,
-        ...(stdoutAcc ? { stdout: stdoutAcc } : {}),
-        ...(stderrAcc ? { stderr: stderrAcc } : {}),
-      });
-    } else if (code === null) {
-      // The docker client was killed by a signal nothing here sent (an operator, the OOM killer). `code`
-      // is null for that, which the success arm below used to read as exit code 0 — reporting a kill as a
-      // clean run. An in-container process that dies of a signal is a different case and still lands in
-      // the arm above it: `docker exec` propagates that as its own numeric exit code (137, …).
-      push({ type: 'error', message: `Process was killed by ${sig ?? 'a signal'}.`,
-        ...(stdoutAcc ? { stdout: stdoutAcc } : {}),
-        ...(stderrAcc ? { stderr: stderrAcc } : {}),
-      });
-    } else if (code !== 0) {
-      push({ type: 'error', message: `Process exited with code ${code}`, code,
-        ...(stdoutAcc ? { stdout: stdoutAcc } : {}),
-        ...(stderrAcc ? { stderr: stderrAcc } : {}),
-      });
-    } else {
-      push({ type: 'result', value: { exitCode: code, stdout: stdoutAcc, stderr: stderrAcc } });
-    }
-    push(null);
-  });
-
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  if (opts.timeout !== undefined) {
-    timer = setTimeout(() => stop('timeout'), opts.timeout);
-  }
-
-  return {
-    [Symbol.asyncIterator]() {
-      return {
-        async next(): Promise<IteratorResult<Ev>> {
-          while (queue.length === 0) {
-            await new Promise<void>(r => { wakeup = r; });
-          }
-          const item = queue.shift()!;
-          if (item === null) {
-            if (timer !== undefined) clearTimeout(timer);
-            opts.signal.removeEventListener('abort', killOnAbort);
-            return { done: true, value: undefined as never };
-          }
-          return { done: false, value: item };
-        },
-        async return(): Promise<IteratorResult<Ev>> {
-          stop('aborted'); // consumer abandoned us early — don't leave the command running
-          if (timer !== undefined) clearTimeout(timer);
-          opts.signal.removeEventListener('abort', killOnAbort);
-          return { done: true, value: undefined as never };
-        },
-      };
-    },
-  };
-}
-
 // ── Executor ──────────────────────────────────────────────────────────────────
 
 interface BashInput {
@@ -512,6 +383,15 @@ interface BashInput {
   timeout?:        number;
   maxOutputBytes?: number;
 }
+
+/** The docker clients for the `bash` calls in flight — the host half of each lease. Module-scoped, so
+ *  it is per load generation: a hot-reloaded plugin tears down the execs IT started and knows nothing
+ *  about a previous generation's, which is correct, those having gone with their own teardown. */
+const active = new Set<ChildProcess>();
+
+/** How long teardown waits for a released lease to take its exec down, before reporting anyway. Well
+ *  inside core's per-plugin teardown budget, since every exec is released at once. */
+const LEASE_DRAIN_MS = 2_000;
 
 function createContainerExecutor(settings: PluginSettings): ToolExecutor<ToolResultOf<'bash'>> {
   return {
@@ -530,12 +410,7 @@ function createContainerExecutor(settings: PluginSettings): ToolExecutor<ToolRes
 
       // execCwd lives inside the rw .data mount — ensure the host-side path exists.
       const hostExecCwd = cfg.projectRoot + cfg.execCwd.slice(cfg.mountPoint.length);
-      // PID files live alongside .data (not in the LLM's cwd) on the same rw mount, so the host
-      // can read the recorded group-leader PID directly to kill a runaway command.
-      const containerPidDir = `${cfg.mountPoint}/${cfg.dataSubdir}/.matbot-exec`;
-      const hostPidDir      = `${cfg.projectRoot}/${cfg.dataSubdir}/.matbot-exec`;
       await mkdir(hostExecCwd, { recursive: true });
-      await mkdir(hostPidDir,  { recursive: true });
 
       const { script, env, timeout, maxOutputBytes } = input as BashInput;
       if (maxOutputBytes !== undefined && (!Number.isFinite(maxOutputBytes) || maxOutputBytes < 1)) {
@@ -543,38 +418,39 @@ function createContainerExecutor(settings: PluginSettings): ToolExecutor<ToolRes
         return;
       }
 
-      const execId            = randomUUID();
-      const containerPidfile  = `${containerPidDir}/${execId}.pid`;
-      const hostPidfile       = `${hostPidDir}/${execId}.pid`;
-
-      // Pass the script and pidfile path by env to avoid quoting; run under setsid so the script
-      // bash leads a fresh process group (pgid == its pid), record that pid, then exec the script.
-      // On timeout/abort the host kills the negative pid — the whole group, children included.
-      const args = ['exec', '-i', '-w', cfg.execCwd,
-        '-e', `MATBOT_SCRIPT=${script}`,
-        '-e', `MATBOT_PIDFILE=${containerPidfile}`,
-      ];
+      // The script goes by env rather than argv to avoid a quoting layer. `-i` keeps stdin attached,
+      // which is what the lease is made of (see LEASE_WRAPPER) — so stdin belongs to the lease and is
+      // never written to.
+      const args = ['exec', '-i', '-w', cfg.execCwd, '-e', `MATBOT_SCRIPT=${script}`];
       for (const [k, v] of Object.entries(env ?? {})) {
         args.push('-e', `${k}=${v}`);
       }
-      // setsid -w: -w keeps the setsid parent waiting so docker exec stays attached for streaming;
-      // without it setsid detaches and the exec returns immediately, orphaning the script.
-      args.push(cfg.name, 'setsid', '-w', 'bash', '-c', 'echo $$ > "$MATBOT_PIDFILE"; exec bash -c "$MATBOT_SCRIPT"');
+      args.push(cfg.name, 'bash', '-c', OUTER_REDIRECT, 'matbot-bash', LEASE_WRAPPER);
 
-      // terminate fires the group-kill; capture its promise so cleanup waits for the PID to be read
-      // before deleting the pidfile (otherwise rm could win the race and killGroup reads ENOENT).
-      let killPromise: Promise<void> | undefined;
+      const child = spawn('docker', args, { env: {}, shell: false });
+      // Closing stdin on a client that has already gone raises EPIPE on the pipe, and an unhandled
+      // 'error' on a stream is fatal to the process.
+      child.stdin?.on('error', () => {});
+      active.add(child);
+
+      // Releasing the lease IS the kill: the wrapper answers EOF by KILLing its own process group, so
+      // the script and everything it spawned go without the host addressing them at all. The SIGKILL
+      // step drops the client whose stdin was somehow not the channel we think it is — and since the
+      // client's death closes that stdin too, it is a second way to fire the same lease rather than a
+      // different mechanism.
+      const kill = (sig: 'SIGTERM' | 'SIGKILL'): void => {
+        if (sig === 'SIGTERM') child.stdin?.end();
+        else child.kill('SIGKILL');
+      };
       try {
-        yield* spawnAndStream('docker', args, {
+        yield* streamProcess(child, {
           ...(timeout !== undefined ? { timeout } : {}),
-          env: {},
-          signal: ctx.signal,
+          signal: ctx.signal, kill,
           maxBytes: maxOutputBytes ?? cfg.maxOutputBytes,
-          terminate: () => { killPromise = killGroup(cfg.name, hostPidfile); },
+          overflowHint: 'raise it for one command by passing a larger `maxOutputBytes`, or for every command with bash_config { action: "set", maxOutputBytes }',
         });
       } finally {
-        if (killPromise) await killPromise;
-        await rm(hostPidfile, { force: true }).catch(() => {});
+        active.delete(child);
       }
     },
   };
@@ -589,10 +465,11 @@ const TOOL_DESCRIPTION =
   'install standard packages with apt freely. ' +
   'The project root is mounted read-only at /app; /app/.data is read-write. ' +
   'A non-zero exit code yields an error event with accumulated stdout/stderr attached. ' +
-  'The script and every process it spawns are killed once combined stdout+stderr reaches `maxOutputBytes` ' +
-  '(default 1000000) — a default, not a limit: pass a larger value for one command, or use `bash_config` to ' +
-  'change it for every command. Prefer redirecting bulk output to a file, since everything returned stays ' +
-  'in the conversation and is re-sent on every later round.';
+  `The script and every process it spawns are killed after \`timeout\` milliseconds (default ${DEFAULT_TIMEOUT_MS}) ` +
+  `or once combined stdout+stderr reaches \`maxOutputBytes\` (default ${DEFAULT_MAX_OUTPUT_BYTES}), whichever comes ` +
+  'first. Both are defaults, not limits: pass a larger value for work that genuinely needs it, or use ' +
+  '`bash_config` to change the output limit for every command. Prefer redirecting bulk output to a file, ' +
+  'since everything returned stays in the conversation and is re-sent on every later round.';
 
 const BASH_INPUT_SCHEMA = {
   type:       'object',
@@ -600,8 +477,8 @@ const BASH_INPUT_SCHEMA = {
   properties: {
     script:  { type: 'string', description: 'Bash script or command to run (passed to `bash -c`).' },
     env:     { type: 'object', additionalProperties: { type: 'string' }, description: 'Extra environment variables.' },
-    timeout: { type: 'number', description: 'Kill the process after this many milliseconds.' },
-    maxOutputBytes: { type: 'number', minimum: 1, description: 'Kill the script once combined stdout+stderr reaches this many bytes, overriding the configured default (1000000) for this command only.' },
+    timeout: { type: 'number', description: `Kill the script, and every process it spawned, after this many milliseconds. Defaults to ${DEFAULT_TIMEOUT_MS}.` },
+    maxOutputBytes: { type: 'number', minimum: 1, description: `Kill the script once combined stdout+stderr reaches this many bytes, overriding the configured default (${DEFAULT_MAX_OUTPUT_BYTES}) for this command only.` },
   },
 } as const;
 
@@ -610,7 +487,7 @@ const BASH_CONFIG_DESCRIPTION =
   '  - `dns`: DNS server IPs (e.g. ["1.1.1.1"]), or the token "host" to use the host\'s current resolvers. ' +
   'Omit, or pass [], to inherit the host\'s DNS (the default).\n' +
   '  - `name`: the container label.\n' +
-  '  - `maxOutputBytes`: cap on combined stdout+stderr per bash command (default 1000000); on exceed the command is killed. ' +
+  '  - `maxOutputBytes`: cap on combined stdout+stderr per bash command (default ' + DEFAULT_MAX_OUTPUT_BYTES + '); on exceed the command is killed. ' +
   'A single command can override it by passing `maxOutputBytes` to `bash` directly; set it here only to change the default for every command.\n' +
   'A `set` persists the overrides. Changing `dns`/`name` removes the running container so the next bash ' +
   'command recreates it; `maxOutputBytes` applies to subsequent commands with no restart. ' +
@@ -655,8 +532,26 @@ export const plugin: MatbotPluginSpec = {
       name:        'bash_config',
       description: BASH_CONFIG_DESCRIPTION,
       inputSchema: BASH_CONFIG_INPUT_SCHEMA,
-      executor:    { execute: (input) => bashConfigExecutor(input, settings) },
+      executor:    { execute: (input, ctx) => bashConfigExecutor(input, settings, ctx.signal) },
     };
     services.tools.register(configTool);
+  },
+
+  /**
+   * Release every lease this generation holds. Only reachable on a graceful path — core runs it from
+   * `teardownPlugins()` on the way to exit and from `unloadPlugin()` on a hot-unload — and only the
+   * unload NEEDS it: on process exit the clients die with us and the daemon closes their stdin anyway,
+   * whereas an unloaded plugin leaves matbot running, so nothing would otherwise let go.
+   */
+  async teardown() {
+    const clients = [...active];
+    active.clear();
+    await Promise.all(clients.map(child => new Promise<void>(resolve => {
+      if (child.exitCode !== null || child.signalCode !== null) return resolve();
+      const timer = setTimeout(() => { child.kill('SIGKILL'); resolve(); }, LEASE_DRAIN_MS);
+      timer.unref();
+      child.once('exit', () => { clearTimeout(timer); resolve(); });
+      child.stdin?.end();
+    })));
   },
 };

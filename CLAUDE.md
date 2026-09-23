@@ -36,7 +36,8 @@ plugin-api/        — @matatbread/matbot-plugin-api: MatbotPlugin, MatbotServic
                                 createNotifier, the broadcaster. See "The /host boundary" below.
 core/              — @matatbread/matbot-core: agentic loop, hook dispatch, plugin loader, config
                      (YAML + .env), security (VaultImpl, Principal origin), knowledge
-                     (LookupKnowledgeIndex). Author-facing subpath exports — link against without
+                     (LookupKnowledgeIndex), boot assembly (`assembleMachine` — see "Boot
+                     assembly" below). Author-facing subpath exports — link against without
                      pulling the runtime:
                        ./providers-base — SSE parser, HTTP helpers (write a provider)
                        ./storage-base   — filter/sort engine, StoreQuery (write a storage backend)
@@ -127,6 +128,20 @@ exactly the reason above — host-specific, so injected rather than in the neutr
 
 Fan-out is the one place the split implies a rule rather than just a location: a plugin that wants to publish an event uses the **`Notifier`**, which is why the raw broadcaster is host-side.
 
+### Boot assembly
+
+**`assembleMachine` (core) is the one expression of the boot graph**: the swap-members and their boot
+defaults, the guarded store proxies, the deferred `StorageBackend` swap and the mount table,
+`register`/`unregister`, `complete`, the session runner, and the core tools (`gate_action`,
+`single_turn`, `about_matbot`). Both apps call it. It was two hand-kept copies, and a step added to one
+was simply absent from the other with nothing to fail.
+
+A host passes only what is genuinely its own: its carriers (installed first), its boot `StorageBackend`
+(the CLI's filesystem one, the browser's IndexedDB + OPFS), its boot `Vault`, how a secret is resolved
+(the browser prompts for a missing one), extra seeded services (the CLI's `FunctionRunner`), and the
+members that acquire a plugin (`loadPlugin`, `unloadPlugin`, `resolver`). `preScanStorage` opens a
+configured storage plugin's backend before any store exists, and `loaded()` runs the post-load checks.
+
 ### Package naming
 - `@matatbread/matbot-foo` — single implementation
 - `@matatbread/matbot-foo-types` — interface-only (augments `MatbotServices`)
@@ -188,7 +203,7 @@ facade over a concrete backend to pin its plugin list across a `StorageBackend` 
 the barrier living inside `machineBusy`.
 
 **The one silent failure is a key naming no loaded plugin** (the name is loader-derived and need not
-match the specifier in `plugins:`), so each host warns for unmatched keys once the loaded set is known;
+match the specifier in `plugins:`), so `assembleMachine`'s `loaded()` warns for unmatched keys once the loaded set is known;
 reserved dunder namespaces are exempt, not being plugins. Nothing distinguishes a defaulted read from a
 stored one — a `*_config get` action reports what is *in effect*, not what is pinned.
 
@@ -270,7 +285,7 @@ type ScratchStore = Store<Session>;
 type MediaStore   = FileStore;      // session media; see Media
 ```
 
-**Swappable core members** (`StorageBackend`, `KnowledgeIndex`, `Vault`, `Notifier`) use `register` to swap live impls behind capture-safe forwarding proxies. A captured reference keeps resolving to the current impl. On `unregister` (i.e. when the providing plugin is unloaded) a swap-member **reverts to the host's captured boot default** rather than dangling on the gone impl — the app decides its own base services (the CLI: filesystem or in-memory; the browser: OPFS), and the registry only remembers and restores them. The host's boot default is captured **before** any storage-plugin pre-scan, so a config-supplied backend never poses as the base; a pre-scanned backend is recorded as plugin-owned, so unloading its plugin reverts to that base.
+**Swappable core members** (`StorageBackend`, `KnowledgeIndex`, `Vault`, `Notifier`) use `register` to swap live impls behind capture-safe forwarding proxies. A captured reference keeps resolving to the current impl. On `unregister` (i.e. when the providing plugin is unloaded) a swap-member **reverts to the host's captured boot default** rather than dangling on the gone impl — the app decides its own base services (the CLI: the filesystem backend; the browser: IndexedDB + OPFS), and the registry only remembers and restores them. The host's boot default is captured **before** any storage-plugin pre-scan, so a config-supplied backend never poses as the base; a pre-scanned backend is recorded as plugin-owned, so unloading its plugin reverts to that base.
 
 ### Context switch & the deferred StorageBackend swap
 
@@ -584,8 +599,8 @@ prompt channel is what deletes the routing rules a `gate?:` flag on `FormField` 
 to branch on and no distinct denial error; call sites yield their existing `Cancelled.` result.
 
 **The default policy is host-seeded, not a configured plugin** — `matbot-default-gate` is a library
-in the `tool-plugin` mould: each host boots `createDefaultGate` as the `PermissionGate` and seeds
-`createGateTools()` beside `plugin`/`provider`. It has to be, because a *minimal* install's first act
+in the `tool-plugin` mould: each host passes its `defaultGate` to `assembleMachine`, which boots it as
+the `PermissionGate` and seeds `gate_action` beside `plugin`/`provider`. It has to be, because a *minimal* install's first act
 is adding a plugin or a provider, which is gated: making the policy — or the means to inspect and
 undo an answer — depend on a `plugins:` line answers the question at exactly the wrong moment. It
 being seeded rather than registered also keeps `gate_action` from colliding with itself at every boot.
@@ -595,7 +610,7 @@ hand-assembled machine.
 It reproduces today's behaviour — ask, offer standing answers, remember them — keyed
 `(gate, subject)`, in its own settings namespace, so an installation authors defaults the ordinary
 way (`default_settings: { '@matatbread/matbot-default-gate': { 'tools.overwrite': [bash, plugin] } }`;
-each host exempts that one key from its "names no loaded plugin" warning, since nothing loads it).
+the "names no loaded plugin" warning exempts that one key, since nothing loads it).
 `gate_action` (`get` / `clear`) reports the standing answers **in effect** and forgets them; there is
 deliberately no `set`, because the write path for a runtime actor is answering a prompt that names
 the specific act. It reports **answers, not a vocabulary**: a gate with no stored answer is absent
@@ -844,8 +859,8 @@ port**. Two implementations of one interface get an alias, never an invented rol
 `MediaResolver` was considered and rejected: it bought nothing the alias didn't, and left something to
 implement.
 
-Both hosts seed their own file area as the boot default, so attachments work out of the box; the seed
-goes in the *registry* rather than on `baseServices`, because `unifyServices` resolves an own property
+`assembleMachine` seeds the host's own file area as the boot default, so attachments work out of the box; the seed
+goes in the *registry* rather than on the base object, because `unifyServices` resolves an own property
 first and a member spelled there is one `register()` could never reach. Unregistering reverts to that
 default rather than turning media off.
 

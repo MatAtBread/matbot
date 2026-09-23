@@ -9,6 +9,76 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## 0.4.17
+
+### API gaps filled
+
+- **`assembleMachine` / `preScanStorage`** — the boot graph as one core function: swap-members and their
+  boot defaults, guarded stores, the deferred `StorageBackend` swap, the mount table, `complete`, the
+  session runner and the core tools. Both apps now stand their machine up through it, passing only what
+  is platform-specific; an embedder can do the same instead of copying ~250 lines of an app's boot.
+
+### Bug fixes
+
+- **Shutdown** — `teardownPlugins` runs teardowns one at a time in reverse load order, each within the
+  10s budget `plugin unload` already applied. It promised reverse order and ran them all at once with no
+  limit, so a plugin could close a service a later-loaded one was still flushing through, and one
+  teardown that never settled held process exit open.
+- **Hooks** — a hook registered while its channel is running joins the next pass, not the one under way.
+  Registration sorted the array a run loop was iterating, so the new hook could run immediately, or the
+  registering hook could be moved back under the cursor and run again — a hook that registers on every
+  call never finished the pass.
+- **Service attribution** — a plugin is attributed a service key only once `register()` has succeeded,
+  and only once however often it registers it. A failed registration was still recorded, so unloading
+  the plugin reverted a service it never held — for a swap-member, someone else's.
+- **Plugin settings** — document versions are random, not `Date.now()`: two writes in one millisecond
+  minted the same version, letting a compare-and-swap accept a stale read.
+- **Notifications** — the warning for an unqualified notification `kind` is logged once per emitter and
+  kind, rather than on every publish.
+
+### Optional
+
+- **`bash` / `docker-bash`** — one process streamer, exported as `@matatbread/matbot-tool-bash/stream`,
+  which `docker-bash` now depends on. `docker-bash` gains what only the local tool had: a default
+  10-minute `timeout` (a hung command previously ran until the turn was aborted), completion that no
+  longer waits on an output pipe held open by a surviving process, and a description that states both
+  defaults. The `bash` contract is declared once, in that module.
+- **`docker-bash`** — a container removal that genuinely fails is reported rather than swallowed, and
+  `bash_config set` removes the old container before persisting, so a failure changes nothing instead of
+  leaving the old container running beside a new one.
+- **`docker-bash`** — `bash_config pull` streams through the shared streamer and is ended by the turn's
+  abort signal; it previously ran to completion however long the image took.
+- **`docker-bash`** — the container is created with `--init`. Its PID 1 was `sleep infinity`, which never
+  reaps, so every process a command left behind — killed on timeout or abort, or backgrounded — stayed as
+  a zombie until the container was removed. An existing container keeps the old PID 1 until it is
+  recreated (`bash_config restart`).
+- **`docker-bash`** — a command no longer outlives the matbot that started it. The exec's stdin is held as
+  a lease: nothing ever writes to it, so EOF means the host-side docker client is gone, and the wrapper
+  answers it by KILLing its own process group — the script and everything it spawned. Because the daemon
+  closes that stdin whenever the client dies, this covers the paths no cleanup code can reach (SIGKILL, a
+  crash, an OOM-kill) as well as the graceful ones; `--init` reaped the zombies a leak left behind, but
+  nothing killed a live orphan, and one was observed holding two cores for over four hours. The plugin
+  also implements `teardown()`, which releases every lease it holds — the one case the daemon cannot
+  signal, since a hot-unloaded plugin leaves matbot running. The lease replaces the pidfile the host used
+  to read: the kill now originates inside the container, which knows its own process group, so
+  `.data/.matbot-exec` and the read/remove race around it are gone. A script cannot use stdin, which is
+  not a new limit — nothing ever wrote to it, so such a script hung until the timeout and now gets EOF.
+- **CLI** — the boot storage is the `FilesystemStorageBackend` whose layout the CLI already used, so
+  `services.StorageBackend` is present by default. `tool-store`'s namespace-collision check, which
+  enumerates it, previously found nothing on a default install.
+- **web bundle** — warns when a plugin's storage backend displaces the one opened at startup, as the CLI
+  already did.
+- **`frontend-telegram`** — interactive prompts. A turn's questions, including every permission gate,
+  are sent to the chat: choices as inline buttons (a `select`, a `confirm`, a text field's default),
+  free text as a reply. Only the sender whose message is being served can answer. `/cancel`, sending
+  another message instead of pressing a button, or 10 minutes without an answer each cancel the question
+  and abandon its turn — never answering with the default, which for a gate can mean "allow". A
+  `password` field is refused rather than asked, since the answer would stay in the chat history. The
+  frontend previously supplied no `PromptFn`, so every gate took its site's non-interactive answer.
+- **`default-gate`** — exports `defaultGate`, the bundle a host passes to `assembleMachine`.
+- **`skills`, `triggers`, `background`, `cognition`, `function-tools`** — document versions are random,
+  not `Date.now()`, for the reason given under *Plugin settings*.
+
 ## 0.4.16
 
 ### Breaking changes

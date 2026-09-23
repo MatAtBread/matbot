@@ -20,11 +20,12 @@ export class HookRegistry implements HookRegistrar {
   private readonly markedFailures = new Set<Hook>();
   private pendingFailureMarkers: { channel: HookPoint; pluginName?: string; message: string }[] = [];
 
+  // A fresh array, never an in-place push + sort, for the reason given at `removeOne`: a run loop
+  // iterating the old list across its awaits would otherwise visit a hook registered mid-run, or visit
+  // one twice after the sort moved it behind the cursor.
   register(hook: Hook): void {
-    const list = this.hooks.get(hook.on) ?? [];
-    list.push(hook);
-    list.sort((a, b) => (a.priority ?? 50) - (b.priority ?? 50));
-    this.hooks.set(hook.on, list);
+    const list = [...(this.hooks.get(hook.on) ?? []), hook];
+    this.hooks.set(hook.on, list.sort((a, b) => (a.priority ?? 50) - (b.priority ?? 50)));
   }
 
   // The hooks registered on one channel, narrowed to that channel's arm. The map is keyed BY `on`, so

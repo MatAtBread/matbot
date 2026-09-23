@@ -48,7 +48,7 @@ declare module '@matatbread/matbot-plugin-api' {
     every_action:
       // `interval` reads "once" for a one-shot (the same sentinel `background` accepts), so one row shape
       // covers both kinds and `nextRun` is the fire time in either.
-      | ToolContract<Array<{ id: string; interval: Duration | 'once'; nextRun: IsoInstant; active: boolean; name?: string; lastRun?: IsoInstant; output?: string }>, { action: 'list' }>
+      | ToolContract<Array<Schedule>, { action: 'list' }>
       // `skipped` appears only when the sweep met a schedule it could not write (one shared in read-only):
       // "all" that silently wasn't all is the failure the field reported one namespace over.
       | ToolContract<{ resumed:   true; count: number; ids: string[]; skipped?: SkippedSchedule[] } | { resumed:   true; id: string }, { action: 'resume';  id: string }>
@@ -161,13 +161,13 @@ interface ScheduleBase {
 }
 
 /** Fires every `intervalMs` until suspended or cancelled. */
-interface EverySchedule extends ScheduleBase { intervalMs: number }
+export interface EverySchedule extends ScheduleBase { intervalMs: number }
 /** Fires once, at `nextRun`, and deletes itself. No `oneShot` flag: the ABSENCE of an interval is
  *  what makes it one, exactly as it is on the `background` tool's own parameters — a separate flag
  *  could disagree with the interval beside it, and nothing would say which was meant. */
-interface OnceSchedule  extends ScheduleBase { intervalMs?: undefined }
+export interface OnceSchedule  extends ScheduleBase { intervalMs?: undefined }
 
-type Schedule = EverySchedule | OnceSchedule;
+export type Schedule = EverySchedule | OnceSchedule;
 
 let scheduleStore:   Store<Schedule> | undefined;
 let activeConfigPath: string | undefined;
@@ -619,7 +619,7 @@ wanted to see the result, they would have asked for it in the foreground.
 async function setActive(id: string, active: boolean): Promise<boolean> {
   const stored = await scheduleStore?.get(id);
   if (!stored) return false;
-  await scheduleStore?.set(id, { ...stored, active, version: Date.now().toString() });
+  await scheduleStore?.set(id, { ...stored, active, version: crypto.randomUUID() });
   wakeSchedule(id);
   return true;
 }
@@ -631,7 +631,7 @@ async function setActiveAll(active: boolean): Promise<{ ids: string[]; skipped: 
   for (const doc of result?.items ?? []) {
     if ((doc.active !== false) === active) continue; // already in the target state
     try {
-      await scheduleStore?.set(doc.id, { ...doc, active, version: Date.now().toString() });
+      await scheduleStore?.set(doc.id, { ...doc, active, version: crypto.randomUUID() });
     } catch (e) {
       // `*` spans the whole store, and a partitioned one holds schedules this principal may read and not
       // write. One refusal is not a refusal of the request: name it and carry on. Throwing here would
@@ -695,7 +695,7 @@ Each entry carries a \`kind\` saying what to do about it — do not read this ou
           const schedules = result?.items ?? [];
           yield {
             type:  'result',
-            value: schedules.map((s: Schedule) => ({
+            value: schedules/*.map((s: Schedule) => ({
               id:       s.id,
               interval: s.intervalMs === undefined ? 'once' : formatDuration(s.intervalMs),
               nextRun:  s.nextRun,
@@ -703,7 +703,7 @@ Each entry carries a \`kind\` saying what to do about it — do not read this ou
               ...(s.name    !== undefined ? { name:    s.name    } : {}),
               ...(s.lastRun !== undefined ? { lastRun: s.lastRun } : {}),
               ...(s.output  !== undefined ? { output:  s.output  } : {}),
-            })),
+            }))*/,
           };
           return;
         }
