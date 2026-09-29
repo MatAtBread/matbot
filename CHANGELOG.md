@@ -105,6 +105,9 @@ churn and less likely to affect a consumer who doesn't use them.
   not compiled functions, the dts split per tool, and every file read), with `filterToolTypesData` to
   narrow it to a live tool set; `ToolTypeIndexImpl` is exported, taking the function it fills a miss from.
   `buildMatbotToolsDts` and the index's output are unchanged.
+- **`mcp-http`** — `mcp_action` advertises `type` (`"remote"`) in its schema. The contract it shares with
+  node `mcp` requires it on `add`, so with ts-validation rejecting, an `add` sent as the schema described
+  it — without `type` — was refused.
 - **`default-gate`** — exports `defaultGate`, the bundle a host passes to `assembleMachine`.
 - **`skills`, `triggers`, `background`, `cognition`, `function-tools`** — document versions are random,
   not `Date.now()`, for the reason given under *Plugin settings*.

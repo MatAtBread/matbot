@@ -42,6 +42,10 @@ const ACCEPTED = {
   'bash.cwd':
     'One contract serves both `bash` implementations. The local one advertises `cwd`; `docker-bash` runs in ' +
     'a fixed directory inside the container, so its schema omits it and its executor ignores it.',
+  ...Object.fromEntries(['type', 'command', 'args', 'env'].map(p => [`mcp_action.${p}`,
+    'One contract serves both `mcp_action` implementations, and must be declared identically to merge. ' +
+    'Node `mcp` adds local stdio servers and advertises these; standalone `mcp-http` connects to HTTP ' +
+    'endpoints only, so its schema omits them and a `local` add there is a runtime error.'])),
 };
 
 // ── Type-text scanning ────────────────────────────────────────────────────────

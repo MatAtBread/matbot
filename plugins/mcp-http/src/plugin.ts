@@ -48,6 +48,9 @@ ACTIONS
       properties: {
         action:   { type: 'string', enum: ['add', 'list', 'remove'], description: 'add: connect a server. list: show servers. remove: disconnect.' },
         name:     { type: 'string', pattern: '^[a-z][a-z0-9_-]*$', description: 'Short lowercase server id (add/remove); becomes the tool-name prefix.' },
+        // Required by the shared contract (node `mcp` also has 'local'), so the typed validator rejects an
+        // add without it; advertised here so the model is told to send it.
+        type:     { type: 'string', enum: ['remote'], description: 'add only: always "remote" — this build connects to HTTP endpoints only.' },
         endpoint: { type: 'string', description: 'add only: the MCP HTTP endpoint URL.' },
         headers:  { type: 'object', additionalProperties: { type: 'string' }, description: 'add only: HTTP headers, e.g. {"Authorization":"Bearer …"}.' },
         proxyToolName: { type: 'string', description: 'add only: prefix for this server\'s tool names, replacing the default "mcp__<name>__". Persisted; reconnects keep it.' },
