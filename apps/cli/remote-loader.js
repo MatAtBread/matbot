@@ -28,6 +28,9 @@ import path from 'node:path';
 
 const CACHE_DIR = '.plugins';
 
+// Per request, headers and body together. The worker reads the same value, inheriting this environment.
+const FETCH_TIMEOUT_MS = Number(process.env.MATBOT_FETCH_TIMEOUT_MS) || 30_000;
+
 // The scheme is not recoverable from the mirrored path — `.plugins/<host>/<path…>` deliberately keys on
 // host so one origin is one directory — so each host records its own. Absent means https, which is what
 // every cache written before this file existed came from.
@@ -147,11 +150,17 @@ export async function resolveFetched(specifier, parent) {
 
   let unreachable;
   for (const candidate of plan.candidates) {
-    let res;
-    try { res = await fetch(candidate); }
-    catch (e) { unreachable ??= e; continue; }
-    if (!res.ok) continue;
-    const body = await res.text();
+    // The signal bounds the body as well as the headers: an origin that stalls mid-response is as stuck as
+    // one that never answers, and either freezes the whole process, whose thread is waiting on this.
+    let body;
+    try {
+      const res = await fetch(candidate, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+      if (!res.ok) continue;
+      body = await res.text();
+    } catch (e) {
+      unreachable ??= e?.name === 'TimeoutError' ? new Error(`no answer within ${FETCH_TIMEOUT_MS} ms`) : e;
+      continue;
+    }
     const p = urlToCachePath(candidate, plan.dotPlugins);
     await mkdir(path.dirname(p), { recursive: true });
     await writeFile(p, body, 'utf8');
@@ -173,7 +182,16 @@ export async function resolveFetched(specifier, parent) {
 //
 // Blocking means the origin cannot be served by this same thread, as it could not under `register()` either
 // since Node 24.12, whose hooks thread the main thread also waits on.
+//
+// Every wait is bounded, because a blocked thread runs nothing — no timer, no SIGINT handler — so an unbounded
+// one is a process that can only be killed. A request is QUEUED until the worker takes it and DONE when it has
+// answered. Never taken means the worker is not running (it failed to start, or died), which nothing else can
+// report: its 'error' and 'exit' events are delivered on this thread, which is the one blocked. Taken and not
+// answered by the time every candidate's fetch has had its full timeout means it is stuck. Either way the
+// worker is discarded, so the next request starts a fresh one and no late answer can be read as its own.
 const FETCHER = 'matbot-remote-fetcher';
+const QUEUED = 0, WORKING = 1, DONE = 2;
+const PICKUP_MS = 10_000;
 let fetcher;
 
 export function resolveFetchedSync(specifier, parent) {
@@ -182,11 +200,21 @@ export function resolveFetchedSync(specifier, parent) {
   const cached = onDisk(plan);
   if (cached !== undefined) return cached;
 
-  fetcher ??= startFetcher();
-  const done = new Int32Array(new SharedArrayBuffer(4));
-  fetcher.worker.postMessage({ specifier, parent, done });
-  Atomics.wait(done, 0, 0);
-  const answer = receiveMessageOnPort(fetcher.answers).message;
+  const current = fetcher ??= startFetcher();
+  const state = new Int32Array(new SharedArrayBuffer(4));
+  current.worker.postMessage({ specifier, parent, state });
+  const stuck =
+    Atomics.wait(state, 0, QUEUED, PICKUP_MS) === 'timed-out' ? `the fetch worker did not start within ${PICKUP_MS} ms`
+    : Atomics.wait(state, 0, WORKING, plan.candidates.length * FETCH_TIMEOUT_MS + PICKUP_MS) === 'timed-out'
+      ? 'the fetch worker did not answer in time'
+    : undefined;
+  if (stuck !== undefined) {
+    if (fetcher === current) fetcher = undefined;
+    void current.worker.terminate();
+    throw Object.assign(new Error(`Cannot fetch "${specifier}" imported by ${parent}: ${stuck}.`),
+                        { code: 'ERR_MODULE_NOT_FOUND' });
+  }
+  const answer = receiveMessageOnPort(current.answers).message;
   if ('error' in answer) throw Object.assign(new Error(answer.error), { code: answer.code });
   return answer.url;
 }
@@ -199,15 +227,21 @@ function startFetcher() {
     workerData: { role: FETCHER, answers: port2 }, transferList: [port2], execArgv: [],
   });
   worker.unref();
+  // A worker that fails reports it as an 'error' event, which with no listener would crash the process. The
+  // request waiting on it has already said what went wrong; all that is left is not to reuse it.
+  worker.on('error', () => {});
+  worker.on('exit', () => { if (fetcher?.worker === worker) fetcher = undefined; });
   return { worker, answers: port1 };
 }
 
 if (!isMainThread && workerData?.role === FETCHER) {
   const { answers } = workerData;
-  parentPort.on('message', async ({ specifier, parent, done }) => {
+  parentPort.on('message', async ({ specifier, parent, state }) => {
+    Atomics.store(state, 0, WORKING);
+    Atomics.notify(state, 0);
     try { answers.postMessage({ url: await resolveFetched(specifier, parent) }); }
     catch (e) { answers.postMessage({ error: e instanceof Error ? e.message : String(e), code: e?.code }); }
-    Atomics.store(done, 0, 1);
-    Atomics.notify(done, 0);
+    Atomics.store(state, 0, DONE);
+    Atomics.notify(state, 0);
   });
 }

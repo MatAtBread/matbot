@@ -72,6 +72,12 @@ churn and less likely to affect a consumer who doesn't use them.
   387 on one CPU, 153 rather than 237 on four. Resolution is unchanged, and a `require()` passes the
   hooks by, as it always did. A fetched plugin's imports are still fetched on demand, on a worker the
   hook waits on, which starts only for a file not yet on disk.
+- **CLI** — fetching a plugin's imports over http is bounded: 30 s per request, headers and body
+  (`MATBOT_FETCH_TIMEOUT_MS`), and a fetch worker that never starts or never answers fails the import
+  rather than waiting on it. An origin that took the connection and never answered used to freeze the
+  whole process for good — the thread that asked runs nothing while it waits, not even a SIGINT handler.
+  The CLI now requires Node 24.12: before it, `register()`'s hooks left the main thread running during a
+  fetch, and the in-thread hooks do not.
 - **CLI** — the boot storage is the `FilesystemStorageBackend` whose layout the CLI already used, so
   `services.StorageBackend` is present by default. `tool-store`'s namespace-collision check, which
   enumerates it, previously found nothing on a default install.

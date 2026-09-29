@@ -6,6 +6,12 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
 import { Worker } from 'node:worker_threads';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execFileP = promisify(execFile);
 
 // A fetched plugin's own imports are fetched as Node asks for them. The hooks now run in-thread and answer
 // synchronously, so the fetch runs on a worker they wait on; this drives that through a real `import()`,
@@ -87,6 +93,33 @@ test('a fetched plugin\'s import that nothing serves fails with the file that as
     });
   } finally {
     await srv.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// A blocked thread runs nothing, not even a SIGINT handler, so an origin that takes the connection and never
+// answers would freeze matbot for good. Run in a child, with a short timeout: this thread stays free to be the
+// origin, and a regression hangs the child rather than the suite.
+test('an origin that never answers fails the import instead of freezing the process', { timeout: 30_000 }, async () => {
+  const held: import('node:http').ServerResponse[] = [];
+  const server = createServer((_req, res) => { held.push(res); });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'matbot-in-thread-stall-')));
+  const hostDir = join(dir, '.plugins', `127.0.0.1:${port}`);
+  try {
+    mkdirSync(join(hostDir, 'p'), { recursive: true });
+    writeFileSync(join(hostDir, '.origin'), 'http:');
+    writeFileSync(join(hostDir, 'p', 'index.ts'), `export * from './stalled.js';\n`);
+    const importer = `import(${JSON.stringify(pathToFileURL(join(hostDir, 'p', 'index.ts')).href)})` +
+      `.then(() => console.log('loaded'), e => console.log(e.code, e.message));`;
+    const run = await execFileP(process.execPath,
+      ['--import', pathToFileURL(join(import.meta.dirname, '..', 'register.js')).href, '--input-type=module', '-e', importer],
+      { env: { ...process.env, MATBOT_FETCH_TIMEOUT_MS: '300' }, timeout: 20_000 });
+    assert.match(run.stdout, /^ERR_MODULE_NOT_FOUND Cannot fetch "\.\/stalled\.js" .*no answer within 300 ms/);
+  } finally {
+    for (const res of held) res.destroy();
+    server.close();
     rmSync(dir, { recursive: true, force: true });
   }
 });

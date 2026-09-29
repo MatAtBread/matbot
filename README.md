@@ -310,7 +310,7 @@ shipped as first-party plugins in this repo).
 
 ## Requirements
 
-- Node 24+
+- Node 24.12+
 - pnpm 9+ (only to run from source; a project install uses npm)
 - An LLM API key (Anthropic, OpenAI-compatible, Google Gemini, DeepSeek, Ollama, …)
 

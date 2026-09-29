@@ -4,7 +4,7 @@ The command-line interface for [matbot](https://github.com/MatAtBread/matbot) â€
 composable TypeScript AI harness. Provides the `matbot` command: an interactive REPL and a
 single-turn runner, with plugins that hot-load at runtime.
 
-Requires **Node 24+** (matbot ships raw TypeScript and relies on Node's native type
+Requires **Node 24.12+** (matbot ships raw TypeScript and relies on Node's native type
 stripping; no build step).
 
 ## Install
