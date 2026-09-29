@@ -695,15 +695,7 @@ Each entry carries a \`kind\` saying what to do about it — do not read this ou
           const schedules = result?.items ?? [];
           yield {
             type:  'result',
-            value: schedules/*.map((s: Schedule) => ({
-              id:       s.id,
-              interval: s.intervalMs === undefined ? 'once' : formatDuration(s.intervalMs),
-              nextRun:  s.nextRun,
-              active:   s.active !== false,
-              ...(s.name    !== undefined ? { name:    s.name    } : {}),
-              ...(s.lastRun !== undefined ? { lastRun: s.lastRun } : {}),
-              ...(s.output  !== undefined ? { output:  s.output  } : {}),
-            }))*/,
+            value: schedules
           };
           return;
         }
