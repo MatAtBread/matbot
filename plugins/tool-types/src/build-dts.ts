@@ -24,9 +24,10 @@ import { buildToolValidator, type ToolValidator } from './validator.js';
 // For `MatbotServices` only the plugin-contributed members are emitted; the base members (`Vault`,
 // `StorageBackend?`, `KnowledgeIndex`) are already visible through plugin-api.
 //
-// Caveat: `ts.createProgram` over the workspace runs in-process and briefly blocks the event loop.
-// Acceptable once-per-compile; the planned coverage work (drive off the live loaded-plugin set, build
-// lazily + dirty on plugin load) also removes that cost. Coverage today is the monorepo `plugins/` tree.
+// Caveat: `ts.createProgram` over the scanned roots runs in-process, synchronously — about 2 s of blocked
+// event loop on a one-CPU host — paid by whichever caller first needs the index (a tool call's validator,
+// a turn's wire contracts), and again after any tool registry change. The index shares one build among
+// callers that meet; nothing yet carries a build over from one process to the next.
 
 /**
  * A registry key declared more than once, with DIFFERENT types, across the scanned files. Declaration
