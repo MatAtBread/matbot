@@ -63,6 +63,9 @@ churn and less likely to affect a consumer who doesn't use them.
   to read: the kill now originates inside the container, which knows its own process group, so
   `.data/.matbot-exec` and the read/remove race around it are gone. A script cannot use stdin, which is
   not a new limit — nothing ever wrote to it, so such a script hung until the timeout and now gets EOF.
+- **CLI** — the package ships `remote-loader.js`. `ts-hooks.js` has imported it since 0.4.5 and `files`
+  never listed it, so every CLI published from 0.4.5 to 0.4.16 failed at boot when installed from npm,
+  with `ERR_MODULE_NOT_FOUND`. A test now boots the CLI as `npm pack` packs it.
 - **CLI** — the boot storage is the `FilesystemStorageBackend` whose layout the CLI already used, so
   `services.StorageBackend` is present by default. `tool-store`'s namespace-collision check, which
   enumerates it, previously found nothing on a default install.
