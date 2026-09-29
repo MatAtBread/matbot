@@ -4,14 +4,17 @@ import { createRequire } from 'node:module';
 import { PLUGIN_API_VERSION, RegistryChangeKind } from '@matatbread/matbot-plugin-api';
 import type { MatbotMachine, MatbotPluginSpec, ToolCheckReport, ToolTypeIndex } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins } from '@matatbread/matbot-core';
-import { buildMatbotToolsDts } from './build-dts.js';
+import { buildToolTypesData, compileToolValidators, type ToolTypesData } from './build-dts.js';
 import { checkSnippetAgainst } from './checker.js';
 import type { ToolValidator } from './validator.js';
 
-export { buildMatbotToolsDts, type MatbotToolsDts } from './build-dts.js';
+export {
+  buildMatbotToolsDts, buildToolTypesData, collectToolTypeRoots, compileToolValidators, filterToolTypesData,
+  type DtsParts, type MatbotToolsDts, type ToolTypesData, type ToolTypeRoots,
+} from './build-dts.js';
 export { checkProjectDir, checkSnippetAgainst, type CheckResult } from './checker.js';
 export {
-  generateValidator, buildToolValidator, compileValidator,
+  generateValidator, buildToolValidator, compileValidator, compileToolValidator,
   type ValidationError, type Validator, type ValidatorSource, type ToolValidator,
 } from './validator.js';
 
@@ -127,8 +130,23 @@ function schemaToTs(schema: unknown, depth = 0): string {
   return 'unknown';
 }
 
+/** Everything a build reads from the live machine, gathered before the build's first await. */
+export interface ToolTypesInputs {
+  projectRoot:        string;
+  pluginEntryUrls:    string[];
+  /** Absent ⇒ every scanned tool, for a build meant to serve any live set (see `filterToolTypesData`). */
+  liveToolNames?:     string[];
+  syntheticContracts: Record<string, string>;
+}
+
+/** Where the index gets a build from on a miss. The default builds one; a specialisation may find one. */
+export type ToolTypesFill = (inputs: ToolTypesInputs) => Promise<ToolTypesData | null>;
+
+export const buildToolTypes: ToolTypesFill = i =>
+  buildToolTypesData(i.projectRoot, i.pluginEntryUrls, i.liveToolNames, i.syntheticContracts);
+
 /**
- * Derives (via {@link buildMatbotToolsDts}) and caches the `.d.ts` of what the loaded tools' calls resolve
+ * Derives (via {@link buildToolTypesData}) and caches the `.d.ts` of what the loaded tools' calls resolve
  * to, invalidating on any tool-registry change. The scan is driven off the loaded plugins' `resolvedUrl`s —
  * the real source each tool was loaded from — so builtin, compiled, and installed plugins are all covered
  * (the types are erased at runtime, but the `.ts` the runtime loaded from is still on disk). A source-less
@@ -137,8 +155,9 @@ function schemaToTs(schema: unknown, depth = 0): string {
  * already declares is skipped, so nothing is declared twice. `declare const tool: ToolProxy` (mapped over
  * the merged `ToolContracts`) plus its override factory `toolInContext` is what generators call.
  */
-class ToolTypeIndexImpl implements ToolTypeIndex {
+export class ToolTypeIndexImpl implements ToolTypeIndex {
   private readonly machine: MatbotMachine;
+  private readonly fill: ToolTypesFill;
   private readonly ac = new AbortController();
   private covered = new Set<string>();   // tool names the source scan already declares (registry-block dedup)
   private cache: string | null = null;   // null ⇒ (re)build needed
@@ -149,8 +168,9 @@ class ToolTypeIndexImpl implements ToolTypeIndex {
   private builtFor = -1;                 // the generation the cached build reflects
   private building: Promise<void> | null = null;
 
-  constructor(machine: MatbotMachine) {
+  constructor(machine: MatbotMachine, fill: ToolTypesFill = buildToolTypes) {
     this.machine = machine;
+    this.fill = fill;
     // Any tool CRUD invalidates the generated dts; the event itself carries nothing we need.
     machine.Notifier.consume(() => { this.generation++; }, this.ac.signal,
       n => n.kind === RegistryChangeKind && n.registry === 'tools');
@@ -193,11 +213,13 @@ class ToolTypeIndexImpl implements ToolTypeIndex {
     const synthetic = Object.fromEntries(
       live.flatMap(t => (t.toolContract !== undefined ? [[t.name, t.toolContract] as const] : [])),
     );
-    const built  = await buildMatbotToolsDts(root, urls, live.map(t => t.name), synthetic);
+    const built  = await this.fill({
+      projectRoot: root, pluginEntryUrls: urls, liveToolNames: live.map(t => t.name), syntheticContracts: synthetic,
+    });
     this.cache      = built?.dts ?? '';
     this.covered    = new Set([...(built?.tools.emitted ?? []), ...(built?.tools.unknown ?? [])]);
     this.contracts  = built?.contracts ?? {};
-    this.validators = built?.validators ?? {};
+    this.validators = compileToolValidators(built?.validators ?? {});
     this.apiExports = built?.apiExports ?? [];
     this.builtFor   = generation;
   }

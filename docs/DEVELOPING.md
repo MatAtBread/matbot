@@ -1322,6 +1322,7 @@ Store-backed index with optional Cloudflare BGE reranker.
 | `@matatbread/matbot-cognition` | `ask_inner_voice`, `remember_fact`, `dream_time`, `cognition_config` + `remembered_facts_action` | Seeds the Inner Voice skill and a remembered-facts store; inner-voice critique, fact memory, background Dream Time consolidation |
 | `@matatbread/matbot-tool-whoami` | `whoami` | Reports the current Principal |
 | `@matatbread/matbot-tool-types` | `ToolTypeIndex` service · Node only | Derives a `.d.ts` of the loaded tools' result/service types so code generators can type what `tool` calls resolve to |
+| `@matatbread/matbot-caching-tool-types` | `ToolTypeIndex` service · Node only | `tool-types` with its build kept in plugin settings across restarts; load it instead of `tool-types` |
 | `@matatbread/matbot-hook-logger` | diagnostic hooks | Logs each hook channel firing |
 | `@matatbread/matbot-frontend-web` | frontend | Web UI with session management (HTTP+SSE on Node, in-process in the browser) |
 | `@matatbread/matbot-frontend-dom` | frontend | Minimal in-process browser chat (the `matbot-demo.html` demonstrator) |
