@@ -4,9 +4,9 @@ import type { Store, FileStore, StorageBackend } from '@matatbread/matbot-plugin
 import { FilesystemFileStore } from '@matatbread/matbot-files-node';
 import { FilesystemStore } from './store.js';
 
-// Reproduces, as an explicit registered backend, the exact layout the node host already falls back to
-// when no StorageBackend is registered: each namespace is a directory `<dotData>/<namespace>` of
-// per-id JSON files (FilesystemStore), and files live under `<dotData>/files` (FilesystemFileStore).
+// The node host's boot backend, and the same thing as an explicit registered one: each namespace is a
+// directory `<dotData>/<namespace>` of per-id JSON files (FilesystemStore), and files live under
+// `<dotData>/files` (FilesystemFileStore).
 // Installing the plugin therefore changes nothing about *where* data lives — its point is that the
 // filesystem store becomes nameable, so you can assert it to override another backend instead of only
 // reaching it implicitly by unregistering whatever is in force. Stores mkdir lazily, so open() opens

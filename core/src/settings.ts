@@ -148,7 +148,7 @@ export function makePluginSettings(rawStore: Store<SettingsDoc>, namespace: stri
       const doc  = await getDoc();
       const data = mutate(doc?.data ?? {});
       if (data === undefined) return;
-      const next: SettingsDoc = { id, version: Date.now().toString(), data };
+      const next: SettingsDoc = { id, version: crypto.randomUUID(), data };
       if (doc === null) { await store.set(id, next); return; }
       const r = await store.cas(id, doc.version, next);
       if (r.ok) return;

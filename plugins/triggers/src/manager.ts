@@ -81,7 +81,7 @@ export class TriggerManager implements Triggers {
     const now = new Date().toISOString();
     const doc: Trigger = {
       id:         crypto.randomUUID(),
-      version:    Date.now().toString(),
+      version:    crypto.randomUUID(),
       conditions: spec.conditions,
       invoke:     spec.invoke,
       ...(spec.enabled  !== undefined ? { enabled:  spec.enabled  } : {}),
@@ -102,7 +102,7 @@ export class TriggerManager implements Triggers {
       ...(patch.invoke     !== undefined ? { invoke:     patch.invoke     } : {}),
       ...(patch.enabled    !== undefined ? { enabled:    patch.enabled    } : {}),
       ...(patch.cooldown   !== undefined ? { cooldown:   patch.cooldown   } : {}),
-      version:   Date.now().toString(),
+      version:   crypto.randomUUID(),
       updatedAt: new Date().toISOString(),
     }));
   }

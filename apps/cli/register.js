@@ -1,5 +1,6 @@
-import { register, createRequire } from 'node:module';
+import { registerHooks, createRequire } from 'node:module';
 import { dirname } from 'node:path';
+import { createHooks } from './ts-hooks.js';
 
 // Host-shared packages that must stay singletons across the plugin/host boundary:
 // the plugin API loads them, plugins import them, and they carry runtime identity
@@ -28,4 +29,7 @@ function hostSharedDirs() {
   return dirs;
 }
 
-register('./ts-hooks.js', import.meta.url, { data: { exclude: hostSharedDirs() } });
+// In-thread, through `registerHooks()`. `register()` runs hooks on a thread of their own, and since Node 24.12
+// the main thread blocks on a round trip to it for every resolve and every load — most of a boot's time, with
+// the few hundred modules matbot loads. It is also deprecated (DEP0205).
+registerHooks(createHooks({ exclude: hostSharedDirs() }));

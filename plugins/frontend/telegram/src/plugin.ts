@@ -1,5 +1,5 @@
 import type {
-  MatbotPluginSpec, MatbotMachine, Principal, Session, PromptFn, FormField, FileHandle,
+  MatbotPluginSpec, MatbotMachine, Principal, Session, FileHandle,
   ToolExecutor, ToolContract, NoParams, ToolResultOf, UserContent, MimeType,
 } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION, isMediaRejectedError, encodeBase64 } from '@matatbread/matbot-plugin-api';
@@ -21,6 +21,8 @@ import {
 } from '@matatbread/matbot-core';
 import { downloadFile, getUpdates, sendChatAction, sendFile, sendMessage, TELEGRAM_UPLOAD_LIMIT } from './bot.js';
 import type { TelegramMessage } from './bot.js';
+import { createPrompter } from './prompt.js';
+import type { Prompter } from './prompt.js';
 
 const PLUGIN_NAME = 'frontend-telegram';
 
@@ -125,6 +127,7 @@ let servicesRef:   MatbotMachine | undefined;
 let botTokenRef:   string | undefined;
 const knownChats = new Set<number>(); // populated as chats interact with the bot
 let openDoor = 0;
+let prompterRef:   Prompter | undefined;
 
 export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,
@@ -292,6 +295,8 @@ export const plugin: MatbotPluginSpec = {
 
     const ac   = new AbortController();
     teardownAc = ac;
+    const prompter = createPrompter(botToken, run);
+    prompterRef = prompter;
 
     async function handleMessage(msg: TelegramMessage, senderName?: string): Promise<void> {
       const chatId = msg.chat.id;
@@ -330,9 +335,10 @@ export const plugin: MatbotPluginSpec = {
           await settings.set(sessionKey, session.id);
         }
 
-        // Keep the typing indicator alive; Telegram expires it after ~5 s.
+        // Keep the typing indicator alive; Telegram expires it after ~5 s. Not while a question waits
+        // on the user — "typing…" over an unanswered question reads as "don't reply yet".
         const typingInterval = setInterval(
-          () => { void sendChatAction(botToken, chatId, 'typing'); },
+          () => { if (!prompter.pending(chatId)) void sendChatAction(botToken, chatId, 'typing'); },
           4_000,
         );
 
@@ -355,34 +361,8 @@ export const plugin: MatbotPluginSpec = {
             content,
             provider:  providerName,
             principal,
-            // ── Interactive prompts: deliberately NOT implemented ───────────────────────────────
-            // This telegram frontend is a *demonstrator* that stress-tests the frontend API; it does
-            // not do `prompt`, and so supplies NONE. It used to pass a stub that auto-accepted each
-            // field's default, which is a worse lie than the absence: to a tool it resolved silently
-            // (the model proceeds as if answered while the chat saw no question), and to a permission
-            // gate it looked like a reachable human, since the one signal for "nobody is here" is that
-            // there is no PromptFn at all. Absent, a privileged operation gets the call site's stated
-            // non-interactive answer and `ask_user` degrades exactly as it does anywhere else with no
-            // channel. Implementing it properly is the obvious next build.
-            // Sketch (exercise for the reader):
-            //
-            //   1. A per-chat pending-prompt slot, module-scoped:
-            //        const pending = new Map<number, (answer: string) => void>();
-            //   2. The prompt impl sends the question and parks a resolver (instead of resolving now):
-            //        prompt: (p) => {
-            //          const q = typeof p === 'string' ? p : p.label;   // + render p.options as buttons
-            //          void sendMessage(botToken, chatId, q);
-            //          return new Promise<string>(res => pending.set(chatId, res));
-            //        }
-            //   3. The dispatch loop (below) routes the *next* message for a chat that has a parked
-            //      prompt to its resolver, instead of starting a fresh turn:
-            //        const resolve = pending.get(chatId);
-            //        if (resolve) { pending.delete(chatId); resolve(text); continue; }
-            //
-            // Wrinkles to handle: cancel (`/cancel` → reject with PromptCancelledError + run.cancelTurn),
-            // a timeout (a turn can't hold the pump forever waiting on a human), and FormField `options`
-            // as an inline keyboard. This is the inverse of `followup`: there matbot continues a turn
-            // on its own; here it pauses one to wait on the human.
+            // A question is sent to the chat and the turn waits for the answer; see prompt.ts.
+            prompt:    prompter.promptFor(chatId, session.id, msg.from),
           });
           // Drain to session idle, not just our own turn's `done`: a `followup` resubmission spawned
           // by our turn runs as a *later* turn with its own traceId. We adopt the turns descended from
@@ -431,6 +411,22 @@ export const plugin: MatbotPluginSpec = {
       }
     }
 
+    // A message is first offered to any question parked in its chat: it may be the answer, and it
+    // must not start a turn of its own if so. `/cancel` gives up on the question and its turn.
+    async function routeMessage(msg: TelegramMessage, senderName?: string): Promise<void> {
+      const chatId = msg.chat.id;
+      if (knownChats.has(chatId) && /^\/cancel(@\w+)?$/.test(msg.text?.trim() ?? '')) {
+        if (prompter.cancelChat(chatId, '✖ Cancelled.') > 0) return;
+        const sessionId = await settings.get<string>(`chat:${chatId}`);
+        const running   = sessionId !== undefined && run.status(sessionId).running;
+        if (running) run.cancelTurn(sessionId);
+        await sendMessage(botToken, chatId, running ? 'Stopped.' : 'Nothing to cancel.').catch(() => {});
+        return;
+      }
+      if (prompter.onMessage(msg) === 'answered') return;
+      await handleMessage(msg, senderName);
+    }
+
     // Background sub-agent runs share the bot token with the foreground process; two concurrent
     // getUpdates long-polls on the same token make Telegram return 409 Conflict. So a sub-agent
     // skips polling (the foreground owner keeps it) but still has a live setup() — it can send.
@@ -455,8 +451,9 @@ export const plugin: MatbotPluginSpec = {
               // store access inside handleMessage runs under it (the turn itself is scoped by pump).
               const senderName = msg.from?.first_name || msg.from?.username;
               const principal: Principal = { id: `telegram-${senderName ?? msg.chat.id}`, type: 'user'};
-              void runAs(principal, () => handleMessage(msg, senderName));
+              void runAs(principal, () => routeMessage(msg, senderName));
             }
+            if (update.callback_query) void prompter.onButton(update.callback_query).catch(() => {});
           }
         } catch (e) {
           if (ac.signal.aborted) break;
@@ -475,6 +472,8 @@ export const plugin: MatbotPluginSpec = {
 
   async teardown() {
     // Aborting the shared signal cancels any in-flight turn via the runner.
+    prompterRef?.closeAll();
+    prompterRef    = undefined;
     teardownAc?.abort();
     teardownAc     = undefined;
     servicesRef    = undefined;

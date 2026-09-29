@@ -245,7 +245,10 @@ Fetched code is mirrored under a matbot-writes / LLM-reads-only `.plugins/` cach
 
 **Node drives the module graph, fetching as it resolves.** Only the manifest and the entry are fetched up
 front; each further import is fetched when Node actually resolves it, by a module hook that maps the
-importing file back to where it came from. So a **dynamic `import(variable)`**, a **root-relative**
+importing file back to where it came from. The hooks answer synchronously, in-thread, so the fetch itself
+runs on a worker the hook waits on — which is why an origin cannot be served by the very matbot process
+fetching from it. While it waits the process runs nothing else, so every fetch is bounded (30 s per request,
+`MATBOT_FETCH_TIMEOUT_MS` to change it) and an origin that never answers fails the import instead. So a **dynamic `import(variable)`**, a **root-relative**
 `/ms@2.1.3/…` specifier and an **absolute URL import** all work — none of which a scan of the source ahead
 of time can see. `import.meta.url` is still a `file:` URL, so `createRequire`, `fileURLToPath` and reading
 a sibling file behave normally, and the tree stays a real package the model can read.
@@ -1319,6 +1322,7 @@ Store-backed index with optional Cloudflare BGE reranker.
 | `@matatbread/matbot-cognition` | `ask_inner_voice`, `remember_fact`, `dream_time`, `cognition_config` + `remembered_facts_action` | Seeds the Inner Voice skill and a remembered-facts store; inner-voice critique, fact memory, background Dream Time consolidation |
 | `@matatbread/matbot-tool-whoami` | `whoami` | Reports the current Principal |
 | `@matatbread/matbot-tool-types` | `ToolTypeIndex` service · Node only | Derives a `.d.ts` of the loaded tools' result/service types so code generators can type what `tool` calls resolve to |
+| `@matatbread/matbot-caching-tool-types` | `ToolTypeIndex` service · Node only | `tool-types` with its build kept in plugin settings across restarts; load it instead of `tool-types` |
 | `@matatbread/matbot-hook-logger` | diagnostic hooks | Logs each hook channel firing |
 | `@matatbread/matbot-frontend-web` | frontend | Web UI with session management (HTTP+SSE on Node, in-process in the browser) |
 | `@matatbread/matbot-frontend-dom` | frontend | Minimal in-process browser chat (the `matbot-demo.html` demonstrator) |

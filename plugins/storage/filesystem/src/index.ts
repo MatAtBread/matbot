@@ -3,10 +3,10 @@ import type { MatbotPluginSpec, MatbotMachine } from '@matatbread/matbot-plugin-
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import { FilesystemStorageBackend } from './backend.js';
 
-// FilesystemStore is exported for the host to construct its own boot base directly (apps/cli wires it
-// as the zero-plugin default). The `plugin` export is the same store as an installable StorageBackend
-// — the node host's default, made nameable so it can be asserted to override another backend rather
-// than only reverted to by unregistering whatever is in force.
+// FilesystemStorageBackend is exported for the host to construct its own boot base directly (apps/cli
+// wires it as the zero-plugin default). The `plugin` export is the same backend, installable — made
+// nameable so it can be asserted to override another backend rather than only reverted to by
+// unregistering whatever is in force.
 export { FilesystemStore } from './store.js';
 export { FilesystemStorageBackend } from './backend.js';
 

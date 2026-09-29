@@ -1,5 +1,5 @@
 import type TS from 'typescript';
-import { buildToolValidator, type ToolValidator } from './validator.js';
+import { compileToolValidator, generateValidator, type ToolValidator, type ValidatorSource } from './validator.js';
 
 // Derive a self-contained `declare module … { interface ToolContracts {…} interface MatbotServices {…} }`
 // from the live type graph, so a compiled (or hand-rolled) plugin's compilation sees correct types for
@@ -24,9 +24,10 @@ import { buildToolValidator, type ToolValidator } from './validator.js';
 // For `MatbotServices` only the plugin-contributed members are emitted; the base members (`Vault`,
 // `StorageBackend?`, `KnowledgeIndex`) are already visible through plugin-api.
 //
-// Caveat: `ts.createProgram` over the workspace runs in-process and briefly blocks the event loop.
-// Acceptable once-per-compile; the planned coverage work (drive off the live loaded-plugin set, build
-// lazily + dirty on plugin load) also removes that cost. Coverage today is the monorepo `plugins/` tree.
+// Caveat: `ts.createProgram` over the scanned roots runs in-process, synchronously — about 2 s of blocked
+// event loop on a one-CPU host — paid by whichever caller first needs the index (a tool call's validator,
+// a turn's wire contracts), and again after any tool registry change. The index shares one build among
+// callers that meet; `@matatbread/matbot-caching-tool-types` carries a build over from one process to the next.
 
 /**
  * A registry key declared more than once, with DIFFERENT types, across the scanned files. Declaration
@@ -62,12 +63,34 @@ export interface MatbotToolsDts {
   // RESOLVED type in this same pass — so conditionals/generics/`Omit` are already evaluated and no
   // second `ts.Program` is ever built. A contract that cannot be honestly validated yields
   // `{ refused }` rather than a permissive validator — and those refusals are the census of what the
-  // typed path does not cover. The emitted TEXT is not carried: `generateValidator` regenerates it.
+  // typed path does not cover.
   validators: Record<string, ToolValidator>;
   // The names of every plugin-api type export. A source-less tool's `toolContract` string may name one
   // (e.g. `StoreQuery`); the consumer (ToolTypeIndex) uses this to import the ones it references so those
   // references resolve rather than dangle.
   apiExports: string[];
+}
+
+/**
+ * A build as plain data: {@link MatbotToolsDts} with each validator as its SOURCE, plus every file the
+ * build read. Serialisable by construction, so a build can be kept beyond the process that made it; what
+ * it depends on is exactly its arguments, tool-types itself, and the content of `files`.
+ */
+export interface ToolTypesData extends Omit<MatbotToolsDts, 'validators'> {
+  validators: Record<string, ValidatorSource>;
+  /** `dts` in pieces, one per tool, so {@link filterToolTypesData} can narrow it without a rebuild. */
+  dtsParts: DtsParts;
+  /** Every source file either Program read (lib files, plugin-api, each root and what it imports). */
+  files: string[];
+}
+
+export interface DtsParts {
+  /** Everything before the `ToolContracts` block: imports, bundled declarations, the module opener. */
+  head:  string;
+  /** Each tool's `ToolContracts` member line, by tool name, in emit order. */
+  tools: Record<string, string>;
+  /** Everything after it: `MatbotServices`, re-emitted augmentations, the closing brace. */
+  tail:  string;
 }
 
 type Classification =
@@ -77,34 +100,19 @@ type Classification =
   | { tag: 'bundle'; sym: TS.Symbol }
   | { tag: 'bail';   label: string };
 
-// `pluginEntryUrls` are the resolved import URLs of the LIVE loaded plugins (each plugin's `resolvedUrl`,
-// via the `plugin` tool's `list`). Each entry is used as a Program root: it pulls in that plugin's own
-// augmenting files transitively, so coverage follows the actual loaded set (npm / `.plugins/` / local),
-// not just the monorepo tree. When none resolve to on-disk source, falls back to globbing the monorepo
-// `plugins/` tree. Returns null when neither yields anything (the caller then uses its static DTS).
-//
-// `liveToolNames` is the live tool registry (`machine.tools.list()`), and it is what makes the emitted
-// `ToolContracts` a description of what a generator can actually CALL rather than of what happens to be on
-// disk: the roots are a superset of the loaded set by construction (see the glob below), so a name absent
-// from the registry is declared, typed, and uncallable — `tool.telegram_send(…)` typechecks clean and
-// throws "not registered" at runtime, which is the one failure the check gate exists to prevent. Omit it
-// only when the caller genuinely wants the whole scanned tree (the clash census test); the registry is not
-// optional information for anything that shows the dts to a model.
-// `syntheticContracts` maps a tool name to its `toolContract` STRING — the form a tool built at runtime
-// must use, having no source to carry a `ToolContracts` augmentation (`function-tools`' generated
-// functions, `tool-store`'s per-namespace tools). They are rendered into one virtual augmentation file
-// added to THIS Program, so declaration merging puts them in the same `ToolContracts` as every scanned
-// arm and the validator generator below reaches them with no second code path and no second Program.
-//
-// They are then held OUT of the emitted dts and out of `contracts`: the caller splices those verbatim
-// from the same strings (`registryBlock`, `splitContract`), which is what the model already sees, and
-// re-deriving that text from the resolved type would change it — expanding an alias the author wrote
-// deliberately — for no gain. So this argument buys exactly one thing: the validators.
-export async function buildMatbotToolsDts(
-  projectRoot: string, pluginEntryUrls?: readonly string[], liveToolNames?: readonly string[],
-  syntheticContracts?: Readonly<Record<string, string>>,
-): Promise<MatbotToolsDts | null> {
-  const ts = (await import('typescript')).default as typeof TS;
+export interface ToolTypeRoots {
+  /** The plugin-api entry every build is anchored on; always `roots[0]`. */
+  pluginApiIndex: string;
+  /** The Program's root files, in the order the Program is given them — which is the order declaration
+   *  merging sees, so it decides a `conflicts` winner and is part of what a build depends on. */
+  roots: string[];
+}
+
+/** What a build of `pluginEntryUrls` would scan, without building it. Null when there is nothing to scan
+ *  beyond plugin-api, or plugin-api itself cannot be found. */
+export async function collectToolTypeRoots(
+  projectRoot: string, pluginEntryUrls?: readonly string[],
+): Promise<ToolTypeRoots | null> {
   const { readFileSync, readdirSync, statSync, existsSync } = await import('node:fs');
   const { join } = await import('node:path');
   const { fileURLToPath } = await import('node:url');
@@ -186,6 +194,41 @@ export async function buildMatbotToolsDts(
     walk(join(projectRoot, 'plugins'));
   }
   if (roots.size === 1) return null;                          // nothing to scan beyond plugin-api itself
+  return { pluginApiIndex, roots: [...roots] };
+}
+
+// `pluginEntryUrls` are the resolved import URLs of the LIVE loaded plugins (each plugin's `resolvedUrl`,
+// via the `plugin` tool's `list`). Each entry is used as a Program root: it pulls in that plugin's own
+// augmenting files transitively, so coverage follows the actual loaded set (npm / `.plugins/` / local),
+// not just the monorepo tree. When none resolve to on-disk source, falls back to globbing the monorepo
+// `plugins/` tree. Returns null when neither yields anything (the caller then uses its static DTS).
+//
+// `liveToolNames` is the live tool registry (`machine.tools.list()`), and it is what makes the emitted
+// `ToolContracts` a description of what a generator can actually CALL rather than of what happens to be on
+// disk: the roots are a superset of the loaded set by construction (see the glob below), so a name absent
+// from the registry is declared, typed, and uncallable — `tool.telegram_send(…)` typechecks clean and
+// throws "not registered" at runtime, which is the one failure the check gate exists to prevent. Omit it
+// only when the caller genuinely wants the whole scanned tree (the clash census test); the registry is not
+// optional information for anything that shows the dts to a model.
+// `syntheticContracts` maps a tool name to its `toolContract` STRING — the form a tool built at runtime
+// must use, having no source to carry a `ToolContracts` augmentation (`function-tools`' generated
+// functions, `tool-store`'s per-namespace tools). They are rendered into one virtual augmentation file
+// added to THIS Program, so declaration merging puts them in the same `ToolContracts` as every scanned
+// arm and the validator generator below reaches them with no second code path and no second Program.
+//
+// They are then held OUT of the emitted dts and out of `contracts`: the caller splices those verbatim
+// from the same strings (`registryBlock`, `splitContract`), which is what the model already sees, and
+// re-deriving that text from the resolved type would change it — expanding an alias the author wrote
+// deliberately — for no gain. So this argument buys exactly one thing: the validators.
+export async function buildToolTypesData(
+  projectRoot: string, pluginEntryUrls?: readonly string[], liveToolNames?: readonly string[],
+  syntheticContracts?: Readonly<Record<string, string>>,
+): Promise<ToolTypesData | null> {
+  const ts = (await import('typescript')).default as typeof TS;
+  const { join } = await import('node:path');
+  const found = await collectToolTypeRoots(projectRoot, pluginEntryUrls);
+  if (!found) return null;
+  const { pluginApiIndex, roots } = found;
 
   const options: TS.CompilerOptions = {
     target:                   ts.ScriptTarget.ES2022,
@@ -197,8 +240,9 @@ export async function buildMatbotToolsDts(
     skipLibCheck:             true,
     baseUrl:                  projectRoot,
   };
-  const program = ts.createProgram([...roots], options);
+  const program = ts.createProgram(roots, options);
   const checker = program.getTypeChecker();
+  const files = new Set(program.getSourceFiles().map(f => f.fileName));
 
   const apiSf = program.getSourceFile(pluginApiIndex)
     ?? program.getSourceFiles().find(f => f.fileName.includes('/plugin-api/') && /\/index\.d?\.ts$/.test(f.fileName));
@@ -225,8 +269,8 @@ export async function buildMatbotToolsDts(
    * by the caller and are what the model already reads; re-deriving them from the resolved type would
    * expand an alias the author wrote deliberately, for no gain.
    */
-  const syntheticValidators = (): Record<string, ToolValidator> => {
-    const out: Record<string, ToolValidator> = {};
+  const syntheticValidators = (): Record<string, ValidatorSource> => {
+    const out: Record<string, ValidatorSource> = {};
     const usable: Record<string, string> = {};
 
     // Screened one at a time, BEFORE any is rendered into the shared file: they become properties of one
@@ -269,6 +313,7 @@ export async function buildMatbotToolsDts(
       ...options, paths: { '@matatbread/matbot-plugin-api': [pluginApiIndex] },
     }, host);
     const chk = prog.getTypeChecker();
+    for (const f of prog.getSourceFiles()) if (f.fileName !== virtualPath) files.add(f.fileName);
     const sf = prog.getSourceFile(virtualPath);
     if (!sf) return out;
 
@@ -318,7 +363,7 @@ export async function buildMatbotToolsDts(
             paramNodes.push(a.typeArguments[1]!);
           }
           out[name] = ok
-            ? buildToolValidator(ts, chk, paramNodes.map(nd => chk.getTypeFromTypeNode(nd)), ann, { excessProperties: 'reject' })
+            ? generateValidator(ts, chk, paramNodes.map(nd => chk.getTypeFromTypeNode(nd)), ann, { excessProperties: 'reject' })
             : { refused: 'toolContract is not `ToolContract<Result, Args>` (or a union of those)' };
         }
       }
@@ -479,10 +524,11 @@ export async function buildMatbotToolsDts(
   // `emitNode` runs and its referenced types are never bundled or imported either.
   const emitInterface = (
     interfaceName: string, onlyAugmented: boolean, only?: ReadonlySet<string>,
-  ): { lines: string[]; emitted: string[]; unknown: string[] } => {
+  ): { lines: string[]; named: Record<string, string>; emitted: string[]; unknown: string[] } => {
     const sym = findCanonicalSymbol(interfaceName);
     const lines: string[] = [], emitted: string[] = [], unknownNames: string[] = [];
-    if (!sym) return { lines, emitted, unknown: unknownNames };
+    const named: Record<string, string> = {};
+    if (!sym) return { lines, named, emitted, unknown: unknownNames };
     const props = [...checker.getPropertiesOfType(checker.getDeclaredTypeOfSymbol(sym))].sort((a, b) => a.name.localeCompare(b.name));
     for (const prop of props) {
       if (onlyAugmented && inPluginApi(prop)) continue;
@@ -491,25 +537,25 @@ export async function buildMatbotToolsDts(
       const decl = (prop.declarations ?? []).find(d => ts.isPropertySignature(d));
       const ann  = decl && ts.isPropertySignature(decl) ? decl.type : undefined;
       if (!ann) {
-        lines.push(`    ${prop.name}${optional}: ${unknownOf('no type annotation')};`);
+        lines.push(named[prop.name] = `    ${prop.name}${optional}: ${unknownOf('no type annotation')};`);
         unknownNames.push(prop.name);
         continue;
       }
       const ctx: Ctx = { imports: new Set(), seen: new Set(), heritageBail: null };
       const text = emitNode(ann, ctx);
       if (ctx.heritageBail) {                                        // can't substitute in `extends` — whole member unknown
-        lines.push(`    ${prop.name}${optional}: ${unknownOf(ctx.heritageBail)};`);
+        lines.push(named[prop.name] = `    ${prop.name}${optional}: ${unknownOf(ctx.heritageBail)};`);
         unknownNames.push(prop.name);
         continue;
       }
       ctx.imports.forEach(n => importNames.add(n));
-      lines.push(`    ${prop.name}${optional}: ${text};`);
+      lines.push(named[prop.name] = `    ${prop.name}${optional}: ${text};`);
       // A member whose own annotation was entirely replaced is effectively unknown; one with only nested
       // substitutions is still a usable typed surface.
       if (/^unknown\b/.test(text.trim())) unknownNames.push(prop.name);
       else emitted.push(prop.name);
     }
-    return { lines, emitted, unknown: unknownNames };
+    return { lines, named, emitted, unknown: unknownNames };
   };
 
   // A tool the registry doesn't hold isn't a tool. `MatbotServices` takes no such filter: a member there is
@@ -712,7 +758,7 @@ export async function buildMatbotToolsDts(
     return { result: results.join(' | '), params: params.join(' | '), paramNodes };
   };
   const contracts: Record<string, { params: string; result: string }> = {};
-  const validators: Record<string, ToolValidator> = {};
+  const validators: Record<string, ValidatorSource> = {};
   const toolContractsSym = findCanonicalSymbol('ToolContracts');
   if (toolContractsSym) {
     for (const prop of checker.getPropertiesOfType(checker.getDeclaredTypeOfSymbol(toolContractsSym))) {
@@ -730,7 +776,7 @@ export async function buildMatbotToolsDts(
       // most common tool-call hallucination into an error the model can repair. It also makes `NoParams`
       // consistent rather than accidentally special: `Record<string, never>` already refuses every key,
       // via its index signature's `never`, so without this a closed contract was the LOOSER of the two.
-      validators[prop.name] = buildToolValidator(
+      validators[prop.name] = generateValidator(
         ts, checker, c.paramNodes.map(nd => checker.getTypeFromTypeNode(nd)), ann,
         { excessProperties: 'reject' },
       );
@@ -742,22 +788,67 @@ export async function buildMatbotToolsDts(
   // for a tool it also registers dynamically, and then the compiler-checked one is the truth.
   for (const [name, v] of Object.entries(syntheticValidators())) validators[name] ??= v;
 
-  const block = (name: string, lines: string[]): string =>
-    lines.length ? `  interface ${name} {\n${lines.join('\n')}\n  }\n` : '';
   const imports = [...importNames].filter(n => apiTypeNames.has(n)).sort();
   const importLine  = imports.length ? `import type { ${imports.join(', ')} } from '@matatbread/matbot-plugin-api';\n` : '';
   const bundleBlock = bundledDecls.size ? `${[...bundledDecls.values()].join('\n\n')}\n\n` : '';
-  const dts = `import '@matatbread/matbot-plugin-api';
-${importLine}${bundleBlock}declare module '@matatbread/matbot-plugin-api' {
-${block('ToolContracts', tools.lines)}${block('MatbotServices', services.lines)}${augmentations.length ? `${augmentations.join('\n')}\n` : ''}}
-`;
+  const dtsParts: DtsParts = {
+    head:  `import '@matatbread/matbot-plugin-api';\n${importLine}${bundleBlock}declare module '@matatbread/matbot-plugin-api' {\n`,
+    tools: tools.named,
+    tail:  `${interfaceBlock('MatbotServices', services.lines)}${augmentations.length ? `${augmentations.join('\n')}\n` : ''}}\n`,
+  };
   return {
-    dts,
+    dts: assembleDts(dtsParts),
+    dtsParts,
     tools:    { emitted: tools.emitted,    unknown: tools.unknown },
     services: { emitted: services.emitted, unknown: services.unknown },
     conflicts,
     contracts,
     validators,
     apiExports: [...apiTypeNames],
+    files: [...files],
   };
+}
+
+const interfaceBlock = (name: string, lines: readonly string[]): string =>
+  lines.length ? `  interface ${name} {\n${lines.join('\n')}\n  }\n` : '';
+
+function assembleDts(parts: DtsParts): string {
+  return `${parts.head}${interfaceBlock('ToolContracts', Object.values(parts.tools))}${parts.tail}`;
+}
+
+/**
+ * A build narrowed to the live tools, as if `liveToolNames` had been passed to it. Nothing a build derives
+ * for one tool depends on which others are live, so a build made over every scanned tool can serve any
+ * live set. The one difference: `head` keeps the imports and bundled declarations that only filtered-out
+ * tools referenced — extra, unreferenced declarations, which change nothing a snippet is checked against.
+ */
+export function filterToolTypesData(data: ToolTypesData, liveToolNames: readonly string[]): ToolTypesData {
+  const live = new Set(liveToolNames);
+  const keep = <V>(r: Readonly<Record<string, V>>): Record<string, V> =>
+    Object.fromEntries(Object.entries(r).filter(([name]) => live.has(name)));
+  const dtsParts: DtsParts = { ...data.dtsParts, tools: keep(data.dtsParts.tools) };
+  return {
+    ...data,
+    dts:        assembleDts(dtsParts),
+    dtsParts,
+    tools:      { emitted: data.tools.emitted.filter(n => live.has(n)), unknown: data.tools.unknown.filter(n => live.has(n)) },
+    conflicts:  data.conflicts.filter(c => c.registry !== 'ToolContracts' || live.has(c.key)),
+    contracts:  keep(data.contracts),
+    validators: keep(data.validators),
+  };
+}
+
+/** {@link buildToolTypesData}, with every validator compiled — the in-process form. */
+export async function buildMatbotToolsDts(
+  projectRoot: string, pluginEntryUrls?: readonly string[], liveToolNames?: readonly string[],
+  syntheticContracts?: Readonly<Record<string, string>>,
+): Promise<MatbotToolsDts | null> {
+  const data = await buildToolTypesData(projectRoot, pluginEntryUrls, liveToolNames, syntheticContracts);
+  if (!data) return null;
+  const { files: _files, dtsParts: _parts, validators, ...rest } = data;
+  return { ...rest, validators: compileToolValidators(validators) };
+}
+
+export function compileToolValidators(sources: Readonly<Record<string, ValidatorSource>>): Record<string, ToolValidator> {
+  return Object.fromEntries(Object.entries(sources).map(([name, s]) => [name, compileToolValidator(s)]));
 }

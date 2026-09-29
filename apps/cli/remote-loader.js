@@ -20,11 +20,16 @@
 // package's URL, lets docker-bash mount `projectRoot` read-only so the model can read what it fetched, and
 // lets a CommonJS dependency load at all. The URL is where a file CAME from; the path is what it IS.
 
-import { mkdir, writeFile, readFile, access } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { Worker, MessageChannel, receiveMessageOnPort, isMainThread, workerData, parentPort } from 'node:worker_threads';
 import path from 'node:path';
 
 const CACHE_DIR = '.plugins';
+
+// Per request, headers and body together. The worker reads the same value, inheriting this environment.
+const FETCH_TIMEOUT_MS = Number(process.env.MATBOT_FETCH_TIMEOUT_MS) || 30_000;
 
 // The scheme is not recoverable from the mirrored path — `.plugins/<host>/<path…>` deliberately keys on
 // host so one origin is one directory — so each host records its own. Absent means https, which is what
@@ -36,11 +41,11 @@ const ORIGIN_FILE = '.origin';
 
 const schemeByHostDir = new Map();
 
-async function schemeFor(hostDir) {
+function schemeFor(hostDir) {
   const cached = schemeByHostDir.get(hostDir);
   if (cached !== undefined) return cached;
   let scheme = 'https:';
-  try { scheme = (await readFile(path.join(hostDir, ORIGIN_FILE), 'utf8')).trim() || 'https:'; }
+  try { scheme = readFileSync(path.join(hostDir, ORIGIN_FILE), 'utf8').trim() || 'https:'; }
   catch { /* pre-existing cache, or a host we have not recorded — https */ }
   schemeByHostDir.set(hostDir, scheme);
   return scheme;
@@ -100,20 +105,9 @@ function candidatesFor(url) {
   return candidates;
 }
 
-const exists = async p => { try { await access(p); return true; } catch { return false; } };
-
-/**
- * Resolve one specifier made from inside a fetched plugin, fetching it if we do not have it.
- *
- * Every candidate is checked on disk before any is fetched, for the same reason the mirrored tree is
- * consulted before the network at all: the `.js` name is the preferred URL but the `.ts` name is what got
- * written, so a per-candidate disk-then-network order would put a doomed request in front of the file we
- * already have — and fail with no network at all. A warm boot therefore makes no requests, and an offline
- * one works, exactly as before.
- *
- * Returns a file: URL, or undefined if this specifier is not ours to resolve (a bare one).
- */
-export async function resolveFetched(specifier, parent) {
+// Which URLs a specifier made from inside a fetched plugin could name, most preferred first; undefined when it
+// is not ours to resolve (a bare one, or `node:`/`data:`).
+function candidatesOf(specifier, parent) {
   const at = cacheLocation(parent);
   if (at === undefined) return undefined;
 
@@ -122,36 +116,132 @@ export async function resolveFetched(specifier, parent) {
     if (!/^https?:/i.test(specifier)) return undefined;      // node:, data: — not ours
     targetUrl = specifier;                                    // an absolute URL, possibly another host
   } else if (specifier.startsWith('/')) {
-    targetUrl = `${await schemeFor(at.hostDir)}//${at.host}${specifier}`;
+    targetUrl = `${schemeFor(at.hostDir)}//${at.host}${specifier}`;
   } else if (specifier.startsWith('.')) {
-    targetUrl = new URL(specifier, `${await schemeFor(at.hostDir)}//${at.host}/${at.rel}`).href;
+    targetUrl = new URL(specifier, `${schemeFor(at.hostDir)}//${at.host}/${at.rel}`).href;
   } else {
     return undefined;                                         // bare: host-provided, or a sibling plugin
   }
+  return { dotPlugins: at.dotPlugins, candidates: candidatesFor(targetUrl) };
+}
 
-  const candidates = candidatesFor(targetUrl);
+// Every candidate is checked on disk before any is fetched, for the same reason the mirrored tree is consulted
+// before the network at all: the `.js` name is the preferred URL but the `.ts` name is what got written, so a
+// per-candidate disk-then-network order would put a doomed request in front of the file we already have — and
+// fail with no network at all. A warm boot therefore makes no requests, and an offline one works.
+function onDisk({ dotPlugins, candidates }) {
   for (const candidate of candidates) {
-    const p = urlToCachePath(candidate, at.dotPlugins);
-    if (await exists(p)) return pathToFileURL(p).href;
+    const p = urlToCachePath(candidate, dotPlugins);
+    if (existsSync(p)) return pathToFileURL(p).href;
   }
+  return undefined;
+}
+
+/**
+ * Resolve one specifier made from inside a fetched plugin, fetching it if we do not have it.
+ *
+ * Returns a file: URL, or undefined if this specifier is not ours to resolve (a bare one).
+ */
+export async function resolveFetched(specifier, parent) {
+  const plan = candidatesOf(specifier, parent);
+  if (plan === undefined) return undefined;
+  const cached = onDisk(plan);
+  if (cached !== undefined) return cached;
 
   let unreachable;
-  for (const candidate of candidates) {
-    let res;
-    try { res = await fetch(candidate); }
-    catch (e) { unreachable ??= e; continue; }
-    if (!res.ok) continue;
-    const body = await res.text();
-    const p = urlToCachePath(candidate, at.dotPlugins);
+  for (const candidate of plan.candidates) {
+    // The signal bounds the body as well as the headers: an origin that stalls mid-response is as stuck as
+    // one that never answers, and either freezes the whole process, whose thread is waiting on this.
+    let body;
+    try {
+      const res = await fetch(candidate, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+      if (!res.ok) continue;
+      body = await res.text();
+    } catch (e) {
+      unreachable ??= e?.name === 'TimeoutError' ? new Error(`no answer within ${FETCH_TIMEOUT_MS} ms`) : e;
+      continue;
+    }
+    const p = urlToCachePath(candidate, plan.dotPlugins);
     await mkdir(path.dirname(p), { recursive: true });
     await writeFile(p, body, 'utf8');
-    await recordOrigin(at.dotPlugins, candidate);
+    await recordOrigin(plan.dotPlugins, candidate);
     return pathToFileURL(p).href;
   }
 
   const reason = unreachable !== undefined
     ? `could not be reached (${unreachable.message})`
-    : `was not found at ${candidates.join(' or ')}`;
+    : `was not found at ${plan.candidates.join(' or ')}`;
   throw Object.assign(new Error(`Cannot fetch "${specifier}" imported by ${parent}: it ${reason}.`),
                       { code: 'ERR_MODULE_NOT_FOUND' });
+}
+
+// The module hooks run in-thread and must answer synchronously, and a fetch can only be awaited. So when a
+// fetched plugin imports a file we do not have yet, `resolveFetched` runs on a worker — this file, started as
+// one — and the hook blocks until it answers: the round trip `module.register()` made for every import of the
+// process, made only for these. A file already on disk never starts it.
+//
+// Blocking means the origin cannot be served by this same thread, as it could not under `register()` either
+// since Node 24.12, whose hooks thread the main thread also waits on.
+//
+// Every wait is bounded, because a blocked thread runs nothing — no timer, no SIGINT handler — so an unbounded
+// one is a process that can only be killed. A request is QUEUED until the worker takes it and DONE when it has
+// answered. Never taken means the worker is not running (it failed to start, or died), which nothing else can
+// report: its 'error' and 'exit' events are delivered on this thread, which is the one blocked. Taken and not
+// answered by the time every candidate's fetch has had its full timeout means it is stuck. Either way the
+// worker is discarded, so the next request starts a fresh one and no late answer can be read as its own.
+const FETCHER = 'matbot-remote-fetcher';
+const QUEUED = 0, WORKING = 1, DONE = 2;
+const PICKUP_MS = 10_000;
+let fetcher;
+
+export function resolveFetchedSync(specifier, parent) {
+  const plan = candidatesOf(specifier, parent);
+  if (plan === undefined) return undefined;
+  const cached = onDisk(plan);
+  if (cached !== undefined) return cached;
+
+  const current = fetcher ??= startFetcher();
+  const state = new Int32Array(new SharedArrayBuffer(4));
+  current.worker.postMessage({ specifier, parent, state });
+  const stuck =
+    Atomics.wait(state, 0, QUEUED, PICKUP_MS) === 'timed-out' ? `the fetch worker did not start within ${PICKUP_MS} ms`
+    : Atomics.wait(state, 0, WORKING, plan.candidates.length * FETCH_TIMEOUT_MS + PICKUP_MS) === 'timed-out'
+      ? 'the fetch worker did not answer in time'
+    : undefined;
+  if (stuck !== undefined) {
+    if (fetcher === current) fetcher = undefined;
+    void current.worker.terminate();
+    throw Object.assign(new Error(`Cannot fetch "${specifier}" imported by ${parent}: ${stuck}.`),
+                        { code: 'ERR_MODULE_NOT_FOUND' });
+  }
+  const answer = receiveMessageOnPort(current.answers).message;
+  if ('error' in answer) throw Object.assign(new Error(answer.error), { code: answer.code });
+  return answer.url;
+}
+
+function startFetcher() {
+  const { port1, port2 } = new MessageChannel();
+  // No `execArgv`: inheriting `--import ./register.js` would give the worker hooks it has no use for — its
+  // own imports are plain JavaScript.
+  const worker = new Worker(new URL(import.meta.url), {
+    workerData: { role: FETCHER, answers: port2 }, transferList: [port2], execArgv: [],
+  });
+  worker.unref();
+  // A worker that fails reports it as an 'error' event, which with no listener would crash the process. The
+  // request waiting on it has already said what went wrong; all that is left is not to reuse it.
+  worker.on('error', () => {});
+  worker.on('exit', () => { if (fetcher?.worker === worker) fetcher = undefined; });
+  return { worker, answers: port1 };
+}
+
+if (!isMainThread && workerData?.role === FETCHER) {
+  const { answers } = workerData;
+  parentPort.on('message', async ({ specifier, parent, state }) => {
+    Atomics.store(state, 0, WORKING);
+    Atomics.notify(state, 0);
+    try { answers.postMessage({ url: await resolveFetched(specifier, parent) }); }
+    catch (e) { answers.postMessage({ error: e instanceof Error ? e.message : String(e), code: e?.code }); }
+    Atomics.store(state, 0, DONE);
+    Atomics.notify(state, 0);
+  });
 }

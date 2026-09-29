@@ -5,6 +5,10 @@ interface TaggedContributor {
   pluginName?: string;
 }
 
+/** The system prompt as sent: the parts joined, or null when there are none. */
+export const joinSystemContext = (parts: readonly SystemContextPart[]): string | null =>
+  parts.length > 0 ? parts.map(p => p.text).join('\n\n') : null;
+
 export class SystemContextRegistryImpl implements SystemContextRegistry {
   private readonly _contributors: TaggedContributor[] = [];
 
@@ -32,9 +36,8 @@ export class SystemContextRegistryImpl implements SystemContextRegistry {
   }
 
   // The joined form is derived from the attributed one, so the prompt the model receives and the
-  // breakdown `about_matbot` reports cannot drift: there is one traversal and one filter.
+  // breakdown `about_matbot` reports cannot drift: there is one traversal, one filter and one join.
   async build(ctx: { session: Session; signal: AbortSignal }): Promise<string | null> {
-    const parts = await this.parts(ctx);
-    return parts.length > 0 ? parts.map(p => p.text).join('\n\n') : null;
+    return joinSystemContext(await this.parts(ctx));
   }
 }

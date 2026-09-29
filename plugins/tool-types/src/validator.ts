@@ -31,28 +31,27 @@ export type ValidatorSource =
 /**
  * What a consumer wants: the callable validator, plus what it does NOT constrain.
  *
- * The emitted source is deliberately not handed out. Anyone who wants the text calls
- * {@link generateValidator}, which is the same generation this went through — so carrying a copy on
- * every entry would be a second way to obtain one thing. (Note `validate.toString()` is NOT that copy:
- * the helper functions live in the enclosing scope of `new Function`, so it recovers only the entry
- * stub, never the logic.)
- *
- * Compiling eagerly rather than lazily is deliberate: `new Function` compiles in the GLOBAL scope, so
- * the validator captures nothing — not the checker, not a `ts.Type`, not this module's locals — and the
- * `ts.Program` is collectable the moment the build returns either way. There is nothing to defer.
+ * The build hands out {@link ValidatorSource}, not this: the source is plain data, so a build can be
+ * kept, moved or persisted and compiled wherever it lands (`validate.toString()` could not stand in —
+ * the helper functions live in the enclosing scope of `new Function`, so it recovers only the entry stub).
+ * `new Function` compiles in the GLOBAL scope, so a compiled validator captures nothing — not the
+ * checker, not a `ts.Type` — and compiling from a stored copy is the same act as compiling a fresh one.
  */
 export type ToolValidator =
   | { validate: Validator; warnings: string[] }
   | { refused: string };
 
-/** Generate and compile in one step — {@link generateValidator} followed by {@link compileValidator}. */
+/** Compile a {@link ValidatorSource}; a refusal passes through unchanged. */
+export function compileToolValidator(source: ValidatorSource): ToolValidator {
+  return 'refused' in source ? source : { validate: compileValidator(source.src), warnings: source.warnings };
+}
+
+/** Generate and compile in one step — {@link generateValidator} followed by {@link compileToolValidator}. */
 export function buildToolValidator(
   ts: typeof TS, checker: TS.TypeChecker, root: TS.Type | readonly TS.Type[], location: TS.Node,
   opts: { excessProperties?: 'allow' | 'reject' } = {},
 ): ToolValidator {
-  const out = generateValidator(ts, checker, root, location, opts);
-  if ('refused' in out) return out;
-  return { validate: compileValidator(out.src), warnings: out.warnings };
+  return compileToolValidator(generateValidator(ts, checker, root, location, opts));
 }
 
 class Unsupported extends Error {
@@ -377,8 +376,9 @@ export function generateValidator(
   }
 }
 
-/** Instantiate a generated validator. The source is emitted by {@link generateValidator} from a type
- *  in this process — never from user input — and is plain JS with no free identifiers but `Object`. */
+/** Instantiate a generated validator. The source is emitted by {@link generateValidator} from a type —
+ *  never from user input — and is plain JS with no free identifiers but `Object`. A stored copy is
+ *  therefore exactly as trusted as the medium it was stored in. */
 export function compileValidator(src: string): Validator {
   return new Function(src)() as Validator;
 }

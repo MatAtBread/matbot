@@ -116,8 +116,7 @@ function isAsyncIterator(value: unknown): value is AsyncIterator<unknown> & Asyn
     && typeof (value as AsyncIterator<unknown>).next === 'function';
 }
 
-// The per-pull re-entry itself is `scopeIterator` (./scoped-iterator.ts) — the usage carrier needs the
-// identical wrap for its call site, and had its own, less faithful copy.
+// The per-pull re-entry itself is `scopeIterator` (./scoped-iterator.ts), shared with the usage carrier.
 function scopedIterator<T>(
   carrier:   PrincipalCarrier,
   principal: Principal,

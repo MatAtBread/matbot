@@ -3,15 +3,16 @@
   "matbotRuntime": [
     "node"
   ],
-  "version": "0.4.16",
+  "version": "0.4.17",
   "engines": {
-    "node": ">=24.0.0"
+    "node": ">=24.12.0"
   },
   "files": [
     "src",
     "bin.js",
     "register.js",
-    "ts-hooks.js"
+    "ts-hooks.js",
+    "remote-loader.js"
   ],
   "description": "matbot CLI: interactive REPL and single-turn runner for the matbot AI harness, with hot-loadable plugins.",
   "keywords": [
@@ -60,6 +61,7 @@
     "typescript": "catalog:",
     "@matatbread/matbot-function-tools": "workspace:^",
     "@matatbread/matbot-tool-types": "workspace:^",
+    "@matatbread/matbot-caching-tool-types": "workspace:^",
     "@matatbread/matbot-tool-ts-validation": "workspace:^",
     "@matatbread/matbot-storage-profiles": "workspace:^",
     "@matatbread/matbot-sessions": "workspace:^",

@@ -18,6 +18,7 @@
 
 import type { PluginSettings, Tool } from '@matatbread/matbot-plugin-api';
 import { makeGateActionTool } from './tool.js';
+import { createDefaultGate, DEFAULT_GATE_SETTINGS_NS } from './gate.js';
 
 export { createDefaultGate, toStandingAnswer, DEFAULT_GATE_SETTINGS_NS } from './gate.js';
 export type { StandingAnswer } from './gate.js';
@@ -29,3 +30,10 @@ export type { GateAnswer } from './tool.js';
 export function createGateTools(settings: PluginSettings): Tool[] {
   return [makeGateActionTool(settings)];
 }
+
+/** Everything a host seeds from this package, in the shape core's `assembleMachine` takes as `gate`. */
+export const defaultGate = {
+  namespace: DEFAULT_GATE_SETTINGS_NS,
+  create:    (settings: PluginSettings) => createDefaultGate(settings),
+  tools:     createGateTools,
+};

@@ -1,6 +1,17 @@
 export interface TelegramUpdate {
   update_id: number;
   message?: TelegramMessage;
+  callback_query?: TelegramCallbackQuery;
+}
+
+export interface TelegramUser { id: number; first_name?: string; username?: string }
+
+/** A press of an inline-keyboard button. `data` is what the button was sent with (≤64 bytes). */
+export interface TelegramCallbackQuery {
+  id:       string;
+  from:     TelegramUser;
+  message?: { message_id: number; chat: { id: number } };
+  data?:    string;
 }
 
 /** One rendition of a photo. Telegram sends several sizes; the last is the largest. */
@@ -25,8 +36,9 @@ export interface TelegramFile {
 export interface TelegramMessage {
   message_id: number;
   chat: { id: number; type: string };
-  from?: { id: number; first_name?: string; username?: string };
+  from?: TelegramUser;
   text?: string;
+  reply_to_message?: { message_id: number };
   /** Prose that came WITH an attachment. Telegram puts it here instead of `text`, so a message with a
    *  photo and a question has an empty `text` — reading only `text` loses the question. */
   caption?:   string;
@@ -39,22 +51,52 @@ export interface TelegramMessage {
 
 const API = 'https://api.telegram.org';
 
+/** Resolves to the id of the last message sent, which is the one carrying `replyMarkup`. */
 export async function sendMessage(
   botToken: string,
   chatId: number,
   text: string,
-): Promise<void> {
-  for (const chunk of splitText(text)) {
+  replyMarkup?: object,
+): Promise<number> {
+  const chunks = [...splitText(text)];
+  let messageId = 0;
+  for (const [i, chunk] of chunks.entries()) {
+    const last = i === chunks.length - 1;
     const res = await fetch(`${API}/bot${botToken}/sendMessage`, {
       method:  'POST',
       headers: { 'content-type': 'application/json' },
-      body:    JSON.stringify({ chat_id: chatId, text: chunk }),
+      body:    JSON.stringify({ chat_id: chatId, text: chunk, ...(last && replyMarkup ? { reply_markup: replyMarkup } : {}) }),
     });
     if (!res.ok) {
       const body = await res.text();
       throw new Error(`sendMessage failed: ${res.status} ${body}`);
     }
+    // The message is delivered by now; an unreadable body must not report it as a failed send.
+    const sent = await res.json().catch(() => undefined) as { result?: { message_id?: number } } | undefined;
+    messageId = sent?.result?.message_id ?? 0;
   }
+  return messageId;
+}
+
+/** Replace a message's text. Sent without `reply_markup`, which also removes its inline keyboard. */
+export async function editMessageText(
+  botToken: string, chatId: number, messageId: number, text: string,
+): Promise<void> {
+  const res = await fetch(`${API}/bot${botToken}/editMessageText`, {
+    method:  'POST',
+    headers: { 'content-type': 'application/json' },
+    body:    JSON.stringify({ chat_id: chatId, message_id: messageId, text: text.slice(0, 4096) }),
+  });
+  if (!res.ok) throw new Error(`editMessageText failed: ${res.status} ${await res.text()}`);
+}
+
+/** Every button press must be answered, or the client shows a spinner on the button until it gives up. */
+export async function answerCallbackQuery(botToken: string, id: string, text?: string): Promise<void> {
+  await fetch(`${API}/bot${botToken}/answerCallbackQuery`, {
+    method:  'POST',
+    headers: { 'content-type': 'application/json' },
+    body:    JSON.stringify({ callback_query_id: id, ...(text !== undefined ? { text } : {}) }),
+  });
 }
 
 /** What a bot may upload in one call. A larger file has to be linked, not sent. */
@@ -129,7 +171,7 @@ export async function getUpdates(
 ): Promise<TelegramUpdate[]> {
   const url =
     `${API}/bot${botToken}/getUpdates` +
-    `?offset=${offset}&timeout=${timeout}&allowed_updates=%5B%22message%22%5D`;
+    `?offset=${offset}&timeout=${timeout}&allowed_updates=%5B%22message%22%2C%22callback_query%22%5D`;
   const res = await fetch(url, { signal });
   if (!res.ok) {
     const body = await res.text();

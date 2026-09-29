@@ -18,9 +18,8 @@ import { MEDIA_RESIDENCY_BYTES, resolveSessionMedia } from './media.js';
 // context, losing any scope entered around the loop body. Scoping each `next()` instead means the
 // tool's body — and anything it kicks off while running — always resumes under its own site.
 //
-// `scopeIterable` is the shared per-pull wrap, as used by `runAs` for the principal: this had its own
-// object-literal copy, which replaced the iterator wholesale and so dropped a class-based tool
-// iterator's own members, prototype and `instanceof`.
+// `scopeIterable` is the per-pull wrap `runAs` also uses for the principal. It wraps the iterator rather
+// than replacing it, so a class-based tool iterator keeps its own members, prototype and `instanceof`.
 const siteScoped = <T>(site: UsageSite, src: AsyncIterable<T>): AsyncIterable<T> =>
   scopeIterable(src, f => withUsageSite(site, f));
 

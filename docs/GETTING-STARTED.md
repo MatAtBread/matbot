@@ -8,7 +8,7 @@ big-picture overview see [README.md](../README.md); for writing plugins see
 
 ## Requirements
 
-- Node 24+ (matbot ships raw TypeScript and relies on Node's native type stripping)
+- Node 24.12+ (matbot ships raw TypeScript and relies on Node's native type stripping)
 - An LLM API key (Anthropic, OpenAI-compatible, DeepSeek, Ollama, …)
 - pnpm 9+ — only needed to run from source
 

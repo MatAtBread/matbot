@@ -175,8 +175,8 @@ left something to implement.
 
 ### It works with no configuration
 
-Both hosts seed their own file area as the boot default — `apps/cli` its `FileStore`, `apps/web-bundle`
-its OPFS one. The seed goes in the **registry**, not on `baseServices`: `unifyServices` resolves an own
+`assembleMachine` seeds the host's own file area as the boot default — the CLI's filesystem one, the
+browser's OPFS one. The seed goes in the **registry**, not on the base object: `unifyServices` resolves an own
 property first, so a member spelled there is one `register()` could never reach. Unregistering reverts to
 that default rather than turning media off.
 

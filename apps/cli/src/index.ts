@@ -1,44 +1,34 @@
 #!/usr/bin/env node
 import { loadConfig, loadConfigFromText, loadDotEnv } from './config.js';
 import { installPlugin }                    from './install.js';
-import { executeQuery, mediumGuard }        from '@matatbread/matbot-core/storage-base';
+import { executeQuery }                    from '@matatbread/matbot-core/storage-base';
 import { loadPluginsWithDescriptions, readPluginMeta, type PluginLoadRequest } from './plugin-description.js';
 import { nodePluginResolver }               from './plugin-resolver.js';
-import type { Principal, ProviderAdapter,
-              ProviderConfig, Session,
+import type { Principal, ProviderConfig, Session,
               Store, StoreQuery, QueryResult, CASResult,
-              MessageContent, UserContent, FileStore, Usage } from '@matatbread/matbot-core';
+              MessageContent, UserContent, Usage } from '@matatbread/matbot-core';
 import { appendMessage, createMessage,
          createSession,
-         createSessionRunner,
-         HookRegistry, SystemContextRegistryImpl, ToolRegistryImpl, ProviderRegistryImpl,
-         instantiateProvider,
+         ProviderRegistryImpl,
          teardownPlugins,
          unloadPlugin as unloadPluginFn,
-         getPluginNameForSpecifier, getRegisteredPlugins, recordServiceKey,
-         installPrincipalCarrier, installUsageCarrier, recordUsage, usageByProvider, addUsage, enterPrincipal, currentPrincipal,
-         installSettingsDefaults, settingsDefaultNamespaces, installSettingsNotifier, makePluginSettings,
-         unifyServices, forwardingProxy, makeSwappable, singleTurnRequest,
-         createMountTable, scheduleAtEdge,
-         createSingleTurnTool, createAboutMatbotTool,
-         isMissingSecretError, createNotifier, notifyingStore, optionValue, optionLabel,
+         getPluginNameForSpecifier, getRegisteredPlugins,
+         installPrincipalCarrier, installUsageCarrier, usageByProvider, enterPrincipal, currentPrincipal,
+         assembleMachine, preScanStorage,
+         isMissingSecretError, optionValue, optionLabel,
          CONFIRM_YES, CONFIRM_NO,
          wireDescription}            from '@matatbread/matbot-core';
-import type { ToolInputValidator } from '@matatbread/matbot-core';
-import type { MatbotMachine, MatbotServices, PluginSettings, Vault, SessionRunner, Notifier, PermissionGate,
-              MatbotPlugin, StorageBackend, KnowledgeIndex, PromptFn, FormField, SwapFn, SettingsDoc } from '@matatbread/matbot-core';
-import { createDefaultGate, createGateTools, DEFAULT_GATE_SETTINGS_NS } from '@matatbread/matbot-default-gate';
+import type { Vault, SessionRunner, PromptFn, FormField } from '@matatbread/matbot-core';
+import { defaultGate }                     from '@matatbread/matbot-default-gate';
 import { systemPrincipal }                 from '@matatbread/matbot-core';
 import { createAlsPrincipalCarrier }       from './principal-als.js';
 import { createAlsUsageCarrier }           from './usage-als.js';
 import { EnvFileVault }                     from './env-vault.js';
 import { createVmFunctionRunner, FUNCTION_SYNC_LIMIT_MS } from './function-runner.js';
-import { FilesystemStore }                 from '@matatbread/matbot-storage-filesystem';
-import { FilesystemFileStore }             from '@matatbread/matbot-files-node';
+import { FilesystemStorageBackend }        from '@matatbread/matbot-storage-filesystem';
 import { createBuiltinTools, createProviderTool, classifySpecifier, materializeRemote, remoteDependencyNotes,
          findDuplicateSingletons, describeDuplicateSingleton, type MaterializedRemote } from '@matatbread/matbot-tool-plugin';
-import { LookupKnowledgeIndex }               from '@matatbread/matbot-core';
-import { access, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, writeFile }          from 'node:fs/promises';
 import { readFileSync, realpathSync }       from 'node:fs';
 import { createInterface }                 from 'node:readline/promises';
 import { createRequire, stripTypeScriptTypes } from 'node:module';
@@ -879,260 +869,19 @@ async function main(): Promise<void> {
   installUsageCarrier(createAlsUsageCarrier());
   enterPrincipal(resolveBootPrincipal(opts, matbotConfig));
 
-  // The install's read-only floor for plugin settings, before anything can build a settings facade.
-  // Read-through, never seeded: a stored value wins, `delete` reverts to the default, and nothing
-  // writes back — so a plugin or provider update cannot destroy it, and it applies to every principal
-  // (a seeded document could only ever have landed under the one that booted).
-  installSettingsDefaults(matbotConfig.defaultSettings);
-
   process.stderr.write(yellow(`[${new Date().toISOString()} ${_pid}] [matbot] ${versionBanner()}\n`));
 
-  // The vault is a capture-safe forwarding proxy over a swappable backend (mirrors StorageBackend):
-  // EnvFileVault by default, replaced when a plugin calls register('Vault', impl). References to
-  // `services.Vault` / `ctx.vault` captured before the swap keep resolving to the live impl.
-  let activeVault: Vault = new EnvFileVault(
-    path.join(path.dirname(configPath), '.env'),
-    process.env as Record<string, string | undefined>,
-  );
-  const vault: Vault = forwardingProxy<Vault>(() => activeVault);
+  const configDir = path.dirname(configPath);
+  const dotData   = path.join(configDir, '.data');
 
-  // ── Stores (created early so plugins like frontend-web can use them) ──────────
-
-  const dotData  = path.join(path.dirname(configPath), '.data');
-  const dataDir  = path.join(dotData, 'sessions');
-  const workDir  = path.join(dotData, 'bash-cwd');
-  const filesDir = path.join(dotData, 'files');
-
-  // The live provider registry: seeded from matbot.yaml, mutated in place by canonicalisation, the
-  // `provider` tool, and (once a storage backend takes over) profiles replayed from its medium. Its
-  // ReadonlyMap surface serves every read-only consumer; `register`/`remove` are the write path.
-  const providers = new ProviderRegistryImpl(matbotConfig.providers);
-
-  // Resolve plugin specifiers here so we can pre-scan for a storage backend before
-  // creating stores. Node caches the imported modules, so loadPlugins below is free.
-  const providerModules: string[] = [];
-  const seenProviderModules = new Set<string>();
-  for (const cfg of providers.values()) {
-    const mod = cfg.module;
-    if (!seenProviderModules.has(mod)) {
-      seenProviderModules.add(mod);
-      providerModules.push(mod);
-    }
-  }
-  const resolvedProviderMods = await resolvePluginSpecifiers(providerModules, path.dirname(configPath));
-  const resolvedPluginMods   = await resolvePluginSpecifiers(matbotConfig.plugins, path.dirname(configPath));
-  const allSpecifiers        = [...resolvedProviderMods, ...resolvedPluginMods];
-
-  // A plugin with storageBackend replaces the default filesystem stores.
-  // It must be listed before any plugin whose setup() calls createStore.
-  let activeStorageBackend: StorageBackend | undefined;
-  let knowledgeImpl: KnowledgeIndex = new LookupKnowledgeIndex();
-  // The boot notification bus: in-process fan-out, everything the host itself publishes attributed to
-  // `core`. Swappable like the vault — register('Notifier', …) points this at a distributed impl.
-  let activeNotifier: Notifier = createNotifier('core');
-  const notifierProxy       = forwardingProxy<Notifier>(() => activeNotifier);
-  // Settings writes announce on the same bus, so a reader can cache one instead of re-reading it on
-  // every use. The proxy, not the impl, so a registered distributed Notifier relays them too.
-  installSettingsNotifier(notifierProxy);
-  // Capture-safe service handles (see forwardingProxy): a captured reference — including a destructure
-  // like `const { KnowledgeIndex, StorageBackend } = services` — keeps resolving to the live impl across
-  // a register()-driven swap, instead of pinning whatever was current at capture time.
-  const knowledgeProxy      = forwardingProxy<KnowledgeIndex>(() => knowledgeImpl);
-  const storageBackendProxy = forwardingProxy<StorageBackend>(() => activeStorageBackend);
-
-  // The host's own boot base — captured *before* the pre-scan, so it is always the app default
-  // (filesystem/memory), never a config-supplied backend. A StorageBackend swap reverts here when its
-  // providing plugin is unloaded. A pre-scanned backend is treated as plugin-owned (see storageBootSpec
-  // below), so unloading it lands on this same base.
-  const bootBackend: StorageBackend | undefined = activeStorageBackend;
-  const bootFileStore: FileStore = new FilesystemFileStore(filesDir);
-
-  // The config entry of the plugin whose storageBackend the pre-scan opened, if any. Recorded against
-  // its plugin name once the loader has resolved names, so its unload reverts storage like a register().
-  let storageBootSpec: string | undefined;
-  // The instance the pre-scan opened, kept so a later register() can report having displaced it. The
-  // host's own boot default (`bootBackend`) is captured BEFORE the pre-scan and is a different thing.
-  let preScanBackend: StorageBackend | undefined;
-  for (const { spec, importSpec } of allSpecifiers) {
-    try {
-      const mod  = await import(/* @vite-ignore */ importSpec) as Record<string, unknown>;
-      const plug = (mod['plugin'] ?? (mod['default'] as Record<string, unknown> | undefined)?.['plugin']) as MatbotPlugin | undefined;
-      if (plug?.storageBackend !== undefined) {
-        activeStorageBackend = await plug.storageBackend.open(dotData);
-        preScanBackend  = activeStorageBackend;
-        storageBootSpec = spec;
-        break;
-      }
-    } catch { /* loadPlugins will surface errors */ }
-  }
-
-  if (activeStorageBackend === undefined) {
-    const mkdirs: Promise<unknown>[] = [mkdir(filesDir, { recursive: true })];
-    // Only create the sessions directory when we'll actually write to it.
-    if (!isEphemeral) mkdirs.push(mkdir(dataDir, { recursive: true }));
-    await Promise.all(mkdirs);
-  }
-
-  // Each Store and FileStore is a forwarding proxy (forwardingProxy/makeSwappable, shared with the
-  // web bundle) backed by a mutable `current` target. Callers may freely capture references — all
-  // method calls route through the proxy to whichever backend is current. register('StorageBackend',
-  // …) calls each proxy's swap fn.
-  type AnyStore = Store<{ id: string; version: string }>;
-
-  // One proxy per namespace, including 'sessions'. Keyed by namespace string.
-  const storeProxies = new Map<string, [AnyStore, SwapFn<AnyStore>]>();
-
-  const makeStoreForNamespace = (namespace: string): AnyStore =>
-    activeStorageBackend?.createStore(namespace) ??
-    new FilesystemStore(namespace === 'sessions' ? dataDir : path.join(dotData, namespace));
-
-  // Bumped by every swap, and read by the medium guard below. A document handed out under one
-  // generation cannot be written back under another: nothing is migrated between backends, so that
-  // write would move it, silently, into a backend that never issued it.
-  let storageGeneration = 0;
-
-  const guarded = new Map<string, AnyStore>();
-
-  const createStore = <T extends { id: string; version: string }>(namespace: string): Store<T> => {
-    let entry = storeProxies.get(namespace);
-    if (entry === undefined) {
-      entry = makeSwappable<AnyStore>(makeStoreForNamespace(namespace));
-      storeProxies.set(namespace, entry);
-    }
-    // Guard OUTSIDE the swap proxy: one stable object per namespace across every swap, so a captured
-    // store reference keeps working and the guard sees each call whichever backend is current.
-    let store = guarded.get(namespace);
-    if (store === undefined) {
-      store = mediumGuard<{ id: string; version: string }>(entry[0], () => storageGeneration, namespace);
-      guarded.set(namespace, store);
-    }
-    return store as Store<T>;
-  };
-
-  // sessions and fileStore are stable proxy references — safe to capture anywhere. Sessions are wrapped
-  // so every write announces itself: the namespace has many writers (the turn pump's title derivation and
-  // persists, session_action rename/hide/unhide, session_edit fork/split, a session minted over HTTP), and
-  // one wrapper covers them all — including the next writer to arrive.
-  const store     = notifyingStore(createStore<Session>('sessions'), notifierProxy, 'sessions', 'session');
-
-  // Boot defaults, captured for revert-on-unregister: a plugin that swaps a core service in via
-  // register() reverts to these when it is unloaded, instead of leaving a dangling reference to the
-  // now-gone impl. (bootBackend/bootFileStore are captured above, before the pre-scan, so a
-  // config-supplied backend never poses as the host base.)
-  // The installation's permission policy — consulted by every privileged call site (`ctx.gate`, and
-  // core's tool-collision decision). The boot default is the default-gate package's own implementation
-  // over its own settings namespace, not the bare asking gate plugin-api ships: the app decides its own
-  // base services, and this is the one that makes standing answers work out of the box.
-  //
-  // Deliberately NOT behind a forwardingProxy, unlike every other swap-member. The documented way to
-  // replace a policy is to capture the one you displace and delegate to it, and a capture-safe proxy
-  // makes that capture a reference to *whatever is current* — which, one line later, is the capturing
-  // plugin's own gate. It then calls itself until the stack overflows, and the pattern the docs
-  // recommend is the pattern that breaks. Exposed as a getter so a member read is still late-bound;
-  // every in-repo consumer resolves it per call (the runner per turn, `invokeTool` and the registry per
-  // decision), so nothing wants the proxy and one thing very much does not. `ToolCallValidator`, which
-  // composes the same way, is a plain registry value for the same reason.
-  const gateSettings = makePluginSettings(createStore<SettingsDoc>('settings'), DEFAULT_GATE_SETTINGS_NS);
-  let activeGate: PermissionGate = createDefaultGate(gateSettings);
-  const bootGate                 = activeGate;
-  const bootVault                  = activeVault;
-  const bootKnowledge              = knowledgeImpl;
-  const bootNotifier               = activeNotifier;
-
-  // The live file proxy starts on the pre-scanned backend (if any), falling back to the host base.
-  const [fileStore, swapFiles] = makeSwappable<FileStore>(activeStorageBackend?.fileStore ?? bootFileStore);
-
-  // Re-point every store proxy + the file proxy at `next` (or the host base when undefined). Returns
-  // whether anything actually changed, so the caller can skip a redundant `mounted` emit. Synchronous:
-  // the repoint completes before this returns, so readers see `next` at once and the `mounted` emit can
-  // fire immediately. The displaced backend is closed in the *background* — a slow or throwing close()
-  // (e.g. node:sqlite's db.close() rejecting on a still-open statement) must never gate the swap or
-  // suppress the mounted notification, which was the cause of a swap that "only took on the 2nd try".
-  // Driven only from the quiescent-edge flush below — never mid-turn.
-  const swapStorage = (next: StorageBackend | undefined): boolean => {
-    const removed = activeStorageBackend;
-    if (removed === next) return false;
-
-    // Only ONE storage backend is ever active, and a plugin registering one displaces whatever the
-    // boot pre-scan opened — silently, because the swap is a supported operation and the loser left no
-    // trace but an opened, orphaned file. Configure two storage plugins (say sqlite and profiles, which
-    // composes the filesystem primitive directly and so cannot layer over sqlite) and the discarded one
-    // still creates its database before being abandoned, which reads as "sqlite is configured and does
-    // nothing". Said once, naming the plugin, at the moment it stops being true.
-    if (removed !== undefined && removed === preScanBackend && next !== undefined) {
-      preScanBackend = undefined;                            // one warning per boot, not per swap
-      console.warn(
-        `[matbot] storage: the backend opened at startup by "${storageBootSpec}" has been replaced by another ` +
-        `plugin's storage backend. Only one is ever active and nothing is migrated between them, so anything ` +
-        `it already wrote is no longer read. Configure just one storage plugin to remove this ambiguity.`,
-      );
-    }
-
-    activeStorageBackend = next;
-    storageGeneration++;
-    for (const [ns, [, swap]] of storeProxies) swap(makeStoreForNamespace(ns));
-    swapFiles(next?.fileStore ?? bootFileStore);
-    void Promise.resolve(removed?.close?.()).catch(e => console.error('[matbot] closing displaced StorageBackend:', e));
-    return true;
-  };
-
-  // Deferred StorageBackend swap. register/unregister('StorageBackend') stage the desired backend here
-  // (last write wins — only the final intended backend matters, so a slot, not a queue) and ask the
-  // context-switch machinery to land it at the next quiescent edge. Swapping the system of record under
-  // a running turn would split a compare-and-swap across two backends, so the apply waits for depth 0.
-  // The mount table batches mount notifications to the quiescent edge: register/unregister mark a key
-  // dirty; the edge computes each key's net presence transition (mount / remount / committed unload) and
-  // multicasts to that key's subscribers. A reload (unregister+register within one turn) collapses to a
-  // single remount. Notification timing is deliberately unspecified — see the `Mounted` contract.
-  const mountTable = createMountTable(() => services);
-  let pendingSwap: { next: StorageBackend | undefined } | undefined;
-  // One apply per edge however many times a swap or a mount change was announced: `pendingSwap` is a
-  // last-write-wins slot read at fire time, so three registers before an edge install one backend rather
-  // than three in turn. One callback also keeps the swap ordered ahead of the mount flush, so the remount
-  // it marks lands in the same edge. Registering is what announces it, so there is nothing else to call.
-  const scheduleEdge = scheduleAtEdge(() => {
-    if (pendingSwap !== undefined) {
-      const { next } = pendingSwap;
-      pendingSwap = undefined;
-      if (swapStorage(next)) mountTable.markDirty('StorageBackend');
-    }
-    mountTable.flush();
-  });
-
-  const stageSwap = (next: StorageBackend | undefined): void => {
-    pendingSwap = { next };
-    scheduleEdge();
-  };
-
-  // Swap the KnowledgeIndex, draining the displaced impl's entries into the incoming one.
-  const swapKnowledge = (next: KnowledgeIndex): void => {
-    const prev = knowledgeImpl;
-    if (prev === next) return;
-    knowledgeImpl = next;
-    if (prev.entries !== undefined) for (const e of prev.entries()) void next.index(e);
-  };
-
-  const serviceRegistry     = new Map<string, unknown>();
-
-  // toolReg is shared: plugins register into it via services, runSession reads it. The validator lookup
-  // is late-bound and read per call: a `ToolCallValidator` is registered by a plugin (tool-types) long
-  // after these builtins are seeded, and may be unloaded again. Absent one, every call passes straight
-  // through — core mandates no validation, it only honours a registered validator, and it does so at the
-  // executor so that EVERY door (the runner, `POST /tools/:name`, `invokeTool`) is covered by one wrapper
-  // rather than by a hook that only guards the model's path.
-  const toolReg = new ToolRegistryImpl(createBuiltinTools(), notifierProxy,
-    () => serviceRegistry.get('ToolCallValidator') as ToolInputValidator | undefined);
-
-  // hookReg is shared: plugins register hooks via services, runSession fires them
-  const hookReg = new HookRegistry();
-  const systemContextReg = new SystemContextRegistryImpl();
-
-  // The host's own file area doubles as the media store, so attachments work out of the box rather than
-  // needing a plugin to switch them on. Seeded into the registry (not put on `baseServices`) precisely so
-  // a plugin CAN replace it — `unifyServices` resolves an own property before the registry, so a member
-  // spelled on the base object is one `register()` can never reach. The value is the swappable file
-  // proxy, so media follows a StorageBackend swap exactly as every other file does.
-  serviceRegistry.set('MediaStore', fileStore);
+  // Resolve plugin specifiers here so we can pre-scan for a storage backend before any store exists.
+  // A plugin with storageBackend replaces the host's filesystem stores, so it must be listed before any
+  // plugin whose setup() calls createStore.
+  const providers            = new ProviderRegistryImpl(matbotConfig.providers);
+  const providerModules      = [...new Set([...providers.values()].map(cfg => cfg.module))];
+  const resolvedProviderMods = await resolvePluginSpecifiers(providerModules, configDir);
+  const resolvedPluginMods   = await resolvePluginSpecifiers(matbotConfig.plugins, configDir);
+  const preScanned           = await preScanStorage([...resolvedProviderMods, ...resolvedPluginMods], dotData);
 
   // Model-authored code shares the one event loop with every session and frontend, so a loop in a
   // tool_function that never awaits would freeze the daemon. Seeded, like MediaStore, so a plugin may
@@ -1140,196 +889,55 @@ async function main(): Promise<void> {
   // and unbounded — what a host with no runner does — which is kept reachable for testing.
   const functionTimeoutMs = matbotConfig.functionTimeoutMs ?? FUNCTION_SYNC_LIMIT_MS;
   const functionRunner = functionTimeoutMs > 0 ? createVmFunctionRunner(functionTimeoutMs) : undefined;
-  if (functionRunner !== undefined) serviceRegistry.set('FunctionRunner', functionRunner);
-  else console.warn('[matbot] function_timeout_ms is 0: tool_function bodies run unbounded, and one that loops without awaiting will freeze this process.');
+  if (functionRunner === undefined) console.warn('[matbot] function_timeout_ms is 0: tool_function bodies run unbounded, and one that loops without awaiting will freeze this process.');
 
-  // Constructed just after the services object (it closes over services.loadPlugin); exposed via
-  // the `run` getter below so frontends submit/observe through one serialiser instead of each
-  // calling runSession directly.
-  let sessionRunner: SessionRunner | undefined;
-
-  const baseServices: MatbotMachine = {
-    // Plugins always receive the plugin-scoped override built in setupPlugin; the base is never the
-    // one a plugin calls. Core reads its reserved settings doc via makePluginSettings directly.
-    settings(): PluginSettings {
-      throw new Error('settings() is only available within a plugin scope (use the services passed to setup()).');
-    },
-
-    createStore,
-
-    get(key) { return serviceRegistry.get(key as string) as never; },
-    async register(key, value) {
-      // StorageBackend is the system of record: stage it and let the quiescent edge apply it (idle →
-      // now; mid-turn → at turn end) — its mount notification is marked dirty there, after the swap
-      // lands. The other swap-keys repoint immediately, then mark dirty so the edge multicasts the mount.
-      if (key === 'StorageBackend')      stageSwap(value as StorageBackend);
-      else if (key === 'KnowledgeIndex') swapKnowledge(value as KnowledgeIndex);
-      else if (key === 'Vault')          activeVault = value as Vault;
-      else if (key === 'Notifier')       activeNotifier = value as Notifier;
-      else if (key === 'PermissionGate') activeGate     = value as PermissionGate;
-      else serviceRegistry.set(key as string, value);
-      if (key !== 'StorageBackend') { mountTable.markDirty(key); scheduleEdge(); }
-    },
-    // Symmetric with register: a swap-key reverts to the app's captured boot default instead of
-    // dangling on the unloaded plugin's impl; everything else is a plain registry delete. Marking dirty
-    // lets the edge deliver a committed unload (or, if re-registered before the edge, a single remount).
-    unregister(key: string) {
-      if (key === 'StorageBackend')      stageSwap(bootBackend);
-      else if (key === 'KnowledgeIndex') knowledgeImpl = bootKnowledge;
-      else if (key === 'Vault')          activeVault = bootVault;
-      else if (key === 'Notifier')       activeNotifier = bootNotifier;
-      else if (key === 'PermissionGate') activeGate     = bootGate;
-      // Reverts to the host file area rather than vanishing: unloading a plugin that put media on S3
-      // should leave attachments working on disk, not silently turn them off until a restart.
-      else if (key === 'MediaStore')     serviceRegistry.set('MediaStore', fileStore);
-      else if (key === 'FunctionRunner' && functionRunner !== undefined) serviceRegistry.set('FunctionRunner', functionRunner);
-      else serviceRegistry.delete(key);
-      if (key !== 'StorageBackend') { mountTable.markDirty(key as keyof MatbotServices); scheduleEdge(); }
-    },
-    registerFrontend() { /* bound per-plugin in setupPlugin's scopedServices; base is a no-op */ },
-
-    async complete(req) {
-      const rawCfg = providers.get(req.provider);
-      if (rawCfg === undefined) {
-        throw new Error(
-          `complete(): unknown provider "${req.provider}". ` +
-          `Available: ${[...providers.keys()].join(', ')}`,
-        );
-      }
-      const resolved: ProviderConfig = {
-        ...rawCfg,
-        // Per-call overrides shallow-merged over the config's own parameters (request wins).
-        ...(req.parameters     !== undefined ? { parameters: { ...rawCfg.parameters, ...req.parameters } } : {}),
-        ...(rawCfg.credentials !== undefined ? { credentials: await resolveCredentials(rawCfg.credentials, vault) } : {}),
-        ...(rawCfg.endpoint    !== undefined ? { endpoint: await vault.resolve(rawCfg.endpoint) } : {}),
-      };
-      const adpt = await instantiateProvider(services, resolved);
-      if (adpt === null) throw new Error(`complete(): provider "${req.provider}" has no loadable adapter (module "${resolved.module}").`);
-      const msgs = req.system !== undefined
-        ? [
-            createMessage({
-              role:    'system',
-              content: [{ type: 'text', text: req.system }],
-              traceId: crypto.randomUUID(),
-            }),
-            ...req.messages,
-          ]
-        : req.messages;
-      const signal = req.signal ?? NEVER_ABORT_SIGNAL;
-      let text = '';
-      // Folded exactly as the runner folds a turn's usage, because an adapter may report one call's
-      // usage in several parts: anthropic sends input + cache counts on `message_start` and output on
-      // `message_delta`. Taking the last event instead of folding therefore reported inputTokens 0 and
-      // no cache figures for every out-of-band completion against it.
-      let usage: Usage = { inputTokens: 0, outputTokens: 0 };
-      const startedAt = Date.now();
-      for await (const ev of adpt.complete(msgs, resolved, [], signal)) {
-        if (ev.type === 'text-delta') text += ev.delta;
-        if (ev.type === 'usage')      usage = addUsage(usage, ev);
-      }
-      // Report into the ambient usage sink: a tool running this completion (singleTurn/complete) has
-      // its spend attributed to whatever site is in force. No-op outside any scope. The bracket is
-      // measured here because this is where the call is actually issued.
-      recordUsage(req.provider, usage, {
-        startedAt: new Date(startedAt).toISOString(), durationMs: Date.now() - startedAt,
-      });
-      return { text, usage };
-    },
-    async singleTurn(req) {
-      return this.complete(singleTurnRequest(req));
-    },
-    async loadPlugin(specifier: string, prompt?: PromptFn, refresh = false) {
-      // refresh re-downloads a changed remote source rather than re-importing the stale cached subtree
-      // (the file:// cache-bust only re-evaluates bytes, it can't refetch them). Default off: a
-      // programmatic load stays cache-first and offline-tolerant. `plugin reload` opts in.
-      const resolved = await resolvePluginSpecifiers([specifier], path.dirname(configPath), refresh);
-      const plugins  = await loadPluginsWithDescriptions(resolved, services, path.dirname(configPath), /* bustCache */ true, prompt, /* onLoadError */ 'throw');
-      const plugin   = plugins[0];
-      if (plugin === undefined) throw new Error(`No plugin loaded for specifier "${specifier}"`);
-      return plugin;
-    },
-    async unloadPlugin(specifier: string): Promise<boolean> {
-      // A loaded plugin records its config-level specifier (= the matbot.yaml entry) and its canonical
-      // name; accept either. (No re-resolution needed — `plugin.specifier` is the original specifier.)
-      const name = getPluginNameForSpecifier(specifier)
-        ?? (getRegisteredPlugins().some(p => p.name === specifier) ? specifier : undefined);
-      if (name === undefined) {
-        console.warn(`[matbot] No loaded plugin found for "${specifier}"`);
-        return false;
-      }
-      return unloadPluginFn(name, services);
-    },
-    resolver:  nodePluginResolver(path.dirname(configPath)),
+  const { services, makeRunner, loaded } = assembleMachine({
+    // The same layout the filesystem storage plugin names: a directory per namespace under `.data`.
+    bootBackend:     new FilesystemStorageBackend(dotData),
+    preScanned,
+    vault:           new EnvFileVault(path.join(configDir, '.env'), process.env as Record<string, string | undefined>),
     providers,
-    mounted:   mountTable.mounted,
-    get StorageBackend() { return activeStorageBackend === undefined ? undefined : storageBackendProxy; },
-    sessions:  store,
-    get run() { return sessionRunner; },
-    files:     fileStore,
-    Vault:     vault,
-    Notifier:  notifierProxy,
-    get PermissionGate() { return activeGate; },
-    hooks:          hookReg,
-    tools:          toolReg,
-    systemContext:  systemContextReg,
-    workdir:    workDir,
-    configPath,
-    isSubAgent: () => isBackground,
-    get KnowledgeIndex() { return knowledgeProxy; },
-    TypeScriptStripper: { strip: (source: string) => stripTypeScriptTypes(source) },
-  };
-  const services: MatbotMachine = unifyServices(baseServices);
-
-  // resolveProvider reads the registry lazily (per turn), so it sees both the canonicalised module
-  // names set below and any live `provider add/remove` edits. instantiateProvider force-loads the
-  // adapter module if its factory isn't registered yet (a runtime-contributed profile), warning and
-  // yielding null — rather than throwing — if it can't be found.
-  const resolveProvider = async (name: string): Promise<{ adapter: ProviderAdapter; config: ProviderConfig } | null> => {
-    const cfg = providers.get(name);
-    if (cfg === undefined) return null;
-    const resolved: ProviderConfig = {
-      ...cfg,
-      ...(cfg.credentials !== undefined ? { credentials: await resolveCredentials(cfg.credentials, vault) } : {}),
-      ...(cfg.endpoint    !== undefined ? { endpoint: await vault.resolve(cfg.endpoint) } : {}),
-    };
-    const adapter = await instantiateProvider(services, resolved);
-    return adapter === null ? null : { adapter, config: resolved };
-  };
-
-  // One runner per store: frontends share this one over the persistent sessions store, but the CLI
-  // can instantiate its own over an ephemeral MemoryStore (see main). That a SessionRunner composes
-  // over *any* Store is the point — nothing about the agentic loop is bound to a single backend.
-  const makeRunner = (sessionStore: Store<Session>): SessionRunner => createSessionRunner({
-    store:         sessionStore,
-    resolveProvider,
-    tools:         toolReg,
-    toolTypeIndex: () => services.ToolTypeIndex,   // resolved live: the tool-types plugin registers it after boot
-    toolPresenter: () => services.ToolPresenter,   // resolved live: a tool-search/deferral plugin registers it after boot
-    steeringPolicy: () => services.SteeringPolicy, // resolved live: a steering plugin registers it after boot
-    mediaStore:    () => services.MediaStore,      // resolved live: seeded to the host file area, a plugin may swap it
-    permissionGate:() => services.PermissionGate,  // resolved live: the boot policy, or whatever a plugin registered over it
-    hooks:         hookReg,
-    systemContext: systemContextReg,
-    vault,
-    files:         fileStore,
-    workdir:       workDir,
-    configPath,
-    loadPlugin:    services.loadPlugin.bind(services),
-    unloadPlugin:  services.unloadPlugin.bind(services),
+    gate:            defaultGate,
+    defaultSettings: matbotConfig.defaultSettings,
+    ...(functionRunner !== undefined ? { seed: { FunctionRunner: functionRunner } } : {}),
+    builtinTools:    createBuiltinTools(),
+    version:         selfVersion(),
+    host: machine => ({
+      async loadPlugin(specifier: string, prompt?: PromptFn, refresh = false) {
+        // refresh re-downloads a changed remote source rather than re-importing the stale cached subtree
+        // (the file:// cache-bust only re-evaluates bytes, it can't refetch them). Default off: a
+        // programmatic load stays cache-first and offline-tolerant. `plugin reload` opts in.
+        const resolved = await resolvePluginSpecifiers([specifier], configDir, refresh);
+        const plugin   = (await loadPluginsWithDescriptions(resolved, machine(), configDir, /* bustCache */ true, prompt, /* onLoadError */ 'throw'))[0];
+        if (plugin === undefined) throw new Error(`No plugin loaded for specifier "${specifier}"`);
+        return plugin;
+      },
+      async unloadPlugin(specifier: string): Promise<boolean> {
+        // A loaded plugin records its config-level specifier (= the matbot.yaml entry) and its canonical
+        // name; accept either.
+        const name = getPluginNameForSpecifier(specifier)
+          ?? (getRegisteredPlugins().some(p => p.name === specifier) ? specifier : undefined);
+        if (name === undefined) {
+          console.warn(`[matbot] No loaded plugin found for "${specifier}"`);
+          return false;
+        }
+        return unloadPluginFn(name, machine());
+      },
+      resolver:   nodePluginResolver(configDir),
+      workdir:    path.join(dotData, 'bash-cwd'),
+      configPath,
+      isSubAgent: () => isBackground,
+      TypeScriptStripper: { strip: (source: string) => stripTypeScriptTypes(source) },
+    }),
   });
-
-  sessionRunner = makeRunner(store);
+  const vault = services.Vault;
+  const store = services.sessions!;
 
   // Historically loaded provider plugins first so their factories were registered (by plugin name)
   // before any frontend's setup() resolved an adapter. No consumer resolves adapters at setup() now —
   // frontends and the central complete()/singleTurn() all go through instantiateProvider, which
-  // force-loads the adapter module on first use. Pre-scan disabled; restore this line to re-enable it.
-  // await loadPluginsWithDescriptions(resolvedProviderMods, services, path.dirname(configPath));
-
-  // No canonicalisation of stored profiles: `instantiateProvider` resolves a specifier to its loaded
-  // plugin's factory at use time and leaves the profile's `module` exactly as written, so `provider list`
-  // reports the source truth (a yaml path stays a yaml path) instead of drifting to the package name once
-  // a profile is touched.
+  // force-loads the adapter module on first use, and leaves each profile's `module` exactly as written,
+  // so `provider list` reports the source truth.
 
   // Map plugin name → the original module specifier written in matbot.yaml. Used by the provider
   // tool as the write-back fallback for a local adapter that has no resolvable package name, and to
@@ -1344,42 +952,17 @@ async function main(): Promise<void> {
   };
   recordOrigPaths(providerModules);
 
-  await loadPluginsWithDescriptions(resolvedPluginMods, services, path.dirname(configPath));
-
-  // A `default_settings:` key is a plugin NAME — loader-derived, and not necessarily the specifier
-  // written in `plugins:`. A key matching nothing loaded is the one silent failure the feature has:
-  // the yaml looks right and no default ever applies. Reserved dunder namespaces (the core's own) are
-  // not plugins and are exempt.
-  {
-    const loaded = new Set(getRegisteredPlugins().map(p => p.name));
-    for (const ns of settingsDefaultNamespaces()) {
-      // The gate's namespace is seeded by this host, not by a loaded plugin, so it would otherwise be
-      // reported as naming nothing — the one key an install is most likely to author by hand.
-      if (loaded.has(ns) || ns === DEFAULT_GATE_SETTINGS_NS || (ns.startsWith('__') && ns.endsWith('__'))) continue;
-      console.warn(
-        `[matbot] default_settings names "${ns}", which is not a loaded plugin — its defaults will ` +
-        `never apply. Key it by the plugin's package name (\`plugin list\` reports them).`,
-      );
-    }
-  }
+  await loadPluginsWithDescriptions(resolvedPluginMods, services, configDir);
+  loaded();
 
   // Said once, now that the installed set is known and before anything uses it. A second copy of a host
   // singleton is survivable by design — which is precisely why nothing else would ever mention it — and
   // it is not repaired here: replacing a package-manager-installed directory with a symlink invites the
   // next `install` to undo it. `plugin list` reports the same thing on demand.
   for (const dup of await findDuplicateSingletons({
-    configDir: path.dirname(configPath),
+    configDir,
     plugins:   getRegisteredPlugins(),
   })) console.warn(`[matbot] ${describeDuplicateSingleton(dup)}`);
-
-  // The pre-scan opened a manifest storageBackend directly, before the loader knew the plugin's name,
-  // so the scoped register() that records a service key never ran. Attribute it now that names exist,
-  // making the boot-opened backend unload-equal to a runtime register(): unloading that plugin reverts
-  // storage to the host base and closes the backend.
-  if (storageBootSpec !== undefined) {
-    const name = getPluginNameForSpecifier(storageBootSpec);
-    if (name !== undefined) recordServiceKey(name, 'StorageBackend');
-  }
 
   // A provider adapter may be loaded via the plugins list (as a path) rather than a
   // provider config. Record those too, so the provider tool knows the YAML-valid path
@@ -1392,28 +975,14 @@ async function main(): Promise<void> {
   // name (location-independent) whenever it resolves, falling back to a path for a local-only adapter
   // that has no resolvable name. Pure string resolution — independent of whether the adapter, which
   // may load lazily on first use, is registered yet.
-  const configRequire = createRequire(path.join(path.dirname(configPath), '_'));
+  const configRequire = createRequire(path.join(configDir, '_'));
   const providerNameResolves = (name: string): boolean =>
     tryResolve(configRequire, name) !== undefined || tryResolve(appRequire, name) !== undefined;
 
   // Register the provider management tool now that all adapter plugins are loaded and
   // their YAML specifiers are recorded — createProviderTool reads getRegisteredPlugins()
   // and pluginNameToOrigPath to build its description.
-  toolReg.register(createProviderTool(providers, pluginNameToOrigPath, providerNameResolves));
-
-  // gate_action: inspect and forget the standing answers the boot policy remembers. Seeded like
-  // `plugin`/`provider` rather than carried by a configured plugin, because the policy itself is: a
-  // minimal install's first act is adding a plugin or a provider, which is gated, so the way to see and
-  // undo an answer cannot depend on a config line being present.
-  for (const tool of createGateTools(gateSettings)) toolReg.register(tool);
-
-  // single_turn: the model-facing surface of the core singleTurn service. Registered here beside the
-  // other core service-management tools (it needs the live `services` for `singleTurn`/`providers`).
-  toolReg.register(createSingleTurnTool(services));
-
-  // about_matbot: the harness's own version + description. The harness isn't a plugin (no `plugin list`
-  // row), so this singleton fact gets a dedicated tool; the app passes its own package version.
-  toolReg.register(createAboutMatbotTool(selfVersion(), services));
+  services.tools.register(createProviderTool(providers, pluginNameToOrigPath, providerNameResolves));
 
   // ── Dump tools (one-shot) ───────────────────────────────────────────────────────
   // `--dump-tools [path]`: serialize the live registry and exit. Each tool's `description` is the WIRE
@@ -1423,7 +992,7 @@ async function main(): Promise<void> {
   // populated; exits before the server/REPL. Used to build corpora for the tool-search work.
   if (opts.dumpTools !== undefined) {
     const wire = await services.ToolTypeIndex?.wireContracts();
-    const dump = toolReg.list().map(t => {
+    const dump = services.tools.list().map(t => {
       const wc = wire?.[t.name];
       return {
         name:        t.name,
@@ -1449,7 +1018,7 @@ async function main(): Promise<void> {
     const shutdown = (): void => {
       process.stderr.write(yellow('\n[matbot] shutting down…\n'));
       teardownPlugins()
-      .then(async () => { await activeStorageBackend?.close?.(); process.exit(0); })
+      .then(async () => { await services.StorageBackend?.close?.(); process.exit(0); })
       .catch(() => process.exit(1));
     };
     process.once('SIGINT',  shutdown);
@@ -1514,7 +1083,7 @@ async function main(): Promise<void> {
   await runStore.set(session.id, session);
   // Reuse the shared runner over the persistent store; spin up a private one over the ephemeral
   // MemoryStore so a throwaway REPL session never shares a queue with the frontends.
-  const cliRun: SessionRunner = isEphemeral ? makeRunner(runStore) : (sessionRunner ?? makeRunner(store));
+  const cliRun: SessionRunner = isEphemeral ? makeRunner(runStore) : services.run!;
 
   // ── Readline (shared by single-turn and REPL for tool prompts) ──────────────
   const rl = createInterface({ input: process.stdin, output: process.stderr });
@@ -1559,7 +1128,7 @@ async function main(): Promise<void> {
     } finally {
       rl.close();
       await teardownPlugins();
-      await activeStorageBackend?.close?.();
+      await services.StorageBackend?.close?.();
     }
     return;
   }
@@ -1582,7 +1151,7 @@ async function main(): Promise<void> {
   } finally {
     rl.close();
     await teardownPlugins();
-    await activeStorageBackend?.close?.();
+    await services.StorageBackend?.close?.();
   }
 
   if (!isEphemeral) {
