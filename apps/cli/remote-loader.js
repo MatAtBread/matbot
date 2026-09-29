@@ -20,8 +20,10 @@
 // package's URL, lets docker-bash mount `projectRoot` read-only so the model can read what it fetched, and
 // lets a CommonJS dependency load at all. The URL is where a file CAME from; the path is what it IS.
 
-import { mkdir, writeFile, readFile, access } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { Worker, MessageChannel, receiveMessageOnPort, isMainThread, workerData, parentPort } from 'node:worker_threads';
 import path from 'node:path';
 
 const CACHE_DIR = '.plugins';
@@ -36,11 +38,11 @@ const ORIGIN_FILE = '.origin';
 
 const schemeByHostDir = new Map();
 
-async function schemeFor(hostDir) {
+function schemeFor(hostDir) {
   const cached = schemeByHostDir.get(hostDir);
   if (cached !== undefined) return cached;
   let scheme = 'https:';
-  try { scheme = (await readFile(path.join(hostDir, ORIGIN_FILE), 'utf8')).trim() || 'https:'; }
+  try { scheme = readFileSync(path.join(hostDir, ORIGIN_FILE), 'utf8').trim() || 'https:'; }
   catch { /* pre-existing cache, or a host we have not recorded — https */ }
   schemeByHostDir.set(hostDir, scheme);
   return scheme;
@@ -100,20 +102,9 @@ function candidatesFor(url) {
   return candidates;
 }
 
-const exists = async p => { try { await access(p); return true; } catch { return false; } };
-
-/**
- * Resolve one specifier made from inside a fetched plugin, fetching it if we do not have it.
- *
- * Every candidate is checked on disk before any is fetched, for the same reason the mirrored tree is
- * consulted before the network at all: the `.js` name is the preferred URL but the `.ts` name is what got
- * written, so a per-candidate disk-then-network order would put a doomed request in front of the file we
- * already have — and fail with no network at all. A warm boot therefore makes no requests, and an offline
- * one works, exactly as before.
- *
- * Returns a file: URL, or undefined if this specifier is not ours to resolve (a bare one).
- */
-export async function resolveFetched(specifier, parent) {
+// Which URLs a specifier made from inside a fetched plugin could name, most preferred first; undefined when it
+// is not ours to resolve (a bare one, or `node:`/`data:`).
+function candidatesOf(specifier, parent) {
   const at = cacheLocation(parent);
   if (at === undefined) return undefined;
 
@@ -122,36 +113,101 @@ export async function resolveFetched(specifier, parent) {
     if (!/^https?:/i.test(specifier)) return undefined;      // node:, data: — not ours
     targetUrl = specifier;                                    // an absolute URL, possibly another host
   } else if (specifier.startsWith('/')) {
-    targetUrl = `${await schemeFor(at.hostDir)}//${at.host}${specifier}`;
+    targetUrl = `${schemeFor(at.hostDir)}//${at.host}${specifier}`;
   } else if (specifier.startsWith('.')) {
-    targetUrl = new URL(specifier, `${await schemeFor(at.hostDir)}//${at.host}/${at.rel}`).href;
+    targetUrl = new URL(specifier, `${schemeFor(at.hostDir)}//${at.host}/${at.rel}`).href;
   } else {
     return undefined;                                         // bare: host-provided, or a sibling plugin
   }
+  return { dotPlugins: at.dotPlugins, candidates: candidatesFor(targetUrl) };
+}
 
-  const candidates = candidatesFor(targetUrl);
+// Every candidate is checked on disk before any is fetched, for the same reason the mirrored tree is consulted
+// before the network at all: the `.js` name is the preferred URL but the `.ts` name is what got written, so a
+// per-candidate disk-then-network order would put a doomed request in front of the file we already have — and
+// fail with no network at all. A warm boot therefore makes no requests, and an offline one works.
+function onDisk({ dotPlugins, candidates }) {
   for (const candidate of candidates) {
-    const p = urlToCachePath(candidate, at.dotPlugins);
-    if (await exists(p)) return pathToFileURL(p).href;
+    const p = urlToCachePath(candidate, dotPlugins);
+    if (existsSync(p)) return pathToFileURL(p).href;
   }
+  return undefined;
+}
+
+/**
+ * Resolve one specifier made from inside a fetched plugin, fetching it if we do not have it.
+ *
+ * Returns a file: URL, or undefined if this specifier is not ours to resolve (a bare one).
+ */
+export async function resolveFetched(specifier, parent) {
+  const plan = candidatesOf(specifier, parent);
+  if (plan === undefined) return undefined;
+  const cached = onDisk(plan);
+  if (cached !== undefined) return cached;
 
   let unreachable;
-  for (const candidate of candidates) {
+  for (const candidate of plan.candidates) {
     let res;
     try { res = await fetch(candidate); }
     catch (e) { unreachable ??= e; continue; }
     if (!res.ok) continue;
     const body = await res.text();
-    const p = urlToCachePath(candidate, at.dotPlugins);
+    const p = urlToCachePath(candidate, plan.dotPlugins);
     await mkdir(path.dirname(p), { recursive: true });
     await writeFile(p, body, 'utf8');
-    await recordOrigin(at.dotPlugins, candidate);
+    await recordOrigin(plan.dotPlugins, candidate);
     return pathToFileURL(p).href;
   }
 
   const reason = unreachable !== undefined
     ? `could not be reached (${unreachable.message})`
-    : `was not found at ${candidates.join(' or ')}`;
+    : `was not found at ${plan.candidates.join(' or ')}`;
   throw Object.assign(new Error(`Cannot fetch "${specifier}" imported by ${parent}: it ${reason}.`),
                       { code: 'ERR_MODULE_NOT_FOUND' });
+}
+
+// The module hooks run in-thread and must answer synchronously, and a fetch can only be awaited. So when a
+// fetched plugin imports a file we do not have yet, `resolveFetched` runs on a worker — this file, started as
+// one — and the hook blocks until it answers: the round trip `module.register()` made for every import of the
+// process, made only for these. A file already on disk never starts it.
+//
+// Blocking means the origin cannot be served by this same thread, as it could not under `register()` either
+// since Node 24.12, whose hooks thread the main thread also waits on.
+const FETCHER = 'matbot-remote-fetcher';
+let fetcher;
+
+export function resolveFetchedSync(specifier, parent) {
+  const plan = candidatesOf(specifier, parent);
+  if (plan === undefined) return undefined;
+  const cached = onDisk(plan);
+  if (cached !== undefined) return cached;
+
+  fetcher ??= startFetcher();
+  const done = new Int32Array(new SharedArrayBuffer(4));
+  fetcher.worker.postMessage({ specifier, parent, done });
+  Atomics.wait(done, 0, 0);
+  const answer = receiveMessageOnPort(fetcher.answers).message;
+  if ('error' in answer) throw Object.assign(new Error(answer.error), { code: answer.code });
+  return answer.url;
+}
+
+function startFetcher() {
+  const { port1, port2 } = new MessageChannel();
+  // No `execArgv`: inheriting `--import ./register.js` would give the worker hooks it has no use for — its
+  // own imports are plain JavaScript.
+  const worker = new Worker(new URL(import.meta.url), {
+    workerData: { role: FETCHER, answers: port2 }, transferList: [port2], execArgv: [],
+  });
+  worker.unref();
+  return { worker, answers: port1 };
+}
+
+if (!isMainThread && workerData?.role === FETCHER) {
+  const { answers } = workerData;
+  parentPort.on('message', async ({ specifier, parent, done }) => {
+    try { answers.postMessage({ url: await resolveFetched(specifier, parent) }); }
+    catch (e) { answers.postMessage({ error: e instanceof Error ? e.message : String(e), code: e?.code }); }
+    Atomics.store(done, 0, 1);
+    Atomics.notify(done, 0);
+  });
 }

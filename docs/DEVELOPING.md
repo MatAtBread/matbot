@@ -245,7 +245,9 @@ Fetched code is mirrored under a matbot-writes / LLM-reads-only `.plugins/` cach
 
 **Node drives the module graph, fetching as it resolves.** Only the manifest and the entry are fetched up
 front; each further import is fetched when Node actually resolves it, by a module hook that maps the
-importing file back to where it came from. So a **dynamic `import(variable)`**, a **root-relative**
+importing file back to where it came from. The hooks answer synchronously, in-thread, so the fetch itself
+runs on a worker the hook waits on — which is why an origin cannot be served by the very matbot process
+fetching from it. So a **dynamic `import(variable)`**, a **root-relative**
 `/ms@2.1.3/…` specifier and an **absolute URL import** all work — none of which a scan of the source ahead
 of time can see. `import.meta.url` is still a `file:` URL, so `createRequire`, `fileURLToPath` and reading
 a sibling file behave normally, and the tree stays a real package the model can read.
