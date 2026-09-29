@@ -75,6 +75,10 @@ churn and less likely to affect a consumer who doesn't use them.
   and abandon its turn — never answering with the default, which for a gate can mean "allow". A
   `password` field is refused rather than asked, since the answer would stay in the chat history. The
   frontend previously supplied no `PromptFn`, so every gate took its site's non-interactive answer.
+- **`tool-types`** — callers that meet while the index is building share one build. Each started its own
+  `ts.Program`, synchronously and one after another: three in one tick took twice as long as one, and a
+  build is about 2 s on one CPU. A tool registered during a build is no longer lost either: the build is
+  left stale for the next caller to redo, where it was marked current.
 - **`default-gate`** — exports `defaultGate`, the bundle a host passes to `assembleMachine`.
 - **`skills`, `triggers`, `background`, `cognition`, `function-tools`** — document versions are random,
   not `Date.now()`, for the reason given under *Plugin settings*.
