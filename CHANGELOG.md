@@ -108,6 +108,9 @@ churn and less likely to affect a consumer who doesn't use them.
 - **`mcp-http`** — `mcp_action` advertises `type` (`"remote"`) in its schema. The contract it shares with
   node `mcp` requires it on `add`, so with ts-validation rejecting, an `add` sent as the schema described
   it — without `type` — was refused.
+- **`background`** — `every_action list` returns each schedule as stored: `intervalMs` (absent for a
+  one-shot) in place of the formatted `interval`, plus `prompt`, `createdAt`, `provider` and `principal`.
+  A caller reading `interval` must read `intervalMs` instead.
 - **`default-gate`** — exports `defaultGate`, the bundle a host passes to `assembleMachine`.
 - **`skills`, `triggers`, `background`, `cognition`, `function-tools`** — document versions are random,
   not `Date.now()`, for the reason given under *Plugin settings*.
