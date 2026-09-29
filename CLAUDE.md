@@ -52,6 +52,7 @@ plugins/            — one directory per package, flat but for the frontend/pro
     skills_compiler/— compiles a procedural skill into a TS tool plugin
     function-tools/— tool_function: TS lambdas/named tools composing registered tools
     tool-types/    — ToolTypeIndex: derives the tool dts + hosts the codegen checker (node)
+    caching-tool-types/— tool-types + its build persisted in settings across restarts (node)
     tool-router/   — ToolPresenter: bounded per-turn tool window + tool_search
     tool-store/    — store_action: named persistent stores with generated CRUD tools
     edit-session/  — session_edit tool (cut/fork/split/compact)

@@ -1,0 +1,50 @@
+{
+  "name": "@matatbread/matbot-caching-tool-types",
+  "matbotRuntime": [
+    "node"
+  ],
+  "version": "0.4.17",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "files": [
+    "src"
+  ],
+  "description": "Node ToolTypeIndex that keeps @matatbread/matbot-tool-types' build in plugin settings, so a process whose plugins and tools are unchanged skips the TypeScript build on its first tool call.",
+  "keywords": [
+    "matbot",
+    "matbot-plugin",
+    "llm",
+    "ai",
+    "agent",
+    "typescript"
+  ],
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "node -e \"process.env.MATBOT_PUBLISH_ALL || (console.error('Refused: publish with pnpm publish-all from the repo root. It checks versions, contents and the web bundle first.'), process.exit(1))\""
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MatAtBread/matbot.git",
+    "directory": "plugins/caching-tool-types"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@matatbread/matbot-tool-types": "workspace:^"
+  },
+  "peerDependencies": {
+    "@matatbread/matbot-plugin-api": "workspace:^"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "@matatbread/matbot-plugin-api": "workspace:^"
+  }
+}

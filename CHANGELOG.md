@@ -94,6 +94,17 @@ churn and less likely to affect a consumer who doesn't use them.
   `ts.Program`, synchronously and one after another: three in one tick took twice as long as one, and a
   build is about 2 s on one CPU. A tool registered during a build is no longer lost either: the build is
   left stale for the next caller to redo, where it was marked current.
+- **`caching-tool-types`** (new) — `tool-types` with its build kept in plugin settings, loaded instead of
+  it. A process whose plugins, synthetic contracts, principal and scanned files are unchanged takes a
+  stored build (~45 ms) instead of making one (2–3 s), so the first tool call after a restart no longer
+  blocks. The stored build covers every scanned tool and is filtered to the live ones, so a tool added or
+  removed — the `mcp__*` tools arriving after boot — costs no rebuild; the last four builds are kept, one
+  per plugin set. A changed file is found by size and mtime, then content where only an mtime moved. The
+  settings medium holds executable validator source, so it must be trusted like plugin code.
+- **`tool-types`** — the build is also available as plain data (`buildToolTypesData`: validator source,
+  not compiled functions, the dts split per tool, and every file read), with `filterToolTypesData` to
+  narrow it to a live tool set; `ToolTypeIndexImpl` is exported, taking the function it fills a miss from.
+  `buildMatbotToolsDts` and the index's output are unchanged.
 - **`default-gate`** — exports `defaultGate`, the bundle a host passes to `assembleMachine`.
 - **`skills`, `triggers`, `background`, `cognition`, `function-tools`** — document versions are random,
   not `Date.now()`, for the reason given under *Plugin settings*.

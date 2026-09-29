@@ -61,6 +61,7 @@
     "typescript": "catalog:",
     "@matatbread/matbot-function-tools": "workspace:^",
     "@matatbread/matbot-tool-types": "workspace:^",
+    "@matatbread/matbot-caching-tool-types": "workspace:^",
     "@matatbread/matbot-tool-ts-validation": "workspace:^",
     "@matatbread/matbot-storage-profiles": "workspace:^",
     "@matatbread/matbot-sessions": "workspace:^",
