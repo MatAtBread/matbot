@@ -46,8 +46,8 @@ declare module '@matatbread/matbot-plugin-api' {
     // `every_action` discriminates on `action`; resume/suspend results further split on whether id is "*"
     // (all) vs a single id, which a caller can't predeclare, so each keeps its two-shape result union.
     every_action:
-      // `interval` reads "once" for a one-shot (the same sentinel `background` accepts), so one row shape
-      // covers both kinds and `nextRun` is the fire time in either.
+      // The stored schedules as they are: a one-shot is the one with no `intervalMs`, and `nextRun` is the
+      // fire time for either kind.
       | ToolContract<Array<Schedule>, { action: 'list' }>
       // `skipped` appears only when the sweep met a schedule it could not write (one shared in read-only):
       // "all" that silently wasn't all is the failure the field reported one namespace over.

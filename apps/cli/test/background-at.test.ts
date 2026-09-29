@@ -123,21 +123,22 @@ test('interval and at together are refused — they are different jobs, not a co
   } finally { await done(); }
 });
 
-test('every_action lists a one-shot as "once", with its fire time', async () => {
+test('every_action lists a one-shot with no interval, and its fire time', async () => {
   const { call, done } = await harness();
   try {
     const once  = resultOf(await call('background', { prompt: 'p', at: '2099-08-23T09:00:00Z', name: 'later' })) as { id: string };
     const every = resultOf(await call('background', { prompt: 'p', interval: '1h' })) as { id: string };
 
     const rows = resultOf(await call('every_action', { action: 'list' })) as
-      Array<{ id: string; interval: string; nextRun: string; active: boolean; name?: string }>;
+      Array<{ id: string; intervalMs?: number; nextRun: string; prompt: string; name?: string }>;
 
     const oneShot   = rows.find(r => r.id === once.id)!;
     const recurring = rows.find(r => r.id === every.id)!;
-    assert.equal(oneShot.interval, 'once');
+    assert.equal('intervalMs' in oneShot, false);
     assert.equal(oneShot.nextRun, '2099-08-23T09:00:00.000Z');
     assert.equal(oneShot.name, 'later');
-    assert.equal(recurring.interval, '1h');
+    assert.equal(oneShot.prompt, 'p');
+    assert.equal(recurring.intervalMs, 3_600_000);
 
     // The same handle manages both kinds: a one-shot the user changed their mind about is cancellable.
     const cancelled = resultOf(await call('every_action', { action: 'cancel', id: once.id })) as { cancelled: boolean };
