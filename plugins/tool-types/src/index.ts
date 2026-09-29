@@ -145,47 +145,61 @@ class ToolTypeIndexImpl implements ToolTypeIndex {
   private contracts: Record<string, { params: string; result: string }> = {};   // per-tool wire contract
   private validators: Record<string, ToolValidator> = {};                       // per-tool compiled validator
   private apiExports: string[] = [];     // plugin-api type export names (for importing those a toolContract names)
-  private dirty = true;
+  private generation = 0;                // tool registry changes seen
+  private builtFor = -1;                 // the generation the cached build reflects
+  private building: Promise<void> | null = null;
 
   constructor(machine: MatbotMachine) {
     this.machine = machine;
     // Any tool CRUD invalidates the generated dts; the event itself carries nothing we need.
-    machine.Notifier.consume(() => { this.dirty = true; }, this.ac.signal,
+    machine.Notifier.consume(() => { this.generation++; }, this.ac.signal,
       n => n.kind === RegistryChangeKind && n.registry === 'tools');
   }
 
   close(): void { this.ac.abort(); }
 
+  // One build at a time, joined by every caller that arrives while it runs: each would otherwise build its
+  // own Program, synchronously and one after another. A caller that arrives after a registry change waits
+  // for a build that includes it, rather than taking one already under way from before it.
   private async ensureBuilt(): Promise<void> {
-    if (this.dirty || this.cache === null) {
-      const root   = this.machine.configPath !== undefined ? dirname(this.machine.configPath) : '.';
-      // Scan the source each loaded plugin was actually loaded from (its resolvedUrl) — builtin, compiled
-      // (.compiled-plugins/), or installed (.plugins/) alike — so every registered tool's real augmentation
-      // is read. build-dts UNIONs a glob of the monorepo `plugins/` tree onto these roots (not a fallback:
-      // it catches host-constructed builtins that have no resolvedUrl), so the scanned set is a SUPERSET of
-      // the loaded one — wherever that tree exists, plugins for other runtimes and plugins nobody loaded are
-      // read too. Hence the live tool names: a scanned root may supply a tool's contract, never the fact that
-      // the tool exists. Otherwise the dts declares uncallable tools (`telegram_send` from an unloaded
-      // telegram frontend), which `check()` then grades generated code against — clean typecheck, "not
-      // registered" at runtime. What the scan CAN'T settle is two roots declaring one live name; that stays
-      // Program-order and audible via `conflicts`.
-      const urls   = getRegisteredPlugins().map(p => p.resolvedUrl).filter((u): u is string => u !== undefined);
-      // A tool built at runtime declares its contract as a string, having no source to augment from. The
-      // scan cannot see those, so they are handed over to be typed from a virtual augmentation — without
-      // which they were described to the model in full and then enforced only by their loose
-      // `inputSchema`, which is backwards: their params were authored by an LLM, not a compiler.
-      const live      = this.machine.tools.list();
-      const synthetic = Object.fromEntries(
-        live.flatMap(t => (t.toolContract !== undefined ? [[t.name, t.toolContract] as const] : [])),
-      );
-      const built  = await buildMatbotToolsDts(root, urls, live.map(t => t.name), synthetic);
-      this.cache      = built?.dts ?? '';
-      this.covered    = new Set([...(built?.tools.emitted ?? []), ...(built?.tools.unknown ?? [])]);
-      this.contracts  = built?.contracts ?? {};
-      this.validators = built?.validators ?? {};
-      this.apiExports = built?.apiExports ?? [];
-      this.dirty      = false;
+    const wanted = this.generation;
+    while (this.builtFor < wanted) {
+      this.building ??= this.build().finally(() => { this.building = null; });
+      await this.building;
     }
+  }
+
+  private async build(): Promise<void> {
+    // Read before anything is awaited, with the live tool list: a change that lands while this builds
+    // leaves the result stale, for the next caller to rebuild, instead of being marked seen.
+    const generation = this.generation;
+    const root   = this.machine.configPath !== undefined ? dirname(this.machine.configPath) : '.';
+    // Scan the source each loaded plugin was actually loaded from (its resolvedUrl) — builtin, compiled
+    // (.compiled-plugins/), or installed (.plugins/) alike — so every registered tool's real augmentation
+    // is read. build-dts UNIONs a glob of the monorepo `plugins/` tree onto these roots (not a fallback:
+    // it catches host-constructed builtins that have no resolvedUrl), so the scanned set is a SUPERSET of
+    // the loaded one — wherever that tree exists, plugins for other runtimes and plugins nobody loaded are
+    // read too. Hence the live tool names: a scanned root may supply a tool's contract, never the fact that
+    // the tool exists. Otherwise the dts declares uncallable tools (`telegram_send` from an unloaded
+    // telegram frontend), which `check()` then grades generated code against — clean typecheck, "not
+    // registered" at runtime. What the scan CAN'T settle is two roots declaring one live name; that stays
+    // Program-order and audible via `conflicts`.
+    const urls   = getRegisteredPlugins().map(p => p.resolvedUrl).filter((u): u is string => u !== undefined);
+    // A tool built at runtime declares its contract as a string, having no source to augment from. The
+    // scan cannot see those, so they are handed over to be typed from a virtual augmentation — without
+    // which they were described to the model in full and then enforced only by their loose
+    // `inputSchema`, which is backwards: their params were authored by an LLM, not a compiler.
+    const live      = this.machine.tools.list();
+    const synthetic = Object.fromEntries(
+      live.flatMap(t => (t.toolContract !== undefined ? [[t.name, t.toolContract] as const] : [])),
+    );
+    const built  = await buildMatbotToolsDts(root, urls, live.map(t => t.name), synthetic);
+    this.cache      = built?.dts ?? '';
+    this.covered    = new Set([...(built?.tools.emitted ?? []), ...(built?.tools.unknown ?? [])]);
+    this.contracts  = built?.contracts ?? {};
+    this.validators = built?.validators ?? {};
+    this.apiExports = built?.apiExports ?? [];
+    this.builtFor   = generation;
   }
 
   async dts(): Promise<string> {
