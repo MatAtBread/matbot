@@ -66,6 +66,12 @@ churn and less likely to affect a consumer who doesn't use them.
 - **CLI** — the package ships `remote-loader.js`. `ts-hooks.js` has imported it since 0.4.5 and `files`
   never listed it, so every CLI published from 0.4.5 to 0.4.16 failed at boot when installed from npm,
   with `ERR_MODULE_NOT_FOUND`. A test now boots the CLI as `npm pack` packs it.
+- **CLI** — module hooks run in-thread, through `module.registerHooks()`, instead of on a hooks thread
+  through `module.register()`: deprecated (DEP0205), and since Node 24.12 a round trip the main thread
+  waits on for every resolve and every load. `matbot --version` on Node 24.16 takes 283 ms rather than
+  387 on one CPU, 153 rather than 237 on four. Resolution is unchanged, and a `require()` passes the
+  hooks by, as it always did. A fetched plugin's imports are still fetched on demand, on a worker the
+  hook waits on, which starts only for a file not yet on disk.
 - **CLI** — the boot storage is the `FilesystemStorageBackend` whose layout the CLI already used, so
   `services.StorageBackend` is present by default. `tool-store`'s namespace-collision check, which
   enumerates it, previously found nothing on a default install.
