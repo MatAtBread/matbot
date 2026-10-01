@@ -59,6 +59,15 @@ churn and less likely to affect a consumer who doesn't use them.
 - **`tool-types`** — a call matching none of a tool's forms, where the forms share no discriminant, says
   why each form refused it (`(1) .interval: required property missing; (2) .at: …; (3) .name: unexpected
   property`), instead of only "no union member matched".
+- **`background-jobs`** (new: `@matatbread/matbot-background-jobs`) — supersedes `matbot-tool-background`,
+  as `background_job` / `background_job_action`, with one change of meaning: a job's reply is not its output. A job tells the
+  user something by appending to a conversation (by default the one it was created from), writing a file
+  or sending a notification, as its prompt asks, and stays silent when there is nothing to say. Jobs run
+  in their own process and reach their parent over an IPC channel, which also carries what they change
+  back to the parent's bus — so a file a job writes shows in the web UI. Keeps its own store: the old
+  plugin's schedules are listed as `legacy` (never run) and can be cancelled, so moving one is "create
+  here, cancel there". A recurring job keeps the tail of what it last printed as `lastReply`, for seeing
+  why a job that should have reported did not.
 - **`sessions`** — `session_action` gains `append`: post a message into a conversation without starting
   a turn (default: this one, or in a background job the one it reports to). In a background job, rename,
   hide and unhide are refused.

@@ -66,6 +66,8 @@ plugins/            — one directory per package, flat but for the frontend/pro
     hook-logger/   — diagnostic: logs every hook channel
     browser/       — IndexedDB store, OPFS files, WebCrypto vault (browser)
     web-principal-user/— WebPrincipalResolver bound to the host OS user
+    background-jobs/— `background_job`/`background_job_action`: jobs in their own process that report by appending
+                   to a conversation (node). Supersedes background/, kept for existing installs
     bash/, docker-bash/, http/, workspace/, background/, ask-user/, whoami/
                    — the standalone tool plugins (no `tools/` grouping directory)
     mcp-http/      — HTTP/SSE MCP servers (cross-runtime); mcp/ adds stdio (node)
@@ -753,6 +755,31 @@ carry, so the frontend keeps it as its own SSE event.
 
 **Distributed is left open, not built.** A registered `Notifier` may forward off-box; it stamps
 `instance` on ingress and must not re-forward a foreign `instance` — that is the loop break.
+
+## Session appends
+
+`services.SessionAppender` adds messages to a session **without running a turn** — a background job's
+report, an answer merged back from elsewhere. A running turn works on an in-memory copy of its session and
+writes it back whole on exit, which is what keeps the store a set of completed turns; so an append is
+checked at once (a missing session is reported to someone who can act on it) and **written at the
+quiescent edge**, where no turn holds any session, then announced. It settles on acceptance, not on the
+write: from inside a turn the edge cannot arrive, so awaiting it would deadlock.
+
+**Two notifications, deliberately.** The write raises the usual `ItemChange` (the session changed); a
+`SessionAppend` beside it carries which message ids arrived — the one thing a re-read cannot recover, since
+a turn adds messages too. A frontend draws those into the open thread; a chat bridge forwards them to the
+chat that mirrors the session (telegram). `AppendMessage` is plain user/assistant text by construction:
+an append arrives unasked into a history replayed on every later turn, so the arms carrying protocol state
+(an unpaired `tool-use`, an unearned `thinking` signature) cannot be expressed.
+
+**A background job never writes a session.** It shares its parent's medium but none of its parent's turns,
+so a write from the job would land under one of them unseen and be undone by its write-back. The host seeds
+an appender in every process and it refuses in a job; `matbot-background-jobs` registers one in the job
+that forwards over the IPC channel to the parent, which applies it (as the job's creator, labelled with
+the job from the channel — not from anything the job says). `session_action` rename/hide/unhide and
+`session_edit` refuse in a job outright. The same channel carries what else the job changes back to the
+parent's bus — **`ItemChange` only**: a registry change describes the job's own process (every job
+registers its tools at boot) and relayed would rebuild the parent's type index and tool search per spawn.
 
 ## Accounting
 
