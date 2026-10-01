@@ -1,19 +1,13 @@
 import type { AppendMessage, AppendResult, NotifyInput, Principal } from '@matatbread/matbot-plugin-api';
 import { ItemChangeKind } from '@matatbread/matbot-plugin-api';
+import type { JobInfo } from '@matatbread/matbot-background-jobs';
+export type { JobInfo };
 
 // The protocol between a job and the process that spawned it, over Node's IPC channel. A job shares
 // its parent's storage medium but none of its parent's turns, so it must not write a session itself;
 // it asks. The channel is per child, so who is asking needs no token: the parent knows which job it
 // spawned on the other end.
 
-/** What a job is told about itself. */
-export interface JobInfo {
-  id:            string;
-  name?:         string;
-  /** The conversation the job reports to, and its title — for the job's own system context. */
-  session?:      string;
-  sessionTitle?: string;
-}
 
 /** Job → parent. A request carries `rid` and is answered; a `notify` is fire-and-forget. */
 export type ChildMessage =

@@ -66,8 +66,9 @@ plugins/            — one directory per package, flat but for the frontend/pro
     hook-logger/   — diagnostic: logs every hook channel
     browser/       — IndexedDB store, OPFS files, WebCrypto vault (browser)
     web-principal-user/— WebPrincipalResolver bound to the host OS user
-    background-jobs/— `background_job`/`background_job_action`: jobs in their own process that report by appending
-                   to a conversation (node). Supersedes background/, kept for existing installs
+    background-jobs/— `background_job`/`background_job_action`: jobs that report by appending to a conversation,
+                   run in-process on an ephemeral run (cross-runtime). Supersedes background/, kept for existing installs
+    background-jobs-node/— the same, each job in its own process (node)
     bash/, docker-bash/, http/, workspace/, background/, ask-user/, whoami/
                    — the standalone tool plugins (no `tools/` grouping directory)
     mcp-http/      — HTTP/SSE MCP servers (cross-runtime); mcp/ adds stdio (node)
@@ -774,12 +775,18 @@ an append arrives unasked into a history replayed on every later turn, so the ar
 
 **A background job never writes a session.** It shares its parent's medium but none of its parent's turns,
 so a write from the job would land under one of them unseen and be undone by its write-back. The host seeds
-an appender in every process and it refuses in a job; `matbot-background-jobs` registers one in the job
+an appender in every process and it refuses in a job; `matbot-background-jobs-node` registers one in the job
 that forwards over the IPC channel to the parent, which applies it (as the job's creator, labelled with
 the job from the channel — not from anything the job says). `session_action` rename/hide/unhide and
 `session_edit` refuse in a job outright. The same channel carries what else the job changes back to the
 parent's bus — **`ItemChange` only**: a registry change describes the job's own process (every job
 registers its tools at boot) and relayed would rebuild the parent's type index and tool search per spawn.
+
+An in-process job (`matbot-background-jobs`) is the same rule reached the other way: it runs on an ephemeral
+run (`services.ephemeral`), so its own session is in a private memory store no other turn can see, and it
+reports through the appender its runner hands tools as `ToolContext.appender` — the scheduler's, which labels
+the message with the job and points it at the job's conversation. Its framing rides in its first message,
+never the system context, which is machine-wide.
 
 ## Accounting
 

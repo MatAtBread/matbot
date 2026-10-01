@@ -1,6 +1,6 @@
 // A stand-in job for background-jobs.test.ts: speaks the real protocol over the real IPC channel, then exits on its
 // own — which it can only do if its end of the channel does not hold the event loop open.
-import { connectToParent, type Endpoint, type JobInfo } from '../../../../plugins/background-jobs/src/channel.ts';
+import { connectToParent, type Endpoint, type JobInfo } from '../../../../plugins/background-jobs-node/src/channel.ts';
 
 const link = connectToParent(process as unknown as Endpoint, process.channel);
 const job  = await link.request<JobInfo>({ op: 'job' });

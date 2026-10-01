@@ -74,11 +74,17 @@ churn and less likely to affect a consumer who doesn't use them.
   as `background_job` / `background_job_action`, with one change of meaning: a job's reply is not its output. A job tells the
   user something by appending to a conversation (by default the one it was created from), writing a file
   or sending a notification, as its prompt asks, and stays silent when there is nothing to say. Jobs run
-  in their own process and reach their parent over an IPC channel, which also carries what they change
-  back to the parent's bus — so a file a job writes shows in the web UI. Keeps its own store: the old
+  in-process on an ephemeral run, so a job's own transcript is never stored, and the plugin is
+  cross-runtime — in a browser it runs jobs while a tab is open, one tab at a time. Stored jobs wait a minute
+  after the plugin loads before any may fire, so one past due at startup does not run while the tools it
+  needs are still loading. Keeps its own store: the old
   plugin's schedules are listed as `legacy` (never run) and can be cancelled, so moving one is "create
   here, cancel there". A recurring job keeps the tail of what it last printed as `lastReply`, for seeing
   why a job that should have reported did not.
+- **`background-jobs-node`** (new: `@matatbread/matbot-background-jobs-node`) — `background-jobs` with each job
+  in its own process, which can be killed and shares no heap with the server, at the cost of a full boot
+  per run. A job reaches its parent over an IPC channel, which also carries what it changes back to the
+  parent's bus — so a file a job writes shows in the web UI. Same tools and store: load one or the other.
 - **`sessions`** — `session_action` gains `append`: post a message into a conversation without starting
   a turn (default: this one, or in a background job the one it reports to). In a background job, rename,
   hide and unhide are refused.

@@ -7,12 +7,12 @@ import { runAs, installPrincipalCarrier, ItemChangeKind, RegistryChangeKind } fr
 import { executeQuery } from '@matatbread/matbot-core/storage-base';
 import type { AppendMessage, MatbotMachine, Session, Store, Tool, ToolContext } from '@matatbread/matbot-plugin-api';
 import { createAlsPrincipalCarrier } from '../src/principal-als.ts';
-import { connectToParent, relayable, serveJob, type Endpoint } from '../../../plugins/background-jobs/src/channel.ts';
-import { plugin as jobsPlugin } from '../../../plugins/background-jobs/src/index.ts';
+import { connectToParent, relayable, serveJob, type Endpoint } from '../../../plugins/background-jobs-node/src/channel.ts';
+import { plugin as jobsPlugin } from '../../../plugins/background-jobs-node/src/index.ts';
 
 installPrincipalCarrier(createAlsPrincipalCarrier());
 
-// `matbot-background-jobs` runs a job in its own process, which shares this one's storage but none of
+// `matbot-background-jobs-node` runs a job in its own process, which shares this one's storage but none of
 // its turns — so the job never writes a session itself. It asks, over an IPC channel, and what it writes
 // elsewhere (a file) is announced back over the same channel. These pin the protocol on the real channel,
 // what may cross it, and the move from the plugin it replaces.

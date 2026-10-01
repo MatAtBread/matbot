@@ -11,10 +11,19 @@ from — where the user sees it and can follow up with its context. It can also 
 Telegram notification if its prompt asks for that, and a job with nothing worth saying ends silently. So a
 job's prompt says what to tell the user and when: *"Check the balance; if it is over 50M, tell the user."*
 
-A job runs in its own process and shares this one's storage, but none of its turns, so it never writes a
-session itself: its appends go back over an IPC channel to the process that started it, which applies them
-when no turn is running. What else the job changes (a file it writes) is announced there too, so the web UI
-shows it.
+## Where a job runs
+
+This package runs each job **in this process**, on an ephemeral run: a private session runner over an
+in-memory store, so the job's own transcript is never stored or listed, and it has every tool and provider
+the conversations around it have. It reports through its run's appender, which labels each message with the
+job. It works in the browser too — but only while a matbot tab is open, since nothing runs a closed one; with
+several tabs open, one of them (the holder of a Web Lock) runs the jobs.
+
+[`@matatbread/matbot-background-jobs-node`](../background-jobs-node) is the same plugin with each job run in
+**its own process** instead: a full matbot booted from this one's config. That is a hard boundary — a job that
+hangs or leaks can be killed, and shares no heap with the server — at the cost of a whole boot per run. Load
+one or the other, not both: they register the same tools and share the same store, so switching keeps your
+jobs.
 
 ## Moving from `matbot-tool-background`
 
