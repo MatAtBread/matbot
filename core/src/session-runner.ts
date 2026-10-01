@@ -371,7 +371,11 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
     return machineBusy(async () => {
       try {
         for (;;) {
-          await drainMerges(id, s);
+          // Not ahead of a redo. A redo re-runs the turn just retracted, found as the session's LAST user
+          // message, so a pair appended here would be re-run in its place, on a history ending in an
+          // assistant message. Left in `merges`, the pair is placed by the redo's first round instead,
+          // ahead of the kept user message, which is where the copy it ran on ended.
+          if (s.queue[0]?.redo === undefined) await drainMerges(id, s);
           if (s.queue.length === 0) break;
           // Per-submission concat: the head always runs; if the head is a concat submission it absorbs
           // the following submissions while they too are concat, stopping at the first non-concat (a turn

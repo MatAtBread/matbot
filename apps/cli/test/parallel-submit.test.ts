@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createSessionRunner, createSession, installPrincipalCarrier, installUsageCarrier } from '@matatbread/matbot-core';
+import { createSessionRunner, createSession, installPrincipalCarrier, installUsageCarrier, HookRegistry } from '@matatbread/matbot-core';
 import type {
   Session, Store, Tool, ToolRegistry, ProviderAdapter, ProviderConfig, CompletionEvent,
   Message, PipelineEvent, Principal, MessageContent,
@@ -92,7 +92,7 @@ function fakeProvider(seen: { main: Message[][]; parallel: Message[][] }, parall
   };
 }
 
-function setup(parallelGate: Promise<void>) {
+function setup(parallelGate: Promise<void>, hooks?: HookRegistry) {
   const session = createSession();
   const store   = memStore(session);
   const seen    = { main: [] as Message[][], parallel: [] as Message[][] };
@@ -103,6 +103,7 @@ function setup(parallelGate: Promise<void>) {
     store,
     resolveProvider: async () => ({ adapter: fakeProvider(seen, parallelGate), config }),
     tools: toolRegistry(slowTool(started.open, release.wait)),
+    ...(hooks !== undefined ? { hooks } : {}),
     loadPlugin: async () => { throw new Error('loadPlugin unused'); },
     unloadPlugin: async () => false,
   });
@@ -190,4 +191,45 @@ test('parallel with nothing running degrades to an ordinary turn', { timeout: 10
   await watch(view, events);
   assert.ok(!events.some(e => e.type === 'parallel'));
   assert.deepEqual((await store.get(sid))!.messages.map(m => m.role), ['user', 'assistant', 'tool', 'assistant']);
+});
+
+// A parallel reply that settles after the running turn's last round, while a followup hook judges it, used
+// to be appended between turns — after the retraction marker, ahead of the redo. The redo then took the
+// parallel message for the turn to re-run, on a history ending in an assistant message (a prefill), and
+// the retracted turn was never answered.
+test('a retract-and-rerun re-runs the retracted turn, not a parallel reply that settled meanwhile', { timeout: 10000 }, async () => {
+  const parallelGate = gate();
+  const hooks = new HookRegistry();
+  let retracted = false;
+  let runner!: ReturnType<typeof setup>['runner'];
+  let sid!: string;
+  hooks.register({ on: 'followup', pluginName: 'retractor', handler: async () => {
+    if (retracted) return {};
+    retracted = true;
+    parallelGate.open();
+    while (runner.status(sid).parallel > 0) await new Promise(r => setImmediate(r));
+    return { retractAndRerun: {} };
+  } });
+  const t = setup(parallelGate.wait, hooks);
+  ({ runner, sid } = t);
+  const { store, seen, started, release } = t;
+
+  const main = await runner.open({ sessionId: sid, signal: new AbortController().signal, content: submit('do it'), provider: 'fake', principal });
+  const events: PipelineEvent[] = [];
+  const collector = watch(main, events);
+  await started.wait;
+  await runner.open({ sessionId: sid, signal: new AbortController().signal, content: submit('Q'), provider: 'fake', principal, mode: 'parallel' });
+  release.open();
+  await collector;
+
+  // The redo's first call reads the retracted request as its last message — not the parallel pair. (Markers
+  // reach the adapter, which elides them.)
+  const last = seen.main[2]!.findLast(m => m.role !== 'marker')!;
+  assert.equal(last.role, 'user');
+  assert.equal(textOf(last), 'do it');
+
+  // The pair was placed where the copy it ran on ended: ahead of the turn it ran beside.
+  const final = (await store.get(sid))!;
+  assert.deepEqual(final.messages.map(m => m.role === 'marker' ? 'marker' : textOf(m) || m.role),
+    ['Q', 'A', 'do it', 'marker', 'assistant', 'tool', 'main done']);
 });
