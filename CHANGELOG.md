@@ -18,6 +18,12 @@ churn and less likely to affect a consumer who doesn't use them.
   the `forked-from` / `continued-in` marker a fork or split already appends, which is what the web UI
   draws. Old persisted data keeps them harmlessly as excess properties.
 
+### API gaps filled
+
+- **`CreateSessionOpts.status`** — a session can be created `archived` (hidden from the default session
+  list) or `pinned`, instead of being created active and changed by a second write that every client
+  watching the list sees.
+
 ### Bug fixes
 
 - **Session runner** — a submission arriving while the pump flushed usage could erase the flushed
@@ -39,6 +45,8 @@ churn and less likely to affect a consumer who doesn't use them.
   deferred until the turn ends, and the result says `deferred: true`. They were written at once and
   then silently undone by the turn's write-back — renaming or hiding a conversation from the web sidebar
   while it was answering did nothing.
+- **`frontend-web`** — `POST /sessions` takes an optional `{ status }` body, and both transports'
+  `createSession` pass it through, so a client can create a session hidden.
 
 ## 0.4.17
 

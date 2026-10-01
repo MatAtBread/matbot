@@ -104,8 +104,8 @@ function makeInProcessTransport(services) {
     throw new Error('Tool returned no result');
   }
 
-  async function createSessionFn() {
-    const session = createSession();
+  async function createSessionFn(opts) {
+    const session = createSession(opts?.status === undefined ? {} : { status: opts.status });
     await services.sessions.set(session.id, session);
     return { id: session.id };
   }

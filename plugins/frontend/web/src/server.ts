@@ -618,7 +618,17 @@ export function createWebServer(deps: WebServerDeps) {
 
     // --- POST /sessions ---
     if (method === 'POST' && url === '/sessions') {
-      const session = createSession();
+      // An empty body is the original form and still means a plain active session.
+      let body: { status?: unknown };
+      try {
+        const raw = await readBody(req);
+        body = raw.trim() === '' ? {} : JSON.parse(raw) as { status?: unknown };
+      } catch { json(res, 400, { error: 'Invalid JSON' }); return; }
+      const { status } = body;
+      if (status !== undefined && status !== 'active' && status !== 'archived' && status !== 'pinned') {
+        json(res, 400, { error: `"status" must be "active", "archived" or "pinned".` }); return;
+      }
+      const session = createSession(status !== undefined ? { status } : {});
       await deps.store.set(session.id, session);
       json(res, 201, { id: session.id });
       return;
