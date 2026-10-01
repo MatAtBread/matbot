@@ -835,11 +835,14 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
           // Any await above may have outlived the turn this steer was for: interrupt only if THAT one
           // is still the running turn. Otherwise fall through and queue — the turn they were steering
           // has already committed, which makes this an ordinary follow-up rather than an interruption.
-          if (decision === 'interrupt' && s.running && s.runningTraceId === steerTarget) {
+          // `running` alone is not "a turn is running": it holds through the usage flush after the queue
+          // drains, where `runningTraceId` is already cleared — and `steerTarget` captured then is
+          // undefined too, so without the first test the two compare equal and nothing gets steered.
+          if (decision === 'interrupt' && s.runningTraceId !== undefined && s.runningTraceId === steerTarget) {
             const nudge = policy?.nudge !== undefined && committed
               ? policy.nudge({ session: committed, steer: content })
               : DEFAULT_STEER_NUDGE;
-            const interruptedTraceId = s.runningTraceId ?? '';
+            const interruptedTraceId = s.runningTraceId;
             // Head of the queue (ahead of anything else already queued): the steer runs immediately
             // after the interrupted turn commits its partial work. Own turn (never concat).
             s.queue.unshift({

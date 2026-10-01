@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createSessionRunner, createSession, installPrincipalCarrier, installUsageCarrier } from '@matatbread/matbot-core';
 import type {
   Session, Store, ToolRegistry, ProviderAdapter, ProviderConfig, CompletionEvent,
-  Principal, MessageContent,
+  Principal, MessageContent, PipelineEvent,
 } from '@matatbread/matbot-core';
 import { createAlsPrincipalCarrier } from '../src/principal-als.js';
 import { createAlsUsageCarrier } from '../src/usage-als.js';
@@ -29,13 +29,12 @@ const emptyTools = {
 
 const text = (t: string): MessageContent[] => [{ type: 'text', text: t }];
 
-test('a submission arriving during the usage flush neither erases it nor is erased', { timeout: 15000 }, async () => {
+// With no hooks registered, the first read after the first turn's two writes (persist-at-turn-start,
+// then the end-of-turn commit) is the flush's. Delay that one: read now, deliver late, as a slow medium
+// would — a snapshot that predates anything written in the meantime.
+function slowFlush() {
   const session = createSession();
   const docs = new Map<string, Session>([[session.id, session]]);
-
-  // With no hooks registered, the first read after the first turn's two writes (persist-at-turn-start,
-  // then the end-of-turn commit) is the flush's. Delay that one: read now, deliver late, as a slow
-  // medium would — a snapshot that predates anything written in the meantime.
   let sets = 0;
   let gated = false;
   let flushReadStarted!: () => void;
@@ -75,10 +74,15 @@ test('a submission arriving during the usage flush neither erases it nor is eras
     loadPlugin:      async () => { throw new Error('loadPlugin unused'); },
     unloadPlugin:    async () => false,
   });
-  const submit = (t: string) => runner.open({
+  const submit = (t: string, mode?: 'interrupt') => runner.open({
     sessionId: session.id, signal: new AbortController().signal,
-    content: text(t), provider: 'fake', principal,
+    content: text(t), provider: 'fake', principal, ...(mode !== undefined ? { mode } : {}),
   });
+  return { session, docs, flushRead, runner, submit };
+}
+
+test('a submission arriving during the usage flush neither erases it nor is erased', { timeout: 15000 }, async () => {
+  const { session, docs, flushRead, runner, submit } = slowFlush();
 
   await submit('one');
   await flushRead;
@@ -89,4 +93,29 @@ test('a submission arriving during the usage flush neither erases it nor is eras
   assert.equal(users.length, 2, 'the second turn\'s user message survived the flush');
   assert.ok((users[0]!.activity?.length ?? 0) > 0, 'the first turn\'s usage survived the second turn');
   assert.ok((users[1]!.activity?.length ?? 0) > 0, 'the second turn\'s usage was flushed too');
+});
+
+// The flush runs while `running` holds but after the running turn's traceId is cleared, so an interrupt
+// arriving then found `steerTarget === undefined === runningTraceId` and steered: the model was told the
+// user had sent this mid-task, and the frontend got a `steer` naming no turn. Nothing is running, so it
+// is an ordinary next turn.
+test('an interrupt arriving during the usage flush is queued, not steered', { timeout: 15000 }, async () => {
+  const { session, flushRead, runner, submit } = slowFlush();
+
+  await submit('one');
+  await flushRead;
+  // Subscribed first: a `steer` goes only to subscribers live when it is sent.
+  const tap = (await runner.open({ sessionId: session.id, signal: new AbortController().signal })).events[Symbol.asyncIterator]();
+  const second = await submit('two', 'interrupt');
+  const events: PipelineEvent[] = [];
+  for (;;) {
+    const { value: ev, done } = await tap.next();
+    if (done) break;
+    events.push(ev);
+    if (ev.type === 'idle' && !runner.status(session.id).busy) break;
+  }
+
+  assert.ok(!events.some(e => e.type === 'steer'), 'no steer event');
+  assert.ok(events.some(e => e.type === 'queued' && e.traceId === second.traceId), 'queued as an ordinary submission');
+  assert.ok(events.some(e => e.type === 'done' && e.traceId === second.traceId), 'and ran');
 });
