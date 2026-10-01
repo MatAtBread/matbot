@@ -22,5 +22,8 @@ every scanned tool and is narrowed to the live ones on the way out, so a tool re
 every `mcp__*` tool arriving after boot — is a filter, not a rebuild. The last four builds are kept, one per
 set of inputs, since one boot can need two: types asked for before the last plugin has loaded, and after.
 
+If reading the stored build fails, the plugin logs a warning and builds normally. The rebuilt index is
+kept in memory even if the settings backend remains unavailable; errors from the build itself still fail.
+
 **Trust.** Each validator is stored as JavaScript source and compiled with `new Function` on load, so the
 settings medium must be trusted like plugin source.

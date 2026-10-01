@@ -113,7 +113,10 @@ export function cachingFill(settings: PluginSettings, build: ToolTypesFill = bui
     if (!found) return build({ ...inputs, ...(liveToolNames !== undefined ? { liveToolNames } : {}) });
     const key = keyOf(inputs, found.roots);
 
-    const stored = held.get(key) ?? await settings.get<Snapshot>(snapshotKey(key));
+    const stored = held.get(key) ?? await settings.get<Snapshot>(snapshotKey(key)).catch((e: unknown) => {
+      console.warn(`[caching-tool-types] could not read cached build: ${e instanceof Error ? e.message : String(e)}`);
+      return undefined;
+    });
     if (stored !== undefined && unchanged(stored.stamps)) {
       held.set(key, stored);
       return out(stored.data);
