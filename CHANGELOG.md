@@ -9,6 +9,13 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## Unreleased
+
+### Optional
+
+- **`caching-tool-types`** — a failed settings read logs a warning and rebuilds the type index,
+  rather than failing tool validation. The rebuilt index remains available in memory.
+
 ## 0.4.17
 
 ### API gaps filled

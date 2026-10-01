@@ -88,6 +88,60 @@ test('the same inputs, with nothing on disk changed, do not build', async () => 
   }
 });
 
+test('a failed snapshot read builds normally and keeps the result in memory', async t => {
+  const { dir } = await project();
+  try {
+    const store = settings();
+    let reads = 0;
+    let builds = 0;
+    const warnings: string[] = [];
+    t.mock.method(console, 'warn', (...args: unknown[]) => warnings.push(args.join(' ')));
+    const fill = cachingFill({
+      ...store,
+      get: async <T>(key: string): Promise<T | undefined> => {
+        if (key.startsWith('snapshot:')) {
+          reads++;
+          throw new Error('settings backend unavailable');
+        }
+        return store.get<T>(key);
+      },
+    }, async i => {
+      builds++;
+      return buildToolTypesData(i.projectRoot, i.pluginEntryUrls, i.liveToolNames, i.syntheticContracts);
+    });
+
+    const first = await fill(inputs(dir));
+    assert.ok(first?.validators['whoami']);
+    const validator = compileToolValidators(first.validators)['whoami'];
+    assert.ok(validator);
+    assert.deepEqual(validator.validate({}), []);
+    assert.notDeepEqual(validator.validate({ unexpected: 1 }), []);
+    assert.deepEqual(await fill(inputs(dir)), first);
+    assert.equal(builds, 1);
+    assert.equal(reads, 1, 'the in-memory snapshot needs no further backend read');
+    assert.deepEqual(warnings, ['[caching-tool-types] could not read cached build: settings backend unavailable']);
+    await new Promise(r => setImmediate(r));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a failed cache read does not hide a failed fallback build', async t => {
+  const { dir } = await project();
+  try {
+    t.mock.method(console, 'warn', () => {});
+    const store = settings();
+    const failure = new Error('type-index build failed');
+    const fill = cachingFill({
+      ...store,
+      get: async () => { throw new Error('settings backend unavailable'); },
+    }, async () => { throw failure; });
+    await assert.rejects(fill(inputs(dir)), error => error === failure);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('a file the build read changing is a miss', async () => {
   const { dir, file } = await project();
   try {
