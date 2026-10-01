@@ -1,5 +1,11 @@
 import { PLUGIN_API_VERSION, RegistryChangeKind } from '@matatbread/matbot-plugin-api';
-import type { MatbotPluginSpec, Message, MessageContent, Tool, ToolPresenter, PresentContext } from '@matatbread/matbot-plugin-api';
+import type { MatbotPluginSpec, Message, MessageContent, Tool, ToolContract, ToolExecutor, ToolResultOf, ToolPresenter, PresentContext } from '@matatbread/matbot-plugin-api';
+
+declare module '@matatbread/matbot-plugin-api' {
+  interface ToolContracts {
+    tool_search: ToolContract<{ found: Array<{ name: string }>; note: string }, { query: string }>;
+  }
+}
 
 // tool-router — the model never sees the whole tool library. Each provider call it sees `tool_search` plus a
 // bounded WORKING SET of full tool specs, delivered through the ephemeral `tools` param (recomputed per
@@ -339,7 +345,7 @@ searching over declining or improvising.`,
             : `No specific tool matched; general-purpose fallbacks are now loaded and appear in your available tools with full specifications. Call one from there, or refine your search.`;
           yield { type: 'result', value: { found, note } };
         },
-      },
+      } satisfies ToolExecutor<ToolResultOf<'tool_search'>>,
     };
     services.tools.register(toolSearch);
 
