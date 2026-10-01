@@ -77,6 +77,13 @@ churn and less likely to affect a consumer who doesn't use them.
 - **`frontend-telegram`** — a message appended to a chat's session is delivered to that chat, so a
   follow-up asked there has it as context. `telegram_send` is documented as the low-level direct send it
   is: it records nothing in any conversation.
+- **`frontend-telegram`** — a chat keeps one session id for good. Archiving its conversation used to make
+  the next message start a new session under a new id, stranding anything holding the old one (a
+  background job reporting to it appended into the archive, which the chat never shows); now the history
+  is moved to a new archived session, linked both ways as a split is, and the chat's session is emptied in
+  place. A `pinned` chat session is no longer mistaken for an archived one. New `telegram_session` finds a
+  chat's session id by the name or @username of the person in it. Machine-authored turn content (a
+  trigger's injected context, a followup's prompt) is no longer sent to the chat.
 
 ## 0.4.17
 

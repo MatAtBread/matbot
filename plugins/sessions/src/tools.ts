@@ -157,8 +157,8 @@ function makeSessionActionTool(store: Store<Session>, env: SessionToolEnv): Tool
       'covers the lifecycle: list sessions, search their contents (query), fetch one in full (get), ' +
       'rename one, hide (archive) one, unhide (unarchive) one, or append a message to one.\n\n' +
       '"append" posts "text" into a conversation as a message from the assistant, without starting a turn. ' +
-      'With no "sessionId" it goes to this conversation — or, from a background job, to the conversation the ' +
-      'job reports to. Use it when the user should be able to follow up on what you say: it becomes part of ' +
+      'With no "sessionId" it goes to a deafult (the current session, or one specified for background job) ' +
+      'Use it when the user should be able to follow up on what you say: it becomes part of ' +
       'that conversation, so a later question there has it as context. It lands once no turn is running, and ' +
       'the result says "deferred": true. A bare notification that needs no follow-up is telegram_send\'s job; ' +
       'append is the one that keeps context.\n\n' +

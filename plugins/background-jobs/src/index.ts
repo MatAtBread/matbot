@@ -500,7 +500,7 @@ const backgroundTool: Tool<ToolResultOf<'background_job'>> = {
   description: `Run a prompt as a job in a detached background process, in one of three timings — pass at most one
 timing field:
 
-  neither interval nor at — run once, starting NOW, and return immediately.
+  neither interval nor at — run once, starting NOW, and return immediately, leaving the job to complete in the background.
   at                      — run once, at the time given. Persists across restarts.
   interval                — run repeatedly, that far apart. Persists across restarts.
 
@@ -508,9 +508,9 @@ Both timed forms return an id: the handle for the background_job_action tool (li
 A one-shot deletes itself once it has run.
 
 HOW THE USER HEARS FROM A JOB. Nothing a job replies is shown to anyone. A job tells the user something by
-appending a message to a conversation (session_action append) — by default THIS conversation, or the one
-named in \`session\` — where they see it and can follow up with its context. It can also use other tools to for
-example write workspace files or send bare Telegram messages, if its prompt asks for that. A job with nothing worth
+appending a message to a session (session_action append) — by default THIS conversation, or the one
+named in \`session\` — where they see it and can follow up with its context. It can also use other tools to, for
+example, write workspace files or send emails, if its prompt asks for that. A job with nothing worth
 saying ends silently. If the user does not specify where they want the output, you should ask them for clarification.
 
 So write the prompt as an instruction to an agent, saying what to tell the user and when:
