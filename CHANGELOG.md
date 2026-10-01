@@ -44,6 +44,11 @@ churn and less likely to affect a consumer who doesn't use them.
   read-modify-write. The flush now runs while the pump still holds the session, and anything queued
   during it runs next.
 
+- **Hooks** — a hook cut off by its turn's abort (a steer, a cancel) is logged as cut off, naming the abort
+  reason, and leaves no failure marker. It was logged as a failure whose whole message was the abort
+  reason — `threw; skipping it for this turn: steer` — and marked durably as one. A hook that genuinely
+  throws is logged with its stack; a non-`Error` throw says that is what it was.
+
 ### Optional
 
 - **`caching-tool-types`** — a failed settings read logs a warning and rebuilds the type index,
