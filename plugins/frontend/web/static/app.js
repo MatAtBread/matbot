@@ -2831,9 +2831,11 @@ function pushTurnEvent(ev) {
   // A parallel turn runs on a COPY of the session, so its terminal's `session` is that copy: noted here so
   // its renderer never redraws the page from it. Its write-back (`merged`) arrives after its terminal and
   // changes nothing already drawn live, so it is consumed here rather than spawning a renderer for a
-  // finished trace. Where the pair landed shows on the next load of the session.
+  // finished trace. Where the pair landed shows on the next load of the session. The note is dropped by
+  // the renderer's own stream once it has handled the last event (`turnEvents`), never here: `merged`
+  // can arrive in the same chunk as the terminal, before the renderer has seen either.
   if (ev.type === 'parallel') parallelTraces.add(ev.traceId);
-  if (ev.type === 'merged') { parallelTraces.delete(ev.traceId); return; }
+  if (ev.type === 'merged') return;
 
   // Markers can arrive after a turn's terminal event (e.g. a followup hook's, emitted post-commit).
   // If the turn's queue is gone/finished, render directly rather than re-spawning a renderTurn for a
@@ -2880,7 +2882,7 @@ async function* turnEvents(traceId) {
   const q = queueFor(traceId);
   for (;;) {
     while (q.items.length) yield q.items.shift();
-    if (q.done) { turnQueues.delete(traceId); return; }
+    if (q.done) { turnQueues.delete(traceId); parallelTraces.delete(traceId); return; }
     await new Promise(res => { q.wake = res; });
   }
 }
@@ -2904,6 +2906,7 @@ async function connectSessionStream(sid) {
   streamAc = new AbortController();
   streamSessionId = sid;
   turnQueues.clear();
+  parallelTraces.clear();
   activeBatchHead = null;
   foldedTraces.clear();
   const ac = streamAc;
@@ -3613,8 +3616,9 @@ async function renderTurn(sid, traceId) {
           const turnFooter  = makeTurnFooter(perProvider, turnTimestamp(ev.session?.messages, traceId));
           if (turnWrap && turnFooter) turnWrap.appendChild(turnFooter);
           loadFiles();
-          // Back-fill origIdx on any dividers added without an index this turn.
-          if (ev.session) {
+          // Back-fill origIdx on any dividers added without an index this turn. Not from a parallel turn's
+          // copy, whose indexes are not the session's: a cut or fork from that divider would miss.
+          if (ev.session && !parallelTraces.has(traceId)) {
             const allDividers = [...messagesEl.querySelectorAll('.msg-divider')];
             const unindexed   = allDividers.filter(d => d.dataset.msgIdx === undefined);
             if (unindexed.length > 0) {
