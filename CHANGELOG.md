@@ -99,7 +99,8 @@ churn and less likely to affect a consumer who doesn't use them.
   then never defaults to the turn's own (throwaway) session.
 - **`skills_compiler`** — a compile's demonstration runs on an ephemeral run instead of a scratch session in
   the user's store, so it is no longer listed while it runs or left behind if the process dies mid-compile.
-  Two log lines report where it ran and confirm it never reached the persisted store.
+  Two log lines report where it ran and confirm it never reached the persisted store. Cancelling a compile
+  now stops its demonstration, which carried on calling tools after the compile was abandoned.
 
 ## 0.4.17
 

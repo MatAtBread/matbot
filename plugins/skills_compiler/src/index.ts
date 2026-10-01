@@ -212,15 +212,24 @@ export async function* demonstrate(
     principal,
   });
 
+  // `signal` on open() only ends this view of the session; the turn runs on the runner's own controller.
+  // So aborting the compile stops the demonstration itself, which would otherwise carry on calling tools.
+  const stop = (): void => { demo.run.abort(scratchId); };
+  opts.signal.addEventListener('abort', stop, { once: true });
+  if (opts.signal.aborted) stop();
   let pct = 10;
-  for await (const ev of view.events) {
-    if (!('traceId' in ev) || ev.traceId !== view.traceId) continue;
-    if (ev.type === 'done' || ev.type === 'aborted') { finalSession = ev.session; break; }
-    if (ev.type === 'error') break;
-    if (ev.type === 'thinking' || ev.type === 'text-delta') {
-      yield { type: 'progress', pct, message: ev.delta };
-      if (pct < 50) pct += 1;
+  try {
+    for await (const ev of view.events) {
+      if (!('traceId' in ev) || ev.traceId !== view.traceId) continue;
+      if (ev.type === 'done' || ev.type === 'aborted') { finalSession = ev.session; break; }
+      if (ev.type === 'error') break;
+      if (ev.type === 'thinking' || ev.type === 'text-delta') {
+        yield { type: 'progress', pct, message: ev.delta };
+        if (pct < 50) pct += 1;
+      }
     }
+  } finally {
+    opts.signal.removeEventListener('abort', stop);
   }
   // `error` carries no session; recover the committed transcript from the store.
   finalSession ??= (await demo.sessions.get(scratchId)) ?? undefined;
