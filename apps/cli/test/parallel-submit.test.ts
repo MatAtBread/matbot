@@ -74,7 +74,8 @@ function fakeProvider(seen: { main: Message[][]; parallel: Message[][] }, parall
     name: 'fake',
     async health() { return { ok: true } as never; },
     complete(messages): AsyncIterable<CompletionEvent> {
-      const isParallel = messages.some(m => textOf(m).includes('<running-request>'));
+      // The parallel submission is always 'Q…' — framed or not, so a test can see when framing is missing.
+      const isParallel = textOf(messages.findLast(m => m.role === 'user') ?? { content: [] }).startsWith('Q');
       (isParallel ? seen.parallel : seen.main).push(messages);
       const afterTool = messages[messages.length - 1]?.role === 'tool';
       return (async function* () {
@@ -92,7 +93,7 @@ function fakeProvider(seen: { main: Message[][]; parallel: Message[][] }, parall
   };
 }
 
-function setup(parallelGate: Promise<void>, hooks?: HookRegistry) {
+function setup(parallelGate: Promise<void>, hooks?: HookRegistry, resolving?: Promise<void>) {
   const session = createSession();
   const store   = memStore(session);
   const seen    = { main: [] as Message[][], parallel: [] as Message[][] };
@@ -101,7 +102,7 @@ function setup(parallelGate: Promise<void>, hooks?: HookRegistry) {
   const config: ProviderConfig = { name: 'fake', module: 'fake', model: 'fake' };
   const runner  = createSessionRunner({
     store,
-    resolveProvider: async () => ({ adapter: fakeProvider(seen, parallelGate), config }),
+    resolveProvider: async () => { await resolving; return { adapter: fakeProvider(seen, parallelGate), config }; },
     tools: toolRegistry(slowTool(started.open, release.wait)),
     ...(hooks !== undefined ? { hooks } : {}),
     loadPlugin: async () => { throw new Error('loadPlugin unused'); },
@@ -232,4 +233,59 @@ test('a retract-and-rerun re-runs the retracted turn, not a parallel reply that 
   const final = (await store.get(sid))!;
   assert.deepEqual(final.messages.map(m => m.role === 'marker' ? 'marker' : textOf(m) || m.role),
     ['Q', 'A', 'do it', 'marker', 'assistant', 'tool', 'main done']);
+});
+
+// The turn head (where a parallel copy is cut, and the request its framing names) was only set once the
+// provider had resolved, after the user message was persisted. A parallel message arriving in between
+// copied the whole session — ending [… 'do it', 'Q'], two user messages in a row — with no framing.
+test('a parallel message arriving while the turn resolves its provider is cut and framed', { timeout: 10000 }, async () => {
+  const resolving = gate();
+  const { sid, store, seen, release, runner } = setup(Promise.resolve(), undefined, resolving.wait);
+  release.open();
+
+  const main = await runner.open({ sessionId: sid, signal: new AbortController().signal, content: submit('do it'), provider: 'fake', principal });
+  const events: PipelineEvent[] = [];
+  const collector = watch(main, events);
+  // The main turn's user message is persisted and its provider is resolving.
+  while (!(await store.get(sid))!.messages.some(m => textOf(m) === 'do it')) await new Promise(r => setImmediate(r));
+  await runner.open({ sessionId: sid, signal: new AbortController().signal, content: submit('Q'), provider: 'fake', principal, mode: 'parallel' });
+  resolving.open();
+  await collector;
+
+  const parCall = seen.parallel[0]!;
+  assert.ok(!parCall.some(m => m.role === 'user' && textOf(m) === 'do it'), 'the running turn is not in the copy');
+  assert.ok(textOf(parCall.findLast(m => m.role === 'user')!).includes('<running-request>\ndo it\n</running-request>'), 'framed with the running request');
+});
+
+// Once a turn's rounds are over it has answered; a parallel message arriving while followup judges it was
+// still told the turn "is still working", and its copy was cut ahead of the answer it could have seen.
+test('a parallel message arriving during followup sees the finished turn, unframed', { timeout: 10000 }, async () => {
+  const inFollowup = gate();
+  const leaveFollowup = gate();
+  const hooks = new HookRegistry();
+  let judged = 0;
+  // Only the main turn's is held: the parallel turn's nested runner shares the hooks.
+  hooks.register({ on: 'followup', pluginName: 'judge', handler: async () => {
+    if (judged++ > 0) return {};
+    inFollowup.open();
+    await leaveFollowup.wait;
+    return {};
+  } });
+  const { sid, store, seen, release, runner } = setup(Promise.resolve(), hooks);
+  release.open();
+
+  const main = await runner.open({ sessionId: sid, signal: new AbortController().signal, content: submit('do it'), provider: 'fake', principal });
+  const events: PipelineEvent[] = [];
+  const collector = watch(main, events);
+  await inFollowup.wait;
+  await runner.open({ sessionId: sid, signal: new AbortController().signal, content: submit('Q'), provider: 'fake', principal, mode: 'parallel' });
+  while (runner.status(sid).parallel > 0) await new Promise(r => setImmediate(r));
+  leaveFollowup.open();
+  await collector;
+
+  const parCall = seen.parallel[0]!;
+  assert.ok(!parCall.some(m => textOf(m).includes('<running-request>')), 'not told a turn is still working');
+  assert.ok(parCall.some(m => m.role === 'assistant' && textOf(m) === 'main done'), 'the copy includes the finished answer');
+  const final = (await store.get(sid))!;
+  assert.deepEqual(final.messages.map(m => textOf(m) || m.role), ['do it', 'assistant', 'tool', 'main done', 'Q', 'A']);
 });

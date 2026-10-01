@@ -150,9 +150,13 @@ interface SessionState {
   // SessionAppender — that writes at the quiescent edge, which cannot arrive until the pump's whole
   // queue drains, and the point of a parallel turn is not waiting for that.
   merges:      ParallelReply[];
-  // Id of the running turn's first own message (its user message; for a redo, the kept one) — where the
-  // copy a parallel turn runs on ends, and so where its pair is placed while this turn runs.
-  turnHead:    string | undefined;
+  // The running turn's first own message (its user message; for a redo, the kept one): its id is where
+  // the copy a parallel turn runs on ends, and so where its pair is placed while this turn runs; its text
+  // is the request that copy's framing names. Set before that message is persisted, so a parallel turn
+  // arriving across the write still knows both. Cleared once the turn's rounds end, because from then
+  // on the turn has answered, and a parallel turn should see the answer rather than be told it is
+  // still being worked on.
+  turnHead:    { id: string; request: string } | undefined;
   // Replies placed into the running turn's in-memory copy and not yet committed: a parallel turn started
   // now must see them, and they reach the store only when that turn ends.
   interjected: ParallelReply[];
@@ -340,7 +344,8 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
   // text ahead of a `thinking` block. Each later pair lands after the earlier ones, so they stay in order.
   const interjectInto = (s: SessionState) => (cur: Session): { session: Session; merged: string[] } | undefined => {
     if (s.merges.length === 0 || s.turnHead === undefined) return undefined;
-    const at = cur.messages.findIndex(m => m.id === s.turnHead);
+    const head = s.turnHead.id;
+    const at = cur.messages.findIndex(m => m.id === head);
     if (at < 0) return undefined;
     const replies = s.merges.splice(0);
     s.interjected.push(...replies);
@@ -409,7 +414,10 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
 
           // Where this turn's own messages begin — see `SessionState.turnHead`. A redo's begin at the user
           // message it re-runs; a fresh turn's at the user message persisted just below.
-          let turnHead = head.redo !== undefined ? session.messages[lastUserIndex(session)]?.id : undefined;
+          if (head.redo !== undefined) {
+            const kept = session.messages[lastUserIndex(session)];
+            s.turnHead = kept !== undefined ? { id: kept.id, request: textOf(kept) } : undefined;
+          }
 
           // A redo re-runs the existing committed user turn — no title derivation, no new user message.
           if (head.redo === undefined) {
@@ -434,7 +442,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
             // resubmission's blocks already carry `origin: 'robo'` (stamped where it was enqueued).
             const userMsg = createMessage({ role: 'user', content, traceId: head.traceId, providerName: head.provider });
             session = appendMessage(session, userMsg);
-            turnHead = userMsg.id;
+            s.turnHead = { id: userMsg.id, request: textOf(userMsg) };
             try {
               await deps.store.set(session.id, session);
             } catch (e) {
@@ -443,6 +451,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
               // it as a turn error and drop this submission rather than let it escape the detached pump and
               // crash the process. Any other write failure stays fatal.
               if (!isReadOnlyError(e)) throw e;
+              s.turnHead = undefined;
               emit(s, { type: 'error', error: e.message, traceId: head.traceId });
               continue;
             }
@@ -450,6 +459,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
 
           const resolved = await deps.resolveProvider(head.provider);
           if (resolved === null) {
+            s.turnHead = undefined;
             emit(s, { type: 'error', error: `Unknown provider "${head.provider}"`, traceId: head.traceId });
             continue;
           }
@@ -460,7 +470,6 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
 
           const ac = new AbortController();
           s.ac = ac;
-          s.turnHead = turnHead;
           // Fold each tool's wire contract — the `params`/`result` text flattened from its single contract
           // (a source tool's ToolContracts arms, or a source-less tool's `toolContract`) — into its description
           // for this turn, so the model reasons about the real TS shapes, not just the loose inputSchema.
@@ -533,6 +542,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
                   emit(s, ev);
                 }
               });
+              s.turnHead = undefined;
 
               // followup — post-commit, in the queue owner. A hook reads the just-committed turn and may
               // head-enqueue a robo follow-up (its own real turn, running next). Runs only for a turn that
@@ -659,6 +669,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
         }
       } finally {
         s.runningTraceId = undefined;
+        s.turnHead = undefined;
         s.replay  = [];
         try {
           // Accounting is flushed HERE — at the drained queue, not at a turn boundary. "The end of a turn"
@@ -703,7 +714,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
   const runParallel = async (
     id: string, s: SessionState, rec: { replay: PipelineEvent[]; stop: AbortController },
     p: { traceId: string; content: MessageContent[]; provider: string; principal: Principal; prompt?: PromptFn;
-         head: string | undefined; interjected: Message[] },
+         head: { id: string; request: string } | undefined; interjected: Message[] },
   ): Promise<void> => {
     const forward = (ev: PipelineEvent): void => {
       rec.replay.push(ev);
@@ -713,12 +724,14 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
     try {
       const stored = await deps.store.get(id);
       if (stored === null) { forward({ type: 'error', error: `Session "${id}" not found`, traceId: p.traceId }); return; }
-      const at       = p.head !== undefined ? stored.messages.findIndex(m => m.id === p.head) : -1;
+      // The head may not be in the store yet — the turn's user message is persisted after the head is set
+      // — in which case nothing of the running turn is there to cut.
+      const at       = p.head !== undefined ? stored.messages.findIndex(m => m.id === p.head!.id) : -1;
       const prefix   = at >= 0 ? stored.messages.slice(0, at) : stored.messages;
       // By the time this read lands the running turn may have committed, interjected replies included.
       const have     = new Set(prefix.map(m => m.id));
       const copy     = { ...stored, messages: [...prefix, ...p.interjected.filter(m => !have.has(m.id))] };
-      const running  = at >= 0 ? textOf(stored.messages[at]!) : '';
+      const running  = p.head?.request ?? '';
 
       const store = new MemoryStore<Session>();
       await store.set(id, copy);
