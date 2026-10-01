@@ -57,6 +57,39 @@ function wholeSessionIndex(session: Session, isCurrentTurn: boolean): number {
   return userIdx >= 0 ? userIdx : session.messages.length;
 }
 
+/**
+ * Where a deferred edit applies, named by a message rather than an index. By the edge, an index no
+ * longer means what it did. A turn does not only append: a parallel reply is placed AHEAD of the running
+ * turn's own messages, and shifts everything after it by two. Measured by a message, an edit lands where
+ * its caller pointed. A message that has gone by then (popped by a retract, cut by another edit) is a
+ * reason not to apply it at all, rather than to apply it at whatever now sits at the old index.
+ *
+ * Which neighbour of the boundary names it decides where something inserted AT the boundary falls, and
+ * the rule is that it stays out of the range the edit removes or rewrites. Nothing that came in after the
+ * caller looked is the caller's to delete or summarise. So a cut, which drops `[idx, end)`, names the
+ * first message it drops (`before`). Summarise and compact, which rewrite `[0, idx)`, name the last
+ * message they cover (`after`). So does split, which moves `[0, idx)` out, and the late arrival stays in
+ * the live session. Each falls back to the other neighbour at an end of the session.
+ */
+type Anchor = { before: string } | { after: string } | { start: true };
+
+function anchorAt(messages: readonly Message[], idx: number, side: 'before' | 'after'): Anchor {
+  const first = messages[idx];
+  const last  = messages[idx - 1];
+  if (side === 'before' && first !== undefined) return { before: first.id };
+  if (last !== undefined) return { after: last.id };
+  return first !== undefined ? { before: first.id } : { start: true };
+}
+
+const anchorSide = (action: IndexAction | 'summarise'): 'before' | 'after' => action === 'cut' ? 'before' : 'after';
+
+function anchoredIndex(session: Session, anchor: Anchor): number | null {
+  if ('start' in anchor) return 0;
+  const id = 'before' in anchor ? anchor.before : anchor.after;
+  const i = session.messages.findIndex(m => m.id === id);
+  return i < 0 ? null : 'before' in anchor ? i : i + 1;
+}
+
 // Resolve msgIndex (raw index into session.messages) to the actual index.
 // The frontend passes the original message index from the full messages array.
 function resolveIndex(session: Session, msgIndex: number): number | null {
@@ -196,11 +229,17 @@ async function applyEdit(store: Store<Session>, action: IndexAction | undefined,
   }
 }
 
-async function applyDeferred(store: Store<Session>, principal: Principal, action: IndexAction, sessionId: string, msgIndex: number): Promise<void> {
+async function applyDeferred(store: Store<Session>, principal: Principal, action: IndexAction, sessionId: string, anchor: Anchor): Promise<void> {
   // Restore the caller's identity: the edge runs outside every principal scope, and the store reads
   // and writes below are the same ownership-checked operations the inline path performs.
   await runAs(principal, async () => {
-    const outcome = await applyEdit(store, action, sessionId, msgIndex);
+    const session = await store.get(sessionId);
+    const idx = session !== null ? anchoredIndex(session, anchor) : null;
+    if (idx === null) {
+      console.error(`[session_edit] deferred ${action} of session "${sessionId}" not applied: the message it named is no longer in the session.`);
+      return;
+    }
+    const outcome = await applyEdit(store, action, sessionId, idx);
     // Nothing left to report to: the caller's turn ended to reach this edge. A CAS conflict here means
     // a writer got in between, and losing the edit is the honest outcome — it is not this plugin's job
     // to fight for the document.
@@ -213,10 +252,11 @@ async function applyDeferred(store: Store<Session>, principal: Principal, action
  *
  * Reads the document itself, like {@link applyEdit}, so it is equally correct inline or from the
  * quiescent edge — and it re-derives the originals it stashes from what it reads, rather than from the
- * copy the summary was written against. The running turn only ever APPENDS, so at the edge that prefix
- * is the same history; for any other session `expectVersion` is the version the summary was built from,
- * which turns a concurrent write during the (slow) LLM call into a reportable CAS failure instead of a
- * silent overwrite.
+ * copy the summary was written against. At the edge the range is re-found by its anchor (see `Anchor`),
+ * so it is the history the summary was written from, plus any parallel reply placed into it meanwhile.
+ * For any other session `expectVersion` is the version the summary was built from, which turns a
+ * concurrent write during the (slow) LLM call into a reportable CAS failure instead of a silent
+ * overwrite.
  */
 async function applySummary(
   store: Store<Session>, sessionId: string, idx: number, summary: HandoffSummary, expectVersion?: string,
@@ -243,8 +283,14 @@ async function applySummary(
   } };
 }
 
-async function applyDeferredSummary(store: Store<Session>, principal: Principal, sessionId: string, idx: number, summary: HandoffSummary): Promise<void> {
+async function applyDeferredSummary(store: Store<Session>, principal: Principal, sessionId: string, anchor: Anchor, summary: HandoffSummary): Promise<void> {
   await runAs(principal, async () => {
+    const session = await store.get(sessionId);
+    const idx = session !== null ? anchoredIndex(session, anchor) : null;
+    if (idx === null) {
+      console.error(`[session_edit] deferred summarise of session "${sessionId}" not applied: the message it ended at is no longer in the session.`);
+      return;
+    }
     const outcome = await applySummary(store, sessionId, idx, summary);
     if (!outcome.ok) console.error(`[session_edit] deferred summarise of session "${sessionId}" failed: ${outcome.message}`);
   });
@@ -331,7 +377,8 @@ function makeSessionEditTool(store: Store<Session>, services: MatbotMachine): To
             return;
           }
           // The running turn's own session is read from ctx.session: its committed document does not yet
-          // hold this turn, and the prefix being summarised is identical in both (a turn only appends).
+          // hold this turn. The prefix being summarised is the same history in both, give or take a
+          // parallel reply placed into the turn, which is why the deferred write re-finds it by anchor.
           const isCurrentTurn = sessionId === ctx.session.id;
           const source = isCurrentTurn ? ctx.session : await store.get(sessionId);
           if (!source) { yield { type: 'error', message: `Session "${sessionId}" not found.` }; return; }
@@ -353,7 +400,8 @@ function makeSessionEditTool(store: Store<Session>, services: MatbotMachine): To
 
           if (isCurrentTurn || turnRunningIn(sessionId)) {
             const principal = currentPrincipal();
-            defer(() => applyDeferredSummary(store, principal, sessionId, idx, summary));
+            const anchor = anchorAt(source.messages, idx, anchorSide('summarise'));
+            defer(() => applyDeferredSummary(store, principal, sessionId, anchor, summary));
             yield { type: 'result', value: {
               deferred: true,
               sessionId,
@@ -384,18 +432,16 @@ function makeSessionEditTool(store: Store<Session>, services: MatbotMachine): To
         if ((isCurrentTurn || turnRunningIn(sessionId)) && (action === 'cut' || action === 'split' || action === 'compact')) {
           if (typeof msgIndex !== 'number') { yield { type: 'error', message: `session_edit "${action}" requires "msgIndex" (number). Only "summarise" may omit it.` }; return; }
           const principal = currentPrincipal();
-          // Resolve a negative (from-the-end) index NOW, against the history the caller can see: by the
-          // edge the committed document has grown by the turn's tail, so "-3" would land three messages
-          // later than the caller meant. That is this turn's own copy, or for another session its
-          // committed document. A positive index is already an absolute address, and a turn only
-          // appends, so it still points at the message it named.
-          let index = msgIndex;
-          if (msgIndex < 0) {
-            const visible = isCurrentTurn ? ctx.session : await store.get(sessionId);
-            if (!visible) { yield { type: 'error', message: `Session "${sessionId}" not found.` }; return; }
-            index = visible.messages.length + msgIndex;
-          }
-          defer(() => applyDeferred(store, principal, action, sessionId, index));
+          // Resolve the index NOW, against the history the caller can see, to the message it names (see
+          // `Anchor`). That is this turn's own copy, or for another session its committed document. By the
+          // edge that document has grown by the turn's tail, so "-3" would land three messages later than
+          // the caller meant, and a parallel reply placed ahead of the turn shifts even a positive index.
+          const visible = isCurrentTurn ? ctx.session : await store.get(sessionId);
+          if (!visible) { yield { type: 'error', message: `Session "${sessionId}" not found.` }; return; }
+          const index = resolveIndex(visible, msgIndex);
+          if (index === null) { yield { type: 'error', message: `msgIndex ${msgIndex} out of range.` }; return; }
+          const anchor = anchorAt(visible.messages, index, anchorSide(action));
+          defer(() => applyDeferred(store, principal, action, sessionId, anchor));
           yield { type: 'result', value: {
             deferred: true,
             sessionId,

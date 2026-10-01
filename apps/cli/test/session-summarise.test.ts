@@ -216,6 +216,69 @@ test('summarising the running turn\'s own session is queued, not applied', async
   assert.deepEqual(docs.get('target')!.messages.map(m => m.role), ['marker', 'user', 'assistant', 'user', 'assistant']);
 });
 
+// The range is re-found at the edge by the last message it covers. Positionally, a parallel pair placed
+// ahead of a running turn inside the range shifted it two messages short, leaving two messages the summary
+// already describes in place beside it. One placed at the range's own boundary must not be swept in.
+async function summariseAround(insertAt: number): Promise<string[]> {
+  const docs   = new Map<string, Session>([['target', seed()]]);
+  const writes: string[] = [];
+  const store = {
+    async get(id: string) { return docs.get(id) ?? null; },
+    async set(id: string, v: Session) { writes.push(id); docs.set(id, v); },
+    async cas(id: string, expected: string, next: Session) {
+      const cur = docs.get(id);
+      if (!cur || cur.version !== expected) return { ok: false as const, doc: cur ?? null };
+      writes.push(id); docs.set(id, next);
+      return { ok: true as const, doc: next };
+    },
+    async delete() { return false; },
+    async query() { return { items: [...docs.values()] }; },
+  } as unknown as Store<Session>;
+
+  const tools = new Map<string, Tool>();
+  const services = {
+    sessions: store,
+    isSubAgent: () => false,
+    tools:    { register: (t: Tool) => { tools.set(t.name, t); } },
+    singleTurn: async () => ({ text: HANDOFF }),
+  } as unknown as MatbotMachine;
+  await editSessionPlugin.setup!(services);
+
+  const ctx = {
+    callId: 'c1', signal: new AbortController().signal, provider: 'test-provider',
+    session: seed(),                                   // the tool's own session IS the target
+  } as unknown as ToolContext;
+
+  const events: Array<{ type: string; value?: unknown; message?: string }> = [];
+  // Held, because that is what makes the deferral observable: the pump holds the machine across its
+  // whole queue, so the quiescent edge the edit is queued on cannot arrive until the turn has ended.
+  // Without the hold the edge lands on the next microtask and the deferral is untestable.
+  await machineBusy(async () => {
+    await runAs(PRINCIPAL, async () => {
+      for await (const ev of tools.get('session_edit')!.executor.execute(
+        { action: 'summarize', sessionId: 'target', msgIndex: 4 }, ctx)) events.push(ev as never);
+    });
+
+    const cur = docs.get('target')!;
+    docs.set('target', { ...cur, version: crypto.randomUUID(), messages: [
+      ...cur.messages.slice(0, insertAt), msg('q', 'user', 'quick question'), msg('a', 'assistant', 'quick answer'), ...cur.messages.slice(insertAt),
+    ] });
+  });
+
+  assert.equal((events.find(e => e.type === 'result')?.value as { deferred: boolean }).deferred, true, JSON.stringify(events));
+  const after = docs.get('target')!.messages;
+  assert.deepEqual(after.slice(0, 3).map(m => m.role), ['marker', 'user', 'assistant'], 'replaced by the summary');
+  return after.slice(3).map(m => m.id);
+}
+
+test('a queued summarise covers what it was written from, though a parallel pair was placed inside it', async () => {
+  assert.deepEqual(await summariseAround(2), ['m5', 'm6'], 'm1–m4 summarised, with the pair placed among them');
+});
+
+test('a queued summarise leaves a parallel pair placed at its boundary alone', async () => {
+  assert.deepEqual(await summariseAround(4), ['q', 'a', 'm5', 'm6']);
+});
+
 test('no msgIndex means the whole session — and in the running one, everything before this turn', async () => {
   // The failure this encodes: the first real summarise was called with msgIndex -1 on the session it was
   // running in, so the range swallowed the user's "compact this session" request AND the turn's own tool
