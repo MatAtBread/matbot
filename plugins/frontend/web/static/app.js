@@ -2672,6 +2672,47 @@ function renderContentParts(wrap, content) {
 // startIdx > 0 appends only messages from that index — used for incremental updates.
 // origIdx (index in session.messages including system) is passed to dividers so
 // the edit-session plugin tools can reference exact positions.
+// One committed message, drawn as a reload draws it. Shared with `showAppended`, so a message arriving
+// outside any turn looks exactly as it will after a refresh.
+function renderStoredMessage(msg, origIdx) {
+  if (msg.role === 'user') {
+    // Stored history is pure committed messages; queued/pending items arrive via the live stream,
+    // not from here. Split by block provenance: genuine user blocks → user bubble, robo blocks
+    // (a hook-injected fragment) → agent-side robo bubble. A wholly-robo turn (followup resubmit)
+    // is just one whose blocks are all robo.
+    appendUserTurn(msg.content, origIdx, msg.traceId);
+  } else if (msg.role === 'assistant') {
+    const wrap = createAssistantWrap('assistant');
+    if (msg.traceId) wrap.dataset.trace = msg.traceId;
+    if (msg.id) wrap.dataset.msgId = msg.id;
+    renderContentParts(wrap, msg.content);
+  } else if (msg.role === 'tool') {
+    // Results are attached to their matching .tool-block via data-call-id; no wrapper needed.
+    const dummy = document.createDocumentFragment();
+    renderContentParts(dummy, msg.content);
+  } else if (msg.role === 'marker') {
+    appendMarker(msg.content, msg.traceId);
+  }
+}
+
+// Messages appended to the open conversation outside any turn — a background job's report. Announced
+// after the write, so they are read back rather than carried. Skipped if already drawn: a reload that
+// raced the announcement has them.
+async function showAppended(sid, ids) {
+  const session = await apiGetSession(sid);
+  if (!session || sid !== currentSessionId) return;
+  // An append lands where no turn is running, so a turn live here now started AFTER it: stored order has
+  // the append first, but drawing it now would put it under that turn's live messages. Re-read instead.
+  if ([...turnQueues.values()].some(q => !q.done)) { void resyncSession(sid); return; }
+  let drew = false;
+  session.messages.forEach((msg, i) => {
+    if (!ids.includes(msg.id) || messagesEl.querySelector(`[data-msg-id="${CSS.escape(msg.id)}"]`)) return;
+    renderStoredMessage(msg, i);
+    drew = true;
+  });
+  if (drew) messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
 function renderSession(session, startIdx, scrollTarget) {
   const allMsgs = session.messages;
   if (!startIdx) {
@@ -2684,23 +2725,7 @@ function renderSession(session, startIdx, scrollTarget) {
     if (msg.role === 'system') continue;
     const fi = nonSysCount++;
     if (startIdx && fi < startIdx) continue;
-    if (msg.role === 'user') {
-      // Stored history is pure committed messages; queued/pending items arrive via the live stream,
-      // not from here. Split by block provenance: genuine user blocks → user bubble, robo blocks
-      // (a hook-injected fragment) → agent-side robo bubble. A wholly-robo turn (followup resubmit)
-      // is just one whose blocks are all robo.
-      appendUserTurn(msg.content, origIdx, msg.traceId);
-    } else if (msg.role === 'assistant') {
-      const wrap = createAssistantWrap('assistant');
-      if (msg.traceId) wrap.dataset.trace = msg.traceId;
-      renderContentParts(wrap, msg.content);
-    } else if (msg.role === 'tool') {
-      // Results are attached to their matching .tool-block via data-call-id; no wrapper needed.
-      const dummy = document.createDocumentFragment();
-      renderContentParts(dummy, msg.content);
-    } else if (msg.role === 'marker') {
-      appendMarker(msg.content, msg.traceId);
-    }
+    renderStoredMessage(msg, origIdx);
   }
   applyTurnUsageBlocks(allMsgs);
   if (scrollTarget !== undefined) {
@@ -3889,6 +3914,11 @@ async function init() {
               break;
             default: break;                                  // a namespace no panel shows
           }
+          break;
+        // A message added to a conversation outside any turn. The same write raises an ItemChange for the
+        // session (refreshing the list above); this one says WHICH messages, so the open thread can show them.
+        case '@matatbread/matbot-plugin-api#SessionAppend':
+          if (n.sessionId === currentSessionId) void showAppended(n.sessionId, n.messageIds ?? []);
           break;
         // Tool churn refreshes skills (skills are tools, and one may be registered out of band — e.g.
         // the Drive backend restoring matbot-skills at boot); plugin churn refreshes the plugins panel,

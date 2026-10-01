@@ -2,7 +2,7 @@ import type {
   MatbotPluginSpec, MatbotMachine, Principal, Session, FileHandle,
   ToolExecutor, ToolContract, NoParams, ToolResultOf, UserContent, MimeType,
 } from '@matatbread/matbot-plugin-api';
-import { PLUGIN_API_VERSION, isMediaRejectedError, encodeBase64 } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, isMediaRejectedError, encodeBase64, SessionAppendKind } from '@matatbread/matbot-plugin-api';
 
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
@@ -126,6 +126,9 @@ let activeProviderName: string;
 let servicesRef:   MatbotMachine | undefined;
 let botTokenRef:   string | undefined;
 const knownChats = new Set<number>(); // populated as chats interact with the bot
+// Session id → the chat it is mirrored to: the reverse of each chat's `chat:<id>` setting, so a message
+// appended to a chat's session from elsewhere can be delivered to that chat.
+const sessionChats = new Map<string, number>();
 let openDoor = 0;
 let prompterRef:   Prompter | undefined;
 
@@ -193,7 +196,7 @@ export const plugin: MatbotPluginSpec = {
     },
     {
       name:        'telegram_send',
-      description: 'Send an out-of-band notification to Telegram, outside of any session. The message is prepended with 🔔. Sends to all chats that have previously contacted the bot, or to a specific chat if chatId is given. Files named in `files` are uploaded after the text — an image inline, audio as a clip, anything else as a document.',
+      description: 'Send a bare notification straight to Telegram — the low-level route. Nothing is recorded in any conversation, so a follow-up question in the chat has no context of it. To tell the user something they may want to follow up on, append it to their conversation with session_action instead: a chat\'s own conversation is delivered to that chat. The message is prepended with 🔔. Sends to all chats that have previously contacted the bot, or to a specific chat if chatId is given. Files named in `files` are uploaded after the text — an image inline, audio as a clip, anything else as a document.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -278,6 +281,10 @@ export const plugin: MatbotPluginSpec = {
     const settings = services.settings();
     for (const id of await settings.get<number[]>(SETTINGS_KEY_KNOWN) ?? []) {
       knownChats.add(id);
+      // Best-effort: where settings are per-principal (a profiles backend) this boot read cannot see a
+      // chat's mapping, and the chat is learned when it next speaks instead.
+      const sessionId = await settings.get<string>(`chat:${id}`).catch(() => undefined);
+      if (sessionId !== undefined) sessionChats.set(sessionId, id);
     }
 
     // Restore a previously persisted provider, or fall back to the first configured one.
@@ -334,6 +341,7 @@ export const plugin: MatbotPluginSpec = {
           await sessions.set(session.id, session);
           await settings.set(sessionKey, session.id);
         }
+        sessionChats.set(session.id, chatId);
 
         // Keep the typing indicator alive; Telegram expires it after ~5 s. Not while a question waits
         // on the user — "typing…" over an unanswered question reads as "don't reply yet".
@@ -435,6 +443,26 @@ export const plugin: MatbotPluginSpec = {
       return;
     }
 
+    // A message appended to a chat's session outside any turn — a background job's report — is delivered
+    // to that chat, which mirrors its session. Without this the chat never shows it, and a follow-up asked
+    // there draws on context the user was never shown. Read back as whoever appended it: that principal
+    // just wrote the session, so it can read it.
+    services.Notifier.consume(n => {
+      if (n.kind !== SessionAppendKind) return;
+      const chatId = sessionChats.get(n.sessionId);
+      if (chatId === undefined) return;
+      const deliver = async (): Promise<void> => {
+        const session = await sessions.get(n.sessionId);
+        for (const m of session?.messages ?? []) {
+          if (m.role !== 'assistant' || !n.messageIds.includes(m.id)) continue;
+          const text = m.content.filter((c): c is Extract<typeof c, { type: 'text' }> => c.type === 'text').map(c => c.text).join('\n').trim();
+          if (text) await sendMessage(botToken, chatId, `🤖 ${text}`);
+        }
+      };
+      void (n.principal !== undefined ? runAs(n.principal, deliver) : deliver())
+        .catch((e: unknown) => console.warn(`[frontend-telegram] Could not deliver an appended message to chat ${chatId}: ${e}\n`));
+    }, ac.signal, n => n.kind === SessionAppendKind);
+
     // Long-poll loop — runs until teardown.
     void (async () => {
       let offset = 0;
@@ -479,5 +507,6 @@ export const plugin: MatbotPluginSpec = {
     servicesRef    = undefined;
     botTokenRef    = undefined;
     knownChats.clear();
+    sessionChats.clear();
   },
 };

@@ -64,6 +64,7 @@ async function harness(reply: string | string[]) {
   const tools = new Map<string, Tool>();
   const services = {
     sessions: store,
+    isSubAgent: () => false,
     tools:    { register: (t: Tool) => { tools.set(t.name, t); } },
     async singleTurn(req: { prompt: string }) {
       prompts.push(req.prompt);
@@ -179,6 +180,7 @@ test('summarising the running turn\'s own session is queued, not applied', async
   const tools = new Map<string, Tool>();
   const services = {
     sessions: store,
+    isSubAgent: () => false,
     tools:    { register: (t: Tool) => { tools.set(t.name, t); } },
     singleTurn: async () => ({ text: HANDOFF }),
   } as unknown as MatbotMachine;
@@ -238,6 +240,7 @@ test('no msgIndex means the whole session — and in the running one, everything
   const tools = new Map<string, Tool>();
   const services = {
     sessions: store,
+    isSubAgent: () => false,
     tools:    { register: (t: Tool) => { tools.set(t.name, t); } },
     async singleTurn(req: { prompt: string }) { seen.push(req.prompt); return { text: HANDOFF }; },
   } as unknown as MatbotMachine;

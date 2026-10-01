@@ -1,4 +1,4 @@
-import type { Tool, ToolContract, ToolResultOf, ToolContext, Session, Store, Filter, StoreQuery, FieldPath, Principal } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolContract, ToolResultOf, ToolContext, Session, Store, Filter, StoreQuery, FieldPath, Principal, SessionAppender } from '@matatbread/matbot-plugin-api';
 import { lastActivityAt, StoreQueryError, currentPrincipal, onContextQuiesce, runAs } from '@matatbread/matbot-plugin-api';
 import { compileFilter, applySort, validateQuery, decodeCursor, encodeCursor, type PageState } from '@matatbread/matbot-core/storage-base';
 
@@ -19,7 +19,9 @@ declare module '@matatbread/matbot-plugin-api' {
       | ToolContract<Session,                          { action: 'get'; sessionId: string }>
       | ToolContract<{ id: string; title: string;        deferred?: true }, { action: 'rename'; sessionId: string; title: string }>
       | ToolContract<{ id: string; status: 'archived';   deferred?: true }, { action: 'hide'; sessionId: string }>
-      | ToolContract<{ id: string; status: 'active';     deferred?: true }, { action: 'unhide'; sessionId: string }>;
+      | ToolContract<{ id: string; status: 'active';     deferred?: true }, { action: 'unhide'; sessionId: string }>
+      // Always deferred — an append lands where no turn holds the session — so `deferred` is not optional.
+      | ToolContract<{ id: string; messageIds: string[]; deferred: true }, { action: 'append'; sessionId?: string; text: string }>;
   }
 }
 
@@ -72,11 +74,26 @@ function lowerSynthOperands(f: Filter): Filter {
   }
 }
 
-/** `busy` says whether a turn is running in a session (the plugin passes `services.run.status`); a
- *  caller with no runner has no turns to defer behind. */
-export function makeSessionTools(store: Store<Session>, busy: (sessionId: string) => boolean = () => false): readonly Tool[] {
-  return [makeSessionActionTool(store, busy)];
+/** What the tool reads off the machine, late-bound so it follows a swap or an unload. Every member is
+ *  optional: a caller with no runner has no turns to defer behind, and one with no appender cannot append. */
+export interface SessionToolEnv {
+  /** Whether a turn is running in a session (the plugin passes `services.run.status`). */
+  busy?:       (sessionId: string) => boolean;
+  appender?:   () => SessionAppender | undefined;
+  /** A background job's process: its sessions are the parent's, written by none of its pumps. */
+  isSubAgent?: () => boolean;
 }
+
+export function makeSessionTools(store: Store<Session>, env: SessionToolEnv = {}): readonly Tool[] {
+  return [makeSessionActionTool(store, env)];
+}
+
+// A background job's store is its parent's medium, but no turn in the parent passes through it: a write
+// from here would land under a running turn there unseen and be undone by its write-back. An append goes
+// through the parent; everything else is refused rather than raced.
+const JOB_CANNOT_EDIT =
+  'A background job cannot rename, hide or unhide a session — it would race the turns of the process that ' +
+  'owns it. Use "append" to say something in a conversation instead.';
 
 type FieldEdit = { title: string } | { status: Session['status'] };
 
@@ -114,14 +131,17 @@ type SessionInput =
   | { action: 'get';    sessionId: string }
   | { action: 'rename'; sessionId: string; title: string }
   | { action: 'hide';   sessionId: string }
-  | { action: 'unhide'; sessionId: string };
+  | { action: 'unhide'; sessionId: string }
+  | { action: 'append'; sessionId?: string; text: string };
 
-function makeSessionActionTool(store: Store<Session>, busy: (sessionId: string) => boolean): Tool<ToolResultOf<'session_action'>> {
+function makeSessionActionTool(store: Store<Session>, env: SessionToolEnv): Tool<ToolResultOf<'session_action'>> {
+  const isSubAgent = env.isSubAgent ?? (() => false);
   // A string is the refusal to report; otherwise what the result adds.
   const editFields = async (sessionId: string, edit: FieldEdit): Promise<string | { deferred?: true }> => {
+    if (isSubAgent()) return JOB_CANNOT_EDIT;
     const session = await store.get(sessionId);
     if (!session) return `Session "${sessionId}" not found.`;
-    if (busy(sessionId)) {
+    if (env.busy?.(sessionId) === true) {
       deferEdit(store, currentPrincipal(), sessionId, edit);
       return { deferred: true };
     }
@@ -135,7 +155,13 @@ function makeSessionActionTool(store: Store<Session>, busy: (sessionId: string) 
       'Manage conversation sessions. A session is a stored conversation — a chronological list of ' +
       'messages identified by a unique ID, with a title and a status (active or archived). This tool ' +
       'covers the lifecycle: list sessions, search their contents (query), fetch one in full (get), ' +
-      'rename one, hide (archive) one, or unhide (unarchive) one.\n\n' +
+      'rename one, hide (archive) one, unhide (unarchive) one, or append a message to one.\n\n' +
+      '"append" posts "text" into a conversation as a message from the assistant, without starting a turn. ' +
+      'With no "sessionId" it goes to this conversation — or, from a background job, to the conversation the ' +
+      'job reports to. Use it when the user should be able to follow up on what you say: it becomes part of ' +
+      'that conversation, so a later question there has it as context. It lands once no turn is running, and ' +
+      'the result says "deferred": true. A bare notification that needs no follow-up is telegram_send\'s job; ' +
+      'append is the one that keeps context.\n\n' +
       'A rename, hide or unhide of a session with a turn running in it — including the one this call is ' +
       'made from — is applied once that turn ends, and the result says "deferred": true. Do not re-issue it.\n\n' +
       '"list" and "query" return lightweight summaries — each item\'s "preview" is just the session\'s ' +
@@ -154,8 +180,9 @@ function makeSessionActionTool(store: Store<Session>, busy: (sessionId: string) 
       type:       'object',
       required:   ['action'],
       properties: {
-        action:          { type: 'string', enum: ['list', 'query', 'get', 'rename', 'hide', 'unhide'], description: 'The operation to perform.' },
-        sessionId:       { type: 'string', description: 'ID of the target session. Required for get/rename/hide/unhide.' },
+        action:          { type: 'string', enum: ['list', 'query', 'get', 'rename', 'hide', 'unhide', 'append'], description: 'The operation to perform.' },
+        sessionId:       { type: 'string', description: 'ID of the target session. Required for get/rename/hide/unhide; optional for append (default: this conversation, or a background job\'s own).' },
+        text:            { type: 'string', description: 'append only: the message to post.' },
         title:           { type: 'string', description: 'New title — required for action "rename".' },
         includeArchived: { type: 'boolean', description: 'list only: include archived sessions. Default false.' },
         where:           { type: 'object', description: 'query only: a store-query Filter over "user"/"assistant" (session text) and stored fields. See description.' },
@@ -165,7 +192,7 @@ function makeSessionActionTool(store: Store<Session>, busy: (sessionId: string) 
       },
     },
     executor: {
-      async *execute(input: unknown, _ctx: ToolContext) {
+      async *execute(input: unknown, ctx: ToolContext) {
         const args = input as Partial<SessionInput> & { action?: string };
 
         switch (args.action) {
@@ -296,8 +323,31 @@ function makeSessionActionTool(store: Store<Session>, busy: (sessionId: string) 
             return;
           }
 
+          case 'append': {
+            const { sessionId, text } = args as Extract<SessionInput, { action: 'append' }>;
+            if (typeof text !== 'string' || text.trim() === '') { yield { type: 'error', message: 'action "append" requires "text".' }; return; }
+            const appender = env.appender?.();
+            if (appender === undefined) { yield { type: 'error', message: 'Nothing here can append to a session.' }; return; }
+            // A background job's own session is a throwaway one nobody will read, so there the default is the
+            // conversation the job reports to — which its appender knows — or none at all.
+            const target = sessionId ?? appender.defaultSessionId ?? (isSubAgent() ? undefined : ctx.session.id);
+            if (target === undefined) {
+              yield { type: 'error', message: 'This background job reports to no conversation, so name the session to append to ("sessionId").' };
+              return;
+            }
+            try {
+              const { sessionId: id, messageIds } = await appender.append(target, [
+                { role: 'assistant', content: [{ type: 'text', text, origin: 'robo' }] },
+              ]);
+              yield { type: 'result', value: { id, messageIds, deferred: true } };
+            } catch (e) {
+              yield { type: 'error', message: e instanceof Error ? e.message : String(e) };
+            }
+            return;
+          }
+
           default:
-            yield { type: 'error', message: `Unknown action "${String(args.action)}". Expected one of: list, query, get, rename, hide, unhide.` };
+            yield { type: 'error', message: `Unknown action "${String(args.action)}". Expected one of: list, query, get, rename, hide, unhide, append.` };
         }
       },
     },

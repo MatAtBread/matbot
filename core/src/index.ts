@@ -23,7 +23,7 @@ export { applyCreateSecret, assertStorableKey, unreferenceableKey, REFERENCEABLE
 // that apply one cannot differ on what a patch MEANS, and re-exported here so an app needs no direct
 // plugin-api dependency to get it.
 export { applyProviderPatch, patchedFields } from '@matatbread/matbot-plugin-api';
-export { isTruncatedToolResult, notifyingStore, ItemChangeKind, RegistryChangeKind, FUNCTION_TIMEOUT } from '@matatbread/matbot-plugin-api';
+export { isTruncatedToolResult, notifyingStore, ItemChangeKind, RegistryChangeKind, SessionAppendKind, FUNCTION_TIMEOUT } from '@matatbread/matbot-plugin-api';
 // The canonical `type: 'confirm'` answers. Same reason as the patch policy above: an app implementing a
 // PromptFn (or a test standing one in) has to speak them, and must not hard-code the rendered label.
 export { CONFIRM_YES, CONFIRM_NO } from '@matatbread/matbot-plugin-api';
@@ -57,6 +57,7 @@ export * from './usage.js';
 export * from './hooks.js';
 export * from './runner.js';
 export * from './session-runner.js';
+export * from './session-append.js';
 export * from './plugin.js';
 export * from './registry.js';
 export * from './settings.js';

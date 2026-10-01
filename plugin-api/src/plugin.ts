@@ -3,6 +3,7 @@ import type {
   ProviderAdapter, ProviderConfig, ProviderRegistry, Tool, ToolRegistry, FrontendInfo,
   Store, Session, SystemContextRegistry, KnowledgeIndex, PromptFn, SessionRunner, Usage, HookRegistrar,
   TypeScriptStripper, FunctionRunner, ToolTypeIndex, ToolPresenter, SteeringPolicy, UserContent, PermissionGate,
+  SessionAppender,
 } from './types.js';
 import type { Notifications, Notifier } from './notify.js';
 
@@ -193,6 +194,11 @@ export interface MatbotServices {
    *  one; absent ⇒ such code runs unbounded, as it must where synchronous code cannot be interrupted.
    *  See {@link FunctionRunner}. */
   readonly FunctionRunner?: FunctionRunner | undefined;
+  /** Appends messages to a session without running a turn, landing at the quiescent edge. The host seeds
+   *  one wherever it holds the session store; a background job registers one that forwards to its parent.
+   *  Absent ⇒ this process has no safe way to append (a job spawned without that channel), and a caller
+   *  refuses rather than writing the store itself. See {@link SessionAppender}. */
+  readonly SessionAppender?: SessionAppender | undefined;
 }
 
 /** The assembled machine: registry services wired to the fixed runtime — what `setup()` receives. */

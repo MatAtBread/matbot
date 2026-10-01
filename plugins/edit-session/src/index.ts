@@ -313,6 +313,13 @@ function makeSessionEditTool(store: Store<Session>, services: MatbotMachine): To
       async *execute(input: unknown, ctx: ToolContext) {
         const { action, sessionId, msgIndex } = input as Partial<SessionEditInput>;
         if (!sessionId) { yield { type: 'error', message: 'session_edit requires "sessionId".' }; return; }
+        // A background job's store is its parent's medium, written by none of the parent's turns: an edit
+        // from here would land under one of them unseen and be undone by its write-back. `fork` is the
+        // exception — it writes a session no turn can yet be running in.
+        if (services.isSubAgent() && action !== 'fork') {
+          yield { type: 'error', message: `A background job cannot ${String(action)} a session — it would race the turns of the process that owns it. Only "fork" is available here.` };
+          return;
+        }
 
         // Summarise runs its LLM call BEFORE any mutation, so a provider failure or a malformed summary
         // leaves the session exactly as it was and is reported here — the one thing the deferred path
@@ -417,6 +424,8 @@ export const plugin: MatbotPluginSpec = {
     const store = services.sessions;
     if (!store) return;
     services.tools.register(makeSessionEditTool(store, services));
-    services.tools.register(makeCompactSessionsTool(store));
+    // Bulk compaction rewrites other sessions wholesale; from a background job that is a write racing
+    // every turn of the process that owns them, with nothing a refusal per session would save.
+    if (!services.isSubAgent()) services.tools.register(makeCompactSessionsTool(store));
   },
 };

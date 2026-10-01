@@ -23,6 +23,12 @@ churn and less likely to affect a consumer who doesn't use them.
 - **`CreateSessionOpts.status`** — a session can be created `archived` (hidden from the default session
   list) or `pinned`, instead of being created active and changed by a second write that every client
   watching the list sees.
+- **`SessionAppender` / `SessionAppend`** — add messages to a session without running a turn: checked at
+  once, written at the quiescent edge (no turn holds a session there to write it back over), announced as
+  a `SessionAppend` notification carrying the new message ids beside the session's `ItemChange`. The host
+  seeds one in every process (`createSessionAppender`); it refuses in a background job, which shares its
+  parent's storage but none of its turns and must go through its parent instead. `AppendMessage` is plain
+  user/assistant text, so nothing appended can break a later turn's provider request.
 
 ### Bug fixes
 
@@ -53,6 +59,15 @@ churn and less likely to affect a consumer who doesn't use them.
 - **`tool-types`** — a call matching none of a tool's forms, where the forms share no discriminant, says
   why each form refused it (`(1) .interval: required property missing; (2) .at: …; (3) .name: unexpected
   property`), instead of only "no union member matched".
+- **`sessions`** — `session_action` gains `append`: post a message into a conversation without starting
+  a turn (default: this one, or in a background job the one it reports to). In a background job, rename,
+  hide and unhide are refused.
+- **`edit-session`** — in a background job, `session_edit` refuses everything but `fork`, and
+  `compact_sessions` is not offered.
+- **`frontend-web`** — a message appended to the open conversation appears in it without a reload.
+- **`frontend-telegram`** — a message appended to a chat's session is delivered to that chat, so a
+  follow-up asked there has it as context. `telegram_send` is documented as the low-level direct send it
+  is: it records nothing in any conversation.
 
 ## 0.4.17
 

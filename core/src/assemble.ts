@@ -19,6 +19,7 @@ import type { ProviderRegistryImpl } from './provider-registry.js';
 import { SystemContextRegistryImpl } from './system-context.js';
 import { LookupKnowledgeIndex } from './knowledge/index.js';
 import { createSessionRunner } from './session-runner.js';
+import { createSessionAppender } from './session-append.js';
 import { createSingleTurnTool } from './single-turn.js';
 import { createAboutMatbotTool } from './about.js';
 import { addUsage } from './usage.js';
@@ -176,7 +177,19 @@ export function assembleMachine(opts: AssembleOptions): AssembledMachine {
   // The host's file area doubles as the media store, so attachments work with no plugin. Seeded into the
   // registry rather than spelled on the base object, because `unifyServices` resolves an own property
   // first — a member spelled there is one `register()` could never reach.
-  const seed: Partial<MatbotServices> = { MediaStore: fileStore, ...opts.seed };
+  //
+  // The session appender is seeded the same way, in every process: it refuses in a background job, which
+  // registers its own (forwarding to its parent) over it — and unloading that reverts to refusing, which
+  // is the honest answer for a job with no channel. Late-bound, as `services` is built below.
+  const seed: Partial<MatbotServices> = {
+    MediaStore:      fileStore,
+    SessionAppender: createSessionAppender({
+      sessions:   () => services.sessions,
+      notifier:   () => services.Notifier,
+      isSubAgent: () => services.isSubAgent(),
+    }),
+    ...opts.seed,
+  };
   const serviceRegistry = new Map<string, unknown>(Object.entries(seed));
   // The validator lookup is late-bound and read per call: one is registered by a plugin long after the
   // builtins are seeded, and may be unloaded again. It wraps the executor, so every door — the runner,

@@ -26,4 +26,5 @@ export * from './types/health.js';
 export * from './types/registries.js';
 export * from './types/events.js';
 export * from './types/session-runner.js';
+export * from './types/session-append.js';
 export * from './types/steering.js';

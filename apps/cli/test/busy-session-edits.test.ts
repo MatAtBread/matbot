@@ -87,7 +87,7 @@ test('a rename of a session mid-turn is deferred past the turn\'s write-back, no
     loadPlugin:      async () => { throw new Error('loadPlugin unused'); },
     unloadPlugin:    async () => false,
   });
-  const tool = makeSessionTools(store, id => runner.status(id).busy).find(t => t.name === 'session_action')!;
+  const tool = makeSessionTools(store, { busy: id => runner.status(id).busy }).find(t => t.name === 'session_action')!;
 
   const view = await runner.open({
     sessionId: session.id, signal: new AbortController().signal,
@@ -111,7 +111,7 @@ test('a rename of a session mid-turn is deferred past the turn\'s write-back, no
 test('a rename of an idle session is applied at once', async () => {
   const session = { ...createSession(), title: 'before' };
   const { store, docs } = casStore(session);
-  const tool = makeSessionTools(store, () => false).find(t => t.name === 'session_action')!;
+  const tool = makeSessionTools(store, { busy: () => false }).find(t => t.name === 'session_action')!;
 
   const events = await drain(tool, { action: 'hide', sessionId: session.id }, {} as ToolContext);
   assert.deepEqual(events.find(e => e.type === 'result')?.value, { id: session.id, status: 'archived' });
@@ -127,6 +127,7 @@ test('session_edit defers an edit of ANOTHER session that has a turn running in 
   const tools = new Map<string, Tool>();
   const services = {
     sessions: store,
+    isSubAgent: () => false,
     tools:    { register: (t: Tool) => { tools.set(t.name, t); } },
     run:      { status: (id: string) => ({ busy: id === 'target', running: id === 'target', queued: 0 }) },
   } as unknown as MatbotMachine;
@@ -145,4 +146,28 @@ test('session_edit defers an edit of ANOTHER session that has a turn running in 
   await quiesced();
 
   assert.deepEqual(docs.get('target')!.messages.map(m => m.id), ['m1', 'm2'], 'the cut landed once the turn ended');
+});
+
+test('in a background job, session_edit refuses to edit a session but still forks one', async () => {
+  const msg = (id: string, role: Message['role']): Message =>
+    ({ id, role, content: [{ type: 'text', text: id }], createdAt: new Date(0).toISOString(), traceId: 't' }) as Message;
+  const target: Session = { ...createSession(), id: 'target', messages: [msg('m1', 'user'), msg('m2', 'assistant')] };
+  const { store, docs } = casStore(target);
+  const tools = new Map<string, Tool>();
+  const services = {
+    sessions:   store,
+    isSubAgent: () => true,
+    tools:      { register: (t: Tool) => { tools.set(t.name, t); } },
+  } as unknown as MatbotMachine;
+  await editSessionPlugin.setup!(services);
+  const ctx = { callId: 'c1', signal: new AbortController().signal, session: { id: 'job', messages: [] } } as unknown as ToolContext;
+
+  // A job's store is its parent's medium, written by none of the parent's turns.
+  const cut = await drain(tools.get('session_edit')!, { action: 'cut', sessionId: 'target', msgIndex: 1 }, ctx);
+  assert.match(cut.find(e => e.type === 'error')?.message ?? '', /background job cannot cut/);
+  assert.equal(docs.get('target')!.messages.length, 2);
+
+  const fork = await drain(tools.get('session_edit')!, { action: 'fork', sessionId: 'target', msgIndex: 1 }, ctx);
+  assert.equal(fork.find(e => e.type === 'error'), undefined, 'fork writes a session no turn can be running in');
+  assert.equal(tools.has('compact_sessions'), false, 'bulk compaction is not offered to a job at all');
 });
