@@ -143,6 +143,9 @@ const knownChats = new Set<number>(); // populated as chats interact with the bo
 const sessionChats = new Map<string, number>();
 // Who last spoke in each chat, persisted under `user:<chatId>`, so a chat can be found by the person in it.
 const chatUsers = new Map<number, ChatUser>();
+// Messages appended to an archived chat session, by session id: kept in the live session when it is next
+// revived (see `revive`), because they arrived for the chat after it was archived.
+const keepOnRevive = new Map<string, Set<string>>();
 let openDoor = 0;
 let prompterRef:   Prompter | undefined;
 
@@ -166,9 +169,11 @@ function linkMarker(relation: 'split-from' | 'continued-in', peerSessionId: stri
  * its history moved to a new archived session linked both ways, as a split at the end would.
  *
  * Not while a turn holds the session: its write-back would restore what was moved out. And never from a
- * background job, which must not write its parent's sessions; there the id is only read.
+ * background job, which must not write its parent's sessions; there the id is only read. Nor for a
+ * `lookup`, which only says which session it is: moving a chat's history is the chat's business, done
+ * when it next speaks.
  */
-async function chatSession(chatId: number, create: boolean): Promise<Session | null> {
+async function chatSession(chatId: number, mode: 'speak' | 'lookup'): Promise<Session | null> {
   const services = servicesRef;
   const sessions = services?.sessions;
   if (!services || !sessions) return null;
@@ -177,12 +182,13 @@ async function chatSession(chatId: number, create: boolean): Promise<Session | n
 
   const storedId = await settings.get<string>(key).catch(() => undefined);
   let session    = storedId !== undefined ? await sessions.get(storedId) : null;
-  if (services.isSubAgent()) return session;
+  if (session) sessionChats.set(session.id, chatId);
+  if (services.isSubAgent() || mode === 'lookup') return session;
 
   if (session?.status === 'archived' && !services.run?.status(session.id).busy) {
     session = await revive(session) ?? session;
   }
-  if (!session && create) {
+  if (!session) {
     session = createSession({ title: `${chatUsers.get(chatId)?.name ?? 'Telegram'} on Telegram` });
     await sessions.set(session.id, session);
     await settings.set(key, session.id);
@@ -191,11 +197,23 @@ async function chatSession(chatId: number, create: boolean): Promise<Session | n
   return session;
 }
 
+/**
+ * Reactivate an archived chat session under its own id, moving its history out to a new archived session.
+ *
+ * Messages appended since it was archived (`keepOnRevive`) stay. They were sent to the chat after the
+ * context was dropped: a job's report the user has just read on the phone, and is about to reply to.
+ * Moved out with the rest, the reply would run with no sight of what it answers.
+ */
 async function revive(session: Session): Promise<Session | null> {
   const sessions = servicesRef!.sessions!;
+  const keep     = keepOnRevive.get(session.id) ?? new Set<string>();
+  const moved    = session.messages.filter(m => !keep.has(m.id));
+  const kept     = session.messages.filter(m => keep.has(m.id));
   let next: Session;
-  if (session.messages.length === 0) {
+  if (moved.length === 0) {
     next = { ...session, status: 'active', version: crypto.randomUUID() };
+    const res = await sessions.cas(session.id, session.version, next);
+    if (!res.ok) return null;
   } else {
     const archiveId = crypto.randomUUID();
     const forward   = linkMarker('continued-in', session.id, 0);
@@ -204,19 +222,37 @@ async function revive(session: Session): Promise<Session | null> {
       id:        archiveId,
       version:   crypto.randomUUID(),
       title:     `${session.title ?? 'Telegram'} (archived ${session.updatedAt.slice(0, 10)})`,
-      messages:  [...session.messages, forward],
+      messages:  [...moved, forward],
       createdAt: new Date().toISOString(),
       updatedAt: forward.createdAt,
     };
     await sessions.set(archiveId, archive);
-    const emptied: Session = { ...session, status: 'active', messages: [linkMarker('split-from', archiveId, session.messages.length - 1)] };
+    const emptied: Session = { ...session, status: 'active', messages: [linkMarker('split-from', archiveId, moved.length - 1), ...kept] };
     next = { ...emptied, updatedAt: lastActivityAt(emptied), version: crypto.randomUUID() };
     const res = await sessions.cas(session.id, session.version, next);
     if (!res.ok) { await sessions.delete(archiveId); return null; }
-    return next;
   }
-  const res = await sessions.cas(session.id, session.version, next);
-  return res.ok ? next : null;
+  keepOnRevive.delete(session.id);
+  return next;
+}
+
+/**
+ * The chat a session mirrors. Learned at boot, and whenever a chat speaks or is looked up; read again
+ * from settings on a miss, so a mapping the boot read did not get (a failed read, another process
+ * sharing this storage) is still found. One settings document read, and only for an unmapped session.
+ */
+async function chatOf(sessionId: string): Promise<number | undefined> {
+  const known = sessionChats.get(sessionId);
+  if (known !== undefined || !servicesRef) return known;
+  const entries = await servicesRef.settings().entries().catch(() => ({} as Record<string, unknown>));
+  for (const [key, value] of Object.entries(entries)) {
+    if (value !== sessionId || !key.startsWith('chat:')) continue;
+    const chatId = Number(key.slice('chat:'.length));
+    if (!knownChats.has(chatId)) continue;
+    sessionChats.set(sessionId, chatId);
+    return chatId;
+  }
+  return undefined;
 }
 
 function matchesUser(user: ChatUser | undefined, wanted: string): boolean {
@@ -374,8 +410,9 @@ export const plugin: MatbotPluginSpec = {
           const chats: TelegramChatSession[] = [];
           for (const chatId of ids) {
             const who     = chatUsers.get(chatId);
-            // Never created here: a chat's session is created by its first message, which names the sender.
-            const session = await chatSession(chatId, false);
+            // Only looked up: a chat's session is created by its first message, which names the sender, and
+            // its history is moved out of an archived one only when the chat next speaks.
+            const session = await chatSession(chatId, 'lookup');
             chats.push({
               chatId,
               ...(who?.name     !== undefined ? { name: who.name }         : {}),
@@ -411,8 +448,7 @@ export const plugin: MatbotPluginSpec = {
     const settings = services.settings();
     for (const id of await settings.get<number[]>(SETTINGS_KEY_KNOWN) ?? []) {
       knownChats.add(id);
-      // Best-effort: where settings are per-principal (a profiles backend) this boot read cannot see a
-      // chat's mapping, and the chat is learned when it next speaks instead.
+      // Best-effort: a mapping this read misses is looked up again when a message is appended (`chatOf`).
       const sessionId = await settings.get<string>(`chat:${id}`).catch(() => undefined);
       if (sessionId !== undefined) sessionChats.set(sessionId, id);
       const user = await settings.get<ChatUser>(`user:${id}`).catch(() => undefined);
@@ -469,7 +505,7 @@ export const plugin: MatbotPluginSpec = {
 
         // The runner appends + persists the user message when the turn starts, so only ensure the
         // session exists here.
-        const session = (await chatSession(chatId, true))!;
+        const session = (await chatSession(chatId, 'speak'))!;
 
         // Keep the typing indicator alive; Telegram expires it after ~5 s. Not while a question waits
         // on the user — "typing…" over an unanswered question reads as "don't reply yet".
@@ -569,20 +605,30 @@ export const plugin: MatbotPluginSpec = {
     // to that chat, which mirrors its session. Without this the chat never shows it, and a follow-up asked
     // there draws on context the user was never shown. Read back as whoever appended it: that principal
     // just wrote the session, so it can read it.
+    //
+    // An append to an ARCHIVED chat session reactivates it, keeping what was appended (see `revive`). The
+    // user reads the message on the phone and replies, and the reply must run with it in context. Left
+    // archived, the reply's revive would move the message out with the rest of the history.
     services.Notifier.consume(n => {
       if (n.kind !== SessionAppendKind) return;
-      const chatId = sessionChats.get(n.sessionId);
-      if (chatId === undefined) return;
       const deliver = async (): Promise<void> => {
+        const chatId = await chatOf(n.sessionId);
+        if (chatId === undefined) return;
         const session = await sessions.get(n.sessionId);
         for (const m of session?.messages ?? []) {
           if (m.role !== 'assistant' || !n.messageIds.includes(m.id)) continue;
           const text = m.content.filter((c): c is Extract<typeof c, { type: 'text' }> => c.type === 'text').map(c => c.text).join('\n').trim();
           if (text) await sendMessage(botToken, chatId, `🤖 ${text}`);
         }
+        if (session?.status !== 'archived') return;
+        const keep = keepOnRevive.get(session.id) ?? new Set<string>();
+        for (const id of n.messageIds) keep.add(id);
+        keepOnRevive.set(session.id, keep);
+        // A turn in it would write back over the move; then the chat's next message revives it instead.
+        if (!run.status(session.id).busy) await revive(session);
       };
       void (n.principal !== undefined ? runAs(n.principal, deliver) : deliver())
-        .catch((e: unknown) => console.warn(`[frontend-telegram] Could not deliver an appended message to chat ${chatId}: ${e}\n`));
+        .catch((e: unknown) => console.warn(`[frontend-telegram] Could not deliver a message appended to session ${n.sessionId}: ${e}\n`));
     }, ac.signal, n => n.kind === SessionAppendKind);
 
     // Long-poll loop — runs until teardown.
@@ -631,5 +677,6 @@ export const plugin: MatbotPluginSpec = {
     knownChats.clear();
     sessionChats.clear();
     chatUsers.clear();
+    keepOnRevive.clear();
   },
 };
