@@ -116,6 +116,16 @@ test('an unknown property is rejected, at its own path', async () => {
   assert.deepEqual(wrongTool.map(e => `${e.path}: ${e.message}`), ['.action: unexpected property', '.id: unexpected property']);
   assert.deepEqual(background.validate({ prompt: 'p', interval: '5m' }), [], 'a key declared by only one arm is not excess');
 
+  // A key some arms declare and others don't fails each arm differently, and nothing says which arm
+  // was meant — so the error says why EACH was refused. This is the call a model really made: `name`
+  // on the run-now form, where only the timed forms take one. "No union member matched" told it nothing.
+  const misplaced = background.validate({ prompt: 'p', name: 'n' });
+  assert.equal(misplaced.length, 1, JSON.stringify(misplaced));
+  assert.equal(misplaced[0]?.path, '.');
+  assert.match(misplaced[0]?.message ?? '', /^matches none of the 3 accepted forms: /);
+  assert.match(misplaced[0]?.message ?? '', /\(2\) \.at: required property missing/);
+  assert.match(misplaced[0]?.message ?? '', /\(3\) \.name: unexpected property/);
+
   const about = built.validators['about_matbot'];
   assert.ok(about && !('refused' in about));
   assert.deepEqual(about.validate({}), [], 'no arguments is the valid call');

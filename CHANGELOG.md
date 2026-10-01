@@ -50,6 +50,9 @@ churn and less likely to affect a consumer who doesn't use them.
 - **`cli`** — `console.info` and `console.debug` go through the same prefixing and background suppression
   as `log`/`warn`/`error`. They bypassed it, so the plugin loader's cache-bust notes landed in a background
   job's output file (its stdout), and in a piped foreground answer.
+- **`tool-types`** — a call matching none of a tool's forms, where the forms share no discriminant, says
+  why each form refused it (`(1) .interval: required property missing; (2) .at: …; (3) .name: unexpected
+  property`), instead of only "no union member matched".
 
 ## 0.4.17
 
