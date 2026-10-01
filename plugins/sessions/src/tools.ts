@@ -1,5 +1,5 @@
-import type { Tool, ToolContract, ToolResultOf, ToolContext, Session, Store, Filter, StoreQuery, FieldPath } from '@matatbread/matbot-plugin-api';
-import { lastActivityAt, StoreQueryError } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolContract, ToolResultOf, ToolContext, Session, Store, Filter, StoreQuery, FieldPath, Principal } from '@matatbread/matbot-plugin-api';
+import { lastActivityAt, StoreQueryError, currentPrincipal, onContextQuiesce, runAs } from '@matatbread/matbot-plugin-api';
 import { compileFilter, applySort, validateQuery, decodeCursor, encodeCursor, type PageState } from '@matatbread/matbot-core/storage-base';
 
 declare module '@matatbread/matbot-plugin-api' {
@@ -17,9 +17,9 @@ declare module '@matatbread/matbot-plugin-api' {
           { action: 'query' } & Omit<StoreQuery, 'immutable'>
         >
       | ToolContract<Session,                          { action: 'get'; sessionId: string }>
-      | ToolContract<{ id: string; title: string },    { action: 'rename'; sessionId: string; title: string }>
-      | ToolContract<{ id: string; status: 'archived' }, { action: 'hide'; sessionId: string }>
-      | ToolContract<{ id: string; status: 'active' },   { action: 'unhide'; sessionId: string }>;
+      | ToolContract<{ id: string; title: string;        deferred?: true }, { action: 'rename'; sessionId: string; title: string }>
+      | ToolContract<{ id: string; status: 'archived';   deferred?: true }, { action: 'hide'; sessionId: string }>
+      | ToolContract<{ id: string; status: 'active';     deferred?: true }, { action: 'unhide'; sessionId: string }>;
   }
 }
 
@@ -72,8 +72,37 @@ function lowerSynthOperands(f: Filter): Filter {
   }
 }
 
-export function makeSessionTools(store: Store<Session>): readonly Tool[] {
-  return [makeSessionActionTool(store)];
+/** `busy` says whether a turn is running in a session (the plugin passes `services.run.status`); a
+ *  caller with no runner has no turns to defer behind. */
+export function makeSessionTools(store: Store<Session>, busy: (sessionId: string) => boolean = () => false): readonly Tool[] {
+  return [makeSessionActionTool(store, busy)];
+}
+
+type FieldEdit = { title: string } | { status: Session['status'] };
+
+// A title or status edit is metadata, not conversational activity: keep updatedAt on the last message
+// (the lastActivityAt invariant) so it doesn't float the session up a recency-sorted list.
+function withEdit(session: Session, edit: FieldEdit): Session {
+  return { ...session, ...edit, version: crypto.randomUUID(), updatedAt: lastActivityAt(session) };
+}
+
+// A session a turn is running in belongs to that turn until it commits: the runner writes its in-memory
+// copy back unconditionally at turn end, so a CAS landing mid-turn succeeds and is then silently undone.
+// So the edit waits for the quiescent edge, as `session_edit`'s do. Nobody is left to report a conflict
+// to by then, and setting a field composes with any other write, so a conflict re-reads and re-applies.
+function deferEdit(store: Store<Session>, principal: Principal, sessionId: string, edit: FieldEdit): void {
+  onContextQuiesce(un => {
+    un();
+    // Returned, not detached: the edge holds back the next turn's read of this session until it lands.
+    return runAs(principal, async () => {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const session = await store.get(sessionId);
+        if (!session) return;
+        if ((await store.cas(sessionId, session.version, withEdit(session, edit))).ok) return;
+      }
+      console.error(`[session_action] deferred edit of session "${sessionId}" lost to repeated concurrent writes.`);
+    });
+  });
 }
 
 // The precise per-action contract. JSON Schema can't express "title required only for rename"
@@ -87,7 +116,19 @@ type SessionInput =
   | { action: 'hide';   sessionId: string }
   | { action: 'unhide'; sessionId: string };
 
-function makeSessionActionTool(store: Store<Session>): Tool<ToolResultOf<'session_action'>> {
+function makeSessionActionTool(store: Store<Session>, busy: (sessionId: string) => boolean): Tool<ToolResultOf<'session_action'>> {
+  // A string is the refusal to report; otherwise what the result adds.
+  const editFields = async (sessionId: string, edit: FieldEdit): Promise<string | { deferred?: true }> => {
+    const session = await store.get(sessionId);
+    if (!session) return `Session "${sessionId}" not found.`;
+    if (busy(sessionId)) {
+      deferEdit(store, currentPrincipal(), sessionId, edit);
+      return { deferred: true };
+    }
+    const res = await store.cas(sessionId, session.version, withEdit(session, edit));
+    return res.ok ? {} : 'Concurrent modification — please retry.';
+  };
+
   return {
     name: 'session_action',
     description:
@@ -95,6 +136,8 @@ function makeSessionActionTool(store: Store<Session>): Tool<ToolResultOf<'sessio
       'messages identified by a unique ID, with a title and a status (active or archived). This tool ' +
       'covers the lifecycle: list sessions, search their contents (query), fetch one in full (get), ' +
       'rename one, hide (archive) one, or unhide (unarchive) one.\n\n' +
+      'A rename, hide or unhide of a session with a turn running in it — including the one this call is ' +
+      'made from — is applied once that turn ends, and the result says "deferred": true. Do not re-issue it.\n\n' +
       '"list" and "query" return lightweight summaries — each item\'s "preview" is just the session\'s ' +
       'first user message truncated to 60 characters (empty if it has no text), a display label, not a ' +
       'summary of the conversation. To read a session\'s contents, use "get".\n\n' +
@@ -229,40 +272,27 @@ function makeSessionActionTool(store: Store<Session>): Tool<ToolResultOf<'sessio
             const { sessionId, title } = args as Extract<SessionInput, { action: 'rename' }>;
             if (!sessionId) { yield { type: 'error', message: 'action "rename" requires "sessionId".' }; return; }
             if (title === undefined) { yield { type: 'error', message: 'action "rename" requires "title".' }; return; }
-            const session = await store.get(sessionId);
-            if (!session) { yield { type: 'error', message: `Session "${sessionId}" not found.` }; return; }
-            // Rename is a metadata edit, not conversational activity: keep updatedAt on the last message
-            // (the lastActivityAt invariant) so renaming doesn't float the session up a recency-sorted list.
-            const next = { ...session, title, version: crypto.randomUUID(), updatedAt: lastActivityAt(session) };
-            const res  = await store.cas(sessionId, session.version, next);
-            if (!res.ok) { yield { type: 'error', message: 'Concurrent modification — please retry.' }; return; }
-            yield { type: 'result', value: { id: sessionId, title } };
+            const outcome = await editFields(sessionId, { title });
+            if (typeof outcome === 'string') { yield { type: 'error', message: outcome }; return; }
+            yield { type: 'result', value: { id: sessionId, title, ...outcome } };
             return;
           }
 
           case 'hide': {
             const { sessionId } = args as Extract<SessionInput, { action: 'hide' }>;
             if (!sessionId) { yield { type: 'error', message: 'action "hide" requires "sessionId".' }; return; }
-            const session = await store.get(sessionId);
-            if (!session) { yield { type: 'error', message: `Session "${sessionId}" not found.` }; return; }
-            // Archiving is a status edit, not conversational activity — preserve updatedAt (lastActivityAt).
-            const next = { ...session, status: 'archived' as const, version: crypto.randomUUID(), updatedAt: lastActivityAt(session) };
-            const res  = await store.cas(sessionId, session.version, next);
-            if (!res.ok) { yield { type: 'error', message: 'Concurrent modification — please retry.' }; return; }
-            yield { type: 'result', value: { id: sessionId, status: 'archived' } };
+            const outcome = await editFields(sessionId, { status: 'archived' });
+            if (typeof outcome === 'string') { yield { type: 'error', message: outcome }; return; }
+            yield { type: 'result', value: { id: sessionId, status: 'archived', ...outcome } };
             return;
           }
 
           case 'unhide': {
             const { sessionId } = args as Extract<SessionInput, { action: 'unhide' }>;
             if (!sessionId) { yield { type: 'error', message: 'action "unhide" requires "sessionId".' }; return; }
-            const session = await store.get(sessionId);
-            if (!session) { yield { type: 'error', message: `Session "${sessionId}" not found.` }; return; }
-            // Unarchiving is a status edit, not conversational activity — preserve updatedAt (lastActivityAt).
-            const next = { ...session, status: 'active' as const, version: crypto.randomUUID(), updatedAt: lastActivityAt(session) };
-            const res  = await store.cas(sessionId, session.version, next);
-            if (!res.ok) { yield { type: 'error', message: 'Concurrent modification — please retry.' }; return; }
-            yield { type: 'result', value: { id: sessionId, status: 'active' } };
+            const outcome = await editFields(sessionId, { status: 'active' });
+            if (typeof outcome === 'string') { yield { type: 'error', message: outcome }; return; }
+            yield { type: 'result', value: { id: sessionId, status: 'active', ...outcome } };
             return;
           }
 

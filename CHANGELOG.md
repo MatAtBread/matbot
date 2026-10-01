@@ -32,6 +32,13 @@ churn and less likely to affect a consumer who doesn't use them.
   rather than failing tool validation. The rebuilt index remains available in memory.
 - **`edit-session`** — `fork` and `split` no longer write `parentSessionId` on the new session; the
   relation marker is the record of where it came from.
+- **`edit-session`** — a cut, split, compact or summarise of ANOTHER session with a turn running in it
+  is deferred until that turn ends, as one of the caller's own session already was. It was written at
+  once and then silently undone by that turn's write-back.
+- **`sessions`** — `session_action` rename, hide and unhide of a session with a turn running in it are
+  deferred until the turn ends, and the result says `deferred: true`. They were written at once and
+  then silently undone by the turn's write-back — renaming or hiding a conversation from the web sidebar
+  while it was answering did nothing.
 
 ## 0.4.17
 

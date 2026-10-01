@@ -9,10 +9,10 @@ import { defer } from './defer.js'
 import { markerMessage, now } from './marker.js'
 import { contentChars, expandSummarised, summariseMessages, summaryMessages, type HandoffSummary } from './summarise.js'
 
-/** An edit of the session the calling turn is running in: applied at the quiescent edge, after the
- *  turn writes its own document back. The tool cannot report its outcome — awaiting the edge from
- *  inside the turn that has to end to reach it is a deadlock — so the result says only that the work
- *  is queued. */
+/** An edit of a session a turn is running in (usually the calling one): applied at the quiescent edge,
+ *  after that turn writes its own document back. The tool cannot report its outcome — awaiting the edge
+ *  from inside a turn that holds the machine is a deadlock — so the result says only that the work is
+ *  queued. */
 interface DeferredEdit { deferred: true; sessionId: string; message: string }
 
 declare module '@matatbread/matbot-plugin-api' {
@@ -251,6 +251,12 @@ async function applyDeferredSummary(store: Store<Session>, principal: Principal,
 }
 
 function makeSessionEditTool(store: Store<Session>, services: MatbotMachine): Tool<ToolResultOf<'session_edit'>> {
+  const turnRunningIn = (sessionId: string): boolean => services.run?.status(sessionId).busy === true;
+  const ownership = (isCurrentTurn: boolean): string => isCurrentTurn
+    ? 'it is the session this turn is running in, and the turn owns it until it commits'
+    : 'a turn is running in it, and that turn owns it until it commits';
+  const unedited = (isCurrentTurn: boolean): string => isCurrentTurn ? ' This turn continues to see the unedited history.' : '';
+
   return {
     name: 'session_edit',
     description:
@@ -286,8 +292,9 @@ function makeSessionEditTool(store: Store<Session>, services: MatbotMachine): To
       '            summarise reads the expanded original history, which can be larger than the\n' +
       '            conversation you can see — if the call fails for want of context, name a bigger\n' +
       '            `provider`; a failed summarise changes nothing, so retrying costs only the call.\n' +
-      'Cutting, splitting, compacting or summarising the session the current turn is running in is DEFERRED: the turn ' +
-      'owns that document until it commits, so the edit is queued and applied once the turn ends. The ' +
+      'Cutting, splitting, compacting or summarising a session with a turn running in it — the current turn, or ' +
+      'another session\'s — is DEFERRED: the turn owns that document until it commits, so the edit is queued ' +
+      'and applied once the turn ends. The ' +
       'result says `deferred: true` and carries no counts — they are not knowable yet. Do not re-issue it, ' +
       'and do not read the session back this turn to check: it still holds the pre-edit history. `fork` is ' +
       'immediate on any session (it only writes a new document), but forks the committed state, without ' +
@@ -337,7 +344,7 @@ function makeSessionEditTool(store: Store<Session>, services: MatbotMachine): To
             summary = await summariseMessages(services, provider, expandSummarised(source.messages.slice(0, idx)), ctx.signal);
           } catch (e) { yield { type: 'error', message: e instanceof Error ? e.message : String(e) }; return; }
 
-          if (sessionId === ctx.session.id) {
+          if (isCurrentTurn || turnRunningIn(sessionId)) {
             const principal = currentPrincipal();
             defer(() => applyDeferredSummary(store, principal, sessionId, idx, summary));
             yield { type: 'result', value: {
@@ -345,8 +352,7 @@ function makeSessionEditTool(store: Store<Session>, services: MatbotMachine): To
               sessionId,
               message:
                 `The summary of session "${sessionId}" is written, and replacing the ${idx} message(s) it covers ` +
-                'is queued: it is the session this turn is running in, and the turn owns it until it commits. ' +
-                'Its outcome cannot be reported here. This turn continues to see the unedited history.',
+                `is queued: ${ownership(isCurrentTurn)}. Its outcome cannot be reported here.${unedited(isCurrentTurn)}`,
             } };
             return;
           }
@@ -359,29 +365,36 @@ function makeSessionEditTool(store: Store<Session>, services: MatbotMachine): To
           return;
         }
 
-        // The running turn owns its session document: the runner takes one in-memory copy at turn start
+        // A running turn owns its session document: the runner takes one in-memory copy at turn start
         // and writes it back unconditionally at turn end, so a write landing here is overwritten seconds
-        // later — silently, since that write is not a CAS. So defer to the quiescent edge, where the
-        // turn's write-back has already happened and the edit reads the committed document.
-        // The outcome cannot be reported: the edge is reached only once this turn has ended, so awaiting
-        // it from inside the turn would deadlock. The result says "queued" and nothing more. `fork` is
+        // later — silently, since that write is not a CAS. That holds for whichever turn it is, this one
+        // or another session's. So defer to the quiescent edge, where the turn's write-back has already
+        // happened and the edit reads the committed document.
+        // The outcome cannot be reported: the edge is reached only once that turn has ended, so awaiting
+        // it from inside this turn would deadlock. The result says "queued" and nothing more. `fork` is
         // exempt — it only writes a new document.
-        if (sessionId === ctx.session.id && (action === 'cut' || action === 'split' || action === 'compact')) {
+        const isCurrentTurn = sessionId === ctx.session.id;
+        if ((isCurrentTurn || turnRunningIn(sessionId)) && (action === 'cut' || action === 'split' || action === 'compact')) {
           if (typeof msgIndex !== 'number') { yield { type: 'error', message: `session_edit "${action}" requires "msgIndex" (number). Only "summarise" may omit it.` }; return; }
           const principal = currentPrincipal();
-          // Resolve a negative (from-the-end) index NOW, against the turn's own copy: by the edge the
-          // committed document has grown by this turn's tail, so "-3" would land three messages later
-          // than the caller meant. A positive index is already an absolute address, and the turn only
+          // Resolve a negative (from-the-end) index NOW, against the history the caller can see: by the
+          // edge the committed document has grown by the turn's tail, so "-3" would land three messages
+          // later than the caller meant. That is this turn's own copy, or for another session its
+          // committed document. A positive index is already an absolute address, and a turn only
           // appends, so it still points at the message it named.
-          const index = msgIndex < 0 ? ctx.session.messages.length + msgIndex : msgIndex;
+          let index = msgIndex;
+          if (msgIndex < 0) {
+            const visible = isCurrentTurn ? ctx.session : await store.get(sessionId);
+            if (!visible) { yield { type: 'error', message: `Session "${sessionId}" not found.` }; return; }
+            index = visible.messages.length + msgIndex;
+          }
           defer(() => applyDeferred(store, principal, action, sessionId, index));
           yield { type: 'result', value: {
             deferred: true,
             sessionId,
             message:
-              `The ${action} of session "${sessionId}" is queued: it is the session this turn is running in, ` +
-              'and the turn owns it until it commits, so the edit is applied once this turn ends. Its ' +
-              'outcome cannot be reported here. This turn continues to see the unedited history.',
+              `The ${action} of session "${sessionId}" is queued: ${ownership(isCurrentTurn)}, so the edit is ` +
+              `applied once that turn ends. Its outcome cannot be reported here.${unedited(isCurrentTurn)}`,
           } };
           return;
         }

@@ -10,7 +10,7 @@ export const plugin: MatbotPluginSpec = {
   async setup(services: MatbotMachine) {
     const store = services.sessions;
     if (!store) return;
-    for (const tool of makeSessionTools(store)) {
+    for (const tool of makeSessionTools(store, id => services.run?.status(id).busy ?? false)) {
       services.tools.register(tool);
     }
   },
