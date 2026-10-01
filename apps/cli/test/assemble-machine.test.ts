@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  assembleMachine, ProviderRegistryImpl, installPrincipalCarrier, createConstantPrincipalCarrier, quiesced,
+  assembleMachine, ProviderRegistryImpl, installPrincipalCarrier, createConstantPrincipalCarrier, quiesced, createSession,
 } from '@matatbread/matbot-core';
 import type { Vault, FileStore, KnowledgeIndex } from '@matatbread/matbot-core';
 import { defaultGate } from '@matatbread/matbot-default-gate';
@@ -86,6 +86,18 @@ test('the core tools arrive with the machine', async t => {
   const names = services.tools.list().map(tool => tool.name);
   for (const name of ['gate_action', 'single_turn', 'about_matbot']) assert.ok(names.includes(name), name);
   assert.ok(services.run, 'with a session runner over the sessions store');
+});
+
+test('an ephemeral run keeps its sessions to itself', async t => {
+  const { services } = await machine(t);
+  const a = services.ephemeral!();
+  const b = services.ephemeral!();
+  const session = createSession();
+  await a.sessions.set(session.id, session);
+
+  assert.equal(await services.sessions!.get(session.id), null, 'nothing reaches the machine\'s store');
+  assert.equal(await b.sessions.get(session.id), null, 'nor another ephemeral run\'s');
+  assert.notEqual(a.run, services.run, 'and it has a runner of its own, so its queue is its own');
 });
 
 test('a provider\'s secrets resolve through the host\'s resolver when it supplies one', async t => {

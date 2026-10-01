@@ -6,7 +6,7 @@ import type {
 } from './types.js';
 import type { MatbotPlugin } from './plugin.js';
 import type { HookRegistry } from './hooks.js';
-import type { ToolTypeIndex, ToolPresenter } from '@matatbread/matbot-plugin-api';
+import type { ToolTypeIndex, ToolPresenter, SessionAppender } from '@matatbread/matbot-plugin-api';
 import { appendMessage, createMessage } from './session.js';
 import { isReadOnlyError, foldOntoUserTurn, lastUserIndex, runAs } from '@matatbread/matbot-plugin-api';
 import { machineBusy, withUsageScope } from '@matatbread/matbot-plugin-api/host';
@@ -41,6 +41,8 @@ export interface SessionRunnerDeps {
   systemContext?:  SystemContextRegistry;
   vault?:          Vault;
   files?:          FileStore;
+  // Only for a runner over a store the machine's appender cannot reach — see `MatbotRuntime.ephemeral`.
+  appender?:       SessionAppender;
   workdir?:        string;
   configPath?:     string;
   loadPlugin:      (specifier: string, prompt?: PromptFn, refresh?: boolean) => Promise<MatbotPlugin>;
@@ -423,6 +425,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
                   ...(deps.systemContext !== undefined ? { systemContext: deps.systemContext } : {}),
                   ...(deps.workdir       !== undefined ? { workdir:       deps.workdir       } : {}),
                   ...(deps.files         !== undefined ? { files:         deps.files         } : {}),
+                  ...(deps.appender      !== undefined ? { appender:      deps.appender      } : {}),
                   ...(mediaStore         !== undefined ? { mediaStore                        } : {}),
                   ...(permissionGate     !== undefined ? { permissionGate                    } : {}),
                   ...(deps.configPath    !== undefined ? { configPath:    deps.configPath    } : {}),

@@ -30,6 +30,12 @@ churn and less likely to affect a consumer who doesn't use them.
   parent's storage but none of its turns and must go through its parent instead. `AppendMessage` is plain
   user/assistant text, so nothing appended can break a later turn's provider request.
 
+- **`MatbotRuntime.ephemeral()` / `EphemeralRun`** — a private session runner over its own in-memory store,
+  for a turn that should leave no trace (a demonstration, an in-process background job): nothing it holds
+  is persisted, announced or listed, and nothing outlives the returned object. Its optional `appender` is
+  handed to tools as the new **`ToolContext.appender`**, so such a turn can report into a real conversation.
+  `MemoryStore` moves from the CLI to `@matatbread/matbot-core/storage-base`.
+
 ### Bug fixes
 
 - **Session runner** — a submission arriving while the pump flushed usage could erase the flushed

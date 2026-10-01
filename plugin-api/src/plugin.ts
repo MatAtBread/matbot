@@ -3,7 +3,7 @@ import type {
   ProviderAdapter, ProviderConfig, ProviderRegistry, Tool, ToolRegistry, FrontendInfo,
   Store, Session, SystemContextRegistry, KnowledgeIndex, PromptFn, SessionRunner, Usage, HookRegistrar,
   TypeScriptStripper, FunctionRunner, ToolTypeIndex, ToolPresenter, SteeringPolicy, UserContent, PermissionGate,
-  SessionAppender,
+  SessionAppender, EphemeralRun,
 } from './types.js';
 import type { Notifications, Notifier } from './notify.js';
 
@@ -300,6 +300,18 @@ export interface MatbotRuntime {
   /** Per-session turn serialiser. Frontends submit and observe through this rather than calling
    *  runSession directly, so concurrent submits queue instead of clobbering the session. */
   readonly run?:            SessionRunner | undefined;
+  /**
+   * A private runner over its own in-memory session store, for a turn that should leave no trace: a
+   * background job's run, a demonstration whose transcript is analysed and thrown away. Nothing it holds
+   * is persisted or announced, and nothing outlives the returned object — so create the session in
+   * `sessions` before `run.open`, and drop both when done.
+   *
+   * Tools on this runner still reach the machine's real stores through what they captured at setup:
+   * `session_action list` sees the user's conversations, and `session_edit` of the ephemeral session
+   * refuses, finding nothing. `appender` is how such a turn reports somewhere real — it arrives as
+   * `ToolContext.appender`, and its `defaultSessionId` is where an append naming no session goes.
+   */
+  ephemeral?(opts?: { appender?: SessionAppender }): EphemeralRun;
   readonly files?:          FileStore;
   readonly hooks:           HookRegistrar;
   readonly tools:           ToolRegistry;

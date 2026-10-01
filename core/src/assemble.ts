@@ -1,6 +1,6 @@
 import type {
   MatbotMachine, MatbotServices, MatbotPlugin, Store, Session, FileStore, StorageBackend, Vault, Notifier,
-  KnowledgeIndex, PermissionGate, PluginSettings, ProviderConfig, ProviderAdapter, SessionRunner, Tool, Usage,
+  KnowledgeIndex, PermissionGate, PluginSettings, ProviderConfig, ProviderAdapter, SessionRunner, SessionAppender, Tool, Usage,
 } from '@matatbread/matbot-plugin-api';
 import {
   forwardingProxy, makeSwappable, createMountTable, scheduleAtEdge, createNotifier, recordUsage, singleTurnRequest,
@@ -9,6 +9,7 @@ import {
 import type { SwapFn } from '@matatbread/matbot-plugin-api/host';
 import { notifyingStore, createMessage } from '@matatbread/matbot-plugin-api';
 import { mediumGuard } from './storage-base/medium-guard.js';
+import { MemoryStore } from './storage-base/memory-store.js';
 import { unifyServices } from './plugin.js';
 import { instantiateProvider, recordServiceKey, getPluginNameForSpecifier, getRegisteredPlugins } from './registry.js';
 import { installSettingsDefaults, installSettingsNotifier, makePluginSettings, settingsDefaultNamespaces } from './settings.js';
@@ -82,7 +83,7 @@ export interface AssembleOptions {
 export interface AssembledMachine {
   services: MatbotMachine;
   /** A session runner over any store — the shared one is `services.run`. */
-  makeRunner(store: Store<Session>): SessionRunner;
+  makeRunner(store: Store<Session>, opts?: { appender?: SessionAppender }): SessionRunner;
   /** Call once the configured plugins have loaded. */
   loaded(): void;
 }
@@ -319,6 +320,10 @@ export function assembleMachine(opts: AssembleOptions): AssembledMachine {
     sessions,
     files:    fileStore,
     get run() { return runner; },
+    ephemeral(opts) {
+      const store = new MemoryStore<Session>();
+      return { sessions: store, run: makeRunner(store, opts) };
+    },
     hooks,
     tools,
     systemContext,
@@ -341,8 +346,9 @@ export function assembleMachine(opts: AssembleOptions): AssembledMachine {
   };
 
   // Services a plugin registers after boot are resolved live, per turn.
-  const makeRunner = (store: Store<Session>): SessionRunner => createSessionRunner({
+  const makeRunner = (store: Store<Session>, extra?: { appender?: SessionAppender }): SessionRunner => createSessionRunner({
     store,
+    ...(extra?.appender !== undefined ? { appender: extra.appender } : {}),
     resolveProvider,
     tools,
     hooks,

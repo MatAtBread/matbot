@@ -5,7 +5,7 @@ import type {
   PermissionGate,
 } from './types.js';
 import type { MatbotPlugin } from './plugin.js';
-import type { ToolPresenter } from '@matatbread/matbot-plugin-api';
+import type { ToolPresenter, SessionAppender } from '@matatbread/matbot-plugin-api';
 import { recordSpan, recordUsage, withUsageSite, scopeIterable } from '@matatbread/matbot-plugin-api/host';
 import { HookRegistry } from './hooks.js';
 import { appendMessage, createMessage } from './session.js';
@@ -115,6 +115,9 @@ export interface RunSessionOpts {
   workdir?:       string;
   configPath?:    string;
   files?:         FileStore;
+  /** Handed to tools as `ToolContext.appender`: set only by a runner whose sessions the machine's own
+   *  appender cannot reach (an ephemeral one). */
+  appender?:      SessionAppender;
   /** Where user-attached session media lives. Resolved once per turn into the outgoing copy, newest-first
    *  and inside {@link MEDIA_RESIDENCY_BYTES}; absent ⇒ every `file-ref` stays a ref and the converters
    *  degrade it. Never read for anything else — the runner does not otherwise touch a file. */
@@ -602,6 +605,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
         ...(opts.workdir     !== undefined ? { workdir:     opts.workdir     } : {}),
         ...(opts.configPath  !== undefined ? { configPath:  opts.configPath  } : {}),
         ...(opts.files       !== undefined ? { files:       opts.files       } : {}),
+        ...(opts.appender    !== undefined ? { appender:    opts.appender    } : {}),
       };
 
       // Iterated by hand rather than with `for await`, so the read can be bounded once the turn is

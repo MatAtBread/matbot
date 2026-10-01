@@ -4,6 +4,7 @@ import type { MimeType } from './primitives.js';
 import type { Principal } from './principal.js';
 import type { SteeringMode } from './steering.js';
 import type { PromptFn } from './tools.js';
+import type { Store } from './storage.js';
 
 // ── Session runner ──────────────────────────────────────────────────────────────
 
@@ -98,4 +99,10 @@ export interface SessionRunner {
   /** Snapshot of a session's live state: whether a turn is running and how many submissions wait
    *  behind it. `busy` is `running || queued > 0`. */
   status(sessionId: string): { busy: boolean; running: boolean; queued: number };
+}
+
+/** A runner and the store it alone reads and writes — see {@link MatbotRuntime.ephemeral}. */
+export interface EphemeralRun {
+  sessions: Store<Session>;
+  run:      SessionRunner;
 }
