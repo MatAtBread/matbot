@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { execArgv, argv, execPath } from 'node:process';
 import { resolve, dirname } from 'node:path';
 import { existsSync }       from 'node:fs';
@@ -56,6 +56,27 @@ function relay(machine: MatbotMachine, job: RunSpec, raw: unknown): void {
   if (n !== undefined) machine.Notifier.notify(n);
 }
 
+/**
+ * Feed a job process its config and wait for it to end. The result is the reason it never started, if
+ * that is how it ended.
+ *
+ * Both `error` listeners matter. A process that cannot be spawned (EAGAIN under load, a vanished
+ * executable) reports it only as `error` on the child, and with no listener that event throws in the
+ * parent, taking the server down with it. Its stdin then fails the write with EPIPE, which is likewise
+ * fatal unheard. And `exit` may never follow, so waiting for `exit` alone would hang the run for good.
+ * An `error` from a child that did start (a failed kill, a send to a closed channel) does not end it, so
+ * that wait goes on.
+ */
+export function superviseChild(child: ChildProcess, input: string): Promise<Error | undefined> {
+  const ended = new Promise<Error | undefined>(resolve => {
+    child.once('exit', () => resolve(undefined));
+    child.on('error', e => { if (child.pid === undefined) resolve(e); });
+  });
+  child.stdin?.on('error', () => { /* reported as the child's own error or exit */ });
+  child.stdin?.end(input);
+  return ended;
+}
+
 function spawnRunner(machine: MatbotMachine): JobRunner | undefined {
   const configPath = machine.configPath;
   const script     = argv[1];
@@ -84,8 +105,7 @@ function spawnRunner(machine: MatbotMachine): JobRunner | undefined {
         },
       );
       if (!child.stdin) return undefined;
-      child.stdin.write(buildJobConfig(configPath, job.prompt, job.provider));
-      child.stdin.end();
+      const ended = superviseChild(child, buildJobConfig(configPath, job.prompt, job.provider));
 
       let tail = '';
       child.stdout?.setEncoding('utf8');
@@ -111,8 +131,13 @@ function spawnRunner(machine: MatbotMachine): JobRunner | undefined {
 
       const kill = (): void => { child.kill(); };
       signal.addEventListener('abort', kill, { once: true });
-      await new Promise<void>(r => child.once('exit', () => r()));
+      const failed = await ended;
       signal.removeEventListener('abort', kill);
+      // Not a rejection: a scheduled job's loop would end on one, and this failure may not recur.
+      if (failed !== undefined) {
+        console.error(`[background-jobs] job ${job.name ?? job.id} could not start its process: ${failed.message}`);
+        return undefined;
+      }
       return { appended, reply: tail.trim() };
     },
   };

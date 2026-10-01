@@ -8,7 +8,7 @@ import { executeQuery } from '@matatbread/matbot-core/storage-base';
 import type { AppendMessage, MatbotMachine, Session, Store, Tool, ToolContext } from '@matatbread/matbot-plugin-api';
 import { createAlsPrincipalCarrier } from '../src/principal-als.ts';
 import { connectToParent, relayable, serveJob, type Endpoint } from '../../../plugins/background-jobs-node/src/channel.ts';
-import { plugin as jobsPlugin } from '../../../plugins/background-jobs-node/src/index.ts';
+import { plugin as jobsPlugin, superviseChild } from '../../../plugins/background-jobs-node/src/index.ts';
 
 installPrincipalCarrier(createAlsPrincipalCarrier());
 
@@ -145,4 +145,20 @@ test('it reports to the conversation it was made from, and lists the old plugin\
   } finally {
     await jobsPlugin.teardown?.();
   }
+});
+
+// A job process that could not be spawned reported it only as `error` on the child. Nothing listened, so
+// the event threw in the parent and took the server down, and the run waited on an `exit` that need not
+// come. The stdin write to the dead process fails too (EPIPE), equally fatal unheard.
+test('a job process that cannot be spawned is reported, not fatal', { timeout: 10000 }, async () => {
+  const child = spawn(join(import.meta.dirname, 'no-such-executable'), [], { stdio: ['pipe', 'pipe', 'inherit', 'ipc'] });
+  const failed = await superviseChild(child, 'prompt: |\n  hello\n');
+  assert.ok(failed instanceof Error && /ENOENT/.test(failed.message), `reported as the spawn failure (${failed?.message})`);
+  // A tick for any stray stream error to surface: unheard, it would fail this test as an uncaught exception.
+  await new Promise(r => setTimeout(r, 50));
+});
+
+test('a job process that runs is supervised to its exit', { timeout: 10000 }, async () => {
+  const child = spawn(process.execPath, ['-e', 'process.stdin.resume(); process.stdin.on("end", () => process.exit(0))'], { stdio: ['pipe', 'ignore', 'inherit'] });
+  assert.equal(await superviseChild(child, 'config'), undefined);
 });
