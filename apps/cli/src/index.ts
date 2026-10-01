@@ -40,13 +40,16 @@ import path                                from 'node:path';
 // background processes are distinguishable in shared terminal output.
 const _pid = process.pid;
 const isBackground = process.env.IS_SUB_AGENT === '1';
-for (const level of ['log', 'warn', 'error'] as const) {
+// Every level that writes, not just the three in common use: an unwrapped `console.debug` (the plugin
+// loader's cache-bust notes) went straight to stdout, unprefixed and unsuppressed — and a background
+// job's stdout IS its output file, so the notes landed in the user's result.
+for (const level of ['log', 'info', 'debug', 'warn', 'error'] as const) {
   const orig = console[level].bind(console) as (...a: unknown[]) => void;
   console[level] = (label, ...args: unknown[]) => {
     if (isBackground && level !== 'error') return;
     // Diagnostics are harness chatter: open yellow on the prefix and close it as a trailing argument,
     // so any object args in between are still coloured rather than only the first one.
-    const on = level === 'log' ? ttyOut : ttyErr;
+    const on = level === 'warn' || level === 'error' ? ttyErr : ttyOut;
     if (on) orig(`\x1b[33m[${new Date().toISOString()} ${_pid}] ${label}`, ...args, '\x1b[0m');
     else    orig(`[${new Date().toISOString()} ${_pid}] ${label}`, ...args);
   };

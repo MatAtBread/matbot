@@ -47,6 +47,9 @@ churn and less likely to affect a consumer who doesn't use them.
   while it was answering did nothing.
 - **`frontend-web`** — `POST /sessions` takes an optional `{ status }` body, and both transports'
   `createSession` pass it through, so a client can create a session hidden.
+- **`cli`** — `console.info` and `console.debug` go through the same prefixing and background suppression
+  as `log`/`warn`/`error`. They bypassed it, so the plugin loader's cache-bust notes landed in a background
+  job's output file (its stdout), and in a piped foreground answer.
 
 ## 0.4.17
 
