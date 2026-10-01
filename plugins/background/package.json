@@ -10,7 +10,7 @@
   "files": [
     "src"
   ],
-  "description": "Run prompts in detached background processes. Schedule recurring prompts with every/every_list/every_cancel/every_suspend/every_resume/everything_suspend/everything_resume.",
+  "description": "DEPRECATED — use @matatbread/matbot-background-jobs (jobs run in-process, cross-runtime) or @matatbread/matbot-background-jobs-node (each job in its own process), which report into a conversation and list this plugin's schedules so they can be moved. Runs prompts in detached background processes (every/every_list/every_cancel/every_suspend/every_resume/everything_suspend/everything_resume).",
   "keywords": [
     "matbot",
     "matbot-plugin",
