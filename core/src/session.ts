@@ -5,9 +5,7 @@ import type { Session, Message } from './types.js';
 export { createMessage } from '@matatbread/matbot-plugin-api';
 
 export interface CreateSessionOpts {
-  title?:                string;
-  parentSessionId?:      string;
-  branchPointMessageId?: string;
+  title?: string;
 }
 
 export function createSession(opts: CreateSessionOpts = {}): Session {
@@ -15,9 +13,7 @@ export function createSession(opts: CreateSessionOpts = {}): Session {
   return {
     id:               crypto.randomUUID(),
     version:          crypto.randomUUID(),
-    ...(opts.title                !== undefined ? { title:                opts.title                } : {}),
-    ...(opts.parentSessionId      !== undefined ? { parentSessionId:      opts.parentSessionId      } : {}),
-    ...(opts.branchPointMessageId !== undefined ? { branchPointMessageId: opts.branchPointMessageId } : {}),
+    ...(opts.title !== undefined ? { title: opts.title } : {}),
     status:    'active',
     messages:  [],
     createdAt: now,

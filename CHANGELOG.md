@@ -11,10 +11,19 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ## Unreleased
 
+### Breaking changes
+
+- **`Session.parentSessionId` / `branchPointMessageId` removed**, with the matching `CreateSessionOpts`
+  fields. Nothing read either: `branchPointMessageId` was never written, and `parentSessionId` duplicated
+  the `forked-from` / `continued-in` marker a fork or split already appends, which is what the web UI
+  draws. Old persisted data keeps them harmlessly as excess properties.
+
 ### Optional
 
 - **`caching-tool-types`** — a failed settings read logs a warning and rebuilds the type index,
   rather than failing tool validation. The rebuilt index remains available in memory.
+- **`edit-session`** — `fork` and `split` no longer write `parentSessionId` on the new session; the
+  relation marker is the record of where it came from.
 
 ## 0.4.17
 
