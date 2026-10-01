@@ -44,6 +44,14 @@ export interface SessionRunnerDeps {
   files?:          FileStore;
   // Only for a runner over a store the machine's appender cannot reach — see `MatbotRuntime.ephemeral`.
   appender?:       SessionAppender;
+  // The store is this runner's own (an ephemeral run's, a parallel turn's copy), so the pump takes no
+  // machine hold. The hold exists so deferred work cannot land in the middle of the pump's
+  // read-modify-writes of the session, and nothing deferred can address a store that only this runner
+  // holds. Held anyway, it cost twice over. A parallel turn always starts inside the main pump's hold, so
+  // with anything staged it waited out the full admit timeout. An in-process background job held the
+  // machine for its whole run, so nothing deferred anywhere (appends, its own included; session edits; a
+  // StorageBackend swap) could land until it finished.
+  privateStore?:   true;
   workdir?:        string;
   configPath?:     string;
   loadPlugin:      (specifier: string, prompt?: PromptFn, refresh?: boolean) => Promise<MatbotPlugin>;
@@ -373,7 +381,9 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
     // pre-edit document and the write-back would put it back. That wait used to be spelled at this call
     // site, and spelling it here made it something the next caller of `machineBusy` could omit without
     // any symptom — so it moved inside the hold it guards.
-    return machineBusy(async () => {
+    //
+    // A runner over a private store skips the hold (see `SessionRunnerDeps.privateStore`).
+    const drain = async (): Promise<void> => {
       try {
         for (;;) {
           // Not ahead of a redo. A redo re-runs the turn just retracted, found as the session's LAST user
@@ -705,7 +715,8 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
           }
         }
       }
-    });
+    };
+    return deps.privateStore ? drain() : machineBusy(drain);
   };
 
   /**
@@ -742,7 +753,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
 
       const store = new MemoryStore<Session>();
       await store.set(id, copy);
-      const sub = createSessionRunner({ ...deps, store });
+      const sub = createSessionRunner({ ...deps, store, privateStore: true });
       if (rec.stop.signal.aborted) { forward({ type: 'cancelled', sessionId: id, traceId: p.traceId }); return; }
       rec.stop.signal.addEventListener('abort', () => sub.abort(id), { once: true });
 

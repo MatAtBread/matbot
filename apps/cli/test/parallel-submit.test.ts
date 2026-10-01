@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createSessionRunner, createSession, installPrincipalCarrier, installUsageCarrier, HookRegistry } from '@matatbread/matbot-core';
+import { createSessionRunner, createSession, installPrincipalCarrier, installUsageCarrier, HookRegistry, onContextQuiesce, quiesced } from '@matatbread/matbot-core';
 import type {
   Session, Store, Tool, ToolRegistry, ProviderAdapter, ProviderConfig, CompletionEvent,
   Message, PipelineEvent, Principal, MessageContent, MediaStore,
@@ -340,4 +340,37 @@ test('a stop that lands while a parallel turn is being submitted stops it', { ti
   assert.equal(seen.parallel.length, 0, 'the parallel turn never called its provider');
   const reply = (await store.get(sid))!.messages.find(m => m.role === 'assistant' && textOf(m).startsWith('(No reply'));
   assert.ok(reply && textOf(reply).includes('was stopped'), 'its reply says it was stopped');
+});
+
+// A parallel turn's nested runner took the machine hold like any pump, and a parallel turn always starts
+// inside the main pump's hold. So with any deferred work staged, it waited out the whole admit timeout
+// (2s) and logged a warning, before answering a message whose point is being answered at once.
+test('a parallel turn does not wait at the barrier for work the running turn holds up', { timeout: 10000 }, async () => {
+  const { sid, started, release, runner } = setup(Promise.resolve());
+  const warnings: string[] = [];
+  const warn = console.warn;
+  console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(' ')); };
+  try {
+    const main = await runner.open({ sessionId: sid, signal: new AbortController().signal, content: submit('do it'), provider: 'fake', principal });
+    const collector = watch(main, []);
+    await started.wait;
+    // Staged while the main pump holds the machine, so it cannot land until that turn's queue drains.
+    let landed = false;
+    onContextQuiesce(un => { un(); landed = true; });
+
+    const t0 = Date.now();
+    await runner.open({ sessionId: sid, signal: new AbortController().signal, content: submit('Q'), provider: 'fake', principal, mode: 'parallel' });
+    while (runner.status(sid).parallel > 0) await new Promise(r => setImmediate(r));
+    const took = Date.now() - t0;
+    assert.equal(landed, false, 'the staged work is still held up by the running turn');
+
+    release.open();
+    await collector;
+    await quiesced();
+    assert.ok(took < 1000, `answered at once, not after the admit timeout (took ${took}ms)`);
+    assert.ok(!warnings.some(w => w.includes('entering the machine after waiting')), 'no barrier warning');
+    assert.equal(landed, true, 'and the staged work landed once the queue drained');
+  } finally {
+    console.warn = warn;
+  }
 });
