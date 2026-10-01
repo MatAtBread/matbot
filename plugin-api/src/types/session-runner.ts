@@ -9,10 +9,10 @@ import type { PromptFn } from './tools.js';
 
 /**
  * A view onto a session returned by `SessionRunner.open`. `session` is the authoritative
- * server-side state — committed messages plus an overlay of any queued-but-not-yet-run
- * submissions (each carrying `metadata.pending: true`). `events` is a lazy, per-session live
- * tap: accessing it subscribes to the turn event stream from now (replaying the in-flight
- * turn, if any); never touching it costs nothing.
+ * server-side state — committed messages only, ending at the running turn's user message. The
+ * in-flight turn and any queued submissions are the delta, delivered over `events`, never overlaid
+ * here. `events` is a lazy, per-session live tap: accessing it subscribes to the turn event stream
+ * from now (replaying the in-flight turn, then the queue); never touching it costs nothing.
  */
 export interface SessionView {
   session:        Session;

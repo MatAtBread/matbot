@@ -554,19 +554,31 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
           }
         }
       } finally {
-        s.running = false;
         s.runningTraceId = undefined;
         s.replay  = [];
-        // Accounting is flushed HERE — at the drained queue, not at a turn boundary. "The end of a turn"
-        // is not a well-defined moment to total anything at: steers terminate and resume, a retract
-        // re-enqueues the turn it just popped, followup enqueues resubmissions, and a detached classifier
-        // settles whenever it settles. The queue draining is unambiguous, and it is after all of them.
-        await flushUsage(id, s);
-        // Deterministic busy→idle signal: running is now false, so any subscriber draining the stream
-        // (a frontend's status tracker) reads an authoritative idle the moment it sees this — no racing
-        // the microtask on which `running` flipped. Not in `replay` (transient lifecycle, not history).
-        notify(s, { type: 'idle', sessionId: id });
-        maybeCleanup(id, s);
+        try {
+          // Accounting is flushed HERE — at the drained queue, not at a turn boundary. "The end of a turn"
+          // is not a well-defined moment to total anything at: steers terminate and resume, a retract
+          // re-enqueues the turn it just popped, followup enqueues resubmissions, and a detached classifier
+          // settles whenever it settles. The queue draining is unambiguous, and it is after all of them.
+          //
+          // And while `running` still holds. The flush is a read-modify-write of the session, so a
+          // submission arriving during it must queue behind this pump rather than start a second one —
+          // whose persist-at-turn-start write would interleave with it, and whichever landed second
+          // erased the other: this flush's entries, or that turn's user message.
+          await flushUsage(id, s);
+        } finally {
+          s.running = false;
+          // A submission that arrived during the flush found the pump running and did not start one.
+          if (s.queue.length > 0) void pump(id, s);
+          else {
+            // Deterministic busy→idle signal: running is now false, so any subscriber draining the stream
+            // (a frontend's status tracker) reads an authoritative idle the moment it sees this — no racing
+            // the microtask on which `running` flipped. Not in `replay` (transient lifecycle, not history).
+            notify(s, { type: 'idle', sessionId: id });
+            maybeCleanup(id, s);
+          }
+        }
       }
     });
   };

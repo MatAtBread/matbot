@@ -1951,9 +1951,8 @@ function fillTurnFooter(det, perProvider, at) {
 //     that is still streaming, which lands the tokens above text the turn has yet to render.
 //
 // The presence of a footer therefore *is* the "this turn has finished" signal, already maintained by the
-// two paths that draw it. No timing assumption is needed, and none would be sound: the runner clears its
-// busy flag before awaiting the flush, so an observer can be told a session is idle while the write is
-// still in flight.
+// two paths that draw it. No timing assumption is needed, and none would be sound: the busy→idle signal
+// and the flush's write are announced on different streams, which keep no order between them.
 // Footers are drawn per VISIBLE turn — a user message and everything up to the next one — not per
 // traceId. The two are usually the same and diverge exactly where it matters: a retract-and-rerun
 // answers a user turn under a *fresh* traceId, so the turn the reader sees spans two of them, with the
@@ -2008,8 +2007,8 @@ function applyTurnUsageBlocks(messages, replace) {
 // Driven by the session write itself, which needs no timing assumption because this only ever REPLACES
 // an existing footer (see `applyTurnUsageBlocks`): an in-flight turn has none, so a mid-turn write
 // leaves it alone, and the flush's own write is what fills in the numbers. Deliberately not keyed on the
-// busy→idle transition — the runner clears its busy flag before awaiting the flush, so idle can be
-// broadcast while the write is still in flight, and there would be no second transition to recover on.
+// busy→idle transition — it arrives on a different stream from the write's announcement, so it can be
+// seen before the re-read would find the numbers, and there would be no second transition to recover on.
 //
 // `seq` guards ordering rather than a timer: two reads in flight can settle out of order and paint an
 // older session over a newer one, and only the last read issued is allowed to paint.

@@ -18,6 +18,14 @@ churn and less likely to affect a consumer who doesn't use them.
   the `forked-from` / `continued-in` marker a fork or split already appends, which is what the web UI
   draws. Old persisted data keeps them harmlessly as excess properties.
 
+### Bug fixes
+
+- **Session runner** — a submission arriving while the pump flushed usage could erase the flushed
+  accounting, or have its own user message erased. The pump dropped its running flag before the flush,
+  so the submission started a second pump whose turn-start write interleaved with the flush's
+  read-modify-write. The flush now runs while the pump still holds the session, and anything queued
+  during it runs next.
+
 ### Optional
 
 - **`caching-tool-types`** — a failed settings read logs a warning and rebuilds the type index,
