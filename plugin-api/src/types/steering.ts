@@ -4,8 +4,9 @@ import type { MessageContent, Session } from './messages.js';
 
 /** Disposition of a submission that arrives while a turn is running. `interrupt` stops the running
  *  turn (its committed partial work is preserved) and runs the new message next; `queue` waits for the
- *  turn boundary. */
-export type SteeringDecision = 'queue' | 'interrupt';
+ *  turn boundary; `parallel` leaves the running turn alone and answers the new message at once on a
+ *  private copy of the session's completed turns, writing back only the message and its final reply. */
+export type SteeringDecision = 'queue' | 'interrupt' | 'parallel';
 /** The wire-level request (see `SubmitOpenOpts.mode`). `auto` defers the decision to the registered
  *  {@link SteeringPolicy} (else the host default). */
 export type SteeringMode = SteeringDecision | 'auto';

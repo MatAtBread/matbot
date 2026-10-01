@@ -1612,27 +1612,26 @@
       max-width: 260px;
     }
     #provider-select:hover { color: #374151; }
-    /* Steering-mode toggle: queue ↔ interrupt, pushed to the RHS of the meta row. */
+    /* Steering mode: a three-way segmented switch (queue | interrupt | parallel), pushed to the RHS of
+       the meta row. Native radios underneath, so arrow keys move between modes and a screen reader
+       announces a group; the label text is the segment, so no mode needs explaining in a tooltip first. */
     #mode-toggle {
       display: inline-flex;
-      align-items: center;
-      gap: 6px;
+      align-items: stretch;
       margin-left: auto;
+      border: 1px solid #d1d5db;
+      border-radius: 999px;
+      overflow: hidden;
       color: #9ca3af;
       user-select: none;
     }
-    #mode-toggle .switch { position: relative; display: inline-block; width: 30px; height: 16px; }
-    #mode-toggle .switch input { opacity: 0; width: 0; height: 0; }
-    #mode-toggle .slider {
-      position: absolute; inset: 0; cursor: pointer;
-      background: #d1d5db; border-radius: 999px; transition: background .15s;
-    }
-    #mode-toggle .slider::before {
-      content: ""; position: absolute; height: 12px; width: 12px; left: 2px; top: 2px;
-      background: #fff; border-radius: 50%; transition: transform .15s;
-    }
-    #mode-toggle input:checked + .slider { background: #6b7280; }
-    #mode-toggle input:checked + .slider::before { transform: translateX(14px); }
+    #mode-toggle label { position: relative; display: flex; cursor: pointer; }
+    #mode-toggle label + label { border-left: 1px solid #d1d5db; }
+    #mode-toggle input { position: absolute; opacity: 0; width: 0; height: 0; }
+    #mode-toggle span { padding: 1px 7px; transition: background .15s, color .15s; }
+    #mode-toggle label:hover span { color: #374151; }
+    #mode-toggle input:checked + span { background: #6b7280; color: #fff; }
+    #mode-toggle input:focus-visible + span { outline: 2px solid #93c5fd; outline-offset: -2px; }
     /* A grid, not a flex row, so the mobile breakpoint can rearrange the composer by changing the
        TEMPLATE alone — no element moves between parents, and DOM order stays free to differ from
        visual order (desktop keeps send-then-stop; mobile wants send in the corner, see below). */
@@ -2085,7 +2084,7 @@
 
       /* The provider + steering controls, revealed by the cog. Same element as the desktop meta row —
          restyled in place rather than duplicated or re-parented, so app.js keeps its one #provider-select
-         and one #mode-interrupt and needs to know nothing about the breakpoint. */
+         and one steer-mode group and needs to know nothing about the breakpoint. */
       #input-meta { display: none; }
       #input-area.settings-open #input-meta {
         display: flex;
@@ -2112,10 +2111,9 @@
         max-width: none; width: 100%; font-size: 1em; color: #111;
         border: 1px solid #d1d5db; border-radius: 8px; padding: 9px 8px; background: #fff;
       }
-      #input-area.settings-open #mode-toggle { margin-left: 0; justify-content: space-between; color: #374151; }
-      #input-area.settings-open #mode-toggle .switch { width: 44px; height: 24px; }
-      #input-area.settings-open #mode-toggle .slider::before { height: 20px; width: 20px; }
-      #input-area.settings-open #mode-toggle input:checked + .slider::before { transform: translateX(20px); }
+      #input-area.settings-open #mode-toggle { margin-left: 0; color: #374151; background: #fff; }
+      #input-area.settings-open #mode-toggle label { flex: 1; }
+      #input-area.settings-open #mode-toggle span { flex: 1; text-align: center; padding: 9px 8px; }
     }
 
   /* ── Print: unclip everything so the full #messages content prints ── */
@@ -2395,10 +2393,10 @@
       <div id="input-meta">
         <span>Provider:</span>
         <select id="provider-select"></select>
-        <span id="mode-toggle" title="How a message sent mid-turn is handled — queue: wait for the current turn to finish; interrupt: stop it (keeping its work so far) and steer immediately">
-          <span class="mode-label">queue</span>
-          <label class="switch"><input type="checkbox" id="mode-interrupt" checked><span class="slider"></span></label>
-          <span class="mode-label">interrupt</span>
+        <span id="mode-toggle" role="radiogroup" aria-label="Messages sent mid-turn" title="How a message sent mid-turn is handled — queue: wait for the current turn to finish; interrupt: stop it (keeping its work so far) and steer immediately; parallel: answer it now, beside the running turn (also Alt+Enter, whichever is selected)">
+          <label><input type="radio" name="steer-mode" value="queue"><span>queue</span></label>
+          <label><input type="radio" name="steer-mode" value="interrupt" checked><span>interrupt</span></label>
+          <label><input type="radio" name="steer-mode" value="parallel"><span>parallel</span></label>
         </span>
       </div>
       <div id="attachments" hidden></div>

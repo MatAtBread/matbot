@@ -151,19 +151,18 @@ const stopBtn        = document.getElementById('stop-btn');
 const newBtn         = document.getElementById('new-btn');
 const providerSel    = document.getElementById('provider-select');
 
-// Steering mode for /submit: 'queue' (wait for the running turn to finish) vs 'interrupt' (stop it —
-// keeping its committed partial work — and steer immediately). A per-browser toggle beside the provider
-// select, mainly for testing; defaults to 'interrupt'. Sent explicitly on every submit, so it overrides
-// the server's own default.
-const modeToggle = document.getElementById('mode-interrupt');
-if (modeToggle) {
+// Steering mode for /submit: 'queue' (wait for the running turn to finish), 'interrupt' (stop it —
+// keeping its committed partial work — and steer immediately) or 'parallel' (answer now, beside it). A
+// per-browser three-way switch beside the provider select; defaults to 'interrupt'. Sent explicitly on
+// every submit, so it overrides the server's own default. Alt+Enter sends one message parallel regardless.
+const modeRadios = [...document.querySelectorAll('#mode-toggle input[name="steer-mode"]')];
+{
   const saved = localStorage[LS_STEER_MODE];
-  modeToggle.checked = saved ? saved === 'interrupt' : true;   // default: interrupt
-  modeToggle.addEventListener('change', () => {
-    localStorage.setItem(LS_STEER_MODE, modeToggle.checked ? 'interrupt' : 'queue');
-  });
+  const pick  = modeRadios.find(r => r.value === saved);
+  if (pick) pick.checked = true;   // else the markup's default: interrupt
+  for (const r of modeRadios) r.addEventListener('change', () => { if (r.checked) localStorage.setItem(LS_STEER_MODE, r.value); });
 }
-const currentSteerMode = () => (modeToggle && !modeToggle.checked ? 'queue' : 'interrupt');
+const currentSteerMode = () => modeRadios.find(r => r.checked)?.value ?? 'interrupt';
 const burgerBtn      = document.getElementById('burger');
 const sidebarOverlay = document.getElementById('sidebar-overlay');
 
@@ -2805,6 +2804,7 @@ async function submitFormResponse(sessionId, values) {
 let streamSessionId = null;       // session the persistent stream is bound to
 let streamAc        = null;       // AbortController for the current stream
 const turnQueues    = new Map();  // traceId -> { items, wake, done, started }
+const parallelTraces = new Set(); // traceIds of parallel turns (see pushTurnEvent)
 
 // Concat policy (the runner merges submissions queued behind a running turn into one turn, answered
 // under the first/head submission's traceId). Mirror it in the UI: a submission that arrives while an
@@ -2827,6 +2827,13 @@ function wake(q) { if (q.wake) { const w = q.wake; q.wake = null; w(); } }
 
 function pushTurnEvent(ev) {
   if (foldedTraces.has(ev.traceId)) return;   // a folded submission's later events (incl. cancelled) are noise
+
+  // A parallel turn runs on a COPY of the session, so its terminal's `session` is that copy: noted here so
+  // its renderer never redraws the page from it. Its write-back (`merged`) arrives after its terminal and
+  // changes nothing already drawn live, so it is consumed here rather than spawning a renderer for a
+  // finished trace. Where the pair landed shows on the next load of the session.
+  if (ev.type === 'parallel') parallelTraces.add(ev.traceId);
+  if (ev.type === 'merged') { parallelTraces.delete(ev.traceId); return; }
 
   // Markers can arrive after a turn's terminal event (e.g. a followup hook's, emitted post-commit).
   // If the turn's queue is gone/finished, render directly rather than re-spawning a renderTurn for a
@@ -3056,7 +3063,7 @@ async function addAttachments(fileList) {
 // concat = true (Shift+Enter / send button): fold into the running turn's batch — fastest way to
 // add more context. concat = false (Ctrl+Enter): a distinct queued turn, run in order — use when the
 // next ask depends on this one's tools/state (e.g. install a plugin, then use it).
-async function sendMessage(concat = true) {
+async function sendMessage(concat = true, mode = currentSteerMode()) {
   if (composerReadOnly) return;                          // shared-in session: writes are rejected by the backend
   const text = inputEl.value.trim();
   // An attachment on its own IS a submission — "what is this?" is often the photo alone.
@@ -3072,7 +3079,7 @@ async function sendMessage(concat = true) {
   const sent = attachments;
   attachments = [];
   renderAttachments();
-  const ok = await submit(content, concat);
+  const ok = await submit(content, concat, mode);
   if (ok) {
     for (const a of sent) URL.revokeObjectURL(a.url);
   } else if (sent.length) {
@@ -3090,7 +3097,7 @@ async function sendMessage(concat = true) {
 // concat defaults false: robo/programmatic submits (plugin install/remove banners, etc.) must each be
 // their own ordered turn — one's tools/state are a precondition for the next ("add plugin X" then "use
 // X", X only visible to a later turn). The human path passes its choice explicitly via sendMessage.
-async function submit(content, concat = false) {
+async function submit(content, concat = false, mode = currentSteerMode()) {
   const provider = providerSel.value;
   // An array submission is empty when it has no blocks — `!content` only catches the string case.
   if (!provider || !content || (Array.isArray(content) && content.length === 0)) return;
@@ -3101,18 +3108,18 @@ async function submit(content, concat = false) {
   // Ensure the persistent event stream is bound to this session before we enqueue, so the turn's
   // events have a consumer (covers the just-created session and the "New session" button path).
   if (streamSessionId !== currentSessionId) connectSessionStream(currentSessionId);
-  return postSubmit(currentSessionId, content, concat);
+  return postSubmit(currentSessionId, content, concat, mode);
 }
 
 // POST a submission and return. The user bubble + response arrive on the stream as a 'queued' event
 // then turn events. Only *failures* are surfaced here (the stream can't, since no turn was created):
 // a timeout (incl. the socket-exhaustion stall that never errors on its own), network error, or
 // non-2xx is shown inline so the message is never silently lost.
-async function postSubmit(sid, content, concat = false) {
+async function postSubmit(sid, content, concat = false, mode = currentSteerMode()) {
   const provider = providerSel.value;
   if (!provider) return false;
   try {
-    await T.submit(sid, { content, provider, concatQueue: concat, mode: currentSteerMode() });
+    await T.submit(sid, { content, provider, concatQueue: concat, mode });
     return true;
   } catch (e) {
     showSubmitError(content, e.name === 'TimeoutError' ? 'submit timed out (no response)' : (e.message || String(e)));
@@ -3245,6 +3252,9 @@ async function renderTurn(sid, traceId) {
           break;
         }
 
+        // A parallel submission (answered beside the running turn rather than interrupting it) draws its
+        // bubble exactly as a steer does, and runs at once.
+        case 'parallel':
         case 'steer': {
           // A mid-turn steer that interrupted a running turn. Its user bubble arrives here, live only:
           // on reload / late-connect the message is in committed history (renderSession draws it) and
@@ -3574,7 +3584,7 @@ async function renderTurn(sid, traceId) {
             // (mid-turn interrupt) the interrupted turn's work is deliberately kept — the steer bubble
             // and its continuation render after it. Re-rendering from ev.session here would wipe the
             // live steer bubble, which isn't persisted until its own turn runs (persist-at-turn-start).
-          } else {
+          } else if (!parallelTraces.has(traceId)) {
             if (turnWrap) turnWrap.remove();
             if (ev.session) renderSession(ev.session);
           }
@@ -3595,7 +3605,8 @@ async function renderTurn(sid, traceId) {
             const det = thinkingContent.closest('details');
             if (det) det.open = false;
           }
-          if (ev.session?.title && chatHeaderEl) chatTitleEl.textContent = ev.session.title;
+          // Not from a parallel turn's copy, which titles itself from its own message when the session has none.
+          if (ev.session?.title && chatHeaderEl && !parallelTraces.has(traceId)) chatTitleEl.textContent = ev.session.title;
           // Per-provider token accounting for this turn, from the persisted session — so it includes
           // spend by tools that ran their own completions (single_turn, ask_inner_voice, dream_time).
           const perProvider = usageByProvider(ev.session?.messages, traceId);
@@ -3669,8 +3680,10 @@ document.getElementById('sessions-enable-btn').onclick = () => {
 inputEl.addEventListener('keydown', e => {
   if (e.key !== 'Enter') return;
   // Ctrl/Cmd+Enter → queued (own turn, run in order). Shift+Enter → concat (fold into the running
-  // batch). Plain Enter keeps the textarea's newline behaviour.
-  if (e.ctrlKey || e.metaKey) { e.preventDefault(); sendMessage(false); }
+  // batch). Alt+Enter → parallel (answered now, beside a running turn; an ordinary turn otherwise).
+  // Plain Enter keeps the textarea's newline behaviour.
+  if (e.altKey)               { e.preventDefault(); sendMessage(false, 'parallel'); }
+  else if (e.ctrlKey || e.metaKey) { e.preventDefault(); sendMessage(false); }
   else if (e.shiftKey)        { e.preventDefault(); sendMessage(true); }
 });
 
@@ -3709,7 +3722,7 @@ if (inputAreaEl) {
 
 // The cog reveals #input-meta — the provider select and the steering toggle — as a panel above the
 // composer on narrow screens. It is the SAME element the desktop meta row shows inline, restyled by the
-// breakpoint, so there is one #provider-select and one #mode-interrupt however the composer is laid out
+// breakpoint, so there is one #provider-select and one steer-mode group however the composer is laid out
 // and nothing here has to know which layout is in force.
 const composerCog = document.getElementById('composer-cog');
 if (composerCog && inputAreaEl) {

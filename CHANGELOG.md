@@ -17,8 +17,19 @@ churn and less likely to affect a consumer who doesn't use them.
   fields. Nothing read either: `branchPointMessageId` was never written, and `parentSessionId` duplicated
   the `forked-from` / `continued-in` marker a fork or split already appends, which is what the web UI
   draws. Old persisted data keeps them harmlessly as excess properties.
+- **`SessionRunner.status()` returns `parallel`** — the number of parallel turns in flight beside the
+  running one, which `busy` now also counts. A custom `SessionRunner` must report it.
 
 ### API gaps filled
+
+- **`mode: 'parallel'` submissions** — a message sent while a turn runs can be answered at once instead of
+  queued or interrupting. It runs on a private copy of the session's completed turns, framed with the
+  running request, and only the message and its final reply come back, as a user/assistant pair. Its tool
+  calls stay in the copy. If the turn it ran beside is still going, the pair is placed ahead of that
+  turn's own messages at its next round boundary, which is exactly the history the reply was generated
+  against; otherwise it is appended. Announced with a `parallel` event, with progress streamed under its
+  own traceId, and a `merged` event once written. `SteeringDecision` gains `'parallel'`, so a
+  `SteeringPolicy` can choose it under `auto`. With nothing running it is an ordinary turn.
 
 - **`CreateSessionOpts.status`** — a session can be created `archived` (hidden from the default session
   list) or `pinned`, instead of being created active and changed by a second write that every client
@@ -51,6 +62,9 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Optional
 
+- **`frontend-web`** — the steering toggle is now a three-way `queue | interrupt | parallel` switch, and
+  Alt+Enter sends a single message in parallel whichever is selected. A parallel turn is drawn with its own
+  live progress.
 - **`caching-tool-types`** — a failed settings read logs a warning and rebuilds the type index,
   rather than failing tool validation. The rebuilt index remains available in memory.
 - **`edit-session`** — `fork` and `split` no longer write `parentSessionId` on the new session; the

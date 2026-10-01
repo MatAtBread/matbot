@@ -136,6 +136,13 @@ export interface RunSessionOpts {
    * re-run of the originating user turn. Empty/absent for an ordinary turn.
    */
   injectedEphemeral?: MessageContent[];
+  /**
+   * Consulted at the top of every round — the one point in a turn where the history is protocol-whole:
+   * every `tool_use` so far is answered, and no provider call is in flight. Returns the session with
+   * messages from outside the turn placed into it (the pump's parallel replies), and the traceIds to
+   * announce as `merged`; `undefined` ⇒ nothing arrived. Where they go is the caller's decision.
+   */
+  interject?:     (session: Session) => { session: Session; merged: string[] } | undefined;
   loadPlugin:     (specifier: string, prompt?: PromptFn, refresh?: boolean) => Promise<MatbotPlugin>;
   unloadPlugin:   (specifier: string) => Promise<boolean>;
 }
@@ -298,6 +305,12 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
       return;
     }
     round += 1;
+
+    const interjected = opts.interject?.(session);
+    if (interjected !== undefined) {
+      session = interjected.session;
+      for (const from of interjected.merged) yield { type: 'merged', traceId: from, into: traceId };
+    }
 
     // A raced screen verdict that already fired (settled during setup, or while a previous tool round
     // ran): fold its correction in before generating, so this call is informed directly rather than

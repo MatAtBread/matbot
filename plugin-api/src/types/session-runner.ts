@@ -74,8 +74,9 @@ export interface SubmitOpenOpts extends OpenOpts {
   concatQueue?: boolean;
   /** Disposition for a submission arriving while a turn is running (see {@link SteeringPolicy}):
    *  'queue' waits for the turn boundary (default), 'interrupt' stops the running turn — keeping its
-   *  committed partial work — and runs this next, 'auto' defers to the registered SteeringPolicy (else
-   *  the host default). Meaningless when nothing is running (degrades to a plain enqueue). */
+   *  committed partial work — and runs this next, 'parallel' answers it now beside the running turn
+   *  (see the `parallel` event), 'auto' defers to the registered SteeringPolicy (else the host
+   *  default). Meaningless when nothing is running (degrades to a plain enqueue). */
   mode?:        SteeringMode;
   /** Interactive prompt implementation for this submission's turn. The frontend owns delivery —
    *  it must target the frontend's per-session client connections, not a single request. */
@@ -90,15 +91,16 @@ export interface SubmitOpenOpts extends OpenOpts {
  */
 export interface SessionRunner {
   open(opts: OpenOpts | SubmitOpenOpts): Promise<SessionView>;
-  /** Abort the running turn (if any) and drop all queued submissions, emitting `cancelled` for each. */
+  /** Abort the running turn (if any), any `parallel` turns beside it, and drop all queued submissions,
+   *  emitting `cancelled` for each. */
   abort(sessionId: string): void;
   /** Abandon the running turn (if any) WITHOUT touching the queue — `pump` advances to the next
    *  queued submission, or idles. The "give up on this turn" path (a prompt cancel); contrast
    *  `abort`, which also clears the queue. A no-op if nothing is running. */
   cancelTurn(sessionId: string): void;
-  /** Snapshot of a session's live state: whether a turn is running and how many submissions wait
-   *  behind it. `busy` is `running || queued > 0`. */
-  status(sessionId: string): { busy: boolean; running: boolean; queued: number };
+  /** Snapshot of a session's live state: whether a turn is running, how many submissions wait behind
+   *  it, and how many `parallel` turns are in flight beside it. `busy` is any of the three. */
+  status(sessionId: string): { busy: boolean; running: boolean; queued: number; parallel: number };
 }
 
 /** A runner and the store it alone reads and writes — see {@link MatbotRuntime.ephemeral}. */
