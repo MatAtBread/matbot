@@ -326,13 +326,15 @@ function makeSessionActionTool(store: Store<Session>, env: SessionToolEnv): Tool
           case 'append': {
             const { sessionId, text } = args as Extract<SessionInput, { action: 'append' }>;
             if (typeof text !== 'string' || text.trim() === '') { yield { type: 'error', message: 'action "append" requires "text".' }; return; }
-            const appender = env.appender?.();
+            const appender = ctx.appender ?? env.appender?.();
             if (appender === undefined) { yield { type: 'error', message: 'Nothing here can append to a session.' }; return; }
-            // A background job's own session is a throwaway one nobody will read, so there the default is the
-            // conversation the job reports to — which its appender knows — or none at all.
-            const target = sessionId ?? appender.defaultSessionId ?? (isSubAgent() ? undefined : ctx.session.id);
+            // A background job's own session — in its own process, or an ephemeral run's here — is a throwaway
+            // one nobody will read, so there the default is the conversation the run reports to, which its
+            // appender knows, or none at all.
+            const throwaway = isSubAgent() || ctx.appender !== undefined;
+            const target = sessionId ?? appender.defaultSessionId ?? (throwaway ? undefined : ctx.session.id);
             if (target === undefined) {
-              yield { type: 'error', message: 'This background job reports to no conversation, so name the session to append to ("sessionId").' };
+              yield { type: 'error', message: 'This run reports to no conversation, so name the session to append to ("sessionId").' };
               return;
             }
             try {

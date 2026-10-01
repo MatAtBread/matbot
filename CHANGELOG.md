@@ -90,6 +90,8 @@ churn and less likely to affect a consumer who doesn't use them.
   place. A `pinned` chat session is no longer mistaken for an archived one. New `telegram_session` finds a
   chat's session id by the name or @username of the person in it. Machine-authored turn content (a
   trigger's injected context, a followup's prompt) is no longer sent to the chat.
+- **`sessions`** — `session_action append` uses the turn's own appender when its runner supplies one, and
+  then never defaults to the turn's own (throwaway) session.
 
 ## 0.4.17
 
