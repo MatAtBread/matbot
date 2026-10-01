@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createSessionRunner, createSession, installPrincipalCarrier, installUsageCarrier, HookRegistry } from '@matatbread/matbot-core';
 import type {
   Session, Store, Tool, ToolRegistry, ProviderAdapter, ProviderConfig, CompletionEvent,
-  Message, PipelineEvent, Principal, MessageContent,
+  Message, PipelineEvent, Principal, MessageContent, MediaStore,
 } from '@matatbread/matbot-core';
 import { createAlsPrincipalCarrier } from '../src/principal-als.js';
 import { createAlsUsageCarrier } from '../src/usage-als.js';
@@ -93,7 +93,7 @@ function fakeProvider(seen: { main: Message[][]; parallel: Message[][] }, parall
   };
 }
 
-function setup(parallelGate: Promise<void>, hooks?: HookRegistry, resolving?: Promise<void>) {
+function setup(parallelGate: Promise<void>, hooks?: HookRegistry, resolving?: Promise<void>, mediaStore?: () => MediaStore | undefined) {
   const session = createSession();
   const store   = memStore(session);
   const seen    = { main: [] as Message[][], parallel: [] as Message[][] };
@@ -105,6 +105,7 @@ function setup(parallelGate: Promise<void>, hooks?: HookRegistry, resolving?: Pr
     resolveProvider: async () => { await resolving; return { adapter: fakeProvider(seen, parallelGate), config }; },
     tools: toolRegistry(slowTool(started.open, release.wait)),
     ...(hooks !== undefined ? { hooks } : {}),
+    ...(mediaStore !== undefined ? { mediaStore } : {}),
     loadPlugin: async () => { throw new Error('loadPlugin unused'); },
     unloadPlugin: async () => false,
   });
@@ -288,4 +289,55 @@ test('a parallel message arriving during followup sees the finished turn, unfram
   assert.ok(parCall.some(m => m.role === 'assistant' && textOf(m) === 'main done'), 'the copy includes the finished answer');
   const final = (await store.get(sid))!;
   assert.deepEqual(final.messages.map(m => textOf(m) || m.role), ['do it', 'assistant', 'tool', 'main done', 'Q', 'A']);
+});
+
+// A turn's controller was only created after its preamble (the store read, the persist, the provider
+// resolving), so a stop sent in that window found nothing to abort and the turn ran anyway.
+test('a cancel sent while a turn resolves its provider stops that turn', { timeout: 10000 }, async () => {
+  const resolving = gate();
+  const { sid, store, seen, release, runner } = setup(Promise.resolve(), undefined, resolving.wait);
+  release.open();
+
+  const main = await runner.open({ sessionId: sid, signal: new AbortController().signal, content: submit('do it'), provider: 'fake', principal });
+  const events: PipelineEvent[] = [];
+  const collector = watch(main, events);
+  while (!(await store.get(sid))!.messages.some(m => textOf(m) === 'do it')) await new Promise(r => setImmediate(r));
+  runner.cancelTurn(sid);
+  resolving.open();
+  await collector;
+
+  const ended = events.find(e => e.type === 'aborted' && e.traceId === main.traceId);
+  assert.ok(ended && ended.type === 'aborted' && ended.reason === 'user-cancel', 'aborted, by the cancel');
+  assert.equal(seen.main.length, 0, 'the provider was never called');
+});
+
+// runParallel wired the stop to its nested runner and then submitted to it; a stop landing in between —
+// here, while the nested submission is at its media boundary — reached a runner with nothing queued yet.
+test('a stop that lands while a parallel turn is being submitted stops it', { timeout: 10000 }, async () => {
+  let fired = false;
+  let runner!: ReturnType<typeof setup>['runner'];
+  let sid!: string;
+  const mediaStore = (): MediaStore | undefined => {
+    // Read synchronously at each submission's media boundary. The first read with a parallel turn
+    // already registered is its nested submission's.
+    if (!fired && runner.status(sid).parallel > 0) { fired = true; runner.abort(sid); }
+    return undefined;
+  };
+  const t = setup(Promise.resolve(), undefined, undefined, mediaStore);
+  ({ runner, sid } = t);
+  const { store, seen, started, release } = t;
+
+  const main = await runner.open({ sessionId: sid, signal: new AbortController().signal, content: submit('do it'), provider: 'fake', principal });
+  const events: PipelineEvent[] = [];
+  const collector = watch(main, events);
+  await started.wait;
+  await runner.open({ sessionId: sid, signal: new AbortController().signal, content: submit('Q'), provider: 'fake', principal, mode: 'parallel' });
+  while (runner.status(sid).parallel > 0) await new Promise(r => setImmediate(r));
+  release.open();
+  await collector;
+
+  assert.ok(fired, 'the stop landed during the nested submission');
+  assert.equal(seen.parallel.length, 0, 'the parallel turn never called its provider');
+  const reply = (await store.get(sid))!.messages.find(m => m.role === 'assistant' && textOf(m).startsWith('(No reply'));
+  assert.ok(reply && textOf(reply).includes('was stopped'), 'its reply says it was stopped');
 });

@@ -393,6 +393,13 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
           }
           const content = batch.flatMap(i => i.content);
           s.runningTraceId = head.traceId;
+          // In the same synchronous step that takes the item off the queue, so there is no moment at which a
+          // stop finds it in neither place: `abort`/`cancelTurn` reach a queued item through the queue and a
+          // dequeued one only through this. Created after the preamble below (a store read, the persist,
+          // the provider resolving), a stop sent during it found nothing and the turn ran anyway. A turn
+          // whose signal is already aborted ends `aborted` at its first round.
+          const ac = new AbortController();
+          s.ac = ac;
           s.replay = [];
           // Seed replay with the running turn's user message as a single merged `queued`, mirroring the
           // message persisted just below. notify() (in open()) reaches only subscribers that are live at
@@ -408,6 +415,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
 
           let session = await deps.store.get(id);
           if (session === null) {
+            s.ac = undefined;
             emit(s, { type: 'error', error: `Session "${id}" not found`, traceId: head.traceId });
             continue;
           }
@@ -451,7 +459,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
               // it as a turn error and drop this submission rather than let it escape the detached pump and
               // crash the process. Any other write failure stays fatal.
               if (!isReadOnlyError(e)) throw e;
-              s.turnHead = undefined;
+              s.ac = s.turnHead = undefined;
               emit(s, { type: 'error', error: e.message, traceId: head.traceId });
               continue;
             }
@@ -459,7 +467,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
 
           const resolved = await deps.resolveProvider(head.provider);
           if (resolved === null) {
-            s.turnHead = undefined;
+            s.ac = s.turnHead = undefined;
             emit(s, { type: 'error', error: `Unknown provider "${head.provider}"`, traceId: head.traceId });
             continue;
           }
@@ -468,8 +476,6 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
           // two never coincide on one item, so either supplies runSession's injectedEphemeral.
           const inject = head.redo?.ephemeral ?? head.injectEphemeral;
 
-          const ac = new AbortController();
-          s.ac = ac;
           // Fold each tool's wire contract — the `params`/`result` text flattened from its single contract
           // (a source tool's ToolContracts arms, or a source-less tool's `toolContract`) — into its description
           // for this turn, so the model reasons about the real TS shapes, not just the loose inputSchema.
@@ -670,6 +676,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
       } finally {
         s.runningTraceId = undefined;
         s.turnHead = undefined;
+        s.ac = undefined;
         s.replay  = [];
         try {
           // Accounting is flushed HERE — at the drained queue, not at a turn boundary. "The end of a turn"
@@ -748,6 +755,9 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
         content: [...asSubmitted(p.content), ...(running ? [parallelFraming(running)] : [])],
         ...(p.prompt !== undefined ? { prompt: p.prompt } : {}),
       });
+      // Again, now that there is something to stop: a stop landing while the submission was on its way in
+      // (its media boundary is an await) reached a runner with nothing queued, and the listener has fired.
+      if (rec.stop.signal.aborted) sub.abort(id);
       for await (const ev of tap) {
         if (ev.type === 'idle') break;
         // Announced as `parallel` already, with the content as submitted rather than the framed copy.
@@ -764,8 +774,9 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
       // every later turn), and its thinking was signed against a history that included those tool rounds.
       const last   = hIdx >= 0 ? msgs.slice(hIdx + 1).findLast(m => m.role === 'assistant') : undefined;
       const answer = (last?.content ?? []).filter(c => c.type === 'text');
-      const ended  = rec.replay.findLast(e => e.type === 'done' || e.type === 'aborted' || e.type === 'error');
+      const ended  = rec.replay.findLast(e => e.type === 'done' || e.type === 'aborted' || e.type === 'error' || e.type === 'cancelled');
       const reason = ended?.type === 'aborted' ? `was stopped (${ended.reason})`
+                   : ended?.type === 'cancelled' ? 'was stopped before it started'
                    : ended?.type === 'error'   ? `failed: ${ended.error}`
                    : 'produced no text';
       reply = {
