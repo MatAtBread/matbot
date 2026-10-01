@@ -92,6 +92,9 @@ churn and less likely to affect a consumer who doesn't use them.
   trigger's injected context, a followup's prompt) is no longer sent to the chat.
 - **`sessions`** — `session_action append` uses the turn's own appender when its runner supplies one, and
   then never defaults to the turn's own (throwaway) session.
+- **`skills_compiler`** — a compile's demonstration runs on an ephemeral run instead of a scratch session in
+  the user's store, so it is no longer listed while it runs or left behind if the process dies mid-compile.
+  Two log lines report where it ran and confirm it never reached the persisted store.
 
 ## 0.4.17
 
