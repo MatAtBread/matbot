@@ -70,7 +70,13 @@ export class HookRegistry implements HookRegistrar {
       // An aborted turn (a steer, a cancel) rejects whatever was awaiting its signal with the abort REASON —
       // often a bare token like 'steer', not an Error — which logged as a failure whose whole message was
       // "steer". The hook was cut off, not broken, so it is said as such and leaves no failure marker.
-      if (signal.aborted) {
+      //
+      // Which is asked of the THROWN value, not of the signal alone. `aborted` stays true for the rest of
+      // the turn, so testing it alone reported every later throw as a cut-off — masking a genuine hook bug,
+      // marker and stack included, from the first steer onwards. Interrupt is the default disposition for a
+      // mid-turn message, so that window is the common case, not a corner of one. A cut-off throw is either
+      // the reason itself (what a signal rejects with) or the standard AbortError.
+      if (signal.aborted && (err === signal.reason || (err as { name?: unknown } | null)?.name === 'AbortError')) {
         console.warn(`[matbot] ${hook.on} hook${owner} was cut off: its turn was aborted (reason: ${describeThrown(signal.reason)}).`);
         return undefined;
       }

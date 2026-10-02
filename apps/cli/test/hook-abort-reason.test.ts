@@ -48,6 +48,44 @@ test('a hook cut off by its turn\'s abort is reported as cut off, with no failur
   assert.deepEqual(await markers(hooks), [], 'and nothing durable is left in the session for it');
 });
 
+// `aborted` stays true for the rest of the turn, so "the signal is aborted" is not the same question as
+// "this throw was the abort". Asking the first masked every genuine hook failure from the first steer
+// onwards — and interrupt is the default disposition for a mid-turn message, so that is the common case.
+test('a hook that throws its own fault DURING an aborted turn is still reported and marked', async () => {
+  const hooks = new HookRegistry();
+  const bug = new TypeError('cannot read properties of undefined');
+  hooks.register({ on: 'followup', pluginName: 'p', handler: () => { throw bug; } });
+
+  const ac = new AbortController();
+  ac.abort('steer');
+  const log = await captured(() => hooks.runFollowup({
+    session: createSession(), config: { provider: 'fake', traceId: 't1' }, signal: ac.signal,
+  } as never));
+
+  assert.equal(log.warn.length, 0, 'not excused as a cut-off just because the turn was aborted');
+  assert.equal(log.error[0]?.[1], bug, 'the Error itself, so the stack survives');
+  assert.deepEqual(await markers(hooks), [{ channel: 'followup', pluginName: 'p', message: bug.message }]);
+});
+
+// The other shape a cut-off arrives in: a helper that rejects with a DOMException rather than the reason.
+test('a hook cut off with an AbortError is a cut-off too, not a failure', async () => {
+  const hooks = new HookRegistry();
+  hooks.register({ on: 'contribute', pluginName: 'p', handler: ({ signal }) => new Promise((_, reject) => {
+    signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
+  }) });
+
+  const ac = new AbortController();
+  const log = await captured(async () => {
+    const run = hooks.runContribute(ctx(ac.signal));
+    ac.abort('user-cancel');
+    await run;
+  });
+
+  assert.equal(log.error.length, 0);
+  assert.match(String(log.warn[0]?.[0]), /was cut off/);
+  assert.deepEqual(await markers(hooks), []);
+});
+
 test('a hook that genuinely throws is logged with the Error, so the stack survives, and marked', async () => {
   const hooks = new HookRegistry();
   const boom = new Error('boom');
