@@ -396,6 +396,9 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
           // ahead of the kept user message, which is where the copy it ran on ended.
           if (s.queue[0]?.redo === undefined) await drainMerges(id, s);
           if (s.queue.length === 0) {
+            // A reply that settled during that write. Its turn's wake-up found nobody waiting, so nothing
+            // else will come round to write it; leaving now would idle with it unwritten, and busy.
+            if (s.merges.length > 0) continue;
             if (s.parallel.size === 0) break;
             // A parallel turn is still out, and this hold covers it. Woken by its settling (its reply is
             // then placed at the top of the loop) or by a new submission. No turn is running meanwhile,
@@ -714,8 +717,9 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
         } finally {
           s.running = false;
           // A submission that arrived during the flush found the pump running and did not start one; nor did
-          // a parallel reply that settled then.
-          if (s.queue.length > 0) void pump(id, s);
+          // a parallel reply that settled then — possible only when a throw left the loop above with parallel
+          // turns still out, since it otherwise ends only once none are.
+          if (s.queue.length > 0 || s.merges.length > 0) void pump(id, s);
           else {
             // Deterministic busy→idle signal: running is now false, so any subscriber draining the stream
             // (a frontend's status tracker) reads an authoritative idle the moment it sees this — no racing

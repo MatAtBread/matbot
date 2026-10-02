@@ -18,11 +18,14 @@ installUsageCarrier(createAlsUsageCarrier());
 
 const principal: Principal = { id: 'tester', type: 'user' };
 
-function memStore(seed: Session): Store<Session> {
+// Holds the next store read or write until released, so a test can act while the pump is suspended there.
+interface StoreHold { get?: () => Promise<void> | undefined; set?: () => Promise<void> | undefined }
+
+function memStore(seed: Session, hold?: StoreHold): Store<Session> {
   const m = new Map<string, Session>([[seed.id, seed]]);
   return {
-    get: async id => m.get(id) ?? null,
-    set: async (id, v) => { m.set(id, v); },
+    get: async id => { await hold?.get?.(); return m.get(id) ?? null; },
+    set: async (id, v) => { await hold?.set?.(); m.set(id, v); },
     cas: async () => { throw new Error('cas unused'); },
     delete: async () => { throw new Error('delete unused'); },
     query: async () => { throw new Error('query unused'); },
@@ -69,18 +72,22 @@ const textOf = (m: Pick<Message, 'content'>): string =>
 
 // One adapter serves both runners. The parallel turn is recognised by its framing (the running request,
 // folded onto its message in the copy); the main turn calls `slow` once, then answers.
-function fakeProvider(seen: { main: Message[][]; parallel: Message[][] }, parallelGate: Promise<void>): ProviderAdapter {
+// A parallel turn's gate: one for all of them, or one per submission (chosen by its text).
+type ParallelGate = Promise<void> | ((text: string) => Promise<void>);
+
+function fakeProvider(seen: { main: Message[][]; parallel: Message[][] }, parallelGate: ParallelGate): ProviderAdapter {
   return {
     name: 'fake',
     async health() { return { ok: true } as never; },
     complete(messages): AsyncIterable<CompletionEvent> {
       // The parallel submission is always 'Q…' — framed or not, so a test can see when framing is missing.
-      const isParallel = textOf(messages.findLast(m => m.role === 'user') ?? { content: [] }).startsWith('Q');
+      const lastUser = textOf(messages.findLast(m => m.role === 'user') ?? { content: [] });
+      const isParallel = lastUser.startsWith('Q');
       (isParallel ? seen.parallel : seen.main).push(messages);
       const afterTool = messages[messages.length - 1]?.role === 'tool';
       return (async function* () {
         if (isParallel) {
-          await parallelGate;
+          await (typeof parallelGate === 'function' ? parallelGate(lastUser) : parallelGate);
           yield { type: 'text-delta', delta: 'A' };
         } else if (afterTool) {
           yield { type: 'text-delta', delta: 'main done' };
@@ -93,9 +100,9 @@ function fakeProvider(seen: { main: Message[][]; parallel: Message[][] }, parall
   };
 }
 
-function setup(parallelGate: Promise<void>, hooks?: HookRegistry, resolving?: Promise<void>, mediaStore?: () => MediaStore | undefined) {
+function setup(parallelGate: ParallelGate, hooks?: HookRegistry, resolving?: Promise<void>, mediaStore?: () => MediaStore | undefined, hold?: StoreHold) {
   const session = createSession();
-  const store   = memStore(session);
+  const store   = memStore(session, hold);
   const seen    = { main: [] as Message[][], parallel: [] as Message[][] };
   const started = gate();
   const release = gate();
@@ -400,4 +407,60 @@ test('staged work waits for a parallel turn that outlives the running one', { ti
   await collector;
   await quiesced();
   assert.equal(landed, true, 'landed once the parallel turn had settled');
+});
+
+// Arm it and the next call waits until released; `reached` settles once that call is waiting.
+function oneShot(): { arm: () => void; reached: Promise<void>; release: () => void; hold: () => Promise<void> | undefined } {
+  let armed = false;
+  const reached = gate();
+  const release = gate();
+  return {
+    arm: () => { armed = true; },
+    reached: reached.wait,
+    release: release.open,
+    hold: () => {
+      if (!armed) return undefined;
+      armed = false;
+      reached.open();
+      return release.wait;
+    },
+  };
+}
+
+// Two parallel turns outlive the running one. The first to settle wakes the waiting pump, which writes its
+// reply; the second settled during that write, found no pump waiting to wake, and the pump — seeing nothing
+// in flight once the write returned — went idle with the second reply unwritten and the session still
+// reporting busy.
+test('a parallel reply that settles while another is being written is written too', { timeout: 10000 }, async () => {
+  const g1 = gate();
+  const g2 = gate();
+  const write = oneShot();
+  const { sid, store, started, release, runner } = setup(text => (text.startsWith('Q1') ? g1.wait : g2.wait), undefined, undefined, undefined, { set: write.hold });
+
+  const main = await runner.open({ sessionId: sid, signal: new AbortController().signal, content: submit('do it'), provider: 'fake', principal });
+  const events: PipelineEvent[] = [];
+  const mainDone = gate();
+  const collector = watch(main, events, ev => { if (ev.type === 'done' && ev.traceId === main.traceId) mainDone.open(); });
+  await started.wait;
+  const p1 = await runner.open({ sessionId: sid, signal: new AbortController().signal, content: submit('Q1'), provider: 'fake', principal, mode: 'parallel' });
+  const p2 = await runner.open({ sessionId: sid, signal: new AbortController().signal, content: submit('Q2'), provider: 'fake', principal, mode: 'parallel' });
+  release.open();
+  await mainDone.wait;    // committed: the next write is the first parallel reply's
+
+  write.arm();
+  g1.open();
+  await write.reached;    // the pump is writing Q1's reply
+  g2.open();
+  while (runner.status(sid).parallel > 0) await new Promise(r => setImmediate(r));
+  write.release();
+  await collector;
+
+  const final = (await store.get(sid))!;
+  assert.deepEqual(final.messages.map(m => textOf(m) || m.role), ['do it', 'assistant', 'tool', 'main done', 'Q1', 'A', 'Q2', 'A']);
+  const idleAt = events.findIndex(e => e.type === 'idle');
+  for (const p of [p1, p2]) {
+    const merged = events.findIndex(e => e.type === 'merged' && e.traceId === p.traceId);
+    assert.ok(merged >= 0 && merged < idleAt, `${p.traceId} announced as merged before idle`);
+  }
+  assert.equal(runner.status(sid).busy, false, 'idle means idle');
 });
