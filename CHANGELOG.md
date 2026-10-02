@@ -82,7 +82,18 @@ churn and less likely to affect a consumer who doesn't use them.
 - **Hooks** — a hook cut off by its turn's abort (a steer, a cancel) is logged as cut off, naming the abort
   reason, and leaves no failure marker. It was logged as a failure whose whole message was the abort
   reason — `threw; skipping it for this turn: steer` — and marked durably as one. A hook that genuinely
-  throws is logged with its stack; a non-`Error` throw says that is what it was.
+  throws is logged with its stack; a non-`Error` throw says that is what it was. "Cut off" is decided by
+  the thrown value — the abort reason itself, or an `AbortError` — not by the signal alone, which stays
+  aborted for the rest of the turn and so excused every later throw: a hook's own fault went unmarked and
+  unlogged from the first steer onwards, which, interrupt being the default disposition for a mid-turn
+  message, is the common case rather than a corner of one.
+- **`runEphemeralTurn`** — waits for the run to go idle rather than returning at its turn's terminal, and
+  returns the transcript read back from the run's store. `followup` is post-commit, so a hook that
+  resubmits or retracts enqueues a further turn AFTER that terminal; it was left running with nobody
+  watching — calling tools and appending through the run's appender past the transcript the caller was
+  handed, and past a cancel that no longer reached it. Aborting at the terminal does not close it either,
+  the queue being drained before the hook enqueues. So a background job's reply tail and appended count
+  now include that work, and a cancel reaches it.
 
 ### Optional
 
@@ -126,6 +137,14 @@ churn and less likely to affect a consumer who doesn't use them.
   plugin's schedules are listed as `legacy` (never run) and can be cancelled, so moving one is "create
   here, cancel there". A recurring job keeps the tail of what it last printed as `lastReply`, for seeing
   why a job that should have reported did not.
+- **`background-jobs`** — every write of a job row is a compare-and-swap, so the writers no longer erase
+  each other: a suspend landing while a job ran was undone by the stamp that followed it, and a cancelled
+  row was recreated by that stamp and armed again on the next boot. A cancelled job now stops its loop,
+  and a suspend or resume contended by a finishing run reports that rather than appearing to succeed.
+- **`background-jobs`** — a one-shot is deleted because it RAN, not because it was reached. A run that
+  could not start at all (no provider to run as, a failed spawn) or was cut short by teardown left no row,
+  losing the request unrun and unreported for a usually-transient condition; it now stays and is tried
+  again on the next boot.
 - **`background-jobs-node`** (new: `@matatbread/matbot-background-jobs-node`) — `background-jobs` with each job
   in its own process, which can be killed and shares no heap with the server, at the cost of a full boot
   per run. A job reaches its parent over an IPC channel, which also carries what it changes back to the

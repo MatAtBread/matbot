@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  createSessionRunner, createSession, installPrincipalCarrier, installUsageCarrier, runEphemeralTurn,
+  createSessionRunner, createSession, installPrincipalCarrier, installUsageCarrier, runEphemeralTurn, HookRegistry,
 } from '@matatbread/matbot-core';
 import type {
   Session, Store, ToolRegistry, ProviderAdapter, ProviderConfig, CompletionEvent, PipelineEvent, Principal,
@@ -198,4 +198,59 @@ test('runEphemeralTurn recovers the transcript when the turn ends in an error', 
   for (; !next.done; next = await turn.next()) types.push(next.value.type);
   assert.equal(types.at(-1), 'error');
   assert.equal(next.value?.messages[0]?.role, 'user', 'read back from the run\'s store');
+});
+
+// `followup` is post-commit, so a hook that resubmits enqueues a FURTHER turn on this runner after the
+// terminal. Stopping at the terminal left that turn running with nobody watching — calling tools and
+// appending through the run's appender past the transcript its caller was handed, and past a cancel that
+// no longer reached it. Aborting at the terminal does not close it either: the queue is drained before the
+// hook enqueues. So the helper waits for the run to go idle, which makes that work the caller's.
+test('a followup resubmission is finished before the run returns, not left escaping it', { timeout: 10000 }, async () => {
+  const prompts: string[] = [];
+  const adapter: ProviderAdapter = {
+    name: 'fake',
+    async health() { return { ok: true } as never; },
+    complete(messages): AsyncIterable<CompletionEvent> {
+      const last = messages.filter(m => m.role === 'user').at(-1);
+      prompts.push((last?.content ?? []).flatMap(c => (c.type === 'text' ? [c.text] : [])).join('|'));
+      return (async function* () {
+        yield { type: 'text-delta', delta: 'answered' };
+        yield { type: 'done' };
+      })();
+    },
+  };
+  const tools = {
+    register: () => {}, unregister: () => {},
+    resolve: () => null, list: () => [], has: () => false,
+  } as unknown as ToolRegistry;
+
+  const hooks = new HookRegistry();
+  hooks.register({
+    on: 'followup', pluginName: 'p',
+    handler: ({ removeHook }) => {
+      removeHook();                           // once, or it chains to MAX_RESUBMIT_DEPTH
+      return { resubmit: { content: [{ type: 'text' as const, text: 'FOLLOWUP' }] } };
+    },
+  });
+
+  const store = new MemoryStore<Session>();
+  const run = createSessionRunner({
+    store, tools, hooks,
+    resolveProvider: async () => ({ adapter, config: { name: 'fake', module: 'fake', model: 'fake' } as ProviderConfig }),
+    loadPlugin: async () => { throw new Error('unused'); },
+    unloadPlugin: async () => false,
+  });
+
+  const turn = runEphemeralTurn({ sessions: store, run }, turnOpts(new AbortController().signal));
+  let next = await turn.next();
+  for (; !next.done; next = await turn.next()) { /* the first turn's events */ }
+
+  // Read before the pump is given any further chance to run.
+  const atReturn = [...prompts];
+  const transcript = next.value;
+  for (let i = 0; i < 40; i++) await new Promise(r => setImmediate(r));
+
+  assert.deepEqual(atReturn, ['go', 'FOLLOWUP'], 'the followup turn ran inside the run');
+  assert.deepEqual(prompts, atReturn, 'and nothing at all ran after the helper returned');
+  assert.ok((transcript?.messages.length ?? 0) > 2, 'the transcript returned includes the followup turn');
 });
