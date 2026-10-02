@@ -1,5 +1,5 @@
 import type { AppendMessage, AppendResult, Notifier, Session, SessionAppender, Store } from './types.js';
-import { tryCurrentPrincipal, SessionAppendKind } from '@matatbread/matbot-plugin-api';
+import { tryCurrentPrincipal, isReadOnlyError, SessionAppendKind } from '@matatbread/matbot-plugin-api';
 import { appendMessage, createMessage } from './session.js';
 import { casAtEdge } from './cas-at-edge.js';
 
@@ -42,7 +42,15 @@ export function createSessionAppender(deps: {
           console.error(`[matbot] append to session "${sessionId}" dropped: the session no longer exists.`);
           return true;
         }
-        if (!(await store.cas(sessionId, current.version, built.reduce(appendMessage, current))).ok) return false;
+        try {
+          if (!(await store.cas(sessionId, current.version, built.reduce(appendMessage, current))).ok) return false;
+        } catch (e) {
+          // Readable, so accepted; not writable — a session shared in read-only. The caller was told it was
+          // accepted, so the log must say what was lost, which the edge's generic "flush rejected" did not.
+          if (!isReadOnlyError(e)) throw e;
+          console.error(`[matbot] append to session "${sessionId}" dropped: ${e.message}`);
+          return true;
+        }
         deps.notifier().notify({
           kind: SessionAppendKind, source: 'append', sessionId, messageIds,
           ...(principal !== undefined ? { principal } : {}),

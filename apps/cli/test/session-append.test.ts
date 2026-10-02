@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  createSession, createSessionAppender, installPrincipalCarrier, machineBusy, quiesced, runAs, SessionAppendKind,
+  createSession, createSessionAppender, installPrincipalCarrier, machineBusy, quiesced, readOnlyError, runAs, SessionAppendKind,
 } from '@matatbread/matbot-core';
 import type { Notifier, Session, SessionAppender, Store, Tool, ToolContext } from '@matatbread/matbot-plugin-api';
 import { makeSessionTools } from '@matatbread/matbot-sessions';
@@ -72,6 +72,29 @@ test('an append is refused at once when it cannot land, and refused outright in 
   // A job's store is its parent's medium, and none of the parent's turns pass through it.
   const job = createSessionAppender({ sessions: () => store, notifier: () => notifier, isSubAgent: () => true });
   await assert.rejects(job.append('any', say('x')), /background job/);
+});
+
+// A session shared in read-only is readable, so the append is accepted; its write is refused at the edge.
+// That refusal escaped as the edge's generic "flush rejected", which never said an append had been lost.
+test('an append that cannot be written at the edge says it was dropped, and announces nothing', async () => {
+  const session = createSession();
+  const { store } = casStore(session);
+  store.cas = async () => { throw readOnlyError('sessions', session.id, 'bob'); };
+  const { notifier, seen } = recordingNotifier();
+  const appender = createSessionAppender({ sessions: () => store, notifier: () => notifier, isSubAgent: () => false });
+
+  const errors: string[] = [];
+  const error = console.error;
+  console.error = (...args: unknown[]) => { errors.push(args.map(String).join(' ')); };
+  try {
+    await runAs(principal, () => appender.append(session.id, say('x')));
+    await quiesced();
+  } finally {
+    console.error = error;
+  }
+  assert.deepEqual(seen, [], 'nothing landed, so nothing is announced');
+  assert.ok(errors.some(e => e.includes(`append to session "${session.id}" dropped`) && e.includes('read-only')),
+    `the log names the lost append and why: ${JSON.stringify(errors)}`);
 });
 
 async function run(tool: Tool, input: unknown, sessionId: string): Promise<Array<{ type: string; value?: unknown; message?: string }>> {
