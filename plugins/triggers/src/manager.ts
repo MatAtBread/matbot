@@ -2,7 +2,7 @@ import type { Store, MatbotMachine } from '@matatbread/matbot-plugin-api';
 import type { Trigger, TriggerSpec, TriggerSurface, TriggerKind, Triggers, FiredCondition } from './types.js';
 import { surfaceOfKind } from './types.js';
 
-const MAX_MSG_CHARS = 1500;
+const MAX_MSG_CHARS = 4000;
 
 // Back-compat default: installs that configured a provider literally named "skills-classifier" (the
 // former hard-coded classifier name) keep working with no migration. A `classifierProvider` setting
@@ -161,14 +161,47 @@ export class TriggerManager implements Triggers {
         'the user message and the assistant message, in chronological order and clearly labelled — ' +
         `followed by a list of conditions. Evaluate each condition against the "${subject.label}". The ` +
         `"${context.label}" is the message it is paired with; use it fully whenever a condition is ` +
-        'relational (refers to what was asked, answered, disputed, or repeated). Fire a condition when, ' +
-        `reading the "${subject.label}" in light of the "${context.label}", it holds. Return ONLY a JSON ` +
-        'object mapping each condition id (the bracketed value) to an object {"match": true|false, ' +
-        '"why": "<a terse fragment, at most ~8 words, citing the specific evidence — not a full sentence>"}. No other text.',
+        'relational (refers to what was asked, answered, disputed, or repeated).\n\n' +
+        // Deliberately short. An earlier version enumerated precedence rules for MATCH vs DO NOT MATCH
+        // clauses, written to adjudicate the long exclusion lists the stored conditions then carried.
+        // That machinery had no business surviving the exclusions: it was itself a patch, and it was
+        // what let a specific MATCH clause overrule a general exclusion and fire on a turn about the
+        // mechanism it was meant to ignore. Conditions state their own scope now, so the judge needs
+        // only the rubric and a bias to silence.
+        // The doctrine the trigger_action tool already states to whoever WRITES a condition — "a rule is
+        // a CONDITION on the FORM or SENTIMENT of a message, NOT its topic" — was missing here, where it
+        // is the judge rather than the author who needs it. Its absence is what let a condition naming a
+        // topic be satisfied by the topic's presence; a rule meant to describe the inside of a reply was
+        // being matched against the outside of it.
+        // Three bases, because the trigger set uses all three and one condition spans two: the Inner
+        // Voice reads FORM and SENTIMENT, while remember_fact, the date condition and 'chez nous' read
+        // CONTENT. A blanket "conditions never describe topic" was false of the latter — it happened to
+        // test clean, but it was only true of the half of the set written most recently. Naming the
+        // basis each condition declares is both accurate and the thing that CONTAINS semantic latitude:
+        // a form condition gets none, and only a content condition gets paraphrase.
+        'Every condition declares its own basis, and is judged on that basis alone:\n' +
+        '• FORM — the shape of the message: a challenge, a complaint, a doubt, an assertion, a ' +
+        'contradiction, a report. A form condition is never satisfied merely because the message is on ' +
+        'the right topic, however exactly the subject appears to line up.\n' +
+        '• SENTIMENT — the feeling or illocution it carries: frustration, disbelief, satisfaction, an ' +
+        'apology, a promise, an admission.\n' +
+        '• CONTENT — a fact, a name, a number, a date, or a stated phrase. A close paraphrase counts: a ' +
+        'condition about relative time is met by "an hour ago" or "last week", not only by the words it ' +
+        'happens to list. Latitude stops at paraphrase of what the condition actually names — it is not ' +
+        'licence to match anything merely related to it.\n' +
+        'Where a condition spans more than one basis, every requirement it states still applies.\n\n' +
+        'Match only on evidence actually present in the text above. A condition that stays silent costs ' +
+        'nothing; one that fires wrongly is disruptive and expensive.\n\n' +
+        `Judge only the "${subject.label}" — the other message is context for relational conditions, ` +
+        'never itself a subject to judge. Return ONLY a JSON object mapping each condition id (the ' +
+        'bracketed value) to an object {"match": true|false, "why": "<a terse fragment, at most ~15 words, ' +
+        'citing the specific evidence — not a full sentence>"}. No other text.',
       prompt:
-        `${context.label} (earlier):\n${context.text === '' ? '(none)' : clip(context.text)}\n\n` +
-        `${subject.label} (later — evaluate the conditions against THIS):\n${clip(subject.text)}\n\n` +
-        `Conditions:\n${candidates.map(c => `[${c.key}] ${c.rule}`).join('\n')}`,
+        `=== ${context.label.toUpperCase()} (earlier) ===\n${context.text === '' ? '(none)' : clip(context.text)}\n\n` +
+        `=== ${subject.label.toUpperCase()} (later — judge the conditions against THIS) ===\n${clip(subject.text)}\n\n` +
+        `=== CONDITIONS (${candidates.length}) ===\n` +
+        candidates.map(c => `--- [${c.key}] ---\n${c.rule}`).join('\n\n') +
+        `\n\n=== END CONDITIONS ===`,
     });
 
     let verdicts: Record<string, unknown> = {};
