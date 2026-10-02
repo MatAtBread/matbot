@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   createSessionRunner, createSession, installPrincipalCarrier, installUsageCarrier, machineBusy, quiesced, runAs,
+  casAtEdge, tryCurrentPrincipal,
 } from '@matatbread/matbot-core';
 import type {
   MatbotMachine, Message, Session, Store, Tool, ToolContext, ToolRegistry, ProviderAdapter, ProviderConfig,
@@ -237,4 +238,77 @@ test('a deferred edit whose message has gone is not applied somewhere else', { t
   }
   assert.deepEqual(docs.get('target')!.messages.map(m => m.id), ['m1', 'm2', 'm3'], 'left alone');
   assert.ok(errors.some(e => /no longer in the session/.test(e)), errors.join('\n'));
+});
+
+// The appender, `session_action` and `session_edit` each wrote "once at the edge, as the caller, reading
+// again on a lost compare-and-swap" for themselves; it is core's `casAtEdge` now.
+test('casAtEdge writes at the edge as the caller, and reads again when it loses', { timeout: 10000 }, async () => {
+  const seen: Array<string | undefined> = [];
+  let tries = 0;
+  await machineBusy(async () => {
+    await runAs(principal, async () => {
+      casAtEdge(async () => { seen.push(tryCurrentPrincipal()?.id); return ++tries === 2; }, 'lost');
+    });
+    await Promise.resolve();
+    assert.equal(tries, 0, 'nothing runs while the machine is held');
+  });
+  await quiesced();
+  assert.equal(tries, 2, 'read again after the first loss, and stopped once it landed');
+  assert.deepEqual(seen, ['tester', 'tester'], 'as the principal in force when it was queued');
+});
+
+test('casAtEdge reports a write lost to every attempt', { timeout: 10000 }, async () => {
+  const errors: string[] = [];
+  const error = console.error;
+  console.error = (...args: unknown[]) => { errors.push(args.map(String).join(' ')); };
+  let tries = 0;
+  try {
+    casAtEdge(async () => { tries++; return false; }, 'the write was lost');
+    await quiesced();
+  } finally {
+    console.error = error;
+  }
+  assert.equal(tries, 3);
+  assert.deepEqual(errors, ['the write was lost']);
+});
+
+// session_edit's deferred edits made one compare-and-swap and gave up. At the edge the other writer is
+// another flusher (an append, a rename), so a cut was dropped merely for landing beside one. Through
+// casAtEdge it reads again, re-finds its anchor, and lands.
+test('a deferred cut that loses its compare-and-swap at the edge is retried, not dropped', { timeout: 15000 }, async () => {
+  const msg = (id: string, role: Message['role']): Message =>
+    ({ id, role, content: [{ type: 'text', text: id }], createdAt: new Date(0).toISOString(), traceId: 't' }) as Message;
+  const target: Session = { ...createSession(), id: 'target', messages: [msg('m1', 'user'), msg('m2', 'assistant'), msg('m3', 'user')] };
+  const { store, docs } = casStore(target);
+  // Another flusher lands between the edit's read and its write: an append, once.
+  let raced = false;
+  const racing = {
+    ...store,
+    cas: async (id: string, expected: string, next: Session) => {
+      if (!raced) {
+        raced = true;
+        const cur = docs.get(id)!;
+        docs.set(id, { ...cur, version: crypto.randomUUID(), messages: [...cur.messages, msg('appended', 'assistant')] });
+      }
+      return store.cas(id, expected, next);
+    },
+  } as Store<Session>;
+
+  const tools = new Map<string, Tool>();
+  const services = {
+    sessions: racing,
+    isSubAgent: () => false,
+    tools:    { register: (t: Tool) => { tools.set(t.name, t); } },
+    run:      { status: (id: string) => ({ busy: id === 'target', running: id === 'target', queued: 0 }) },
+  } as unknown as MatbotMachine;
+  await editSessionPlugin.setup!(services);
+  const ctx = { callId: 'c1', signal: new AbortController().signal, session: { id: 'caller', messages: [] } } as unknown as ToolContext;
+
+  await machineBusy(async () => {
+    await drain(tools.get('session_edit')!, { action: 'cut', sessionId: 'target', msgIndex: 2 }, ctx);
+  });
+  await quiesced();
+
+  assert.ok(raced, 'the first write lost');
+  assert.deepEqual(docs.get('target')!.messages.map(m => m.id), ['m1', 'm2'], 'and the cut landed on the re-read');
 });

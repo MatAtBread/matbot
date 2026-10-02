@@ -50,6 +50,10 @@ churn and less likely to affect a consumer who doesn't use them.
   is persisted, announced or listed, and nothing outlives the returned object. Its optional `appender` is
   handed to tools as the new **`ToolContext.appender`**, so such a turn can report into a real conversation.
   `MemoryStore` moves from the CLI to `@matatbread/matbot-core/storage-base`.
+- **`casAtEdge(attempt, lost)`** (core) — write once at the next quiescent edge, as the principal in force
+  when it was queued, reading again when the write loses its compare-and-swap, and logging `lost` once the
+  attempts run out. For a write to a session a turn is running in. The session appender, `session_action`'s
+  deferred rename, hide and unhide, and `session_edit`'s deferred edits all use it.
 
 ### Bug fixes
 
@@ -80,7 +84,9 @@ churn and less likely to affect a consumer who doesn't use them.
   is deferred until that turn ends, as one of the caller's own session already was. It was written at
   once and then silently undone by that turn's write-back. A deferred edit is addressed by the message it
   names, not by its index, so a reply placed into the running turn meanwhile cannot shift it, and one
-  whose message has gone by then is not applied.
+  whose message has gone by then is not applied. One that loses its compare-and-swap at the edge (to an
+  append or a rename landing beside it) reads again and retries instead of being dropped, and so does
+  `compact_sessions`' deferred compaction of the calling session.
 - **`sessions`** — `session_action` rename, hide and unhide of a session with a turn running in it are
   deferred until the turn ends, and the result says `deferred: true`. They were written at once and
   then silently undone by the turn's write-back — renaming or hiding a conversation from the web sidebar

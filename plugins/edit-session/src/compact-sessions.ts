@@ -29,7 +29,7 @@
  */
 
 import type { Tool, ToolExecutor, ToolContract, ToolContext, ToolResultOf, Session, Store } from '@matatbread/matbot-plugin-api';
-import { lastActivityAt, currentPrincipal, runAs, isReadOnlyError } from '@matatbread/matbot-plugin-api';
+import { lastActivityAt, isReadOnlyError } from '@matatbread/matbot-plugin-api';
 
 import { compactBefore } from './compaction.js'
 import { defer } from './defer.js'
@@ -158,11 +158,6 @@ export function makeCompactSessionsTool(store: Store<Session>): Tool<ToolResultO
 
       const inactiveMs = input.inactiveDays! * 24 * 60 * 60 * 1000;
       const opts: Required<CompactSessionsParams> = { inactiveDays: input.inactiveDays!, activeMessages: input.activeMessages! };
-      // The edge runs outside every principal scope, so the deferred compaction below has to carry
-      // this one in: its store reads and writes are the same ownership-checked operations the inline
-      // path performs.
-      const principal = currentPrincipal();
-
       do {
         const page = await store.query({ cursor, limit: 100 });
         cursor = page.cursor;
@@ -178,11 +173,16 @@ export function makeCompactSessionsTool(store: Store<Session>): Tool<ToolResultO
           // which point the turn has committed and the policy re-decides against what it committed.
           if (session.id === currentSessionId) {
             deferred.push({ sessionId: session.id, title: session.title ?? '' });
+            // At the edge, a lost compare-and-swap IS worth reading again (see compactOne): the swap or the
+            // other flusher behind it has landed by then.
             defer(async () => {
-              const outcome = await runAs(principal, () => compactOne(store, session.id, opts, inactiveMs));
+              const outcome = await compactOne(store, session.id, opts, inactiveMs);
+              if (outcome.done) return true;
+              if (outcome.kind === 'unavailable') return false;
               // Nothing left to report to: the caller's turn ended to reach this edge.
-              if (!outcome.done) console.warn(`[compact_sessions] deferred compaction of the calling session skipped: ${outcome.reason}`);
-            });
+              console.warn(`[compact_sessions] deferred compaction of the calling session skipped: ${outcome.reason}`);
+              return true;
+            }, `[compact_sessions] deferred compaction of session "${session.id}" lost to repeated concurrent writes.`);
             continue;
           }
 

@@ -1,34 +1,24 @@
-import { onContextQuiesce } from '@matatbread/matbot-plugin-api';
+import { casAtEdge } from '@matatbread/matbot-core';
 
 /**
- * Run an edit of the *running turn's own* session after that turn has committed.
+ * Run an edit of a session a turn is running in once that turn has committed: `casAtEdge`, which writes at
+ * the quiescent edge as the caller and reads again when the write loses its compare-and-swap.
  *
- * The runner holds one in-memory copy of the session document and writes it back unconditionally at
- * turn end, so an edit landing mid-turn is silently overwritten. The quiescent edge is the first
- * moment the committed document is readable — and it is by construction unreachable until the tool
- * call, and the turn, have returned. Hence "defer, and say so": the caller cannot be told the
- * outcome, because waiting for it would hold open the very edge it is waiting for.
+ * What this adds is serialisation of this plugin's own edits against each other. Flushers settle together,
+ * so two deferred edits of one session would race for the same document. Each would recover by reading
+ * again, but every loss spends one of a bounded number of attempts, and a turn that queues a compact, a
+ * cut and a summarise should not have them compete. A throw is logged here and ends that edit, since
+ * nobody is left to report it to.
  */
+let tail: Promise<unknown> = Promise.resolve();
 
-// Serialises deferred edits against each other: two landing at once would CAS the same document
-// concurrently, and applying an index-based edit to already-shifted history is nonsense.
-let tail: Promise<void> = Promise.resolve();
-
-// A one-shot quiescer, unregistering itself as it fires: the flusher contract asks for idempotence,
-// and running exactly once is how this one gets it. Registering is also what announces the work, so the
-// edge is guaranteed to arrive rather than depending on some other operation happening to release — this
-// is called from inside a tool executor, which means the pump is holding the machine and there is no edge
-// to be had until it lets go.
-//
-// The promise is RETURNED to the edge, not detached. That is what makes the deferral whole: the edge
-// suspends the next operation that asked to be quiesced — the pump, before it takes its copy of the
-// session — until this edit has landed. Detached, the edit would merely *start* after the turn
-// committed, and a submission arriving in the meantime could read the document before the CAS and put
-// the pre-edit version back with its own write-back.
-export function defer(job: () => Promise<void>): void {
-  onContextQuiesce(un => {
-    un();
-    tail = tail.then(job).catch(e => console.error('[edit-session] deferred edit failed:', e instanceof Error ? e.message : e));
-    return tail;
-  });
+export function defer(attempt: () => Promise<boolean>, lost: string): void {
+  casAtEdge(() => {
+    const run = tail.then(attempt).catch((e: unknown) => {
+      console.error('[edit-session] deferred edit failed:', e instanceof Error ? e.message : e);
+      return true;
+    });
+    tail = run;
+    return run;
+  }, lost);
 }

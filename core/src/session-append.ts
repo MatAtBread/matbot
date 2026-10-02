@@ -1,11 +1,7 @@
 import type { AppendMessage, AppendResult, Notifier, Session, SessionAppender, Store } from './types.js';
-import { onContextQuiesce, runAs, tryCurrentPrincipal, SessionAppendKind } from '@matatbread/matbot-plugin-api';
+import { tryCurrentPrincipal, SessionAppendKind } from '@matatbread/matbot-plugin-api';
 import { appendMessage, createMessage } from './session.js';
-
-// A conflict means another writer landed between this edge flusher's read and its write — at the edge
-// that is another flusher, never a turn. An append composes with any of them, so it re-reads and goes
-// again rather than giving up; the bound only stops a pathological loop.
-const APPEND_ATTEMPTS = 3;
+import { casAtEdge } from './cas-at-edge.js';
 
 /**
  * The host's {@link SessionAppender}: an append is checked now and written at the quiescent edge.
@@ -40,30 +36,19 @@ export function createSessionAppender(deps: {
       }));
       const messageIds = built.map(m => m.id);
 
-      // The edge runs outside every principal scope, and the store is ownership-checked: restore the
-      // caller's, exactly as the deferred session edits do.
-      const write = async (): Promise<void> => {
-        for (let attempt = 0; attempt < APPEND_ATTEMPTS; attempt++) {
-          const current = await store.get(sessionId);
-          if (current === null) {
-            console.error(`[matbot] append to session "${sessionId}" dropped: the session no longer exists.`);
-            return;
-          }
-          if ((await store.cas(sessionId, current.version, built.reduce(appendMessage, current))).ok) {
-            deps.notifier().notify({
-              kind: SessionAppendKind, source: 'append', sessionId, messageIds,
-              ...(principal !== undefined ? { principal } : {}),
-            });
-            return;
-          }
+      casAtEdge(async () => {
+        const current = await store.get(sessionId);
+        if (current === null) {
+          console.error(`[matbot] append to session "${sessionId}" dropped: the session no longer exists.`);
+          return true;
         }
-        console.error(`[matbot] append to session "${sessionId}" lost to repeated concurrent writes.`);
-      };
-      onContextQuiesce(un => {
-        un();
-        // Returned, not detached: the edge holds back the next turn's read of this session until it lands.
-        return principal !== undefined ? runAs(principal, write) : write();
-      });
+        if (!(await store.cas(sessionId, current.version, built.reduce(appendMessage, current))).ok) return false;
+        deps.notifier().notify({
+          kind: SessionAppendKind, source: 'append', sessionId, messageIds,
+          ...(principal !== undefined ? { principal } : {}),
+        });
+        return true;
+      }, `[matbot] append to session "${sessionId}" lost to repeated concurrent writes.`);
       return { sessionId, messageIds };
     },
   };

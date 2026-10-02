@@ -1,5 +1,6 @@
-import type { Tool, ToolContract, ToolResultOf, ToolContext, Session, Store, Filter, StoreQuery, FieldPath, Principal, SessionAppender } from '@matatbread/matbot-plugin-api';
-import { lastActivityAt, StoreQueryError, currentPrincipal, onContextQuiesce, runAs } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolContract, ToolResultOf, ToolContext, Session, Store, Filter, StoreQuery, FieldPath, SessionAppender } from '@matatbread/matbot-plugin-api';
+import { lastActivityAt, StoreQueryError } from '@matatbread/matbot-plugin-api';
+import { casAtEdge } from '@matatbread/matbot-core';
 import { compileFilter, applySort, validateQuery, decodeCursor, encodeCursor, type PageState } from '@matatbread/matbot-core/storage-base';
 
 declare module '@matatbread/matbot-plugin-api' {
@@ -107,19 +108,11 @@ function withEdit(session: Session, edit: FieldEdit): Session {
 // copy back unconditionally at turn end, so a CAS landing mid-turn succeeds and is then silently undone.
 // So the edit waits for the quiescent edge, as `session_edit`'s do. Nobody is left to report a conflict
 // to by then, and setting a field composes with any other write, so a conflict re-reads and re-applies.
-function deferEdit(store: Store<Session>, principal: Principal, sessionId: string, edit: FieldEdit): void {
-  onContextQuiesce(un => {
-    un();
-    // Returned, not detached: the edge holds back the next turn's read of this session until it lands.
-    return runAs(principal, async () => {
-      for (let attempt = 0; attempt < 3; attempt++) {
-        const session = await store.get(sessionId);
-        if (!session) return;
-        if ((await store.cas(sessionId, session.version, withEdit(session, edit))).ok) return;
-      }
-      console.error(`[session_action] deferred edit of session "${sessionId}" lost to repeated concurrent writes.`);
-    });
-  });
+function deferEdit(store: Store<Session>, sessionId: string, edit: FieldEdit): void {
+  casAtEdge(async () => {
+    const session = await store.get(sessionId);
+    return !session || (await store.cas(sessionId, session.version, withEdit(session, edit))).ok;
+  }, `[session_action] deferred edit of session "${sessionId}" lost to repeated concurrent writes.`);
 }
 
 // The precise per-action contract. JSON Schema can't express "title required only for rename"
@@ -142,7 +135,7 @@ function makeSessionActionTool(store: Store<Session>, env: SessionToolEnv): Tool
     const session = await store.get(sessionId);
     if (!session) return `Session "${sessionId}" not found.`;
     if (env.busy?.(sessionId) === true) {
-      deferEdit(store, currentPrincipal(), sessionId, edit);
+      deferEdit(store, sessionId, edit);
       return { deferred: true };
     }
     const res = await store.cas(sessionId, session.version, withEdit(session, edit));

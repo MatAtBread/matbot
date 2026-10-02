@@ -1,7 +1,7 @@
 import type {
-  MatbotPluginSpec, MatbotMachine, Principal, Tool, ToolContract, ToolContext, ToolResultOf, Session, Store, Message,
+  MatbotPluginSpec, MatbotMachine, Tool, ToolContract, ToolContext, ToolResultOf, Session, Store, Message,
 } from '@matatbread/matbot-plugin-api';
-import { PLUGIN_API_VERSION, lastActivityAt, lastUserIndex, currentPrincipal, runAs } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, lastActivityAt, lastUserIndex } from '@matatbread/matbot-plugin-api';
 
 import { makeCompactSessionsTool } from './compact-sessions.js'
 import { compactBefore } from './compaction.js'
@@ -119,9 +119,11 @@ interface SessionEditInput { action: IndexAction | 'summarise' | 'summarize'; se
  *  (a provider to summarise with), and the one whose work happens before the edit rather than in it. */
 type IndexAction = 'cut' | 'fork' | 'split' | 'compact';
 
+// `conflict` marks a lost compare-and-swap: inline it is reported for the caller to retry, and a deferred
+// edit reads again and retries itself.
 type EditOutcome =
   | { ok: true;  value: ToolResultOf<'session_edit'> }
-  | { ok: false; message: string };
+  | { ok: false; message: string; conflict?: true };
 
 // Reads the document itself, so it is equally correct called inline (the tool call) or later from the
 // quiescent edge (the deferred self-edit) — the deferred path must NOT close over a session read
@@ -137,7 +139,7 @@ async function applyEdit(store: Store<Session>, action: IndexAction | undefined,
       const trimmed: Session = { ...session, messages: session.messages.slice(0, idx) };
       const next: Session = bumpVersion({ ...trimmed, updatedAt: lastActivityAt(trimmed) });
       const res = await store.cas(sessionId, session.version, next);
-      if (!res.ok) return { ok: false, message: 'Concurrent modification — please retry.' };
+      if (!res.ok) return { ok: false, message: 'Concurrent modification — please retry.', conflict: true };
       return { ok: true, value: { sessionId, messagesRemaining: next.messages.length } };
     }
 
@@ -196,7 +198,7 @@ async function applyEdit(store: Store<Session>, action: IndexAction | undefined,
       if (!res.ok) {
         // CAS failed — clean up the new session we just created
         await store.delete(newSession.id);
-        return { ok: false, message: 'Concurrent modification — please retry.' };
+        return { ok: false, message: 'Concurrent modification — please retry.', conflict: true };
       }
 
       return {
@@ -220,7 +222,7 @@ async function applyEdit(store: Store<Session>, action: IndexAction | undefined,
       const compacted: Session = { ...session, messages };
       const next: Session = bumpVersion({ ...compacted, updatedAt: lastActivityAt(compacted) });
       const res = await store.cas(sessionId, session.version, next);
-      if (!res.ok) return { ok: false, message: 'Concurrent modification — please retry.' };
+      if (!res.ok) return { ok: false, message: 'Concurrent modification — please retry.', conflict: true };
       return { ok: true, value: { sessionId, messagesStripped: stripped } };
     }
 
@@ -229,22 +231,23 @@ async function applyEdit(store: Store<Session>, action: IndexAction | undefined,
   }
 }
 
-async function applyDeferred(store: Store<Session>, principal: Principal, action: IndexAction, sessionId: string, anchor: Anchor): Promise<void> {
-  // Restore the caller's identity: the edge runs outside every principal scope, and the store reads
-  // and writes below are the same ownership-checked operations the inline path performs.
-  await runAs(principal, async () => {
+// Nothing left to report to: the caller's turn ended to reach the edge. A lost compare-and-swap means
+// another flusher wrote the session at the same edge (an append, a rename), so the edit reads it again
+// and re-finds its anchor rather than being dropped for landing beside it.
+function applyDeferred(store: Store<Session>, action: IndexAction, sessionId: string, anchor: Anchor): void {
+  defer(async () => {
     const session = await store.get(sessionId);
     const idx = session !== null ? anchoredIndex(session, anchor) : null;
     if (idx === null) {
       console.error(`[session_edit] deferred ${action} of session "${sessionId}" not applied: the message it named is no longer in the session.`);
-      return;
+      return true;
     }
     const outcome = await applyEdit(store, action, sessionId, idx);
-    // Nothing left to report to: the caller's turn ended to reach this edge. A CAS conflict here means
-    // a writer got in between, and losing the edit is the honest outcome — it is not this plugin's job
-    // to fight for the document.
-    if (!outcome.ok) console.error(`[session_edit] deferred ${action} of session "${sessionId}" failed: ${outcome.message}`);
-  });
+    if (outcome.ok) return true;
+    if (outcome.conflict) return false;
+    console.error(`[session_edit] deferred ${action} of session "${sessionId}" failed: ${outcome.message}`);
+    return true;
+  }, `[session_edit] deferred ${action} of session "${sessionId}" lost to repeated concurrent writes.`);
 }
 
 /**
@@ -273,7 +276,7 @@ async function applySummary(
   const summarised: Session = { ...session, messages: [...replacement, ...session.messages.slice(idx)] };
   const next: Session = bumpVersion({ ...summarised, updatedAt: lastActivityAt(summarised) });
   const res = await store.cas(sessionId, expectVersion ?? session.version, next);
-  if (!res.ok) return { ok: false, message: 'Concurrent modification — please retry.' };
+  if (!res.ok) return { ok: false, message: 'Concurrent modification — please retry.', conflict: true };
   return { ok: true, value: {
     sessionId,
     messagesSummarised: idx,
@@ -283,17 +286,20 @@ async function applySummary(
   } };
 }
 
-async function applyDeferredSummary(store: Store<Session>, principal: Principal, sessionId: string, anchor: Anchor, summary: HandoffSummary): Promise<void> {
-  await runAs(principal, async () => {
+function applyDeferredSummary(store: Store<Session>, sessionId: string, anchor: Anchor, summary: HandoffSummary): void {
+  defer(async () => {
     const session = await store.get(sessionId);
     const idx = session !== null ? anchoredIndex(session, anchor) : null;
     if (idx === null) {
       console.error(`[session_edit] deferred summarise of session "${sessionId}" not applied: the message it ended at is no longer in the session.`);
-      return;
+      return true;
     }
     const outcome = await applySummary(store, sessionId, idx, summary);
-    if (!outcome.ok) console.error(`[session_edit] deferred summarise of session "${sessionId}" failed: ${outcome.message}`);
-  });
+    if (outcome.ok) return true;
+    if (outcome.conflict) return false;
+    console.error(`[session_edit] deferred summarise of session "${sessionId}" failed: ${outcome.message}`);
+    return true;
+  }, `[session_edit] deferred summarise of session "${sessionId}" lost to repeated concurrent writes.`);
 }
 
 function makeSessionEditTool(store: Store<Session>, services: MatbotMachine): Tool<ToolResultOf<'session_edit'>> {
@@ -399,9 +405,7 @@ function makeSessionEditTool(store: Store<Session>, services: MatbotMachine): To
           } catch (e) { yield { type: 'error', message: e instanceof Error ? e.message : String(e) }; return; }
 
           if (isCurrentTurn || turnRunningIn(sessionId)) {
-            const principal = currentPrincipal();
-            const anchor = anchorAt(source.messages, idx, anchorSide('summarise'));
-            defer(() => applyDeferredSummary(store, principal, sessionId, anchor, summary));
+            applyDeferredSummary(store, sessionId, anchorAt(source.messages, idx, anchorSide('summarise')), summary);
             yield { type: 'result', value: {
               deferred: true,
               sessionId,
@@ -431,7 +435,6 @@ function makeSessionEditTool(store: Store<Session>, services: MatbotMachine): To
         const isCurrentTurn = sessionId === ctx.session.id;
         if ((isCurrentTurn || turnRunningIn(sessionId)) && (action === 'cut' || action === 'split' || action === 'compact')) {
           if (typeof msgIndex !== 'number') { yield { type: 'error', message: `session_edit "${action}" requires "msgIndex" (number). Only "summarise" may omit it.` }; return; }
-          const principal = currentPrincipal();
           // Resolve the index NOW, against the history the caller can see, to the message it names (see
           // `Anchor`). That is this turn's own copy, or for another session its committed document. By the
           // edge that document has grown by the turn's tail, so "-3" would land three messages later than
@@ -440,8 +443,7 @@ function makeSessionEditTool(store: Store<Session>, services: MatbotMachine): To
           if (!visible) { yield { type: 'error', message: `Session "${sessionId}" not found.` }; return; }
           const index = resolveIndex(visible, msgIndex);
           if (index === null) { yield { type: 'error', message: `msgIndex ${msgIndex} out of range.` }; return; }
-          const anchor = anchorAt(visible.messages, index, anchorSide(action));
-          defer(() => applyDeferred(store, principal, action, sessionId, anchor));
+          applyDeferred(store, action, sessionId, anchorAt(visible.messages, index, anchorSide(action)));
           yield { type: 'result', value: {
             deferred: true,
             sessionId,
