@@ -1,4 +1,5 @@
 import { PLUGIN_API_VERSION, currentPrincipal, invokeTool, toolResult, toolText } from '@matatbread/matbot-plugin-api';
+import { runEphemeralTurn } from '@matatbread/matbot-core';
 import type { MatbotPluginSpec, MatbotMachine, ToolExecutor, ToolEvent, ToolContext, ToolContract, ToolResultOf, Session, Message, EphemeralRun, Store, PromptFn } from '@matatbread/matbot-plugin-api';
 import { buildMatbotToolsDts, checkProjectDir } from '@matatbread/matbot-tool-types';
 import { writePluginScaffold } from './scaffold.js';
@@ -180,24 +181,16 @@ export async function* demonstrate(
   // (pump bails while s.running). An ephemeral run has its own runner over a private in-memory store, so
   // the transcript is never persisted, announced or listed, and a process dying mid-demonstration leaves
   // nothing behind; config, settings and tools are still the machine's.
-  const principal = currentPrincipal();
-  const nowIso = new Date().toISOString();
   const scratchId = crypto.randomUUID();
-  const scratch: Session = {
-    id: scratchId,
-    version: crypto.randomUUID(),
-    status: 'active',
-    messages: [],
-    createdAt: nowIso,
-    updatedAt: nowIso,
-  };
-  await demo.sessions.set(scratchId, scratch);
   console.error(`[skills_compiler] demonstrating "${opts.skill}" in ephemeral session ${scratchId}`);
 
-  let finalSession: Session | undefined;
-  const view = await demo.run.open({
+  // Aborting the compile stops the demonstration itself (see runEphemeralTurn), which would otherwise carry
+  // on calling tools.
+  const turn = runEphemeralTurn(demo, {
     sessionId: scratchId,
-    signal: opts.signal,
+    signal:    opts.signal,
+    provider:  opts.provider,
+    principal: currentPrincipal(),
     // Thread the calling turn's interactive prompt channel into the demonstration so its ask_user steps
     // reach the real user (an interactive compile demonstrates the real interactive flow). Without a
     // channel, the runner's fallback answers each prompt with its declared default and rejects
@@ -208,31 +201,17 @@ export async function* demonstrate(
       origin: 'robo',
       text: `Follow the instructions in the skill "${opts.skill}". Apply them now — they take precedence over brevity.\n\n${opts.skillContent}`,
     }],
-    provider: opts.provider,
-    principal,
   });
-
-  // `signal` on open() only ends this view of the session; the turn runs on the runner's own controller.
-  // So aborting the compile stops the demonstration itself, which would otherwise carry on calling tools.
-  const stop = (): void => { demo.run.abort(scratchId); };
-  opts.signal.addEventListener('abort', stop, { once: true });
-  if (opts.signal.aborted) stop();
   let pct = 10;
-  try {
-    for await (const ev of view.events) {
-      if (!('traceId' in ev) || ev.traceId !== view.traceId) continue;
-      if (ev.type === 'done' || ev.type === 'aborted') { finalSession = ev.session; break; }
-      if (ev.type === 'error') break;
-      if (ev.type === 'thinking' || ev.type === 'text-delta') {
-        yield { type: 'progress', pct, message: ev.delta };
-        if (pct < 50) pct += 1;
-      }
+  let next = await turn.next();
+  for (; !next.done; next = await turn.next()) {
+    const ev = next.value;
+    if (ev.type === 'thinking' || ev.type === 'text-delta') {
+      yield { type: 'progress', pct, message: ev.delta };
+      if (pct < 50) pct += 1;
     }
-  } finally {
-    opts.signal.removeEventListener('abort', stop);
   }
-  // `error` carries no session; recover the committed transcript from the store.
-  finalSession ??= (await demo.sessions.get(scratchId)) ?? undefined;
+  const finalSession = next.value;
 
   // While the ephemeral run is new: say where the transcript went, and check it is NOT in the machine's
   // store — the one way this could regress unseen, since the compile result is the same either way.

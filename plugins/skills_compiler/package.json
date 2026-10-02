@@ -24,7 +24,8 @@
     "access": "public"
   },
   "peerDependencies": {
-    "@matatbread/matbot-plugin-api": "workspace:^"
+    "@matatbread/matbot-plugin-api": "workspace:^",
+    "@matatbread/matbot-core": "workspace:^"
   },
   "dependencies": {
     "typescript": "catalog:",
@@ -33,6 +34,7 @@
   "devDependencies": {
     "@types/node": "catalog:",
     "@matatbread/matbot-plugin-api": "workspace:^",
-    "@matatbread/matbot-skills": "workspace:^"
+    "@matatbread/matbot-skills": "workspace:^",
+    "@matatbread/matbot-core": "workspace:^"
   }
 }

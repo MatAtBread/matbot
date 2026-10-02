@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  createSessionRunner, createSession, installPrincipalCarrier, installUsageCarrier,
+  createSessionRunner, createSession, installPrincipalCarrier, installUsageCarrier, runEphemeralTurn,
 } from '@matatbread/matbot-core';
 import type {
   Session, Store, ToolRegistry, ProviderAdapter, ProviderConfig, CompletionEvent, PipelineEvent, Principal,
-  SessionAppender,
+  SessionAppender, EphemeralRun, Tool,
 } from '@matatbread/matbot-core';
 import { MemoryStore } from '@matatbread/matbot-core/storage-base';
 import { makeSessionTools } from '@matatbread/matbot-sessions';
@@ -104,4 +104,98 @@ test('an ephemeral run that reports nowhere refuses an unnamed append rather tha
   const results = await runEphemeral(machine.appender, run.appender);
   assert.deepEqual(run.calls, []);
   assert.match(results.join('\n'), /reports to no conversation/);
+});
+
+// `runEphemeralTurn` is the one turn a background job and a skill demonstration each ran for themselves:
+// fresh session, open, wire the caller's signal to the run's abort, keep to its own turn's events, stop at
+// the terminal, and recover the transcript when the terminal carries none.
+
+// A tool that blocks until the turn is aborted, so a test can tell a stopped turn from a finished one.
+function ephemeralWith(script: 'tool' | 'answer' | 'fail'): { demo: EphemeralRun; toolStarted: Promise<void>; toolAborted: Promise<void> } {
+  let started!: () => void;
+  let aborted!: () => void;
+  const toolStarted = new Promise<void>(r => { started = r; });
+  const toolAborted = new Promise<void>(r => { aborted = r; });
+  const blocker: Tool = {
+    name: 'block', description: 'blocks until aborted', inputSchema: { type: 'object' },
+    executor: {
+      execute(_input, ctx) {
+        return (async function* () {
+          started();
+          await new Promise<void>(r => { if (ctx.signal.aborted) r(); else ctx.signal.addEventListener('abort', () => r(), { once: true }); });
+          aborted();
+          yield { type: 'result' as const, value: {} };
+        })();
+      },
+    },
+  };
+  const tools = {
+    register: () => {}, unregister: () => {},
+    resolve: (n: string) => (n === 'block' ? blocker : null), list: () => [blocker], has: (n: string) => n === 'block',
+  } as unknown as ToolRegistry;
+  const adapter: ProviderAdapter = {
+    name: 'fake',
+    async health() { return { ok: true } as never; },
+    complete(): AsyncIterable<CompletionEvent> {
+      return (async function* () {
+        if (script === 'fail') throw new Error('provider down');
+        if (script === 'tool') yield { type: 'tool-call', id: 'c0', name: 'block', input: {} };
+        else yield { type: 'text-delta', delta: 'answered' };
+        yield { type: 'done' };
+      })();
+    },
+  };
+  const store = new MemoryStore<Session>();
+  const run = createSessionRunner({
+    store, tools,
+    resolveProvider: async () => ({ adapter, config: { name: 'fake', module: 'fake', model: 'fake' } as ProviderConfig }),
+    loadPlugin: async () => { throw new Error('loadPlugin unused'); },
+    unloadPlugin: async () => false,
+  });
+  return { demo: { sessions: store, run }, toolStarted, toolAborted };
+}
+
+const turnOpts = (signal: AbortSignal) => ({ content: [{ type: 'text' as const, text: 'go' }], provider: 'fake', principal, signal });
+
+test('runEphemeralTurn yields its own turn and returns the transcript', async () => {
+  const { demo } = ephemeralWith('answer');
+  const turn = runEphemeralTurn(demo, { ...turnOpts(new AbortController().signal), sessionId: 'named' });
+  const types: string[] = [];
+  let next = await turn.next();
+  for (; !next.done; next = await turn.next()) types.push(next.value.type);
+  assert.equal(types.at(-1), 'done', 'up to and including its terminal');
+  assert.ok(!types.includes('idle'), 'only the turn\'s own events, not the session\'s');
+  assert.equal(next.value?.id, 'named');
+  assert.equal(next.value?.messages.at(-1)?.role, 'assistant');
+});
+
+test('runEphemeralTurn stops the turn when its signal aborts', { timeout: 10000 }, async () => {
+  const { demo, toolStarted, toolAborted } = ephemeralWith('tool');
+  const ac = new AbortController();
+  const turn = runEphemeralTurn(demo, turnOpts(ac.signal));
+  const draining = (async () => { let n = await turn.next(); while (!n.done) n = await turn.next(); return n.value; })();
+  await toolStarted;
+  ac.abort();
+  await toolAborted;
+  const final = await draining;
+  assert.ok(final, 'the transcript of the stopped turn comes back');
+});
+
+test('runEphemeralTurn stops a turn its caller stopped reading', { timeout: 10000 }, async () => {
+  const { demo, toolStarted, toolAborted } = ephemeralWith('tool');
+  const turn = runEphemeralTurn(demo, turnOpts(new AbortController().signal));
+  const reading = (async () => { for await (const ev of turn) if (ev.type === 'tool:start') return; })();
+  await toolStarted;
+  await reading;
+  await toolAborted;
+});
+
+test('runEphemeralTurn recovers the transcript when the turn ends in an error', { timeout: 10000 }, async () => {
+  const { demo } = ephemeralWith('fail');
+  const turn = runEphemeralTurn(demo, turnOpts(new AbortController().signal));
+  let next = await turn.next();
+  const types: string[] = [];
+  for (; !next.done; next = await turn.next()) types.push(next.value.type);
+  assert.equal(types.at(-1), 'error');
+  assert.equal(next.value?.messages[0]?.role, 'user', 'read back from the run\'s store');
 });

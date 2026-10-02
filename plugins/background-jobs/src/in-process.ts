@@ -1,5 +1,6 @@
 import type { AppendMessage, MatbotMachine, Session, SessionAppender } from '@matatbread/matbot-plugin-api';
 import { tryCurrentPrincipal } from '@matatbread/matbot-plugin-api';
+import { runEphemeralTurn } from '@matatbread/matbot-core';
 import { appendFor, jobContext, jobInfo, REPLY_TAIL, type JobRunner, type RunOutcome, type RunSpec } from './jobs.js';
 
 /**
@@ -36,41 +37,21 @@ export function inProcessRunner(machine: MatbotMachine): JobRunner | undefined {
           return result;
         },
       };
-      const { sessions, run } = ephemeral({ appender });
-
-      const now = new Date().toISOString();
-      const session: Session = { id: crypto.randomUUID(), version: crypto.randomUUID(), status: 'active', messages: [], createdAt: now, updatedAt: now };
-      await sessions.set(session.id, session);
-
       // The job's framing rides in its own first message, not the system context: a registered contributor
       // is machine-wide, and would tell every conversation in this process that it is a background job.
+      // A cancel or an unload stops the turn itself (see runEphemeralTurn), so it cannot report after the
+      // job is gone.
       const context = jobContext(await jobInfo(machine, job));
-      const view = await run.open({
-        sessionId: session.id, signal, provider, principal,
+      const turn = runEphemeralTurn(ephemeral({ appender }), {
+        signal, provider, principal,
         content: [
           { type: 'text', origin: 'robo', text: context },
           { type: 'text', text: job.prompt },
         ],
       });
-
-      // `signal` on open() only ends this view of the session; the turn runs on the runner's own controller.
-      // So a cancel or an unload stops the turn itself — otherwise it would carry on calling tools, and could
-      // still report, after the job was gone.
-      const stop = (): void => { run.abort(session.id); };
-      signal.addEventListener('abort', stop, { once: true });
-      if (signal.aborted) stop();
-      let final: Session | undefined;
-      try {
-        for await (const ev of view.events) {
-          if (!('traceId' in ev) || ev.traceId !== view.traceId) continue;
-          if (ev.type === 'done' || ev.type === 'aborted') { final = ev.session; break; }
-          if (ev.type === 'error') break;
-        }
-      } finally {
-        signal.removeEventListener('abort', stop);
-      }
-      final ??= (await sessions.get(session.id)) ?? undefined;
-      return { appended, reply: lastReply(final).slice(-REPLY_TAIL) };
+      let next = await turn.next();
+      while (!next.done) next = await turn.next();
+      return { appended, reply: lastReply(next.value).slice(-REPLY_TAIL) };
     },
   };
 }

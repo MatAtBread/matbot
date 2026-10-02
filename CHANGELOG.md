@@ -54,6 +54,11 @@ churn and less likely to affect a consumer who doesn't use them.
   when it was queued, reading again when the write loses its compare-and-swap, and logging `lost` once the
   attempts run out. For a write to a session a turn is running in. The session appender, `session_action`'s
   deferred rename, hide and unhide, and `session_edit`'s deferred edits all use it.
+- **`runEphemeralTurn(run, opts)`** (core) — one turn on an ephemeral run, from a fresh session to its
+  transcript: yields the turn's own events up to its terminal, and returns the committed session,
+  recovered from the run's store when the terminal carries none. The caller's signal stops the turn
+  itself, not just the view of it, and so does a caller that stops reading. `background-jobs` and
+  `skills_compiler` use it.
 
 ### Bug fixes
 
