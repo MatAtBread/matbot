@@ -89,6 +89,9 @@ churn and less likely to affect a consumer who doesn't use them.
 - **`frontend-web`** — the steering toggle is now a three-way `queue | interrupt | parallel` switch, and
   Alt+Enter sends a single message in parallel whichever is selected. A parallel turn is drawn with its own
   live progress.
+- **`provider-google`** — a tool parameter with a JSON Schema type list (`type: ['string', 'array']`)
+  no longer fails every request with a 400. Each `anyOf` branch now takes the keywords for its own type
+  (`items` goes on the array branch). They used to stay on the parent, where Gemini rejects them.
 - **`caching-tool-types`** — a failed settings read logs a warning and rebuilds the type index,
   rather than failing tool validation. The rebuilt index remains available in memory.
 - **`edit-session`** — `fork` and `split` no longer write `parentSessionId` on the new session; the

@@ -41,6 +41,18 @@ const SCHEMA_KEYS = new Set([
   'minLength', 'maxLength', 'pattern', 'example', 'propertyOrdering',
 ]);
 
+// Gemini rejects a keyword on a node whose `type` it doesn't belong to (`items` needs ARRAY). Only
+// reachable via a JSON Schema type list — `{ type: ['string', 'array'], items }` — whose keywords
+// apply per member, so each anyOf branch takes the ones for its own type and the parent keeps none.
+const TYPED_KEYS: Record<string, readonly string[]> = {
+  array:   ['items', 'minItems', 'maxItems'],
+  object:  ['properties', 'required', 'minProperties', 'maxProperties', 'propertyOrdering'],
+  string:  ['format', 'enum', 'minLength', 'maxLength', 'pattern'],
+  number:  ['format', 'enum', 'minimum', 'maximum'],
+  integer: ['format', 'enum', 'minimum', 'maximum'],
+};
+const ALL_TYPED_KEYS = new Set(Object.values(TYPED_KEYS).flat());
+
 function sanitizeSchema(schema: unknown): unknown {
   if (Array.isArray(schema)) return schema.map(sanitizeSchema);
   if (schema === null || typeof schema !== 'object') return schema;
@@ -49,10 +61,22 @@ function sanitizeSchema(schema: unknown): unknown {
 
   const rawType = src['type'];
   if (Array.isArray(rawType)) {
-    const nonNull = rawType.filter(t => t !== 'null');
+    const nonNull = rawType.filter((t): t is string => typeof t === 'string' && t !== 'null');
     if (rawType.includes('null')) out['nullable'] = true;
     if (nonNull.length === 1) out['type'] = nonNull[0];
-    else if (nonNull.length > 1) out['anyOf'] = nonNull.map(t => ({ type: t }));
+    else if (nonNull.length > 1) {
+      out['anyOf'] = nonNull.map(t => {
+        const branch: Record<string, unknown> = { type: t };
+        for (const k of TYPED_KEYS[t] ?? []) if (k in src) branch[k] = src[k];
+        if ('const' in src && TYPED_KEYS[t]?.includes('enum')) branch['const'] = src['const'];
+        return sanitizeSchema(branch);
+      });
+      for (const [k, v] of Object.entries(src)) {
+        if (k === 'type' || k === 'const' || ALL_TYPED_KEYS.has(k) || !SCHEMA_KEYS.has(k)) continue;
+        out[k] = v;
+      }
+      return out;
+    }
   } else if (rawType !== undefined) {
     out['type'] = rawType;
   }
