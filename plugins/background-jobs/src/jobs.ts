@@ -136,9 +136,6 @@ let jobStore:         Store<Job> | undefined;
 let legacyStore:      Store<Omit<LegacyJob, 'legacy'>> | undefined;
 let machine:          MatbotMachine | undefined;
 let pluginAc:         AbortController | undefined;
-const activeLoops      = new Map<string, AbortController>();
-// One entry per job while it is sleeping; aborting it wakes the sleep early.
-const sleepControllers = new Map<string, AbortController>();
 
 // ── Running a job ─────────────────────────────────────────────────────────────
 
@@ -174,9 +171,9 @@ export interface JobRunner {
 export interface BackgroundJobsHost {
   /** What `plugin list` shows for the package — each specialisation says where its jobs run. */
   description: string;
-  /** The runner for this machine, or `undefined` if jobs cannot run here (so none are armed). */
+  /** The runner for this machine, or `undefined` if jobs cannot run here (so no scheduler ticks). */
   runner(machine: MatbotMachine): JobRunner | undefined;
-  /** Setup in a process that IS a job (`isSubAgent()`), instead of arming a scheduler. */
+  /** Setup in a process that IS a job (`isSubAgent()`), instead of running a scheduler. */
   inJob?(machine: MatbotMachine, signal: AbortSignal): Promise<void>;
   /** Runs first in teardown — a job's last announcements may still be in flight. */
   teardown?(): Promise<void>;
@@ -236,45 +233,74 @@ export async function appendFor(
   return job.principal !== undefined ? runAs(job.principal, append) : append();
 }
 
-// ── Scheduler loop ────────────────────────────────────────────────────────────
+// ── Scheduler ─────────────────────────────────────────────────────────────────
 
-// wakeSignal interrupts the sleep without killing the loop (used by suspend/resume). Pass Infinity to
-// sleep until one of the signals fires. Listeners are detached on every exit, including the timeout: the
-// signals outlive the sleep, so a listener left behind per call would accumulate for the process's life.
+// Several matbots may share one job store — every open browser tab loads this plugin over the same
+// IndexedDB — and each would otherwise arm every stored job, firing it once per tab. There is no leader
+// and no lock: THE ROW IS THE SCHEDULE AND `nextRun` IS THE CLAIM. One tick per matbot reads the rows,
+// compare-and-swaps the fire time of each job that is due, and runs only what it won. A loser re-reads a
+// row that is no longer due and leaves it alone.
+//
+// Nothing is held, so nothing has to be released and a claimer that dies owes nothing. That also puts a
+// job's whole lifecycle in its row, which is what lets a tab write one and another tab run it: creating,
+// suspending, resuming and cancelling are row writes, picked up by whichever matbot ticks next.
+
+// wakeSignal shortens the sleep without ending the scheduler (used by every local row write). Listeners
+// are detached on every exit: the signals outlive the sleep, so one left behind per call would accumulate
+// for the process's life.
 function sleep(ms: number, signal: AbortSignal, wakeSignal?: AbortSignal): Promise<void> {
   return new Promise(resolve => {
     if (signal.aborted || wakeSignal?.aborted) { resolve(); return; }
-    let id: ReturnType<typeof setTimeout> | undefined;
     const done = () => {
-      if (id !== undefined) clearTimeout(id);
+      clearTimeout(id);
       signal.removeEventListener('abort', done);
       wakeSignal?.removeEventListener('abort', done);
       resolve();
     };
-    id = isFinite(ms) ? setTimeout(done, ms) : undefined;
+    const id = setTimeout(done, ms);
     signal.addEventListener('abort', done, { once: true });
     wakeSignal?.addEventListener('abort', done, { once: true });
   });
 }
 
-// setTimeout takes a 32-bit signed delay: hand it more and it fires IMMEDIATELY. A long wait is slept in
-// chunks against its deadline, which is also the only form that survives the clock moving under it.
-const MAX_TIMEOUT_MS = 2_147_483_647;
-
-// How long after this plugin's setup before a stored job may fire — see setup.
+// How long after this plugin's setup before a stored job may fire — see the scheduler.
 export const BOOT_GRACE_MS = 60_000;
 
-async function sleepUntil(deadlineMs: number, signal: AbortSignal, wakeSignal?: AbortSignal): Promise<void> {
-  for (;;) {
-    const remaining = deadlineMs - Date.now();
-    if (remaining <= 0 || signal.aborted || wakeSignal?.aborted === true) return;
-    await sleep(Math.min(remaining, MAX_TIMEOUT_MS), signal, wakeSignal);
-  }
-}
+// The longest a tick will sleep, however far off the next job is. This is the window in which a row
+// another matbot wrote — a job created, resumed or cancelled in another tab — is picked up here, and it
+// replaces a cross-realm wake: there is nothing to notify, because the row already says everything.
+// Re-reading every minute is also what absorbs the clock moving under a long wait.
+const DISCOVERY_CEILING_MS = 60_000;
 
-function wakeJob(id: string): void {
-  const wakeAc = sleepControllers.get(id);
-  if (wakeAc) { sleepControllers.delete(id); wakeAc.abort(); }
+// A floor under it, so a tick that found something due but could not claim it cannot spin.
+const MIN_SLEEP_MS = 1_000;
+
+// A one-shot's claim pushes its fire time this far out instead of deleting the row (which happens only
+// once it has RUN), so a matbot that dies mid-run costs the job its punctuality rather than the request:
+// the next tick past the window claims it again. The same preference the delete already stated.
+const ONESHOT_RETRY_MS = 300_000;
+
+// The first tick after a restart finds everything that came due while matbot was down, and firing those
+// together is the pulse the old per-job startup delay existed to avoid. A recurring job claimed on that
+// tick starts at a random point within this window; later ticks need none, since each job then fires at
+// its own nextRun. Never a one-shot: its time IS its time.
+const BOOT_STAGGER_MS = 10_000;
+
+// One entry per run in flight here, so a cancel can stop it and a run longer than its own interval is not
+// started twice. Correctly per-realm: it is this process's runs, not the schedule.
+const inFlight = new Map<string, AbortController>();
+// Set while the scheduler is sleeping; aborting it brings the next tick forward.
+let tickWake: AbortController | undefined;
+
+/**
+ * Bring the next tick forward after a local row write — a job created, suspended, resumed or cancelled
+ * here — so it takes effect now rather than within the discovery ceiling. Another matbot's write is not
+ * seen here at all; the ceiling is what bounds how late that one is picked up.
+ */
+function nudge(): void {
+  const wake = tickWake;
+  tickWake = undefined;
+  wake?.abort();
 }
 
 const runSpec = (job: Job): RunSpec => ({
@@ -285,120 +311,142 @@ const runSpec = (job: Job): RunSpec => ({
   ...(job.principal !== undefined ? { principal: job.principal } : {}),
 });
 
-// A single run at a stated time: no interval, no stagger (its time IS its time), and it ends by deleting
-// itself — three of the recurring loop's four decisions inverted, so kept apart from it.
-function armOnce(job: Job): void {
-  if (!activeRunner || !pluginAc) return;
-  if (activeLoops.has(job.id)) return;
-
-  const ac = new AbortController();
-  pluginAc.signal.addEventListener('abort', () => ac.abort(), { once: true });
-  activeLoops.set(job.id, ac);
-
-  void (async (): Promise<void> => {
-    while (!ac.signal.aborted) {
-      const stored: Job | null | undefined = await jobStore?.get(job.id);
-      if (!stored) break;                                  // cancelled while it waited
-      job = stored;
-
-      // Suspended ⇒ wait until resumed. Past due — including a fire time that went by while the process
-      // was down — runs late rather than expiring silently: `at` refuses a past time at creation.
-      const waitMs = job.active === false ? Infinity : Date.parse(job.nextRun) - Date.now();
-      if (waitMs <= 0) {
-        const outcome = await runJob(runSpec(job), ac.signal);
-        // Deleted only once the job has RUN. A process killed mid-run leaves the request outstanding and
-        // it fires again on the next boot, the kinder of the two failures for a one-shot — and so does a
-        // run that never started at all (no provider to run as, a failed spawn: `undefined`) or one cut
-        // short by teardown. Deleting on those lost the request outright, unrun and unreported, for a
-        // condition that is usually transient. The row stays and the next boot tries it, late.
-        if (outcome !== undefined && !ac.signal.aborted) await jobStore?.delete(job.id);
-        break;
-      }
-
-      const wakeAc = new AbortController();
-      sleepControllers.set(job.id, wakeAc);
-      await (waitMs === Infinity
-        ? sleep(Infinity, ac.signal, wakeAc.signal)
-        : sleepUntil(Date.parse(job.nextRun), ac.signal, wakeAc.signal));
-      sleepControllers.delete(job.id);
-    }
-
-    activeLoops.delete(job.id);
-    sleepControllers.delete(job.id);
-  })().catch((err: unknown) => {
-    console.error(`[background-jobs] one-shot ${job.id} failed:`, err);
-    activeLoops.delete(job.id);
-    sleepControllers.delete(job.id);
-  });
+/**
+ * The first occurrence strictly after `nowMs`, keeping the cadence the job was created on.
+ *
+ * Advancing by a single interval would leave a job that came due ten intervals ago still due, and the
+ * next tick would claim and run it again at once — ten catch-up runs for a machine that was off for a
+ * morning. Stamping `nowMs + intervalMs` instead (which is what the old post-run stamp did) slid the
+ * schedule by the length of every run.
+ */
+function nextOccurrence(dueMs: number, intervalMs: number, nowMs: number): number {
+  const iv = Math.max(intervalMs, 1);                      // "0s" would otherwise divide by zero
+  if (dueMs > nowMs) return dueMs + iv;
+  return dueMs + (Math.floor((nowMs - dueMs) / iv) + 1) * iv;
 }
 
-function armJob(job: Job): void {
-  if (!activeRunner || !pluginAc) return;
-  if (activeLoops.has(job.id)) return;
+/**
+ * Take a due job for this matbot by advancing its fire time, and return the row as claimed — or
+ * `undefined`, meaning it is not ours to run.
+ *
+ * A single `cas`, deliberately NOT `mutate`: a lost swap here says another matbot claimed the job (or a
+ * suspend landed on it), and re-reading to apply the claim again is exactly the duplicate run this
+ * exists to prevent. `lastRun` is stamped with the claim rather than after the run, so a job in flight
+ * is distinguishable from one that has never run.
+ */
+async function claim(job: Job, nowMs: number): Promise<Job | undefined> {
+  const store = jobStore;
+  if (store === undefined) return undefined;
+  const claimed: Job = {
+    ...job,
+    version: crypto.randomUUID(),
+    lastRun: isoAt(nowMs),
+    nextRun: job.intervalMs === undefined
+      ? isoAt(nowMs + ONESHOT_RETRY_MS)
+      : isoAt(nextOccurrence(Date.parse(job.nextRun), job.intervalMs, nowMs)),
+  };
+  return (await store.cas(job.id, job.version, claimed)).ok ? claimed : undefined;
+}
 
-  const { intervalMs } = job;
-  if (intervalMs === undefined) { armOnce(job); return; }
+/** Run a job this matbot has claimed, and record what it left behind. */
+function start(job: Job, staggerMs: number): void {
+  if (!pluginAc) return;
 
   const ac = new AbortController();
   pluginAc.signal.addEventListener('abort', () => ac.abort(), { once: true });
-  activeLoops.set(job.id, ac);
+  inFlight.set(job.id, ac);
 
   void (async (): Promise<void> => {
-    // Stagger startup: a random delay in [10s, intervalMs], so a restart with several jobs due at once does
-    // not fire them in one pulse. Not for a suspended job — it waits indefinitely anyway.
-    if (job.active !== false) {
-      const startupDelay = intervalMs <= 10_000
-        ? intervalMs
-        : 10_000 + Math.floor(Math.pow(Math.random(), 2) * (intervalMs - 10_000));
-      const wakeAc = new AbortController();
-      sleepControllers.set(job.id, wakeAc);
-      await sleep(startupDelay, ac.signal, wakeAc.signal);
-      sleepControllers.delete(job.id);
+    if (staggerMs > 0) await sleep(staggerMs, ac.signal);
+    if (ac.signal.aborted) return;
+
+    const outcome = await runJob(runSpec(job), ac.signal);
+
+    if (job.intervalMs === undefined) {
+      // Deleted only once the job has RUN. A run that never started at all (no provider to run as, a
+      // failed spawn: `undefined`) or one cut short by teardown leaves the row, and its claim window
+      // expires it back into a later tick — the kinder of the two failures for a one-shot, since the
+      // condition is usually transient. Unconditional: it ran, whatever else landed on the row since.
+      if (outcome !== undefined && !ac.signal.aborted) await jobStore?.delete(job.id);
+      return;
     }
 
-    while (!ac.signal.aborted) {
-      const stored: Job | null | undefined = await jobStore?.get(job.id);
-      if (!stored) break;
-      job = stored;
-
-      if (job.active === false) {
-        const wakeAc = new AbortController();
-        sleepControllers.set(job.id, wakeAc);
-        await sleep(Infinity, ac.signal, wakeAc.signal);
-        sleepControllers.delete(job.id);
-        continue;
-      }
-
-      const outcome = await runJob(runSpec(job), ac.signal);
-
-      // Stamp what this run leaves behind, under compare-and-swap against the row as it is NOW: it may
-      // have been suspended, resumed or cancelled while the run was in flight, and a blind write would
-      // erase that — or put a cancelled row back (see `mutate`). Gone means cancelled: stop the loop.
-      const now   = Date.now();
-      const reply = outcome?.reply;
-      const stamped = await mutate(job.id, current => ({
-        ...current,
-        lastRun: isoAt(now),
-        nextRun: isoAt(now + intervalMs),
-        ...(reply !== undefined && reply !== '' ? { lastReply: reply } : {}),
-      }));
-      if (!stamped.done && stamped.kind === 'gone') break;
-      // Contended: another writer's view of the row stands, and the next iteration re-reads it anyway.
-      if (stamped.done) job = stamped.job;
-
-      const wakeAc = new AbortController();
-      sleepControllers.set(job.id, wakeAc);
-      await sleepUntil(Date.now() + intervalMs, ac.signal, wakeAc.signal);
-      sleepControllers.delete(job.id);
+    const reply = outcome?.reply;
+    if (reply !== undefined && reply !== '') {
+      // The claim already moved `nextRun`, so this is advisory and composes onto whatever the row says
+      // now — a suspend, a resume or a cancel may have landed while the run was in flight. `mutate`
+      // rather than `cas`, for exactly the reason the claim is the other way round: losing this costs a
+      // post-mortem, not a run.
+      await mutate(job.id, current => ({ ...current, lastReply: reply }));
     }
+  })()
+    .catch((err: unknown) => { console.error(`[background-jobs] job ${job.id} failed:`, err); })
+    .finally(() => {
+      if (inFlight.get(job.id) === ac) inFlight.delete(job.id);
+    });
+}
 
-    activeLoops.delete(job.id);
-    sleepControllers.delete(job.id);
-  })().catch((err: unknown) => {
-    console.error(`[background-jobs] job ${job.id} loop crashed:`, err);
-    activeLoops.delete(job.id);
-    sleepControllers.delete(job.id);
-  });
+/** One pass over the rows. Returns how long to sleep before the next one. */
+async function tick(staggered: boolean): Promise<number> {
+  const store = jobStore;
+  if (store === undefined) return DISCOVERY_CEILING_MS;
+
+  const nowMs = Date.now();
+  let soonest = Infinity;
+
+  for (const job of (await store.query({})).items) {
+    // Suspended ⇒ nothing is owed until it is resumed, which is a row write this tick will see.
+    if (job.active === false) continue;
+
+    const dueMs = Date.parse(job.nextRun);
+    // Past due — including a fire time that went by while matbot was down — runs late rather than
+    // expiring silently: `at` refuses a time already past at CREATION, so a stored one was once future.
+    if (dueMs > nowMs) { soonest = Math.min(soonest, dueMs); continue; }
+
+    const claimed = await claim(job, nowMs);
+    if (claimed === undefined) continue;
+    soonest = Math.min(soonest, Date.parse(claimed.nextRun));
+
+    // Still in flight from an earlier occurrence: this one is skipped, not queued, and the claim has
+    // already carried the schedule past it — the same gap the old per-job loop left by sleeping a whole
+    // interval after each run. A job slower than its own interval would otherwise run back-to-back.
+    if (inFlight.has(claimed.id)) continue;
+
+    const stagger = staggered && claimed.intervalMs !== undefined
+      ? Math.random() * Math.min(BOOT_STAGGER_MS, claimed.intervalMs)
+      : 0;
+    start(claimed, stagger);
+  }
+
+  return Math.min(soonest - Date.now(), DISCOVERY_CEILING_MS);
+}
+
+async function scheduler(signal: AbortSignal): Promise<void> {
+  // Stored jobs wait out the boot. Plugins load plugins, so there is no "booted" moment to wait for, and a
+  // job past due would otherwise fire while the tools it needs are still arriving. A nudge cuts the wait
+  // short, because a nudge only comes from a call made on this machine — which is plainly loaded if
+  // something is calling it, the condition the grace was waiting for.
+  const bootWake = new AbortController();
+  tickWake = bootWake;
+  await sleep(BOOT_GRACE_MS, signal, bootWake.signal);
+  tickWake = undefined;
+
+  for (let staggered = true; !signal.aborted; staggered = false) {
+    let waitMs = DISCOVERY_CEILING_MS;
+    try {
+      waitMs = await tick(staggered);
+    } catch (err) {
+      // A store that is briefly unreadable (a backend swapping under us) must not end the scheduler:
+      // every job is in a row, so the next tick carries on from wherever this one left off.
+      console.error('[background-jobs] scheduler tick failed:', err);
+    }
+    if (signal.aborted) return;
+
+    const wake = new AbortController();
+    tickWake = wake;
+    await sleep(Math.max(waitMs, MIN_SLEEP_MS), signal, wake.signal);
+    tickWake = undefined;
+  }
 }
 
 // ── Tools ─────────────────────────────────────────────────────────────────────
@@ -540,7 +588,7 @@ Do not wait for a job's result: tell the user it has started, and that it will r
           ...common,
         };
         await jobStore.set(job.id, job);
-        armJob(job);
+        nudge();                                 // the row is the schedule; the tick picks it up
         yield { type: 'result', value: { id, at: job.nextRun, ...echoed } };
         return;
       }
@@ -579,7 +627,7 @@ Do not wait for a job's result: tell the user it has started, and that it will r
         ...common,
       };
       await jobStore.set(job.id, job);
-      armJob(job);
+      nudge();                                   // the row is the schedule; the tick picks it up
       yield { type: 'result', value: { id, interval: iv, ...echoed } };
     },
   },
@@ -590,15 +638,19 @@ Do not wait for a job's result: tell the user it has started, and that it will r
 /**
  * Change one job row under compare-and-swap.
  *
- * Every writer of a row is a read-modify-write and they race each other: the scheduler stamping
- * `lastRun`/`nextRun` after a run, a `suspend` flipping `active`, a `cancel` deleting it. A plain `set`
- * let whichever landed last win over a document it had never read — a suspend overwritten by the stamp
- * that followed it, and a cancelled row RECREATED by that stamp, to be armed again on the next boot. So
- * each writer re-reads, applies its change to what it finds and swaps on that version; a loss means
- * another writer got there, and reading again composes with it instead of erasing it.
+ * Every writer of a row is a read-modify-write and they race each other: a run recording its `lastReply`,
+ * a `suspend` flipping `active`, a `cancel` deleting it. A plain `set` let whichever landed last win over a
+ * document it had never read — a suspend overwritten by the stamp that followed it, and a cancelled row
+ * RECREATED by that stamp, to be run again on the next boot. So each writer re-reads, applies its change to
+ * what it finds and swaps on that version; a loss means another writer got there, and reading again composes
+ * with it instead of erasing it.
  *
- * `gone` is distinct from `contended` because the callers act on it: a row that has been cancelled is the
- * scheduler's cue to stop its loop, and the tool's to say it does not exist. A `set` reported neither.
+ * `claim` is the one writer that does NOT retry, for the opposite reason: there, a lost swap means another
+ * matbot took the job.
+ *
+ * `gone` is distinct from `contended` because the callers act on it: a cancelled row is the tool's cue to
+ * say the job does not exist, and a run's cue that there is nothing left to record against. A `set`
+ * reported neither.
  */
 type Written =
   | { done: true;  job: Job }
@@ -621,7 +673,7 @@ async function mutate(id: string, change: (job: Job) => Job): Promise<Written> {
 
 async function setActive(id: string, active: boolean): Promise<Written> {
   const written = await mutate(id, job => ({ ...job, active }));
-  if (written.done) wakeJob(id);
+  if (written.done) nudge();
   return written;
 }
 
@@ -637,7 +689,7 @@ async function setActiveAll(active: boolean): Promise<{ ids: string[]; skipped: 
       if (!written.done) {
         if (written.kind === 'contended') {
           skipped.push({ id: doc.id, kind: 'unavailable',
-            reason: 'it is being written concurrently (its own run is stamping it) — asking again should work' });
+            reason: 'it is being written concurrently (a run of it is starting or finishing) — asking again should work' });
         }
         continue;
       }
@@ -666,7 +718,8 @@ const jobActionTool: Tool<ToolResultOf<'background_job_action'>> = {
   name: 'background_job_action',
   description: `Manage the jobs the background_job tool scheduled for later — recurring ones (created with an interval) and
 one-shots (created with an at). A one-shot's row has no intervalMs, its fire time is nextRun, and it disappears
-once it has run. A recurring job's lastReply is the end of what it last printed — never shown to the user, but
+once it has run. A job with a lastRun and a nextRun in the future may be running right now: nextRun is moved
+forward when a run starts, so that no other matbot sharing this store runs the same job at the same time. A recurring job's lastReply is the end of what it last printed — never shown to the user, but
 the place to look when a job that should have reported did not.
 
 ACTIONS
@@ -727,7 +780,7 @@ carries a \`kind\` saying what to do about it — do not read this out of the \`
           if (!written.done) {
             // Contended is not "not found": the row is there and its own run is stamping it.
             if (written.kind === 'contended') {
-              yield { type: 'error', message: `Job ${act.id} is being written concurrently (a run of it is finishing) — ask again.` };
+              yield { type: 'error', message: `Job ${act.id} is being written concurrently (a run of it is starting or finishing) — ask again.` };
               return;
             }
             const legacy = await legacyStore?.get(act.id);
@@ -750,10 +803,12 @@ carries a \`kind\` saying what to do about it — do not read this out of the \`
             yield { type: 'result', value: { cancelled: true, id: act.id, legacy: true } };
             return;
           }
-          const ac = activeLoops.get(act.id);
-          if (ac) { ac.abort(); activeLoops.delete(act.id); }
-          wakeJob(act.id);
+          // Stop a run of it in flight HERE; one in flight in another matbot ends when it ends, and
+          // finds the row gone when it goes to write what it left behind.
+          const ac = inFlight.get(act.id);
+          if (ac) { ac.abort(); inFlight.delete(act.id); }
           await jobStore?.delete(act.id);
+          nudge();
           yield { type: 'result', value: { cancelled: true, id: act.id } };
           return;
         }
@@ -786,23 +841,6 @@ export function jobContext(job: JobInfo): string {
 
 // ── Plugin ────────────────────────────────────────────────────────────────────
 
-interface LockManager {
-  request(name: string, opts: { signal: AbortSignal }, held: () => Promise<void>): Promise<void>;
-}
-
-// Every open tab of a browser matbot loads this plugin over the same storage, and each would arm every
-// job — running it once per tab. Only the holder of a named Web Lock arms them; when its tab closes the
-// lock passes to another. Where there is no lock manager there is nothing to share one with, and the
-// scheduler simply arms.
-async function whileLeader(signal: AbortSignal, arm: () => Promise<void>): Promise<void> {
-  const locks = (globalThis as { navigator?: { locks?: LockManager } }).navigator?.locks;
-  if (locks === undefined) { await arm(); return; }
-  await locks.request('matbot-background-jobs', { signal }, async () => {
-    await arm();
-    await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }));
-  }).catch(() => { /* aborted while queued for the lock: this tab never led, which is fine */ });
-}
-
 /**
  * The plugin, given where its jobs run. This package's own `plugin` runs them in this process; the node
  * specialisation passes a runner that spawns a process per job, and the setup a job's process needs.
@@ -815,7 +853,7 @@ export function createBackgroundJobsPlugin(host: BackgroundJobsHost): MatbotPlug
 
     async setup(services: MatbotMachine) {
       pluginAc = new AbortController();
-      // A job must not arm a scheduler of its own — that would cascade.
+      // A job must not run a scheduler of its own — that would cascade.
       if (services.isSubAgent()) { await host.inJob?.(services, pluginAc.signal); return; }
       machine      = services;
       activeRunner = host.runner(services);
@@ -829,25 +867,17 @@ export function createBackgroundJobsPlugin(host: BackgroundJobsHost): MatbotPlug
       }
       if (activeRunner === undefined) return;
 
-      const store  = jobStore;
-      const signal = pluginAc.signal;
-      // Not awaited: in a browser, waiting for the lock is waiting for another tab to close.
-      void whileLeader(signal, async () => {
-        // Stored jobs wait out the boot. Plugins load plugins, so there is no "booted" moment to wait for,
-        // and a job past due — one whose time went by while matbot was down — would otherwise fire while
-        // the tools it needs are still arriving. A job created by a call meanwhile is armed at once: someone
-        // is plainly using a machine that has loaded.
-        await sleep(BOOT_GRACE_MS, signal);
-        if (signal.aborted) return;
-        for (const doc of (await store.query({})).items) armJob(doc);
-      });
+      // Not awaited: it ticks for this plugin's whole load extent.
+      void scheduler(pluginAc.signal)
+        .catch((err: unknown) => { console.error('[background-jobs] scheduler stopped:', err); });
     },
 
     async teardown() {
       await host.teardown?.();
       pluginAc?.abort();
       pluginAc     = undefined;
-      activeLoops.clear();
+      tickWake     = undefined;
+      inFlight.clear();
       jobStore     = undefined;
       legacyStore  = undefined;
       activeRunner = undefined;

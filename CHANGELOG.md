@@ -139,8 +139,25 @@ churn and less likely to affect a consumer who doesn't use them.
   why a job that should have reported did not.
 - **`background-jobs`** — every write of a job row is a compare-and-swap, so the writers no longer erase
   each other: a suspend landing while a job ran was undone by the stamp that followed it, and a cancelled
-  row was recreated by that stamp and armed again on the next boot. A cancelled job now stops its loop,
-  and a suspend or resume contended by a finishing run reports that rather than appearing to succeed.
+  row was recreated by that stamp and run again on the next boot. A cancelled job now stops the run it has
+  in flight, and a suspend or resume contended by a run reports that rather than appearing to succeed.
+- **`background-jobs`** — a job fires once per occurrence however many matbots share its store. Every open
+  browser tab loads the plugin over the same IndexedDB and each armed a per-job loop of its own, so a job
+  ran once per tab: N turns and N reports in the conversation. The per-realm loops are replaced by one
+  bounded tick per matbot, and **the row is the schedule while `nextRun` is the claim** — a due job is
+  taken by compare-and-swapping its fire time forward, and run only by whichever matbot won the swap.
+  Nothing is held and nothing is leased, so a tab closed mid-run costs a recurring job one occurrence,
+  while a one-shot's claim moves its fire time out instead of deleting the row and is therefore claimed
+  again a few minutes later (at-least-once, the better failure for a request that was asked for and never
+  ran). Two consequences beyond the duplicate: a job created in one tab is no longer armed only there and
+  orphaned when that tab closes, and a `suspend`, `resume` or `cancel` made in one tab now reaches the
+  matbot that runs the job — a resume used to need to wake a loop in the tab that made it, so a job
+  another tab held suspended slept for ever. All four are row writes, picked up by whichever matbot ticks
+  next (at once in the one that wrote them, within a minute elsewhere). Exclusivity is the backend's `cas`:
+  IndexedDB and SQLite are exclusive across realms, which is what the browser case needs. Two further
+  fixes fall out: a recurring job's cadence no longer slides by the length of each run, since the fire time
+  is advanced before the run rather than stamped after it, and a job overdue by many intervals runs once
+  rather than once per occurrence it missed.
 - **`background-jobs`** — a one-shot is deleted because it RAN, not because it was reached. A run that
   could not start at all (no provider to run as, a failed spawn) or was cut short by teardown left no row,
   losing the request unrun and unreported for a usually-transient condition; it now stays and is tried
