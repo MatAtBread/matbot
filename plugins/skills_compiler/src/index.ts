@@ -1,5 +1,6 @@
 import { PLUGIN_API_VERSION, currentPrincipal, invokeTool, toolResult, toolText } from '@matatbread/matbot-plugin-api';
-import type { MatbotPluginSpec, MatbotMachine, ToolExecutor, ToolEvent, ToolContext, ToolContract, ToolResultOf, Session, Message } from '@matatbread/matbot-plugin-api';
+import { runEphemeralTurn } from '@matatbread/matbot-core';
+import type { MatbotPluginSpec, MatbotMachine, ToolExecutor, ToolEvent, ToolContext, ToolContract, ToolResultOf, Session, Message, EphemeralRun, Store, PromptFn } from '@matatbread/matbot-plugin-api';
 import { buildMatbotToolsDts, checkProjectDir } from '@matatbread/matbot-tool-types';
 import { writePluginScaffold } from './scaffold.js';
 // Re-exported for the scaffold's own tests: what it must not assume about where matbot.yaml sits is
@@ -165,7 +166,63 @@ function buildTranscript(messages: Message[]): string {
   return out.join('\n\n');
 }
 
+/**
+ * Perform the skill once, for real, and return the committed transcript — the working trace the
+ * distillation reads. Exported for its test: whether this runs on an ephemeral run is not observable
+ * from the compile result, and the property is the point.
+ */
+export async function* demonstrate(
+  demo:            EphemeralRun,
+  machineSessions: Store<Session> | undefined,
+  opts: { skill: string; skillContent: string; provider: string; signal: AbortSignal; prompt?: PromptFn },
+): AsyncGenerator<ToolEvent<never>, Session | undefined> {
+  // Demonstrate in a SEPARATE session, never ctx.session.id: the runner serialises turns per session, so
+  // submitting back to the caller's session queues behind the very turn running this tool and deadlocks
+  // (pump bails while s.running). An ephemeral run has its own runner over a private in-memory store, so
+  // the transcript is never persisted, announced or listed, and a process dying mid-demonstration leaves
+  // nothing behind; config, settings and tools are still the machine's.
+  const scratchId = crypto.randomUUID();
+  console.error(`[skills_compiler] demonstrating "${opts.skill}" in ephemeral session ${scratchId}`);
+
+  // Aborting the compile stops the demonstration itself (see runEphemeralTurn), which would otherwise carry
+  // on calling tools.
+  const turn = runEphemeralTurn(demo, {
+    sessionId: scratchId,
+    signal:    opts.signal,
+    provider:  opts.provider,
+    principal: currentPrincipal(),
+    // Thread the calling turn's interactive prompt channel into the demonstration so its ask_user steps
+    // reach the real user (an interactive compile demonstrates the real interactive flow). Without a
+    // channel, the runner's fallback answers each prompt with its declared default and rejects
+    // default-less ones — which stalls any skill whose procedure needs an answer only the user knows.
+    ...(opts.prompt !== undefined ? { prompt: opts.prompt } : {}),
+    content: [{
+      type: 'text',
+      origin: 'robo',
+      text: `Follow the instructions in the skill "${opts.skill}". Apply them now — they take precedence over brevity.\n\n${opts.skillContent}`,
+    }],
+  });
+  let pct = 10;
+  let next = await turn.next();
+  for (; !next.done; next = await turn.next()) {
+    const ev = next.value;
+    if (ev.type === 'thinking' || ev.type === 'text-delta') {
+      yield { type: 'progress', pct, message: ev.delta };
+      if (pct < 50) pct += 1;
+    }
+  }
+  const finalSession = next.value;
+
+  // While the ephemeral run is new: say where the transcript went, and check it is NOT in the machine's
+  // store — the one way this could regress unseen, since the compile result is the same either way.
+  const leaked = (await machineSessions?.get(scratchId)) != null;
+  console.error(`[skills_compiler] demonstration ${scratchId} ended with ${finalSession?.messages.length ?? 0} message(s); ` +
+    (leaked ? 'LEAKED into the persisted session store' : 'not in the persisted session store'));
+  return finalSession;
+}
+
 export function createSkillCompilerPlugin(): MatbotPluginSpec {
+
   return {
     apiVersion: PLUGIN_API_VERSION,
 
@@ -390,65 +447,15 @@ ${toolContractsDts}
 
           if (!iterate) {
             yield { type: 'progress', pct: 10, message: `Executing "${skill}"...` };
-            if (!services.run || !services.sessions) {
+            if (!services.ephemeral) {
               yield { type: 'error', message: 'No session runner.' };
               return;
             }
 
-            // Demonstrate in a SEPARATE session, never ctx.session.id: the runner serialises turns per
-            // session, so submitting back to the caller's session queues behind the very turn running
-            // this tool and deadlocks (pump bails while s.running). A distinct session has its own queue.
-            // It reuses the host's runner/store, so config, settings and tools are all present; it's a
-            // throwaway, so we delete it once the demonstration turn completes.
-            const principal = currentPrincipal();
-            const nowIso = new Date().toISOString();
-            const scratchId = crypto.randomUUID();
-            const scratch: Session = {
-              id: scratchId,
-              version: crypto.randomUUID(),
-              status: 'active',
-              messages: [],
-              createdAt: nowIso,
-              updatedAt: nowIso,
-            };
-            await services.sessions.set(scratchId, scratch);
-
-            let finalSession: Session | undefined;
-            try {
-              const view = await services.run.open({
-                sessionId: scratchId,
-                signal: ctx.signal,
-                // Thread the calling turn's interactive prompt channel into the demonstration so its
-                // ask_user steps reach the real user (an interactive compile demonstrates the real
-                // interactive flow). Without a channel, the runner's fallback answers each prompt with
-                // its declared default and rejects default-less ones — which stalls any skill whose
-                // procedure needs an answer only the user knows.
-                ...(ctx.prompt !== undefined ? { prompt: ctx.prompt } : {}),
-                content: [{
-                  type: 'text',
-                  origin: 'robo',
-                  text: `Follow the instructions in the skill "${skill}". Apply them now — they take precedence over brevity.\n\n${skillContent}`,
-                }],
-                provider: codeProvider,
-                principal,
-              });
-
-              let pct = 10;
-              for await (const ev of view.events) {
-                if (!('traceId' in ev) || ev.traceId !== view.traceId) continue;
-                if (ev.type === 'done' || ev.type === 'aborted') { finalSession = ev.session; break; }
-                if (ev.type === 'error') break;
-                if (ev.type === 'thinking' || ev.type === 'text-delta') {
-                  yield { type: 'progress', pct, message: ev.delta }
-                  if (pct < 50)
-                    pct += 1;
-                }
-              }
-              // `error` carries no session; recover the committed transcript from the store before deletion.
-              finalSession ??= (await services.sessions.get(scratchId)) ?? undefined;
-            } finally {
-              await services.sessions.delete(scratchId);
-            }
+            const finalSession = yield* demonstrate(services.ephemeral(), services.sessions, {
+              skill, skillContent, provider: codeProvider, signal: ctx.signal,
+              ...(ctx.prompt !== undefined ? { prompt: ctx.prompt } : {}),
+            });
 
             if (!finalSession) {
               yield { type: 'error', message: 'Demonstration produced no session to analyse.' };

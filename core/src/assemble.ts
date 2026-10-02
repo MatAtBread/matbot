@@ -1,6 +1,6 @@
 import type {
   MatbotMachine, MatbotServices, MatbotPlugin, Store, Session, FileStore, StorageBackend, Vault, Notifier,
-  KnowledgeIndex, PermissionGate, PluginSettings, ProviderConfig, ProviderAdapter, SessionRunner, Tool, Usage,
+  KnowledgeIndex, PermissionGate, PluginSettings, ProviderConfig, ProviderAdapter, SessionRunner, SessionAppender, Tool, Usage,
 } from '@matatbread/matbot-plugin-api';
 import {
   forwardingProxy, makeSwappable, createMountTable, scheduleAtEdge, createNotifier, recordUsage, singleTurnRequest,
@@ -9,6 +9,7 @@ import {
 import type { SwapFn } from '@matatbread/matbot-plugin-api/host';
 import { notifyingStore, createMessage } from '@matatbread/matbot-plugin-api';
 import { mediumGuard } from './storage-base/medium-guard.js';
+import { MemoryStore } from './storage-base/memory-store.js';
 import { unifyServices } from './plugin.js';
 import { instantiateProvider, recordServiceKey, getPluginNameForSpecifier, getRegisteredPlugins } from './registry.js';
 import { installSettingsDefaults, installSettingsNotifier, makePluginSettings, settingsDefaultNamespaces } from './settings.js';
@@ -19,6 +20,7 @@ import type { ProviderRegistryImpl } from './provider-registry.js';
 import { SystemContextRegistryImpl } from './system-context.js';
 import { LookupKnowledgeIndex } from './knowledge/index.js';
 import { createSessionRunner } from './session-runner.js';
+import { createSessionAppender } from './session-append.js';
 import { createSingleTurnTool } from './single-turn.js';
 import { createAboutMatbotTool } from './about.js';
 import { addUsage } from './usage.js';
@@ -81,7 +83,7 @@ export interface AssembleOptions {
 export interface AssembledMachine {
   services: MatbotMachine;
   /** A session runner over any store — the shared one is `services.run`. */
-  makeRunner(store: Store<Session>): SessionRunner;
+  makeRunner(store: Store<Session>, opts?: { appender?: SessionAppender }): SessionRunner;
   /** Call once the configured plugins have loaded. */
   loaded(): void;
 }
@@ -176,7 +178,21 @@ export function assembleMachine(opts: AssembleOptions): AssembledMachine {
   // The host's file area doubles as the media store, so attachments work with no plugin. Seeded into the
   // registry rather than spelled on the base object, because `unifyServices` resolves an own property
   // first — a member spelled there is one `register()` could never reach.
-  const seed: Partial<MatbotServices> = { MediaStore: fileStore, ...opts.seed };
+  //
+  // The session appender is seeded the same way, in every process: it refuses in a background job, which
+  // registers its own (forwarding to its parent) over it — and unloading that reverts to refusing, which
+  // is the honest answer for a job with no channel. Late-bound, as `services` is built below. It writes
+  // through the shared runner, the one writer of the sessions in `services.sessions`.
+  const seed: Partial<MatbotServices> = {
+    MediaStore:      fileStore,
+    SessionAppender: createSessionAppender({
+      sessions:   () => services.sessions,
+      run:        () => services.run,
+      notifier:   () => services.Notifier,
+      isSubAgent: () => services.isSubAgent(),
+    }),
+    ...opts.seed,
+  };
   const serviceRegistry = new Map<string, unknown>(Object.entries(seed));
   // The validator lookup is late-bound and read per call: one is registered by a plugin long after the
   // builtins are seeded, and may be unloaded again. It wraps the executor, so every door — the runner,
@@ -306,6 +322,10 @@ export function assembleMachine(opts: AssembleOptions): AssembledMachine {
     sessions,
     files:    fileStore,
     get run() { return runner; },
+    ephemeral(opts) {
+      const store = new MemoryStore<Session>();
+      return { sessions: store, run: makeRunner(store, opts) };
+    },
     hooks,
     tools,
     systemContext,
@@ -328,8 +348,9 @@ export function assembleMachine(opts: AssembleOptions): AssembledMachine {
   };
 
   // Services a plugin registers after boot are resolved live, per turn.
-  const makeRunner = (store: Store<Session>): SessionRunner => createSessionRunner({
+  const makeRunner = (store: Store<Session>, extra?: { appender?: SessionAppender }): SessionRunner => createSessionRunner({
     store,
+    ...(extra?.appender !== undefined ? { appender: extra.appender } : {}),
     resolveProvider,
     tools,
     hooks,

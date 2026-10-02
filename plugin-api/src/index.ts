@@ -29,10 +29,10 @@ export { PLUGIN_API_VERSION } from './plugin.js';
 // the host's job (`/host`).
 export { currentPrincipal, tryCurrentPrincipal, runAs } from './principal-context.js';
 
-// Notifications: publish, consume, and the two kinds plugin-api itself defines. Minting the process
+// Notifications: publish, consume, and the three kinds plugin-api itself defines. Minting the process
 // notifier is the host's job (`/host`).
 export type * from './notify.js';
-export { ItemChangeKind, RegistryChangeKind, notifyingStore } from './notify.js';
+export { ItemChangeKind, RegistryChangeKind, SessionAppendKind, notifyingStore } from './notify.js';
 
 // The quiescent edge: defer work to the next moment it is safe to touch machine state. A plugin that has
 // something to do after the current operation — a store edit the running turn would otherwise write over —

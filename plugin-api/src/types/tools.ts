@@ -4,6 +4,7 @@ import type { MatbotPlugin } from '../plugin.js';
 import type { JSONSchema } from './primitives.js';
 import type { PermissionRequest } from './permission.js';
 import type { Vault } from './vault.js';
+import type { SessionAppender } from './session-append.js';
 
 // ── Tools ─────────────────────────────────────────────────────────────────────
 
@@ -212,6 +213,12 @@ export interface ToolContext {
   workdir?:    string;
   configPath?: string;
   files?:      FileStore;
+  /**
+   * The appender belonging to the runner this turn is on, when it is not the machine's — an ephemeral
+   * run's ({@link MatbotRuntime.ephemeral}), whose session exists nowhere the machine's appender can
+   * reach. Prefer it over `services.SessionAppender`; absent ⇒ the machine's is the right one.
+   */
+  appender?:   SessionAppender;
   /** Prompt the user for input. The host provides a readline or form implementation. */
   prompt:      PromptFn;
   /**

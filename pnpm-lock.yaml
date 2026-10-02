@@ -153,6 +153,34 @@ importers:
         specifier: 'catalog:'
         version: 6.0.3
 
+  plugins/background-jobs:
+    devDependencies:
+      '@matatbread/matbot-core':
+        specifier: workspace:^
+        version: link:../../core
+      '@matatbread/matbot-plugin-api':
+        specifier: workspace:^
+        version: link:../../plugin-api
+      typescript:
+        specifier: 'catalog:'
+        version: 6.0.3
+
+  plugins/background-jobs-node:
+    dependencies:
+      '@matatbread/matbot-background-jobs':
+        specifier: workspace:^
+        version: link:../background-jobs
+    devDependencies:
+      '@matatbread/matbot-plugin-api':
+        specifier: workspace:^
+        version: link:../../plugin-api
+      '@types/node':
+        specifier: 'catalog:'
+        version: 22.19.19
+      typescript:
+        specifier: 'catalog:'
+        version: 6.0.3
+
   plugins/bash:
     devDependencies:
       '@matatbread/matbot-plugin-api':
@@ -525,6 +553,9 @@ importers:
         specifier: 'catalog:'
         version: 6.0.3
     devDependencies:
+      '@matatbread/matbot-core':
+        specifier: workspace:^
+        version: link:../../core
       '@matatbread/matbot-plugin-api':
         specifier: workspace:^
         version: link:../../plugin-api

@@ -1,0 +1,49 @@
+{
+  "name": "@matatbread/matbot-background-jobs-node",
+  "matbotRuntime": [
+    "node"
+  ],
+  "version": "0.4.18",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "files": [
+    "src"
+  ],
+  "description": "Node background jobs: @matatbread/matbot-background-jobs with each job run in its own process — a hard boundary that can be killed, at the cost of a full boot per run.",
+  "keywords": [
+    "matbot",
+    "matbot-plugin",
+    "llm",
+    "ai",
+    "agent"
+  ],
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "node -e \"process.env.MATBOT_PUBLISH_ALL || (console.error('Refused: publish with pnpm publish-all from the repo root. It checks versions, contents and the web bundle first.'), process.exit(1))\""
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MatAtBread/matbot.git",
+    "directory": "plugins/background-jobs-node"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@matatbread/matbot-background-jobs": "workspace:^"
+  },
+  "peerDependencies": {
+    "@matatbread/matbot-plugin-api": "workspace:^"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "@matatbread/matbot-plugin-api": "workspace:^"
+  }
+}

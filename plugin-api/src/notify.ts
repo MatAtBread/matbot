@@ -89,7 +89,22 @@ export interface RegistryChange extends NotificationBase {
 }
 
 /**
- * The wire tags for the two kinds defined here. A `kind` is a globally-scoped token — unlike a type
+ * Messages were appended to a session outside any turn (see `SessionAppender`) — not by the session's
+ * own pump, so nothing on that session's turn stream says so.
+ *
+ * The same write raises an {@link ItemChange} for the session; this exists beside it because it carries
+ * the one thing a re-read cannot recover: WHICH messages arrived this way. A turn adds messages too, so a
+ * consumer diffing the document would have to keep a copy of it to tell them apart. A frontend draws
+ * these into the open conversation; a chat bridge forwards them to the chat the session belongs to.
+ * Identity only, as ever — a consumer re-reads the session for the content.
+ */
+export interface SessionAppend extends NotificationBase {
+  readonly sessionId:  string;
+  readonly messageIds: readonly string[];
+}
+
+/**
+ * The wire tags for the kinds defined here. A `kind` is a globally-scoped token — unlike a type
  * name, which an importer can rename out of a clash — so these exist to give one back: import the const
  * under whatever local name suits (`import { ItemChangeKind as Changed }`) and use it as a `case` label
  * or in a filter. `satisfies` ties each to a real key, so a typo fails the build here instead of
@@ -97,6 +112,7 @@ export interface RegistryChange extends NotificationBase {
  */
 export const ItemChangeKind     = '@matatbread/matbot-plugin-api#ItemChange'     satisfies keyof Notifications;
 export const RegistryChangeKind = '@matatbread/matbot-plugin-api#RegistryChange' satisfies keyof Notifications;
+export const SessionAppendKind  = '@matatbread/matbot-plugin-api#SessionAppend'  satisfies keyof Notifications;
 
 /**
  * The registry of notification shapes, keyed by `kind` — augment it exactly like `MatbotServices` /
@@ -128,6 +144,7 @@ export const RegistryChangeKind = '@matatbread/matbot-plugin-api#RegistryChange'
 export interface Notifications {
   '@matatbread/matbot-plugin-api#ItemChange':    ItemChange;
   '@matatbread/matbot-plugin-api#RegistryChange': RegistryChange;
+  '@matatbread/matbot-plugin-api#SessionAppend':  SessionAppend;
 }
 
 /** A notification as a consumer sees it: the arm, plus the `kind` its registry key supplies. Grafting

@@ -9,12 +9,188 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
-## Unreleased
+## 0.4.18
+
+### Breaking changes
+
+- **`Session.parentSessionId` / `branchPointMessageId` removed**, with the matching `CreateSessionOpts`
+  fields. Nothing read either: `branchPointMessageId` was never written, and `parentSessionId` duplicated
+  the `forked-from` / `continued-in` marker a fork or split already appends, which is what the web UI
+  draws. Old persisted data keeps them harmlessly as excess properties.
+- **`SessionRunner.status()` returns `parallel`** — the number of parallel turns in flight beside the
+  running one, which `busy` now also counts. A custom `SessionRunner` must report it.
+- **`SessionRunner.write()`** — the runner is each session's one writer (see below), so a custom
+  `SessionRunner` must implement it.
+
+### API gaps filled
+
+- **`mode: 'parallel'` submissions** — a message sent while a turn runs can be answered at once instead of
+  queued or interrupting. It runs on a private copy of the session's completed turns, framed with the
+  running request, and only the message and its final reply come back, as a user/assistant pair. Its tool
+  calls stay in the copy. If the turn it ran beside is still going, the pair is placed ahead of that
+  turn's own messages at its next round boundary, which is exactly the history the reply was generated
+  against; otherwise it is appended. Announced with a `parallel` event, with progress streamed under its
+  own traceId, and a `merged` event once written. `SteeringDecision` gains `'parallel'`, so a
+  `SteeringPolicy` can choose it under `auto`. With nothing running it is an ordinary turn. A parallel
+  turn that arrives once the running turn has answered (while followup hooks judge it) sees the answer and
+  is not told a turn is still working. A parallel turn runs inside the machine hold of the session's pump,
+  which keeps it until every parallel turn it admitted has settled, so deferred work never lands under one
+  and it never waits at the quiescent-edge barrier behind the turn it runs beside.
+
+- **`CreateSessionOpts.status`** — a session can be created `archived` (hidden from the default session
+  list) or `pinned`, instead of being created active and changed by a second write that every client
+  watching the list sees.
+- **`SessionAppender` / `SessionAppend`** — add messages to a session without running a turn: checked at
+  once, written by the session's runner once no turn holds the session (one would write it back over the
+  append), announced as a `SessionAppend` notification carrying the new message ids beside the session's `ItemChange`. The host
+  seeds one in every process (`createSessionAppender`); it refuses in a background job, which shares its
+  parent's storage but none of its turns and must go through its parent instead. With no turn to wait for,
+  the append settles once written, so one that cannot land (the session is gone, or shared in read-only)
+  is reported to its caller; otherwise it settles on acceptance. `AppendMessage` is plain user/assistant
+  text, so nothing appended can break a later turn's provider request.
+
+- **`MatbotRuntime.ephemeral()` / `EphemeralRun`** — a private session runner over its own in-memory store,
+  for a turn that should leave no trace (a demonstration, an in-process background job): nothing it holds
+  is persisted, announced or listed, and nothing outlives the returned object. Its optional `appender` is
+  handed to tools as the new **`ToolContext.appender`**, so such a turn can report into a real conversation.
+  `MemoryStore` moves from the CLI to `@matatbread/matbot-core/storage-base`.
+- **`SessionRunner.write(sessionId, attempt, lost)`** — write a session from outside its turns. The runner
+  is the session's one writer: it runs `attempt` between that session's turns, in arrival order, as the
+  principal in force at the call, and no turn of the session starts until it is done. Other sessions'
+  turns do not delay it, so a write no longer waits for every turn on the machine, and a background job
+  or a long parallel turn no longer holds back writes to sessions it is not running in. `attempt` reads
+  and compare-and-swaps the document itself, and a lost CAS is read again. `deferred` says whether it
+  waits for a turn, which may be the caller's own. The session appender, `session_action` and
+  `session_edit` all write through it.
+- **`runEphemeralTurn(run, opts)`** (core) — one turn on an ephemeral run, from a fresh session to its
+  transcript: yields the turn's own events up to its terminal, and returns the committed session,
+  recovered from the run's store when the terminal carries none. The caller's signal stops the turn
+  itself, not just the view of it, and so does a caller that stops reading. `background-jobs` and
+  `skills_compiler` use it.
+
+### Bug fixes
+
+- **Session runner** — a submission arriving while the pump flushed usage could erase the flushed
+  accounting, or have its own user message erased. The pump dropped its running flag before the flush,
+  so the submission started a second pump whose turn-start write interleaved with the flush's
+  read-modify-write. The flush now runs while the pump still holds the session, and anything queued
+  during it runs next.
+- **Session runner** — a stop or cancel sent before a turn's first provider round (while its user message
+  was being saved or its provider resolved) was lost, and the turn ran anyway. The turn's controller is
+  now created as it is taken off the queue.
+
+- **Hooks** — a hook cut off by its turn's abort (a steer, a cancel) is logged as cut off, naming the abort
+  reason, and leaves no failure marker. It was logged as a failure whose whole message was the abort
+  reason — `threw; skipping it for this turn: steer` — and marked durably as one. A hook that genuinely
+  throws is logged with its stack; a non-`Error` throw says that is what it was. "Cut off" is decided by
+  the thrown value — the abort reason itself, or an `AbortError` — not by the signal alone, which stays
+  aborted for the rest of the turn and so excused every later throw: a hook's own fault went unmarked and
+  unlogged from the first steer onwards, which, interrupt being the default disposition for a mid-turn
+  message, is the common case rather than a corner of one.
+- **`runEphemeralTurn`** — waits for the run to go idle rather than returning at its turn's terminal, and
+  returns the transcript read back from the run's store. `followup` is post-commit, so a hook that
+  resubmits or retracts enqueues a further turn AFTER that terminal; it was left running with nobody
+  watching — calling tools and appending through the run's appender past the transcript the caller was
+  handed, and past a cancel that no longer reached it. Aborting at the terminal does not close it either,
+  the queue being drained before the hook enqueues. So a background job's reply tail and appended count
+  now include that work, and a cancel reaches it.
 
 ### Optional
 
+- **`frontend-web`** — the steering toggle is now a three-way `queue | interrupt | parallel` switch, and
+  Alt+Enter sends a single message in parallel whichever is selected. A parallel turn is drawn with its own
+  live progress.
+- **`provider-google`** — a tool parameter with a JSON Schema type list (`type: ['string', 'array']`)
+  no longer fails every request with a 400. Each `anyOf` branch now takes the keywords for its own type
+  (`items` goes on the array branch). They used to stay on the parent, where Gemini rejects them.
 - **`caching-tool-types`** — a failed settings read logs a warning and rebuilds the type index,
   rather than failing tool validation. The rebuilt index remains available in memory.
+- **`edit-session`** — `fork` and `split` no longer write `parentSessionId` on the new session; the
+  relation marker is the record of where it came from.
+- **`edit-session`** — a cut, split, compact or summarise of ANOTHER session with a turn running in it
+  is deferred until that turn ends, as one of the caller's own session already was. It was written at
+  once and then silently undone by that turn's write-back. A deferred edit is addressed by the message it
+  names, not by its index, so a reply placed into the running turn meanwhile cannot shift it, and one
+  whose message has gone by then is not applied. One that loses its compare-and-swap reads again and
+  retries instead of being dropped. `compact_sessions` defers any session with a turn running in it, not
+  only the calling one; it compacted the others in place, under their turns' write-backs.
+- **`sessions`** — `session_action` rename, hide and unhide of a session with a turn running in it are
+  deferred until the turn ends, and the result says `deferred: true`. They were written at once and
+  then silently undone by the turn's write-back — renaming or hiding a conversation from the web sidebar
+  while it was answering did nothing.
+- **`frontend-web`** — `POST /sessions` takes an optional `{ status }` body, and both transports'
+  `createSession` pass it through, so a client can create a session hidden.
+- **`cli`** — `console.info` and `console.debug` go through the same prefixing and background suppression
+  as `log`/`warn`/`error`. They bypassed it, so the plugin loader's cache-bust notes landed in a background
+  job's output file (its stdout), and in a piped foreground answer.
+- **`tool-types`** — a call matching none of a tool's forms, where the forms share no discriminant, says
+  why each form refused it (`(1) .interval: required property missing; (2) .at: …; (3) .name: unexpected
+  property`), instead of only "no union member matched".
+- **`background-jobs`** (new: `@matatbread/matbot-background-jobs`) — supersedes `matbot-tool-background`,
+  as `background_job` / `background_job_action`, with one change of meaning: a job's reply is not its output. A job tells the
+  user something by appending to a conversation (by default the one it was created from), writing a file
+  or sending a notification, as its prompt asks, and stays silent when there is nothing to say. Jobs run
+  in-process on an ephemeral run, so a job's own transcript is never stored, and the plugin is
+  cross-runtime — in a browser it runs jobs while a tab is open, one tab at a time. Stored jobs wait a minute
+  after the plugin loads before any may fire, so one past due at startup does not run while the tools it
+  needs are still loading. Keeps its own store: the old
+  plugin's schedules are listed as `legacy` (never run) and can be cancelled, so moving one is "create
+  here, cancel there". A recurring job keeps the tail of what it last printed as `lastReply`, for seeing
+  why a job that should have reported did not.
+- **`background-jobs`** — every write of a job row is a compare-and-swap, so the writers no longer erase
+  each other: a suspend landing while a job ran was undone by the stamp that followed it, and a cancelled
+  row was recreated by that stamp and run again on the next boot. A cancelled job now stops the run it has
+  in flight, and a suspend or resume contended by a run reports that rather than appearing to succeed.
+- **`background-jobs`** — a job fires once per occurrence however many matbots share its store. Every open
+  browser tab loads the plugin over the same IndexedDB and each armed a per-job loop of its own, so a job
+  ran once per tab: N turns and N reports in the conversation. The per-realm loops are replaced by one
+  bounded tick per matbot, and **the row is the schedule while `nextRun` is the claim** — a due job is
+  taken by compare-and-swapping its fire time forward, and run only by whichever matbot won the swap.
+  Nothing is held and nothing is leased, so a tab closed mid-run costs a recurring job one occurrence,
+  while a one-shot's claim moves its fire time out instead of deleting the row and is therefore claimed
+  again a few minutes later (at-least-once, the better failure for a request that was asked for and never
+  ran). Two consequences beyond the duplicate: a job created in one tab is no longer armed only there and
+  orphaned when that tab closes, and a `suspend`, `resume` or `cancel` made in one tab now reaches the
+  matbot that runs the job — a resume used to need to wake a loop in the tab that made it, so a job
+  another tab held suspended slept for ever. All four are row writes, picked up by whichever matbot ticks
+  next (at once in the one that wrote them, within a minute elsewhere). Exclusivity is the backend's `cas`:
+  IndexedDB and SQLite are exclusive across realms, which is what the browser case needs. Two further
+  fixes fall out: a recurring job's cadence no longer slides by the length of each run, since the fire time
+  is advanced before the run rather than stamped after it, and a job overdue by many intervals runs once
+  rather than once per occurrence it missed.
+- **`background-jobs`** — a one-shot is deleted because it RAN, not because it was reached. A run that
+  could not start at all (no provider to run as, a failed spawn) or was cut short by teardown left no row,
+  losing the request unrun and unreported for a usually-transient condition; it now stays and is tried
+  again on the next boot.
+- **`background-jobs-node`** (new: `@matatbread/matbot-background-jobs-node`) — `background-jobs` with each job
+  in its own process, which can be killed and shares no heap with the server, at the cost of a full boot
+  per run. A job reaches its parent over an IPC channel, which also carries what it changes back to the
+  parent's bus — so a file a job writes shows in the web UI. Same tools and store: load one or the other.
+  A job process that cannot be spawned is logged, and is not fatal to the server.
+- **`sessions`** — `session_action` gains `append`: post a message into a conversation without starting
+  a turn (default: this one, or in a background job the one it reports to). In a background job, rename,
+  hide and unhide are refused.
+- **`edit-session`** — in a background job, `session_edit` refuses everything but `fork`, and
+  `compact_sessions` is not offered.
+- **`frontend-web`** — a message appended to the open conversation appears in it without a reload.
+- **`frontend-telegram`** — a message appended to a chat's session is delivered to that chat, so a
+  follow-up asked there has it as context. `telegram_send` is documented as the low-level direct send it
+  is: it records nothing in any conversation.
+- **`frontend-telegram`** — a chat keeps one session id for good. Archiving its conversation used to make
+  the next message start a new session under a new id, stranding anything holding the old one (a
+  background job reporting to it appended into the archive, which the chat never shows); now the history
+  is moved to a new archived session, linked both ways as a split is, and the chat's session is emptied in
+  place, by the session's runner, after any turn holding it. A message appended to an archived chat session
+  reactivates it and stays in it, so the user's reply runs with it in context. A `pinned` chat session is no longer mistaken for an archived one. New
+  `telegram_session` finds a chat's session id by the name or @username of the person in it, without
+  moving its history. Machine-authored turn content (a
+  trigger's injected context, a followup's prompt) is no longer sent to the chat.
+- **`sessions`** — `session_action append` uses the turn's own appender when its runner supplies one, and
+  then never defaults to the turn's own (throwaway) session.
+- **`skills_compiler`** — a compile's demonstration runs on an ephemeral run instead of a scratch session in
+  the user's store, so it is no longer listed while it runs or left behind if the process dies mid-compile.
+  Two log lines report where it ran and confirm it never reached the persisted store. Cancelling a compile
+  now stops its demonstration, which carried on calling tools after the compile was abandoned.
 
 ## 0.4.17
 

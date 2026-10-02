@@ -5,7 +5,7 @@ import type {
   PermissionGate,
 } from './types.js';
 import type { MatbotPlugin } from './plugin.js';
-import type { ToolPresenter } from '@matatbread/matbot-plugin-api';
+import type { ToolPresenter, SessionAppender } from '@matatbread/matbot-plugin-api';
 import { recordSpan, recordUsage, withUsageSite, scopeIterable } from '@matatbread/matbot-plugin-api/host';
 import { HookRegistry } from './hooks.js';
 import { appendMessage, createMessage } from './session.js';
@@ -115,6 +115,9 @@ export interface RunSessionOpts {
   workdir?:       string;
   configPath?:    string;
   files?:         FileStore;
+  /** Handed to tools as `ToolContext.appender`: set only by a runner whose sessions the machine's own
+   *  appender cannot reach (an ephemeral one). */
+  appender?:      SessionAppender;
   /** Where user-attached session media lives. Resolved once per turn into the outgoing copy, newest-first
    *  and inside {@link MEDIA_RESIDENCY_BYTES}; absent ⇒ every `file-ref` stays a ref and the converters
    *  degrade it. Never read for anything else — the runner does not otherwise touch a file. */
@@ -133,6 +136,13 @@ export interface RunSessionOpts {
    * re-run of the originating user turn. Empty/absent for an ordinary turn.
    */
   injectedEphemeral?: MessageContent[];
+  /**
+   * Consulted at the top of every round — the one point in a turn where the history is protocol-whole:
+   * every `tool_use` so far is answered, and no provider call is in flight. Returns the session with
+   * messages from outside the turn placed into it (the pump's parallel replies), and the traceIds to
+   * announce as `merged`; `undefined` ⇒ nothing arrived. Where they go is the caller's decision.
+   */
+  interject?:     (session: Session) => { session: Session; merged: string[] } | undefined;
   loadPlugin:     (specifier: string, prompt?: PromptFn, refresh?: boolean) => Promise<MatbotPlugin>;
   unloadPlugin:   (specifier: string) => Promise<boolean>;
 }
@@ -295,6 +305,12 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
       return;
     }
     round += 1;
+
+    const interjected = opts.interject?.(session);
+    if (interjected !== undefined) {
+      session = interjected.session;
+      for (const from of interjected.merged) yield { type: 'merged', traceId: from, into: traceId };
+    }
 
     // A raced screen verdict that already fired (settled during setup, or while a previous tool round
     // ran): fold its correction in before generating, so this call is informed directly rather than
@@ -602,6 +618,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
         ...(opts.workdir     !== undefined ? { workdir:     opts.workdir     } : {}),
         ...(opts.configPath  !== undefined ? { configPath:  opts.configPath  } : {}),
         ...(opts.files       !== undefined ? { files:       opts.files       } : {}),
+        ...(opts.appender    !== undefined ? { appender:    opts.appender    } : {}),
       };
 
       // Iterated by hand rather than with `for await`, so the read can be bounded once the turn is

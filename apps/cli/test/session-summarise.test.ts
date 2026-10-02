@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { runAs, installPrincipalCarrier, machineBusy } from '@matatbread/matbot-core';
+import { runAs, installPrincipalCarrier } from '@matatbread/matbot-core';
 import type { MatbotMachine, Message, Session, Store, Tool, ToolContext } from '@matatbread/matbot-plugin-api';
 import { createAlsPrincipalCarrier } from '../src/principal-als.ts';
 import { plugin as editSessionPlugin } from '../../../plugins/edit-session/src/index.ts';
+import { heldRunner } from './fixtures/held-runner.ts';
 
 // `session_edit`'s `summarise` replaces history with an LLM-written hand-off pair. Two properties carry
 // the whole design, and neither is visible from the happy path alone:
@@ -64,6 +65,7 @@ async function harness(reply: string | string[]) {
   const tools = new Map<string, Tool>();
   const services = {
     sessions: store,
+    isSubAgent: () => false,
     tools:    { register: (t: Tool) => { tools.set(t.name, t); } },
     async singleTurn(req: { prompt: string }) {
       prompts.push(req.prompt);
@@ -177,10 +179,13 @@ test('summarising the running turn\'s own session is queued, not applied', async
   } as unknown as Store<Session>;
 
   const tools = new Map<string, Tool>();
+  const { run, endTurn } = heldRunner('target');
   const services = {
     sessions: store,
+    isSubAgent: () => false,
     tools:    { register: (t: Tool) => { tools.set(t.name, t); } },
     singleTurn: async () => ({ text: HANDOFF }),
+    run,
   } as unknown as MatbotMachine;
   await editSessionPlugin.setup!(services);
 
@@ -190,28 +195,85 @@ test('summarising the running turn\'s own session is queued, not applied', async
   } as unknown as ToolContext;
 
   const events: Array<{ type: string; value?: unknown; message?: string }> = [];
-  // Held, because that is what makes the deferral observable: the pump holds the machine across its
-  // whole queue, so the quiescent edge the edit is queued on cannot arrive until the turn has ended.
-  // Without the hold the edge lands on the next microtask and the deferral is untestable.
-  await machineBusy(async () => {
-    await runAs(PRINCIPAL, async () => {
-      for await (const ev of tools.get('session_edit')!.executor.execute(
-        { action: 'summarize', sessionId: 'target', msgIndex: 4 }, ctx)) events.push(ev as never);
-    });
-
-    // Nothing written yet: the turn owns that document until it commits, and a write landing here would
-    // be overwritten seconds later by the runner's own write-back — silently, since that is not a CAS.
-    assert.deepEqual(writes, []);
+  await runAs(PRINCIPAL, async () => {
+    for await (const ev of tools.get('session_edit')!.executor.execute(
+      { action: 'summarize', sessionId: 'target', msgIndex: 4 }, ctx)) events.push(ev as never);
   });
+  // Nothing written yet: the turn owns that document until it commits, and a write landing here would
+  // be overwritten seconds later by the runner's own write-back — silently, since that is not a CAS.
+  assert.deepEqual(writes, []);
+  await endTurn();
 
   const value = events.find(e => e.type === 'result')?.value as { deferred: boolean; message: string };
   assert.equal(value.deferred, true, JSON.stringify(events));
   assert.match(value.message, /queued/);
   // The American spelling reached the same action: being told "unknown action" for it teaches nothing.
 
-  // …and it lands as the hold releases — the edge suspends on the flusher, so no extra wait is needed.
+  // …and it lands once the turn has ended.
   assert.deepEqual(writes, ['target']);
   assert.deepEqual(docs.get('target')!.messages.map(m => m.role), ['marker', 'user', 'assistant', 'user', 'assistant']);
+});
+
+// The range is re-found, once the turn has ended, by the last message it covers. Positionally, a parallel pair placed
+// ahead of a running turn inside the range shifted it two messages short, leaving two messages the summary
+// already describes in place beside it. One placed at the range's own boundary must not be swept in.
+async function summariseAround(insertAt: number): Promise<string[]> {
+  const docs   = new Map<string, Session>([['target', seed()]]);
+  const writes: string[] = [];
+  const store = {
+    async get(id: string) { return docs.get(id) ?? null; },
+    async set(id: string, v: Session) { writes.push(id); docs.set(id, v); },
+    async cas(id: string, expected: string, next: Session) {
+      const cur = docs.get(id);
+      if (!cur || cur.version !== expected) return { ok: false as const, doc: cur ?? null };
+      writes.push(id); docs.set(id, next);
+      return { ok: true as const, doc: next };
+    },
+    async delete() { return false; },
+    async query() { return { items: [...docs.values()] }; },
+  } as unknown as Store<Session>;
+
+  const tools = new Map<string, Tool>();
+  const { run, endTurn } = heldRunner('target');
+  const services = {
+    sessions: store,
+    isSubAgent: () => false,
+    tools:    { register: (t: Tool) => { tools.set(t.name, t); } },
+    singleTurn: async () => ({ text: HANDOFF }),
+    run,
+  } as unknown as MatbotMachine;
+  await editSessionPlugin.setup!(services);
+
+  const ctx = {
+    callId: 'c1', signal: new AbortController().signal, provider: 'test-provider',
+    session: seed(),                                   // the tool's own session IS the target
+  } as unknown as ToolContext;
+
+  const events: Array<{ type: string; value?: unknown; message?: string }> = [];
+  await runAs(PRINCIPAL, async () => {
+    for await (const ev of tools.get('session_edit')!.executor.execute(
+      { action: 'summarize', sessionId: 'target', msgIndex: 4 }, ctx)) events.push(ev as never);
+  });
+  // The turn commits with a parallel pair placed into it.
+  await endTurn(() => {
+    const cur = docs.get('target')!;
+    docs.set('target', { ...cur, version: crypto.randomUUID(), messages: [
+      ...cur.messages.slice(0, insertAt), msg('q', 'user', 'quick question'), msg('a', 'assistant', 'quick answer'), ...cur.messages.slice(insertAt),
+    ] });
+  });
+
+  assert.equal((events.find(e => e.type === 'result')?.value as { deferred: boolean }).deferred, true, JSON.stringify(events));
+  const after = docs.get('target')!.messages;
+  assert.deepEqual(after.slice(0, 3).map(m => m.role), ['marker', 'user', 'assistant'], 'replaced by the summary');
+  return after.slice(3).map(m => m.id);
+}
+
+test('a queued summarise covers what it was written from, though a parallel pair was placed inside it', async () => {
+  assert.deepEqual(await summariseAround(2), ['m5', 'm6'], 'm1–m4 summarised, with the pair placed among them');
+});
+
+test('a queued summarise leaves a parallel pair placed at its boundary alone', async () => {
+  assert.deepEqual(await summariseAround(4), ['q', 'a', 'm5', 'm6']);
 });
 
 test('no msgIndex means the whole session — and in the running one, everything before this turn', async () => {
@@ -236,10 +298,13 @@ test('no msgIndex means the whole session — and in the running one, everything
   } as unknown as Store<Session>;
 
   const tools = new Map<string, Tool>();
+  const { run, endTurn } = heldRunner('running');
   const services = {
     sessions: store,
+    isSubAgent: () => false,
     tools:    { register: (t: Tool) => { tools.set(t.name, t); } },
     async singleTurn(req: { prompt: string }) { seen.push(req.prompt); return { text: HANDOFF }; },
+    run,
   } as unknown as MatbotMachine;
   await editSessionPlugin.setup!(services);
   const tool = tools.get('session_edit')!;
@@ -269,11 +334,10 @@ test('no msgIndex means the whole session — and in the running one, everything
 
   seen.length = 0;
   const ev2: Array<{ type: string; value?: unknown }> = [];
-  await machineBusy(async () => {
-    await runAs(PRINCIPAL, async () => {
-      for await (const ev of tool.executor.execute({ action: 'summarise', sessionId: 'running' }, ctx)) ev2.push(ev as never);
-    });
+  await runAs(PRINCIPAL, async () => {
+    for await (const ev of tool.executor.execute({ action: 'summarise', sessionId: 'running' }, ctx)) ev2.push(ev as never);
   });
+  await endTurn();
 
   assert.equal((ev2.find(e => e.type === 'result')?.value as { deferred?: boolean }).deferred, true);
   // The request and the turn's tool rounds are NOT in what the summariser was shown …

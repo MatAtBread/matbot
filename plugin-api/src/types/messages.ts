@@ -181,13 +181,13 @@ export interface Session {
   // Legacy: persisted sessions may still carry `ownerPrincipalId` / `actorPrincipalId` / `persona`, and
   // `contexts` (a required-but-never-read `string[]`, dropped at 0.4.0 — system context is contributed by
   // SystemContextContributor, not carried on the session). Never read — ownership-at-rest is structural
-  // (the storage partition), resolved via the backend, not a field. Left undeclared; old data keeps them
-  // harmlessly as excess properties.
-  title?:                string;
-  status:                SessionStatus;
-  messages:              Message[];
-  parentSessionId?:      string;
-  branchPointMessageId?: string;
-  createdAt:             ISODate;
-  updatedAt:             ISODate;
+  // (the storage partition), resolved via the backend, not a field. Likewise `parentSessionId` /
+  // `branchPointMessageId` (dropped at 0.4.18): a fork or split records its relation as a marker in the
+  // session (`peerSessionId` + `targetMsg`), which is what a frontend reads. Left undeclared; old data
+  // keeps them harmlessly as excess properties.
+  title?:    string;
+  status:    SessionStatus;
+  messages:  Message[];
+  createdAt: ISODate;
+  updatedAt: ISODate;
 }

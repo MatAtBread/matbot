@@ -3,6 +3,7 @@ import type {
   ProviderAdapter, ProviderConfig, ProviderRegistry, Tool, ToolRegistry, FrontendInfo,
   Store, Session, SystemContextRegistry, KnowledgeIndex, PromptFn, SessionRunner, Usage, HookRegistrar,
   TypeScriptStripper, FunctionRunner, ToolTypeIndex, ToolPresenter, SteeringPolicy, UserContent, PermissionGate,
+  SessionAppender, EphemeralRun,
 } from './types.js';
 import type { Notifications, Notifier } from './notify.js';
 
@@ -193,6 +194,11 @@ export interface MatbotServices {
    *  one; absent ⇒ such code runs unbounded, as it must where synchronous code cannot be interrupted.
    *  See {@link FunctionRunner}. */
   readonly FunctionRunner?: FunctionRunner | undefined;
+  /** Appends messages to a session without running a turn, once no turn holds it. The host seeds
+   *  one wherever it holds the session store; a background job registers one that forwards to its parent.
+   *  Absent ⇒ this process has no safe way to append (a job spawned without that channel), and a caller
+   *  refuses rather than writing the store itself. See {@link SessionAppender}. */
+  readonly SessionAppender?: SessionAppender | undefined;
 }
 
 /** The assembled machine: registry services wired to the fixed runtime — what `setup()` receives. */
@@ -294,6 +300,22 @@ export interface MatbotRuntime {
   /** Per-session turn serialiser. Frontends submit and observe through this rather than calling
    *  runSession directly, so concurrent submits queue instead of clobbering the session. */
   readonly run?:            SessionRunner | undefined;
+  /**
+   * A private runner over its own in-memory session store, for a turn that should leave no trace: a
+   * background job's run, a demonstration whose transcript is analysed and thrown away. Nothing it holds
+   * is persisted or announced, and nothing outlives the returned object — so create the session in
+   * `sessions` before `run.open`, and drop both when done.
+   *
+   * Tools on this runner still reach the machine's real stores through what they captured at setup:
+   * `session_action list` sees the user's conversations, and `session_edit` of the ephemeral session
+   * refuses, finding nothing. `appender` is how such a turn reports somewhere real — it arrives as
+   * `ToolContext.appender`, and its `defaultSessionId` is where an append naming no session goes.
+   *
+   * Its turns hold the machine as any turn does. Its tools use the live machine, so a storage swap or an
+   * unload waits until the run ends. Its appends, and its edits of other sessions, do not: each waits only
+   * for a turn of the session it writes (`SessionRunner.write`).
+   */
+  ephemeral?(opts?: { appender?: SessionAppender }): EphemeralRun;
   readonly files?:          FileStore;
   readonly hooks:           HookRegistrar;
   readonly tools:           ToolRegistry;

@@ -246,12 +246,18 @@ export function generateValidator(
       return `${OBJ_GUARD}  switch (${access('v', disc.name)}) {\n${cases}\n`
            + `    default: E(p + ${lit(propPath(disc.name))}, 'expected one of ${disc.vals.map(lit).join(', ')}', ${access('v', disc.name)}, e); return false;\n  }`;
     }
-    // No discriminant: try each arm against a scratch buffer so a failed arm's errors don't leak.
+    // No discriminant: try each arm against its own scratch buffer so a failed arm's errors don't leak.
+    // If none matches, say why EACH was refused. Nothing says which arm the caller meant, and a bare
+    // "no union member matched" leaves them to guess: `background` with `name` on its run-now form read
+    // as nothing at all, when the arms said exactly "drop .name, or add .at / .interval".
     const attempts = arms.map((a, i) => {
       const c = check(a, 'v', 'p', `${where}|${i}`);
-      return `  if (${c.reports ? c.expr.replace(/, e\)$/, ', scratch)') : c.expr}) return true;`;
+      return `  const s${i} = [];\n  if (${c.reports ? c.expr.replace(/, e\)$/, `, s${i})`) : c.expr}) return true;`;
     }).join('\n');
-    return `${excessAcrossArms(arms)}  const scratch = [];\n${attempts}\n  E(p, 'no union member matched', v, e);\n  return false;`;
+    const why = `[${arms.map((_, i) => `s${i}`).join(', ')}].map((s, i) => '(' + (i + 1) + ') ' + `
+              + `(s.length ? s.slice(0, 2).map(x => x.path + ': ' + x.message).join(', ') : 'wrong type')).join('; ')`;
+    return `${excessAcrossArms(arms)}${attempts}\n`
+         + `  E(p, 'matches none of the ${arms.length} accepted forms: ' + ${why}, v, e);\n  return false;`;
   }
 
   // A key no arm declares fails EVERY arm, so it can be reported by name before the arms are tried —

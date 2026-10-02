@@ -16,9 +16,10 @@
  * `compactBefore` in ./compaction.ts, shared with the `session_edit` `compact` action. This file owns
  * only the policy: which sessions, and where each one's cutoff falls.
  *
- * The current session (ctx.session.id) is deferred to the quiescent edge rather than compacted in
- * place: the running turn owns that document until it commits. Idempotent: a session whose content has
- * already been stripped yields 0 messagesStripped and no error.
+ * A session a turn is running in — the one this is called from, or any other — is compacted by its runner
+ * once that turn ends rather than in place: the turn owns that document until it commits, and would write
+ * over a compaction made under it. Idempotent: a session whose content has already been stripped yields 0
+ * messagesStripped and no error.
  *
  * A sweep spans a whole store, so it meets sessions it cannot write — one shared in read-only from
  * another profile. That is a condition, not a fault: it is reported per session under `skipped` and the
@@ -28,11 +29,10 @@
  * Invoke via background tool or call directly as a tool.
  */
 
-import type { Tool, ToolExecutor, ToolContract, ToolContext, ToolResultOf, Session, Store } from '@matatbread/matbot-plugin-api';
-import { lastActivityAt, currentPrincipal, runAs, isReadOnlyError } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolExecutor, ToolContract, ToolContext, ToolResultOf, Session, Store, SessionRunner } from '@matatbread/matbot-plugin-api';
+import { lastActivityAt, isReadOnlyError } from '@matatbread/matbot-plugin-api';
 
 import { compactBefore } from './compaction.js'
-import { defer } from './defer.js'
 
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
@@ -45,9 +45,9 @@ declare module '@matatbread/matbot-plugin-api' {
          *  `denied` (never going to work, it isn't yours) vs `unavailable` (try later). `reason` is the
          *  human-readable detail; branch on `kind`, never on the prose. */
         skipped:   Array<{ sessionId: string; title: string; kind: SkipKind; reason: string }>;
-        /** The calling turn's own session, whose compaction was queued for after this turn commits.
-         *  No tier and no count: both are decided when it is applied, and reporting them would mean
-         *  waiting for an edge this turn has to end to reach. */
+        /** Sessions a turn was running in — the calling turn's own among them — whose compaction was
+         *  queued for after that turn commits. No tier and no count: both are decided when it is applied,
+         *  and reporting them would mean waiting for a turn that may be this one. */
         deferred:  Array<{ sessionId: string; title: string }>;
       },
       { inactiveDays?: number; activeMessages?: number }
@@ -79,9 +79,9 @@ type CompactOutcome =
   | { done: false; kind: SkipKind; reason: string };
 
 // The whole per-session policy — tier decision included — behind one re-read, so it is equally
-// correct run inline during the scan or later from the quiescent edge (the current session's deferred
+// correct run during the scan or later, once a turn holding the session has ended (a deferred
 // compaction). The deferred path MUST decide against the document as it will then be, not as the scan
-// saw it: by the edge the session has grown by the turn that called this tool.
+// saw it: by then the session has grown by that turn.
 async function compactOne(
   store:      Store<Session>,
   sessionId:  string,
@@ -117,8 +117,8 @@ async function compactOne(
     //   that cannot be taken here. A swap is deferred to the quiescent edge, and under the pump (a tool
     //   call inside a turn) the machine is held across the whole queue, so the edge is unreachable until
     //   this turn ends: the retry would re-read the same medium and lose again, and sleeping first only
-    //   holds open the very turn the edge is waiting for. The retry belongs at the edge, where the swap
-    //   has actually landed — which is a layer above this one, not a loop inside it.
+    //   holds open the very turn the edge is waiting for. A deferred compaction, made once its turn has
+    //   ended, does read again — a layer above this one, not a loop inside it.
     if (!res.ok) return { done: false, kind: 'unavailable',
       reason: 'the session changed while it was being written (a concurrent edit, or the storage backend was swapped) — a later run will pick it up' };
     return { done: true, tier, stripped };
@@ -134,13 +134,55 @@ async function compactOne(
   }
 }
 
+// Compact one session through its runner (`SessionRunner.write`), which makes the write once no turn holds
+// the session. When none does, that is now, and the outcome is reported — after ONE attempt, as above.
+//
+// When a turn does (the session this tool is called from is one), the compaction is `'deferred'`, not
+// skipped. Compacting it in place would be undone by the turn's own write-back seconds later — but it may
+// be the session whose history is being re-sent every round, which makes "never touch it" the wrong answer.
+// Made once the turn has committed, the policy re-decides against what it committed, and a lost
+// compare-and-swap IS worth reading again then; nobody is left to report a skip to, so it is logged.
+async function compactThrough(
+  run:        SessionRunner | undefined,
+  store:      Store<Session>,
+  sessionId:  string,
+  opts:       Required<CompactSessionsParams>,
+  inactiveMs: number,
+): Promise<CompactOutcome | 'deferred'> {
+  if (run === undefined) return compactOne(store, sessionId, opts, inactiveMs);
+  let deferred = false;
+  let outcome: CompactOutcome | undefined;
+  let failure: { error: unknown } | undefined;
+  const write = run.write(sessionId, async () => {
+    try {
+      outcome = await compactOne(store, sessionId, opts, inactiveMs);
+    } catch (e) {
+      // A real fault aborts the sweep (see the header) — which only a sweep still running can do.
+      if (deferred) throw e;
+      failure = { error: e };
+      return true;
+    }
+    if (!deferred || outcome.done) return true;
+    if (outcome.kind === 'unavailable') return false;
+    console.warn(`[compact_sessions] deferred compaction of session "${sessionId}" skipped: ${outcome.reason}`);
+    return true;
+  }, `[compact_sessions] deferred compaction of session "${sessionId}" lost to repeated concurrent writes.`);
+  // Read by the attempt, which never runs before `write` returns.
+  deferred = write.deferred;
+  if (deferred) return 'deferred';
+  await write.done;
+  if (failure !== undefined) throw failure.error;
+  return outcome ?? { done: false, kind: 'unavailable', reason: 'the write failed (see the log) — a later run will pick it up' };
+}
+
 // ── tool factory ──────────────────────────────────────────────────────────────
 
 const compactSessionDefaults: Required<CompactSessionsParams> = { activeMessages: 10, inactiveDays: 28 };
-export function makeCompactSessionsTool(store: Store<Session>): Tool<ToolResultOf<'compact_sessions'>> {
+// `run` is the runner whose turns hold the sessions in `store` (`services.run`), and so their one writer.
+// Absent, there are no turns to wait for, and each session is compacted in place.
+export function makeCompactSessionsTool(store: Store<Session>, run?: () => SessionRunner | undefined): Tool<ToolResultOf<'compact_sessions'>> {
   const executor: ToolExecutor<ToolResultOf<'compact_sessions'>> = {
-    async *execute(input: CompactSessionsParams | null | undefined, ctx: ToolContext) {
-      const currentSessionId = ctx.session.id;
+    async *execute(input: CompactSessionsParams | null | undefined, _ctx: ToolContext) {
       const compacted: Array<{ sessionId: string; title: string; tier: 'full' | 'partial'; messagesStripped: number }> = [];
       const skipped: Array<{ sessionId: string; title: string; kind: SkipKind; reason: string }> = [];
       const deferred: Array<{ sessionId: string; title: string }> = [];
@@ -158,11 +200,6 @@ export function makeCompactSessionsTool(store: Store<Session>): Tool<ToolResultO
 
       const inactiveMs = input.inactiveDays! * 24 * 60 * 60 * 1000;
       const opts: Required<CompactSessionsParams> = { inactiveDays: input.inactiveDays!, activeMessages: input.activeMessages! };
-      // The edge runs outside every principal scope, so the deferred compaction below has to carry
-      // this one in: its store reads and writes are the same ownership-checked operations the inline
-      // path performs.
-      const principal = currentPrincipal();
-
       do {
         const page = await store.query({ cursor, limit: 100 });
         cursor = page.cursor;
@@ -171,22 +208,8 @@ export function makeCompactSessionsTool(store: Store<Session>): Tool<ToolResultO
         for (const session of page.items) {
           totalExamined++;
 
-          // The session this tool is being called from is deferred, not skipped. The turn owns its
-          // document until it commits, so compacting it inline would be undone by the turn's own
-          // write-back seconds later — but it is also the session whose history is being re-sent every
-          // round, which makes "never touch it" the wrong answer. Applied at the quiescent edge, by
-          // which point the turn has committed and the policy re-decides against what it committed.
-          if (session.id === currentSessionId) {
-            deferred.push({ sessionId: session.id, title: session.title ?? '' });
-            defer(async () => {
-              const outcome = await runAs(principal, () => compactOne(store, session.id, opts, inactiveMs));
-              // Nothing left to report to: the caller's turn ended to reach this edge.
-              if (!outcome.done) console.warn(`[compact_sessions] deferred compaction of the calling session skipped: ${outcome.reason}`);
-            });
-            continue;
-          }
-
-          const outcome = await compactOne(store, session.id, opts, inactiveMs);
+          const outcome = await compactThrough(run?.(), store, session.id, opts, inactiveMs);
+          if (outcome === 'deferred') { deferred.push({ sessionId: session.id, title: session.title ?? '' }); continue; }
           if (outcome.done) compacted.push({ sessionId: session.id, title: session.title ?? '', tier: outcome.tier, messagesStripped: outcome.stripped });
           else              skipped.push({ sessionId: session.id, title: session.title ?? '', kind: outcome.kind, reason: outcome.reason });
         }
@@ -210,8 +233,9 @@ Two tiers:
   Tier 2 — Partial compact: active sessions with >20 messages, keeping the last 10 intact.
     Strips tool calls / tool results / thinking from all earlier messages.
 A message left with no content is removed rather than kept empty, so message positions shift.
-The session you are called from is compacted too, but only once the current turn commits — it is
-reported under \`deferred\`, without a tier or a count, and this turn goes on seeing its full history.
+A session a turn is running in — the one you are called from among them — is compacted too, but only once
+that turn commits. It is reported under \`deferred\`, without a tier or a count, and this turn goes on
+seeing its full history.
 Idempotent — safe to run on a schedule.
 Returns a summary of what was compacted, deferred and skipped. Each \`skipped\` entry carries a \`kind\`
 saying what to do about it — do not try to read this out of the \`reason\` prose:

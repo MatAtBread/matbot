@@ -1,8 +1,8 @@
 import type {
-  MatbotPluginSpec, MatbotMachine, Principal, Session, FileHandle,
+  MatbotPluginSpec, MatbotMachine, Principal, Session, FileHandle, Message, Marker, SessionRunner, SessionWrite,
   ToolExecutor, ToolContract, NoParams, ToolResultOf, UserContent, MimeType,
 } from '@matatbread/matbot-plugin-api';
-import { PLUGIN_API_VERSION, isMediaRejectedError, encodeBase64 } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, isMediaRejectedError, encodeBase64, SessionAppendKind, lastActivityAt } from '@matatbread/matbot-plugin-api';
 
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
@@ -14,6 +14,8 @@ declare module '@matatbread/matbot-plugin-api' {
     // `sent` counts the chats the notification reached; `attached` the file uploads that succeeded
     // across them (files × chats), so a partial delivery is visible rather than reported as success.
     telegram_send:      ToolContract<{ sent: number; attached: number }, { text: string; chatId?: number; files?: string[] }>;
+    // `sessionId` is null where this process cannot see the chat's conversation, or it has none yet.
+    telegram_session:   ToolContract<{ chats: TelegramChatSession[] }, { user?: string }>;
   }
 }
 import {
@@ -25,6 +27,16 @@ import { createPrompter } from './prompt.js';
 import type { Prompter } from './prompt.js';
 
 const PLUGIN_NAME = 'frontend-telegram';
+
+export interface TelegramChatSession {
+  chatId:    number;
+  name?:     string;
+  username?: string;
+  sessionId: string | null;
+  title?:    string;
+}
+
+interface ChatUser { name?: string; username?: string }
 
 /**
  * Turn a Telegram message into the submission content. This is the case that proves the by-value
@@ -126,8 +138,144 @@ let activeProviderName: string;
 let servicesRef:   MatbotMachine | undefined;
 let botTokenRef:   string | undefined;
 const knownChats = new Set<number>(); // populated as chats interact with the bot
+// Session id → the chat it is mirrored to: the reverse of each chat's `chat:<id>` setting, so a message
+// appended to a chat's session from elsewhere can be delivered to that chat.
+const sessionChats = new Map<string, number>();
+// Who last spoke in each chat, persisted under `user:<chatId>`, so a chat can be found by the person in it.
+const chatUsers = new Map<number, ChatUser>();
+// Messages appended to an archived chat session, by session id: kept in the live session when it is next
+// revived (see `revive`), because they arrived for the chat after it was archived.
+const keepOnRevive = new Map<string, Set<string>>();
 let openDoor = 0;
 let prompterRef:   Prompter | undefined;
+
+// The web UI draws edit-session's split markers as links between the two threads. An archived chat is
+// moved out exactly as `session_edit split` would move it, so it is written in that plugin's shape and
+// under its creator — duplicated rather than imported because edit-session need not be loaded.
+const SPLIT_MARKER_CREATOR = '@matatbread/matbot-edit-session';
+
+function linkMarker(relation: 'split-from' | 'continued-in', peerSessionId: string, targetMsg: number): Message {
+  const marker: Marker = { type: 'marker', creator: SPLIT_MARKER_CREATOR, data: { relation, peerSessionId, targetMsg } };
+  return { id: crypto.randomUUID(), role: 'marker', content: [marker], createdAt: new Date().toISOString(), traceId: crypto.randomUUID() };
+}
+
+/**
+ * The chat's conversation, under the id it has always had.
+ *
+ * A chat maps to ONE session id for good, because things outside the chat hold that id — a background
+ * job reporting to it, a schedule — and archiving in the web UI (to drop the context) used to strand
+ * them: the next message started a fresh session under a new id, and every later append went into the
+ * archived one, which the chat never shows. So an archived chat session is emptied in place instead,
+ * its history moved to a new archived session linked both ways, as a split at the end would.
+ *
+ * The move is the session runner's to make (`reviveThrough`), after any turn holding the session, whose
+ * write-back would restore what was moved out, and before the turn this message starts. Never from a
+ * background job, which must not write its parent's sessions; there the id is only read. Nor for a
+ * `lookup`, which only says which session it is: moving a chat's history is the chat's business, done
+ * when it next speaks.
+ */
+async function chatSession(chatId: number, mode: 'speak' | 'lookup'): Promise<Session | null> {
+  const services = servicesRef;
+  const sessions = services?.sessions;
+  if (!services || !sessions) return null;
+  const settings = services.settings();
+  const key      = `chat:${chatId}`;
+
+  const storedId = await settings.get<string>(key).catch(() => undefined);
+  let session    = storedId !== undefined ? await sessions.get(storedId) : null;
+  if (session) sessionChats.set(session.id, chatId);
+  if (services.isSubAgent() || mode === 'lookup') return session;
+
+  if (session?.status === 'archived' && services.run !== undefined) {
+    const write = reviveThrough(services.run, session.id);
+    // Made now, so the session returned is the revived one. Deferred, it is made before this message's
+    // turn all the same, which queues behind the turn it waits for.
+    if (!write.deferred) {
+      await write.done;
+      session = await sessions.get(session.id) ?? session;
+    }
+  }
+  if (!session) {
+    session = createSession({ title: `${chatUsers.get(chatId)?.name ?? 'Telegram'} on Telegram` });
+    await sessions.set(session.id, session);
+    await settings.set(key, session.id);
+  }
+  if (session) sessionChats.set(session.id, chatId);
+  return session;
+}
+
+// Revive a chat session through its runner, the one writer of a session (`SessionRunner.write`): after any
+// turn holding it, and re-read then, since by that time it may have been revived or unarchived already.
+function reviveThrough(run: SessionRunner, sessionId: string): SessionWrite {
+  return run.write(sessionId, async () => {
+    const current = await servicesRef?.sessions?.get(sessionId);
+    if (current?.status !== 'archived') return true;
+    return (await revive(current)) !== null;
+  }, `[frontend-telegram] reviving chat session "${sessionId}" lost to repeated concurrent writes.`);
+}
+
+/**
+ * Reactivate an archived chat session under its own id, moving its history out to a new archived session.
+ *
+ * Messages appended since it was archived (`keepOnRevive`) stay. They were sent to the chat after the
+ * context was dropped: a job's report the user has just read on the phone, and is about to reply to.
+ * Moved out with the rest, the reply would run with no sight of what it answers.
+ */
+async function revive(session: Session): Promise<Session | null> {
+  const sessions = servicesRef!.sessions!;
+  const keep     = keepOnRevive.get(session.id) ?? new Set<string>();
+  const moved    = session.messages.filter(m => !keep.has(m.id));
+  const kept     = session.messages.filter(m => keep.has(m.id));
+  let next: Session;
+  if (moved.length === 0) {
+    next = { ...session, status: 'active', version: crypto.randomUUID() };
+    const res = await sessions.cas(session.id, session.version, next);
+    if (!res.ok) return null;
+  } else {
+    const archiveId = crypto.randomUUID();
+    const forward   = linkMarker('continued-in', session.id, 0);
+    const archive: Session = {
+      ...session,
+      id:        archiveId,
+      version:   crypto.randomUUID(),
+      title:     `${session.title ?? 'Telegram'} (archived ${session.updatedAt.slice(0, 10)})`,
+      messages:  [...moved, forward],
+      createdAt: new Date().toISOString(),
+      updatedAt: forward.createdAt,
+    };
+    await sessions.set(archiveId, archive);
+    const emptied: Session = { ...session, status: 'active', messages: [linkMarker('split-from', archiveId, moved.length - 1), ...kept] };
+    next = { ...emptied, updatedAt: lastActivityAt(emptied), version: crypto.randomUUID() };
+    const res = await sessions.cas(session.id, session.version, next);
+    if (!res.ok) { await sessions.delete(archiveId); return null; }
+  }
+  keepOnRevive.delete(session.id);
+  return next;
+}
+
+/**
+ * The chat a session mirrors. Learned at boot, and whenever a chat speaks or is looked up; read again
+ * from settings on a miss, so a mapping the boot read did not get (a failed read, another process
+ * sharing this storage) is still found. One settings document read, and only for an unmapped session.
+ */
+async function chatOf(sessionId: string): Promise<number | undefined> {
+  const known = sessionChats.get(sessionId);
+  if (known !== undefined || !servicesRef) return known;
+  const entries = await servicesRef.settings().entries().catch(() => ({} as Record<string, unknown>));
+  for (const [key, value] of Object.entries(entries)) {
+    if (value !== sessionId || !key.startsWith('chat:')) continue;
+    const chatId = Number(key.slice('chat:'.length));
+    if (!knownChats.has(chatId)) continue;
+    sessionChats.set(sessionId, chatId);
+    return chatId;
+  }
+  return undefined;
+}
+
+function matchesUser(user: ChatUser | undefined, wanted: string): boolean {
+  const w = wanted.replace(/^@/, '').toLowerCase();
+  return user?.name?.toLowerCase() === w || user?.username?.toLowerCase() === w;
+}
 
 export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,
@@ -193,12 +341,12 @@ export const plugin: MatbotPluginSpec = {
     },
     {
       name:        'telegram_send',
-      description: 'Send an out-of-band notification to Telegram, outside of any session. The message is prepended with 🔔. Sends to all chats that have previously contacted the bot, or to a specific chat if chatId is given. Files named in `files` are uploaded after the text — an image inline, audio as a clip, anything else as a document.',
+      description: 'Send a bare message straight to Telegram — the low-level route. Nothing is recorded in any conversation, so a follow-up question in the chat has no context of it. Prefer `session_action action:append` (`telegram_session` finds the session ID) to tell the user something they may want to follow up on. The message is prepended with 🔔. Sends to all chats that have previously contacted the bot, or to a specific chat if chatId is given. Files named in `files` are uploaded after the text — an image inline, audio as a clip, anything else as a document.',
       inputSchema: {
         type: 'object',
         properties: {
           text:   { type: 'string',  description: 'Notification text' },
-          chatId: { type: 'integer', description: 'Target chat ID. Omit to broadcast to all known chats.' },
+          chatId: { type: 'integer', description: 'Target telegram chat ID. Omit to broadcast to all known chats.' },
           files:  {
             type:        'array',
             items:       { type: 'string' },
@@ -255,6 +403,45 @@ export const plugin: MatbotPluginSpec = {
         },
       } satisfies ToolExecutor<ToolResultOf<'telegram_send'>>,
     },
+    {
+      name:        'telegram_session',
+      description: 'Returns a stable session ID for a Telegram user: the session (conversation) their telegram chat mirrors, found by their first name or @username (omit `user` to list every chat). A message appended to that session with session_action is also delivered to the chat, so this is how to report to someone on Telegram from anywhere else. The ID does not change when the session is archived: its history moves out and the ID stays.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          user: { type: 'string', description: "The person's Telegram first name or @username." },
+        },
+      },
+      executor: {
+        async *execute(input: unknown) {
+          if (!servicesRef) { yield { type: 'error' as const, message: 'Telegram plugin not active' }; return; }
+          const { user } = input as { user?: string };
+          const ids = [...knownChats].filter(id => user === undefined || matchesUser(chatUsers.get(id), user));
+          if (ids.length === 0) {
+            const names = [...knownChats].map(id => chatUsers.get(id)?.name ?? chatUsers.get(id)?.username ?? String(id));
+            yield { type: 'error' as const, message: user === undefined
+              ? 'No Telegram chats are known yet.'
+              : `No Telegram chat with a user named "${user}". Known: ${names.join(', ') || '(none)'}.` };
+            return;
+          }
+          const chats: TelegramChatSession[] = [];
+          for (const chatId of ids) {
+            const who     = chatUsers.get(chatId);
+            // Only looked up: a chat's session is created by its first message, which names the sender, and
+            // its history is moved out of an archived one only when the chat next speaks.
+            const session = await chatSession(chatId, 'lookup');
+            chats.push({
+              chatId,
+              ...(who?.name     !== undefined ? { name: who.name }         : {}),
+              ...(who?.username !== undefined ? { username: who.username } : {}),
+              sessionId: session?.id ?? null,
+              ...(session?.title !== undefined ? { title: session.title } : {}),
+            });
+          }
+          yield { type: 'result' as const, value: { chats } };
+        },
+      } satisfies ToolExecutor<ToolResultOf<'telegram_session'>>,
+    },
   ],
 
   async setup(services: MatbotMachine) {
@@ -266,7 +453,7 @@ export const plugin: MatbotPluginSpec = {
       return;
     }
 
-    const sessions = services.sessions!;
+    const sessions = services.sessions;
     if (!sessions) throw new Error('frontend-telegram requires services.sessions');
     const run = services.run ?? (() => { throw new Error('frontend-telegram requires services.run'); })();
 
@@ -278,6 +465,11 @@ export const plugin: MatbotPluginSpec = {
     const settings = services.settings();
     for (const id of await settings.get<number[]>(SETTINGS_KEY_KNOWN) ?? []) {
       knownChats.add(id);
+      // Best-effort: a mapping this read misses is looked up again when a message is appended (`chatOf`).
+      const sessionId = await settings.get<string>(`chat:${id}`).catch(() => undefined);
+      if (sessionId !== undefined) sessionChats.set(sessionId, id);
+      const user = await settings.get<ChatUser>(`user:${id}`).catch(() => undefined);
+      if (user !== undefined) chatUsers.set(id, user);
     }
 
     // Restore a previously persisted provider, or fall back to the first configured one.
@@ -318,22 +510,19 @@ export const plugin: MatbotPluginSpec = {
       try {
         sendChatAction(botToken, chatId, 'typing').catch(() => {});
 
-        // Look up or create a persistent session for this chat. The runner appends + persists the
-        // user message when the turn starts, so we only ensure the session exists here.
-        const sessionKey = `chat:${chatId}`;
-        const storedId   = await settings.get<string>(sessionKey);
-        let session: Session | null = storedId !== undefined ? await sessions.get(storedId) : null;
-        // If the session was hidden/archived in the web UI, treat it as gone
-        // so a new session is created with the current naming convention
-        if (session?.status !== 'active') session = null;
-        if (!session) {
-          session = createSession();
-          // Name the session after the sender so it's identifiable in the web UI
-          const name = senderName || 'Telegram';
-          session.title = `${name} on Telegram`;
-          await sessions.set(session.id, session);
-          await settings.set(sessionKey, session.id);
+        const user: ChatUser = {
+          ...(senderName        !== undefined ? { name: senderName }            : {}),
+          ...(msg.from?.username !== undefined ? { username: msg.from.username } : {}),
+        };
+        const known = chatUsers.get(chatId);
+        if (known?.name !== user.name || known?.username !== user.username) {
+          chatUsers.set(chatId, user);
+          settings.set(`user:${chatId}`, user).catch(() => {});
         }
+
+        // The runner appends + persists the user message when the turn starts, so only ensure the
+        // session exists here.
+        const session = (await chatSession(chatId, 'speak'))!;
 
         // Keep the typing indicator alive; Telegram expires it after ~5 s. Not while a question waits
         // on the user — "typing…" over an unanswered question reads as "don't reply yet".
@@ -367,20 +556,14 @@ export const plugin: MatbotPluginSpec = {
           // Drain to session idle, not just our own turn's `done`: a `followup` resubmission spawned
           // by our turn runs as a *later* turn with its own traceId. We adopt the turns descended from
           // ours (rootTraceId lineage) and ignore any concurrent submission's turns. Each turn's
-          // assistant text is sent when it completes; a turn's machine-authored (robo) content is sent
-          // as its own bot message — Telegram can't echo a user turn, so robo content surfaces "from
-          // the LLM", which is what it is (matbot chose to continue the turn).
+          // assistant text is sent when it completes. A turn's machine-authored (robo) content — a
+          // trigger's fenced context, a followup's prompt — is not sent: it is matbot talking to the
+          // model, and on a phone it is noise around the answer it produces.
           const owned = new Set<string>([view.traceId!]);
           for await (const event of view.events) {
             if (event.type === 'idle') break;
             if (event.type === 'queued') {
-              if (owned.has(event.rootTraceId)) {
-                owned.add(event.traceId);
-                const roboText = event.content
-                  .filter((c): c is Extract<typeof c, { type: 'text' }> => c.type === 'text' && c.origin === 'robo')
-                  .map(c => c.text).join('\n').trim();
-                if (roboText) await sendMessage(botToken, chatId, `🤖 ${roboText}`);
-              }
+              if (owned.has(event.rootTraceId)) owned.add(event.traceId);
               continue;
             }
             if (!owned.has(event.traceId)) continue;
@@ -435,6 +618,36 @@ export const plugin: MatbotPluginSpec = {
       return;
     }
 
+    // A message appended to a chat's session outside any turn — a background job's report — is delivered
+    // to that chat, which mirrors its session. Without this the chat never shows it, and a follow-up asked
+    // there draws on context the user was never shown. Read back as whoever appended it: that principal
+    // just wrote the session, so it can read it.
+    //
+    // An append to an ARCHIVED chat session reactivates it, keeping what was appended (see `revive`). The
+    // user reads the message on the phone and replies, and the reply must run with it in context. Left
+    // archived, the reply's revive would move the message out with the rest of the history.
+    services.Notifier.consume(n => {
+      if (n.kind !== SessionAppendKind) return;
+      const deliver = async (): Promise<void> => {
+        const chatId = await chatOf(n.sessionId);
+        if (chatId === undefined) return;
+        const session = await sessions.get(n.sessionId);
+        for (const m of session?.messages ?? []) {
+          if (m.role !== 'assistant' || !n.messageIds.includes(m.id)) continue;
+          const text = m.content.filter((c): c is Extract<typeof c, { type: 'text' }> => c.type === 'text').map(c => c.text).join('\n').trim();
+          if (text) await sendMessage(botToken, chatId, `🤖 ${text}`);
+        }
+        if (session?.status !== 'archived') return;
+        const keep = keepOnRevive.get(session.id) ?? new Set<string>();
+        for (const id of n.messageIds) keep.add(id);
+        keepOnRevive.set(session.id, keep);
+        // After any turn holding it, which would write back over the move.
+        reviveThrough(run, session.id);
+      };
+      void (n.principal !== undefined ? runAs(n.principal, deliver) : deliver())
+        .catch((e: unknown) => console.warn(`[frontend-telegram] Could not deliver a message appended to session ${n.sessionId}: ${e}\n`));
+    }, ac.signal, n => n.kind === SessionAppendKind);
+
     // Long-poll loop — runs until teardown.
     void (async () => {
       let offset = 0;
@@ -479,5 +692,8 @@ export const plugin: MatbotPluginSpec = {
     servicesRef    = undefined;
     botTokenRef    = undefined;
     knownChats.clear();
+    sessionChats.clear();
+    chatUsers.clear();
+    keepOnRevive.clear();
   },
 };

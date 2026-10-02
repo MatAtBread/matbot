@@ -1,18 +1,16 @@
 import type {
-  MatbotPluginSpec, MatbotMachine, Principal, Tool, ToolContract, ToolContext, ToolResultOf, Session, Store, Message,
+  MatbotPluginSpec, MatbotMachine, Tool, ToolContract, ToolContext, ToolResultOf, Session, Store, Message, SessionRunner,
 } from '@matatbread/matbot-plugin-api';
-import { PLUGIN_API_VERSION, lastActivityAt, lastUserIndex, currentPrincipal, runAs } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, lastActivityAt, lastUserIndex } from '@matatbread/matbot-plugin-api';
 
 import { makeCompactSessionsTool } from './compact-sessions.js'
 import { compactBefore } from './compaction.js'
-import { defer } from './defer.js'
 import { markerMessage, now } from './marker.js'
 import { contentChars, expandSummarised, summariseMessages, summaryMessages, type HandoffSummary } from './summarise.js'
 
-/** An edit of the session the calling turn is running in: applied at the quiescent edge, after the
- *  turn writes its own document back. The tool cannot report its outcome — awaiting the edge from
- *  inside the turn that has to end to reach it is a deadlock — so the result says only that the work
- *  is queued. */
+/** An edit of a session a turn is running in (usually the calling one): made by the session's runner once
+ *  that turn has written its own document back. The tool cannot report its outcome — awaiting it from
+ *  inside the turn it is waiting for is a deadlock — so the result says only that the work is queued. */
 interface DeferredEdit { deferred: true; sessionId: string; message: string }
 
 declare module '@matatbread/matbot-plugin-api' {
@@ -57,6 +55,39 @@ function wholeSessionIndex(session: Session, isCurrentTurn: boolean): number {
   return userIdx >= 0 ? userIdx : session.messages.length;
 }
 
+/**
+ * Where an edit applies, named by a message rather than an index. By the time it is made, an index no
+ * longer means what it did. A turn does not only append: a parallel reply is placed AHEAD of the running
+ * turn's own messages, and shifts everything after it by two. Measured by a message, an edit lands where
+ * its caller pointed. A message that has gone by then (popped by a retract, cut by another edit) is a
+ * reason not to apply it at all, rather than to apply it at whatever now sits at the old index.
+ *
+ * Which neighbour of the boundary names it decides where something inserted AT the boundary falls, and
+ * the rule is that it stays out of the range the edit removes or rewrites. Nothing that came in after the
+ * caller looked is the caller's to delete or summarise. So a cut, which drops `[idx, end)`, names the
+ * first message it drops (`before`). Summarise and compact, which rewrite `[0, idx)`, name the last
+ * message they cover (`after`). So does split, which moves `[0, idx)` out, and the late arrival stays in
+ * the live session. Each falls back to the other neighbour at an end of the session.
+ */
+type Anchor = { before: string } | { after: string } | { start: true };
+
+function anchorAt(messages: readonly Message[], idx: number, side: 'before' | 'after'): Anchor {
+  const first = messages[idx];
+  const last  = messages[idx - 1];
+  if (side === 'before' && first !== undefined) return { before: first.id };
+  if (last !== undefined) return { after: last.id };
+  return first !== undefined ? { before: first.id } : { start: true };
+}
+
+const anchorSide = (action: IndexAction | 'summarise'): 'before' | 'after' => action === 'cut' ? 'before' : 'after';
+
+function anchoredIndex(session: Session, anchor: Anchor): number | null {
+  if ('start' in anchor) return 0;
+  const id = 'before' in anchor ? anchor.before : anchor.after;
+  const i = session.messages.findIndex(m => m.id === id);
+  return i < 0 ? null : 'before' in anchor ? i : i + 1;
+}
+
 // Resolve msgIndex (raw index into session.messages) to the actual index.
 // The frontend passes the original message index from the full messages array.
 function resolveIndex(session: Session, msgIndex: number): number | null {
@@ -86,13 +117,15 @@ interface SessionEditInput { action: IndexAction | 'summarise' | 'summarize'; se
  *  (a provider to summarise with), and the one whose work happens before the edit rather than in it. */
 type IndexAction = 'cut' | 'fork' | 'split' | 'compact';
 
+// `conflict` marks a lost compare-and-swap: handed to the runner (`writeEdit`) the edit reads again and
+// retries; anywhere else it is reported for the caller to retry.
 type EditOutcome =
   | { ok: true;  value: ToolResultOf<'session_edit'> }
-  | { ok: false; message: string };
+  | { ok: false; message: string; conflict?: true };
 
-// Reads the document itself, so it is equally correct called inline (the tool call) or later from the
-// quiescent edge (the deferred self-edit) — the deferred path must NOT close over a session read
-// before the turn committed, which is exactly the state the turn is about to overwrite.
+// Reads the document itself, so it is equally correct called at once or once a turn holding the session
+// has ended (the deferred self-edit) — the deferred path must NOT close over a session read before the
+// turn committed, which is exactly the state the turn is about to overwrite.
 async function applyEdit(store: Store<Session>, action: IndexAction | undefined, sessionId: string, msgIndex: number): Promise<EditOutcome> {
   const session = await store.get(sessionId);
   if (!session) return { ok: false, message: `Session "${sessionId}" not found.` };
@@ -104,7 +137,7 @@ async function applyEdit(store: Store<Session>, action: IndexAction | undefined,
       const trimmed: Session = { ...session, messages: session.messages.slice(0, idx) };
       const next: Session = bumpVersion({ ...trimmed, updatedAt: lastActivityAt(trimmed) });
       const res = await store.cas(sessionId, session.version, next);
-      if (!res.ok) return { ok: false, message: 'Concurrent modification — please retry.' };
+      if (!res.ok) return { ok: false, message: 'Concurrent modification — please retry.', conflict: true };
       return { ok: true, value: { sessionId, messagesRemaining: next.messages.length } };
     }
 
@@ -117,7 +150,6 @@ async function applyEdit(store: Store<Session>, action: IndexAction | undefined,
       const forked: Session = {
         ...bumpVersion(session),
         id:               crypto.randomUUID(),
-        parentSessionId:  sessionId,
         messages:         [...session.messages.slice(0, idx), forkMarker],
         createdAt:        now(),
         updatedAt:        forkMarker.createdAt,
@@ -144,7 +176,6 @@ async function applyEdit(store: Store<Session>, action: IndexAction | undefined,
       const newSession: Session = {
         ...bumpVersion(session),
         id:               newSessionId,
-        parentSessionId:  sessionId,
         messages:         [...prefixMsgs, continuedMarker],
         createdAt:        now(),
         updatedAt:        continuedMarker.createdAt,
@@ -165,7 +196,7 @@ async function applyEdit(store: Store<Session>, action: IndexAction | undefined,
       if (!res.ok) {
         // CAS failed — clean up the new session we just created
         await store.delete(newSession.id);
-        return { ok: false, message: 'Concurrent modification — please retry.' };
+        return { ok: false, message: 'Concurrent modification — please retry.', conflict: true };
       }
 
       return {
@@ -189,7 +220,7 @@ async function applyEdit(store: Store<Session>, action: IndexAction | undefined,
       const compacted: Session = { ...session, messages };
       const next: Session = bumpVersion({ ...compacted, updatedAt: lastActivityAt(compacted) });
       const res = await store.cas(sessionId, session.version, next);
-      if (!res.ok) return { ok: false, message: 'Concurrent modification — please retry.' };
+      if (!res.ok) return { ok: false, message: 'Concurrent modification — please retry.', conflict: true };
       return { ok: true, value: { sessionId, messagesStripped: stripped } };
     }
 
@@ -198,27 +229,55 @@ async function applyEdit(store: Store<Session>, action: IndexAction | undefined,
   }
 }
 
-async function applyDeferred(store: Store<Session>, principal: Principal, action: IndexAction, sessionId: string, msgIndex: number): Promise<void> {
-  // Restore the caller's identity: the edge runs outside every principal scope, and the store reads
-  // and writes below are the same ownership-checked operations the inline path performs.
-  await runAs(principal, async () => {
-    const outcome = await applyEdit(store, action, sessionId, msgIndex);
-    // Nothing left to report to: the caller's turn ended to reach this edge. A CAS conflict here means
-    // a writer got in between, and losing the edit is the honest outcome — it is not this plugin's job
-    // to fight for the document.
-    if (!outcome.ok) console.error(`[session_edit] deferred ${action} of session "${sessionId}" failed: ${outcome.message}`);
-  });
+// One attempt at an index edit, at the message the caller named (see `Anchor`), in the session as it is
+// when the edit is made. A lost compare-and-swap comes back as a `conflict`, to be read again and retried.
+function anchoredEdit(store: Store<Session>, action: IndexAction, sessionId: string, anchor: Anchor): () => Promise<EditOutcome> {
+  return async () => {
+    const session = await store.get(sessionId);
+    if (session === null) return { ok: false, message: `Session "${sessionId}" not found.` };
+    const idx = anchoredIndex(session, anchor);
+    if (idx === null) return { ok: false, message: 'the message it named is no longer in the session.' };
+    return applyEdit(store, action, sessionId, idx);
+  };
+}
+
+/**
+ * Hand an edit of `sessionId` to the runner that owns the session (`SessionRunner.write`), which makes it
+ * once no turn holds the session. `apply` makes one attempt against the session as it then is, and a
+ * `conflict` is read again and retried.
+ *
+ * When no turn holds the session the edit is made now and its outcome returned. When one does, the result
+ * is `'deferred'`: that turn may be the caller's own, which the edit is waiting for, so a failure is logged
+ * instead, there being nobody left to tell. `apply` is told which, for an edit whose rules differ.
+ */
+async function writeEdit(
+  run: SessionRunner | undefined, sessionId: string, what: string, apply: (deferred: boolean) => Promise<EditOutcome>,
+): Promise<EditOutcome | 'deferred'> {
+  if (run === undefined) return apply(false);
+  let deferred = false;
+  let outcome: EditOutcome = { ok: false, message: `The ${what} failed (see the log).` };
+  const write = run.write(sessionId, async () => {
+    outcome = await apply(deferred);
+    if (!outcome.ok && outcome.conflict === true) return false;
+    if (deferred && !outcome.ok) console.error(`[session_edit] deferred ${what} of session "${sessionId}" not applied: ${outcome.message}`);
+    return true;
+  }, `[session_edit] ${what} of session "${sessionId}" lost to repeated concurrent writes.`);
+  // Read by `apply`, which never runs before `write` returns.
+  deferred = write.deferred;
+  if (deferred) return 'deferred';
+  await write.done;
+  return outcome;
 }
 
 /**
  * Splice a prepared hand-off summary in place of `messages[0..msgIndex)`.
  *
- * Reads the document itself, like {@link applyEdit}, so it is equally correct inline or from the
- * quiescent edge — and it re-derives the originals it stashes from what it reads, rather than from the
- * copy the summary was written against. The running turn only ever APPENDS, so at the edge that prefix
- * is the same history; for any other session `expectVersion` is the version the summary was built from,
- * which turns a concurrent write during the (slow) LLM call into a reportable CAS failure instead of a
- * silent overwrite.
+ * Reads the document itself, like {@link applyEdit}, so it is equally correct at once or deferred — and
+ * it re-derives the originals it stashes from what it reads, rather than from the copy the summary was
+ * written against. Deferred, the range is re-found by its anchor (see `Anchor`), so it is the history the
+ * summary was written from, plus any parallel reply placed into it meanwhile. Made at once,
+ * `expectVersion` is the version the summary was built from, which turns a concurrent write during the
+ * (slow) LLM call into a reportable CAS failure instead of a silent overwrite.
  */
 async function applySummary(
   store: Store<Session>, sessionId: string, idx: number, summary: HandoffSummary, expectVersion?: string,
@@ -235,7 +294,7 @@ async function applySummary(
   const summarised: Session = { ...session, messages: [...replacement, ...session.messages.slice(idx)] };
   const next: Session = bumpVersion({ ...summarised, updatedAt: lastActivityAt(summarised) });
   const res = await store.cas(sessionId, expectVersion ?? session.version, next);
-  if (!res.ok) return { ok: false, message: 'Concurrent modification — please retry.' };
+  if (!res.ok) return { ok: false, message: 'Concurrent modification — please retry.', conflict: true };
   return { ok: true, value: {
     sessionId,
     messagesSummarised: idx,
@@ -245,14 +304,12 @@ async function applySummary(
   } };
 }
 
-async function applyDeferredSummary(store: Store<Session>, principal: Principal, sessionId: string, idx: number, summary: HandoffSummary): Promise<void> {
-  await runAs(principal, async () => {
-    const outcome = await applySummary(store, sessionId, idx, summary);
-    if (!outcome.ok) console.error(`[session_edit] deferred summarise of session "${sessionId}" failed: ${outcome.message}`);
-  });
-}
-
 function makeSessionEditTool(store: Store<Session>, services: MatbotMachine): Tool<ToolResultOf<'session_edit'>> {
+  const ownership = (isCurrentTurn: boolean): string => isCurrentTurn
+    ? 'it is the session this turn is running in, and the turn owns it until it commits'
+    : 'a turn is running in it, and that turn owns it until it commits';
+  const unedited = (isCurrentTurn: boolean): string => isCurrentTurn ? ' This turn continues to see the unedited history.' : '';
+
   return {
     name: 'session_edit',
     description:
@@ -288,8 +345,9 @@ function makeSessionEditTool(store: Store<Session>, services: MatbotMachine): To
       '            summarise reads the expanded original history, which can be larger than the\n' +
       '            conversation you can see — if the call fails for want of context, name a bigger\n' +
       '            `provider`; a failed summarise changes nothing, so retrying costs only the call.\n' +
-      'Cutting, splitting, compacting or summarising the session the current turn is running in is DEFERRED: the turn ' +
-      'owns that document until it commits, so the edit is queued and applied once the turn ends. The ' +
+      'Cutting, splitting, compacting or summarising a session with a turn running in it — the current turn, or ' +
+      'another session\'s — is DEFERRED: the turn owns that document until it commits, so the edit is queued ' +
+      'and applied once the turn ends. The ' +
       'result says `deferred: true` and carries no counts — they are not knowable yet. Do not re-issue it, ' +
       'and do not read the session back this turn to check: it still holds the pre-edit history. `fork` is ' +
       'immediate on any session (it only writes a new document), but forks the committed state, without ' +
@@ -308,6 +366,13 @@ function makeSessionEditTool(store: Store<Session>, services: MatbotMachine): To
       async *execute(input: unknown, ctx: ToolContext) {
         const { action, sessionId, msgIndex } = input as Partial<SessionEditInput>;
         if (!sessionId) { yield { type: 'error', message: 'session_edit requires "sessionId".' }; return; }
+        // A background job's store is its parent's medium, written by none of the parent's turns: an edit
+        // from here would land under one of them unseen and be undone by its write-back. `fork` is the
+        // exception — it writes a session no turn can yet be running in.
+        if (services.isSubAgent() && action !== 'fork') {
+          yield { type: 'error', message: `A background job cannot ${String(action)} a session — it would race the turns of the process that owns it. Only "fork" is available here.` };
+          return;
+        }
 
         // Summarise runs its LLM call BEFORE any mutation, so a provider failure or a malformed summary
         // leaves the session exactly as it was and is reported here — the one thing the deferred path
@@ -319,7 +384,8 @@ function makeSessionEditTool(store: Store<Session>, services: MatbotMachine): To
             return;
           }
           // The running turn's own session is read from ctx.session: its committed document does not yet
-          // hold this turn, and the prefix being summarised is identical in both (a turn only appends).
+          // hold this turn. The prefix being summarised is the same history in both, give or take a
+          // parallel reply placed into the turn, which is why the deferred write re-finds it by anchor.
           const isCurrentTurn = sessionId === ctx.session.id;
           const source = isCurrentTurn ? ctx.session : await store.get(sessionId);
           if (!source) { yield { type: 'error', message: `Session "${sessionId}" not found.` }; return; }
@@ -339,51 +405,70 @@ function makeSessionEditTool(store: Store<Session>, services: MatbotMachine): To
             summary = await summariseMessages(services, provider, expandSummarised(source.messages.slice(0, idx)), ctx.signal);
           } catch (e) { yield { type: 'error', message: e instanceof Error ? e.message : String(e) }; return; }
 
-          if (sessionId === ctx.session.id) {
-            const principal = currentPrincipal();
-            defer(() => applyDeferredSummary(store, principal, sessionId, idx, summary));
+          // Made now, of another session, the replacement is checked against the version the summary was
+          // written from: the LLM call is slow enough that a concurrent write is a real possibility, and
+          // summarising over one would discard it silently, so a conflict is reported rather than retried.
+          // Deferred, the waiting turn has grown the session since, so the range is re-found by its anchor
+          // instead — and so it is for this turn's own session however it is made, since what the summary
+          // was written from is the turn's copy (or a parallel turn's), whose version and indices are not
+          // the stored document's.
+          const anchor = anchorAt(source.messages, idx, anchorSide('summarise'));
+          const outcome = await writeEdit(services.run, sessionId, 'summarise', async deferred => {
+            if (!deferred && !isCurrentTurn) {
+              const made = await applySummary(store, sessionId, idx, summary, source.version);
+              return made.ok ? made : { ok: false, message: made.message };
+            }
+            const session = await store.get(sessionId);
+            const at = session !== null ? anchoredIndex(session, anchor) : null;
+            if (at === null) return { ok: false, message: 'the message it ended at is no longer in the session.' };
+            return applySummary(store, sessionId, at, summary);
+          });
+          if (outcome === 'deferred') {
             yield { type: 'result', value: {
               deferred: true,
               sessionId,
               message:
                 `The summary of session "${sessionId}" is written, and replacing the ${idx} message(s) it covers ` +
-                'is queued: it is the session this turn is running in, and the turn owns it until it commits. ' +
-                'Its outcome cannot be reported here. This turn continues to see the unedited history.',
+                `is queued: ${ownership(isCurrentTurn)}. Its outcome cannot be reported here.${unedited(isCurrentTurn)}`,
             } };
             return;
           }
-
-          // CAS against the version the summary was written from: the LLM call is slow enough that a
-          // concurrent write is a real possibility, and summarising over one would discard it silently.
-          const outcome = await applySummary(store, sessionId, idx, summary, source.version);
           if (!outcome.ok) { yield { type: 'error', message: outcome.message }; return; }
           yield { type: 'result', value: outcome.value };
           return;
         }
 
-        // The running turn owns its session document: the runner takes one in-memory copy at turn start
+        // A running turn owns its session document: the runner takes one in-memory copy at turn start
         // and writes it back unconditionally at turn end, so a write landing here is overwritten seconds
-        // later — silently, since that write is not a CAS. So defer to the quiescent edge, where the
-        // turn's write-back has already happened and the edit reads the committed document.
-        // The outcome cannot be reported: the edge is reached only once this turn has ended, so awaiting
-        // it from inside the turn would deadlock. The result says "queued" and nothing more. `fork` is
-        // exempt — it only writes a new document.
-        if (sessionId === ctx.session.id && (action === 'cut' || action === 'split' || action === 'compact')) {
+        // later — silently, since that write is not a CAS. That holds for whichever turn it is, this one
+        // or another session's. So the edit is the runner's to make (`writeEdit`), once that turn's
+        // write-back has happened, and it reads the committed document.
+        // The outcome cannot then be reported: awaiting it from inside this turn would deadlock. The result
+        // says "queued" and nothing more. `fork` is exempt — it only writes a new document.
+        const isCurrentTurn = sessionId === ctx.session.id;
+        if (action === 'cut' || action === 'split' || action === 'compact') {
           if (typeof msgIndex !== 'number') { yield { type: 'error', message: `session_edit "${action}" requires "msgIndex" (number). Only "summarise" may omit it.` }; return; }
-          const principal = currentPrincipal();
-          // Resolve a negative (from-the-end) index NOW, against the turn's own copy: by the edge the
-          // committed document has grown by this turn's tail, so "-3" would land three messages later
-          // than the caller meant. A positive index is already an absolute address, and the turn only
-          // appends, so it still points at the message it named.
-          const index = msgIndex < 0 ? ctx.session.messages.length + msgIndex : msgIndex;
-          defer(() => applyDeferred(store, principal, action, sessionId, index));
+          // Resolve the index NOW, against the history the caller can see, to the message it names (see
+          // `Anchor`). That is this turn's own copy, or for another session its committed document. If a
+          // turn holds the session, its document has grown by that turn's tail by the time the edit is made,
+          // so "-3" would land three messages later than the caller meant, and a parallel reply placed
+          // ahead of the turn shifts even a positive index.
+          const visible = isCurrentTurn ? ctx.session : await store.get(sessionId);
+          if (!visible) { yield { type: 'error', message: `Session "${sessionId}" not found.` }; return; }
+          const index = resolveIndex(visible, msgIndex);
+          if (index === null) { yield { type: 'error', message: `msgIndex ${msgIndex} out of range.` }; return; }
+          const outcome = await writeEdit(services.run, sessionId, action, anchoredEdit(store, action, sessionId, anchorAt(visible.messages, index, anchorSide(action))));
+          if (outcome !== 'deferred') {
+            if (!outcome.ok) { yield { type: 'error', message: outcome.message }; return; }
+            yield { type: 'result', value: outcome.value };
+            return;
+          }
           yield { type: 'result', value: {
             deferred: true,
             sessionId,
             message:
-              `The ${action} of session "${sessionId}" is queued: it is the session this turn is running in, ` +
-              'and the turn owns it until it commits, so the edit is applied once this turn ends. Its ' +
-              'outcome cannot be reported here. This turn continues to see the unedited history.',
+              `The ${action} of session "${sessionId}" is queued: ${ownership(isCurrentTurn)}, so the edit is ` +
+              `applied once that turn ends. Its outcome cannot be reported here.${unedited(isCurrentTurn)}`,
           } };
           return;
         }
@@ -406,6 +491,8 @@ export const plugin: MatbotPluginSpec = {
     const store = services.sessions;
     if (!store) return;
     services.tools.register(makeSessionEditTool(store, services));
-    services.tools.register(makeCompactSessionsTool(store));
+    // Bulk compaction rewrites other sessions wholesale; from a background job that is a write racing
+    // every turn of the process that owns them, with nothing a refusal per session would save.
+    if (!services.isSubAgent()) services.tools.register(makeCompactSessionsTool(store, () => services.run));
   },
 };

@@ -7,7 +7,7 @@
 // Contract — `window.matbotTransport`:
 //   hostRuntime                                    -> 'node' | 'browser'  which runtime the UI is on
 //   callTool(name, input)                          -> Promise<any>     buffered tool call (throws on error)
-//   createSession()                                -> Promise<{ id }>
+//   createSession({ status }?)                     -> Promise<{ id }>   status 'archived' creates it hidden
 //   sessionBusy(id)                                -> Promise<boolean>
 //   submit(sid, { content, provider, concatQueue, mode }) -> Promise<{ queued, traceId }>  (throws on failure)
 //   sessionEvents(sid, signal)                     -> AsyncIterable<PipelineEvent>   all turn output for the session
@@ -88,8 +88,10 @@
     return data;
   }
 
-  async function createSession() {
-    const r = await apiFetch('/sessions', { method: 'POST' });
+  async function createSession(opts) {
+    const r = await apiFetch('/sessions', opts?.status === undefined ? { method: 'POST' } : {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: opts.status }),
+    });
     return r.json();
   }
 

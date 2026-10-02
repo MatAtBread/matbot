@@ -59,16 +59,30 @@ export class HookRegistry implements HookRegistrar {
   // than per-channel because it is the one place every handler invocation passes through — and because
   // the site must be in force when the handler *starts*, so work it kicks off detached stays attributed
   // to it however late it settles.
-  private async invoke<R>(hook: Hook, run: () => R | Promise<R>): Promise<R | undefined> {
+  private async invoke<R>(hook: Hook, signal: AbortSignal, run: () => R | Promise<R>): Promise<R | undefined> {
     try {
       return await withUsageSite(
         { kind: 'hook', channel: hook.on, ...(hook.pluginName !== undefined ? { plugin: hook.pluginName } : {}) },
         run,
       );
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
       const owner = hook.pluginName !== undefined ? ` from "${hook.pluginName}"` : '';
-      console.error(`[matbot] ${hook.on} hook${owner} threw; skipping it for this turn:`, message);
+      // An aborted turn (a steer, a cancel) rejects whatever was awaiting its signal with the abort REASON —
+      // often a bare token like 'steer', not an Error — which logged as a failure whose whole message was
+      // "steer". The hook was cut off, not broken, so it is said as such and leaves no failure marker.
+      //
+      // Which is asked of the THROWN value, not of the signal alone. `aborted` stays true for the rest of
+      // the turn, so testing it alone reported every later throw as a cut-off — masking a genuine hook bug,
+      // marker and stack included, from the first steer onwards. Interrupt is the default disposition for a
+      // mid-turn message, so that window is the common case, not a corner of one. A cut-off throw is either
+      // the reason itself (what a signal rejects with) or the standard AbortError.
+      if (signal.aborted && (err === signal.reason || (err as { name?: unknown } | null)?.name === 'AbortError')) {
+        console.warn(`[matbot] ${hook.on} hook${owner} was cut off: its turn was aborted (reason: ${describeThrown(signal.reason)}).`);
+        return undefined;
+      }
+      const message = err instanceof Error ? err.message : `threw a non-Error value: ${describeThrown(err)}`;
+      // The Error itself, not its message, so the log carries the stack — the message alone rarely says where.
+      console.error(`[matbot] ${hook.on} hook${owner} threw; skipping it for this turn:`, err instanceof Error ? err : message);
       if (!this.markedFailures.has(hook)) {
         this.markedFailures.add(hook);
         this.pendingFailureMarkers.push({
@@ -134,7 +148,7 @@ export class HookRegistry implements HookRegistrar {
       session = folded;
     };
     for (const hook of this.on('screen')) {
-      const r = await this.invoke(hook, () => hook.handler({ ...ctx, session, removeHook: () => this.removeOne('screen', hook) }));
+      const r = await this.invoke(hook, ctx.signal, () => hook.handler({ ...ctx, session, removeHook: () => this.removeOne('screen', hook) }));
       if (!r) continue;
       if (r.session)                     session = r.session;
       if (r.ephemeral)                   ephemeral.push(...r.ephemeral);
@@ -155,7 +169,7 @@ export class HookRegistry implements HookRegistrar {
   async runContribute(ctx: Omit<ContributeContext, 'removeHook'>): Promise<Message[]> {
     let outgoing = ctx.outgoing as Message[];
     for (const hook of this.on('contribute')) {
-      const r = await this.invoke(hook, () => hook.handler({ ...ctx, outgoing, removeHook: () => this.removeOne('contribute', hook) }));
+      const r = await this.invoke(hook, ctx.signal, () => hook.handler({ ...ctx, outgoing, removeHook: () => this.removeOne('contribute', hook) }));
       if (r) outgoing = r;
     }
     return outgoing;
@@ -164,7 +178,7 @@ export class HookRegistry implements HookRegistrar {
   // toolcall stops at the first hook that rejects or aborts; the rest don't run.
   async runToolCall(ctx: Omit<ToolCallContext, 'removeHook'>): Promise<ToolCallResult> {
     for (const hook of this.on('toolcall')) {
-      const r = await this.invoke(hook, () => hook.handler({ ...ctx, removeHook: () => this.removeOne('toolcall', hook) }));
+      const r = await this.invoke(hook, ctx.signal, () => hook.handler({ ...ctx, removeHook: () => this.removeOne('toolcall', hook) }));
       if (r && (r.rejectTool || r.abort)) return r;
     }
     return {};
@@ -175,7 +189,7 @@ export class HookRegistry implements HookRegistrar {
   async runToolResult(ctx: Omit<ToolResultContext, 'removeHook'>): Promise<unknown> {
     let result = ctx.result;
     for (const hook of this.on('toolresult')) {
-      const r = await this.invoke(hook, () => hook.handler({ ...ctx, result, removeHook: () => this.removeOne('toolresult', hook) }));
+      const r = await this.invoke(hook, ctx.signal, () => hook.handler({ ...ctx, result, removeHook: () => this.removeOne('toolresult', hook) }));
       if (r) result = r.result;
     }
     return result;
@@ -195,7 +209,7 @@ export class HookRegistry implements HookRegistrar {
     // asking to pop and re-run with nothing added was answered by doing nothing at all, silently.
     let retracting = false;
     for (const hook of this.on('followup')) {
-      const r = await this.invoke(hook, () => hook.handler({ ...ctx, removeHook: () => this.removeOne('followup', hook) }));
+      const r = await this.invoke(hook, ctx.signal, () => hook.handler({ ...ctx, removeHook: () => this.removeOne('followup', hook) }));
       if (r?.resubmit)        resubmits.push(r.resubmit.content);
       if (r?.retractAndRerun) {
         retracting = true;
@@ -206,4 +220,10 @@ export class HookRegistry implements HookRegistrar {
     }
     return { resubmits, markers, ...(retracting ? { retract: { context: retractCtx, durable: retractDur } } : {}) };
   }
+}
+
+function describeThrown(value: unknown): string {
+  if (value instanceof Error) return `${value.name}: ${value.message}`;
+  if (typeof value === 'string') return JSON.stringify(value);
+  try { return JSON.stringify(value) ?? String(value); } catch { return String(value); }
 }

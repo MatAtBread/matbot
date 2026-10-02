@@ -55,6 +55,18 @@ export type TurnEvent =
   // the pump's per-turn `queued` replay seed / committed store order — this is purely live delivery.
   | { type: 'steer';          content: MessageContent[]; interruptedTraceId: string; traceId: string; rootTraceId: string }
 
+  // A mid-turn submission answered IN PARALLEL with the running turn (`mode: 'parallel'`), which is left
+  // untouched. It runs on a private copy of the session's completed turns — everything before
+  // `runningTraceId`'s user message — so its events (this one first, then its own turn's, under
+  // `traceId`) are live delivery only: its tool calls stay in that copy and are never persisted, and its
+  // terminal's `session` is the COPY, not this session. What survives is the submission and its final
+  // reply, written back as a user/assistant pair and announced by `merged`.
+  | { type: 'parallel';       content: MessageContent[]; runningTraceId: string; traceId: string; rootTraceId: string }
+  // A parallel turn's pair has been written into the session. `into` is the turn that was running when
+  // it landed: the pair went into that turn's history, ahead of its user message (where the copy it ran
+  // on ended), at a round boundary. Absent ⇒ nothing was running and it was appended.
+  | { type: 'merged';         traceId: string; into?: string }
+
   // ── terminals: exactly one per turn ──
   | { type: 'done';           session: Session;       traceId: string }
   | { type: 'aborted';        reason: string; session: Session; traceId: string }

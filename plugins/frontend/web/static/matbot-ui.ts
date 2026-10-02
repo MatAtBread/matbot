@@ -54,7 +54,7 @@ declare global {
     hostRuntime: 'node' | 'browser';
     /** Run a tool and resolve its result, narrowed by the params passed. Throws on a tool error. */
     callTool<K extends ToolName, P extends ToolArgs<K>>(name: K, input?: P): Promise<ToolResult<K, P>>;
-    createSession(): Promise<{ id: string }>;
+    createSession(opts?: { status?: 'active' | 'archived' | 'pinned' }): Promise<{ id: string }>;
     sessionBusy(id: string): Promise<boolean>;
     submit(sessionId: string, body: { content: unknown; provider?: string; concatQueue?: boolean; mode?: string }): Promise<{ queued: boolean; traceId?: string }>;
     sessionEvents(sessionId: string, signal?: AbortSignal): AsyncIterable<any>;
