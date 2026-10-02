@@ -73,7 +73,8 @@ interface QueuedItem {
   // than introducing a new user message: the pump skips the persist-at-turn-start append (the user
   // message already exists) and hands `ephemeral` (the trigger tool's output) to runSession, which
   // tail-folds it for this run only. `content` is empty for such an item — there is no new bubble.
-  redo?: { ephemeral: MessageContent[] };
+  // `head` is the user message the retraction kept (see `SessionState.turnHead`), absent if there was none.
+  redo?: { ephemeral: MessageContent[]; head?: { id: string; request: string } };
   // Turn-scoped ephemeral context to fold onto this item's turn (tail-folded, never persisted) — used
   // to carry an interrupt's "keep going, noting the above" nudge. Feeds runSession's injectedEphemeral,
   // the same path `redo` uses; the two are mutually exclusive in practice (redo re-runs an existing
@@ -158,8 +159,10 @@ interface SessionState {
   merges:      ParallelReply[];
   // The running turn's first own message (its user message; for a redo, the kept one): its id is where
   // the copy a parallel turn runs on ends, and so where its pair is placed while this turn runs; its text
-  // is the request that copy's framing names. Set before that message is persisted, so a parallel turn
-  // arriving across the write still knows both. Cleared once the turn's rounds end, because from then
+  // is the request that copy's framing names. Set together with `runningTraceId`, in the step that takes
+  // the item off the queue: `runningTraceId` is what admits a parallel turn, so set any later — even after
+  // the store read that follows — one arriving in between had no head, ran unframed, and copied the turn
+  // it was beside. Cleared once the turn's rounds end, because from then
   // on the turn has answered, and a parallel turn should see the answer rather than be told it is
   // still being worked on.
   turnHead:    { id: string; request: string } | undefined;
@@ -418,6 +421,13 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
           }
           const content = batch.flatMap(i => i.content);
           s.runningTraceId = head.traceId;
+          // The turn head, in this same step (see `SessionState.turnHead`): a fresh turn's user message is
+          // minted here, so its id is known before the read below, and persisted after it; a redo's is the
+          // message its retraction kept.
+          const userMsg = head.redo === undefined
+            ? createMessage({ role: 'user', content, traceId: head.traceId, providerName: head.provider })
+            : undefined;
+          s.turnHead = userMsg !== undefined ? { id: userMsg.id, request: textOf(userMsg) } : head.redo?.head;
           // In the same synchronous step that takes the item off the queue, so there is no moment at which a
           // stop finds it in neither place: `abort`/`cancelTurn` reach a queued item through the queue and a
           // dequeued one only through this. Created after the preamble below (a store read, the persist,
@@ -440,20 +450,13 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
 
           let session = await deps.store.get(id);
           if (session === null) {
-            s.ac = undefined;
+            s.ac = s.turnHead = undefined;
             emit(s, { type: 'error', error: `Session "${id}" not found`, traceId: head.traceId });
             continue;
           }
 
-          // Where this turn's own messages begin — see `SessionState.turnHead`. A redo's begin at the user
-          // message it re-runs; a fresh turn's at the user message persisted just below.
-          if (head.redo !== undefined) {
-            const kept = session.messages[lastUserIndex(session)];
-            s.turnHead = kept !== undefined ? { id: kept.id, request: textOf(kept) } : undefined;
-          }
-
           // A redo re-runs the existing committed user turn — no title derivation, no new user message.
-          if (head.redo === undefined) {
+          if (userMsg !== undefined) {
             if (!session.title && !session.messages.some(m => m.role === 'user')) {
               // Falls back to the attachment names when the turn has no words of its own: an image-only
               // first turn is a real submission, and got no title at all — which reads in the session
@@ -473,9 +476,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
             // Persist-at-turn-start: the user message only hits the store when its turn begins, never
             // while queued. That is what stops a mid-turn submit from clobbering session state. A robo
             // resubmission's blocks already carry `origin: 'robo'` (stamped where it was enqueued).
-            const userMsg = createMessage({ role: 'user', content, traceId: head.traceId, providerName: head.provider });
             session = appendMessage(session, userMsg);
-            s.turnHead = { id: userMsg.id, request: textOf(userMsg) };
             try {
               await deps.store.set(session.id, session);
             } catch (e) {
@@ -651,6 +652,8 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
                       ? { ...committed, messages: committed.messages.slice(0, lastUserIdx + 1) }
                       : committed;
                     const kept = foldOntoUserTurn(truncated, durable).messages;
+                    // The redo's turn head: the user message kept here, as folded — what it re-runs.
+                    const keptHead = lastUserIdx >= 0 ? kept[lastUserIdx] : undefined;
                     const retractionMsg: Message = createMessage({
                       role:    'marker',
                       traceId: head.traceId,
@@ -680,7 +683,10 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
                       principal:     head.principal,
                       concatQueue:   false,
                       resubmitDepth: head.resubmitDepth + 1,
-                      redo:          { ephemeral: followup.retract.context ?? [] },
+                      redo:          {
+                        ephemeral: followup.retract.context ?? [],
+                        ...(keptHead !== undefined ? { head: { id: keptHead.id, request: textOf(keptHead) } } : {}),
+                      },
                       ...(head.prompt !== undefined ? { prompt: head.prompt } : {}),
                     });
                   }

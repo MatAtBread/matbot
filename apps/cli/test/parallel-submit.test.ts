@@ -464,3 +464,54 @@ test('a parallel reply that settles while another is being written is written to
   }
   assert.equal(runner.status(sid).busy, false, 'idle means idle');
 });
+
+// The turn head was set only after the turn's store read, but `runningTraceId` — which is what admits a
+// parallel message — before it. One arriving during that read was admitted with no head: no framing, and a
+// copy cut nowhere.
+test('a parallel message arriving while the next turn reads its session is cut and framed', { timeout: 10000 }, async () => {
+  const read = oneShot();
+  const { sid, seen, started, release, runner } = setup(Promise.resolve(), undefined, undefined, undefined, { get: read.hold });
+
+  const main = await runner.open({ sessionId: sid, signal: new AbortController().signal, content: submit('do it'), provider: 'fake', principal });
+  const collector = watch(main, []);
+  await started.wait;
+  await runner.open({ sessionId: sid, signal: new AbortController().signal, content: submit('next'), provider: 'fake', principal });
+  read.arm();
+  release.open();
+  await read.reached;     // 'do it' has committed; 'next' is dequeued and reading its session
+  await runner.open({ sessionId: sid, signal: new AbortController().signal, content: submit('Q'), provider: 'fake', principal, mode: 'parallel' });
+  read.release();
+  await collector;
+
+  const parCall = seen.parallel[0]!;
+  assert.ok(!parCall.some(m => m.role === 'user' && textOf(m) === 'next'), 'the running turn is not in the copy');
+  assert.ok(parCall.some(m => m.role === 'assistant' && textOf(m) === 'main done'), 'the completed turn is');
+  assert.ok(textOf(parCall.findLast(m => m.role === 'user')!).includes('<running-request>\nnext\n</running-request>'), 'framed with the running request');
+});
+
+// The same window for a redo, whose head (the user message its retraction kept) was likewise found only by
+// that read.
+test('a parallel message arriving while a redo reads its session is cut and framed', { timeout: 10000 }, async () => {
+  const read = oneShot();
+  const hooks = new HookRegistry();
+  let retracted = false;
+  hooks.register({ on: 'followup', pluginName: 'retractor', handler: async () => {
+    if (retracted) return {};
+    retracted = true;
+    read.arm();           // the next read is the redo's: the retraction is written just after this returns
+    return { retractAndRerun: {} };
+  } });
+  const { sid, seen, release, runner } = setup(Promise.resolve(), hooks, undefined, undefined, { get: read.hold });
+  release.open();
+
+  const main = await runner.open({ sessionId: sid, signal: new AbortController().signal, content: submit('do it'), provider: 'fake', principal });
+  const collector = watch(main, []);
+  await read.reached;
+  await runner.open({ sessionId: sid, signal: new AbortController().signal, content: submit('Q'), provider: 'fake', principal, mode: 'parallel' });
+  read.release();
+  await collector;
+
+  const parCall = seen.parallel[0]!;
+  assert.ok(!parCall.some(m => m.role === 'user' && textOf(m) === 'do it'), 'the turn being re-run is not in the copy');
+  assert.ok(textOf(parCall.findLast(m => m.role === 'user')!).includes('<running-request>\ndo it\n</running-request>'), 'framed with the request being re-run');
+});
