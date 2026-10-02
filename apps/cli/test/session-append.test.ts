@@ -1,18 +1,23 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  createSession, createSessionAppender, installPrincipalCarrier, machineBusy, quiesced, readOnlyError, runAs, SessionAppendKind,
+  createSession, createSessionAppender, createSessionRunner, installPrincipalCarrier, installUsageCarrier, readOnlyError,
+  runAs, SessionAppendKind,
 } from '@matatbread/matbot-core';
-import type { Notifier, Session, SessionAppender, Store, Tool, ToolContext } from '@matatbread/matbot-plugin-api';
+import type {
+  CompletionEvent, Notifier, ProviderAdapter, ProviderConfig, Session, SessionAppender, SessionRunner, Store, Tool, ToolContext,
+} from '@matatbread/matbot-plugin-api';
 import { makeSessionTools } from '@matatbread/matbot-sessions';
 import { createAlsPrincipalCarrier } from '../src/principal-als.js';
+import { createAlsUsageCarrier } from '../src/usage-als.js';
 
 installPrincipalCarrier(createAlsPrincipalCarrier());
+installUsageCarrier(createAlsUsageCarrier());
 
 // An append adds messages to a session without running a turn — a background job's report. A running
 // turn owns its session and writes its in-memory copy back whole at the end, so the append is checked at
-// once (a missing session is reported to someone who can act on it) and written at the quiescent edge,
-// where no turn holds any session. Then it is announced: the ItemChange the write raises says the
+// once (a missing session is reported to someone who can act on it) and written by the session's runner
+// once no turn holds that session. Then it is announced: the ItemChange the write raises says the
 // session changed; `SessionAppend` says WHICH messages arrived, which a re-read cannot.
 
 const principal = { id: 'tester', type: 'user' as const };
@@ -41,54 +46,107 @@ function recordingNotifier(): { notifier: Notifier; seen: Array<Record<string, u
 
 const say = (text: string) => [{ role: 'assistant' as const, content: [{ type: 'text' as const, text, origin: 'robo' as const }] }];
 
-test('an append waits for the quiescent edge, then lands and says which messages arrived', { timeout: 15000 }, async () => {
+// A runner over `store` whose turns wait in their provider call until released.
+function runnerOver(store: Store<Session>): { runner: SessionRunner; holdTurn: (sessionId: string) => Promise<{ release: () => void; idle: Promise<void> }> } {
+  let release!: () => void;
+  let entered!: () => void;
+  const adapter: ProviderAdapter = {
+    name: 'fake',
+    async health() { return { ok: true } as never; },
+    complete(): AsyncIterable<CompletionEvent> {
+      return (async function* () {
+        const held = new Promise<void>(r => { release = r; });
+        entered();
+        await held;
+        yield { type: 'text-delta', delta: 'answer' };
+        yield { type: 'done' };
+      })();
+    },
+  };
+  const runner = createSessionRunner({
+    store,
+    resolveProvider: async () => ({ adapter, config: { name: 'fake', module: 'fake', model: 'fake' } as ProviderConfig }),
+    loadPlugin:      async () => { throw new Error('loadPlugin unused'); },
+    unloadPlugin:    async () => false,
+  });
+  return {
+    runner,
+    async holdTurn(sessionId) {
+      const inTurn = new Promise<void>(r => { entered = r; });
+      const view = await runAs(principal, () => runner.open({
+        sessionId, signal: new AbortController().signal, content: [{ type: 'text', text: 'go' }], provider: 'fake', principal,
+      }));
+      await inTurn;
+      return { release: () => release(), idle: (async () => { for await (const ev of view.events) if (ev.type === 'idle') break; })() };
+    },
+  };
+}
+
+test('an append waits for the turn holding its session, then lands and says which messages arrived', { timeout: 15000 }, async () => {
   const session = createSession();
   const { store, docs } = casStore(session);
   const { notifier, seen } = recordingNotifier();
-  const appender = createSessionAppender({ sessions: () => store, notifier: () => notifier, isSubAgent: () => false });
+  const { runner, holdTurn } = runnerOver(store);
+  const appender = createSessionAppender({ sessions: () => store, run: () => runner, notifier: () => notifier, isSubAgent: () => false });
 
-  // Holding the machine stands in for a running turn: the edge cannot arrive until it ends.
-  let accepted!: { sessionId: string; messageIds: string[] };
-  await machineBusy(async () => {
-    accepted = await runAs(principal, () => appender.append(session.id, say('Time for the dentist.')));
-    assert.equal(docs.get(session.id)!.messages.length, 0, 'accepted, but not written while a turn could own the session');
-  });
-  await quiesced();
+  const turn = await holdTurn(session.id);
+  const accepted = await runAs(principal, () => appender.append(session.id, say('Time for the dentist.')));
+  assert.equal(accepted.deferred, true, 'accepted while a turn holds the session');
+  assert.ok(!docs.get(session.id)!.messages.some(m => accepted.messageIds.includes(m.id)), 'and not written under it');
+
+  turn.release();
+  await turn.idle;
 
   const after = docs.get(session.id)!;
-  assert.deepEqual(after.messages.map(m => m.id), accepted.messageIds, 'the ids handed back at acceptance are the ones written');
-  assert.equal(after.messages[0]!.role, 'assistant');
-  assert.deepEqual(after.messages[0]!.content, [{ type: 'text', text: 'Time for the dentist.', origin: 'robo' }]);
-  assert.deepEqual(seen, [{ kind: SessionAppendKind, source: 'append', sessionId: session.id, messageIds: accepted.messageIds, principal }]);
+  assert.deepEqual(after.messages.map(m => m.role), ['user', 'assistant', 'assistant'], 'written after the turn, not undone by it');
+  const appended = after.messages.at(-1)!;
+  assert.deepEqual([appended.id], accepted.messageIds, 'the ids handed back at acceptance are the ones written');
+  assert.deepEqual(appended.content, [{ type: 'text', text: 'Time for the dentist.', origin: 'robo' }]);
+  assert.deepEqual(seen.filter(n => n.kind === SessionAppendKind),
+    [{ kind: SessionAppendKind, source: 'append', sessionId: session.id, messageIds: accepted.messageIds, principal }]);
+});
+
+test('an append to a session no turn holds is written before it settles', async () => {
+  const session = createSession();
+  const { store, docs } = casStore(session);
+  const { notifier } = recordingNotifier();
+  const { runner } = runnerOver(store);
+  const appender = createSessionAppender({ sessions: () => store, run: () => runner, notifier: () => notifier, isSubAgent: () => false });
+
+  const accepted = await runAs(principal, () => appender.append(session.id, say('Done.')));
+  assert.equal(accepted.deferred, undefined);
+  assert.deepEqual(docs.get(session.id)!.messages.map(m => m.id), accepted.messageIds);
 });
 
 test('an append is refused at once when it cannot land, and refused outright in a background job', async () => {
   const { store } = casStore();
   const { notifier } = recordingNotifier();
-  const parent = createSessionAppender({ sessions: () => store, notifier: () => notifier, isSubAgent: () => false });
+  const { runner } = runnerOver(store);
+  const parent = createSessionAppender({ sessions: () => store, run: () => runner, notifier: () => notifier, isSubAgent: () => false });
   await assert.rejects(parent.append('nope', say('x')), /Session "nope" not found/);
   await assert.rejects(parent.append(undefined, say('x')), /No session was named/);
 
   // A job's store is its parent's medium, and none of the parent's turns pass through it.
-  const job = createSessionAppender({ sessions: () => store, notifier: () => notifier, isSubAgent: () => true });
+  const job = createSessionAppender({ sessions: () => store, run: () => runner, notifier: () => notifier, isSubAgent: () => true });
   await assert.rejects(job.append('any', say('x')), /background job/);
 });
 
-// A session shared in read-only is readable, so the append is accepted; its write is refused at the edge.
-// That refusal escaped as the edge's generic "flush rejected", which never said an append had been lost.
-test('an append that cannot be written at the edge says it was dropped, and announces nothing', async () => {
+// A session shared in read-only is readable, so the append is accepted; its write is refused. That refusal
+// escaped as the edge's generic "flush rejected", which never said an append had been lost — and the caller
+// had already been told it was accepted. With no turn to wait for, the caller is now told.
+test('an append that cannot be written says it was dropped, to the caller when it can, and announces nothing', async () => {
   const session = createSession();
   const { store } = casStore(session);
   store.cas = async () => { throw readOnlyError('sessions', session.id, 'bob'); };
   const { notifier, seen } = recordingNotifier();
-  const appender = createSessionAppender({ sessions: () => store, notifier: () => notifier, isSubAgent: () => false });
+  const { runner } = runnerOver(store);
+  const appender = createSessionAppender({ sessions: () => store, run: () => runner, notifier: () => notifier, isSubAgent: () => false });
 
   const errors: string[] = [];
   const error = console.error;
   console.error = (...args: unknown[]) => { errors.push(args.map(String).join(' ')); };
   try {
-    await runAs(principal, () => appender.append(session.id, say('x')));
-    await quiesced();
+    await assert.rejects(runAs(principal, () => appender.append(session.id, say('x'))), /not written.*read-only/);
   } finally {
     console.error = error;
   }
@@ -106,19 +164,26 @@ async function run(tool: Tool, input: unknown, sessionId: string): Promise<Array
   });
 }
 
-test('session_action append defaults to this conversation, and lands once nothing is running', { timeout: 15000 }, async () => {
+test('session_action append defaults to this conversation, and says deferred only while it waits', { timeout: 15000 }, async () => {
   const session = createSession();
   const { store, docs } = casStore(session);
   const { notifier } = recordingNotifier();
-  const appender = createSessionAppender({ sessions: () => store, notifier: () => notifier, isSubAgent: () => false });
-  const tool = makeSessionTools(store, { appender: () => appender }).find(t => t.name === 'session_action')!;
+  const { runner, holdTurn } = runnerOver(store);
+  const appender = createSessionAppender({ sessions: () => store, run: () => runner, notifier: () => notifier, isSubAgent: () => false });
+  const tool = makeSessionTools(store, { appender: () => appender, run: () => runner }).find(t => t.name === 'session_action')!;
 
-  const events = await run(tool, { action: 'append', text: 'Noted.' }, session.id);
-  const result = events.find(e => e.type === 'result')?.value as { id: string; messageIds: string[]; deferred: true };
+  const now = await run(tool, { action: 'append', text: 'Noted.' }, session.id);
+  const result = now.find(e => e.type === 'result')?.value as { id: string; messageIds: string[]; deferred?: true };
   assert.equal(result.id, session.id, 'no sessionId ⇒ the conversation the call came from');
-  assert.equal(result.deferred, true);
-  await quiesced();
+  assert.equal(result.deferred, undefined, 'nothing was running, so it is written');
   assert.equal(docs.get(session.id)!.messages.length, 1);
+
+  const turn = await holdTurn(session.id);
+  const later = await run(tool, { action: 'append', text: 'Later.' }, session.id);
+  assert.equal((later.find(e => e.type === 'result')?.value as { deferred?: true }).deferred, true, 'a turn holds it');
+  turn.release();
+  await turn.idle;
+  assert.equal(docs.get(session.id)!.messages.at(-1)!.id, (later.find(e => e.type === 'result')?.value as { messageIds: string[] }).messageIds[0]);
 });
 
 test('in a background job, append goes to the job\'s conversation and every other session write is refused', async () => {

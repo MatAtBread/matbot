@@ -194,7 +194,7 @@ export interface MatbotServices {
    *  one; absent ⇒ such code runs unbounded, as it must where synchronous code cannot be interrupted.
    *  See {@link FunctionRunner}. */
   readonly FunctionRunner?: FunctionRunner | undefined;
-  /** Appends messages to a session without running a turn, landing at the quiescent edge. The host seeds
+  /** Appends messages to a session without running a turn, once no turn holds it. The host seeds
    *  one wherever it holds the session store; a background job registers one that forwards to its parent.
    *  Absent ⇒ this process has no safe way to append (a job spawned without that channel), and a caller
    *  refuses rather than writing the store itself. See {@link SessionAppender}. */
@@ -311,8 +311,9 @@ export interface MatbotRuntime {
    * refuses, finding nothing. `appender` is how such a turn reports somewhere real — it arrives as
    * `ToolContext.appender`, and its `defaultSessionId` is where an append naming no session goes.
    *
-   * Its turns hold the machine as any turn does. Its tools use the live machine, so a storage swap, an
-   * unload or a deferred edit waits until the run ends, and so do the run's own appends.
+   * Its turns hold the machine as any turn does. Its tools use the live machine, so a storage swap or an
+   * unload waits until the run ends. Its appends, and its edits of other sessions, do not: each waits only
+   * for a turn of the session it writes (`SessionRunner.write`).
    */
   ephemeral?(opts?: { appender?: SessionAppender }): EphemeralRun;
   readonly files?:          FileStore;

@@ -101,6 +101,31 @@ export interface SessionRunner {
   /** Snapshot of a session's live state: whether a turn is running, how many submissions wait behind
    *  it, and how many `parallel` turns are in flight beside it. `busy` is any of the three. */
   status(sessionId: string): { busy: boolean; running: boolean; queued: number; parallel: number };
+  /**
+   * Write session `sessionId` from outside its turns — an append, a rename, an edit of its history.
+   *
+   * A turn works on an in-memory copy of its session and writes it back whole when it ends, so a write
+   * landing during a turn is undone by that write-back. The runner is therefore the session's one writer:
+   * it runs `attempt` between that session's turns, in the order writes arrive, and no turn of the session
+   * starts until it has finished. Other sessions' turns do not delay it.
+   *
+   * `attempt` reads the session itself and writes it with compare-and-swap, which still answers any writer
+   * outside this runner (another process sharing the store). It resolves `false` only when that CAS lost,
+   * to be read and tried again, and `true` once finished, whether or not it wrote; it reports its own
+   * failures. `lost` is logged if every attempt loses. It runs as the principal in force at this call.
+   *
+   * It never runs before this call returns. See {@link SessionWrite} for when awaiting it is safe.
+   */
+  write(sessionId: string, attempt: () => Promise<boolean>, lost: string): SessionWrite;
+}
+
+/** A write handed to {@link SessionRunner.write}. */
+export interface SessionWrite {
+  /** A turn of the session was in progress, so the write waits for it to end. Then never await `done`
+   *  from that turn: its end is what the write is waiting for. */
+  deferred: boolean;
+  /** Settles once the write has run, however it ended (each failure is logged). Never rejects. */
+  done:     Promise<void>;
 }
 
 /** A runner and the store it alone reads and writes — see {@link MatbotRuntime.ephemeral}. */

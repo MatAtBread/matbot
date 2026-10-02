@@ -20,16 +20,19 @@ export interface AppendResult {
   /** The ids the appended messages will carry — minted at acceptance, so a caller can name them before
    *  the write has landed. */
   messageIds: string[];
+  /** The write waits for a turn holding the session, so it has not landed yet. Absent ⇒ it has. */
+  deferred?:  true;
 }
 
 /**
  * Adds messages to the end of a session without running a turn.
  *
  * A running turn owns its session: the runner works on an in-memory copy and writes it back whole when
- * the turn ends, which is what keeps the stored session a set of completed turns. So an append is
- * applied at the quiescent edge, where no turn holds any session, and announced then as a
- * `SessionAppend` notification. It settles once **accepted**, not once written — the edge cannot
- * arrive while the caller's own turn is running, so awaiting the write from a tool would deadlock.
+ * the turn ends, which is what keeps the stored session a set of completed turns. So an append is written
+ * by the session's runner once no turn holds that session (`SessionRunner.write`), and announced then as a
+ * `SessionAppend` notification. When no turn holds it, that is at once, and the append settles once
+ * written, reporting a write that could not land. When one does, it settles once **accepted**: the caller
+ * may be that very turn, and awaiting the write from inside it would deadlock.
  *
  * The host seeds one in every process that holds the session store. A background job does not get
  * one: it shares the store's medium with its parent but none of the parent's pumps, so a write it made

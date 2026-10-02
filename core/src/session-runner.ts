@@ -6,9 +6,9 @@ import type {
 } from './types.js';
 import type { MatbotPlugin } from './plugin.js';
 import type { HookRegistry } from './hooks.js';
-import type { ToolTypeIndex, ToolPresenter, SessionAppender } from '@matatbread/matbot-plugin-api';
+import type { ToolTypeIndex, ToolPresenter, SessionAppender, SessionWrite } from '@matatbread/matbot-plugin-api';
 import { appendMessage, createMessage } from './session.js';
-import { isReadOnlyError, foldOntoUserTurn, lastUserIndex, runAs } from '@matatbread/matbot-plugin-api';
+import { isReadOnlyError, foldOntoUserTurn, lastUserIndex, runAs, tryCurrentPrincipal } from '@matatbread/matbot-plugin-api';
 import { machineBusy, withUsageScope } from '@matatbread/matbot-plugin-api/host';
 import { runSession } from './runner.js';
 import { ingestMedia } from './media.js';
@@ -84,6 +84,11 @@ interface QueuedItem {
 }
 
 const MAX_RESUBMIT_DEPTH = 8;
+
+// Tries a write gets (see `SessionRunner.write`). Writes of one session are applied one at a time, so a lost
+// compare-and-swap means a writer outside this runner — another process on the same store, a storage swap
+// `mediumGuard` refused — and reading again composes with it. The bound only stops a pathological loop.
+const WRITE_ATTEMPTS = 3;
 
 // Disposition for a `mode: 'auto'` mid-turn submission when no SteeringPolicy is registered (or it
 // declares no `classify`). Interrupt-by-default: a message sent while the agent works stops the
@@ -172,6 +177,8 @@ interface SessionState {
   // Set while the pump has run out of queue but still holds the machine for a parallel turn: resolving it
   // resumes the loop.
   wake:        (() => void) | undefined;
+  // Writes from outside the turns (`SessionRunner.write`), waiting for a moment no turn holds the session.
+  writes:      Array<() => Promise<void>>;
 }
 
 interface Sink {
@@ -247,14 +254,14 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
     let s = states.get(id);
     if (s === undefined) {
       s = { queue: [], running: false, runningTraceId: undefined, ac: undefined, subscribers: new Set(), replay: [], pendingUsage: [],
-            parallel: new Map(), merges: [], turnHead: undefined, interjected: [], wake: undefined };
+            parallel: new Map(), merges: [], turnHead: undefined, interjected: [], wake: undefined, writes: [] };
       states.set(id, s);
     }
     return s;
   };
 
   const maybeCleanup = (id: string, s: SessionState): void => {
-    if (!s.running && s.queue.length === 0 && s.subscribers.size === 0 && s.parallel.size === 0 && s.merges.length === 0) states.delete(id);
+    if (!s.running && s.queue.length === 0 && s.subscribers.size === 0 && s.parallel.size === 0 && s.merges.length === 0 && s.writes.length === 0) states.delete(id);
   };
 
   // Turn events go to the replay buffer (so a mid-flight subscriber sees the in-progress turn) and
@@ -348,6 +355,13 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
     for (const r of replies) notify(s, { type: 'merged', traceId: r.traceId });
   };
 
+  // Between turns, too: the writes that were waiting for no turn to hold the session. One at a time, in
+  // the order they came, each reading the document for itself, so each sees the one before it — two
+  // writes of one session never race each other. Never throws (see `write`).
+  const drainWrites = async (s: SessionState): Promise<void> => {
+    for (let w = s.writes.shift(); w !== undefined; w = s.writes.shift()) await w();
+  };
+
   // While a turn runs: called by runSession at the top of each round. The pair goes AHEAD of the running
   // turn's own messages, where the copy the parallel turn ran on ended — so the history stays exactly
   // what that reply was generated against, and alternates without help. At the tail, after the latest
@@ -372,7 +386,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
     if (s.running) { const wake = s.wake; s.wake = undefined; wake?.(); return; }
     s.running = true;
     // Hold the machine for the WHOLE queue, not per turn. A deferred machine mutation (the
-    // StorageBackend swap, a plugin's deferred edit of this very session) may only land where no
+    // StorageBackend swap, the remounts a plugin load or unload stages) may only land where no
     // operation spans it — and the pump's own store work does not stop at a turn's end: it reads the
     // committed document back for followup, appends markers to it, rewrites it for a retract, and
     // persists the next turn's user message before that turn opens. All of that sits between turns,
@@ -380,12 +394,14 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
     // usage flushes at, for the same reason. `machineBusy` releases on every exit including a throw,
     // so no early return out of the loop below can leave the machine held.
     //
-    // It also waits for deferred work to land before taking the hold, which is why there is no separate
-    // `quiesced()` here any more: a flusher that rewrites this very session (a `session_edit` deferred
-    // out of the last turn) finishes before the loop below reads its copy, or the read would take the
-    // pre-edit document and the write-back would put it back. That wait used to be spelled at this call
-    // site, and spelling it here made it something the next caller of `machineBusy` could omit without
-    // any symptom — so it moved inside the hold it guards.
+    // It also waits for deferred machine work to land before taking the hold, so a staged swap is in place
+    // before the loop below reads anything. That wait used to be spelled at this call site, and spelling
+    // it there made it something the next caller of `machineBusy` could omit without any symptom — so it
+    // moved inside the hold it guards.
+    //
+    // Writes of this session from outside its turns are not machine work, and do not wait for the edge:
+    // this loop applies them itself, between its turns (`drainWrites`), so they wait only for this
+    // session's turns, and the next turn reads what they wrote.
     //
     // The parallel turns this pump admits are part of the same operation. Their tools use the machine
     // just as the queue's turns do, so the hold stays up until they have settled too (see the wait in the
@@ -396,12 +412,19 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
           // Not ahead of a redo. A redo re-runs the turn just retracted, found as the session's LAST user
           // message, so a pair appended here would be re-run in its place, on a history ending in an
           // assistant message. Left in `merges`, the pair is placed by the redo's first round instead,
-          // ahead of the kept user message, which is where the copy it ran on ended.
-          if (s.queue[0]?.redo === undefined) await drainMerges(id, s);
+          // ahead of the kept user message, which is where the copy it ran on ended. Writes wait for the
+          // redo to end, for the same reason and because one could remove the message it re-runs.
+          //
+          // Writes before replies: a cut queued by the turn just ended drops everything from its anchor
+          // to the end, so a parallel reply appended first would go with it.
+          if (s.queue[0]?.redo === undefined) {
+            await drainWrites(s);
+            await drainMerges(id, s);
+            // One that arrived while the other was writing. Its arrival found the pump busy, so nothing
+            // else will come round for it; going on would leave it unwritten, and the session busy.
+            if (s.writes.length > 0 || s.merges.length > 0) continue;
+          }
           if (s.queue.length === 0) {
-            // A reply that settled during that write. Its turn's wake-up found nobody waiting, so nothing
-            // else will come round to write it; leaving now would idle with it unwritten, and busy.
-            if (s.merges.length > 0) continue;
             if (s.parallel.size === 0) break;
             // A parallel turn is still out, and this hold covers it. Woken by its settling (its reply is
             // then placed at the top of the loop) or by a new submission. No turn is running meanwhile,
@@ -722,10 +745,10 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
           await flushUsage(id, s);
         } finally {
           s.running = false;
-          // A submission that arrived during the flush found the pump running and did not start one; nor did
-          // a parallel reply that settled then — possible only when a throw left the loop above with parallel
-          // turns still out, since it otherwise ends only once none are.
-          if (s.queue.length > 0 || s.merges.length > 0) void pump(id, s);
+          // A submission or a write that arrived during the flush found the pump running and did not start
+          // one; nor did a parallel reply that settled then — possible only when a throw left the loop above
+          // with parallel turns still out, since it otherwise ends only once none are.
+          if (s.queue.length > 0 || s.merges.length > 0 || s.writes.length > 0) void pump(id, s);
           else {
             // Deterministic busy→idle signal: running is now false, so any subscriber draining the stream
             // (a frontend's status tracker) reads an authoritative idle the moment it sees this — no racing
@@ -1019,6 +1042,36 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
       const queued   = s?.queue.length ?? 0;
       const parallel = s?.parallel.size ?? 0;
       return { busy: running || queued > 0 || parallel > 0 || (s?.merges.length ?? 0) > 0, running, queued, parallel };
+    },
+
+    write(sessionId: string, attempt: () => Promise<boolean>, lost: string): SessionWrite {
+      const s = stateFor(sessionId);
+      // As the caller. The pump runs in the scope of whatever started it, and the store checks ownership.
+      const principal = tryCurrentPrincipal();
+      // It waits for a turn exactly when one is in progress (`ac` is set from dequeue until the turn,
+      // followup included, is done), or when a redo is next — it waits for that too (see the loop).
+      // Otherwise the pump reaches it before taking the next turn off the queue.
+      const deferred = s.ac !== undefined || s.queue[0]?.redo !== undefined;
+      let settle!: () => void;
+      const done = new Promise<void>(resolve => { settle = resolve; });
+      const tries = async (): Promise<void> => {
+        for (let n = 0; n < WRITE_ATTEMPTS; n++) if (await attempt()) return;
+        console.error(lost);
+      };
+      s.writes.push(async () => {
+        try {
+          await (principal !== undefined ? runAs(principal, tries) : tries());
+        } catch (e) {
+          // Nobody may be awaiting it, and the pump must go on to the next write and turn.
+          console.error(`[matbot] a write of session "${sessionId}" failed:`, e instanceof Error ? e : String(e));
+        } finally {
+          settle();
+        }
+      });
+      // On a microtask, so the write cannot start before this returns: a caller decides what to do from
+      // `deferred`, and its attempt may read what it set after the call.
+      queueMicrotask(() => { void pump(sessionId, s); });
+      return { deferred, done };
     },
   };
 }

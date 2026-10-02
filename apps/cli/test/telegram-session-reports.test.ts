@@ -77,6 +77,11 @@ function harness(t: { after(fn: () => Promise<void> | void): void }, seed: Sessi
     Notifier:         { consume: (handler: (n: Notification) => void) => { onAppend = handler; } },
     run: {
       status: () => ({ busy: false, running: false, queued: 0, parallel: 0 }),
+      // No turn holds the session here, so a write is made at once — after the call returns, as the runner's is.
+      write:  (_id: string, attempt: () => Promise<boolean>) => ({
+        deferred: false,
+        done:     Promise.resolve().then(async () => { for (let n = 0; n < 3; n++) if (await attempt()) return; }),
+      }),
       open:   async (o: { sessionId: string }) => {
         opened.push(docs.get(o.sessionId)!);
         return { traceId: 'turn', session: docs.get(o.sessionId)!, queued: 0, events: (async function* () { yield { type: 'idle', sessionId: o.sessionId }; })() };

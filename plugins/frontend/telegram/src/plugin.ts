@@ -1,5 +1,5 @@
 import type {
-  MatbotPluginSpec, MatbotMachine, Principal, Session, FileHandle, Message, Marker,
+  MatbotPluginSpec, MatbotMachine, Principal, Session, FileHandle, Message, Marker, SessionRunner, SessionWrite,
   ToolExecutor, ToolContract, NoParams, ToolResultOf, UserContent, MimeType,
 } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION, isMediaRejectedError, encodeBase64, SessionAppendKind, lastActivityAt } from '@matatbread/matbot-plugin-api';
@@ -168,7 +168,8 @@ function linkMarker(relation: 'split-from' | 'continued-in', peerSessionId: stri
  * archived one, which the chat never shows. So an archived chat session is emptied in place instead,
  * its history moved to a new archived session linked both ways, as a split at the end would.
  *
- * Not while a turn holds the session: its write-back would restore what was moved out. And never from a
+ * The move is the session runner's to make (`reviveThrough`), after any turn holding the session, whose
+ * write-back would restore what was moved out, and before the turn this message starts. Never from a
  * background job, which must not write its parent's sessions; there the id is only read. Nor for a
  * `lookup`, which only says which session it is: moving a chat's history is the chat's business, done
  * when it next speaks.
@@ -185,8 +186,14 @@ async function chatSession(chatId: number, mode: 'speak' | 'lookup'): Promise<Se
   if (session) sessionChats.set(session.id, chatId);
   if (services.isSubAgent() || mode === 'lookup') return session;
 
-  if (session?.status === 'archived' && !services.run?.status(session.id).busy) {
-    session = await revive(session) ?? session;
+  if (session?.status === 'archived' && services.run !== undefined) {
+    const write = reviveThrough(services.run, session.id);
+    // Made now, so the session returned is the revived one. Deferred, it is made before this message's
+    // turn all the same, which queues behind the turn it waits for.
+    if (!write.deferred) {
+      await write.done;
+      session = await sessions.get(session.id) ?? session;
+    }
   }
   if (!session) {
     session = createSession({ title: `${chatUsers.get(chatId)?.name ?? 'Telegram'} on Telegram` });
@@ -195,6 +202,16 @@ async function chatSession(chatId: number, mode: 'speak' | 'lookup'): Promise<Se
   }
   if (session) sessionChats.set(session.id, chatId);
   return session;
+}
+
+// Revive a chat session through its runner, the one writer of a session (`SessionRunner.write`): after any
+// turn holding it, and re-read then, since by that time it may have been revived or unarchived already.
+function reviveThrough(run: SessionRunner, sessionId: string): SessionWrite {
+  return run.write(sessionId, async () => {
+    const current = await servicesRef?.sessions?.get(sessionId);
+    if (current?.status !== 'archived') return true;
+    return (await revive(current)) !== null;
+  }, `[frontend-telegram] reviving chat session "${sessionId}" lost to repeated concurrent writes.`);
 }
 
 /**
@@ -624,8 +641,8 @@ export const plugin: MatbotPluginSpec = {
         const keep = keepOnRevive.get(session.id) ?? new Set<string>();
         for (const id of n.messageIds) keep.add(id);
         keepOnRevive.set(session.id, keep);
-        // A turn in it would write back over the move; then the chat's next message revives it instead.
-        if (!run.status(session.id).busy) await revive(session);
+        // After any turn holding it, which would write back over the move.
+        reviveThrough(run, session.id);
       };
       void (n.principal !== undefined ? runAs(n.principal, deliver) : deliver())
         .catch((e: unknown) => console.warn(`[frontend-telegram] Could not deliver a message appended to session ${n.sessionId}: ${e}\n`));

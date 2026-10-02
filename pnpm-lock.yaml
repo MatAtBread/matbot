@@ -267,9 +267,6 @@ importers:
 
   plugins/edit-session:
     devDependencies:
-      '@matatbread/matbot-core':
-        specifier: workspace:^
-        version: link:../../core
       '@matatbread/matbot-plugin-api':
         specifier: workspace:^
         version: link:../../plugin-api

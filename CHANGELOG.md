@@ -19,6 +19,8 @@ churn and less likely to affect a consumer who doesn't use them.
   draws. Old persisted data keeps them harmlessly as excess properties.
 - **`SessionRunner.status()` returns `parallel`** — the number of parallel turns in flight beside the
   running one, which `busy` now also counts. A custom `SessionRunner` must report it.
+- **`SessionRunner.write()`** — the runner is each session's one writer (see below), so a custom
+  `SessionRunner` must implement it.
 
 ### API gaps filled
 
@@ -39,21 +41,27 @@ churn and less likely to affect a consumer who doesn't use them.
   list) or `pinned`, instead of being created active and changed by a second write that every client
   watching the list sees.
 - **`SessionAppender` / `SessionAppend`** — add messages to a session without running a turn: checked at
-  once, written at the quiescent edge (no turn holds a session there to write it back over), announced as
-  a `SessionAppend` notification carrying the new message ids beside the session's `ItemChange`. The host
+  once, written by the session's runner once no turn holds the session (one would write it back over the
+  append), announced as a `SessionAppend` notification carrying the new message ids beside the session's `ItemChange`. The host
   seeds one in every process (`createSessionAppender`); it refuses in a background job, which shares its
-  parent's storage but none of its turns and must go through its parent instead. `AppendMessage` is plain
-  user/assistant text, so nothing appended can break a later turn's provider request.
+  parent's storage but none of its turns and must go through its parent instead. With no turn to wait for,
+  the append settles once written, so one that cannot land (the session is gone, or shared in read-only)
+  is reported to its caller; otherwise it settles on acceptance. `AppendMessage` is plain user/assistant
+  text, so nothing appended can break a later turn's provider request.
 
 - **`MatbotRuntime.ephemeral()` / `EphemeralRun`** — a private session runner over its own in-memory store,
   for a turn that should leave no trace (a demonstration, an in-process background job): nothing it holds
   is persisted, announced or listed, and nothing outlives the returned object. Its optional `appender` is
   handed to tools as the new **`ToolContext.appender`**, so such a turn can report into a real conversation.
   `MemoryStore` moves from the CLI to `@matatbread/matbot-core/storage-base`.
-- **`casAtEdge(attempt, lost)`** (core) — write once at the next quiescent edge, as the principal in force
-  when it was queued, reading again when the write loses its compare-and-swap, and logging `lost` once the
-  attempts run out. For a write to a session a turn is running in. The session appender, `session_action`'s
-  deferred rename, hide and unhide, and `session_edit`'s deferred edits all use it.
+- **`SessionRunner.write(sessionId, attempt, lost)`** — write a session from outside its turns. The runner
+  is the session's one writer: it runs `attempt` between that session's turns, in arrival order, as the
+  principal in force at the call, and no turn of the session starts until it is done. Other sessions'
+  turns do not delay it, so a write no longer waits for every turn on the machine, and a background job
+  or a long parallel turn no longer holds back writes to sessions it is not running in. `attempt` reads
+  and compare-and-swaps the document itself, and a lost CAS is read again. `deferred` says whether it
+  waits for a turn, which may be the caller's own. The session appender, `session_action` and
+  `session_edit` all write through it.
 - **`runEphemeralTurn(run, opts)`** (core) — one turn on an ephemeral run, from a fresh session to its
   transcript: yields the turn's own events up to its terminal, and returns the committed session,
   recovered from the run's store when the terminal carries none. The caller's signal stops the turn
@@ -89,9 +97,9 @@ churn and less likely to affect a consumer who doesn't use them.
   is deferred until that turn ends, as one of the caller's own session already was. It was written at
   once and then silently undone by that turn's write-back. A deferred edit is addressed by the message it
   names, not by its index, so a reply placed into the running turn meanwhile cannot shift it, and one
-  whose message has gone by then is not applied. One that loses its compare-and-swap at the edge (to an
-  append or a rename landing beside it) reads again and retries instead of being dropped, and so does
-  `compact_sessions`' deferred compaction of the calling session.
+  whose message has gone by then is not applied. One that loses its compare-and-swap reads again and
+  retries instead of being dropped. `compact_sessions` defers any session with a turn running in it, not
+  only the calling one; it compacted the others in place, under their turns' write-backs.
 - **`sessions`** — `session_action` rename, hide and unhide of a session with a turn running in it are
   deferred until the turn ends, and the result says `deferred: true`. They were written at once and
   then silently undone by the turn's write-back — renaming or hiding a conversation from the web sidebar
@@ -133,8 +141,8 @@ churn and less likely to affect a consumer who doesn't use them.
   the next message start a new session under a new id, stranding anything holding the old one (a
   background job reporting to it appended into the archive, which the chat never shows); now the history
   is moved to a new archived session, linked both ways as a split is, and the chat's session is emptied in
-  place. A message appended to an archived chat session reactivates it and stays in it, so the user's reply
-  runs with it in context. A `pinned` chat session is no longer mistaken for an archived one. New
+  place, by the session's runner, after any turn holding it. A message appended to an archived chat session
+  reactivates it and stays in it, so the user's reply runs with it in context. A `pinned` chat session is no longer mistaken for an archived one. New
   `telegram_session` finds a chat's session id by the name or @username of the person in it, without
   moving its history. Machine-authored turn content (a
   trigger's injected context, a followup's prompt) is no longer sent to the chat.

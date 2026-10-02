@@ -1,6 +1,5 @@
-import type { Tool, ToolContract, ToolResultOf, ToolContext, Session, Store, Filter, StoreQuery, FieldPath, SessionAppender } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolContract, ToolResultOf, ToolContext, Session, Store, Filter, StoreQuery, FieldPath, SessionAppender, SessionRunner } from '@matatbread/matbot-plugin-api';
 import { lastActivityAt, StoreQueryError } from '@matatbread/matbot-plugin-api';
-import { casAtEdge } from '@matatbread/matbot-core';
 import { compileFilter, applySort, validateQuery, decodeCursor, encodeCursor, type PageState } from '@matatbread/matbot-core/storage-base';
 
 declare module '@matatbread/matbot-plugin-api' {
@@ -21,8 +20,8 @@ declare module '@matatbread/matbot-plugin-api' {
       | ToolContract<{ id: string; title: string;        deferred?: true }, { action: 'rename'; sessionId: string; title: string }>
       | ToolContract<{ id: string; status: 'archived';   deferred?: true }, { action: 'hide'; sessionId: string }>
       | ToolContract<{ id: string; status: 'active';     deferred?: true }, { action: 'unhide'; sessionId: string }>
-      // Always deferred — an append lands where no turn holds the session — so `deferred` is not optional.
-      | ToolContract<{ id: string; messageIds: string[]; deferred: true }, { action: 'append'; sessionId?: string; text: string }>;
+      // `deferred` while it waits for a turn of that session, which may be this one.
+      | ToolContract<{ id: string; messageIds: string[]; deferred?: true }, { action: 'append'; sessionId?: string; text: string }>;
   }
 }
 
@@ -78,8 +77,8 @@ function lowerSynthOperands(f: Filter): Filter {
 /** What the tool reads off the machine, late-bound so it follows a swap or an unload. Every member is
  *  optional: a caller with no runner has no turns to defer behind, and one with no appender cannot append. */
 export interface SessionToolEnv {
-  /** Whether a turn is running in a session (the plugin passes `services.run.status`). */
-  busy?:       (sessionId: string) => boolean;
+  /** The runner whose turns hold the sessions in `store`, and so their one writer (`services.run`). */
+  run?:        () => SessionRunner | undefined;
   appender?:   () => SessionAppender | undefined;
   /** A background job's process: its sessions are the parent's, written by none of its pumps. */
   isSubAgent?: () => boolean;
@@ -92,6 +91,8 @@ export function makeSessionTools(store: Store<Session>, env: SessionToolEnv = {}
 // A background job's store is its parent's medium, but no turn in the parent passes through it: a write
 // from here would land under a running turn there unseen and be undone by its write-back. An append goes
 // through the parent; everything else is refused rather than raced.
+const CONCURRENT = 'Concurrent modification — please retry.';
+
 const JOB_CANNOT_EDIT =
   'A background job cannot rename, hide or unhide a session — it would race the turns of the process that ' +
   'owns it. Use "append" to say something in a conversation instead.';
@@ -102,17 +103,6 @@ type FieldEdit = { title: string } | { status: Session['status'] };
 // (the lastActivityAt invariant) so it doesn't float the session up a recency-sorted list.
 function withEdit(session: Session, edit: FieldEdit): Session {
   return { ...session, ...edit, version: crypto.randomUUID(), updatedAt: lastActivityAt(session) };
-}
-
-// A session a turn is running in belongs to that turn until it commits: the runner writes its in-memory
-// copy back unconditionally at turn end, so a CAS landing mid-turn succeeds and is then silently undone.
-// So the edit waits for the quiescent edge, as `session_edit`'s do. Nobody is left to report a conflict
-// to by then, and setting a field composes with any other write, so a conflict re-reads and re-applies.
-function deferEdit(store: Store<Session>, sessionId: string, edit: FieldEdit): void {
-  casAtEdge(async () => {
-    const session = await store.get(sessionId);
-    return !session || (await store.cas(sessionId, session.version, withEdit(session, edit))).ok;
-  }, `[session_action] deferred edit of session "${sessionId}" lost to repeated concurrent writes.`);
 }
 
 // The precise per-action contract. JSON Schema can't express "title required only for rename"
@@ -130,16 +120,29 @@ type SessionInput =
 function makeSessionActionTool(store: Store<Session>, env: SessionToolEnv): Tool<ToolResultOf<'session_action'>> {
   const isSubAgent = env.isSubAgent ?? (() => false);
   // A string is the refusal to report; otherwise what the result adds.
+  //
+  // A session a turn is running in belongs to that turn until it commits: the runner writes its in-memory
+  // copy back unconditionally at turn end, so a CAS landing mid-turn succeeds and is then silently undone.
+  // So the edit is the runner's to make (`SessionRunner.write`), which waits for that turn if there is one.
+  // Setting a field composes with any other write, so a lost compare-and-swap reads again and re-applies.
   const editFields = async (sessionId: string, edit: FieldEdit): Promise<string | { deferred?: true }> => {
     if (isSubAgent()) return JOB_CANNOT_EDIT;
-    const session = await store.get(sessionId);
-    if (!session) return `Session "${sessionId}" not found.`;
-    if (env.busy?.(sessionId) === true) {
-      deferEdit(store, sessionId, edit);
-      return { deferred: true };
-    }
-    const res = await store.cas(sessionId, session.version, withEdit(session, edit));
-    return res.ok ? {} : 'Concurrent modification — please retry.';
+    if (!(await store.get(sessionId))) return `Session "${sessionId}" not found.`;
+    let outcome: string | undefined = CONCURRENT;
+    const attempt = async (): Promise<boolean> => {
+      const session = await store.get(sessionId);
+      if (!session) { outcome = `Session "${sessionId}" not found.`; return true; }
+      if (!(await store.cas(sessionId, session.version, withEdit(session, edit))).ok) return false;
+      outcome = undefined;
+      return true;
+    };
+    const run = env.run?.();
+    // No runner, no turns to wait for: one attempt, a lost compare-and-swap reported for the caller to retry.
+    if (run === undefined) { await attempt(); return outcome ?? {}; }
+    const write = run.write(sessionId, attempt, `[session_action] edit of session "${sessionId}" lost to repeated concurrent writes.`);
+    if (write.deferred) return { deferred: true };
+    await write.done;
+    return outcome ?? {};
   };
 
   return {
@@ -152,8 +155,9 @@ function makeSessionActionTool(store: Store<Session>, env: SessionToolEnv): Tool
       '"append" posts "text" into a conversation as a message from the assistant, without starting a turn. ' +
       'With no "sessionId" it goes to a deafult (the current session, or one specified for background job) ' +
       'Use it when the user should be able to follow up on what you say: it becomes part of ' +
-      'that conversation, so a later question there has it as context. It lands once no turn is running, and ' +
-      'the result says "deferred": true. A bare notification that needs no follow-up is telegram_send\'s job; ' +
+      'that conversation, so a later question there has it as context. It lands once no turn is running in ' +
+      'that conversation — at once if none is — and while it waits the result says "deferred": true (always, ' +
+      'for this conversation). A bare notification that needs no follow-up is telegram_send\'s job; ' +
       'append is the one that keeps context.\n\n' +
       'A rename, hide or unhide of a session with a turn running in it — including the one this call is ' +
       'made from — is applied once that turn ends, and the result says "deferred": true. Do not re-issue it.\n\n' +
@@ -331,10 +335,10 @@ function makeSessionActionTool(store: Store<Session>, env: SessionToolEnv): Tool
               return;
             }
             try {
-              const { sessionId: id, messageIds } = await appender.append(target, [
+              const { sessionId: id, messageIds, deferred } = await appender.append(target, [
                 { role: 'assistant', content: [{ type: 'text', text, origin: 'robo' }] },
               ]);
-              yield { type: 'result', value: { id, messageIds, deferred: true } };
+              yield { type: 'result', value: { id, messageIds, ...(deferred ? { deferred } : {}) } };
             } catch (e) {
               yield { type: 'error', message: e instanceof Error ? e.message : String(e) };
             }

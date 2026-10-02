@@ -181,11 +181,13 @@ export function assembleMachine(opts: AssembleOptions): AssembledMachine {
   //
   // The session appender is seeded the same way, in every process: it refuses in a background job, which
   // registers its own (forwarding to its parent) over it — and unloading that reverts to refusing, which
-  // is the honest answer for a job with no channel. Late-bound, as `services` is built below.
+  // is the honest answer for a job with no channel. Late-bound, as `services` is built below. It writes
+  // through the shared runner, the one writer of the sessions in `services.sessions`.
   const seed: Partial<MatbotServices> = {
     MediaStore:      fileStore,
     SessionAppender: createSessionAppender({
       sessions:   () => services.sessions,
+      run:        () => services.run,
       notifier:   () => services.Notifier,
       isSubAgent: () => services.isSubAgent(),
     }),

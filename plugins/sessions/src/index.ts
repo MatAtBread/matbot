@@ -11,7 +11,7 @@ export const plugin: MatbotPluginSpec = {
     const store = services.sessions;
     if (!store) return;
     const tools = makeSessionTools(store, {
-      busy:       id => services.run?.status(id).busy ?? false,
+      run:        () => services.run,
       appender:   () => services.SessionAppender,
       isSubAgent: () => services.isSubAgent(),
     });
