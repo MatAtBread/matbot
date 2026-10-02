@@ -31,8 +31,9 @@ churn and less likely to affect a consumer who doesn't use them.
   own traceId, and a `merged` event once written. `SteeringDecision` gains `'parallel'`, so a
   `SteeringPolicy` can choose it under `auto`. With nothing running it is an ordinary turn. A parallel
   turn that arrives once the running turn has answered (while followup hooks judge it) sees the answer and
-  is not told a turn is still working, and its runner takes no machine hold, so it never waits at the
-  quiescent-edge barrier behind the turn it runs beside.
+  is not told a turn is still working. A parallel turn runs inside the machine hold of the session's pump,
+  which keeps it until every parallel turn it admitted has settled, so deferred work never lands under one
+  and it never waits at the quiescent-edge barrier behind the turn it runs beside.
 
 - **`CreateSessionOpts.status`** — a session can be created `archived` (hidden from the default session
   list) or `pinned`, instead of being created active and changed by a second write that every client
@@ -48,8 +49,6 @@ churn and less likely to affect a consumer who doesn't use them.
   for a turn that should leave no trace (a demonstration, an in-process background job): nothing it holds
   is persisted, announced or listed, and nothing outlives the returned object. Its optional `appender` is
   handed to tools as the new **`ToolContext.appender`**, so such a turn can report into a real conversation.
-  Its turns take no machine hold, since nothing deferred can address a store only it holds, so deferred
-  work (an append, a session edit, a storage swap) lands while it runs instead of waiting for it to end.
   `MemoryStore` moves from the CLI to `@matatbread/matbot-core/storage-base`.
 
 ### Bug fixes

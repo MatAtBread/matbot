@@ -44,14 +44,12 @@ export interface SessionRunnerDeps {
   files?:          FileStore;
   // Only for a runner over a store the machine's appender cannot reach — see `MatbotRuntime.ephemeral`.
   appender?:       SessionAppender;
-  // The store is this runner's own (an ephemeral run's, a parallel turn's copy), so the pump takes no
-  // machine hold. The hold exists so deferred work cannot land in the middle of the pump's
-  // read-modify-writes of the session, and nothing deferred can address a store that only this runner
-  // holds. Held anyway, it cost twice over. A parallel turn always starts inside the main pump's hold, so
-  // with anything staged it waited out the full admit timeout. An in-process background job held the
-  // machine for its whole run, so nothing deferred anywhere (appends, its own included; session edits; a
-  // StorageBackend swap) could land until it finished.
-  privateStore?:   true;
+  // Set only for a parallel turn's runner, whose whole life falls inside the hold of the pump that
+  // admitted it (that pump waits for its parallel turns before it releases). So this runner's pump takes
+  // no hold of its own. Taking one would gain nothing, since nothing deferred can land while the outer
+  // hold is up. And it would cost the full admit timeout whenever anything is staged, because the
+  // barrier would be waiting for a drain that its own parent prevents.
+  heldByCreator?:  true;
   workdir?:        string;
   configPath?:     string;
   loadPlugin:      (specifier: string, prompt?: PromptFn, refresh?: boolean) => Promise<MatbotPlugin>;
@@ -168,6 +166,9 @@ interface SessionState {
   // Replies placed into the running turn's in-memory copy and not yet committed: a parallel turn started
   // now must see them, and they reach the store only when that turn ends.
   interjected: ParallelReply[];
+  // Set while the pump has run out of queue but still holds the machine for a parallel turn: resolving it
+  // resumes the loop.
+  wake:        (() => void) | undefined;
 }
 
 interface Sink {
@@ -243,7 +244,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
     let s = states.get(id);
     if (s === undefined) {
       s = { queue: [], running: false, runningTraceId: undefined, ac: undefined, subscribers: new Set(), replay: [], pendingUsage: [],
-            parallel: new Map(), merges: [], turnHead: undefined, interjected: [] };
+            parallel: new Map(), merges: [], turnHead: undefined, interjected: [], wake: undefined };
       states.set(id, s);
     }
     return s;
@@ -364,7 +365,8 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
   };
 
   const pump = async (id: string, s: SessionState): Promise<void> => {
-    if (s.running) return;
+    // Already pumping: it picks this up, though it may be waiting for a parallel turn and need waking.
+    if (s.running) { const wake = s.wake; s.wake = undefined; wake?.(); return; }
     s.running = true;
     // Hold the machine for the WHOLE queue, not per turn. A deferred machine mutation (the
     // StorageBackend swap, a plugin's deferred edit of this very session) may only land where no
@@ -382,7 +384,9 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
     // site, and spelling it here made it something the next caller of `machineBusy` could omit without
     // any symptom — so it moved inside the hold it guards.
     //
-    // A runner over a private store skips the hold (see `SessionRunnerDeps.privateStore`).
+    // The parallel turns this pump admits are part of the same operation. Their tools use the machine
+    // just as the queue's turns do, so the hold stays up until they have settled too (see the wait in the
+    // loop below), and their own runner takes none (`SessionRunnerDeps.heldByCreator`).
     const drain = async (): Promise<void> => {
       try {
         for (;;) {
@@ -391,7 +395,15 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
           // assistant message. Left in `merges`, the pair is placed by the redo's first round instead,
           // ahead of the kept user message, which is where the copy it ran on ended.
           if (s.queue[0]?.redo === undefined) await drainMerges(id, s);
-          if (s.queue.length === 0) break;
+          if (s.queue.length === 0) {
+            if (s.parallel.size === 0) break;
+            // A parallel turn is still out, and this hold covers it. Woken by its settling (its reply is
+            // then placed at the top of the loop) or by a new submission. No turn is running meanwhile,
+            // so an interrupt or a parallel submission arriving now queues as an ordinary turn.
+            s.runningTraceId = undefined;
+            await new Promise<void>(resolve => { s.wake = resolve; });
+            continue;
+          }
           // Per-submission concat: the head always runs; if the head is a concat submission it absorbs
           // the following submissions while they too are concat, stopping at the first non-concat (a turn
           // boundary). Net effect: maximal runs of consecutive concat submissions merge into one turn,
@@ -703,10 +715,8 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
           s.running = false;
           // A submission that arrived during the flush found the pump running and did not start one; nor did
           // a parallel reply that settled then.
-          if (s.queue.length > 0 || s.merges.length > 0) void pump(id, s);
-          // Not idle while a parallel turn is still out: its reply has yet to be written, and the pump it
-          // starts to write it ends with the `idle` this one would have sent.
-          else if (s.parallel.size === 0) {
+          if (s.queue.length > 0) void pump(id, s);
+          else {
             // Deterministic busy→idle signal: running is now false, so any subscriber draining the stream
             // (a frontend's status tracker) reads an authoritative idle the moment it sees this — no racing
             // the microtask on which `running` flipped. Not in `replay` (transient lifecycle, not history).
@@ -716,7 +726,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
         }
       }
     };
-    return deps.privateStore ? drain() : machineBusy(drain);
+    return deps.heldByCreator ? drain() : machineBusy(drain);
   };
 
   /**
@@ -753,7 +763,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
 
       const store = new MemoryStore<Session>();
       await store.set(id, copy);
-      const sub = createSessionRunner({ ...deps, store, privateStore: true });
+      const sub = createSessionRunner({ ...deps, store, heldByCreator: true });
       if (rec.stop.signal.aborted) { forward({ type: 'cancelled', sessionId: id, traceId: p.traceId }); return; }
       rec.stop.signal.addEventListener('abort', () => sub.abort(id), { once: true });
 
@@ -808,8 +818,8 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
     } finally {
       s.parallel.delete(p.traceId);
       if (reply !== undefined) s.merges.push(reply);
-      // Placed by the running turn if there is one (it is polled each round), else by this pump — which
-      // also sends the `idle` the main pump withheld while this was out.
+      // Placed by the running turn if there is one (it is polled each round), else by the pump that admitted
+      // this turn, which is waiting for it.
       void pump(id, s);
     }
   };

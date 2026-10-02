@@ -322,7 +322,7 @@ export function assembleMachine(opts: AssembleOptions): AssembledMachine {
     get run() { return runner; },
     ephemeral(opts) {
       const store = new MemoryStore<Session>();
-      return { sessions: store, run: makeRunner(store, { ...opts, privateStore: true }) };
+      return { sessions: store, run: makeRunner(store, opts) };
     },
     hooks,
     tools,
@@ -346,9 +346,8 @@ export function assembleMachine(opts: AssembleOptions): AssembledMachine {
   };
 
   // Services a plugin registers after boot are resolved live, per turn.
-  const makeRunner = (store: Store<Session>, extra?: { appender?: SessionAppender; privateStore?: true }): SessionRunner => createSessionRunner({
+  const makeRunner = (store: Store<Session>, extra?: { appender?: SessionAppender }): SessionRunner => createSessionRunner({
     store,
-    ...(extra?.privateStore !== undefined ? { privateStore: extra.privateStore } : {}),
     ...(extra?.appender !== undefined ? { appender: extra.appender } : {}),
     resolveProvider,
     tools,

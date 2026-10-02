@@ -344,7 +344,8 @@ test('a stop that lands while a parallel turn is being submitted stops it', { ti
 
 // A parallel turn's nested runner took the machine hold like any pump, and a parallel turn always starts
 // inside the main pump's hold. So with any deferred work staged, it waited out the whole admit timeout
-// (2s) and logged a warning, before answering a message whose point is being answered at once.
+// (2s) and logged a warning, before answering a message whose point is being answered at once. It now
+// runs inside the hold of the pump that admitted it, and takes none of its own.
 test('a parallel turn does not wait at the barrier for work the running turn holds up', { timeout: 10000 }, async () => {
   const { sid, started, release, runner } = setup(Promise.resolve());
   const warnings: string[] = [];
@@ -373,4 +374,30 @@ test('a parallel turn does not wait at the barrier for work the running turn hol
   } finally {
     console.warn = warn;
   }
+});
+
+// The other half: a parallel turn's tools use the live machine as much as the running turn's do, so
+// deferred work must not land while it is still out, even once the turn it ran beside has committed and
+// the queue is empty. The admitting pump keeps the hold until it settles.
+test('staged work waits for a parallel turn that outlives the running one', { timeout: 10000 }, async () => {
+  const parallelGate = gate();
+  const { sid, started, release, runner } = setup(parallelGate.wait);
+  const main = await runner.open({ sessionId: sid, signal: new AbortController().signal, content: submit('do it'), provider: 'fake', principal });
+  const mainDone = gate();
+  const collector = watch(main, [], ev => { if (ev.type === 'done' && ev.traceId === main.traceId) mainDone.open(); });
+  await started.wait;
+  await runner.open({ sessionId: sid, signal: new AbortController().signal, content: submit('Q'), provider: 'fake', principal, mode: 'parallel' });
+  let landed = false;
+  onContextQuiesce(un => { un(); landed = true; });
+
+  release.open();
+  await mainDone.wait;
+  for (let i = 0; i < 20; i++) await new Promise(r => setTimeout(r, 5));
+  assert.equal(landed, false, 'still held: the parallel turn is out');
+  assert.equal(runner.status(sid).parallel, 1);
+
+  parallelGate.open();
+  await collector;
+  await quiesced();
+  assert.equal(landed, true, 'landed once the parallel turn had settled');
 });

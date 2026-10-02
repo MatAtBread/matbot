@@ -311,9 +311,8 @@ export interface MatbotRuntime {
    * refuses, finding nothing. `appender` is how such a turn reports somewhere real — it arrives as
    * `ToolContext.appender`, and its `defaultSessionId` is where an append naming no session goes.
    *
-   * Its turns do not hold the machine, since nothing deferred can address a store only this run holds.
-   * Deferred work (an append, a session edit, a storage swap) can therefore land while a job runs, and
-   * an append the job makes is written while the job is still going rather than after it ends.
+   * Its turns hold the machine as any turn does. Its tools use the live machine, so a storage swap, an
+   * unload or a deferred edit waits until the run ends, and so do the run's own appends.
    */
   ephemeral?(opts?: { appender?: SessionAppender }): EphemeralRun;
   readonly files?:          FileStore;
