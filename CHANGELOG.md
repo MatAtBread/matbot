@@ -29,7 +29,10 @@ churn and less likely to affect a consumer who doesn't use them.
   turn's own messages at its next round boundary, which is exactly the history the reply was generated
   against; otherwise it is appended. Announced with a `parallel` event, with progress streamed under its
   own traceId, and a `merged` event once written. `SteeringDecision` gains `'parallel'`, so a
-  `SteeringPolicy` can choose it under `auto`. With nothing running it is an ordinary turn.
+  `SteeringPolicy` can choose it under `auto`. With nothing running it is an ordinary turn. A parallel
+  turn that arrives once the running turn has answered (while followup hooks judge it) sees the answer and
+  is not told a turn is still working, and its runner takes no machine hold, so it never waits at the
+  quiescent-edge barrier behind the turn it runs beside.
 
 - **`CreateSessionOpts.status`** — a session can be created `archived` (hidden from the default session
   list) or `pinned`, instead of being created active and changed by a second write that every client
@@ -45,6 +48,8 @@ churn and less likely to affect a consumer who doesn't use them.
   for a turn that should leave no trace (a demonstration, an in-process background job): nothing it holds
   is persisted, announced or listed, and nothing outlives the returned object. Its optional `appender` is
   handed to tools as the new **`ToolContext.appender`**, so such a turn can report into a real conversation.
+  Its turns take no machine hold, since nothing deferred can address a store only it holds, so deferred
+  work (an append, a session edit, a storage swap) lands while it runs instead of waiting for it to end.
   `MemoryStore` moves from the CLI to `@matatbread/matbot-core/storage-base`.
 
 ### Bug fixes
@@ -54,6 +59,9 @@ churn and less likely to affect a consumer who doesn't use them.
   so the submission started a second pump whose turn-start write interleaved with the flush's
   read-modify-write. The flush now runs while the pump still holds the session, and anything queued
   during it runs next.
+- **Session runner** — a stop or cancel sent before a turn's first provider round (while its user message
+  was being saved or its provider resolved) was lost, and the turn ran anyway. The turn's controller is
+  now created as it is taken off the queue.
 
 - **Hooks** — a hook cut off by its turn's abort (a steer, a cancel) is logged as cut off, naming the abort
   reason, and leaves no failure marker. It was logged as a failure whose whole message was the abort
@@ -71,7 +79,9 @@ churn and less likely to affect a consumer who doesn't use them.
   relation marker is the record of where it came from.
 - **`edit-session`** — a cut, split, compact or summarise of ANOTHER session with a turn running in it
   is deferred until that turn ends, as one of the caller's own session already was. It was written at
-  once and then silently undone by that turn's write-back.
+  once and then silently undone by that turn's write-back. A deferred edit is addressed by the message it
+  names, not by its index, so a reply placed into the running turn meanwhile cannot shift it, and one
+  whose message has gone by then is not applied.
 - **`sessions`** — `session_action` rename, hide and unhide of a session with a turn running in it are
   deferred until the turn ends, and the result says `deferred: true`. They were written at once and
   then silently undone by the turn's write-back — renaming or hiding a conversation from the web sidebar
@@ -99,6 +109,7 @@ churn and less likely to affect a consumer who doesn't use them.
   in its own process, which can be killed and shares no heap with the server, at the cost of a full boot
   per run. A job reaches its parent over an IPC channel, which also carries what it changes back to the
   parent's bus — so a file a job writes shows in the web UI. Same tools and store: load one or the other.
+  A job process that cannot be spawned is logged, and is not fatal to the server.
 - **`sessions`** — `session_action` gains `append`: post a message into a conversation without starting
   a turn (default: this one, or in a background job the one it reports to). In a background job, rename,
   hide and unhide are refused.
@@ -112,8 +123,10 @@ churn and less likely to affect a consumer who doesn't use them.
   the next message start a new session under a new id, stranding anything holding the old one (a
   background job reporting to it appended into the archive, which the chat never shows); now the history
   is moved to a new archived session, linked both ways as a split is, and the chat's session is emptied in
-  place. A `pinned` chat session is no longer mistaken for an archived one. New `telegram_session` finds a
-  chat's session id by the name or @username of the person in it. Machine-authored turn content (a
+  place. A message appended to an archived chat session reactivates it and stays in it, so the user's reply
+  runs with it in context. A `pinned` chat session is no longer mistaken for an archived one. New
+  `telegram_session` finds a chat's session id by the name or @username of the person in it, without
+  moving its history. Machine-authored turn content (a
   trigger's injected context, a followup's prompt) is no longer sent to the chat.
 - **`sessions`** — `session_action append` uses the turn's own appender when its runner supplies one, and
   then never defaults to the turn's own (throwaway) session.
