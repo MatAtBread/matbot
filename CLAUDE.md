@@ -311,6 +311,34 @@ The wait lives *inside* `machineBusy` rather than at the call site, for the reas
 
 A turn works on an in-memory copy of its session and writes it back whole when it ends, so a write landing mid-turn is silently undone. Session writes used to wait for the machine edge, which waits for **every** turn on the machine rather than the one holding that session: a rename raised a machine-wide barrier, a long parallel turn or an in-process job held back every session's writes, and the admit bound fired for work that was never machine-wide. A session write is not machine work. **The runner is each session's one writer**: `SessionRunner.write(sessionId, attempt, lost)` runs `attempt` between that session's turns (`drainWrites`, at the top of the pump's loop, before the next turn reads), in arrival order, and no turn of the session starts until it is done. Other sessions' turns do not delay it. With no turn to wait for it runs at once — as the pump, so a submission arriving meanwhile queues behind it instead of reading under it.
 
+**"Nothing is written mid-turn" is not the invariant; "the runner owns the session exclusively" is.**
+Several writes during one turn are fine as long as the runner knows about all of them, and one case needs
+it: a parallel turn's pair is a *completed* turn, not a partial one, so it is placed in the store as it
+settles (`placeNow`) rather than waiting for the running turn's next round boundary — which a turn parked
+in one long tool call never reaches, leaving a finished reply in no store, no replay and no stream. The
+pair goes on `merges` as well, so the running turn takes it into its own in-memory session and its
+whole-document write-back carries it instead of erasing it; `end` does a final `interject` pull, being the
+funnel every exit passes through, for the turn that is aborted inside that same tool call and so reaches
+no further boundary. The three placement paths — `placeNow`, `interjectInto`, `drainMerges` — are mutually
+idempotent on the pair's message id, and exactly one announces `merged`. The turn's own partial output is
+a different thing and stays unpersisted: it is genuinely incomplete, and a crash must not commit half a
+turn.
+
+**A pair is anchored on the head its OWN copy was cut at**, captured at submit and carried on the reply —
+never on the session's current head. The two differ exactly where it matters: a parallel turn submitted
+*during* a turn's `followup` ran on a copy that INCLUDED that finished turn, so its pair belongs after it,
+and the current head would put it in front of the very history it answered. A reply with no head of its
+own belongs at the tail, which is the pump's to append and must wait for it — appended early it would
+become the session's last user message, which is the turn a redo re-runs.
+
+**The corollary is that post-commit writes compare.** `followup`'s marker append and its retract rewrite
+were whole-document `set`s built from the session the hooks were handed before they ran, justified by the
+pump being the only writer once a turn has committed. It no longer is, so both CAS against that snapshot
+and rebuild from `current` if it moved, and the retraction enqueues its redo only if the write landed.
+Rebuilding is safe because every landmark they use is "the last user message", which a pair placed ahead
+of it does not move. They CAS rather than re-read because a re-read costs a round trip per turn and
+consumes the next `store.get`, which is a thing a test legitimately holds.
+
 **Ordering, not a lock — and CAS stays.** Nothing is held but the runner's own per-session state, the same map `status()` reads; there is no lock object, and nothing in `Session` or `Store`, which do not lock and must not (OPFS, IndexedDB, Drive). `attempt` still reads the document and compare-and-swaps it, and a lost CAS is read again (bounded). Within a process, writes of one session no longer race each other; the CAS still answers a writer outside the runner — another process on the same store, a swap `mediumGuard` refuses. Across processes this does nothing, any more than the edge did: a background job's process forwards over its channel instead.
 
 **`deferred` says who may wait.** It is true when a turn of the session is in progress (or a redo is next), so the write waits for that turn — which may be the caller's own, so awaiting `done` then deadlocks. Callers say "queued" when deferred and report the real outcome otherwise. `done` never rejects; a write logs its own failures. The write never starts before `write()` returns, so an attempt may read what its caller set from `deferred`. At a boundary, writes go before parallel replies (a cut queued by the turn just ended drops through to the end, and would take a reply appended before it), and neither goes ahead of a redo.

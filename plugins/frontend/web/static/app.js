@@ -2184,6 +2184,163 @@ function scrollMessagesToBottom() {
   }
 }
 
+// ── Parallel turns: the in-flight overlay ─────────────────────────────────────
+//
+// A `mode: 'parallel'` submission has no position in the thread while it runs. It is answered on a
+// private copy of the session's completed turns, and only the submission and its final reply are
+// written back — ahead of the running turn's user message, where that copy ended, announced by
+// `merged`. Drawing it inline at the tail, where its events arrive, therefore puts it somewhere a
+// refresh will not: it belongs ABOVE the turn it ran beside. So it is drawn in a pane docked above
+// the composer, outside #messages, and its nodes are moved into place when `merged` says where they
+// landed. The pane is also the honest rendering of what it is: in flight, beside the conversation,
+// not yet part of it.
+const parallelOverlayEl = document.getElementById('parallel-overlay');
+const parallelPanes     = new Map();   // traceId -> pane element, while that turn is unlanded
+const parallelMerges    = new Map();   // traceId -> `into`, once `merged` has said where the pair went
+const parallelEnded     = new Set();   // traceIds whose renderer has drained its terminal
+
+function paneFor(traceId) {
+  let pane = parallelPanes.get(traceId);
+  if (!pane) {
+    pane = document.createElement('div');
+    pane.className = 'parallel-pane';
+    pane.dataset.trace = traceId;
+    parallelOverlayEl.appendChild(pane);
+    parallelPanes.set(traceId, pane);
+    // The overlay is a flex sibling of #messages, so a new pane shortens the scrollport: re-pin the
+    // tail of the running turn, which the user is most likely reading.
+    scrollMessagesToBottom();
+  }
+  return pane;
+}
+
+// A parallel submission's bubble. Deliberately not appendUserBubble: no turn divider (the pane has no
+// position to divide, and an unindexed divider would be mis-backfilled by the running turn's `done`),
+// and the pane is the container. Adopts an existing bubble so a replayed `parallel` on a late connect
+// doesn't draw a second one.
+function appendPaneUserBubble(traceId, text, media) {
+  const pane = paneFor(traceId);
+  const existing = pane.querySelector('.message.user');
+  if (existing) return existing;
+  const div = makeBubble('user', text, media);
+  div.dataset.trace = traceId;
+  pane.appendChild(div);
+  scrollMessagesToBottom();
+  return div;
+}
+
+function clearParallelPanes() {
+  parallelOverlayEl.replaceChildren();
+  parallelPanes.clear();
+  parallelMerges.clear();
+  parallelEnded.clear();
+}
+
+// Where the pair went, from `merged`: `into` is the turn it landed inside (ahead of that turn's user
+// message), absent ⇒ nothing was running and it was appended.
+function noteParallelMerge(traceId, into) { parallelMerges.set(traceId, into); tryLandParallel(traceId); }
+
+// This turn's renderer has drained its terminal, so its pane now holds everything it is going to hold.
+// If it does not land right now, it is waiting on the write-back, which the runner defers to the running
+// turn's next ROUND boundary — `interject` is polled at the top of a round, so a turn parked in one long
+// tool call reaches no boundary; and a reply that settles during that turn's `followup` cannot be placed
+// at all until the hooks have decided whether one of them retracts the turn. Say so on the pane: a
+// finished reply sitting in a pane is otherwise indistinguishable from a stalled one.
+function noteParallelEnd(traceId) {
+  parallelEnded.add(traceId);
+  tryLandParallel(traceId);
+  // Only if it is still waiting a moment later. The runner now places a settled pair as it settles, so
+  // `merged` usually arrives in the same chunk as the terminal; flashing the waiting state for two frames
+  // on every parallel turn would be noise. Self-cancelling — a landed pane is off the map.
+  setTimeout(() => parallelPanes.get(traceId)?.classList.add('pending-merge'), 400);
+}
+
+// Take the pane's place in the thread — but only once BOTH facts are in: where the pair went, and that
+// the pane is complete. Either can arrive first. `merged` is yielded on the RUNNING turn's stream at its
+// next round boundary, so it may precede this turn's own terminal — and landing on whichever came first
+// moved a pane the renderer then kept adding to, which re-created a second pane (`paneFor`) that nothing
+// would ever land. A pane with no `merged` at all (the store refused the write) is left where it is,
+// which is correct: that reply is not in the session.
+function tryLandParallel(traceId) {
+  if (!parallelMerges.has(traceId) || !parallelEnded.has(traceId)) return;
+  const into = parallelMerges.get(traceId);
+  parallelMerges.delete(traceId);
+  parallelEnded.delete(traceId);
+  const pane = parallelPanes.get(traceId);
+  if (!pane) return;
+  parallelPanes.delete(traceId);
+  // The pane's own nodes are MOVED, never redrawn, so nothing the renderer captured is invalidated.
+  // `into`'s first tagged node is its user bubble, and the divider in front of that bubble belongs to
+  // it, so go ahead of the divider too — otherwise the pair lands between a turn and its own label.
+  const anchor = into ? messagesEl.querySelector(`.message[data-trace="${into}"]`) : null;
+  const prev   = anchor?.previousElementSibling;
+  const before = prev?.classList.contains('msg-divider') ? prev : anchor;
+  messagesEl.querySelector('.empty-state')?.remove();
+  const nodes = [...pane.children];
+  // Where each node is NOW, while it is still in the pane: the "first" half of the FLIP below.
+  const from  = nodes.map(n => n.getBoundingClientRect());
+  for (const n of nodes) {
+    if (before) messagesEl.insertBefore(n, before);
+    else messagesEl.appendChild(n);
+  }
+  pane.remove();
+  // No divider is added in front of the group: the only index it could carry is the running turn's to
+  // assign, and the next load of the session draws the canonical ones anyway. The flight plus the ring
+  // are what say "it landed here" instead.
+  flyToPlace(nodes, from);
+}
+
+// A ring that fades, once a node is where it belongs.
+function ringLanded(n) {
+  if (!n.classList.contains('message')) return;
+  n.classList.add('parallel-landed');
+  setTimeout(() => n.classList.remove('parallel-landed'), 1100);
+}
+
+// Animate the move the pane just made: FLIP. The nodes are already in their final place and laid out —
+// `from` is where each one was while still in the pane — so each is offset BACK to where it was and then
+// released, and only `transform` changes. Measuring after the move is what makes this self-correcting:
+// collapsing the overlay and inserting above the viewport both shift the list, and the flight still
+// starts wherever the node visually was.
+function flyToPlace(nodes, from) {
+  const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches === true;
+  nodes.forEach((n, i) => {
+    const was = from[i];
+    const now = n.getBoundingClientRect();
+    const dx  = was ? was.left - now.left : 0;
+    const dy  = was ? was.top  - now.top  : 0;
+    // Nothing worth animating; or a flight across the whole conversation, which reads as a glitch rather
+    // than a journey — the pair can land far above the fold, and the ring says where it went.
+    if (reduced || !was || (Math.abs(dx) < 2 && Math.abs(dy) < 2) || Math.abs(dy) > window.innerHeight * 1.5) {
+      ringLanded(n);
+      return;
+    }
+    n.classList.add('parallel-flying');
+    n.style.transform = `translate(${dx}px, ${dy}px)`;
+    let settled = false;
+    // `transitionend` BUBBLES, so a descendant's own transition (a copy button, a details toggle) would
+    // otherwise end the flight early: only this node's own transform counts.
+    const settle = (ev) => {
+      if (settled || (ev !== undefined && (ev.target !== n || ev.propertyName !== 'transform'))) return;
+      settled = true;
+      n.removeEventListener('transitionend', settle);
+      n.classList.remove('parallel-flying', 'parallel-settling');
+      n.style.transform = '';
+      ringLanded(n);
+    };
+    // Next frame, so the offset is painted before the transition towards zero starts; in the same frame
+    // the browser coalesces the two and nothing moves.
+    requestAnimationFrame(() => {
+      n.classList.add('parallel-settling');
+      n.style.transform = '';
+      n.addEventListener('transitionend', settle);
+      // `transitionend` does not fire if the tab is hidden or the node is re-rendered mid-flight, and a
+      // node left `pointer-events: none` would be permanently unclickable.
+      setTimeout(() => settle(), 700);
+    });
+  });
+}
+
 function appendUserBubble(text, msgIdx, pending, traceId, media) {
   messagesEl.querySelector('.empty-state')?.remove();
   if (messagesEl.querySelector('.message')) {
@@ -2434,7 +2591,7 @@ function scrollToMsgIdx(msgIdx) {
 // responses. Anchoring each turn's wrap to its own user bubble keeps responses interleaved, matching
 // the reload (renderSession) order. A joined in-progress turn has no user bubble (it's in committed
 // history); passing nothing falls back to tail-append, which is correct there.
-function createAssistantWrap(labelText, anchorAfter) {
+function createAssistantWrap(labelText, anchorAfter, container = messagesEl) {
   messagesEl.querySelector('.empty-state')?.remove();
   const wrap = document.createElement('div');
   wrap.className = 'message assistant';
@@ -2444,10 +2601,13 @@ function createAssistantWrap(labelText, anchorAfter) {
   // label.textContent = labelText || 'assistant';
   // wrap.appendChild(label);
   wrap.appendChild(makeCopyBtn());
-  if (anchorAfter && anchorAfter.parentNode === messagesEl) {
-    messagesEl.insertBefore(wrap, anchorAfter.nextSibling);
+  // The bubble's own parent, not messagesEl: a parallel turn's bubble lives in its pane and its wrap
+  // belongs beside it there. A detached bubble (never appended, or already removed) has no parent and
+  // falls through to the container, as it did when this tested for messagesEl explicitly.
+  if (anchorAfter?.parentNode) {
+    anchorAfter.parentNode.insertBefore(wrap, anchorAfter.nextSibling);
   } else {
-    messagesEl.appendChild(wrap);
+    container.appendChild(wrap);
   }
   return wrap;
 }
@@ -2455,6 +2615,7 @@ function createAssistantWrap(labelText, anchorAfter) {
 // Render marker blocks as centered cross-thread notices. Markers are opaque to the LLM; the UI
 // is free to interpret known creators. Unknown creators get a generic, non-navigating chip.
 function appendMarker(content, traceId) {
+  const into = (traceId ? parallelPanes.get(traceId) : null) ?? messagesEl;
   messagesEl.querySelector('.empty-state')?.remove();
   for (const part of content) {
     if (part.type !== 'marker') continue;
@@ -2465,7 +2626,7 @@ function appendMarker(content, traceId) {
     if (part.creator === 'matbot-retraction' && traceId) {
       messagesEl.querySelectorAll(`.message.assistant[data-trace="${traceId}"]`).forEach(el => el.remove());
     }
-    messagesEl.appendChild(renderMarker(part));
+    into.appendChild(renderMarker(part));
   }
 }
 
@@ -2829,13 +2990,14 @@ function pushTurnEvent(ev) {
   if (foldedTraces.has(ev.traceId)) return;   // a folded submission's later events (incl. cancelled) are noise
 
   // A parallel turn runs on a COPY of the session, so its terminal's `session` is that copy: noted here so
-  // its renderer never redraws the page from it. Its write-back (`merged`) arrives after its terminal and
-  // changes nothing already drawn live, so it is consumed here rather than spawning a renderer for a
-  // finished trace. Where the pair landed shows on the next load of the session. The note is dropped by
-  // the renderer's own stream once it has handled the last event (`turnEvents`), never here: `merged`
-  // can arrive in the same chunk as the terminal, before the renderer has seen either.
+  // its renderer never redraws the page from it. Its write-back (`merged`) is handled here rather than
+  // through the turn's queue, for two reasons: it can arrive in the same chunk as the terminal, before
+  // the renderer has seen either, and by then that trace's queue may already be gone — a `merged` must
+  // not spawn a renderer for a finished turn. Moving the pane's nodes is pure DOM keyed by traceId, so
+  // it needs nothing the renderer holds. The note itself is dropped by the renderer's own stream once
+  // it has handled the last event (`turnEvents`), never here.
   if (ev.type === 'parallel') parallelTraces.add(ev.traceId);
-  if (ev.type === 'merged') return;
+  if (ev.type === 'merged') { noteParallelMerge(ev.traceId, ev.into); return; }
 
   // Markers can arrive after a turn's terminal event (e.g. a followup hook's, emitted post-commit).
   // If the turn's queue is gone/finished, render directly rather than re-spawning a renderTurn for a
@@ -2882,7 +3044,15 @@ async function* turnEvents(traceId) {
   const q = queueFor(traceId);
   for (;;) {
     while (q.items.length) yield q.items.shift();
-    if (q.done) { turnQueues.delete(traceId); parallelTraces.delete(traceId); return; }
+    if (q.done) {
+      turnQueues.delete(traceId);
+      // The pane is complete now that the terminal has been handled, so this is the other half of the
+      // landing condition. Before dropping the parallel note — `tryLandParallel` is reached from here
+      // and from `merged`, in either order.
+      if (parallelTraces.has(traceId)) noteParallelEnd(traceId);
+      parallelTraces.delete(traceId);
+      return;
+    }
     await new Promise(res => { q.wake = res; });
   }
 }
@@ -2907,6 +3077,7 @@ async function connectSessionStream(sid) {
   streamSessionId = sid;
   turnQueues.clear();
   parallelTraces.clear();
+  clearParallelPanes();
   activeBatchHead = null;
   foldedTraces.clear();
   const ac = streamAc;
@@ -3169,7 +3340,9 @@ async function renderTurn(sid, traceId) {
     if (started) return;
     started = true;
     if (userBubble) userBubble.classList.remove('pending');
-    turnWrap = createAssistantWrap('assistant', userBubble);
+    turnWrap = parallelTraces.has(traceId)
+      ? createAssistantWrap('assistant', userBubble, paneFor(traceId))
+      : createAssistantWrap('assistant', userBubble);
     turnWrap.dataset.trace = traceId;   // so a retraction marker for this turn can drop this wrap live
     loadingEl = document.createElement('div');
     loadingEl.className = 'msg-loading';
@@ -3255,9 +3428,26 @@ async function renderTurn(sid, traceId) {
           break;
         }
 
-        // A parallel submission (answered beside the running turn rather than interrupting it) draws its
-        // bubble exactly as a steer does, and runs at once.
-        case 'parallel':
+        // A parallel submission: answered beside the running turn rather than interrupting it, and
+        // written back ahead of that turn's user message when it settles. It has no position in the
+        // thread until then, so its bubble (and, via markStarted, its wrap) goes in a floating pane
+        // and `merged` moves the pair into place. Live only, like a steer: a reconnect replays this
+        // event and the pane is rebuilt, having been cleared with the rest of the stream state.
+        case 'parallel': {
+          if (!userBubble) {
+            const text  = (ev.content ?? []).filter(c => c.type === 'text').map(c => c.text).join('\n');
+            const media = liveMedia(ev.content);
+            if (text || media.length) {
+              userBubble = appendPaneUserBubble(traceId, text, media);
+              userBubbleText = userBubble.querySelector('.md-body')?.textContent ?? text;
+            } else {
+              paneFor(traceId);   // nothing to show for the submission, but the reply still needs the pane
+            }
+          }
+          markStarted();
+          break;
+        }
+
         case 'steer': {
           // A mid-turn steer that interrupted a running turn. Its user bubble arrives here, live only:
           // on reload / late-connect the message is in committed history (renderSession draws it) and
@@ -3671,9 +3861,49 @@ async function renderTurn(sid, traceId) {
 // separate button shown only while a turn is running; it aborts and clears the queue. Send and the
 // input stay live during a turn so you can type-ahead and queue.
 sendBtn.onclick = () => {
+  // A long press has already sent this one, in parallel. The click that ends the press is part of the
+  // same gesture, so it must not send a second time. A self-expiring stamp rather than a flag: a press
+  // released off the button fires no click at all, and a flag left standing would swallow a later one.
+  if (Date.now() - longPressSentAt < 1000) { longPressSentAt = 0; return; }
   if (sendBtn.classList.contains('scroll-down-mode')) scrollToBottomAndReset();
   else sendMessage();
 };
+
+// Long-press Send → parallel, the pointer equivalent of Alt+Enter: answered now, beside the running
+// turn, rather than queued behind it. The mode switch still overrides the server default for an
+// ordinary tap; this is the one-off, same as the keyboard shortcut it mirrors.
+const LONG_PRESS_MS = 500;
+let pressTimer      = null;
+let longPressSentAt = 0;
+
+function disarmLongPress() {
+  if (pressTimer !== null) { clearTimeout(pressTimer); pressTimer = null; }
+  sendBtn.classList.remove('send-arming');
+}
+
+// Mirrors `sendMessage`'s own guard — an attachment with no text IS a submission. Checked before
+// arming rather than after the delay: `sendMessage` is async, so its return says nothing about whether
+// it submitted, and a ring that fills and then does nothing reads as a broken button.
+const hasSubmission = () => !composerReadOnly && (inputEl.value.trim() !== '' || attachments.length > 0);
+
+sendBtn.addEventListener('pointerdown', e => {
+  // Primary button only; not while the button is a scroll-to-bottom control, and not with nothing to
+  // send — there is no submission behind it then, so arming would promise what it cannot do.
+  if (e.button !== 0 || sendBtn.classList.contains('scroll-down-mode') || !hasSubmission()) return;
+  sendBtn.classList.add('send-arming');
+  pressTimer = setTimeout(() => {
+    pressTimer = null;
+    sendBtn.classList.remove('send-arming');
+    longPressSentAt = Date.now();
+    void sendMessage(false, 'parallel');
+  }, LONG_PRESS_MS);
+});
+for (const ev of ['pointerup', 'pointercancel', 'pointerleave']) {
+  sendBtn.addEventListener(ev, disarmLongPress);
+}
+// A long press on a touch screen otherwise raises the OS callout (copy / share), which both interrupts
+// the gesture and leaves the button armed.
+sendBtn.addEventListener('contextmenu', e => e.preventDefault());
 
 stopBtn.onclick = () => requestStop();
 

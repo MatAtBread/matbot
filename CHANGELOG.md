@@ -70,6 +70,26 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Bug fixes
 
+- **A settled parallel reply is written as it settles**, not only at the running turn's next round
+  boundary. `interject` is polled at the top of a round, so a turn parked in one long tool call (a 40s
+  `sleep`) reached no boundary and the pair existed in no store, no replay and no stream until that tool
+  returned: a client that reconnected in the window could not see it at all. The pair is a COMPLETED turn,
+  so it is placed in the store at once, ahead of the running turn's head — the same position
+  `interjectInto` uses — with CAS against that turn's own whole-document commit, and `merged` is announced
+  then. Every placement path (the new one, the round boundary, the between-turns drain) is idempotent on
+  the pair's message id and exactly one of them announces. A turn that ends without reaching another round
+  boundary (aborted or thrown inside that same tool call) now takes any such reply through a final
+  `interject` pull in `end`, so its whole-document write-back no longer erases a pair already in the store.
+  A reply that settles while the turn's `followup` hooks are judging it is placed too, which with
+  LLM-judged trigger conditions is the longest window of the three: it is anchored on the head its OWN copy
+  was cut at, captured at submit, rather than on the session's current head — a parallel turn submitted
+  *during* followup ran on a copy that included the finished turn, so its pair still belongs after it.
+- **`followup`'s own writes compare-and-swap.** The post-commit marker append and the retract-and-rerun
+  rewrite built their whole-document write from the session the hooks were handed *before* they ran, on the
+  basis that the pump was the only writer at that point. It no longer is, so both now CAS against that
+  snapshot and rebuild from `current` if it moved; the retraction enqueues its redo only if the write
+  landed, rather than re-running a turn whose original answer is still in the session.
+
 - **Session runner** — a submission arriving while the pump flushed usage could erase the flushed
   accounting, or have its own user message erased. The pump dropped its running flag before the flush,
   so the submission started a second pump whose turn-start write interleaved with the flush's
@@ -98,8 +118,11 @@ churn and less likely to affect a consumer who doesn't use them.
 ### Optional
 
 - **`frontend-web`** — the steering toggle is now a three-way `queue | interrupt | parallel` switch, and
-  Alt+Enter sends a single message in parallel whichever is selected. A parallel turn is drawn with its own
-  live progress.
+  Alt+Enter sends a single message in parallel whichever is selected. A long press on Send does the same
+  with a pointer. A parallel turn is drawn with its own live progress, in a pane docked above the
+  conversation rather than inline at the tail: it has no position in the thread until its pair is written
+  back, so it floats there and then animates into place when `merged` says where it landed. A pane whose
+  reply has settled but whose pair cannot be placed yet says so.
 - **`provider-google`** — a tool parameter with a JSON Schema type list (`type: ['string', 'array']`)
   no longer fails every request with a 400. Each `anyOf` branch now takes the keywords for its own type
   (`items` goes on the array branch). They used to stay on the parent, where Gemini rejects them.

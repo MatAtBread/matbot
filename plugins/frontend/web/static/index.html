@@ -1090,6 +1090,98 @@
       border: 1px solid #ebf0ff;
     }
 
+    /* ── Parallel turns: the in-flight overlay ──────────────────
+       A `mode: 'parallel'` submission is answered beside the running turn, on a private copy of the
+       session's completed turns, and only the submission and its final reply are written back — ahead
+       of the running turn's user message, where that copy ended. So while it is in flight it has no
+       position in the thread at all: it sits in a pane docked above the composer, outside #messages,
+       and its nodes are moved into place when `merged` says where they landed. */
+    #parallel-overlay {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding: 0 28px 12px;
+      flex-shrink: 0;
+      max-height: 25vh;
+      overflow-y: auto;
+      /* A tray overhanging the conversation. Opaque, because a shadow cast by a transparent box reads as
+         a dark band under nothing; `relative` + `z-index` because #messages is a LATER sibling and the
+         bubbles inside it have backgrounds of their own, which would otherwise paint over the shadow.
+         Negative spread keeps it a downward overhang rather than a halo bleeding up under the header. */
+      position: relative;
+      z-index: 2;
+      background: #fff;
+      box-shadow: 0 16px 28px -10px rgba(49, 46, 129, 0.45);
+    }
+    #parallel-overlay:empty { display: none; }
+
+    .parallel-pane {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      margin-top: 10px;
+      padding: 16px 14px 12px;
+      border: 1px solid #c7d2fe;
+      border-radius: 12px;
+      background: #ececff;
+      box-shadow: 0 4px 18px rgba(49, 46, 129, 0.10);
+      animation: parallel-in 180ms ease-out;
+    }
+    .parallel-pane:empty { display: none; }
+    .parallel-pane > .message { max-width: min(1000px, 92%); }
+    .parallel-pane > .message.assistant .msg-text { max-height: 24vh; overflow-y: auto; }
+    .parallel-pane::before {
+      content: '\21c4 parallel';
+      position: absolute;
+      top: -9px;
+      left: 12px;
+      padding: 1px 8px;
+      font-size: 0.62em;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: #4338ca;
+      background: #eef2ff;
+      border: 1px solid #c7d2fe;
+      border-radius: 999px;
+      line-height: 1.6;
+      pointer-events: none;
+    }
+    /* Answered, but with nowhere to go yet. Usually the turn it ran beside has committed and its
+       `followup` hooks are still judging it: until they have, nobody knows whether one will retract that
+       turn, and a pair placed first could become the message a redo re-runs. Deliberately does not name a
+       cause — "placed" is the one thing true of every window that reaches here. */
+    .parallel-pane.pending-merge { border-style: dashed; }
+    .parallel-pane.pending-merge::before { content: '\21c4 parallel \00b7 waiting to be placed'; }
+
+    @keyframes parallel-in {
+      from { opacity: 0; transform: translateY(10px); }
+      to   { opacity: 1; transform: none; }
+    }
+
+    /* In flight from the pane to its place in the thread (see `flyToPlace`). Above its new neighbours
+       while it travels, and not clickable until it has arrived — the transform means its painted position
+       and its hit area agree, but a half-arrived bubble is not a thing to click. `will-change` keeps the
+       move off the main thread; it is dropped again on arrival rather than left on every landed pair. */
+    .parallel-flying {
+      position: relative;
+      z-index: 3;
+      will-change: transform;
+      pointer-events: none;
+    }
+    .parallel-flying.parallel-settling {
+      transition: transform 420ms cubic-bezier(0.22, 0.61, 0.36, 1);
+    }
+
+    /* Taking its place: a ring that fades, rather than the `msg-nav-flash` the divider nav uses —
+       that one animates `background` to the user bubble's #111 and would black out an assistant wrap. */
+    .parallel-landed { animation: parallel-land 1100ms ease-out; }
+    @keyframes parallel-land {
+      from { box-shadow: 0 0 0 2px #818cf8; }
+      to   { box-shadow: 0 0 0 2px rgba(129, 140, 248, 0); }
+    }
+
     /* Marker: centered cross-thread link notice */
     .marker-note {
       align-self: center;
@@ -1744,7 +1836,7 @@
       font-size: 2.14em;
       font-weight: 500;
       flex-shrink: 0;
-      transition: background 0.1s;
+      transition: background 0.1s, transform 0.12s;
       height: 1.5em;
       width: 1.5em;
       line-height: 1em;
@@ -1752,7 +1844,34 @@
       align-items: center;
       justify-content: center;
       padding: 0;
+      position: relative;            /* anchors the long-press ring */
+      -webkit-touch-callout: none;   /* a long press must not raise the OS copy/share callout */
+      user-select: none;
     }
+
+    /* Long-press Send → parallel send (the pointer twin of Alt+Enter). The ring sweeps closed over the
+       press delay, so the gesture is discoverable and its progress visible rather than a dead pause.
+       `conic-gradient` on a mask ring: no extra element, and nothing to clear if the press is abandoned.
+       Not shown at all when there is nothing to send — see `hasSubmission`. */
+    /* The armed state itself, which needs no `@property` and so works everywhere: without it, a browser
+       that cannot interpolate the sweep below shows no feedback at all for half a second. */
+    #send-btn.send-arming { background: #4338ca; transform: scale(0.94); }
+    #send-btn.send-arming::after {
+      content: '';
+      position: absolute;
+      inset: -4px;
+      border-radius: 50%;
+      background: conic-gradient(#818cf8 var(--sweep, 0turn), transparent 0);
+      -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
+      mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
+      animation: send-arm 500ms linear forwards;
+      pointer-events: none;
+    }
+    /* The sweep is an animated custom property, so it needs declaring to be interpolable rather than
+       swapped at 50%. */
+    @property --sweep { syntax: '<angle>'; inherits: false; initial-value: 0turn; }
+    @keyframes send-arm { from { --sweep: 0turn; } to { --sweep: 1turn; } }
+
     #send-btn:hover              { background: #374151; }
     #send-btn:disabled           { background: #d1d5db; cursor: not-allowed; }
     #send-btn.stop-mode          { background: #dc2626; }
@@ -2019,6 +2138,7 @@
         padding-top: max(10px, env(safe-area-inset-top, 0px));
       }
       #messages    { padding-left: 16px; padding-right: 16px; }
+      #parallel-overlay { padding-left: 10px; padding-right: 10px; max-height: 38vh; }
       #input-area  {
         padding-top: 0px;
         padding-left: 6px;
@@ -2141,6 +2261,10 @@
     }
 
     #chat-header {
+      display: none !important;
+    }
+
+    #parallel-overlay {
       display: none !important;
     }
 
@@ -2384,6 +2508,7 @@
 
   <main id="main">
     <div id="chat-header"><button id="burger" aria-label="Open menu">&#9776;</button><span id="chat-title"></span><span id="readonly-badge" class="readonly-badge" hidden></span><button id="share-btn" class="hdr-btn" title="Share this conversation with another profile" hidden aria-label="Share conversation"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4"/></svg></button></div>
+    <div id="parallel-overlay"></div>
     <div id="messages"></div>
     <div id="sessions-banner" class="plugin-prompt-banner">
       <span>Sessions plugin not loaded — conversations won't be saved after reload.</span>
@@ -2411,7 +2536,7 @@
                accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,audio/*,text/plain,text/markdown,text/csv">
         <textarea id="input" rows="1" placeholder="Shift+⬅️ to send, ⬅️ for newline"></textarea>
         <button id="stop-btn" style="visibility:hidden" title="Stop the running turn and drop anything queued" aria-label="Stop"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg><span class="ctl-label">Stop</span></button>
-        <button id="send-btn" aria-label="Send"><svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" aria-hidden="true"><path d="M9 6v12l9-6z"/></svg><span class="ctl-label">Send</span></button>
+        <button id="send-btn" aria-label="Send" title="Send. Hold to send in parallel — answered now, beside the running turn (same as Alt+Enter)."><svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" aria-hidden="true"><path d="M9 6v12l9-6z"/></svg><span class="ctl-label">Send</span></button>
       </div>
     </div>
     <button id="scroll-down-btn" style="display:none" title="Scroll to bottom" aria-label="Scroll to bottom"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>

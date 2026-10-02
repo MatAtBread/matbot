@@ -27,10 +27,21 @@ const principal: Principal = { id: 'tester', type: 'user' };
 
 function memStore(seed: Session): Store<Session> {
   const m = new Map<string, Session>([[seed.id, seed]]);
+  // A version that moves, and a real `cas`: the pump's post-commit writes (the followup marker append,
+  // the retract rewrite) compare against the document the hooks were shown, because a settled parallel
+  // reply may have been placed into it meanwhile. They are no longer unconditional `set`s.
+  let v = 0;
+  const bump = (doc: Session): Session => ({ ...doc, version: String(++v) });
   return {
     get: async id => m.get(id) ?? null,
-    set: async (id, v) => { m.set(id, v); },
-    cas: async () => { throw new Error('cas unused'); },
+    set: async (id, val) => { m.set(id, bump(val)); },
+    cas: async (id, expected, next) => {
+      const cur = m.get(id) ?? null;
+      if (cur === null || cur.version !== expected) return { ok: false, current: cur };
+      const doc = bump(next);
+      m.set(id, doc);
+      return { ok: true, doc };
+    },
     delete: async () => { throw new Error('delete unused'); },
     query: async () => { throw new Error('query unused'); },
   };

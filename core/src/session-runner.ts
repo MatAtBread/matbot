@@ -123,6 +123,17 @@ const parallelFraming = (running: string): UserContent => ({
 interface ParallelReply {
   traceId:  string;
   messages: [Message, Message];
+  /** The id of the message this reply's copy was cut AT — the running turn's head when it was submitted,
+   *  captured then. The pair belongs immediately ahead of it, because that is where the history the reply
+   *  was generated against ended. Absent ⇒ the copy was cut at the end of the session (nothing was
+   *  running, or the turn's rounds were already over and only its `followup` hooks were left), so the
+   *  pair belongs at the TAIL and there is no id to place it against. */
+  head?:    string;
+  /** Written to the store by `placeNow` when it settled, rather than left for the running turn's next
+   *  round boundary. It stays on `merges` all the same, because the running turn's in-memory session
+   *  must still learn of it or that turn's whole-document write-back erases it — but it must never be
+   *  written or announced a second time, which is what every reader of this flag is for. */
+  persisted?: boolean;
 }
 
 // Marker creator for a retract-and-rerun: its `data.retracted` carries the popped (superseded) turn
@@ -342,9 +353,17 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
   // appended — after the turn it ran beside, which by now has committed.
   const drainMerges = async (id: string, s: SessionState): Promise<void> => {
     if (s.merges.length === 0) return;
-    const replies = s.merges.splice(0);
+    // One `placeNow` already wrote is in the store and was announced then; it stayed on the list only so
+    // a running turn's in-memory session would pick it up, and there is no running turn here.
+    const taken = s.merges.splice(0).filter(r => r.persisted !== true);
+    if (taken.length === 0) return;
     const session = await deps.store.get(id);
     if (session === null) return;
+    // And one whose `placeNow` is still in flight has no flag set yet, so the id is the authority: every
+    // placement path is idempotent on it, and whichever gets there first is the one that announces.
+    const have    = new Set(session.messages.map(m => m.id));
+    const replies = taken.filter(r => !have.has(r.messages[0].id));
+    if (replies.length === 0) return;
     try {
       await deps.store.set(id, replies.flatMap(r => r.messages).reduce(appendMessage, session));
     } catch (e) {
@@ -375,10 +394,94 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
     if (at < 0) return undefined;
     const replies = s.merges.splice(0);
     s.interjected.push(...replies);
+    // Only what is not already here. `placeNow` may have written a pair while a PREVIOUS turn's followup
+    // hooks ran, and this turn (a redo, or whatever followup enqueued) then read a session that already
+    // contains it — so splicing the list wholesale would duplicate the pair. The id is the authority, the
+    // same way it is in `placeNow` and `drainMerges`.
+    const have = new Set(cur.messages.map(m => m.id));
+    const add  = replies.flatMap(r => r.messages).filter(m => !have.has(m.id));
     return {
-      session: { ...cur, messages: [...cur.messages.slice(0, at), ...replies.flatMap(r => r.messages), ...cur.messages.slice(at)] },
-      merged:  replies.map(r => r.traceId),
+      session: { ...cur, messages: [...cur.messages.slice(0, at), ...add, ...cur.messages.slice(at)] },
+      // A reply `placeNow` wrote announced itself then. It still has to reach the turn's in-memory
+      // session — that is the whole reason it is on this list — but announcing it twice would make a
+      // frontend place the same pair twice.
+      merged:  replies.filter(r => r.persisted !== true).map(r => r.traceId),
     };
+  };
+
+  /**
+   * A whole-document rewrite of a session whose turn has already committed — the `followup` writes. The
+   * pump used to be the only writer at that point, so an unconditional `set` was safe; it no longer is,
+   * because `placeNow` may insert a settled parallel pair while the hooks are judging. So these compare
+   * against the document the hooks were shown and rebuild from `current` if it moved, which costs no read
+   * at all on the uncontended path — a re-read would cost one per turn, and would also consume the next
+   * `store.get`, which is a thing tests legitimately hold.
+   *
+   * `build` is called once per attempt and must therefore derive everything from the document it is given.
+   * Giving up is logged rather than thrown: the turn has committed, and the caller decides what a write it
+   * could not make means (the retraction does not enqueue a redo it never wrote).
+   */
+  const rewrite = async (
+    id: string, from: Session, build: (cur: Session) => Session, lost: string,
+  ): Promise<boolean> => {
+    let cur = from;
+    for (let n = 0; n < WRITE_ATTEMPTS; n++) {
+      const res = await deps.store.cas(id, cur.version, build(cur));
+      if (res.ok) return true;
+      if (res.current === null) break;
+      cur = res.current;
+    }
+    console.error(lost);
+    return false;
+  };
+
+  /**
+   * Place a settled parallel reply in the store NOW, while a turn is still running, rather than leaving
+   * it to that turn's next round boundary. A turn parked in one long tool call reaches no boundary, so
+   * the pair used to exist in no store, no replay and no stream until the tool returned — a client that
+   * reconnected in that window could not see it at all, and the pair is a COMPLETED turn, not a partial
+   * one: nothing about it is waiting to be finished.
+   *
+   * The runner still owns the session exclusively. The pair is handed to the running turn as well
+   * (`interjectInto`, and the final pull in `end`), so that turn's whole-document write-back carries it
+   * instead of erasing it. Placed ahead of the running turn's head, exactly where `interjectInto` puts
+   * it, so the two never disagree about where the pair goes.
+   *
+   * CAS rather than `set`, because the running turn commits with a whole-document write of its own:
+   * losing the compare is how we learn it landed, and `current` is what it wrote.
+   *
+   * Three outcomes, because the pair is on `merges` before this runs and so EVERY placement path may
+   * reach it — this one, `interjectInto` at a round boundary, `drainMerges` once the turn is over. They
+   * are mutually idempotent on the pair's own message id, and exactly one of them inserts it: `present`
+   * says somebody else did, and is why this does not announce a `merged` the other path already sent.
+   */
+  const placeNow = async (id: string, reply: ParallelReply): Promise<'inserted' | 'present' | 'no'> => {
+    if (reply.head === undefined) return 'no';
+    let cur = await deps.store.get(id);
+    for (let n = 0; n < WRITE_ATTEMPTS; n++) {
+      if (cur === null) return 'no';
+      if (cur.messages.some(m => m.id === reply.messages[0].id)) return 'present';
+      // The reply's OWN head, not the session's current one: a parallel turn submitted during a turn's
+      // `followup` ran on a copy that INCLUDED that finished turn, so its pair belongs after it, and
+      // `s.turnHead` would have put it in front of the very history it answered. Resolved per attempt,
+      // since a lost compare hands us a different document.
+      const at = cur.messages.findIndex(m => m.id === reply.head);
+      // The head is not in the store yet (it is persisted just after it is set), or a retract has since
+      // popped it: either way there is nothing here to place against. Leave it to the turn or the pump.
+      if (at < 0) return 'no';
+      const next = { ...cur, messages: [...cur.messages.slice(0, at), ...reply.messages, ...cur.messages.slice(at)] };
+      try {
+        const res = await deps.store.cas(id, cur.version, next);
+        if (res.ok) return 'inserted';
+        cur = res.current;
+      } catch (e) {
+        // A shared session this principal may only read. The turn's own placement reports it (drainMerges
+        // / the turn's commit); claiming nothing was written is what lets that path run unchanged.
+        if (!isReadOnlyError(e)) throw e;
+        return 'no';
+      }
+    }
+    return 'no';
   };
 
   const pump = async (id: string, s: SessionState): Promise<void> => {
@@ -627,11 +730,9 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
                   // the message tail, so these markers are folded into that single write instead (below)
                   // to keep ordering sane (a separate append here would be sliced into the popped region).
                   if (followup.markers.length > 0 && !followup.retract) {
-                    await deps.store.set(id, {
-                      ...committed,
-                      messages: [...committed.messages,
-                        createMessage({ role: 'marker', content: followup.markers, traceId: head.traceId })],
-                    });
+                    const markerMsg = createMessage({ role: 'marker', content: followup.markers, traceId: head.traceId });
+                    await rewrite(id, committed, cur => ({ ...cur, messages: [...cur.messages, markerMsg] }),
+                      `[matbot] followup markers of session "${id}" were not written`);
                     notify(s, { type: 'marker', content: followup.markers, traceId: head.traceId });
                   }
                   // unshift in reverse so the hooks' order is preserved at the head of the queue. Stamp
@@ -663,55 +764,69 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
                   // head, delivering the trigger tool's output as ephemeral context. Unshifted last so it
                   // sits at the very head (runs next) even if a resubmit was also queued above.
                   if (followup.retract) {
-                    const lastUserIdx = lastUserIndex(committed);
-                    const popped = lastUserIdx >= 0 ? committed.messages.slice(lastUserIdx + 1) : [];
                     // `durable` correction (a contextual fire that landed post-commit) folds onto the user
                     // message we keep — persisted, so the redo AND every later turn see it in history, the
                     // exact durability the clean in-situ path gives. `context` stays ephemeral (redo only).
                     // The fold runs on the *truncated* session, whose last user message is the one we keep,
                     // so it goes through the same helper as the screen and raced-verdict folds.
                     const durable = followup.retract.durable ?? [];
-                    const truncated = lastUserIdx >= 0
-                      ? { ...committed, messages: committed.messages.slice(0, lastUserIdx + 1) }
-                      : committed;
-                    const kept = foldOntoUserTurn(truncated, durable).messages;
-                    // The redo's turn head: the user message kept here, as folded — what it re-runs.
-                    const keptHead = lastUserIdx >= 0 ? kept[lastUserIdx] : undefined;
-                    const retractionMsg: Message = createMessage({
-                      role:    'marker',
-                      traceId: head.traceId,
-                      // `retracted` is what was popped (the superseded answer); `injected` is the ephemeral
-                      // context fed to the redo — neither is otherwise persisted, so the pair fully traces
-                      // the swap for a post-mortem (and a frontend can render the strike-through + the cause).
-                      content: [{ type: 'marker', creator: RETRACTION_CREATOR, data: { retracted: popped, injected: followup.retract.context ?? [], traceId: head.traceId } }],
-                    });
                     // Any followup markers ride along as a trailing marker message (not folded into the
                     // retraction marker) so each creator's trace stays its own block.
                     const trailing: Message[] = followup.markers.length > 0
                       ? [createMessage({ role: 'marker', content: followup.markers, traceId: head.traceId })]
                       : [];
-                    await deps.store.set(id, { ...committed, messages: [...kept, retractionMsg, ...trailing] });
-                    // Emit the durable fold live (as a robo-user on the kept user turn) before the retraction
-                    // marker, mirroring the screen-time durable path's ordering.
-                    if (durable.length > 0) notify(s, { type: 'robo-user', content: durable, traceId: head.traceId });
-                    notify(s, { type: 'marker', content: retractionMsg.content, traceId: head.traceId });
-                    if (trailing.length > 0) notify(s, { type: 'marker', content: followup.markers, traceId: head.traceId });
+                    // Recomputed per attempt: a settled parallel pair may have been placed while the hooks
+                    // judged, ahead of the turn we are about to pop, so the landmarks are taken from the
+                    // document we are actually writing over. Every one of them is "the last user message",
+                    // which a pair placed ahead of it does not move — so this changes nothing but which
+                    // document the kept prefix comes from.
+                    let keptHead:      Message | undefined;
+                    let retractionMsg: Message | undefined;
+                    const wrote = await rewrite(id, committed, cur => {
+                      const lastUserIdx = lastUserIndex(cur);
+                      const popped      = lastUserIdx >= 0 ? cur.messages.slice(lastUserIdx + 1) : [];
+                      const truncated   = lastUserIdx >= 0
+                        ? { ...cur, messages: cur.messages.slice(0, lastUserIdx + 1) }
+                        : cur;
+                      const kept = foldOntoUserTurn(truncated, durable).messages;
+                      // The redo's turn head: the user message kept here, as folded — what it re-runs.
+                      keptHead      = lastUserIdx >= 0 ? kept[lastUserIdx] : undefined;
+                      retractionMsg = createMessage({
+                        role:    'marker',
+                        traceId: head.traceId,
+                        // `retracted` is what was popped (the superseded answer); `injected` is the ephemeral
+                        // context fed to the redo — neither is otherwise persisted, so the pair fully traces
+                        // the swap for a post-mortem (and a frontend can render the strike-through + the cause).
+                        content: [{ type: 'marker', creator: RETRACTION_CREATOR, data: { retracted: popped, injected: followup.retract?.context ?? [], traceId: head.traceId } }],
+                      });
+                      return { ...cur, messages: [...kept, retractionMsg, ...trailing] };
+                    }, `[matbot] the retraction of session "${id}" was not written; it will not be re-run`);
+                    // Only if it landed: nothing was popped otherwise, so there is nothing to re-run and
+                    // nothing to announce — a redo enqueued here would re-answer a turn whose original
+                    // answer is still in the session.
+                    if (wrote && retractionMsg !== undefined) {
+                      // Emit the durable fold live (as a robo-user on the kept user turn) before the
+                      // retraction marker, mirroring the screen-time durable path's ordering.
+                      if (durable.length > 0) notify(s, { type: 'robo-user', content: durable, traceId: head.traceId });
+                      notify(s, { type: 'marker', content: retractionMsg.content, traceId: head.traceId });
+                      if (trailing.length > 0) notify(s, { type: 'marker', content: followup.markers, traceId: head.traceId });
 
-                    const rt = crypto.randomUUID();
-                    s.queue.unshift({
-                      traceId:       rt,
-                      rootTraceId:   head.rootTraceId,
-                      content:       [],
-                      provider:      head.provider,
-                      principal:     head.principal,
-                      concatQueue:   false,
-                      resubmitDepth: head.resubmitDepth + 1,
-                      redo:          {
-                        ephemeral: followup.retract.context ?? [],
-                        ...(keptHead !== undefined ? { head: { id: keptHead.id, request: textOf(keptHead) } } : {}),
-                      },
-                      ...(head.prompt !== undefined ? { prompt: head.prompt } : {}),
-                    });
+                      const rt = crypto.randomUUID();
+                      s.queue.unshift({
+                        traceId:       rt,
+                        rootTraceId:   head.rootTraceId,
+                        content:       [],
+                        provider:      head.provider,
+                        principal:     head.principal,
+                        concatQueue:   false,
+                        resubmitDepth: head.resubmitDepth + 1,
+                        redo:          {
+                          ephemeral: followup.retract.context ?? [],
+                          ...(keptHead !== undefined ? { head: { id: keptHead.id, request: textOf(keptHead) } } : {}),
+                        },
+                        ...(head.prompt !== undefined ? { prompt: head.prompt } : {}),
+                      });
+                    }
                   }
                 }
               }
@@ -723,8 +838,10 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
             s.turnHead = undefined;
             // Every terminal commits, and the replies placed into the turn went with it. No terminal means
             // runSession threw before committing, taking them with it — so they go back to be placed again.
+            // Not one `placeNow` already wrote: that is in the store whatever this turn did, and placing
+            // it again would duplicate the pair.
             const placed = s.interjected.splice(0);
-            if (terminal === undefined) s.merges.unshift(...placed);
+            if (terminal === undefined) s.merges.unshift(...placed.filter(r => r.persisted !== true));
           }
         }
       } finally {
@@ -835,6 +952,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
                    : 'produced no text';
       reply = {
         traceId:  p.traceId,
+        ...(p.head !== undefined ? { head: p.head.id } : {}),
         messages: [
           // The copy's own head, carrying its accounting, but with the content as the person submitted it.
           qHead !== undefined
@@ -850,7 +968,36 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
       forward({ type: 'error', error: String(e), traceId: p.traceId });
     } finally {
       s.parallel.delete(p.traceId);
-      if (reply !== undefined) s.merges.push(reply);
+      if (reply !== undefined) {
+        // On the list BEFORE the write below, and never only in the write: the turn may end while we are
+        // writing, and then `end`'s final pull or `drainMerges` is the path that places this pair. Being
+        // on the list is also how the running turn's in-memory session learns of it, so its whole-document
+        // write-back carries the pair instead of erasing it.
+        s.merges.push(reply);
+        // Placed NOW while a turn is in progress, rather than left for that turn's next round boundary,
+        // which a turn parked in one long tool call never reaches — nor does one whose rounds are over and
+        // whose `followup` hooks are still judging it, which with LLM-judged trigger conditions is seconds.
+        // `ac` spans the whole turn, followup included; `turnHead` does not, and is not what anchors this.
+        // A reply with no head of its own belongs at the TAIL, which is the pump's to append and must wait
+        // for it: appended now it would become the session's last user message, which is the turn a redo
+        // re-runs. A failure places it exactly as it used to be.
+        if (s.ac !== undefined && reply.head !== undefined) {
+          let placed: 'inserted' | 'present' | 'no' = 'no';
+          try {
+            placed = await placeNow(id, reply);
+          } catch (e) {
+            console.error(`[matbot] placing a parallel reply of session "${id}" failed:`,
+              e instanceof Error ? e : String(e));
+          }
+          reply.persisted = placed !== 'no';
+          // Only the writer that inserted it announces. `into` is the running turn: the pair went ahead of
+          // its user message, which is where the copy this ran on ended.
+          if (placed === 'inserted') {
+            notify(s, { type: 'merged', traceId: reply.traceId,
+              ...(s.runningTraceId !== undefined ? { into: s.runningTraceId } : {}) });
+          }
+        }
+      }
       // Placed by the running turn if there is one (it is polled each round), else by the pump that admitted
       // this turn, which is waiting for it.
       void pump(id, s);

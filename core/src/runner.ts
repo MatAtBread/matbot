@@ -175,7 +175,15 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
   // Nothing is written mid-turn, so "commit" here means the whole turn or none of it.
   // Closes over the reassigned `session` deliberately, so no exit can commit a stale copy.
   async function* end(terminal: TurnEvent): AsyncIterable<TurnEvent> {
+    // One last pull, because this is the funnel every exit passes through. A parallel reply that settled
+    // since the previous round boundary may already be in the store (the session runner places one as it
+    // settles, so a turn parked in a long tool call does not hide it) — and the write below is the whole
+    // document, so a reply this turn never took would be erased by it. Reachable: a turn aborted or
+    // thrown during that same tool call never reaches another round top.
+    const late = opts.interject?.(session);
+    if (late !== undefined) session = late.session;
     await store.set(session.id, session);
+    if (late !== undefined) for (const from of late.merged) yield { type: 'merged', traceId: from, into: traceId };
     yield terminal;
   }
 

@@ -23,10 +23,22 @@ interface StoreHold { get?: () => Promise<void> | undefined; set?: () => Promise
 
 function memStore(seed: Session, hold?: StoreHold): Store<Session> {
   const m = new Map<string, Session>([[seed.id, seed]]);
+  // The version has to MOVE, or a lost compare is unreachable here: `placeNow` writes a settled parallel
+  // pair with cas while the running turn commits the whole document with set, and the interleaving only
+  // means anything if a write is observable in the version. Bumped on both paths, as a real store does.
+  let v = 0;
+  const bump = (doc: Session): Session => ({ ...doc, version: String(++v) });
   return {
     get: async id => { await hold?.get?.(); return m.get(id) ?? null; },
-    set: async (id, v) => { await hold?.set?.(); m.set(id, v); },
-    cas: async () => { throw new Error('cas unused'); },
+    set: async (id, val) => { await hold?.set?.(); m.set(id, bump(val)); },
+    cas: async (id, expected, next) => {
+      await hold?.set?.();
+      const cur = m.get(id) ?? null;
+      if (cur === null || cur.version !== expected) return { ok: false, current: cur };
+      const doc = bump(next);
+      m.set(id, doc);
+      return { ok: true, doc };
+    },
     delete: async () => { throw new Error('delete unused'); },
     query: async () => { throw new Error('query unused'); },
   };
@@ -164,6 +176,104 @@ test('parallel reply lands ahead of the still-running turn, at a round boundary'
   // The main turn's next round read the pair, ahead of its own request.
   const next = seen.main[1]!.map(m => textOf(m));
   assert.deepEqual(next.slice(0, 3), ['Q', 'A', 'do it']);
+});
+
+// A parallel reply is a COMPLETED turn, not a partial one — nothing about it is waiting to be finished.
+// It used to sit in no store, no replay and no stream until the running turn reached its next round
+// boundary, and a turn parked in one long tool call reaches none: a client that reconnected in that window
+// could not see the pair at all. It is now written as it settles.
+test('a parallel reply is in the store before the running turn reaches its next round', { timeout: 10000 }, async () => {
+  const { sid, store, started, release, runner } = setup(Promise.resolve());
+
+  const main = await runner.open({ sessionId: sid, signal: new AbortController().signal, content: submit('do it'), provider: 'fake', principal });
+  const events: PipelineEvent[] = [];
+  const collector = watch(main, events);
+
+  await started.wait;   // the main turn is inside `slow` and cannot reach another round boundary
+  const par = await runner.open({ sessionId: sid, signal: new AbortController().signal, content: submit('Q'), provider: 'fake', principal, mode: 'parallel' });
+  while (runner.status(sid).parallel > 0) await new Promise(r => setImmediate(r));
+
+  const mid = (await store.get(sid))!;
+  assert.deepEqual(mid.messages.map(m => textOf(m) || m.role), ['Q', 'A', 'do it'],
+    'readable ahead of the running turn, while that turn is still in its tool call');
+  assert.ok(events.some(e => e.type === 'merged' && e.traceId === par.traceId && e.into === main.traceId),
+    'and announced then, naming the turn it went into');
+
+  release.open();
+  await collector;
+
+  const final = (await store.get(sid))!;
+  assert.deepEqual(final.messages.map(m => textOf(m) || m.role), ['Q', 'A', 'do it', 'assistant', 'tool', 'main done'],
+    'and the running turn commits on top of it rather than over it');
+  assert.equal(events.filter(e => e.type === 'merged').length, 1, 'announced exactly once, not again by the turn');
+});
+
+// The window the final `interject` pull in `end` exists for. The pair is in the store, but the turn that
+// was running never reaches another round boundary — so it never takes the pair into its own session, and
+// its commit is a WHOLE-document write. Without that pull it wrote the pair straight back out of existence.
+test('a turn aborted in the tool call it was parked in does not erase a placed parallel reply', { timeout: 10000 }, async () => {
+  const { sid, store, started, release, runner } = setup(Promise.resolve());
+
+  const main = await runner.open({ sessionId: sid, signal: new AbortController().signal, content: submit('do it'), provider: 'fake', principal });
+  const events: PipelineEvent[] = [];
+  const collector = watch(main, events);
+
+  await started.wait;
+  await runner.open({ sessionId: sid, signal: new AbortController().signal, content: submit('Q'), provider: 'fake', principal, mode: 'parallel' });
+  while (runner.status(sid).parallel > 0) await new Promise(r => setImmediate(r));
+  assert.ok((await store.get(sid))!.messages.some(m => textOf(m) === 'A'), 'placed while parked');
+
+  runner.abort(sid);
+  release.open();
+  await collector;
+
+  const final = (await store.get(sid))!;
+  assert.deepEqual(final.messages.map(m => textOf(m) || m.role).slice(0, 3), ['Q', 'A', 'do it'],
+    'the abort committed on top of the pair, not over it');
+});
+
+// The turn's rounds are over, so there is no round boundary left to place at, and `turnHead` has been
+// cleared — but the reply captured the head its own copy was cut at, so it can still be placed against it.
+// With LLM-judged trigger conditions on `followup` this window is seconds long, and the pair used to spend
+// all of it in no store, no replay and no stream.
+test('a parallel reply that settles during followup is placed before the hooks return', { timeout: 10000 }, async () => {
+  const parallelGate  = gate();
+  const inFollowup    = gate();
+  const leaveFollowup = gate();
+  const hooks = new HookRegistry();
+  let judged = 0;
+  // Only the main turn's is held; the parallel turn's nested runner shares the hooks.
+  hooks.register({ on: 'followup', pluginName: 'judge', handler: async () => {
+    if (judged++ > 0) return {};
+    inFollowup.open();
+    await leaveFollowup.wait;
+    return {};
+  } });
+  const { sid, store, started, release, runner } = setup(parallelGate.wait, hooks);
+
+  const main = await runner.open({ sessionId: sid, signal: new AbortController().signal, content: submit('do it'), provider: 'fake', principal });
+  const events: PipelineEvent[] = [];
+  const collector = watch(main, events);
+
+  await started.wait;
+  // Submitted while the turn is running, so its copy is cut at that turn's head — the id it is placed
+  // against later.
+  const par = await runner.open({ sessionId: sid, signal: new AbortController().signal, content: submit('Q'), provider: 'fake', principal, mode: 'parallel' });
+  release.open();          // the tool returns, the turn commits, and followup takes over
+  await inFollowup.wait;
+  parallelGate.open();     // only now does the parallel turn answer
+  while (runner.status(sid).parallel > 0) await new Promise(r => setImmediate(r));
+
+  // Still inside the hook, which has not returned and so has not reached any of the pump's own writes.
+  const mid = (await store.get(sid))!;
+  assert.deepEqual(mid.messages.map(m => textOf(m) || m.role), ['Q', 'A', 'do it', 'assistant', 'tool', 'main done'],
+    'placed ahead of the turn it ran beside, without waiting for the hooks');
+  assert.ok(events.some(e => e.type === 'merged' && e.traceId === par.traceId && e.into === main.traceId),
+    'and announced then');
+
+  leaveFollowup.open();
+  await collector;
+  assert.equal(events.filter(e => e.type === 'merged').length, 1, 'announced exactly once');
 });
 
 test('parallel reply that outlives the running turn is appended after it', { timeout: 10000 }, async () => {
