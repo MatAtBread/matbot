@@ -305,10 +305,13 @@ function armOnce(job: Job): void {
       // was down — runs late rather than expiring silently: `at` refuses a past time at creation.
       const waitMs = job.active === false ? Infinity : Date.parse(job.nextRun) - Date.now();
       if (waitMs <= 0) {
-        await runJob(runSpec(job), ac.signal);
-        // Deleted only once the job has finished: a process killed mid-run leaves the request outstanding
-        // and it fires again on the next boot, the kinder of the two failures for a one-shot.
-        await jobStore?.delete(job.id);
+        const outcome = await runJob(runSpec(job), ac.signal);
+        // Deleted only once the job has RUN. A process killed mid-run leaves the request outstanding and
+        // it fires again on the next boot, the kinder of the two failures for a one-shot — and so does a
+        // run that never started at all (no provider to run as, a failed spawn: `undefined`) or one cut
+        // short by teardown. Deleting on those lost the request outright, unrun and unreported, for a
+        // condition that is usually transient. The row stays and the next boot tries it, late.
+        if (outcome !== undefined && !ac.signal.aborted) await jobStore?.delete(job.id);
         break;
       }
 
@@ -354,7 +357,7 @@ function armJob(job: Job): void {
     }
 
     while (!ac.signal.aborted) {
-      let stored: Job | null | undefined = await jobStore?.get(job.id);
+      const stored: Job | null | undefined = await jobStore?.get(job.id);
       if (!stored) break;
       job = stored;
 
@@ -368,21 +371,20 @@ function armJob(job: Job): void {
 
       const outcome = await runJob(runSpec(job), ac.signal);
 
-      // Re-read: it may have been suspended or edited while it ran.
-      stored = await jobStore?.get(job.id);
-      if (!stored) break;
-      job = stored;
-
-      const now = Date.now();
+      // Stamp what this run leaves behind, under compare-and-swap against the row as it is NOW: it may
+      // have been suspended, resumed or cancelled while the run was in flight, and a blind write would
+      // erase that — or put a cancelled row back (see `mutate`). Gone means cancelled: stop the loop.
+      const now   = Date.now();
       const reply = outcome?.reply;
-      job = {
-        ...job,
+      const stamped = await mutate(job.id, current => ({
+        ...current,
         lastRun: isoAt(now),
         nextRun: isoAt(now + intervalMs),
-        version: now.toString(),
         ...(reply !== undefined && reply !== '' ? { lastReply: reply } : {}),
-      };
-      await jobStore?.set(job.id, job);
+      }));
+      if (!stamped.done && stamped.kind === 'gone') break;
+      // Contended: another writer's view of the row stands, and the next iteration re-reads it anyway.
+      if (stamped.done) job = stamped.job;
 
       const wakeAc = new AbortController();
       sleepControllers.set(job.id, wakeAc);
@@ -585,12 +587,42 @@ Do not wait for a job's result: tell the user it has started, and that it will r
 
 // ── background_job_action lifecycle helpers ──────────────────────────────────────────────
 
-async function setActive(id: string, active: boolean): Promise<boolean> {
-  const stored = await jobStore?.get(id);
-  if (!stored) return false;
-  await jobStore?.set(id, { ...stored, active, version: crypto.randomUUID() });
-  wakeJob(id);
-  return true;
+/**
+ * Change one job row under compare-and-swap.
+ *
+ * Every writer of a row is a read-modify-write and they race each other: the scheduler stamping
+ * `lastRun`/`nextRun` after a run, a `suspend` flipping `active`, a `cancel` deleting it. A plain `set`
+ * let whichever landed last win over a document it had never read — a suspend overwritten by the stamp
+ * that followed it, and a cancelled row RECREATED by that stamp, to be armed again on the next boot. So
+ * each writer re-reads, applies its change to what it finds and swaps on that version; a loss means
+ * another writer got there, and reading again composes with it instead of erasing it.
+ *
+ * `gone` is distinct from `contended` because the callers act on it: a row that has been cancelled is the
+ * scheduler's cue to stop its loop, and the tool's to say it does not exist. A `set` reported neither.
+ */
+type Written =
+  | { done: true;  job: Job }
+  | { done: false; kind: 'gone' | 'contended' };
+
+const JOB_WRITE_ATTEMPTS = 3;
+
+async function mutate(id: string, change: (job: Job) => Job): Promise<Written> {
+  const store = jobStore;
+  if (store === undefined) return { done: false, kind: 'gone' };
+  for (let n = 0; n < JOB_WRITE_ATTEMPTS; n++) {
+    const current = await store.get(id);
+    if (!current) return { done: false, kind: 'gone' };
+    const next: Job = { ...change(current), version: crypto.randomUUID() };
+    // A read-only refusal is the caller's to classify (see setActiveAll), so it is left to propagate.
+    if ((await store.cas(id, current.version, next)).ok) return { done: true, job: next };
+  }
+  return { done: false, kind: 'contended' };
+}
+
+async function setActive(id: string, active: boolean): Promise<Written> {
+  const written = await mutate(id, job => ({ ...job, active }));
+  if (written.done) wakeJob(id);
+  return written;
 }
 
 async function setActiveAll(active: boolean): Promise<{ ids: string[]; skipped: SkippedJob[] }> {
@@ -600,7 +632,15 @@ async function setActiveAll(active: boolean): Promise<{ ids: string[]; skipped: 
   for (const doc of result?.items ?? []) {
     if ((doc.active !== false) === active) continue; // already in the target state
     try {
-      await jobStore?.set(doc.id, { ...doc, active, version: crypto.randomUUID() });
+      const written = await setActive(doc.id, active);
+      // Gone means cancelled since the query — nothing was asked of it and nothing is owed about it.
+      if (!written.done) {
+        if (written.kind === 'contended') {
+          skipped.push({ id: doc.id, kind: 'unavailable',
+            reason: 'it is being written concurrently (its own run is stamping it) — asking again should work' });
+        }
+        continue;
+      }
     } catch (e) {
       // `*` spans the whole store, and a partitioned one holds jobs this principal may read and not write.
       // One refusal is not a refusal of the request: name it and carry on.
@@ -609,8 +649,7 @@ async function setActiveAll(active: boolean): Promise<{ ids: string[]; skipped: 
         reason: `owned by "${e.owner || 'global'}" and shared in read-only — only its owner can change it` });
       continue;
     }
-    wakeJob(doc.id);
-    ids.push(doc.id);
+    ids.push(doc.id);                                      // woken by setActive, which made the write
   }
   return { ids, skipped };
 }
@@ -684,7 +723,13 @@ carries a \`kind\` saying what to do about it — do not read this out of the \`
             yield { type: 'result', value: active ? { resumed: true, ...report } : { suspended: true, ...report } };
             return;
           }
-          if (!(await setActive(act.id, active))) {
+          const written = await setActive(act.id, active);
+          if (!written.done) {
+            // Contended is not "not found": the row is there and its own run is stamping it.
+            if (written.kind === 'contended') {
+              yield { type: 'error', message: `Job ${act.id} is being written concurrently (a run of it is finishing) — ask again.` };
+              return;
+            }
             const legacy = await legacyStore?.get(act.id);
             yield { type: 'error', message: legacy
               ? `Job ${act.id} is a legacy schedule, which this plugin does not run. Create it again with background_job, then cancel this one.`
