@@ -1175,6 +1175,13 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
       for (const { stop } of s.parallel.values()) stop.abort('user-abort');
     },
 
+    abortParallel(sessionId: string, traceId: string): void {
+      // Only this turn's own stop. Nothing else is touched — not the running turn it was answered
+      // beside, not the queue, not its siblings — and it settles through the ordinary path, so its pair
+      // is still written back with a note where the reply would have been.
+      states.get(sessionId)?.parallel.get(traceId)?.stop.abort('user-abort');
+    },
+
     cancelTurn(sessionId: string): void {
       const s = states.get(sessionId);
       if (s === undefined) return;

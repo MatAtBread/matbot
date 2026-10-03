@@ -60,7 +60,8 @@ declare global {
     sessionEvents(sessionId: string, signal?: AbortSignal): AsyncIterable<any>;
     answerPrompt(sessionId: string, body: unknown): Promise<void>;
     answerEnv(sessionId: string, body: unknown): Promise<void>;
-    abort(sessionId: string): Promise<void>;
+    /** With a traceId, stops that ONE parallel turn; without, the running turn and the whole queue. */
+    abort(sessionId: string, traceId?: string): Promise<void>;
     statusEvents(signal?: AbortSignal): AsyncIterable<{ sessionId: string; busy: boolean }>;
     notifications(signal?: AbortSignal): AsyncIterable<any>;
     openFile(namespace: string, name: string): void;

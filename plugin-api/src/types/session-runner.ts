@@ -94,6 +94,15 @@ export interface SessionRunner {
   /** Abort the running turn (if any), any `parallel` turns beside it, and drop all queued submissions,
    *  emitting `cancelled` for each. */
   abort(sessionId: string): void;
+  /** Stop ONE `parallel` turn, leaving the running turn, the queue and any other parallel turns alone.
+   *  A parallel turn is the only kind that can be stopped individually: it runs on a nested runner with
+   *  a stop of its own, where a queued submission has not started and the running turn is what `abort`
+   *  and `cancelTurn` already address. It still settles and writes back its pair, carrying a note in
+   *  place of the reply — the submission was made, and dropping it would lose that. A no-op if no
+   *  parallel turn of the session carries this traceId. Deliberately its own method rather than an
+   *  optional argument to `abort`: an implementation that ignored the argument would silently stop
+   *  everything, which is the opposite of what the caller asked. */
+  abortParallel(sessionId: string, traceId: string): void;
   /** Abandon the running turn (if any) WITHOUT touching the queue — `pump` advances to the next
    *  queued submission, or idles. The "give up on this turn" path (a prompt cancel); contrast
    *  `abort`, which also clears the queue. A no-op if nothing is running. */

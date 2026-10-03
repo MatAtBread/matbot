@@ -276,6 +276,57 @@ test('a parallel reply that settles during followup is placed before the hooks r
   assert.equal(events.filter(e => e.type === 'merged').length, 1, 'announced exactly once');
 });
 
+// Only a parallel turn can be stopped on its own: it runs on a nested runner with a stop of its own,
+// where a queued submission has not started and the running turn is what `abort`/`cancelTurn` address.
+// Stopping one must leave the turn it runs beside completely alone — and it still writes back its pair,
+// because the submission was made and dropping it would lose that.
+test('a parallel turn can be stopped on its own, leaving the running turn alone', { timeout: 10000 }, async () => {
+  const parallelGate = gate();
+  const { sid, store, started, release, runner } = setup(parallelGate.wait);
+
+  const main = await runner.open({ sessionId: sid, signal: new AbortController().signal, content: submit('do it'), provider: 'fake', principal });
+  const events: PipelineEvent[] = [];
+  const collector = watch(main, events);
+
+  await started.wait;
+  const par = await runner.open({ sessionId: sid, signal: new AbortController().signal, content: submit('Q'), provider: 'fake', principal, mode: 'parallel' });
+  assert.equal(runner.status(sid).parallel, 1);
+
+  runner.abortParallel(sid, par.traceId!);
+  while (runner.status(sid).parallel > 0) await new Promise(r => setImmediate(r));
+
+  assert.equal(runner.status(sid).running, true, 'the turn it ran beside is untouched');
+  release.open();
+  parallelGate.open();
+  await collector;
+
+  const final = (await store.get(sid))!;
+  const texts = final.messages.map(m => textOf(m) || m.role);
+  assert.ok(texts.includes('Q'), 'the submission is still recorded');
+  const note = final.messages.find(m => textOf(m).startsWith('(No reply'));
+  assert.ok(note && textOf(note).includes('was stopped'), 'with a note where the reply would have been');
+  assert.ok(texts.includes('main done'), 'and the running turn answered as normal');
+});
+
+// A traceId that names nothing — a finished parallel turn, the running turn, a typo — must not become
+// the blunt abort by accident.
+test('abortParallel with an unknown traceId stops nothing', { timeout: 10000 }, async () => {
+  const { sid, store, started, release, runner } = setup(Promise.resolve());
+
+  const main = await runner.open({ sessionId: sid, signal: new AbortController().signal, content: submit('do it'), provider: 'fake', principal });
+  const events: PipelineEvent[] = [];
+  const collector = watch(main, events);
+  await started.wait;
+
+  runner.abortParallel(sid, main.traceId!);     // the RUNNING turn's traceId, not a parallel one
+  runner.abortParallel(sid, 'nope');
+  assert.equal(runner.status(sid).running, true);
+
+  release.open();
+  await collector;
+  assert.ok((await store.get(sid))!.messages.some(m => textOf(m) === 'main done'), 'it ran to completion');
+});
+
 test('parallel reply that outlives the running turn is appended after it', { timeout: 10000 }, async () => {
   const parallelGate = gate();
   const { sid, store, started, release, runner } = setup(parallelGate.wait);

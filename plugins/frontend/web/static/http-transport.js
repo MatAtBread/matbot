@@ -13,7 +13,7 @@
 //   sessionEvents(sid, signal)                     -> AsyncIterable<PipelineEvent>   all turn output for the session
 //   answerPrompt(sid, body)                        -> Promise<void>    body = { answer } | { cancel: true }
 //   answerEnv(sid, body)                           -> Promise<void>    body = { callId, ok, value } | { callId, ok:false, error }
-//   abort(sid)                                     -> Promise<void>
+//   abort(sid, traceId?)                           -> Promise<void>  (traceId: that parallel turn only)
 //   statusEvents(signal)                           -> AsyncIterable<{ sessionId, busy }>
 //   notifications(signal)                          -> AsyncIterable<Notification>
 //   openFile(namespace, path)                      -> void
@@ -241,8 +241,11 @@
     });
   }
 
-  async function abort(sid) {
-    await apiFetch('/sessions/' + sid + '/abort', { method: 'POST' });
+  async function abort(sid, traceId) {
+    await apiFetch('/sessions/' + sid + '/abort', {
+      method: 'POST',
+      ...(traceId !== undefined ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ traceId }) } : {}),
+    });
   }
 
   // All global (non-session) event types share ONE EventSource to /events, demuxed by event name and

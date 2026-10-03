@@ -843,8 +843,19 @@ export function createWebServer(deps: WebServerDeps) {
       // rather than hang, then drop the queue + abort the running turn. Cancel, not resolve('') —
       // giving up is the one thing the user unambiguously did, and PromptCancelledError is how a tool
       // is told so; resolving would hand it the field's default as though it had been chosen.
-      pendingPrompts.get(sId)?.cancel();
-      deps.run.abort(sId);
+      // A traceId names ONE parallel turn: stop that and nothing else. No prompt cancel on this path —
+      // `pendingPrompts` is keyed by session, so cancelling would take the running turn's prompt down
+      // with it, and the parallel turn's own stop is what its nested runner observes.
+      // An empty body is the ordinary "stop everything" abort, so a parse failure is not an error here.
+      let abortBody: { traceId?: unknown } = {};
+      try { abortBody = JSON.parse(await readBody(req)) as { traceId?: unknown }; } catch { /* no body */ }
+      const traceId = typeof abortBody.traceId === 'string' ? abortBody.traceId : undefined;
+      if (traceId !== undefined) {
+        deps.run.abortParallel(sId, traceId);
+      } else {
+        pendingPrompts.get(sId)?.cancel();
+        deps.run.abort(sId);
+      }
       updateBusy(sId);
       json(res, 200, { ok: true });
       return;

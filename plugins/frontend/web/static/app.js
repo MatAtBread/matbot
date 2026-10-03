@@ -2205,6 +2205,49 @@ function paneFor(traceId) {
     pane = document.createElement('div');
     pane.className = 'parallel-pane';
     pane.dataset.trace = traceId;
+
+    // The pane's own chrome, kept OUT of `.parallel-body`: landing moves the body's children into the
+    // thread, and a stop button must not travel with them.
+    const chrome = document.createElement('div');
+    chrome.className = 'parallel-chrome';
+
+    const minBtn = document.createElement('button');
+    minBtn.className = 'parallel-btn parallel-min';
+    minBtn.type = 'button';
+    minBtn.title = 'Minimise';
+    minBtn.setAttribute('aria-label', 'Minimise');
+    minBtn.textContent = '\u2013';          // en dash; the glyph swaps with the state
+    minBtn.onclick = () => {
+      const min = pane.classList.toggle('minimized');
+      minBtn.textContent = min ? '\u25a1' : '\u2013';
+      minBtn.title = min ? 'Restore' : 'Minimise';
+      minBtn.setAttribute('aria-label', minBtn.title);
+    };
+
+    // Stops THIS parallel turn and nothing else — not the turn it runs beside, not its siblings. It
+    // still settles and writes back its pair, with a note where the reply would have been, so the pane
+    // lands as any other does rather than vanishing.
+    const stopBtn = document.createElement('button');
+    stopBtn.className = 'parallel-btn parallel-stop';
+    stopBtn.type = 'button';
+    stopBtn.title = 'Stop this parallel turn';
+    stopBtn.setAttribute('aria-label', 'Stop this parallel turn');
+    stopBtn.textContent = '\u25a0';         // filled square, as Stop is elsewhere
+    stopBtn.onclick = () => {
+      stopBtn.disabled = true;
+      void T.abort(streamSessionId, traceId).catch(() => { stopBtn.disabled = false; });
+    };
+
+    chrome.append(minBtn, stopBtn);
+
+    // What the pane shows once minimised: the submission, on one line. Filled by appendPaneUserBubble.
+    const summary = document.createElement('div');
+    summary.className = 'parallel-summary';
+
+    const body = document.createElement('div');
+    body.className = 'parallel-body';
+
+    pane.append(chrome, summary, body);
     parallelOverlayEl.appendChild(pane);
     parallelPanes.set(traceId, pane);
     // The overlay is a flex sibling of #messages, so a new pane shortens the scrollport: re-pin the
@@ -2214,17 +2257,24 @@ function paneFor(traceId) {
   return pane;
 }
 
+// Where a pane's MESSAGES live. Everything landing moves comes from here, so the chrome stays behind.
+const paneBody = (traceId) => paneFor(traceId).querySelector('.parallel-body');
+
 // A parallel submission's bubble. Deliberately not appendUserBubble: no turn divider (the pane has no
 // position to divide, and an unindexed divider would be mis-backfilled by the running turn's `done`),
 // and the pane is the container. Adopts an existing bubble so a replayed `parallel` on a late connect
 // doesn't draw a second one.
 function appendPaneUserBubble(traceId, text, media) {
   const pane = paneFor(traceId);
-  const existing = pane.querySelector('.message.user');
+  const body = pane.querySelector('.parallel-body');
+  const existing = body.querySelector('.message.user');
   if (existing) return existing;
   const div = makeBubble('user', text, media);
   div.dataset.trace = traceId;
-  pane.appendChild(div);
+  body.appendChild(div);
+  // The minimised line says which submission this is; without it a collapsed pane is anonymous.
+  const summary = pane.querySelector('.parallel-summary');
+  if (summary) summary.textContent = text || '(attachment)';
   scrollMessagesToBottom();
   return div;
 }
@@ -2253,6 +2303,8 @@ function noteParallelEnd(traceId) {
   // `merged` usually arrives in the same chunk as the terminal; flashing the waiting state for two frames
   // on every parallel turn would be noise. Self-cancelling — a landed pane is off the map.
   setTimeout(() => parallelPanes.get(traceId)?.classList.add('pending-merge'), 400);
+  // Its reply is in; there is nothing left to stop.
+  parallelPanes.get(traceId)?.classList.add('settled');
 }
 
 // Take the pane's place in the thread — but only once BOTH facts are in: where the pair went, and that
@@ -2276,7 +2328,7 @@ function tryLandParallel(traceId) {
   const prev   = anchor?.previousElementSibling;
   const before = prev?.classList.contains('msg-divider') ? prev : anchor;
   messagesEl.querySelector('.empty-state')?.remove();
-  const nodes = [...pane.children];
+  const nodes = [...pane.querySelector('.parallel-body').children];
   // Where each node is NOW, while it is still in the pane: the "first" half of the FLIP below.
   const from  = nodes.map(n => n.getBoundingClientRect());
   for (const n of nodes) {
@@ -2615,7 +2667,7 @@ function createAssistantWrap(labelText, anchorAfter, container = messagesEl) {
 // Render marker blocks as centered cross-thread notices. Markers are opaque to the LLM; the UI
 // is free to interpret known creators. Unknown creators get a generic, non-navigating chip.
 function appendMarker(content, traceId) {
-  const into = (traceId ? parallelPanes.get(traceId) : null) ?? messagesEl;
+  const into = (traceId ? parallelPanes.get(traceId)?.querySelector('.parallel-body') : null) ?? messagesEl;
   messagesEl.querySelector('.empty-state')?.remove();
   for (const part of content) {
     if (part.type !== 'marker') continue;
@@ -3341,7 +3393,7 @@ async function renderTurn(sid, traceId) {
     started = true;
     if (userBubble) userBubble.classList.remove('pending');
     turnWrap = parallelTraces.has(traceId)
-      ? createAssistantWrap('assistant', userBubble, paneFor(traceId))
+      ? createAssistantWrap('assistant', userBubble, paneBody(traceId))
       : createAssistantWrap('assistant', userBubble);
     turnWrap.dataset.trace = traceId;   // so a retraction marker for this turn can drop this wrap live
     loadingEl = document.createElement('div');

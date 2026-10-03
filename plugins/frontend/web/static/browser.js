@@ -295,7 +295,10 @@ function makeInProcessTransport(services) {
     else entry.reject(new Error(typeof body.error === 'string' && body.error ? body.error : 'Browser evaluation failed.'));
   }
 
-  async function abort(sid) {
+  async function abort(sid, traceId) {
+    // A traceId names ONE parallel turn: stop that and nothing else. No prompt release on that path —
+    // `pendingPrompts` is keyed by session, so releasing would take the running turn's prompt with it.
+    if (traceId !== undefined) { run.abortParallel(sid, traceId); updateBusy(sid); return; }
     // Release any pending prompt first so a turn parked on ctx.prompt() observes the abort rather
     // than hangs, then drop the queue + abort the running turn (mirror server.ts).
     const r = pendingPrompts.get(sid);

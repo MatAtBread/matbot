@@ -972,7 +972,7 @@
 
     /* ── Main ──────────────────────────────────────────────────── */
 
-    #main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+    #main { flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative; }
     #chat-header {
       padding: 10px 28px;
       border-bottom: 1px solid #e5e7eb;
@@ -1097,26 +1097,33 @@
        position in the thread at all: it sits in a pane docked above the composer, outside #messages,
        and its nodes are moved into place when `merged` says where they landed. */
     #parallel-overlay {
+      /* A wrapping ROW, not a column: an expanded pane takes a whole row to itself, while minimised ones
+         are auto-width and sit side by side. `flex-end` gathers them at the conversation's right edge —
+         which is also why the overlay's gutters have to match #messages'. */
       display: flex;
-      flex-direction: column;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      align-items: flex-start;
       gap: 10px;
-      padding: 0 28px 12px;
+      padding: 24px 50px;
       flex-shrink: 0;
-      max-height: 25vh;
-      overflow-y: auto;
-      /* A tray overhanging the conversation. Opaque, because a shadow cast by a transparent box reads as
-         a dark band under nothing; `relative` + `z-index` because #messages is a LATER sibling and the
-         bubbles inside it have backgrounds of their own, which would otherwise paint over the shadow.
-         Negative spread keeps it a downward overhang rather than a halo bleeding up under the header. */
-      position: relative;
-      z-index: 2;
-      background: #fff;
-      box-shadow: 0 16px 28px -10px rgba(49, 46, 129, 0.45);
+      /* Absolute, so it floats OVER the conversation rather than shortening it — hence the shadow. `top`
+         is left auto on purpose: that resolves to the static position, i.e. exactly under the chat
+         header. Only the horizontal needs pinning; with left/right/width all auto an absolute box shrinks
+         to fit its content, which is what stopped `justify-content: flex-end` from doing anything. */
+      position: absolute;
+      left: 0;
+      right: 0;
+      z-index: 7;
+      /* max-height: 25vh; */
+      /* overflow-y: auto; */
+      /* width: inherit; */
     }
     #parallel-overlay:empty { display: none; }
 
     .parallel-pane {
       position: relative;
+      flex: 0 0 100%;                /* expanded: a row of its own */
       display: flex;
       flex-direction: column;
       gap: 14px;
@@ -1125,10 +1132,70 @@
       border: 1px solid #c7d2fe;
       border-radius: 12px;
       background: #ececff;
-      box-shadow: 0 4px 18px rgba(49, 46, 129, 0.10);
+      /* The pane is the thing that floats, so it carries the overhang. Negative spread keeps it falling
+         downward rather than haloing up around the pill. */
+      box-shadow: 0 16px 28px 10px rgba(49, 46, 129, 0.45);
       animation: parallel-in 180ms ease-out;
+      filter: hue-rotate(-45deg);
     }
-    .parallel-pane:empty { display: none; }
+    /* The pane always has chrome now, so `:empty` no longer says "nothing to show" — the body does. */
+    .parallel-pane:not(:has(.parallel-body .message)) { display: none; }
+
+    /* Chrome: floated top-right, out of the content flow, so it never shifts the messages. */
+    .parallel-chrome {
+      position: absolute;
+      /* Hard against the pane's right edge, straddling the border as the pill does on the left. */
+      top: -13px;
+      right: 0;
+      display: flex;
+      gap: 5px;
+    }
+    .parallel-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 26px;
+      height: 26px;
+      padding: 0;
+      font-size: 0.95em;
+      line-height: 1;
+      color: #4338ca;
+      background: #eef2ff;
+      border: 1px solid #c7d2fe;
+      border-radius: 999px;
+      cursor: pointer;
+      transition: background 0.1s, color 0.1s;
+    }
+    .parallel-btn:hover    { background: #c7d2fe; }
+    .parallel-btn:disabled { opacity: 0.45; cursor: default; }
+    .parallel-stop         { color: #b91c1c; background: #fef2f2; border-color: #fecaca; }
+    .parallel-stop:hover   { background: #fecaca; }
+    /* Once the reply has settled there is nothing left to stop, so the control goes rather than
+       sitting there inert. */
+    .parallel-pane.settled .parallel-stop { display: none; }
+
+    /* Minimised: one line, the submission, capped — it is a placeholder for something in flight, not a
+       thing to read. `fit-content` so a short message does not leave a wide empty card. */
+    .parallel-summary { display: none; }
+    /* Minimised: one line high, sized to its title, and gathered at the right by the overlay's
+       `justify-content` — so several of them share a row. `min-width` because the pill sits at the left
+       edge and the chrome at the right, and a short title would otherwise let them collide. */
+    .parallel-pane.minimized {
+      flex: 0 1 auto;
+      width: fit-content;
+      min-width: 200px;
+      max-width: min(360px, 70%);
+      padding: 10px 14px 8px;
+    }
+    .parallel-pane.minimized .parallel-body { display: none; }
+    .parallel-pane.minimized .parallel-summary {
+      display: block;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-size: 0.86em;
+      color: #4338ca;
+    }
     .parallel-pane > .message { max-width: min(1000px, 92%); }
     .parallel-pane > .message.assistant .msg-text { max-height: 24vh; overflow-y: auto; }
     .parallel-pane::before {
@@ -2138,7 +2205,8 @@
         padding-top: max(10px, env(safe-area-inset-top, 0px));
       }
       #messages    { padding-left: 16px; padding-right: 16px; }
-      #parallel-overlay { padding-left: 10px; padding-right: 10px; max-height: 38vh; }
+      /* Same gutters as #messages above, or the panes do not line up with the conversation. */
+      #parallel-overlay { padding-left: 16px; padding-right: 16px; max-height: 38vh; }
       #input-area  {
         padding-top: 0px;
         padding-left: 6px;

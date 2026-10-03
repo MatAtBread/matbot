@@ -21,6 +21,14 @@ churn and less likely to affect a consumer who doesn't use them.
   running one, which `busy` now also counts. A custom `SessionRunner` must report it.
 - **`SessionRunner.write()`** — the runner is each session's one writer (see below), so a custom
   `SessionRunner` must implement it.
+- **`SessionRunner.abortParallel(sessionId, traceId)`** — stops ONE `parallel` turn, leaving the running
+  turn, the queue and any other parallel turns alone; a custom `SessionRunner` must implement it. A
+  parallel turn is the only kind that can be stopped individually, since it runs on a nested runner with a
+  stop of its own. It still settles and writes back its pair, carrying a note in place of the reply — the
+  submission was made, and dropping it would lose that. A no-op for a traceId no parallel turn of the
+  session carries. Deliberately its own method rather than an optional argument to `abort`: an
+  implementation that ignored the argument would silently stop everything, the opposite of what was
+  asked.
 
 ### API gaps filled
 
@@ -122,7 +130,9 @@ churn and less likely to affect a consumer who doesn't use them.
   with a pointer. A parallel turn is drawn with its own live progress, in a pane docked above the
   conversation rather than inline at the tail: it has no position in the thread until its pair is written
   back, so it floats there and then animates into place when `merged` says where it landed. A pane whose
-  reply has settled but whose pair cannot be placed yet says so.
+  reply has settled but whose pair cannot be placed yet says so. Each pane carries a stop, which ends that
+  turn alone (`POST /sessions/:id/abort` takes an optional `traceId`), and a minimise, which collapses it
+  to a one-line chip; minimised chips gather on a row at the conversation's right edge.
 - **`provider-google`** — a tool parameter with a JSON Schema type list (`type: ['string', 'array']`)
   no longer fails every request with a 400. Each `anyOf` branch now takes the keywords for its own type
   (`items` goes on the array branch). They used to stay on the parent, where Gemini rejects them.
