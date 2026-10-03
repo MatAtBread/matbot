@@ -96,8 +96,12 @@ export class FilesystemStore<T extends { id: string; version: string }> implemen
     return tail;
   }
 
+  // The temp name is unique per write, never `<file>.tmp`. Two writers of one document are expected
+  // here — a parallel reply's `cas` races the running turn's whole-document `set`, and the CAS is how
+  // the loser learns it lost — but a shared temp name means one writer renames it away and the other's
+  // rename fails ENOENT before any CAS can answer, with its error path unlinking the winner's temp.
   private async writeAtomic(filePath: string, content: string): Promise<void> {
-    const tmp = `${filePath}.tmp`;
+    const tmp = `${filePath}.${process.pid.toString(36)}.${Math.random().toString(36).slice(2, 10)}.tmp`;
     await fs.writeFile(tmp, content, 'utf8');
     try {
       await fs.rename(tmp, filePath);
@@ -118,7 +122,14 @@ export class FilesystemStore<T extends { id: string; version: string }> implemen
     }
   }
 
+  // Locked, so two concurrent whole-document writes of one session land in a defined order rather than
+  // interleaving their read-back. `cas` already holds the lock and calls `write` directly: taking it
+  // again would wait on itself.
   async set(id: string, value: T): Promise<void> {
+    return this.withLock(id, () => this.write(id, value));
+  }
+
+  private async write(id: string, value: T): Promise<void> {
     await this.init();
     await this.writeAtomic(this.filePath(id), JSON.stringify(value, null, 2));
     this.forget(id);
@@ -130,7 +141,7 @@ export class FilesystemStore<T extends { id: string; version: string }> implemen
       if (current === null || current.version !== expected) {
         return { ok: false, current } satisfies CASResult<T>;
       }
-      await this.set(id, next);
+      await this.write(id, next);
       return { ok: true, doc: next } satisfies CASResult<T>;
     });
   }
@@ -165,7 +176,7 @@ export class FilesystemStore<T extends { id: string; version: string }> implemen
     const pool: T[] = [];
     await Promise.all(
       entries
-        // The names encodeId can produce. Still excludes writeAtomic's `<name>.json.tmp` scratch files.
+        // The names encodeId can produce. Still excludes writeAtomic's `<name>.json.<unique>.tmp` scratch files.
         .filter(e => /^[\w.%-]+\.json$/.test(e))
         .map(async e => {
           const path = join(this.dir, e);

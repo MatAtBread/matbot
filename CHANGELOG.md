@@ -224,6 +224,13 @@ churn and less likely to affect a consumer who doesn't use them.
   the user's store, so it is no longer listed while it runs or left behind if the process dies mid-compile.
   Two log lines report where it ran and confirm it never reached the persisted store. Cancelling a compile
   now stops its demonstration, which carried on calling tools after the compile was abandoned.
+- **`storage-filesystem`** — two concurrent writers of one document no longer tear each other's write.
+  Every write used the same scratch name (`<file>.tmp`), so one writer renamed it away and the other's
+  rename failed `ENOENT` — then unlinked that name, which by then could be the winner's next scratch
+  file. Each write now names its own, and `set` takes the per-key lock `cas` already held. Two writers
+  are expected here: a settled parallel reply compare-and-swaps itself into a session while the running
+  turn commits its own whole-document write, and the compare is how the loser learns it lost — but the
+  file write tore before any compare could answer, so the placement reported a failure instead.
 
 ## 0.4.17
 
