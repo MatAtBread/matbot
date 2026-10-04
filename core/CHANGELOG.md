@@ -1,5 +1,11 @@
 # @matatbread/matbot-core
 
+## 0.4.19
+
+### Patch Changes
+
+- @matatbread/matbot-plugin-api@0.4.19
+
 ## 0.4.15
 
 ### Patch Changes

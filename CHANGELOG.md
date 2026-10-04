@@ -9,6 +9,17 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## 0.4.19
+
+### Optional
+
+- **`web-bundle`** — `background-jobs` is baked into `matbot.html`. It is a cross-runtime plugin and
+  the cross-tab scheduling fix in 0.4.18 was specifically about the browser case — every open tab
+  arming a per-job loop over one IndexedDB — but the plugin was never added to `matbot.web.json`, so
+  it was absent from the artifact entirely and no browser install could load it without fetching it
+  over http. It is a `bundledPlugins` entry, so it is baked and offered through the `plugin` tool's
+  discover rather than auto-loaded, like `triggers` and `skills`.
+
 ## 0.4.18
 
 ### Breaking changes

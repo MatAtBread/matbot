@@ -728,7 +728,7 @@ ACTIONS
   resume  — Resume a suspended job (runs nearly immediately, then on its interval).
   cancel  — Permanently delete a job. Prefer suspend for a temporary pause.
 
-The id is a job id from 'list' or from the background_job tool. For suspend and resume, pass id "*" to act on ALL
+The id is a job id as reported by the list action, or by the background_job tool. For suspend and resume, pass id "*" to act on ALL
 jobs at once. cancel requires a specific id — "*" is not accepted (no bulk delete).
 
 LEGACY ROWS. A row with "legacy": true is a schedule left by the plugin this one replaced. It is listed so it

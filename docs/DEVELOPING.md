@@ -1302,7 +1302,9 @@ Store-backed index with optional Cloudflare BGE reranker.
 | `@matatbread/matbot-tool-http` | `http` | Make HTTP requests |
 | `@matatbread/matbot-tool-workspace` | `workspace_action` | Read/show/write/list/delete workspace files; `show` hands an image, PDF or audio clip to the model to look at |
 | `@matatbread/matbot-tool-ask-user` | `ask_user` | Ask the user a question mid-turn (one-shot prompt) |
-| `@matatbread/matbot-tool-background` | `background`, `every_action` | Detached background jobs — now, at a stated time, or on a recurring schedule |
+| `@matatbread/matbot-background-jobs` | `background_job`, `background_job_action` | Jobs that report by appending to a conversation — now, at a stated time, or on a recurring schedule. Each job runs in-process on an ephemeral run (Node + browser) |
+| `@matatbread/matbot-background-jobs-node` | `background_job`, `background_job_action` | Node specialization of `background-jobs`: each job gets its own process, which can be killed and shares no heap with the server. Load this **or** `background-jobs`, not both |
+| `@matatbread/matbot-tool-background` | `background`, `every_action` · superseded | The former background plugin. Superseded by `background-jobs`, which changes what a job's reply means: a job reports by appending to a conversation rather than returning output. Its schedules are listed as `"legacy": true` and never run |
 | `@matatbread/matbot-tool-mcp` | `mcp_action` | Connect to MCP servers — stdio (local) and remote (delegates to mcp-http); Node only |
 | `@matatbread/matbot-mcp-http` | `mcp_action` | Connect to HTTP/SSE MCP servers (Node + browser) |
 | `@matatbread/matbot-sessions` | `session_action` | Session lifecycle: list, get, rename, hide |
@@ -1323,6 +1325,7 @@ Store-backed index with optional Cloudflare BGE reranker.
 | `@matatbread/matbot-tool-whoami` | `whoami` | Reports the current Principal |
 | `@matatbread/matbot-tool-types` | `ToolTypeIndex` service · Node only | Derives a `.d.ts` of the loaded tools' result/service types so code generators can type what `tool` calls resolve to |
 | `@matatbread/matbot-caching-tool-types` | `ToolTypeIndex` service · Node only | `tool-types` with its build kept in plugin settings across restarts; load it instead of `tool-types` |
+| `@matatbread/matbot-tool-ts-validation` | `ToolCallValidator` service · Node only | Validates a tool call against its `ToolContract` params type (via `tool-types`). Defers to whatever validator it displaced when it has no opinion, so it composes with `json-validation` in either load order |
 | `@matatbread/matbot-hook-logger` | diagnostic hooks | Logs each hook channel firing |
 | `@matatbread/matbot-frontend-web` | frontend | Web UI with session management (HTTP+SSE on Node, in-process in the browser) |
 | `@matatbread/matbot-frontend-dom` | frontend | Minimal in-process browser chat (the `matbot-demo.html` demonstrator) |

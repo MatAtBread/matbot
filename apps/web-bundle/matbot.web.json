@@ -21,6 +21,7 @@
     "plugins/workspace",
     "plugins/rumsfeld",
     "plugins/triggers",
+    "plugins/background-jobs",
     "plugins/skills",
     "plugins/mcp-http",
     "plugins/whoami",
