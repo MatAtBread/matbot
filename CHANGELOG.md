@@ -231,6 +231,27 @@ churn and less likely to affect a consumer who doesn't use them.
   are expected here: a settled parallel reply compare-and-swaps itself into a session while the running
   turn commits its own whole-document write, and the compare is how the loser learns it lost — but the
   file write tore before any compare could answer, so the placement reported a failure instead.
+- **`triggers`** — the classifier prompt is more selective. Every condition is judged on the basis it
+  declares — FORM (the shape of the message: a challenge, a doubt, a contradiction), SENTIMENT (the
+  feeling or illocution it carries) or CONTENT (a fact, a name, a number, a date, a stated phrase) — and
+  on that basis alone: a form condition is never satisfied merely because the message is on the right
+  topic, and a content condition's latitude stops at close paraphrase of what the condition actually
+  names. Where a condition spans two bases, every requirement it states still applies. The doctrine
+  `trigger_action` already states to whoever WRITES a condition — a rule is a condition on the form or
+  sentiment of a message, not its topic — was missing where the JUDGE needs it, which is what let a
+  condition naming a topic be satisfied by the topic's presence. The MATCH / DO-NOT-MATCH precedence
+  rules are gone: they were themselves a patch for the long exclusion lists the stored conditions used to
+  carry, and they were what let a specific MATCH clause overrule a general exclusion and fire on a turn
+  about the mechanism it was meant to ignore. The judge is also told explicitly that only the subject
+  message is judged (the paired one is context for relational conditions, never a subject itself), and
+  that a silent condition costs nothing while one firing wrongly is disruptive and expensive. The message
+  clip rose from 1500 to 4000 characters, the conditions are delimited rather than one per line, and the
+  `why` fragment from ~8 to ~15 words.
+- **`cognition`** — the `ask_inner_voice` back-off counts consults per TURN rather than consecutively,
+  and the cap is 2 rather than 3. "Consecutive" broke the count whenever another tool ran in the same
+  assistant message, so a critique batched with any verification call reset it to zero and the cap was
+  unreachable in practice. An agent that critiques AND acts in the same round is behaving well, and
+  batching must not buy it more consultations.
 
 ## 0.4.17
 
