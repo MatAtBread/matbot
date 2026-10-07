@@ -2187,8 +2187,8 @@ function scrollMessagesToBottom() {
 // ── Parallel turns: the in-flight overlay ─────────────────────────────────────
 //
 // A `mode: 'parallel'` submission has no position in the thread while it runs. It is answered on a
-// private copy of the session's completed turns, and only the submission and its final reply are
-// written back — ahead of the running turn's user message, where that copy ended, announced by
+// private copy of the session's completed turns, and its submission and whole span — tool calls and
+// all — are written back ahead of the running turn's user message, where that copy ended, announced by
 // `merged`. Drawing it inline at the tail, where its events arrive, therefore puts it somewhere a
 // refresh will not: it belongs ABOVE the turn it ran beside. So it is drawn in a pane docked above
 // the composer, outside #messages, and its nodes are moved into place when `merged` says where they
@@ -2225,7 +2225,7 @@ function paneFor(traceId) {
     };
 
     // Stops THIS parallel turn and nothing else — not the turn it runs beside, not its siblings. It
-    // still settles and writes back its pair, with a note where the reply would have been, so the pane
+    // still settles and writes back its span, with a note where the reply would have been, so the pane
     // lands as any other does rather than vanishing.
     const stopBtn = document.createElement('button');
     stopBtn.className = 'parallel-btn parallel-stop';

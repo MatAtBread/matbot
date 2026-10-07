@@ -108,7 +108,7 @@ const DEFAULT_STEER_NUDGE: MessageContent[] = [{
 // "how's it going?" mid-task sees a history that ends a turn early and answers as though nothing were
 // running. Names the running request so the reply can be about it, and says what happens to the reply.
 const PARALLEL_FRAMING_CAP = 2_000;
-const parallelFraming = (running: string): UserContent => ({
+const parallelFraming = (running: string): Extract<UserContent, { type: 'text' }> => ({
   type: 'text',
   origin: 'robo',
   text: 'A separate turn of this conversation is still working on the request below, and you cannot see its '
@@ -118,11 +118,32 @@ const parallelFraming = (running: string): UserContent => ({
     + '\n</running-request>',
 });
 
-// A parallel turn's write-back: its submission and final reply, ready to place. Built once, when the
-// parallel turn settles; placed by whoever holds the session at that moment (see `merges`).
+// A parallel turn's span as it can be placed into shared history: trimmed back to the last point at
+// which every tool-call in it has its result. An abort (or a failure mid-round) leaves a trailing
+// tool-call with nothing answering it, and an unpaired call is not valid wire for any provider — it
+// would break not just this placement but every later turn of the session.
+const closedSpan = (msgs: Message[]): Message[] => {
+  const open = new Set<string>();
+  let closed = 0;
+  for (const [i, m] of msgs.entries()) {
+    for (const c of m.content) {
+      if (c.type === 'tool-call')        open.add(c.id);
+      else if (c.type === 'tool-result') open.delete(c.id);
+    }
+    if (open.size === 0) closed = i + 1;
+  }
+  return msgs.slice(0, closed);
+};
+
+// A parallel turn's write-back: its submission and everything the turn produced, ready to place. Built
+// once, when the parallel turn settles; placed by whoever holds the session at that moment (see
+// `merges`).
 interface ParallelReply {
   traceId:  string;
-  messages: [Message, Message];
+  /** The turn's head first, then its whole span — thinking, tool calls, their results, its markers and
+   *  its final reply. Non-empty by construction, which is what keeps `messages[0]` the head: every
+   *  placement path dedupes on that id. */
+  messages: [Message, ...Message[]];
   /** The id of the message this reply's copy was cut AT — the running turn's head when it was submitted,
    *  captured then. The pair belongs immediately ahead of it, because that is where the history the reply
    *  was generated against ended. Absent ⇒ the copy was cut at the end of the session (nothing was
@@ -881,12 +902,12 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
 
   /**
    * A parallel turn: the submission runs at once on a nested runner over a private copy of the session's
-   * completed turns, and only it and its final reply come back (`ParallelReply`). The copy ends where the
+   * completed turns, and its submission plus everything it produced come back (`ParallelReply`). The copy ends where the
    * running turn's own messages begin (`head`), plus any replies already placed into that turn but not
    * yet committed (`interjected`) — both captured at submit, before any await could outlive the turn.
    *
-   * Its events are forwarded under its own traceId as progress, never persisted: its tool calls belong to
-   * the copy, which is dropped here. A nested runner rather than `runSession` so the turn is an ordinary
+   * Its events are forwarded under its own traceId as progress; what persists is the span the write-back
+   * carries, read from the copy once the turn has settled. A nested runner rather than `runSession` so the turn is an ordinary
    * one — screen, followup, accounting, media — with nothing re-implemented.
    */
   const runParallel = async (
@@ -910,6 +931,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
       const have     = new Set(prefix.map(m => m.id));
       const copy     = { ...stored, messages: [...prefix, ...p.interjected.filter(m => !have.has(m.id))] };
       const running  = p.head?.request ?? '';
+      const framing  = running ? parallelFraming(running) : undefined;
 
       const store = new MemoryStore<Session>();
       await store.set(id, copy);
@@ -941,10 +963,21 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
       const msgs   = final?.messages ?? [];
       const hIdx   = msgs.findIndex(m => m.role === 'user' && m.traceId === p.traceId);
       const qHead  = msgs[hIdx];
-      // Only the reply's text crosses back: its tool calls stay in the copy (an unpaired one would break
-      // every later turn), and its thinking was signed against a history that included those tool rounds.
-      const last   = hIdx >= 0 ? msgs.slice(hIdx + 1).findLast(m => m.role === 'assistant') : undefined;
-      const answer = (last?.content ?? []).filter(c => c.type === 'text');
+      // The turn's WHOLE span crosses back, not just its final text: thinking, tool calls, their results
+      // and any markers. A history holding only the answer makes everything a parallel turn actually did
+      // unrecoverable the moment the live stream is gone — `determine_provenance` reads a real tool result
+      // as fabricated, and so does a person scrolling back. The span is placed exactly where the copy was
+      // cut, so it sits in the history it was generated against, and `closedSpan` is what keeps it valid
+      // wire. Thinking rides along persisted but unsubmitted (every adapter elides a historical block),
+      // and a foreign round-trip token is the adapters' to drop by `providerName`, which these messages
+      // carry — so nothing here depends on which provider ran the turn.
+      const span   = hIdx >= 0 ? closedSpan(msgs.slice(hIdx + 1)) : [];
+      // Answered iff the span ENDS with assistant text. Not "contains some": a turn aborted after
+      // "let me check that" has said nothing, and a span ending on a tool result needs the note after it
+      // to close the turn on an assistant message.
+      const tail   = span[span.length - 1];
+      const answer = tail?.role === 'assistant'
+        ? tail.content.filter(c => c.type === 'text' && c.text.trim() !== '') : [];
       const ended  = rec.replay.findLast(e => e.type === 'done' || e.type === 'aborted' || e.type === 'error' || e.type === 'cancelled');
       const reason = ended?.type === 'aborted' ? `was stopped (${ended.reason})`
                    : ended?.type === 'cancelled' ? 'was stopped before it started'
@@ -954,14 +987,19 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
         traceId:  p.traceId,
         ...(p.head !== undefined ? { head: p.head.id } : {}),
         messages: [
-          // The copy's own head, carrying its accounting, but with the content as the person submitted it.
+          // The copy's own head, carrying its accounting, with the framing block taken back OFF — that
+          // block is this turn's own context and not something the person wrote. Subtracted rather than
+          // replaced with `p.content` wholesale: a `contextual` trigger folds its correction DURABLY onto
+          // the head, and overwriting the content dropped exactly that, so the correction informed the
+          // answer and then vanished from the history the answer sits in.
           qHead !== undefined
-            ? { ...qHead, content: p.content }
+            ? { ...qHead, content: qHead.content.filter(c => !(framing !== undefined && c.type === 'text'
+                && c.origin === framing.origin && c.text === framing.text)) }
             : createMessage({ role: 'user', content: p.content, traceId: p.traceId, providerName: p.provider }),
-          last !== undefined && answer.length > 0
-            ? { ...last, content: answer }
-            : createMessage({ role: 'assistant', content: [{ type: 'text', text: `(No reply — this message's parallel turn ${reason}.)` }],
-                traceId: p.traceId, providerName: p.provider }),
+          ...span,
+          ...(answer.length > 0 ? [] : [createMessage({
+            role: 'assistant', content: [{ type: 'text', text: `(No reply — this message's parallel turn ${reason}.)` }],
+            traceId: p.traceId, providerName: p.provider })]),
         ],
       };
     } catch (e) {

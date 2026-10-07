@@ -13,6 +13,25 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Bug fixes
 
+- **A parallel turn writes back its whole span, not just its final text.** `mode: 'parallel'`
+  merged only the submission and the last assistant message's text, so everything the turn
+  actually did — its thinking, its tool calls and their results, its markers — existed in the
+  live stream and nowhere else. The session is the only record once that stream is gone, which
+  made a genuine tool call unrecoverable: `determine_provenance` found no invocation and read a
+  truthful report as fabricated. The span now crosses back whole, read after the nested runner
+  idles (so it is what that turn's own `screen`/`followup` triggers settled on — a retraction
+  marker and its redo, a resubmit's robo turn — rather than its first draft), and trimmed to the
+  last point at which every tool-call has its result, since an unpaired call in shared history is
+  not valid wire for any provider. Thinking is persisted but still unsubmitted (every adapter
+  elides a historical block) and a foreign round-trip token is still the adapters' to drop by
+  `providerName`, so nothing here depends on which provider ran the turn. A turn that produced no
+  final text keeps the note saying why, now placed after the rounds it did complete.
+- **A `contextual` trigger's durable fold on a parallel turn survives the write-back.** The
+  turn's head was rebuilt from the content as submitted, to strip the framing block the copy ran
+  on; that also dropped any `durable` blocks a `screen` hook had folded onto it, so the correction
+  informed the answer and then vanished from the history the answer sits in. The framing block is
+  now subtracted instead.
+
 - **An attached text file reaches the model as text, in every adapter.** A `.csv`, `.json` or
   `.yaml` attachment was routed — correctly — to the `document` arm, and then each adapter did the
   one thing that loses it: `openai-compat` and non-PDF `anthropic` degraded it to a bare

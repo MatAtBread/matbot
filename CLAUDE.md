@@ -313,20 +313,32 @@ A turn works on an in-memory copy of its session and writes it back whole when i
 
 **"Nothing is written mid-turn" is not the invariant; "the runner owns the session exclusively" is.**
 Several writes during one turn are fine as long as the runner knows about all of them, and one case needs
-it: a parallel turn's pair is a *completed* turn, not a partial one, so it is placed in the store as it
+it: a parallel turn's write-back is a *completed* turn, not a partial one, so it is placed in the store as it
 settles (`placeNow`) rather than waiting for the running turn's next round boundary — which a turn parked
 in one long tool call never reaches, leaving a finished reply in no store, no replay and no stream. The
-pair goes on `merges` as well, so the running turn takes it into its own in-memory session and its
+span goes on `merges` as well, so the running turn takes it into its own in-memory session and its
 whole-document write-back carries it instead of erasing it; `end` does a final `interject` pull, being the
 funnel every exit passes through, for the turn that is aborted inside that same tool call and so reaches
 no further boundary. The three placement paths — `placeNow`, `interjectInto`, `drainMerges` — are mutually
-idempotent on the pair's message id, and exactly one announces `merged`. The turn's own partial output is
+idempotent on its head's message id, and exactly one announces `merged`. The turn's own partial output is
 a different thing and stays unpersisted: it is genuinely incomplete, and a crash must not commit half a
 turn.
 
-**A pair is anchored on the head its OWN copy was cut at**, captured at submit and carried on the reply —
+**What crosses back is the turn's whole settled span**, not its final text: the submission (with the
+framing block subtracted, but any `durable` fold a `contextual` trigger made KEPT), then every message the
+turn produced — thinking, tool calls, their results, its markers, a retraction and the redo that
+superseded it, a `followup` resubmit's robo turn. The session is the only record once the live stream is
+gone, and one holding the answer alone makes a tool call a parallel turn genuinely made unrecoverable:
+`determine_provenance` finds no invocation and reads a truthful report as fabricated. It is read after the
+nested runner idles, so it is what that turn's own hooks settled on rather than its first draft, and it is
+trimmed to the last point at which every tool-call has its result (`closedSpan`) — an unpaired call placed
+into shared history is not valid wire for any provider and would break every later turn. Thinking rides
+along persisted but unsubmitted (every adapter elides a historical block) and a foreign round-trip token
+is the adapters' to drop by `providerName`, so none of this depends on which provider ran the turn.
+
+**A span is anchored on the head its OWN copy was cut at**, captured at submit and carried on the reply —
 never on the session's current head. The two differ exactly where it matters: a parallel turn submitted
-*during* a turn's `followup` ran on a copy that INCLUDED that finished turn, so its pair belongs after it,
+*during* a turn's `followup` ran on a copy that INCLUDED that finished turn, so its span belongs after it,
 and the current head would put it in front of the very history it answered. A reply with no head of its
 own belongs at the tail, which is the pump's to append and must wait for it — appended early it would
 become the session's last user message, which is the turn a redo re-runs.

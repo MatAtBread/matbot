@@ -1105,15 +1105,15 @@
       justify-content: flex-end;
       align-items: flex-start;
       gap: 10px;
-      padding: 24px 50px;
       flex-shrink: 0;
       /* Absolute, so it floats OVER the conversation rather than shortening it — hence the shadow. `top`
          is left auto on purpose: that resolves to the static position, i.e. exactly under the chat
          header. Only the horizontal needs pinning; with left/right/width all auto an absolute box shrinks
          to fit its content, which is what stopped `justify-content: flex-end` from doing anything. */
       position: absolute;
-      left: 0;
-      right: 0;
+      left: 3em;
+      right: 8vw;
+      top: 2.25em;
       z-index: 7;
       /* max-height: 25vh; */
       /* overflow-y: auto; */
@@ -1137,6 +1137,12 @@
       box-shadow: 0 16px 28px 10px rgba(49, 46, 129, 0.45);
       animation: parallel-in 180ms ease-out;
       filter: hue-rotate(-45deg);
+      max-height: 30vh;
+      /* NOT the scroller, though it is the thing with the cap: `overflow` clips absolutely-positioned
+         descendants too, and both the chrome and the `::before` pill straddle this box's top border on
+         purpose (`top: -13px` / `-9px`). Scrolling here cut the top off both. The cap stays, and
+         `.parallel-body` does the scrolling inside it — which is also the right box for it, being the
+         only part that grows. */
     }
     /* The pane always has chrome now, so `:empty` no longer says "nothing to show" — the body does. */
     .parallel-pane:not(:has(.parallel-body .message)) { display: none; }
@@ -1187,6 +1193,12 @@
       max-width: min(360px, 70%);
       padding: 10px 14px 8px;
     }
+    /* The pane's scrollport. `min-height: 0` because a flex item's `min-height: auto` resolves to its
+       content along the main axis, which is exactly what stops it shrinking inside the pane's cap. */
+    .parallel-body {
+      min-height: 0;
+      overflow-y: auto;
+    }
     .parallel-pane.minimized .parallel-body { display: none; }
     .parallel-pane.minimized .parallel-summary {
       display: block;
@@ -1196,8 +1208,11 @@
       font-size: 0.86em;
       color: #4338ca;
     }
-    .parallel-pane > .message { max-width: min(1000px, 92%); }
-    .parallel-pane > .message.assistant .msg-text { max-height: 24vh; overflow-y: auto; }
+    /* The body, not the pane: messages have lived inside `.parallel-body` since landing needed something
+       to move that the chrome would not travel with, so addressed as a child of the pane this matched
+       nothing. The per-message `max-height`/`overflow-y` that used to sit here is gone with it — a second
+       scrollport nested inside a 30vh one is worse than the cap it was duplicating. */
+    .parallel-body > .message { max-width: min(1000px, 92%); }
     .parallel-pane::before {
       content: '\21c4 parallel';
       position: absolute;
@@ -2205,8 +2220,6 @@
         padding-top: max(10px, env(safe-area-inset-top, 0px));
       }
       #messages    { padding-left: 16px; padding-right: 16px; }
-      /* Same gutters as #messages above, or the panes do not line up with the conversation. */
-      #parallel-overlay { padding-left: 16px; padding-right: 16px; max-height: 38vh; }
       #input-area  {
         padding-top: 0px;
         padding-left: 6px;

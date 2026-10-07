@@ -12,9 +12,9 @@ installPrincipalCarrier(createAlsPrincipalCarrier());
 installUsageCarrier(createAlsUsageCarrier());
 
 // `mode: 'parallel'`: a submission arriving mid-turn is answered at once on a copy of the session's
-// completed turns, leaving the running turn alone, and only the submission and its final reply come back
-// — as a user/assistant pair placed ahead of the running turn's own messages (where the copy ended) if it
-// is still running, else appended after it.
+// completed turns, leaving the running turn alone, and its submission and whole span — thinking, tool
+// calls, their results, whatever its own triggers settled on — come back, placed ahead of the running
+// turn's own messages (where the copy ended) if it is still running, else appended after it.
 
 const principal: Principal = { id: 'tester', type: 'user' };
 
@@ -169,7 +169,7 @@ test('parallel reply lands ahead of the still-running turn, at a round boundary'
   const final = (await store.get(sid))!;
   assert.deepEqual(final.messages.map(m => m.role), ['user', 'assistant', 'user', 'assistant', 'tool', 'assistant']);
   assert.equal(textOf(final.messages[0]!), 'Q', 'submission persisted without its framing');
-  assert.equal(textOf(final.messages[1]!), 'A', 'only the final reply came back');
+  assert.equal(textOf(final.messages[1]!), 'A', 'the reply came back (this turn made no tool call)');
   assert.equal(textOf(final.messages[2]!), 'do it');
   assert.equal(textOf(final.messages[5]!), 'main done');
 
@@ -675,4 +675,219 @@ test('a parallel message arriving while a redo reads its session is cut and fram
   const parCall = seen.parallel[0]!;
   assert.ok(!parCall.some(m => m.role === 'user' && textOf(m) === 'do it'), 'the turn being re-run is not in the copy');
   assert.ok(textOf(parCall.findLast(m => m.role === 'user')!).includes('<running-request>\ndo it\n</running-request>'), 'framed with the request being re-run');
+});
+
+// A parallel turn's whole span crosses back, not only its final text. The session is the only record of
+// what ran once the live stream is gone: with the answer alone, a tool call a parallel turn genuinely
+// made reads back as fabricated — `determine_provenance` finds no invocation and vetoes a truthful
+// report. So the span is persisted, trimmed to the last point at which every tool-call has its result.
+test('a parallel turn merges its whole span — thinking, tool calls and their results', { timeout: 10000 }, async () => {
+  const session = createSession();
+  const store   = memStore(session);
+  const seen    = { main: [] as Message[][], parallel: [] as Message[][] };
+  const started = gate();
+  const release = gate();
+
+  const quick: Tool = {
+    name: 'quick', description: 'answers at once', inputSchema: { type: 'object' },
+    executor: { execute() { return (async function* () { yield { type: 'result' as const, value: { temp: 17 } }; })(); } },
+  };
+  const tools = toolRegistry(slowTool(started.open, release.wait));
+  tools.register(quick);
+
+  const config: ProviderConfig = { name: 'fake', module: 'fake', model: 'fake' };
+  const adapter: ProviderAdapter = {
+    name: 'fake',
+    async health() { return { ok: true } as never; },
+    complete(messages): AsyncIterable<CompletionEvent> {
+      const lastUser   = textOf(messages.findLast(m => m.role === 'user') ?? { content: [] });
+      const isParallel = lastUser.startsWith('Q');
+      (isParallel ? seen.parallel : seen.main).push(messages);
+      const afterTool = messages[messages.length - 1]?.role === 'tool';
+      return (async function* () {
+        if (isParallel && !afterTool) {
+          yield { type: 'thinking-block', thinking: 'which tool', signature: 'sig-1' };
+          yield { type: 'tool-call', id: 'q1', name: 'quick', input: {} };
+        } else if (isParallel) {
+          yield { type: 'text-delta', delta: '17C' };
+        } else if (afterTool) {
+          yield { type: 'text-delta', delta: 'main done' };
+        } else {
+          yield { type: 'tool-call', id: 'c1', name: 'slow', input: {} };
+        }
+        yield { type: 'done' };
+      })();
+    },
+  };
+  const runner = createSessionRunner({
+    store, tools,
+    resolveProvider: async () => ({ adapter, config }),
+    loadPlugin: async () => { throw new Error('loadPlugin unused'); },
+    unloadPlugin: async () => false,
+  });
+
+  const main = await runner.open({ sessionId: session.id, signal: new AbortController().signal, content: submit('do it'), provider: 'fake', principal });
+  const events: PipelineEvent[] = [];
+  const collector = watch(main, events);
+
+  await started.wait;
+  await runner.open({ sessionId: session.id, signal: new AbortController().signal, content: submit('Q'), provider: 'fake', principal, mode: 'parallel' });
+  while (runner.status(session.id).parallel > 0) await new Promise(r => setImmediate(r));
+  release.open();
+  await collector;
+
+  const final = (await store.get(session.id))!;
+  assert.deepEqual(final.messages.map(m => m.role),
+    ['user', 'assistant', 'tool', 'assistant', 'user', 'assistant', 'tool', 'assistant'],
+    'the parallel span sits whole ahead of the turn it ran beside');
+
+  const call = final.messages[1]!.content.find(c => c.type === 'tool-call');
+  assert.ok(call && call.type === 'tool-call' && call.name === 'quick', 'the tool call it made is in the history');
+  assert.ok(final.messages[1]!.content.some(c => c.type === 'thinking' && c.signature === 'sig-1'),
+    'and its thinking, verbatim');
+  const result = final.messages[2]!.content.find(c => c.type === 'tool-result');
+  assert.ok(result && result.type === 'tool-result' && result.id === 'q1', 'paired with its result');
+  assert.deepEqual((result as { result?: unknown }).result, { temp: 17 }, 'carrying what the tool returned');
+  assert.equal(textOf(final.messages[3]!), '17C', 'and the reply after it');
+
+  // The running turn took the span into its own copy, in order, ahead of its own request.
+  const next = seen.main[1]!;
+  assert.deepEqual(next.map(m => m.role), ['user', 'assistant', 'tool', 'assistant', 'user', 'assistant', 'tool'],
+    'the running turn sees the span, not just the answer');
+});
+
+// A parallel turn stopped between rounds has done real work — a tool call and its result — and no reply.
+// The span crosses back whole, trimmed to what is paired, and the note closes it on an assistant message
+// so the placement still alternates ahead of the turn it ran beside.
+test('a parallel turn stopped after a tool result keeps the round and notes the missing reply', { timeout: 10000 }, async () => {
+  const session = createSession();
+  const store   = memStore(session);
+  const started = gate();
+  const release = gate();
+  let stopPar: () => void = () => {};
+
+  const tools = toolRegistry(slowTool(started.open, release.wait));
+  tools.register({
+    name: 'parquick', description: 'answers, then the turn is stopped', inputSchema: { type: 'object' },
+    executor: { execute() { return (async function* () {
+      yield { type: 'result' as const, value: { temp: 17 } };
+      stopPar();   // lands between rounds: the tool message is committed, the next provider call is not
+    })(); } },
+  });
+
+  const config: ProviderConfig = { name: 'fake', module: 'fake', model: 'fake' };
+  const adapter: ProviderAdapter = {
+    name: 'fake',
+    async health() { return { ok: true } as never; },
+    complete(messages): AsyncIterable<CompletionEvent> {
+      const isParallel = textOf(messages.findLast(m => m.role === 'user') ?? { content: [] }).startsWith('Q');
+      const afterTool  = messages[messages.length - 1]?.role === 'tool';
+      return (async function* () {
+        if (isParallel && !afterTool) yield { type: 'tool-call', id: 'p1', name: 'parquick', input: {} };
+        else if (isParallel)          yield { type: 'text-delta', delta: 'never reached' };
+        else if (afterTool)           yield { type: 'text-delta', delta: 'main done' };
+        else                          yield { type: 'tool-call', id: 'c1', name: 'slow', input: {} };
+        yield { type: 'done' };
+      })();
+    },
+  };
+  const runner = createSessionRunner({
+    store, tools,
+    resolveProvider: async () => ({ adapter, config }),
+    loadPlugin: async () => { throw new Error('loadPlugin unused'); },
+    unloadPlugin: async () => false,
+  });
+
+  const main = await runner.open({ sessionId: session.id, signal: new AbortController().signal, content: submit('do it'), provider: 'fake', principal });
+  const events: PipelineEvent[] = [];
+  const collector = watch(main, events);
+
+  await started.wait;
+  const par = await runner.open({ sessionId: session.id, signal: new AbortController().signal, content: submit('Q'), provider: 'fake', principal, mode: 'parallel' });
+  stopPar = () => runner.abortParallel(session.id, par.traceId);
+  while (runner.status(session.id).parallel > 0) await new Promise(r => setImmediate(r));
+  release.open();
+  await collector;
+
+  const final = (await store.get(session.id))!;
+  assert.deepEqual(final.messages.map(m => m.role),
+    ['user', 'assistant', 'tool', 'assistant', 'user', 'assistant', 'tool', 'assistant'],
+    'the tool round it completed is kept');
+  assert.ok(final.messages[2]!.content.some(c => c.type === 'tool-result' && c.id === 'p1'), 'with its result');
+  assert.match(textOf(final.messages[3]!), /^\(No reply —/, 'and a note where the reply would have been');
+});
+
+// A parallel turn is an ordinary turn on a nested runner that shares this one's hooks, so its triggers
+// run on it — and the write-back is read only once that runner has idled, which is after `followup` and
+// after anything `followup` enqueued. So what crosses back is the turn's SETTLED history: a retraction
+// marker and the redo's answer, not the response the retract superseded.
+test('a parallel turn obeys its own triggers, and merges what they settled on', { timeout: 10000 }, async () => {
+  const hooks = new HookRegistry();
+  let retracted = 0;
+  hooks.register({ on: 'followup', pluginName: 'retract-once', handler: ctx => {
+    // Only the parallel turn's, and only its first pass: the redo must be allowed to stand.
+    const head = ctx.session.messages.findLast(m => m.role === 'user');
+    if (head === undefined || !textOf(head).startsWith('Q') || retracted++ > 0) return {};
+    return { retractAndRerun: { context: [{ type: 'text', text: 'try again' }] } };
+  } });
+  const { sid, store, seen, started, release, runner } = setup(Promise.resolve(), hooks);
+
+  const main = await runner.open({ sessionId: sid, signal: new AbortController().signal, content: submit('do it'), provider: 'fake', principal });
+  const events: PipelineEvent[] = [];
+  const collector = watch(main, events);
+
+  await started.wait;
+  await runner.open({ sessionId: sid, signal: new AbortController().signal, content: submit('Q'), provider: 'fake', principal, mode: 'parallel' });
+  while (runner.status(sid).parallel > 0) await new Promise(r => setImmediate(r));
+  release.open();
+  await collector;
+
+  assert.equal(retracted, 2, 'the hook saw the parallel turn twice — the original and its redo');
+  assert.ok(seen.parallel[1]!.some(m => textOf(m).includes('try again')), 'the redo ran with the injected context');
+
+  const final = (await store.get(sid))!;
+  assert.deepEqual(final.messages.map(m => m.role).slice(0, 4), ['user', 'marker', 'assistant', 'user'],
+    'the retraction marker and the redo cross back, ahead of the turn it ran beside');
+  const marker = final.messages[1]!.content.find(c => c.type === 'marker');
+  assert.ok(marker && marker.type === 'marker' && marker.creator === 'matbot-retraction',
+    'the retraction is in the shared history, not left behind in the copy');
+  assert.equal(textOf(final.messages[2]!), 'A', 'and the answer is the redo\'s, written once');
+});
+
+// The other two trigger surfaces. A `followup` resubmit enqueues a robo turn on the nested runner, so it
+// is part of the span by the time the runner idles. And a `contextual` correction is folded DURABLY onto
+// the turn's head — which the write-back used to overwrite with the content as submitted, so the
+// correction informed the answer and then vanished from the history the answer sits in.
+test('a parallel turn merges a followup resubmit, and keeps a durable fold on its head', { timeout: 10000 }, async () => {
+  const hooks = new HookRegistry();
+  let followed = 0;
+  hooks.register({ on: 'screen', pluginName: 'contextualise', handler: ctx => {
+    const head = ctx.session.messages.findLast(m => m.role === 'user');
+    if (head === undefined || !textOf(head).startsWith('Q')) return {};
+    return { durable: [{ type: 'text', text: 'noted durably', origin: 'robo' }] };
+  } });
+  hooks.register({ on: 'followup', pluginName: 'follow-once', handler: ctx => {
+    const head = ctx.session.messages.findLast(m => m.role === 'user');
+    if (head === undefined || !textOf(head).startsWith('Q') || followed++ > 0) return {};
+    return { resubmit: { content: [{ type: 'text', text: 'Q-again', origin: 'robo' }] } };
+  } });
+  const { sid, store, started, release, runner } = setup(Promise.resolve(), hooks);
+
+  const main = await runner.open({ sessionId: sid, signal: new AbortController().signal, content: submit('do it'), provider: 'fake', principal });
+  const events: PipelineEvent[] = [];
+  const collector = watch(main, events);
+
+  await started.wait;
+  await runner.open({ sessionId: sid, signal: new AbortController().signal, content: submit('Q'), provider: 'fake', principal, mode: 'parallel' });
+  while (runner.status(sid).parallel > 0) await new Promise(r => setImmediate(r));
+  release.open();
+  await collector;
+
+  const final = (await store.get(sid))!;
+  assert.deepEqual(final.messages.map(m => m.role).slice(0, 5), ['user', 'assistant', 'user', 'assistant', 'user'],
+    'the robo turn the followup enqueued crosses back with the rest of the span');
+  assert.ok(textOf(final.messages[2]!).startsWith('Q-again'), 'as its own robo-user message');
+  const head = final.messages[0]!.content;
+  assert.ok(head.some(c => c.type === 'text' && c.text === 'noted durably'), 'the durable fold survived the write-back');
+  assert.ok(!head.some(c => c.type === 'text' && c.text.includes('<running-request>')), 'and the framing did not');
 });
