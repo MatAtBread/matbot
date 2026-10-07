@@ -1,5 +1,6 @@
 import type { Message, Tool } from '@matatbread/matbot-plugin-api';
 import { foreignToolNote } from '@matatbread/matbot-provider-openai-compat';
+import { textDocument } from '@matatbread/matbot-core/providers-base';
 
 // ── Native Gemini (generateContent) wire types ────────────────────────────────
 // See https://ai.google.dev/api/generate-content. The native format differs from OpenAI's in three
@@ -211,7 +212,14 @@ export function toGeminiContents(messages: Message[], currentProvider?: string):
         case 'file-ref': parts.push({ text: `[Attached file: ${c.name}]` }); break;
         // Gemini takes documents and audio the same way it takes images — inline bytes plus a mime
         // type — so there is nothing to degrade.
-        case 'document': parts.push({ inlineData: { mimeType: c.mimeType, data: c.data } }); break;
+        // Gemini reads a text file either way; a text part survives the OpenAI-compat fallback this
+        // adapter drops to by endpoint path, where `inlineData` does not exist.
+        case 'document': {
+          const text = textDocument(c);
+          if (text !== null) parts.push({ text });
+          else parts.push({ inlineData: { mimeType: c.mimeType, data: c.data } });
+          break;
+        }
         case 'audio':    parts.push({ inlineData: { mimeType: c.mimeType, data: c.data } }); break;
         case 'redacted-thinking':
         case 'reasoning':

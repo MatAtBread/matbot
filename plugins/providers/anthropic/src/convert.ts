@@ -1,4 +1,5 @@
 import type { Message, Tool, JSONSchema } from '@matatbread/matbot-plugin-api';
+import { textDocument } from '@matatbread/matbot-core/providers-base';
 
 // ── Internal Anthropic API types ──────────────────────────────────────────────
 
@@ -35,12 +36,6 @@ export interface AnthropicToolDef {
 function cacheLastBlock(msg: AnthropicMessage, cc: CacheControl): void {
   const last = msg.content[msg.content.length - 1];
   if (last) (last as { cache_control?: CacheControl }).cache_control = cc;
-}
-
-// Message content is base64 whatever the mime type; a text document must be sent decoded. atob yields
-// one byte per char, so re-widen through TextDecoder rather than trusting it for anything non-ASCII.
-function decodeBase64Text(data: string): string {
-  return new TextDecoder().decode(Uint8Array.from(atob(data), ch => ch.charCodeAt(0)));
 }
 
 export function toAnthropicMessages(messages: Message[], cc: CacheControl): AnthropicMessage[] {
@@ -91,14 +86,17 @@ export function toAnthropicMessages(messages: Message[], cc: CacheControl): Anth
           }];
         case 'file-ref':
           return [{ type: 'text', text: `[Attached file: ${c.name}]` }];
-        case 'document':
+        case 'document': {
           if (c.mimeType === 'application/pdf')
             return [{ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: c.data },
               ...(c.name !== undefined ? { title: c.name } : {}) }];
-          if (c.mimeType.startsWith('text/'))
-            return [{ type: 'document', source: { type: 'text', media_type: 'text/plain', data: decodeBase64Text(c.data) },
-              ...(c.name !== undefined ? { title: c.name } : {}) }];
+          // A text source block, which this protocol does have, is discarded by the Anthropic-compatible
+          // shims other vendors front their models with — see `textDocument`. The title it buys is folded
+          // into the framing instead, and the model reads the same characters either way.
+          const text = textDocument(c);
+          if (text !== null) return [{ type: 'text', text }];
           return [{ type: 'text', text: `[Document: ${c.name ?? c.mimeType}]` }];
+        }
         case 'audio':
           return [{ type: 'text', text: `[Audio: ${c.mimeType}]` }];
         case 'refusal':

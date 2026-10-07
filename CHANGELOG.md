@@ -11,6 +11,27 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ## 0.4.19
 
+### Bug fixes
+
+- **An attached text file reaches the model as text, in every adapter.** A `.csv`, `.json` or
+  `.yaml` attachment was routed — correctly — to the `document` arm, and then each adapter did the
+  one thing that loses it: `openai-compat` and non-PDF `anthropic` degraded it to a bare
+  `[Document: name]` note, and the `document` block with a text source that the Anthropic protocol
+  *does* have is silently discarded by the vendor shims that front other models on that same API
+  (DeepSeek's substitutes the literal `[Unsupported Document]` server-side). The model was
+  therefore told a file was attached and shown nothing, which reads to it as a lost attachment
+  rather than an absence: the observed turn spent six rounds hunting for the bytes — two
+  `tool_search` calls, `workspace_action list`, `session_action get` to recover the `fileId` from
+  its own transcript, then `bash` and `find` over `.data/files` — and only succeeded because that
+  install grants a shell. Textual documents now go as a named text block (`textDocument`, in
+  `core/providers-base`, since a mime-routing rule with three copies is one that gets fixed in one
+  of them), which is the one content shape every endpoint implements and is lossless for text: the
+  model reads the same characters either way. "Textual" is wider than `text/*` — `application/json`,
+  `application/yaml`, a `+json`/`+xml` suffix — but is never *guessed*: an unlisted type and an
+  `application/octet-stream` keep the old degradation, and the decode is `fatal` so a mislabelled
+  binary cannot reach a prompt as mojibake. A PDF still goes as a document block (anthropic, google)
+  or its note (openai-compat), having no text form.
+
 ### Optional
 
 - **`web-bundle`** — `background-jobs` is baked into `matbot.html`. It is a cross-runtime plugin and
@@ -19,6 +40,12 @@ churn and less likely to affect a consumer who doesn't use them.
   it was absent from the artifact entirely and no browser install could load it without fetching it
   over http. It is a `bundledPlugins` entry, so it is baked and offered through the `plugin` tool's
   discover rather than auto-loaded, like `triggers` and `skills`.
+- **`frontend/web`** — the composer types a file the OS could not. `.yaml` and `.toml` arrive from
+  the picker with an empty `file.type` on most installs, which was posted as
+  `application/octet-stream` and so degraded to a note by every adapter. The extension is at that
+  boundary and the server is never told it, so the composer now maps the text extensions itself;
+  the picker's `accept` list offers them too. Text types only — guessing a binary's type buys
+  nothing, the bytes going as base64 either way.
 
 ## 0.4.18
 

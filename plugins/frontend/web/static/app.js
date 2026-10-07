@@ -3195,6 +3195,28 @@ function attachArm(mimeType) {
   return 'document';
 }
 
+// A file the OS could not type arrives with an empty `file.type` — ".yaml" and ".toml" on most installs,
+// and whatever the user's mime database happens to be missing. The extension is right here and the
+// server is not told it, so typing it is this boundary's job: untyped, it goes as octet-stream, which
+// every adapter degrades to a bare "[Document: x]" note — the model told a file is attached and shown
+// nothing. Text types only; guessing a binary's type buys nothing, since the bytes go as base64 either
+// way and a wrong guess 400s an image.
+const TEXT_EXT = {
+  '.csv': 'text/csv', '.tsv': 'text/tab-separated-values', '.txt': 'text/plain',
+  '.md': 'text/markdown', '.markdown': 'text/markdown', '.log': 'text/plain',
+  '.json': 'application/json', '.ndjson': 'application/x-ndjson', '.jsonl': 'application/x-ndjson',
+  '.yaml': 'application/yaml', '.yml': 'application/yaml', '.toml': 'application/toml',
+  '.xml': 'application/xml', '.ini': 'text/plain', '.cfg': 'text/plain', '.conf': 'text/plain',
+  '.sql': 'application/sql', '.html': 'text/html', '.css': 'text/css',
+  '.js': 'text/javascript', '.mjs': 'text/javascript', '.ts': 'text/plain', '.py': 'text/plain',
+  '.sh': 'text/plain', '.rs': 'text/plain', '.go': 'text/plain', '.c': 'text/plain', '.h': 'text/plain',
+};
+function typeOf(file) {
+  if (file.type) return file.type;
+  const dot = file.name.lastIndexOf('.');
+  return (dot !== -1 ? TEXT_EXT[file.name.slice(dot).toLowerCase()] : undefined) ?? 'application/octet-stream';
+}
+
 let attachErrorTimer;
 function showAttachError(msg) {
   let el = document.querySelector('.attach-error');
@@ -3261,7 +3283,7 @@ async function addAttachments(fileList) {
     // The third mirrored refusal. `accept` on the picker covers the common case (and is what makes iOS
     // transcode a camera-roll photo to JPEG rather than handing over HEIC), but drag and paste bypass it
     // entirely — and the round trip this saves is the whole file.
-    const mime = file.type || 'application/octet-stream';
+    const mime = typeOf(file);
     if (attachArm(mime) === null) {
       showAttachError(`"${file.name}" is ${mime}, which no model can read. Convert it to PNG or JPEG first.`);
       continue;
@@ -3272,8 +3294,6 @@ async function addAttachments(fileList) {
     for (let i = 0; i < bytes.length; i += CHUNK) bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
     attachments.push({
       name:     file.name,
-      // A file the OS could not type would be posted with an empty mimeType, which no converter can
-      // route; call it a generic binary and let the provider degrade it to a text note.
       mimeType: mime,
       data:     btoa(bin),
       size:     file.size,
