@@ -15,6 +15,7 @@ import type { MatbotMachine, ToolContext, ToolEvent } from '@matatbread/matbot-p
 // misdirection cost more than the failure.
 
 const stripper = { strip: (s: string) => stripTypeScriptTypes(s) };
+const host = { TypeScriptStripper: stripper };
 
 // The exact definition from the field report, verbatim.
 const REPORTED = "whoareyou(): { session: string; provider: string } {\n  // Resolve the session from the injected execution context, never by searching\n  // storage: on the first turn the current session may not be flushed yet, so a\n  // recency-based query could resolve to the wrong session and report another\n  // conversation's provider.\n  const sessionId = context.sessionId;\n  if (!sessionId) {\n    return { session: '', provider: 'unknown' };\n  }\n\n  const detail: any = await tool.session_action({ action: 'get', sessionId });\n  if (detail === null || typeof detail !== 'object' || !('messages' in detail)) {\n    return { session: sessionId, provider: 'unknown' };\n  }\n  const msgs: any[] = detail.messages;\n  if (!Array.isArray(msgs) || msgs.length === 0) {\n    return { session: sessionId, provider: 'unknown' };\n  }\n  const lastMsg = msgs[msgs.length - 1] as { providerName?: string };\n  const provider: string = lastMsg.providerName || 'unknown';\n  const title: string = typeof detail.title === 'string' && detail.title ? detail.title : sessionId;\n  return { session: title, provider };\n}";
@@ -47,7 +48,7 @@ test('a comment ahead of the definition is trivia, not a parse failure', async (
   assert.equal(sig.name, 'f');
   assert.equal(sig.returnType, 'string');
   // It must also COMPILE: leading trivia would otherwise land between `function` and the name.
-  const fn = await buildAsyncFn(stripper, src, ['a']);
+  const fn = await buildAsyncFn(host, src, ['a']);
   assert.equal(typeof fn, 'function');
 });
 
@@ -82,7 +83,7 @@ test('the reported definition also runs, resolving the session from the injected
     prompt: () => Promise.reject(new Error('non-interactive')),
   } as unknown as ToolContext;
 
-  const fn = await buildAsyncFn(stripper, REPORTED, []);
+  const fn = await buildAsyncFn(host, REPORTED, []);
   const events: ToolEvent[] = [];
   for await (const ev of runFunction(machine, ctx, fn, [])) events.push(ev);
 
@@ -101,12 +102,12 @@ test('a composition returning undefined yields no result event', async () => {
     prompt: () => Promise.reject(new Error('non-interactive')),
   } as unknown as ToolContext;
 
-  const silent = await buildAsyncFn(stripper, `f(): string | undefined { return undefined; }`, []);
+  const silent = await buildAsyncFn(host, `f(): string | undefined { return undefined; }`, []);
   const events: ToolEvent[] = [];
   for await (const ev of runFunction(machine, ctx, silent, [])) events.push(ev);
   assert.deepEqual(events, []);
 
-  const speaking = await buildAsyncFn(stripper, `f(): string | undefined { return 'said'; }`, []);
+  const speaking = await buildAsyncFn(host, `f(): string | undefined { return 'said'; }`, []);
   const spoke: ToolEvent[] = [];
   for await (const ev of runFunction(machine, ctx, speaking, [])) spoke.push(ev);
   assert.deepEqual(spoke, [{ type: 'result', value: 'said' }]);
@@ -207,7 +208,7 @@ test('context.progress reaches the consumer while the body is still running', { 
     context.progress(100, 'finished');
     return r;
   }`;
-  const fn = await buildAsyncFn(stripper, src, []);
+  const fn = await buildAsyncFn(host, src, []);
   const events: ToolEvent[] = [];
   for await (const ev of runFunction(machine, ctx, fn, [])) {
     events.push(ev);
@@ -237,7 +238,7 @@ test('progress percentages are rounded and clamped, and an empty message is omit
     context.progress(150);
     context.progress(Number.NaN, '');
   }`;
-  const fn = await buildAsyncFn(stripper, src, []);
+  const fn = await buildAsyncFn(host, src, []);
   const events: ToolEvent[] = [];
   for await (const ev of runFunction(machine, ctx, fn, [])) events.push(ev);
 

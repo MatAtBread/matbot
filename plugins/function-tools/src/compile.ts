@@ -1,6 +1,6 @@
 import { FUNCTION_TIMEOUT, makeToolBox } from '@matatbread/matbot-plugin-api';
 import { stripLeadingTrivia } from './signature.js';
-import type { MatbotMachine, ComposedCallContext, FunctionRunner, ToolContext, ToolEvent, TypeScriptStripper } from '@matatbread/matbot-plugin-api';
+import type { MatbotMachine, ComposedCallContext, FunctionRunner, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
 
 export type CompiledFn = (tool: unknown, toolInContext: unknown, context: ComposedCallContext, ...args: unknown[]) => Promise<unknown>;
 
@@ -8,7 +8,11 @@ export type CompiledFn = (tool: unknown, toolInContext: unknown, context: Compos
 export const INJECTED = ['tool', 'toolInContext', 'context'] as const;
 
 const AsyncFunction = Object.getPrototypeOf(async function () { /* */ }).constructor as
-  new (...names: string[]) => CompiledFn;
+  new (...names: string[]) => (...args: unknown[]) => Promise<unknown>;
+
+/** What compiling and running model-authored code reads from the host: the stripper once, at build, and the
+ *  runner at every call. */
+export type CompileHost = Pick<MatbotMachine, 'TypeScriptStripper' | 'FunctionRunner'>;
 
 const LEADING = /^\s*(?:async\s+)?(?:function\s+)?/;
 const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
@@ -21,19 +25,43 @@ const CANCELLED = 'Cancelled: the call was aborted while the function was still 
  * async so tool calls inside can be awaited; `tool` is the proxy passed as the first argument. Type
  * erasure is delegated to the host-provided {@link TypeScriptStripper} (node's native stripper or the
  * browser's sucrase), so this stays platform-agnostic; because that strip may be async, so is this.
- * With a host {@link FunctionRunner} the result's synchronous work is bounded; without one it is not.
+ * The result runs under whichever {@link FunctionRunner} is current at each call; see {@link compileUnder}.
  */
-export async function buildAsyncFn(stripper: TypeScriptStripper, definition: string, paramNames: string[], runner?: FunctionRunner): Promise<CompiledFn> {
+export async function buildAsyncFn(host: CompileHost, definition: string, paramNames: string[]): Promise<CompiledFn> {
   // Leading trivia goes first: a doc comment ahead of the definition would otherwise land between
   // `function` and the name, which is a syntax error rather than the harmless prose it looks like.
   const wrapped = `(async function ${stripLeadingTrivia(definition).replace(LEADING, '')})`;
   let stripped: string;
-  try { stripped = await stripper.strip(wrapped); }
+  try { stripped = await host.TypeScriptStripper.strip(wrapped); }
   catch (e) { throw new Error(`not valid TypeScript (${msg(e)})`); }
-  const body = `return ${stripped}(${paramNames.join(', ')});`;
-  const params = [...INJECTED, ...paramNames];
-  try { return runner !== undefined ? runner.compile(params, body) as CompiledFn : new AsyncFunction(...params, body); }
-  catch (e) { throw new Error(`could not compile (${msg(e)})`); }
+  return compileUnder(host, [...INJECTED, ...paramNames], `return ${stripped}(${paramNames.join(', ')});`) as CompiledFn;
+}
+
+/**
+ * Compile `body` under the host's current {@link FunctionRunner}, and again at a call that finds a different
+ * one. A runner's bound lives in the function it returns, so a compiled body cannot be handed to another;
+ * and a defined function is compiled once and then called for as long as it stays registered, across any
+ * number of runner registrations — a runner registered later must reach it, and one withdrawn (its plugin
+ * unloaded, reverting to the host's) must not stay on. Only this step is redone: the strip does not depend
+ * on the runner.
+ *
+ * Compiled eagerly too, so a syntax error is reported at definition rather than at first call.
+ */
+export function compileUnder(host: Pick<MatbotMachine, 'FunctionRunner'>, params: readonly string[], body: string): (...args: unknown[]) => Promise<unknown> {
+  const compile = (runner: FunctionRunner | undefined): ((...args: unknown[]) => Promise<unknown>) => {
+    try { return runner !== undefined ? runner.compile(params, body) : new AsyncFunction(...params, body); }
+    catch (e) { throw new Error(`could not compile (${msg(e)})`); }
+  };
+  let runner = host.FunctionRunner;
+  let fn = compile(runner);
+  return (...args) => {
+    const current = host.FunctionRunner;
+    if (current !== runner) {
+      try { fn = compile(current); } catch (e) { return Promise.reject(e); }
+      runner = current;
+    }
+    return fn(...args);
+  };
 }
 
 /**

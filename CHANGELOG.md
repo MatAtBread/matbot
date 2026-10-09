@@ -65,6 +65,13 @@ churn and less likely to affect a consumer who doesn't use them.
   boundary and the server is never told it, so the composer now maps the text extensions itself;
   the picker's `accept` list offers them too. Text types only — guessing a binary's type buys
   nothing, the bytes going as base64 either way.
+- **`function-tools`** — a defined function or package runs under the `FunctionRunner` current at each
+  call, not the one current when it was registered. Defined tools are compiled once and stay registered,
+  so a runner registered after `function-tools` loaded never reached them, and unloading a plugin that
+  had replaced the runner left them running unbounded under the host's restored one. A call that finds a
+  different runner recompiles under it; the strip is not redone. `buildAsyncFn` and `buildPackageFn` now
+  take the host (`CompileHost`: `TypeScriptStripper` + `FunctionRunner`) in place of the stripper and
+  runner arguments.
 
 ## 0.4.18
 
