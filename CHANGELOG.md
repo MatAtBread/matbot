@@ -9,6 +9,22 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## 0.4.20
+
+### Optional
+
+- **`background-jobs` / `sessions`** — a job's reporting conversation is stated where the model reads
+  it. Both tools described the append target as "this conversation" or "a default", which a model
+  reads as the conversation it is in when it looks: it told the user a job would "report back here"
+  — true only of the conversation the job was created in — and, running *as* a job, it took
+  `session_action append` with no `sessionId` to be writing into its own session. Nothing about where
+  an append lands has changed: the target is fixed when the job is created, from the `session` given
+  or the conversation the creating call is made from, and stored on the job; a job's own session is a
+  throwaway on an ephemeral run that nobody reads, and is never the target. The descriptions now say
+  that, the `session` parameter says it is recorded rather than followed, `sessionId` says it wins
+  outright when given, and `background_job_action list` points at the `session` it reports in each
+  row as the thing to read instead of assuming.
+
 ## 0.4.19
 
 ### API gaps filled
