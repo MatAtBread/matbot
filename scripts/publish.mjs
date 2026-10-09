@@ -119,6 +119,33 @@ async function fetchPackument(name, attempts = 4) {
   throw new Error(`cannot read ${name} from the registry: ${lastError?.message}`);
 }
 
+// Is this exact version readable? Asked at the per-version document rather than the packument,
+// because the packument is served through Cloudflare with `max-age=300` and a client
+// `Cache-Control: no-cache` is ignored (`cf-cache-status: HIT`, age climbing) — so a version
+// written a moment ago stays invisible there for up to five minutes, which is indistinguishable
+// from a publish that failed. Telling those two apart is the whole job of SETTLE and VERIFY, and
+// 0.4.19 is what it looks like when they cannot: all ten read as missing while at least nine were
+// already live, so the run reported a broken release and was abandoned by hand. The per-version
+// document is never edge-cached in either direction (`DYNAMIC` for a 200, no cache headers at all
+// on the 404), so it answers about the registry rather than about an edge.
+async function isVersionReadable(name, version, attempts = 4) {
+  let lastError;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const res = await fetch(`${REGISTRY}/${name.replace('/', '%2f')}/${version}`);
+      if (res.status === 404) return false;
+      if (res.ok) return true;
+      lastError = new Error(`HTTP ${res.status}`);
+    } catch (err) {
+      lastError = err;
+    }
+    await sleep(500 * 2 ** i);
+  }
+  // Same rule as the packument read: a read that could not be completed is not an answer. Saying
+  // "absent" would send RECONCILE off to republish something that is already there.
+  throw new Error(`cannot read ${name}@${version} from the registry: ${lastError?.message}`);
+}
+
 async function registryState(pkgs) {
   const entries = await Promise.all(pkgs.map(async p => {
     const { versions, distTags } = await fetchPackument(p.name);
@@ -513,8 +540,7 @@ function publishBatch() {
 async function isPublished(pkg, attempts = 1) {
   for (let i = 0; i < attempts; i++) {
     if (i) await sleep(Math.min(2000 * i, 10000));
-    const { versions } = await fetchPackument(pkg.name);
-    if (Object.hasOwn(versions, pkg.version)) return true;
+    if (await isVersionReadable(pkg.name, pkg.version)) return true;
   }
   return false;
 }
@@ -681,10 +707,21 @@ console.log(`   ${c.green('✓')} canary ${{ exists: 'already on npm', 'exists-p
 
 publishBatch();
 
+// Presence is monotonic within a run — nothing here unpublishes — so only what is still absent is
+// asked about, and a package that has landed is never read again. The whole packument is not
+// re-read: everything else on the state entry (`latest`, `highest`, the version list, the tarball
+// url) was needed by PREFLIGHT, which runs before anything is written and for which a five-minute
+// edge copy is the correct view.
+async function refreshPresence() {
+  await mapLimit(missing(), CONTENT_CONCURRENCY, async pkg => {
+    if (await isVersionReadable(pkg.name, pkg.version)) state.get(pkg.name).present = true;
+  });
+}
+
 // Poll until the registry agrees, or until patience runs out. Returns what is still absent.
 async function settle(attempts, label) {
   for (let attempt = 1; attempt <= attempts; attempt++) {
-    state = await registryState(pkgs);
+    await refreshPresence();
     if (!missing().length || attempt === attempts) break;
     const wait = Math.min(VERIFY_BASE_MS * attempt, 15000);
     console.log(c.dim(`   ${missing().length} not yet readable; ${label} in ${wait / 1000}s (${attempt}/${attempts - 1})`));
