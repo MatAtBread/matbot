@@ -11,6 +11,18 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ## 0.4.19
 
+### API gaps filled
+
+- **Turn-scoped tools from a `screen` hook.** `ScreenResult.tools` is a `TurnToolSource` —
+  `(session) => Tool[]` — that the runner asks at the top of every round, with the session as it then
+  stands, so a tool a turn's own call defines in one round is callable in the next. Its tools are
+  advertised after the `ToolPresenter` (which never sees them) and resolved after the registry, and
+  they are never registered: no other session, no `POST /tools/:name`, no type index and no presenter
+  sees them. A name the registry holds is dropped with a warning — shadowing a registered tool is a
+  gated decision, and a hook is not a way round it. The round's map rides on `ToolContext.turnTools`,
+  and `invokeTool` resolves through it when handed one, so a tool forwarding its context — a composed
+  function's `tool.x()` — reaches the turn's tools exactly as the model does.
+
 ### Bug fixes
 
 - **A parallel turn writes back its whole span, not just its final text.** `mode: 'parallel'`
@@ -72,6 +84,18 @@ churn and less likely to affect a consumer who doesn't use them.
   different runner recompiles under it; the strip is not redone. `buildAsyncFn` and `buildPackageFn` now
   take the host (`CompileHost`: `TypeScriptStripper` + `FunctionRunner`) in place of the stripper and
   runner arguments.
+- **`function-tools`** — `define { scope: 'session' }`: a function only the conversation that defined it
+  can see. Meant for what the model builds while working something out — a lambda it needs again, a
+  helper two lambdas share — so it neither joins every conversation's tool list nor appears over HTTP or
+  to the tool presenter; `'global'` (the default) stays the scope for a tool the user asked for. Stored as
+  a marker in the session, so fork, cut and compact carry it correctly (a `split` can strand a later
+  function calling an earlier one; `check` finds that). Offered to the model from the next round, callable
+  by name from the session's other functions, and type-checked like a registered tool — the checker sees
+  this turn's functions through an augmentation appended to the snippet. A name a global tool holds is
+  refused at definition, and withheld with the same message on any later turn where a global tool has
+  taken it. A global function may not call a session one (it would fail in every other conversation);
+  re-defining a session function as `'global'` promotes it and retires the session one. `list` reports
+  `sessionFunctions`, and `remove`/`check` cover them.
 
 ## 0.4.18
 

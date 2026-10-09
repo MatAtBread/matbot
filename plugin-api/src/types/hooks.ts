@@ -24,6 +24,7 @@ export interface RunConfig {
  *               doesn't bust the cached prefix), `durable` context (the persisted, visible twin of
  *               `ephemeral`: folded onto this turn's user message as `origin: 'robo'` blocks and
  *               carried live as a `robo-user` event, so it survives into the next turn's history),
+ *               turn-scoped `tools` (a source the runner asks each round — see {@link TurnToolSource}),
  *               or `abort`. Mix freely. This is where the durable-vs-ephemeral choice for incoming
  *               user input lives.
  *   contribute  runner, before *every* provider call. Ephemeral by construction (it re-fires, so a
@@ -123,8 +124,27 @@ export interface ScreenResult {
    * you just want to annotate (e.g. a fired trigger's silent tool recording what it did).
    */
   markers?:   MessageContent[];
+  /** Tools for this turn only — see {@link TurnToolSource}. */
+  tools?:     TurnToolSource;
   abort?:     string;
 }
+
+/**
+ * Tools that exist for one turn of one session and nowhere else: advertised to the model, runnable by
+ * it, and runnable by any tool in the turn that forwards its context ({@link ToolContext.turnTools}) —
+ * but never registered, so no other session, no sessionless door (`POST /tools/:name`), the type index
+ * and the tool presenter never see them. The shape a session-scoped `tool_function` needs.
+ *
+ * A SOURCE rather than a list because the runner asks it at the top of EVERY round, with the session as
+ * it then stands: a turn's own tool calls change the session (a marker recording a definition lands at
+ * the end of its round), and a tool defined in round 2 must be callable in round 3, not next turn. So a
+ * source is called often and should cache whatever is costly to build.
+ *
+ * A turn tool may not shadow a registered one: a name the registry holds is dropped, with a warning, and
+ * the registered tool keeps it. Shadowing a tool by registration is a gated decision (`tools.overwrite`),
+ * and a hook must not be a way round it. A source wanting the model to hear about a clash says so itself.
+ */
+export type TurnToolSource = (session: Session) => readonly Tool[] | Promise<readonly Tool[]>;
 
 export interface ContributeContext {
   readonly outgoing: readonly Message[];

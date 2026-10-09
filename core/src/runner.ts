@@ -5,7 +5,7 @@ import type {
   PermissionGate,
 } from './types.js';
 import type { MatbotPlugin } from './plugin.js';
-import type { ToolPresenter, SessionAppender } from '@matatbread/matbot-plugin-api';
+import type { ToolPresenter, SessionAppender, TurnToolSource } from '@matatbread/matbot-plugin-api';
 import { recordSpan, recordUsage, withUsageSite, scopeIterable } from '@matatbread/matbot-plugin-api/host';
 import { HookRegistry } from './hooks.js';
 import { appendMessage, createMessage } from './session.js';
@@ -82,6 +82,38 @@ function abandonDeadline(signal: AbortSignal, ms: number): { wait: Promise<typeo
 const INTERRUPTED_TOOL_RESULT = {
   error: 'Tool call interrupted before completion — the turn was interrupted while it was running. It may not have run to completion, and any side effect may or may not have occurred. Re-run it only if you still need its result.',
 } as const;
+
+/**
+ * The turn tools `screen` offered (see {@link TurnToolSource}), as they stand for this round. Asked every
+ * round because the turn itself changes the session they are derived from. A name the registry (or the
+ * turn-start snapshot) already holds is dropped: the registered tool keeps it, since shadowing one is a
+ * gated decision and a hook must not be a way round it. `warned` keeps that to one line per name a turn.
+ * A source that throws is skipped, like a throwing hook — it must not take the turn down with it.
+ */
+async function resolveTurnTools(
+  sources:  readonly TurnToolSource[],
+  session:  Session,
+  taken:    (name: string) => boolean,
+  warned:   Set<string>,
+): Promise<Map<string, Tool>> {
+  const out = new Map<string, Tool>();
+  for (const source of sources) {
+    let offered: readonly Tool[];
+    try { offered = await source(session); }
+    catch (e) { console.warn(`[runner] a turn tool source failed: ${e instanceof Error ? e.message : String(e)}`); continue; }
+    for (const tool of offered) {
+      if (taken(tool.name)) {
+        if (!warned.has(tool.name)) {
+          warned.add(tool.name);
+          console.warn(`[runner] turn tool "${tool.name}" dropped: a registered tool has that name.`);
+        }
+        continue;
+      }
+      if (!out.has(tool.name)) out.set(tool.name, tool);
+    }
+  }
+  return out;
+}
 
 export interface RunSessionOpts {
   session:        Session;
@@ -238,6 +270,11 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
   // Returns whether anything was claimed. What the caller does with that is the part that legitimately
   // differs — proceed, abort the in-flight provider call, or re-run the loop — so it stays at the site.
   const deferred = screen.deferred;
+
+  // Re-resolved at the top of every round (below), so a tool defined in one round is callable in the next.
+  const turnToolSources = screen.tools;
+  const turnToolWarned  = new Set<string>();
+  let turnTools = new Map<string, Tool>();
   async function* claimVerdicts(): AsyncGenerator<TurnEvent, boolean, undefined> {
     if (deferred.length === 0) return false;
     const ephemeralC: MessageContent[] = [];
@@ -325,6 +362,11 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
     // discarded. This is the no-waste path — the verdict landed before we spent any tokens.
     yield* claimVerdicts();
 
+    if (turnToolSources.length > 0) {
+      turnTools = await resolveTurnTools(turnToolSources, session,
+        name => tools.has(name) || (opts.toolRegistry?.resolve(name) ?? null) !== null, turnToolWarned);
+    }
+
     const pendingCalls: Array<{ id: string; name: string; input: unknown; meta?: ProviderMeta;
       truncated?: { bytes: number; stopReason?: string } }> = [];
     const assistantParts: MessageContent[] = [];
@@ -381,10 +423,13 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
     // tools stay callable — execution resolves against the live registry (opts.toolRegistry), not this.
     // Scoped to the round: a presenter may itself run completions (deriving a tool's search terms), and
     // that spend belongs to the round that asked for it — it is neither a tool call nor a hook.
-    const advertised = opts.toolPresenter
+    // Turn tools go AFTER the presenter, never through it: they are few, made for this session, and
+    // absent from the registry a presenter's own search reads — one it windowed out could not come back.
+    const presented = opts.toolPresenter
       ? await withUsageSite({ kind: 'round', round },
           () => opts.toolPresenter!.present([...tools.values()], { session, provider: config.provider }))
       : [...tools.values()];
+    const advertised = turnTools.size > 0 ? [...presented, ...turnTools.values()] : presented;
     // Per-call signal linked to the turn signal: an in-situ restart aborts THIS provider call (callAc)
     // to cancel the in-flight request and stop backend generation, without aborting the whole turn.
     const callAc = new AbortController();
@@ -525,7 +570,8 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
     for (const [callIdx, tc] of pendingCalls.entries()) {
       yield { type: 'tool:start', callId: tc.id, name: tc.name, input: tc.input, traceId };
 
-      const tool = opts.toolRegistry !== undefined ? opts.toolRegistry.resolve(tc.name) : tools.get(tc.name);
+      const tool = (opts.toolRegistry !== undefined ? opts.toolRegistry.resolve(tc.name) : tools.get(tc.name))
+        ?? turnTools.get(tc.name);
       if (!tool) {
         const err = { error: `Unknown tool: ${tc.name}` };
         toolResults.push({ type: 'tool-result', id: tc.id, result: err, isError: true });
@@ -627,6 +673,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
         ...(opts.configPath  !== undefined ? { configPath:  opts.configPath  } : {}),
         ...(opts.files       !== undefined ? { files:       opts.files       } : {}),
         ...(opts.appender    !== undefined ? { appender:    opts.appender    } : {}),
+        ...(turnTools.size   > 0         ? { turnTools                      } : {}),
       };
 
       // Iterated by hand rather than with `for await`, so the read can be bounded once the turn is

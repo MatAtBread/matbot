@@ -1,5 +1,5 @@
 import type {
-  Hook, HookPoint, HookRegistrar, Message, MessageContent, Session, DeferredScreen,
+  Hook, HookPoint, HookRegistrar, Message, MessageContent, Session, DeferredScreen, TurnToolSource,
   ScreenContext, ContributeContext, ToolCallContext, ToolCallResult, ToolResultContext, FollowupContext,
 } from './types.js';
 import { foldOntoUserTurn, createMessage } from './session.js';
@@ -120,12 +120,13 @@ export class HookRegistry implements HookRegistrar {
 
   // screen folds across hooks: each sees the session as shaped so far, accumulates ephemeral, and
   // the first `abort` short-circuits (the partial session is returned so the caller can persist it).
-  async runScreen(ctx: Omit<ScreenContext, 'removeHook'>): Promise<{ session: Session; ephemeral: MessageContent[]; durable: MessageContent[]; markers: MessageContent[]; deferred: DeferredScreen[]; abort?: string }> {
+  async runScreen(ctx: Omit<ScreenContext, 'removeHook'>): Promise<{ session: Session; ephemeral: MessageContent[]; durable: MessageContent[]; markers: MessageContent[]; deferred: DeferredScreen[]; tools: TurnToolSource[]; abort?: string }> {
     let session = ctx.session;
     const ephemeral: MessageContent[] = [];
     // Raced verdicts handed back by hooks: the runner polls each without gating the turn (see
     // DeferredScreen). Usually zero or one; an array so several racing hooks compose.
     const deferred: DeferredScreen[] = [];
+    const tools: TurnToolSource[] = [];
     // Handler-returned markers: appended to the session here (so they persist) and accumulated so the
     // runner can also emit them live — keeping a live draw and a reload identical.
     const handlerMarkers: MessageContent[] = [];
@@ -155,13 +156,14 @@ export class HookRegistry implements HookRegistrar {
       if (r.durable && r.durable.length) foldDurable(r.durable);
       if (r.markers && r.markers.length) appendMarkers(r.markers);
       if (r.deferred)                    deferred.push(r.deferred);
+      if (r.tools)                       tools.push(r.tools);
       if (r.abort) {
         const drained = this.drainFailureMarkers(session);
-        return { session: drained.session, ephemeral, durable, markers: [...handlerMarkers, ...drained.markers], deferred, abort: r.abort };
+        return { session: drained.session, ephemeral, durable, markers: [...handlerMarkers, ...drained.markers], deferred, tools, abort: r.abort };
       }
     }
     const drained = this.drainFailureMarkers(session);
-    return { session: drained.session, ephemeral, durable, markers: [...handlerMarkers, ...drained.markers], deferred };
+    return { session: drained.session, ephemeral, durable, markers: [...handlerMarkers, ...drained.markers], deferred, tools };
   }
 
   // contribute folds the outgoing array through each hook — a pure transform pipeline; the stored

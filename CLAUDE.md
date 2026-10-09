@@ -505,13 +505,19 @@ A throwing handler is isolated (caught, logged, skipped) — never propagated. A
 
 | `on` | Cadence | Session | Effects |
 |---|---|---|---|
-| `screen`     | once per turn, before 1st provider call | read-write | replace `session`, add `ephemeral` context (tail of outgoing messages, never persisted), add `durable` context (folded onto the user turn — persisted + visible — and carried live as `robo-user`), append durable `markers`, and/or `abort` |
+| `screen`     | once per turn, before 1st provider call | read-write | replace `session`, add `ephemeral` context (tail of outgoing messages, never persisted), add `durable` context (folded onto the user turn — persisted + visible — and carried live as `robo-user`), append durable `markers`, offer turn-scoped `tools`, and/or `abort` |
 | `contribute` | before *every* provider call | read-only | return transformed `outgoing` copy (ephemeral) |
 | `toolcall`   | before each tool exec | read-only | `rejectTool` and/or `abort` |
 | `toolresult` | after each tool exec | read-only | replace `result` (redaction) or observe |
 | `followup`   | once, post-commit | read + durable-marker | `resubmit` robo turn, `retractAndRerun` (pop committed turn, re-run with context), append durable `markers` |
 
 `screen` and `followup` are the durable-mutate points (once per turn). `contribute` is the in-harness cousin of a wrapping provider — mind prompt caching: inject at the tail or as stable prefix.
+
+### Turn-scoped tools
+
+`screen`'s `tools` is a **source**, `(session) => Tool[]`, that the runner asks at the top of every round — not a list — because a turn's own tool calls change the session it derives from, and a tool defined in round 2 must be callable in round 3. Its tools are never registered: advertised *after* the `ToolPresenter` (whose search reads the registry, so a tool it windowed out could never come back), resolved *after* the registry, and carried to nested calls on `ToolContext.turnTools`, which `invokeTool` consults — so `tool.x()` inside a composed function reaches them exactly as the model does, and a sessionless door (`POST /tools/:name`) cannot. A name the registry holds is dropped: shadowing a registered tool is a gated decision (`tools.overwrite`) and a hook is not a way round it. A `ToolCallValidator` finds tools by registry name, so it has nothing to say about these; a source validates its own tools' input.
+
+The one consumer is `function-tools`' `define { scope: 'session' }`, which stores each definition as a marker in its session (so fork/cut/compact carry it) and types `tool.<session fn>()` by appending a `ToolContracts` augmentation **after** the snippet it checks — built from `turnTools`, never from the markers, so what passes the check is exactly what resolves at run time.
 
 ### Authorship vs. role
 

@@ -81,7 +81,7 @@ function fakeMachine(tools: Tool[] = []): MatbotMachine {
 }
 
 const ctx = {
-  callId: 'c1', session: { id: 's1' }, signal: new AbortController().signal,
+  callId: 'c1', session: { id: 's1', messages: [] }, signal: new AbortController().signal,
   prompt: () => Promise.reject(new Error('non-interactive')),
 } as unknown as ToolContext;
 
@@ -191,6 +191,7 @@ async function boot(tools: Tool[], data: Map<string, Map<string, never>>): Promi
     Notifier: { notify() {} },
     mounted: { observe() {} },
     systemContext: { register() {} },
+    hooks: { register() {} },
     createStore: (ns: string) => {
       if (!data.has(ns)) data.set(ns, new Map());
       return memoryStore(data.get(ns)!);

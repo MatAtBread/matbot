@@ -89,7 +89,10 @@ export async function* runFunction(
     session: ctx.session,
     signal:  ctx.signal,
     prompt:  ctx.prompt,
-    ...(ctx.provider !== undefined ? { provider: ctx.provider } : {}),
+    ...(ctx.provider  !== undefined ? { provider:  ctx.provider  } : {}),
+    // How a body reaches this session's own functions: they are never registered, so `tool.x()` finds
+    // them only by carrying the turn's tools down, as the runner handed them to this call.
+    ...(ctx.turnTools !== undefined ? { turnTools: ctx.turnTools } : {}),
   }, { onEvent: emit });
 
   const context: ComposedCallContext = {
