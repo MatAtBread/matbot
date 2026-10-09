@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { stripTypeScriptTypes } from 'node:module';
-import { buildAsyncFn, runFunction, parsePackage, buildPackageFn, exportFn } from '@matatbread/matbot-function-tools';
+import { buildAsyncFn, runFunction, parsePackage, buildPackageFn, exportFn, type CompileHost } from '@matatbread/matbot-function-tools';
 import { invokeTool, parseConfig } from '@matatbread/matbot-core';
-import type { MatbotMachine, Tool, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
+import type { FunctionRunner, MatbotMachine, Tool, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
 import { createVmFunctionRunner, FUNCTION_SYNC_LIMIT_MS } from '../src/function-runner.ts';
 
 // A tool_function body runs on the daemon's one event loop. 18da1564 (2026-09-15) froze every session for
@@ -37,7 +37,8 @@ async function last(events: AsyncIterable<ToolEvent>): Promise<ToolEvent | undef
   return final;
 }
 
-const lambda = (src: string) => buildAsyncFn(stripper, src, ['args'], runner);
+const bounded = { TypeScriptStripper: stripper, FunctionRunner: runner };
+const lambda = (src: string) => buildAsyncFn(bounded, src, ['args']);
 
 function pingTool(): Tool & { calls: () => number } {
   let calls = 0;
@@ -73,11 +74,11 @@ test('awaiting is not work: a call slower than the limit completes', async () =>
 
 test('a package export is bounded too, being called inside the timed run', async () => {
   const spin = 'export function spin(args: {}): number { for (;;) {} }';
-  const spinning = await buildPackageFn(stripper, spin, parsePackage('P', spin), runner);
+  const spinning = await buildPackageFn(bounded, spin, parsePackage('P', spin));
   assert.match(message(await last(runFunction(machineWith(), ctxFor(), exportFn(spinning, 'spin'), [{}]))), LIMIT);
 
   const ok = 'function double(n: number): number { return n * 2; }\nexport function twice(args: { n: number }): number { return double(args.n); }';
-  const working = await buildPackageFn(stripper, ok, parsePackage('P', ok), runner);
+  const working = await buildPackageFn(bounded, ok, parsePackage('P', ok));
   assert.deepEqual(await last(runFunction(machineWith(), ctxFor(), exportFn(working, 'twice'), [{ n: 21 }])), { type: 'result', value: 42 });
 });
 
@@ -90,8 +91,33 @@ test('a run started inside another takes its own call, and a loop there is still
 });
 
 test('with no runner the body runs directly, as it did before', async () => {
-  const fn = await buildAsyncFn(stripper, "(args: {}): Promise<string> { return 'direct'; }", ['args']);
+  const fn = await buildAsyncFn({ TypeScriptStripper: stripper }, "(args: {}): Promise<string> { return 'direct'; }", ['args']);
   assert.deepEqual(await last(runFunction(machineWith(), ctxFor(), fn, [{}])), { type: 'result', value: 'direct' });
+});
+
+test('a body compiles under the runner current at each call, and only again when it changes', async () => {
+  const compiled: string[] = [];
+  const tagging = (tag: string): FunctionRunner => ({
+    compile(params, body) {
+      compiled.push(tag);
+      const fn = new Function(...params, body) as (...a: unknown[]) => Promise<unknown>;
+      return async (...a) => `${tag}:${String(await fn(...a))}`;
+    },
+  });
+  const host: CompileHost = { TypeScriptStripper: stripper, FunctionRunner: tagging('A') };
+  const fn = await buildAsyncFn(host, "(args: {}): Promise<string> { return 'ok'; }", ['args']);
+  const call = async (): Promise<unknown> => {
+    const ev = await last(runFunction(machineWith(), ctxFor(), fn, [{}]));
+    return ev?.type === 'result' ? ev.value : ev;
+  };
+  assert.deepEqual(compiled, ['A'], 'compiled at build, so a syntax error is reported then');
+  assert.equal(await call(), 'A:ok');
+  assert.deepEqual(compiled, ['A'], 'not recompiled while the runner is unchanged');
+  Object.assign(host, { FunctionRunner: tagging('B') });
+  assert.equal(await call(), 'B:ok');
+  Object.assign(host, { FunctionRunner: undefined });
+  assert.equal(await call(), 'ok', 'a runner withdrawn is not kept on by a function compiled under it');
+  assert.deepEqual(compiled, ['A', 'B']);
 });
 
 test('aborting ends the call, and a body looping over tool calls then stops itself', async () => {

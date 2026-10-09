@@ -58,11 +58,11 @@ export function bindGate(
  */
 export type InvokeToolOptions =
   Pick<ToolContext, 'session' | 'signal'>
-  & Partial<Pick<ToolContext, 'prompt' | 'provider' | 'callId'>>;
+  & Partial<Pick<ToolContext, 'prompt' | 'provider' | 'callId' | 'turnTools'>>;
 
 /**
  * Programmatically invoke a tool by name, the same way the harness does — resolve it off the
- * machine's tool registry, build a `ToolContext` from the machine, and return its event stream.
+ * machine's tool registry (else the turn's own tools, when `opts` carries them), build a `ToolContext` from the machine, and return its event stream.
  * The host-only bits a one-shot caller can't derive (the session under which the call runs, its
  * abort signal, and an optional interactive `prompt`/`provider`) come in via `opts` — pass the
  * calling tool's `ctx` to forward them all (see {@link InvokeToolOptions}); everything else (vault,
@@ -79,7 +79,8 @@ export function invokeTool<K extends string, const P>(
   params:  P,
   opts:    InvokeToolOptions,
 ): AsyncIterable<ToolEvent<ToolResultFor<K, P>>> {
-  const tool = machine.tools.resolve(name);
+  // The registry first, as the runner does: a turn tool never shadows a registered one.
+  const tool = machine.tools.resolve(name) ?? opts.turnTools?.get(name) ?? null;
   if (tool === null) throw new Error(`Tool "${name}" is not registered`);
   // A call whose turn was cancelled never starts. Otherwise a composed body looping over `await tool.x()`
   // goes on calling tools after the abort, each callee deciding for itself whether to honour the signal.
@@ -98,6 +99,7 @@ export function invokeTool<K extends string, const P>(
     // non-interactive case the request's `fallback` exists to answer.
     ...bindGate(machine.PermissionGate, name, opts.prompt),
     ...(opts.provider      !== undefined ? { provider:   opts.provider      } : {}),
+    ...(opts.turnTools     !== undefined ? { turnTools:  opts.turnTools     } : {}),
     ...(machine.workdir    !== undefined ? { workdir:    machine.workdir    } : {}),
     ...(machine.configPath !== undefined ? { configPath: machine.configPath } : {}),
     ...(machine.files      !== undefined ? { files:      machine.files      } : {}),

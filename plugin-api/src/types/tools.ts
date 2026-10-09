@@ -219,6 +219,13 @@ export interface ToolContext {
    * reach. Prefer it over `services.SessionAppender`; absent ⇒ the machine's is the right one.
    */
   appender?:   SessionAppender;
+  /**
+   * The tools that exist for this turn only ({@link TurnToolSource}), as the runner resolved them for
+   * this round. Never in the registry, so a tool calling another by name finds them only through here —
+   * which {@link invokeTool} does when handed this context, the way a forwarding tool already should.
+   * Absent ⇒ none, or a door that runs no turn (`POST /tools/:name`).
+   */
+  turnTools?:  ReadonlyMap<string, Tool>;
   /** Prompt the user for input. The host provides a readline or form implementation. */
   prompt:      PromptFn;
   /**

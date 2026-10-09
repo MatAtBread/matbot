@@ -4,13 +4,14 @@ import { stripTypeScriptTypes } from 'node:module';
 import { join } from 'node:path';
 import { parsePackage, buildPackageFn, exportFn, runFunction, createFunctionToolsPlugin } from '@matatbread/matbot-function-tools';
 import { createToolTypesPlugin } from '@matatbread/matbot-tool-types';
-import type { MatbotMachine, Store, Tool, ToolContext, ToolEvent, ToolTypeIndex } from '@matatbread/matbot-plugin-api';
+import type { FunctionRunner, MatbotMachine, Store, Tool, ToolContext, ToolEvent, ToolTypeIndex } from '@matatbread/matbot-plugin-api';
 
 // A tool_function PACKAGE (#63): one TypeScript module whose exported functions become tools named
 // `<package>__<function>`, and whose other declarations are private — never registered, so never in the
 // bounded tool window competing with the exports that use them.
 
 const stripper = { strip: (s: string) => stripTypeScriptTypes(s) };
+const host = { TypeScriptStripper: stripper };
 
 const PRESENCE = `
 interface Report { home: boolean; room?: string }
@@ -80,7 +81,7 @@ function fakeMachine(tools: Tool[] = []): MatbotMachine {
 }
 
 const ctx = {
-  callId: 'c1', session: { id: 's1' }, signal: new AbortController().signal,
+  callId: 'c1', session: { id: 's1', messages: [] }, signal: new AbortController().signal,
   prompt: () => Promise.reject(new Error('non-interactive')),
 } as unknown as ToolContext;
 
@@ -100,7 +101,7 @@ async function run(machine: MatbotMachine, name: string, input: unknown): Promis
 test('an export calls a private helper, which calls a registered tool', async () => {
   const machine = fakeMachine([sensor({ home: true, room: 'kitchen' })]);
   const parsed = parsePackage('Presence', PRESENCE);
-  const pkg = await buildPackageFn(stripper, PRESENCE, parsed);
+  const pkg = await buildPackageFn(host, PRESENCE, parsed);
   const events: ToolEvent[] = [];
   for await (const ev of runFunction(machine, ctx, exportFn(pkg, 'room'), [{}])) events.push(ev);
   assert.deepEqual(events.at(-1), { type: 'result', value: 'kitchen' });
@@ -161,7 +162,7 @@ test('top-level forms that would behave differently if run once are refused, nam
 test('the module is evaluated per call, so even the const escape hatch does not persist', async () => {
   const src = 'const state = { n: 0 };\nexport async function bump(args: {}): Promise<number> { return ++state.n; }';
   const parsed = parsePackage('Counter', src);
-  const pkg = await buildPackageFn(stripper, src, parsed);
+  const pkg = await buildPackageFn(host, src, parsed);
   for (let i = 0; i < 2; i++) {
     const events: ToolEvent[] = [];
     for await (const ev of runFunction(fakeMachine(), ctx, exportFn(pkg, 'bump'), [{}])) events.push(ev);
@@ -190,6 +191,7 @@ async function boot(tools: Tool[], data: Map<string, Map<string, never>>): Promi
     Notifier: { notify() {} },
     mounted: { observe() {} },
     systemContext: { register() {} },
+    hooks: { register() {} },
     createStore: (ns: string) => {
       if (!data.has(ns)) data.set(ns, new Map());
       return memoryStore(data.get(ns)!);
@@ -266,4 +268,23 @@ test('a package is type-checked as a whole, so a private helper is checked again
   const ko = await index.check(bad);
   assert.equal(ko.ok, false);
   assert.match(ko.diagnostics.map(d => d.rendered).join('\n'), /TS2345/);
+});
+
+test('a defined function or package runs under the runner current at each call, not the one it was defined under', async () => {
+  // Defined tools are compiled once and stay registered, so a runner arriving later — a plugin listed after
+  // function-tools, or loaded at runtime — must still reach them, and one withdrawn must not stay on.
+  const tagging: FunctionRunner = {
+    compile(params, body) {
+      const fn = new Function(...params, body) as (...a: unknown[]) => Promise<unknown>;
+      return async (...a) => `bounded:${String(await fn(...a))}`;
+    },
+  };
+  const { machine, teardown } = await boot([], new Map());
+  resultOf(await run(machine, 'tool_function', { action: 'define', definition: "hello(args: {}): string { return 'hi'; }" }));
+  resultOf(await run(machine, 'tool_function', { action: 'package', name: 'P', definition: "export function hello(args: {}): string { return 'hi'; }" }));
+  for (const [runner, expected] of [[tagging, 'bounded:hi'], [undefined, 'hi']] as const) {
+    Object.assign(machine, { FunctionRunner: runner });
+    for (const name of ['hello', 'P__hello']) assert.equal(resultOf(await run(machine, name, {})), expected, `${name} under ${runner ? 'a runner' : 'none'}`);
+  }
+  await teardown();
 });

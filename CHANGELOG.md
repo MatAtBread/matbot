@@ -11,6 +11,58 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ## 0.4.19
 
+### API gaps filled
+
+- **Turn-scoped tools from a `screen` hook.** `ScreenResult.tools` is a `TurnToolSource` —
+  `(session) => Tool[]` — that the runner asks at the top of every round, with the session as it then
+  stands, so a tool a turn's own call defines in one round is callable in the next. Its tools are
+  advertised after the `ToolPresenter` (which never sees them) and resolved after the registry, and
+  they are never registered: no other session, no `POST /tools/:name`, no type index and no presenter
+  sees them. A name the registry holds is dropped with a warning — shadowing a registered tool is a
+  gated decision, and a hook is not a way round it. The round's map rides on `ToolContext.turnTools`,
+  and `invokeTool` resolves through it when handed one, so a tool forwarding its context — a composed
+  function's `tool.x()` — reaches the turn's tools exactly as the model does.
+
+### Bug fixes
+
+- **A parallel turn writes back its whole span, not just its final text.** `mode: 'parallel'`
+  merged only the submission and the last assistant message's text, so everything the turn
+  actually did — its thinking, its tool calls and their results, its markers — existed in the
+  live stream and nowhere else. The session is the only record once that stream is gone, which
+  made a genuine tool call unrecoverable: `determine_provenance` found no invocation and read a
+  truthful report as fabricated. The span now crosses back whole, read after the nested runner
+  idles (so it is what that turn's own `screen`/`followup` triggers settled on — a retraction
+  marker and its redo, a resubmit's robo turn — rather than its first draft), and trimmed to the
+  last point at which every tool-call has its result, since an unpaired call in shared history is
+  not valid wire for any provider. Thinking is persisted but still unsubmitted (every adapter
+  elides a historical block) and a foreign round-trip token is still the adapters' to drop by
+  `providerName`, so nothing here depends on which provider ran the turn. A turn that produced no
+  final text keeps the note saying why, now placed after the rounds it did complete.
+- **A `contextual` trigger's durable fold on a parallel turn survives the write-back.** The
+  turn's head was rebuilt from the content as submitted, to strip the framing block the copy ran
+  on; that also dropped any `durable` blocks a `screen` hook had folded onto it, so the correction
+  informed the answer and then vanished from the history the answer sits in. The framing block is
+  now subtracted instead.
+
+- **An attached text file reaches the model as text, in every adapter.** A `.csv`, `.json` or
+  `.yaml` attachment was routed — correctly — to the `document` arm, and then each adapter did the
+  one thing that loses it: `openai-compat` and non-PDF `anthropic` degraded it to a bare
+  `[Document: name]` note, and the `document` block with a text source that the Anthropic protocol
+  *does* have is silently discarded by the vendor shims that front other models on that same API
+  (DeepSeek's substitutes the literal `[Unsupported Document]` server-side). The model was
+  therefore told a file was attached and shown nothing, which reads to it as a lost attachment
+  rather than an absence: the observed turn spent six rounds hunting for the bytes — two
+  `tool_search` calls, `workspace_action list`, `session_action get` to recover the `fileId` from
+  its own transcript, then `bash` and `find` over `.data/files` — and only succeeded because that
+  install grants a shell. Textual documents now go as a named text block (`textDocument`, in
+  `core/providers-base`, since a mime-routing rule with three copies is one that gets fixed in one
+  of them), which is the one content shape every endpoint implements and is lossless for text: the
+  model reads the same characters either way. "Textual" is wider than `text/*` — `application/json`,
+  `application/yaml`, a `+json`/`+xml` suffix — but is never *guessed*: an unlisted type and an
+  `application/octet-stream` keep the old degradation, and the decode is `fatal` so a mislabelled
+  binary cannot reach a prompt as mojibake. A PDF still goes as a document block (anthropic, google)
+  or its note (openai-compat), having no text form.
+
 ### Optional
 
 - **`web-bundle`** — `background-jobs` is baked into `matbot.html`. It is a cross-runtime plugin and
@@ -19,6 +71,31 @@ churn and less likely to affect a consumer who doesn't use them.
   it was absent from the artifact entirely and no browser install could load it without fetching it
   over http. It is a `bundledPlugins` entry, so it is baked and offered through the `plugin` tool's
   discover rather than auto-loaded, like `triggers` and `skills`.
+- **`frontend/web`** — the composer types a file the OS could not. `.yaml` and `.toml` arrive from
+  the picker with an empty `file.type` on most installs, which was posted as
+  `application/octet-stream` and so degraded to a note by every adapter. The extension is at that
+  boundary and the server is never told it, so the composer now maps the text extensions itself;
+  the picker's `accept` list offers them too. Text types only — guessing a binary's type buys
+  nothing, the bytes going as base64 either way.
+- **`function-tools`** — a defined function or package runs under the `FunctionRunner` current at each
+  call, not the one current when it was registered. Defined tools are compiled once and stay registered,
+  so a runner registered after `function-tools` loaded never reached them, and unloading a plugin that
+  had replaced the runner left them running unbounded under the host's restored one. A call that finds a
+  different runner recompiles under it; the strip is not redone. `buildAsyncFn` and `buildPackageFn` now
+  take the host (`CompileHost`: `TypeScriptStripper` + `FunctionRunner`) in place of the stripper and
+  runner arguments.
+- **`function-tools`** — `define { scope: 'session' }`: a function only the conversation that defined it
+  can see. Meant for what the model builds while working something out — a lambda it needs again, a
+  helper two lambdas share — so it neither joins every conversation's tool list nor appears over HTTP or
+  to the tool presenter; `'global'` (the default) stays the scope for a tool the user asked for. Stored as
+  a marker in the session, so fork, cut and compact carry it correctly (a `split` can strand a later
+  function calling an earlier one; `check` finds that). Offered to the model from the next round, callable
+  by name from the session's other functions, and type-checked like a registered tool — the checker sees
+  this turn's functions through an augmentation appended to the snippet. A name a global tool holds is
+  refused at definition, and withheld with the same message on any later turn where a global tool has
+  taken it. A global function may not call a session one (it would fail in every other conversation);
+  re-defining a session function as `'global'` promotes it and retires the session one. `list` reports
+  `sessionFunctions`, and `remove`/`check` cover them.
 
 ## 0.4.18
 

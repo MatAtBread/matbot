@@ -184,17 +184,21 @@ test('anthropic renders a PDF natively and folds adjacent user messages', { time
   assert.deepEqual(tail[1].source, { type: 'base64', media_type: 'application/pdf', data: PDF });
 });
 
-test('anthropic sends a text document decoded, and degrades what it cannot carry', { timeout: 15000 }, async () => {
+test('anthropic sends a text document as text, and degrades what it cannot carry', { timeout: 15000 }, async () => {
   const cap = captureBody();
   await drain(new AnthropicAdapter().complete([
     msg('user', [
-      { type: 'document', data: b64utf8('héllo'), mimeType: 'text/markdown' },
+      { type: 'document', data: b64utf8('héllo'), mimeType: 'text/markdown', name: 'note.md' },
       { type: 'audio',    data: PNG, mimeType: 'audio/mpeg' },
     ]),
   ], cfg, [], new AbortController().signal));
 
   const content = (cap.body().messages as Array<{ content: any[] }>)[0]!.content;
-  assert.deepEqual(content[0].source, { type: 'text', media_type: 'text/plain', data: 'héllo' });
+  // A text block, not the `document` block with a text source this protocol does have: the vendor
+  // shims that front other models on this same API discard that block and substitute a note, so the
+  // model is told a file is attached and shown nothing. Lossless — it reads the same characters.
+  assert.equal(content[0].type, 'text');
+  assert.equal(content[0].text, '--- note.md ---\nhéllo\n--- end of note.md ---');
   assert.equal(content[1].type, 'text', 'audio has no Anthropic representation');
   assert.match(content[1].text, /^\[Audio: audio\/mpeg\]$/);
 });

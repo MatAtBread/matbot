@@ -1,11 +1,12 @@
 import { PLUGIN_API_VERSION, notifyingStore, renderToolCheck as renderCheck } from '@matatbread/matbot-plugin-api';
 import type {
-  JSONSchema, MatbotMachine, MatbotPluginSpec, Store,
+  JSONSchema, MatbotMachine, MatbotPluginSpec, MessageContent, Session, Store,
   Tool, ToolContext, ToolEvent, ToolContract, ToolResultOf, ToolCheckReport,
 } from '@matatbread/matbot-plugin-api';
 import { buildAsyncFn, runFunction, INJECTED, type CompiledFn } from './compile.js';
 import { parseSignature, paramsSchema, type ParsedParam, type ParsedSignature } from './signature.js';
 import { parsePackage, buildPackageFn, exportFn, type ParsedPackage } from './package.js';
+import { MARKER_CREATOR, sessionFunctions, turnContracts, shadowMessage, type SessionFunctionMarker, type SessionFunctionRecord } from './session.js';
 
 const TOOL_NAME         = 'tool_function';
 const PLUGIN_NAME       = 'function-tools';
@@ -16,7 +17,7 @@ interface FunctionRecord { name: string; definition: string; description?: strin
 
 /** One function's row in a `check` sweep: the service's report, plus who it is about. `diagnostics`
  *  carries each finding's own `rendered` text, so a reader displays that and counts on `total`. */
-interface CheckResult extends ToolCheckReport { name: string; package?: true; definedUnchecked?: true }
+interface CheckResult extends ToolCheckReport { name: string; package?: true; session?: true; definedUnchecked?: true }
 
 interface PackageRecord { name: string; tools: string[]; definition: string; definedUnchecked?: true }
 
@@ -69,21 +70,96 @@ function checkSnippet(sig: ParsedSignature): string {
   return `async function __fn(${sig.paramsText}): ${ret} ${sig.body}`;
 }
 
+type DefinedSignature = ParsedSignature & { name: string; returnType: string };
+
+/** What every `define` requires of its source, whichever scope it is going to. */
+function parseDefinition(definition: string): DefinedSignature {
+  const sig = parseSignature(definition);
+  if (sig.name === undefined) throw new Error('define requires a NAMED function, e.g. `weather(city: string): string { … }`.');
+  if (sig.name === TOOL_NAME) throw new Error(`"${TOOL_NAME}" is reserved.`);
+  assertNoInjectedClash(sig.params);
+  if (sig.returnType === undefined) throw new Error('define requires an explicit return type — it is verified against the body and becomes the tool\'s result contract, e.g. `weather(city: string): string { … }`. Use `: void` for a side-effect-only tool, or `: unknown` if the result is genuinely dynamic.');
+  return { ...sig, name: sig.name, returnType: sig.returnType };
+}
+
+/** A defined function's contract, in the same shape as a `ToolContracts` arm. */
+const contractOf = (sig: ParsedSignature): string => `ToolContract<${sig.returnType ?? 'unknown'}, ${paramsTypeText(sig.params)}>`;
+
+/** A global definition's failed type-check. A global function calling one of this session's functions
+ *  fails the check (its check never sees them) and the bare diagnostic does not say why — it would run
+ *  here and fail in every other session — so the names it trips on are spelled out. */
+function globalTypeError(report: ToolCheckReport, sessionNames: Iterable<string>): string {
+  const rendered = report.diagnostics.map(d => d.rendered).join('\n');
+  const tripped  = [...sessionNames].filter(n => rendered.includes(`'${n}'`));
+  const hint = tripped.length === 0 ? '' : `\n\nHINT: ${tripped.map(n => `"${n}"`).join(', ')} ${tripped.length === 1 ? 'is a session function' : 'are session functions'}, which only this conversation can call — a global function calling ${tripped.length === 1 ? 'it' : 'them'} would fail everywhere else. Define ${tripped.length === 1 ? 'it' : 'them'} with scope: 'global' first.`;
+  return `type error(s) — fix and re-define, or pass noTypeCheck to bypass:\n${renderCheck(report)}${hint}`;
+}
+
+/** The tool a defined function becomes — the same for a registered one and a session one, bar `origin`
+ *  (where its description says it came from) and `check` (the input gate a session one needs, having no
+ *  registry entry for a validator to find it by). */
+function definedTool(
+  machine: MatbotMachine, rec: FunctionRecord, sig: ParsedSignature, fn: CompiledFn,
+  origin: string, extra?: { wire?: true; check?: (input: Record<string, unknown>) => string | undefined },
+): Tool {
+  const paramNames = sig.params.map(p => p.name);
+  const contract   = contractOf(sig);
+  const base = rec.description ? rec.description : `${PLACEHOLDER_DESCRIPTION}\n\nSource:\n${rec.definition}`;
+  // A registered tool's params/result text is folded in by the host at dispatch; a session one never
+  // reaches that fold, so it carries the same two blocks itself.
+  const wire = extra?.wire === true
+    ? `\n\nTypeScript params:\n\`\`\`\n${paramsTypeText(sig.params)}\n\`\`\`\n\nTypeScript result:\n\`\`\`\n${sig.returnType ?? 'unknown'}\n\`\`\``
+    : '';
+  return {
+    name:        rec.name,
+    description: `${base}\n\n${origin}${wire}`,
+    inputSchema: paramsSchema(sig.params),
+    // A defined function has no augmentation source; it carries its own contract. Same shape as a
+    // ToolContracts arm — the params object paired with the declared return type — so tool-types splices
+    // it into the dts registry block (bare `ToolContract` rewritten to an inline import) and derives the
+    // wire text from it, exactly as it does from a source tool's arms.
+    toolContract: contract,
+    pluginName:  PLUGIN_NAME,
+    executor: {
+      execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
+        const obj = (input ?? {}) as Record<string, unknown>;
+        const bad = extra?.check?.(obj);
+        if (bad !== undefined) return (async function* () { yield { type: 'error', message: bad } satisfies ToolEvent; })();
+        return runFunction(machine, ctx, fn, paramNames.map(p => obj[p]), { tool: rec.name, source: rec.definition });
+      },
+    },
+  };
+}
+
+/** The input gate for a session function: the two shapes of wrong call a model actually makes — a
+ *  misspelt name (dropped silently, it reads as "not given") and a missing one. Types are the checker's. */
+function paramsGate(name: string, params: readonly ParsedParam[]): (input: Record<string, unknown>) => string | undefined {
+  const known = new Set(params.map(p => p.name));
+  return input => {
+    if (typeof input !== 'object' || input === null || Array.isArray(input)) return `Invalid input for tool "${name}": expected an object of named parameters.`;
+    const errs = [
+      ...Object.keys(input).filter(k => !known.has(k)).map(k => `unknown property "${k}"`),
+      ...params.filter(p => !p.optional && input[p.name] === undefined).map(p => `missing required property "${p.name}"`),
+    ];
+    return errs.length === 0 ? undefined : `Invalid input for tool "${name}": ${errs.join('; ')}. It takes ${paramsTypeText([...params])}.`;
+  };
+}
+
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
     tool_function:
-      | ToolContract<{ message: string; tool: string; parameters: ParsedParam[] }, { action: 'define'; definition: string; description?: string; noTypeCheck?: boolean }>
+      | ToolContract<{ message: string; tool: string; parameters: ParsedParam[] }, { action: 'define'; definition: string; description?: string; scope?: 'global' | 'session'; noTypeCheck?: boolean }>
       | ToolContract<unknown,                                                      { action: 'lambda'; definition: string; params?: object; noTypeCheck?: boolean }>
       | ToolContract<{ message: string; package: string; tools: string[] },         { action: 'package'; name: string; definition: string; noTypeCheck?: boolean }>
       | ToolContract<{ ok: boolean; checked: boolean; results: CheckResult[] },    { action: 'check';  name?: string; package?: string }>
-      | ToolContract<{ functions: FunctionRecord[]; packages: PackageRecord[] },  { action: 'list'   }>
+      | ToolContract<{ functions: FunctionRecord[]; packages: PackageRecord[]; sessionFunctions: SessionFunctionRecord[] }, { action: 'list' }>
       | ToolContract<{ available: boolean; dts: string },                         { action: 'types'  }>
       | ToolContract<{ message: string },                                         { action: 'remove'; name: string } | { action: 'remove'; package: string }>;
   }
 }
 
 type ToolFunctionAction =
-  | { action: 'define'; definition: string; description?: string; noTypeCheck?: boolean }
+  | { action: 'define'; definition: string; description?: string; scope?: 'global' | 'session'; noTypeCheck?: boolean }
   | { action: 'lambda'; definition: string; params?: unknown; noTypeCheck?: boolean }
   | { action: 'package'; name: string; definition: string; noTypeCheck?: boolean }
   | { action: 'check'; name?: string; package?: string }
@@ -129,12 +205,13 @@ class FunctionStore {
     return items.map(recordOf);
   }
 
-  async define(definition: string, description?: string, noTypeCheck = false): Promise<{ name: string; parameters: ParsedParam[] }> {
-    const sig = parseSignature(definition);
-    if (sig.name === undefined) throw new Error('define requires a NAMED function, e.g. `weather(city: string): string { … }`.');
-    if (sig.name === TOOL_NAME) throw new Error(`"${TOOL_NAME}" is reserved.`);
-    assertNoInjectedClash(sig.params);
-    if (sig.returnType === undefined) throw new Error('define requires an explicit return type — it is verified against the body and becomes the tool\'s result contract, e.g. `weather(city: string): string { … }`. Use `: void` for a side-effect-only tool, or `: unknown` if the result is genuinely dynamic.');
+  async has(name: string): Promise<boolean> {
+    return await this.store.get(name) !== null;
+  }
+
+  /** `sessionNames`: the calling session's own functions, named in the hint if the check trips on one. */
+  async define(definition: string, description?: string, noTypeCheck = false, sessionNames: Iterable<string> = []): Promise<{ name: string; parameters: ParsedParam[] }> {
+    const sig = parseDefinition(definition);
     const clash = this.machine.tools.resolve(sig.name);
     if (clash !== null && !this.registered.has(sig.name)) {
       throw new Error(`A tool named "${sig.name}" already exists and wasn't defined here — choose another name.`);
@@ -146,7 +223,7 @@ class FunctionStore {
     let checked = false;
     if (index !== undefined && !noTypeCheck) {
       const report = await index.check(checkSnippet(sig));
-      if (!report.ok) throw new Error(`type error(s) — fix and re-define, or pass noTypeCheck to bypass:\n${renderCheck(report)}`);
+      if (!report.ok) throw new Error(globalTypeError(report, sessionNames));
       // An index that cannot check says so, and a clean report from one proves nothing. The browser
       // registers such an index (for `dts()`), so trusting "an index was present" marked its definitions
       // verified when nothing had read them.
@@ -224,27 +301,9 @@ class FunctionStore {
   }
 
   private async registerTool(rec: FunctionRecord): Promise<void> {
-    const sig        = parseSignature(rec.definition);
-    const paramNames = sig.params.map(p => p.name);
-    const fn: CompiledFn = await buildAsyncFn(this.machine.TypeScriptStripper, rec.definition, paramNames, this.machine.FunctionRunner);
-    const machine = this.machine;
-    const tool: Tool = {
-      name:        rec.name,
-      description: `${rec.description ? rec.description : (`${PLACEHOLDER_DESCRIPTION}\n\nSource:\n${rec.definition}`)}\n\nDefined via ${TOOL_NAME}.`,
-      inputSchema: paramsSchema(sig.params),
-      // A defined function has no augmentation source; it carries its own contract. Same shape as a
-      // ToolContracts arm — the params object paired with the declared return type — so tool-types splices
-      // it into the dts registry block (bare `ToolContract` rewritten to an inline import) and derives the
-      // wire text from it, exactly as it does from a source tool's arms.
-      toolContract: `ToolContract<${sig.returnType ?? 'unknown'}, ${paramsTypeText(sig.params)}>`,
-      pluginName:  PLUGIN_NAME,
-      executor: {
-        execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
-          const obj = (input ?? {}) as Record<string, unknown>;
-          return runFunction(machine, ctx, fn, paramNames.map(p => obj[p]), { tool: rec.name, source: rec.definition });
-        },
-      },
-    };
+    const sig = parseSignature(rec.definition);
+    const fn  = await buildAsyncFn(this.machine, rec.definition, sig.params.map(p => p.name));
+    const tool = definedTool(this.machine, rec, sig, fn, `Defined via ${TOOL_NAME}.`);
     this.machine.tools.remove(rec.name);   // replace on re-define; no-op when absent
     this.machine.tools.register(tool);
   }
@@ -293,14 +352,14 @@ class PackageStore {
     return undefined;
   }
 
-  async define(name: string, definition: string, noTypeCheck = false): Promise<string[]> {
+  async define(name: string, definition: string, noTypeCheck = false, sessionNames: Iterable<string> = []): Promise<string[]> {
     const parsed = parsePackage(name, definition);
     // The whole module is the snippet, so a private helper's signature is checked against its callers too.
     const index = this.machine.ToolTypeIndex;
     let checked = false;
     if (index !== undefined && !noTypeCheck) {
       const report = await index.check(definition);
-      if (!report.ok) throw new Error(`type error(s) — fix and re-define, or pass noTypeCheck to bypass:\n${renderCheck(report)}`);
+      if (!report.ok) throw new Error(globalTypeError(report, sessionNames));
       checked = report.checked;
     }
     await this.install(name, parsed, definition);
@@ -359,7 +418,7 @@ class PackageStore {
   /** Compile, then check every exported name, then swap the group in — so a failure at any step leaves
    *  the previous definition (or nothing) registered, never half of the new one. */
   private async install(name: string, parsed: ParsedPackage, definition: string): Promise<void> {
-    const pkg  = await buildPackageFn(this.machine.TypeScriptStripper, definition, parsed, this.machine.FunctionRunner);
+    const pkg  = await buildPackageFn(this.machine, definition, parsed);
     const mine = this.owned.get(name) ?? new Set<string>();
     for (const e of parsed.exports) {
       if (this.machine.tools.resolve(e.toolName) !== null && !mine.has(e.toolName)) {
@@ -389,6 +448,118 @@ class PackageStore {
     this.owned.set(name, next);
   }
 }
+
+/** A `check` row that is not a tsc finding, shaped like one so a reader counts every row the same way. */
+const findingRow = (label: string, message: string): ToolCheckReport =>
+  ({ ok: false, checked: false, total: 1, diagnostics: [{ label, code: 0, message, rendered: message }] });
+
+const BUILD_CACHE_LIMIT = 256;
+
+/**
+ * The session-scoped functions. The session holds them ({@link SessionFunctionMarker}), so what this keeps
+ * is only a cache of the tools built from them: the runner asks for a session's tools at every round of
+ * every turn, and recompiling the same source each time is the one cost worth avoiding. Keyed by the
+ * record, so two sessions with the same source share a build and a re-definition is a new key. Bounded,
+ * oldest out — a long-lived process sees every session's history pass through here.
+ */
+class SessionFunctions {
+  private readonly machine: MatbotMachine;
+  private readonly built  = new Map<string, Promise<Tool | Error>>();
+  private readonly warned = new Set<string>();
+
+  constructor(machine: MatbotMachine) {
+    this.machine = machine;
+  }
+
+  /** The tools to offer `session` this round — the source the screen hook hands the runner. */
+  async tools(session: Session): Promise<Tool[]> {
+    const out: Tool[] = [];
+    for (const rec of sessionFunctions(session).values()) {
+      // A global tool has since taken the name. The screen hook tells the model; offering it here would
+      // only have the runner drop it.
+      if (this.machine.tools.resolve(rec.name) !== null) continue;
+      const tool = await this.build(rec);
+      if (!(tool instanceof Error)) { out.push(tool); continue; }
+      const key = `${rec.name}\0${rec.definition}`;
+      if (!this.warned.has(key)) {
+        this.warned.add(key);
+        console.warn(`[${PLUGIN_NAME}] session function "${rec.name}" (session ${session.id}) is not offered: ${tool.message}`);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Verify a definition and return the marker recording it. Nothing is stored: the marker IS the
+   * definition, and the runner puts it in the session at the end of this round, which is what makes it
+   * callable from the next. Checked against this turn's tools — including the session's other functions,
+   * so one may call another — plus itself, so it may recurse.
+   */
+  async define(ctx: ToolContext, definition: string, description?: string, noTypeCheck = false): Promise<{ marker: SessionFunctionMarker; name: string; parameters: ParsedParam[] }> {
+    const sig = parseDefinition(definition);
+    if (this.machine.tools.resolve(sig.name) !== null) throw new Error(shadowMessage(sig.name));
+    const index = this.machine.ToolTypeIndex;
+    let checked = false;
+    if (index !== undefined && !noTypeCheck) {
+      const report = await index.check(checkSnippet(sig) + turnContracts(ctx.turnTools, { name: sig.name, contract: contractOf(sig) }));
+      if (!report.ok) throw new Error(`type error(s) — fix and re-define, or pass noTypeCheck to bypass:\n${renderCheck(report)}`);
+      checked = report.checked;
+    }
+    const rec: SessionFunctionRecord = {
+      name: sig.name, definition,
+      ...(description !== undefined && description.trim() !== '' ? { description: description.trim() } : {}),
+      ...(checked ? {} : { definedUnchecked: true as const }),
+    };
+    const built = await this.build(rec);   // compiles: a bad source fails here, before any marker exists
+    if (built instanceof Error) throw built;
+    return { marker: { op: 'define', ...rec }, name: sig.name, parameters: sig.params };
+  }
+
+  /** define's check, re-run against the tools as they stand now — which is how a function left calling
+   *  one a `split` took away, or one a global tool has since shadowed, is found before it is called. */
+  async check(ctx: ToolContext, recs: Iterable<SessionFunctionRecord>): Promise<CheckResult[]> {
+    const index = this.machine.ToolTypeIndex;
+    if (index === undefined) throw new Error('No type-checker is available here (e.g. the browser), so nothing can be checked.');
+    const results: CheckResult[] = [];
+    for (const rec of recs) {
+      let report: ToolCheckReport;
+      if (this.machine.tools.resolve(rec.name) !== null) report = findingRow('SHADOWED', shadowMessage(rec.name));
+      else {
+        try {
+          const sig = parseSignature(rec.definition);
+          report = await index.check(checkSnippet(sig) + turnContracts(ctx.turnTools, { name: rec.name, contract: contractOf(sig) }));
+        } catch (e) { report = findingRow('PARSE', e instanceof Error ? e.message : String(e)); }
+      }
+      results.push({
+        name: rec.name, session: true, ...report,
+        ...(rec.definedUnchecked === true ? { definedUnchecked: true as const } : {}),
+      });
+    }
+    return results;
+  }
+
+  private build(rec: SessionFunctionRecord): Promise<Tool | Error> {
+    const key = JSON.stringify([rec.name, rec.definition, rec.description ?? null]);
+    const hit = this.built.get(key);
+    if (hit !== undefined) return hit;
+    const made = (async (): Promise<Tool | Error> => {
+      try {
+        const sig = parseSignature(rec.definition);
+        const fn  = await buildAsyncFn(this.machine, rec.definition, sig.params.map(p => p.name));
+        return definedTool(this.machine, rec, sig, fn, `Defined via ${TOOL_NAME} for this conversation only.`,
+          { wire: true, check: paramsGate(rec.name, sig.params) });
+      } catch (e) { return e instanceof Error ? e : new Error(String(e)); }
+    })();
+    this.built.set(key, made);
+    if (this.built.size > BUILD_CACHE_LIMIT) {
+      const oldest = this.built.keys().next().value;
+      if (oldest !== undefined) this.built.delete(oldest);
+    }
+    return made;
+  }
+}
+
+const sessionMarker = (data: SessionFunctionMarker): ToolEvent => ({ type: 'marker', creator: MARKER_CREATOR, data });
 
 const DESCRIPTION = `WHEN TO USE THIS — judge it by the SIZE and SHAPE of the work, not by the number of calls:
 
@@ -462,13 +633,25 @@ Before composing, run \`{ action: 'types' }\` to fetch TypeScript declarations o
 calls resolve to — write \`await tool.x(...)\` against those real return types instead of guessing shapes.
 
 ACTIONS
-  define — Persist a NAMED function and register it as a new tool of the same name. Parameters are
+  define — Persist a NAMED function as a new tool of the same name — in every conversation, or in this
+           one only (see \`scope\` below). Parameters are
            derived from the signature and become the tool's inputs. You MUST declare an explicit return
            type — it is verified against the body and becomes the tool's result contract (use void for a
            side-effect-only tool). Pass an optional \`description\` to
-           document the new tool (shown to the model). Survives restart. Re-defining the same name
-           recompiles it. Never shadows a tool you didn't define here. Note: tools defined this way become
-           visible on the *next turn*.
+           document the new tool (shown to the model). Re-defining the same name recompiles it. Never
+           shadows a tool you didn't define here.
+           \`scope\` — WHO ASKED for the function decides it:
+             'global' (default): the user asked for a tool ("make me a tool that calculates Fibonacci
+                     numbers"). It is saved, survives restart, and is a tool in every conversation, over
+                     HTTP and to the tool presenter. Visible from the *next turn*.
+             'session': USE THIS for any function you define on your own initiative while working
+                     something out — a lambda you will call more than once, or a helper two lambdas share.
+                     Only THIS conversation sees it: call it directly, or as \`await tool.<name>(…)\` from
+                     your other functions, type-checked like any tool. Callable from your *next step*. A
+                     global tool in every conversation's list is a cost to every conversation, so do not
+                     make one the user did not ask for.
+           A global function cannot call a session one: it would fail in every other conversation. To
+           promote a session function, define it again with scope 'global' (it replaces the session one).
   lambda — Compile and run an ANONYMOUS one-argument function once, now, against \`params\`. Nothing is
            persisted or registered. This is the ordinary way to reduce a bulky or repetitive tool chain to
            just its answer — but NOT a wrapper for a single call (see NOT FOR THIS above). If the same
@@ -501,7 +684,8 @@ ACTIONS
            anything between calls — a counter, a cache, a connection, one-time setup — or needs hooks,
            services or background work, write a matbot PLUGIN, which has all of those capabilities.
   check  — Re-run define's type-check over a function you already defined, without running or re-registering
-           it. Pass \`name\` for one function or \`package\` for one package, or omit both to check everything. Use this after anything that
+           it. Pass \`name\` for one function or \`package\` for one package, or omit both to check everything,
+           this conversation's session functions included. Use this after anything that
            could move a contract a function was written against — a tool changing its parameters or result,
            a plugin loading or unloading — since a defined function is compiled but NOT re-checked on
            reload, so it keeps working until the moment it doesn't. Returns a row per function: \`total\` is
@@ -511,14 +695,15 @@ ACTIONS
            \`definedUnchecked: true\` if that function was never type-checked when it was defined.
            READ \`ok\` TOGETHER WITH \`checked\`, on the result and on each row: \`checked: false\` means
            no type-checker could run here, so \`ok: true\` says only that nothing was examined.
-  list   — Show the functions and packages you've defined, with their source. \`definedUnchecked: true\` marks one that
+  list   — Show the functions and packages you've defined, with their source, and this conversation's
+           session functions (\`sessionFunctions\`). \`definedUnchecked: true\` marks one that
            was registered without a type-check (it was defined with \`noTypeCheck\`, or no checker was
            available) — run \`check\` on it, since a bypass hides errors that are still there.
   types  — Return TypeScript declarations (a .d.ts) of what the available tools' calls resolve to, so you
            can compose against real return types. Node only; \`available: false\` with an empty dts where
            type info can't be derived (e.g. the browser) — fall back to inferring shapes and testing.
-  remove — Delete a defined function (\`name\`) and unregister its tool, or a whole package (\`package\`)
-           and every tool it exports.
+  remove — Delete a defined function (\`name\`, global or this conversation's) and its tool, or a whole
+           package (\`package\`) and every tool it exports.
 
 Functions use method-shorthand syntax — NOT arrow functions:
 
@@ -559,6 +744,7 @@ const INPUT_SCHEMA: JSONSchema = {
     action:     { type: 'string', enum: ['define', 'lambda', 'package', 'check', 'list', 'types', 'remove'], description: 'define: persist a named function as a tool. lambda: run an anonymous function once. package: persist a TypeScript module whose exported functions become tools <package>__<function>. check: re-type-check already-defined functions/packages against the current tool types. types: get TypeScript declarations of tool return types. list / remove: manage defined functions and packages.' },
     definition:  { type: 'string', description: 'define/lambda: the function source (method-shorthand TypeScript, no arrow). package: the module source — exported functions become tools, the rest is private. Stateless: only declarations at the top level (no let/var, statements or top-level await).' },
     package:     { type: 'string', description: 'remove / check (optional): the package to delete or check.' },
+    scope:       { type: 'string', enum: ['global', 'session'], description: "define only (optional, default 'global'): 'global' when the user asked for the tool — saved, and a tool in every conversation; 'session' for a function you define yourself while working something out (a lambda you need again, a helper two lambdas share) — only this conversation sees it, callable from your next step." },
     description: { type: 'string', description: 'define only (optional): Describe the intent of the function from the context used to create it. Include a clause describing the use-cases for the function tool. Becomes the defined tool\'s description, and therefore it is important to make the description both specific in terms of intent and use-cases. Do not describe the mechanism or execution as this is already clear from the code.' },
     params:      { type: 'object', description: 'lambda only: the single argument object passed to the function.' },
     noTypeCheck: { type: 'boolean', description: 'define/lambda (optional, default false): skip the TypeScript type-check of the body against the live tool types. The check is a strong signal the composition is sound before it is registered/run — leave it on unless you must bypass a spurious error (e.g. composing a tool whose result type is `unknown`). A bypassed error does not go away: it is still there, and will surface later when something unrelated moves, so a function defined this way is marked `definedUnchecked` in `list` and `check` and should be checked again once the obstacle is gone. No effect where no type-checker is available (e.g. the browser) — a definition made there is marked the same way, being equally unverified.' },
@@ -588,11 +774,14 @@ const MULTI_STAGE_ADVICE =
   '`await tool.x(params)` and a `return` of what came back is strictly WORSE than calling that tool: the ' +
   'same result reaches you either way, and the wrapper cost you a types call and a round to write it. If ' +
   'the body would not filter, count, aggregate, loop, or feed the result into a second call, it has ' +
-  'nothing to do — call the tool directly.';
+  'nothing to do — call the tool directly. ' +
+  "A lambda you will need again, or a helper two lambdas share, is `{ action: 'define', scope: 'session' }`: " +
+  'it is then a tool only in this conversation, callable by name from your next step and as ' +
+  '`await tool.<name>(…)` from your other functions — instead of a lambda written out twice.';
 
 const errorEvent = (message: string): ToolEvent => ({ type: 'error', message });
 
-function functionTool(machine: MatbotMachine, store: FunctionStore, packages: PackageStore): Tool<ToolResultOf<'tool_function'>> {
+function functionTool(machine: MatbotMachine, store: FunctionStore, packages: PackageStore, sessions: SessionFunctions): Tool<ToolResultOf<'tool_function'>> {
   return {
     name:        TOOL_NAME,
     description: DESCRIPTION,
@@ -603,18 +792,31 @@ function functionTool(machine: MatbotMachine, store: FunctionStore, packages: Pa
         switch (act.action) {
           case 'define': {
             if (typeof act.definition !== 'string' || act.definition.trim() === '') { yield errorEvent('define requires a "definition" (a named function).'); return; }
+            if (act.scope !== undefined && act.scope !== 'global' && act.scope !== 'session') { yield errorEvent('define: "scope" must be "global" or "session".'); return; }
+            const note = act.noTypeCheck === true ? ' (type-check skipped)' : '';
+            const mine = sessionFunctions(ctx.session);
             try {
-              const { name, parameters } = await store.define(act.definition, act.description, act.noTypeCheck === true);
+              if (act.scope === 'session') {
+                const { marker, name, parameters } = await sessions.define(ctx, act.definition, act.description, act.noTypeCheck === true);
+                yield sessionMarker(marker);
+                const params = parameters.map(p => p.name).join(', ');
+                yield { type: 'result', value: { message: `Defined session function "${name}"${params ? ` (${params})` : ''}.${note} Callable from your next step, in this conversation only — directly, or as \`await tool.${name}(…)\` from your other functions.`, tool: name, parameters } };
+                return;
+              }
+              const { name, parameters } = await store.define(act.definition, act.description, act.noTypeCheck === true, mine.keys());
+              // Promotion: a session function of this name would now be shadowed by its own global
+              // successor, and told so every turn. Retire it with the same marker a remove writes.
+              const promoted = mine.has(name);
+              if (promoted) yield sessionMarker({ op: 'remove', name });
               const params = parameters.map(p => p.name).join(', ');
-              const note = act.noTypeCheck === true ? ' (type-check skipped)' : '';
-              yield { type: 'result', value: { message: `Defined tool "${name}"${params ? ` (${params})` : ''}.${note} Call it directly to run.`, tool: name, parameters } };
+              yield { type: 'result', value: { message: `Defined tool "${name}"${params ? ` (${params})` : ''}.${note}${promoted ? ' It replaces the session function of that name.' : ''} Call it directly to run.`, tool: name, parameters } };
             } catch (e) { yield errorEvent(e instanceof Error ? e.message : String(e)); }
             return;
           }
           case 'lambda': {
             if (typeof act.definition !== 'string' || act.definition.trim() === '') { yield errorEvent('lambda requires a "definition" (an anonymous function).'); return; }
             let fn: CompiledFn;
-            try { fn = await buildAsyncFn(machine.TypeScriptStripper, act.definition, ['args'], machine.FunctionRunner); }
+            try { fn = await buildAsyncFn(machine, act.definition, ['args']); }
             catch (e) { yield errorEvent(e instanceof Error ? e.message : String(e)); return; }
             // The lambda calling convention is ONE argument (the params object). Gate it structurally:
             // the typecheck grades the function against its OWN signature, not the convention, so a
@@ -633,7 +835,7 @@ function functionTool(machine: MatbotMachine, store: FunctionStore, packages: Pa
             // noTypeCheck). Syntax was already gated by buildAsyncFn above.
             const index = machine.ToolTypeIndex;
             if (index !== undefined && act.noTypeCheck !== true && sig !== undefined) {
-              const report = await index.check(checkSnippet(sig));
+              const report = await index.check(checkSnippet(sig) + turnContracts(ctx.turnTools));
               if (!report.ok) { yield errorEvent(`type error(s) — fix and re-run, or pass noTypeCheck to bypass:\n${renderCheck(report)}`); return; }
             }
             yield* runFunction(machine, ctx, fn, [act.params ?? {}], { tool: `${TOOL_NAME} lambda`, source: act.definition });
@@ -643,7 +845,7 @@ function functionTool(machine: MatbotMachine, store: FunctionStore, packages: Pa
             if (typeof act.name !== 'string' || act.name === '') { yield errorEvent('package requires a "name" (the package name).'); return; }
             if (typeof act.definition !== 'string' || act.definition.trim() === '') { yield errorEvent('package requires a "definition" (the module source).'); return; }
             try {
-              const tools = await packages.define(act.name, act.definition, act.noTypeCheck === true);
+              const tools = await packages.define(act.name, act.definition, act.noTypeCheck === true, sessionFunctions(ctx.session).keys());
               const note = act.noTypeCheck === true ? ' (type-check skipped)' : '';
               yield { type: 'result', value: { message: `Defined package "${act.name}" exporting ${tools.map(t => `"${t}"`).join(', ')}.${note} Call them by those names.`, package: act.name, tools } };
             } catch (e) { yield errorEvent(e instanceof Error ? e.message : String(e)); }
@@ -655,9 +857,12 @@ function functionTool(machine: MatbotMachine, store: FunctionStore, packages: Pa
               return;
             }
             try {
+              const mine = sessionFunctions(ctx.session);
+              const own  = act.name !== undefined ? mine.get(act.name) : undefined;
               const results = act.package !== undefined ? await packages.check(act.package)
-                : act.name !== undefined ? await store.check(act.name)
-                : [...await store.check(), ...await packages.check()];
+                : act.name !== undefined
+                  ? (own !== undefined && !await store.has(act.name) ? await sessions.check(ctx, [own]) : await store.check(act.name))
+                  : [...await store.check(), ...await packages.check(), ...await sessions.check(ctx, mine.values())];
               // `ok` is qualified by `checked` here exactly as it is on a row: where no type-checker can
               // run (the browser registers an index that supplies types but checks nothing), every row
               // comes back clean and a bare `ok: true` would report success for work nothing did.
@@ -670,7 +875,7 @@ function functionTool(machine: MatbotMachine, store: FunctionStore, packages: Pa
             return;
           }
           case 'list':
-            yield { type: 'result', value: { functions: await store.list(), packages: await packages.list() } };
+            yield { type: 'result', value: { functions: await store.list(), packages: await packages.list(), sessionFunctions: [...sessionFunctions(ctx.session).values()] } };
             return;
           case 'types': {
             const index = machine.ToolTypeIndex;
@@ -678,7 +883,7 @@ function functionTool(machine: MatbotMachine, store: FunctionStore, packages: Pa
               yield { type: 'result', value: { available: false, dts: '' } };
               return;
             }
-            yield { type: 'result', value: { available: true, dts: await index.dts() } };
+            yield { type: 'result', value: { available: true, dts: `${await index.dts()}${turnContracts(ctx.turnTools)}\n` } };
             return;
           }
           case 'remove': {
@@ -688,6 +893,13 @@ function functionTool(machine: MatbotMachine, store: FunctionStore, packages: Pa
               return;
             }
             if (typeof act.name !== 'string' || act.name === '') { yield errorEvent('remove requires a "name" (a function) or a "package".'); return; }
+            // A global one first: in the rare case both exist, the session one is already shadowed, and a
+            // person saying "remove the X tool" means the one they can see everywhere.
+            if (!await store.has(act.name) && sessionFunctions(ctx.session).has(act.name)) {
+              yield sessionMarker({ op: 'remove', name: act.name });
+              yield { type: 'result', value: { message: `Removed session function "${act.name}".` } };
+              return;
+            }
             const ok = await store.remove(act.name);
             const owner = ok ? undefined : packages.ownerOf(act.name);
             // A package is removed as a group, so one export cannot be removed from under its siblings.
@@ -724,14 +936,30 @@ export function createFunctionToolsPlugin(): MatbotPluginSpec {
         services.createStore<PackageDoc>(PACKAGE_NAMESPACE), services.Notifier, PACKAGE_NAMESPACE, 'function-package',
       ));
       packages = pkgs;
+      const sessionFns = new SessionFunctions(services);
       await fns.reload();
       await pkgs.reload();
       // The registered tools are state derived from the store at setup time, so they must be rebuilt
       // when a deferred StorageBackend swap lands on a different `functions` set. No `replay` — the
       // boot load is above; this reacts only to future swaps.
       services.mounted.observe({ key: 'StorageBackend', signal: lifecycle.signal }, () => void fns.reload().then(() => pkgs.reload()));
-      services.tools.register(functionTool(services, fns, pkgs));
+      services.tools.register(functionTool(services, fns, pkgs, sessionFns));
       services.systemContext.register(() => MULTI_STAGE_ADVICE);
+      // Session functions reach a turn only through here: never registered, offered by the runner each
+      // round from the session's own markers. A name a global tool has taken since is withheld, and the
+      // model is told why, since it may not have caused the clash and cannot see it any other way.
+      services.hooks.register({
+        on: 'screen',
+        pluginName: PLUGIN_NAME,
+        handler: ({ session }) => {
+          const shadowed = [...sessionFunctions(session).keys()].filter(n => services.tools.resolve(n) !== null);
+          const ephemeral: MessageContent[] = shadowed.map(n => ({
+            type: 'text',
+            text: `${shadowMessage(n)} — "${n}" is a session function defined earlier in this conversation; define it again under a unique name with scope: 'session'.`,
+          }));
+          return { tools: current => sessionFns.tools(current), ...(ephemeral.length > 0 ? { ephemeral } : {}) };
+        },
+      });
     },
 
     async teardown() { lifecycle?.abort(); store?.removeAll(); packages?.removeAll(); },

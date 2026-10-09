@@ -1,5 +1,5 @@
-import type { FunctionRunner, JSONSchema, TypeScriptStripper } from '@matatbread/matbot-plugin-api';
-import { INJECTED, type CompiledFn } from './compile.js';
+import type { JSONSchema } from '@matatbread/matbot-plugin-api';
+import { INJECTED, compileUnder, type CompileHost, type CompiledFn } from './compile.js';
 import { inertEnd, matchBrace, matchParen, parseSignature, tsTypeToSchema, type ParsedParam } from './signature.js';
 
 /** The separator between a package name and an export's name in the registered tool name. Not `.`, which
@@ -30,9 +30,6 @@ export interface ParsedPackage {
 }
 
 export type PackageFn = (tool: unknown, toolInContext: unknown, context: unknown, exportName: string, arg: unknown) => Promise<unknown>;
-
-const AsyncFunction = Object.getPrototypeOf(async function () { /* */ }).constructor as
-  new (...names: string[]) => PackageFn;
 
 const IDENT_CHAR = /[\w$]/;
 
@@ -366,16 +363,14 @@ const EXPORT_ARG  = '__matbotExportArg';
  * after awaiting the module: that await would start the export's own work outside any stretch a
  * {@link FunctionRunner} bounds.
  */
-export async function buildPackageFn(stripper: TypeScriptStripper, source: string, parsed: ParsedPackage, runner?: FunctionRunner): Promise<PackageFn> {
+export async function buildPackageFn(host: CompileHost, source: string, parsed: ParsedPackage): Promise<PackageFn> {
   let blanked = source;
   for (const at of parsed.exportAt) blanked = `${blanked.slice(0, at)}      ${blanked.slice(at + 6)}`;
   let stripped: string;
-  try { stripped = await stripper.strip(blanked); }
+  try { stripped = await host.TypeScriptStripper.strip(blanked); }
   catch (e) { throw new Error(`not valid TypeScript (${msg(e)})`); }
   const body = `${stripped}\n;return ({ ${parsed.exports.map(e => e.name).join(', ')} })[${EXPORT_NAME}](${EXPORT_ARG});`;
-  const params = [...INJECTED, EXPORT_NAME, EXPORT_ARG];
-  try { return runner !== undefined ? runner.compile(params, body) as PackageFn : new AsyncFunction(...params, body); }
-  catch (e) { throw new Error(`could not compile (${msg(e)})`); }
+  return compileUnder(host, [...INJECTED, EXPORT_NAME, EXPORT_ARG], body) as PackageFn;
 }
 
 /** One export of a compiled package, in the calling convention `runFunction` drives. */

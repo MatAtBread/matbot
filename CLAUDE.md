@@ -313,20 +313,32 @@ A turn works on an in-memory copy of its session and writes it back whole when i
 
 **"Nothing is written mid-turn" is not the invariant; "the runner owns the session exclusively" is.**
 Several writes during one turn are fine as long as the runner knows about all of them, and one case needs
-it: a parallel turn's pair is a *completed* turn, not a partial one, so it is placed in the store as it
+it: a parallel turn's write-back is a *completed* turn, not a partial one, so it is placed in the store as it
 settles (`placeNow`) rather than waiting for the running turn's next round boundary — which a turn parked
 in one long tool call never reaches, leaving a finished reply in no store, no replay and no stream. The
-pair goes on `merges` as well, so the running turn takes it into its own in-memory session and its
+span goes on `merges` as well, so the running turn takes it into its own in-memory session and its
 whole-document write-back carries it instead of erasing it; `end` does a final `interject` pull, being the
 funnel every exit passes through, for the turn that is aborted inside that same tool call and so reaches
 no further boundary. The three placement paths — `placeNow`, `interjectInto`, `drainMerges` — are mutually
-idempotent on the pair's message id, and exactly one announces `merged`. The turn's own partial output is
+idempotent on its head's message id, and exactly one announces `merged`. The turn's own partial output is
 a different thing and stays unpersisted: it is genuinely incomplete, and a crash must not commit half a
 turn.
 
-**A pair is anchored on the head its OWN copy was cut at**, captured at submit and carried on the reply —
+**What crosses back is the turn's whole settled span**, not its final text: the submission (with the
+framing block subtracted, but any `durable` fold a `contextual` trigger made KEPT), then every message the
+turn produced — thinking, tool calls, their results, its markers, a retraction and the redo that
+superseded it, a `followup` resubmit's robo turn. The session is the only record once the live stream is
+gone, and one holding the answer alone makes a tool call a parallel turn genuinely made unrecoverable:
+`determine_provenance` finds no invocation and reads a truthful report as fabricated. It is read after the
+nested runner idles, so it is what that turn's own hooks settled on rather than its first draft, and it is
+trimmed to the last point at which every tool-call has its result (`closedSpan`) — an unpaired call placed
+into shared history is not valid wire for any provider and would break every later turn. Thinking rides
+along persisted but unsubmitted (every adapter elides a historical block) and a foreign round-trip token
+is the adapters' to drop by `providerName`, so none of this depends on which provider ran the turn.
+
+**A span is anchored on the head its OWN copy was cut at**, captured at submit and carried on the reply —
 never on the session's current head. The two differ exactly where it matters: a parallel turn submitted
-*during* a turn's `followup` ran on a copy that INCLUDED that finished turn, so its pair belongs after it,
+*during* a turn's `followup` ran on a copy that INCLUDED that finished turn, so its span belongs after it,
 and the current head would put it in front of the very history it answered. A reply with no head of its
 own belongs at the tail, which is the pump's to append and must wait for it — appended early it would
 become the session's last user message, which is the turn a redo re-runs.
@@ -493,13 +505,19 @@ A throwing handler is isolated (caught, logged, skipped) — never propagated. A
 
 | `on` | Cadence | Session | Effects |
 |---|---|---|---|
-| `screen`     | once per turn, before 1st provider call | read-write | replace `session`, add `ephemeral` context (tail of outgoing messages, never persisted), add `durable` context (folded onto the user turn — persisted + visible — and carried live as `robo-user`), append durable `markers`, and/or `abort` |
+| `screen`     | once per turn, before 1st provider call | read-write | replace `session`, add `ephemeral` context (tail of outgoing messages, never persisted), add `durable` context (folded onto the user turn — persisted + visible — and carried live as `robo-user`), append durable `markers`, offer turn-scoped `tools`, and/or `abort` |
 | `contribute` | before *every* provider call | read-only | return transformed `outgoing` copy (ephemeral) |
 | `toolcall`   | before each tool exec | read-only | `rejectTool` and/or `abort` |
 | `toolresult` | after each tool exec | read-only | replace `result` (redaction) or observe |
 | `followup`   | once, post-commit | read + durable-marker | `resubmit` robo turn, `retractAndRerun` (pop committed turn, re-run with context), append durable `markers` |
 
 `screen` and `followup` are the durable-mutate points (once per turn). `contribute` is the in-harness cousin of a wrapping provider — mind prompt caching: inject at the tail or as stable prefix.
+
+### Turn-scoped tools
+
+`screen`'s `tools` is a **source**, `(session) => Tool[]`, that the runner asks at the top of every round — not a list — because a turn's own tool calls change the session it derives from, and a tool defined in round 2 must be callable in round 3. Its tools are never registered: advertised *after* the `ToolPresenter` (whose search reads the registry, so a tool it windowed out could never come back), resolved *after* the registry, and carried to nested calls on `ToolContext.turnTools`, which `invokeTool` consults — so `tool.x()` inside a composed function reaches them exactly as the model does, and a sessionless door (`POST /tools/:name`) cannot. A name the registry holds is dropped: shadowing a registered tool is a gated decision (`tools.overwrite`) and a hook is not a way round it. A `ToolCallValidator` finds tools by registry name, so it has nothing to say about these; a source validates its own tools' input.
+
+The one consumer is `function-tools`' `define { scope: 'session' }`, which stores each definition as a marker in its session (so fork/cut/compact carry it) and types `tool.<session fn>()` by appending a `ToolContracts` augmentation **after** the snippet it checks — built from `turnTools`, never from the markers, so what passes the check is exactly what resolves at run time.
 
 ### Authorship vs. role
 

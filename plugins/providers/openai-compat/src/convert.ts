@@ -1,4 +1,5 @@
 import type { Message, MessageContent, Tool, JSONSchema } from '@matatbread/matbot-plugin-api';
+import { textDocument } from '@matatbread/matbot-core/providers-base';
 
 // Gemini 3 thought signatures ride on a tool-call's `ProviderMeta`, namespaced under `google`. Homed in
 // THIS package (not the native @matatbread/matbot-provider-google adapter) because both surfaces round-
@@ -150,7 +151,9 @@ export function toOAIMessages(messages: Message[], cache = false, geminiMode = f
         case 'image':     return [{ type: 'image_url', image_url: { url: `data:${c.mimeType};base64,${c.data}` } }];
         case 'image-url': return [{ type: 'image_url', image_url: { url: c.url, ...(c.detail !== undefined ? { detail: c.detail } : {}) } }];
         case 'file-ref':  return [{ type: 'text', text: `[Attached file: ${c.name}]` }];
-        case 'document':  return [{ type: 'text', text: `[Document: ${c.name ?? c.mimeType}]` }];
+        // This protocol has no document block at all, so a text file was being announced and then
+        // withheld. Inlined as text it is lossless; a PDF still degrades to the note.
+        case 'document':  return [{ type: 'text', text: textDocument(c) ?? `[Document: ${c.name ?? c.mimeType}]` }];
         case 'audio':     return [{ type: 'text', text: `[Audio: ${c.mimeType}]` }];
         case 'thinking':
         case 'redacted-thinking':
