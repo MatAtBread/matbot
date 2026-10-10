@@ -19,10 +19,11 @@ const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e))
 const CANCELLED = 'Cancelled: the call was aborted while the function was still running.';
 
 /**
- * Compile a method-shorthand function definition into a runnable async function. The body is wrapped
- * as an immediately-returned function expression — `(async function <rest>)(...args)` — so both the
- * named (define) and anonymous (lambda) forms strip and construct through one path. Everything runs
- * async so tool calls inside can be awaited; `tool` is the proxy passed as the first argument. Type
+ * Compile a method-shorthand function definition into a runnable async function. The definition is
+ * wrapped as an immediately-returned function expression — `(async function <rest>)(...args)` — so a
+ * leading `async` or `function` keyword is stripped and the named form constructs through one path; the
+ * body-only form (no head at all) goes through {@link buildBodyFn} instead. Everything runs async so tool
+ * calls inside can be awaited; `tool` is the proxy passed as the first argument. Type
  * erasure is delegated to the host-provided {@link TypeScriptStripper} (node's native stripper or the
  * browser's sucrase), so this stays platform-agnostic; because that strip may be async, so is this.
  * The result runs under whichever {@link FunctionRunner} is current at each call; see {@link compileUnder}.
@@ -47,6 +48,33 @@ export async function buildAsyncFn(host: CompileHost, definition: string, paramN
  *
  * Compiled eagerly too, so a syntax error is reported at definition rather than at first call.
  */
+/**
+ * Compile a bare statement block into a runnable async function — the `execute` form, whose definition IS
+ * its body. There is no head to strip, so the block is appended to a synthesised empty one and the braces
+ * the author wrote become the function's own.
+ *
+ * Requiring the braces is load-bearing rather than a parsing convenience. An arrow head is a legal
+ * *expression statement*, so a tolerantly-wrapped `(args) => { … }` would compile, evaluate and discard
+ * the function, and return `undefined` — a silent `null` on the wire that reads exactly like a body which
+ * chose to return nothing. Demanding the `{` turns that into a reported error that names the fix, which is
+ * the whole point of the form: with no head to write there is no arrow to write either.
+ */
+export async function buildBodyFn(host: CompileHost, definition: string): Promise<CompiledFn> {
+  const src = stripLeadingTrivia(definition);
+  if (!src.startsWith('{')) {
+    throw new Error(
+      'execute takes a bare BODY, not a function: write the statements between braces, e.g. ' +
+      "`{ const xs = await tool.x({}); return xs.length; }`" +
+      '. There is no function head, no parameter list and no `=>` — an arrow form would compile and then return nothing at all.',
+    );
+  }
+  const wrapped = `(async function () ${src})`;
+  let stripped: string;
+  try { stripped = await host.TypeScriptStripper.strip(wrapped); }
+  catch (e) { throw new Error(`not valid TypeScript (${msg(e)})`); }
+  return compileUnder(host, INJECTED, `return ${stripped}();`) as CompiledFn;
+}
+
 export function compileUnder(host: Pick<MatbotMachine, 'FunctionRunner'>, params: readonly string[], body: string): (...args: unknown[]) => Promise<unknown> {
   const compile = (runner: FunctionRunner | undefined): ((...args: unknown[]) => Promise<unknown>) => {
     try { return runner !== undefined ? runner.compile(params, body) : new AsyncFunction(...params, body); }

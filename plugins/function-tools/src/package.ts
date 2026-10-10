@@ -326,7 +326,7 @@ function deriveExport(packageName: string, name: string, fnSource: string, descr
   if (toolName.length > MAX_TOOL_NAME) throw new Error(`tool name "${toolName}" is longer than ${MAX_TOOL_NAME} characters, which providers reject — shorten the package or function name.`);
 
   const sig = parseSignature(fnSource);
-  // One object parameter (or none) — the lambda convention, so a call to it from inside the package and
+  // One object parameter (or none) — the single-argument convention, so a call to it from inside the package and
   // `tool.<package>__<name>(…)` from outside take the same argument.
   if (sig.params.length > 1) throw new Error(`exported function "${name}" takes ${sig.params.length} parameters — a tool takes ONE object parameter, e.g. \`${name}(args: { a: string; b: number })\`.`);
   const param = sig.params[0];

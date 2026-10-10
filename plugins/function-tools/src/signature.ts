@@ -174,7 +174,8 @@ function parseParam(seg: string): ParsedParam | null {
   };
 }
 
-/** Parse a method-shorthand function head (`name(params): ret { … }`). `name` is absent for a lambda. */
+/** Parse a method-shorthand function head (`name(params): ret { … }`). `name` is absent when the head has
+ *  none — `define` requires one, so an anonymous head reaching here is the caller's form, not the parser's. */
 export function parseSignature(source: string): ParsedSignature {
   const src  = stripLeadingTrivia(source);
   const head = src.match(/^\s*(?:async\s+)?(?:function\s+)?([A-Za-z_$][\w$]*)?\s*\(/);
