@@ -51,6 +51,11 @@ const HINTS: { codes: number[]; pattern?: RegExp; hint: string }[] = [
     hint: 'the value may be undefined — often an indexed access (array[i], record[key]) under noUncheckedIndexedAccess. Guard it (if (v !== undefined) …) rather than asserting.',
   },
   {
+    codes: [90003],
+    pattern: /Object\.(?:keys|values|entries|assign)\s*\(/,
+    hint: "Object.keys/values/entries already accept a precisely-typed object — drop the cast and pass the value itself. (If you wanted the key names as a type, that is `keyof typeof x`.)",
+  },
+  {
     codes: [1484, 1485],
     hint: 'verbatimModuleSyntax: types must be imported with `import type { … }`; values with a plain `import`.',
   },
@@ -192,21 +197,6 @@ export async function checkProjectDir(
   return { ok: false, output: parts.join('\n').trim() };
 }
 
-/**
- * Node's own type declarations, as a `typeRoots` entry — so a body reaching a builtin through the
- * runner's dynamic `import()` is checked against the real signatures rather than failing to resolve.
- *
- * Resolved from THIS package, where `@types/node` is a dependency, not from the checked project: the
- * program is rooted at the `matbot.yaml` directory, which under pnpm (and in any published install)
- * has no `node_modules/@types` in its lookup chain at all — so the default typeRoots walk finds
- * nothing and every `node:` specifier reports as unresolved.
- */
-async function nodeTypeRoot(): Promise<string> {
-  const { createRequire } = await import('node:module');
-  const { dirname } = await import('node:path');
-  return dirname(dirname(createRequire(import.meta.url).resolve('@types/node/package.json')));
-}
-
 /** Typecheck a snippet against an ambient prefix (the derived tool dts) as one virtual module rooted
  *  at `root`. Returns one annotated block per diagnostic, positions snippet-relative — the shape
  *  {@link ToolTypeIndex.check} has always returned, upgraded from bare `line N: message` strings. */
@@ -216,12 +206,11 @@ export async function checkSnippetAgainst(opts: {
   prefixLen:     number;
   prefixLines:   number;
   apiIndexPath?: string;
+  /** `paths` entries for the module specifiers this installation permits a body to import — one per
+   *  permitted module, so a module outside the set does not resolve and is a compile error rather than
+   *  something that typechecks and is refused at run time. Built by the caller, which knows the set. */
+  importPaths?: Record<string, string[]>;
 }): Promise<ToolCheckReport> {
-  // Node's types roughly double a check's cost, so they are loaded only for a snippet that actually
-  // names a builtin. Read off the SNIPPET, never the whole source: the ambient prefix mentions `node:`
-  // itself, in the line that tells the author the imports are available. A miss costs an unresolved
-  // module — which fails the check rather than passing it, so the degradation is visible and safe.
-  const wantsNode = /(['"\u0060])node:/.test(opts.source.slice(opts.prefixLen));
   const diags = await runWorker({
     mode: 'snippet',
     root: opts.root,
@@ -230,7 +219,7 @@ export async function checkSnippetAgainst(opts: {
     prefixLines: opts.prefixLines,
     virtualPath: `${opts.root}/__mb_toolcheck_${crypto.randomUUID()}.ts`,
     ...(opts.apiIndexPath !== undefined ? { apiIndexPath: opts.apiIndexPath } : {}),
-    ...(wantsNode ? { nodeTypeRoot: await nodeTypeRoot() } : {}),
+    ...(opts.importPaths  !== undefined ? { importPaths:  opts.importPaths  } : {}),
   });
   return reportOf(diags ?? []);
 }
@@ -281,10 +270,13 @@ try {
       target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.NodeNext, moduleResolution: ts.ModuleResolutionKind.NodeNext,
       strict: true, exactOptionalPropertyTypes: true, noEmit: true, skipLibCheck: true, baseUrl: baseDir,
     };
-    if (workerData.apiIndexPath) options.paths = { '@matatbread/matbot-plugin-api': [workerData.apiIndexPath] };
-    // 'types' is required, not just the root: with typeRoots alone nothing is auto-included here and
-    // every 'node:' specifier still reports unresolved.
-    if (workerData.nodeTypeRoot) { options.typeRoots = [workerData.nodeTypeRoot]; options.types = ['node']; }
+    // Module types come in through 'paths', one entry per PERMITTED specifier, never through
+    // types:['node'] — which is all-or-nothing (it makes every builtin resolve, so a module the install
+    // forbids typechecks clean and is refused only at run time) and pulls 168 files where this pulls 65.
+    options.paths = {
+      ...(workerData.apiIndexPath ? { '@matatbread/matbot-plugin-api': [workerData.apiIndexPath] } : {}),
+      ...(workerData.importPaths ?? {}),
+    };
     const host = ts.createCompilerHost(options);
     const getSF = host.getSourceFile.bind(host);
     host.getSourceFile = function (f, lang, onErr, create) {
@@ -363,7 +355,7 @@ try {
     require:    "'require' is not defined in a function body — it is compiled as a bare async function, not a module. Use a dynamic import instead: 'const fs = await import('node:fs/promises')'.",
     module:     "'module' is not defined in a function body — it is compiled as a bare async function, not a CommonJS module. Return a value instead of assigning to an export.",
     exports:    "'exports' is not defined in a function body — it is compiled as a bare async function, not a CommonJS module. Return a value instead of assigning to an export.",
-    __dirname:  "'__dirname' is not defined in a function body. A relative dynamic import resolves against matbot's working directory, so 'await import('./x.ts')' works without it; for a path, use 'process.cwd()'.",
+    __dirname:  "'__dirname' is not defined in a function body, and neither is 'process' — a body computes and calls tools, it does not navigate the filesystem by hand. 'context.workdir' is the directory a call was given, when it was given one.",
     __filename: "'__filename' is not defined in a function body. There is no file — the body is compiled from source held in the session.",
   };
   const envGate = workerData.mode === 'snippet';

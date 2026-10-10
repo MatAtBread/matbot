@@ -11,24 +11,77 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ## 0.4.20
 
+### Breaking changes
+
+- **A `tool_function` body's imports are asked about.** The dynamic `import()` added earlier in this
+  release was unconditional and advertised in the generated tool dts; the first time a body imports
+  something, the user is now asked, naming the function and the module. The `tool_function.import` gate is
+  keyed on the pair `"<function> <specifier>"` rather than the specifier alone, because *why is this
+  function asking for `node:fs`* is the question being put, and a specifier-only key would let a brand-new
+  function inherit every grant a reviewed one had earned. `function_imports: { permit: […] }` in
+  `matbot.yaml` is an optional restriction on what may even be asked for; **absent means no restriction**,
+  because a gate that is never reached is not a gate, and `permit: []` switches imports off — the only way
+  to say "never", since a standing answer is always a yes. A body
+  still writes `import(…)`: `function-tools` rewrites it onto an injected gated loader, so a computed
+  specifier works too — the argument passes through and the gate sees the string the body built. The vm
+  runner also withholds `process`, `globalThis`, `global`, `Buffer`, `eval`, `Function` and the phantom
+  `require`/`module`/`exports`/`__dirname`/`__filename`, because `process.getBuiltinModule` otherwise
+  reaches every builtin with no import at all and the gate would be decorative. It is not a sandbox and
+  is not described as one — `(()=>{}).constructor('return process')()` recovers the real `process`, and a
+  non-builtin module loads as host code that is not shadowed, which its gate label says.
+
+### API gaps filled
+
+- **`PermissionRequest.standing`** — the answers one act may be remembered as, narrowest first, each as
+  the subject a policy would store and the prose a human reads. The call site supplies the subjects
+  because only it knows how its own generalise, so a policy matches by set membership over strings it
+  never parses and no gate id is hardcoded in it. It supplies the labels for the same reason it supplies
+  `label`: a subject is a key chosen to be stable and unambiguous, and keys make terrible prose —
+  `#execute node:fs/` is a correct key and an unusable question. A policy stores only a subject that was
+  actually offered, so no other gate's memory semantics change, and with none offered it falls back to
+  naming the subject — right for a gate whose subject is already prose (`@x/foo` for `plugin.add`).
+- **`FunctionRunner.permittedImports` and `FunctionRunner.import()`** — the optional restriction (absent
+  ⇒ unrestricted; `[]` ⇒ none), and how a granted specifier becomes a module. The restriction is on the
+  runner because the runner is the execution environment and two consumers need one answer: the capability
+  that imports, and the type index that declares the reachable set. `import()` is platform-specific because node refuses an `http(s)` specifier
+  outright (`ERR_UNSUPPORTED_ESM_URL_SCHEME`), so it materialises one under `.plugins/` and imports from
+  disk, while a browser imports the URL directly.
+
 ### Optional
 
-- **`tool-types` / `cli`** — a `tool_function` body can `await import('node:…')`, and is type-checked
-  when it does. The vm runner compiles the body with `importModuleDynamically:
-  USE_MAIN_CONTEXT_DEFAULT_LOADER`, so dynamic import routes through the main context's own ESM
-  loader and the CLI's registered hooks apply unchanged — the `.js`→`.ts` remap, type stripping,
-  `?mbfresh=` propagation and `.plugins/` fetching. No capability is granted: running in this
-  context, a body already reached every builtin through `process.getBuiltinModule`, so `vm` was never
-  a boundary here. The bound on synchronous work is unaffected. `ToolTypeIndex.check` loads node's
-  types for a snippet that names a builtin — so a hallucinated `os.hstname()` is caught instead of
-  the specifier merely failing to resolve — which required `@types/node` as a dependency of
-  `tool-types`, the check program being rooted at the `matbot.yaml` directory, where neither a pnpm
-  workspace nor a published install has `node_modules/@types` in the lookup chain. Loading them also
-  declares `require`, `module`, `exports`, `__dirname` and `__filename`, none of which the runner
-  defines; a new structural rule (ENV-GATE, beside the cast gate) rejects those and `import.meta`
-  and names the working form, rather than letting `require('node:fs')` typecheck and fail at the
-  first call. `ToolCheckDiagnostic.label` now carries a per-rule name for a structural finding
-  instead of always `CAST-GATE`.
+- **`frontend/web`** — a streaming turn writes the DOM once per animation frame instead of once per
+  delta. Each delta used to write and then measure — a full `marked.parse` of the whole message plus
+  `innerHTML`, then `offsetHeight`, `scrollIntoView` and `scrollTop` — which is a forced synchronous
+  reflow apiece, and `turnEvents` drains its queue through microtasks, so a whole SSE chunk's worth
+  ran in one task with no paint between them. A profile of a real conversation showed hundreds of
+  long frames, most of them from thinking deltas. Writes are now coalesced by a keyed,
+  last-write-wins frame scheduler (the DOM analogue of `scheduleAtEdge`): the element is created
+  synchronously, so it keeps its place in the stream ahead of any tool block that follows, and only
+  the render and the measurement wait for the frame. The key is the *element*, not the turn — two
+  text blocks either side of a tool call that lands inside one frame share a turn, and keying on the
+  turn let the second block's write evict the first's and leave it permanently empty. The text is
+  captured at schedule time rather than read at fire time, since `tool:end` resets the accumulator.
+  Latency is unchanged: a single delta still renders on the very next frame, which a debounce timer
+  could not say. The one visible change is that a **thinking** block no longer chases its own bottom
+  past the viewport — it is bounded by the same fits-the-viewport test the text path has had since
+  continuous bottom-chasing was removed, which thinking reached around. The header/composer height
+  behind that test is cached and invalidated by a `ResizeObserver` rather than at each site that
+  could grow the composer, which is a list a later feature omits with no error and no symptom.
+
+- **`tool-types` / `cli`** — a `tool_function` body's imports are type-checked against the modules the
+  installation permits. `ToolTypeIndex.check` scopes node's declarations with `paths`, one entry per
+  reachable module, rather than `types: ['node']` — which is all-or-nothing, so every builtin resolves
+  unconditionally and a module the install forbids typechecks clean and is refused only at run time, the
+  exact failure the check gate exists to prevent. It also pulls 65 files where `types` pulled 168. This required
+  `@types/node` as a dependency of `tool-types`: the check program is rooted at the `matbot.yaml`
+  directory, where neither a pnpm workspace nor a published install has `node_modules/@types` in the
+  lookup chain. Loading node's types also declares `require`, `module`, `exports`, `__dirname` and
+  `__filename`, none of which a body has, so a new structural rule (**ENV-GATE**, beside the cast gate)
+  rejects those and `import.meta` with the working form named, rather than letting `require('node:fs')`
+  typecheck and fail at the first call. `ToolCheckDiagnostic.label` now carries a per-rule name for a
+  structural finding instead of always `CAST-GATE`. An `http(s)` module gets no types at all:
+  TypeScript cannot express "a module with arbitrary named exports", and an untypeable thing is a
+  stated refusal here, not a fake type.
 
 - **`background-jobs` / `sessions`** — a job's reporting conversation is stated where the model reads
   it. Both tools described the append target as "this conversation" or "a default", which a model

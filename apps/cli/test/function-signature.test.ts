@@ -281,3 +281,20 @@ test('a body calling context.progress passes the type-check gate', async () => {
   `);
   assert.ok(diags.length > 0, 'a message passed as the percentage should be rejected');
 });
+
+// A declared return type is the tool's RESULT, and every body is async — so `f(): T` and
+// `async f(): Promise<T>` describe one tool. Spliced verbatim they disagreed on the way out: the second
+// made `tool.f()` resolve to `Promise<T>`, which `await` hid (it unwraps recursively) and `.then(r => r.x)`
+// did not, while tsc's own "Did you forget to use 'await'?" pointed at the one thing already correct.
+test('a declared Promise<T> and a declared T register the same contract', async () => {
+  const { buildAsyncFn: _b } = await import('@matatbread/matbot-function-tools');
+  const { parseSignature, unwrapPromise } = await import('@matatbread/matbot-function-tools');
+  const bare = parseSignature(`f(p: string): { bytes: number } { return { bytes: p.length }; }`);
+  const prom = parseSignature(`async f(p: string): Promise<{ bytes: number }> { return { bytes: p.length }; }`);
+  assert.equal(unwrapPromise(prom.returnType!), unwrapPromise(bare.returnType!));
+  assert.equal(unwrapPromise(prom.returnType!), '{ bytes: number }');
+  // Not over-eager: a result that merely MENTIONS Promise keeps its shape.
+  assert.equal(unwrapPromise('{ p: Promise<number> }'), '{ p: Promise<number> }');
+  assert.equal(unwrapPromise('Promise<Promise<number>>'), 'Promise<number>', 'one layer, not all');
+  assert.equal(unwrapPromise('string'), 'string');
+});

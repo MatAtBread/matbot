@@ -26,6 +26,27 @@ export interface PermissionRequest {
   /** What this site does when nothing can be asked and nothing decides — today's non-interactive
    *  behaviour, stated once per site instead of implied at each. */
   fallback: boolean;
+  /**
+   * The standing answers this act may be remembered as, NARROWEST FIRST — what a policy offers beside
+   * "just this once", each as the subject it would store and the prose a human reads. A policy consults
+   * {@link subject} and then each of these in order, and may store whichever was chosen; absent, the
+   * only standing answer is the exact subject, labelled by the policy.
+   *
+   * The call site supplies the SUBJECTS because only it knows how its own generalise: a module specifier
+   * widens by protocol or by directory, a plugin specifier by registry scope, and neither rule is one a
+   * policy could derive without knowing the gate. Which is the point — a policy does **set membership**
+   * over strings it never parses, so no gate id is hardcoded in it and a gate this build never compiled
+   * against generalises the same way.
+   *
+   * It supplies the LABELS for the same reason it supplies {@link label}: a subject is a key, chosen to
+   * be stable and unambiguous, and keys make terrible prose. `#execute node:fs/` is a correct key and an
+   * unusable question. A policy rendering `Always allow "<subject>"` can only ever show the key, because
+   * saying it in English needs exactly the knowledge the subject was built to avoid requiring.
+   *
+   * A policy must never store a subject that was not offered here: that is what keeps this from widening
+   * the memory semantics of every other gate.
+   */
+  standing?: readonly { readonly subject: string; readonly label: string }[];
 }
 
 /**

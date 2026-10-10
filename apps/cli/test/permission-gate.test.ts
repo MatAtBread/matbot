@@ -83,6 +83,69 @@ function policy(defaults?: Record<string, unknown>, previous?: PermissionGate): 
 
 afterEach(() => { installSettingsDefaults(undefined); });
 
+// ── Suggested generalisations ─────────────────────────────────────────────────
+// A two-dimensional decision (which function, which module) cannot be keyed on the subject alone — a
+// brand-new function would inherit every grant a reviewed one earned. The call site enumerates how its
+// own subjects generalise and the policy does set membership over strings it never parses, so no gate id
+// is hardcoded here and a gate this build never compiled against generalises the same way.
+
+const importReq = (over: Partial<PermissionRequest> = {}): PermissionRequest => ({
+  gate: 'tool_function.import', subject: 'probe node:os',
+  label: 'Allow function "probe" to import **node:os**?', fallback: false,
+  standing: [
+    { subject: 'probe node:os', label: 'Always allow function "probe" to import node:os' },
+    { subject: 'probe node:',   label: 'Always allow function "probe" to import any node builtin' },
+    { subject: '* node:os',     label: 'Always allow ANY function to import node:os' },
+  ], ...over,
+});
+
+test('a stored generalisation covers a subject it was never written for', async () => {
+  const { gate } = policy({ 'tool_function.import': ['probe node:'] });
+  // Nobody stored "probe node:os", and nobody is asked: the suggestion matched.
+  const { asked } = recorder('deny');
+  assert.equal(await gate.decide(importReq(), asked.length === 0 ? undefined : undefined), true);
+  // A different function is NOT covered by the first one's standing answer.
+  assert.equal(await gate.decide(importReq({ subject: 'other node:os', standing: [
+    { subject: 'other node:', label: 'x' }, { subject: '* node:os', label: 'y' }] }), undefined), false);
+});
+
+test('each standing answer is offered in order, labelled by the CALL SITE, and the chosen one is stored', async () => {
+  const { gate, settings } = policy();
+  const { asked, ask } = recorder('always-1');
+  assert.equal(await gate.decide(importReq(), ask), true);
+  // The policy renders the call site's prose and never rewrites it — the same rule `label` follows.
+  // Rendering `Always allow "<subject>"` could only ever show the key, which is what made the prompt
+  // unreadable: nothing outside the call site knows that `node:` means "any builtin".
+  assert.deepEqual(asked[0]?.options?.map(optionLabel), [
+    'Deny', 'Allow',
+    'Always allow function "probe" to import node:os',
+    'Always allow function "probe" to import any node builtin',
+    'Always allow ANY function to import node:os',
+    'Always allow every tool_function.import',
+  ]);
+  assert.deepEqual(await settings.get('tool_function.import'), ['probe node:']);
+});
+
+test('with none offered, the policy still offers the exact subject', async () => {
+  // A gate whose subject is already prose a human recognises (`@x/foo`) needs nothing more, and naming
+  // the subject is all a policy can honestly do.
+  const { gate, settings } = policy();
+  const { asked, ask } = recorder('always-0');
+  assert.equal(await gate.decide(req(), ask), true);
+  assert.deepEqual(asked[0]?.options?.map(optionLabel),
+    ['Deny', 'Allow', 'Always allow "@x/foo"', 'Always allow every plugin.add']);
+  assert.deepEqual(await settings.get('plugin.add'), ['@x/foo']);
+});
+
+test('a policy stores only a subject it actually offered', async () => {
+  // The remembered value is looked up among the rendered options, never taken from the answer text —
+  // otherwise a call site could widen any gate's memory by what it puts in one field.
+  const { gate, docs } = policy();
+  const { ask } = recorder('always-9');
+  assert.equal(await gate.decide(importReq(), ask), false, 'an unrecognised answer grants nothing');
+  assert.equal(docs.size, 0);
+});
+
 test('an unknown gate id is asked about, never allowed', async () => {
   const { gate } = policy({ 'plugin.add': ['@x/foo'] });
   const { asked, ask } = recorder('Deny');
@@ -149,7 +212,7 @@ test('the options separate what is shown from what is answered', async () => {
   await gate.decide(req({ gate: 'plugin.add', subject: '@x/foo' }), seen.ask);
 
   const opts = seen.asked[0]?.options ?? [];
-  assert.deepEqual(opts.map(optionValue), ['deny', 'allow', 'always-subject', 'always-gate']);
+  assert.deepEqual(opts.map(optionValue), ['deny', 'allow', 'always-0', 'always-gate']);
   assert.deepEqual(opts.map(optionLabel), [
     'Deny', 'Allow', 'Always allow "@x/foo"', 'Always allow every plugin.add',
   ]);
@@ -230,8 +293,8 @@ test('two "Always allow" answers at once keep both subjects', async () => {
   // writes must be serialised: unguarded, both read the same list and the second drops the first.
   const { gate, settings } = policy();
   await Promise.all([
-    gate.decide(req({ subject: '@x/foo' }), recorder('always-subject').ask),
-    gate.decide(req({ subject: '@y/bar' }), recorder('always-subject').ask),
+    gate.decide(req({ subject: '@x/foo' }), recorder('always-0').ask),
+    gate.decide(req({ subject: '@y/bar' }), recorder('always-0').ask),
   ]);
   assert.deepEqual((await settings.get<string[]>('plugin.add'))?.slice().sort(), ['@x/foo', '@y/bar']);
 });
@@ -264,7 +327,7 @@ test('gate_action get reports ANSWERS — never a default it cannot know', async
   assert.deepEqual(configured.answers, [{ gate: 'tools.overwrite', effect: 'subjects', subjects: ['bash'] }]);
 
   // An answer given at a prompt reads the same way as one an installation configured, and joins it.
-  await gate.decide(req(), recorder('always-subject').ask);
+  await gate.decide(req(), recorder('always-0').ask);
   const after = await run<{ answers: { gate: string; effect: string; subjects?: string[] }[] }>(
     tool, { action: 'get', gate: 'plugin.add' });
   assert.deepEqual(after.answers, [{ gate: 'plugin.add', effect: 'subjects', subjects: ['@x/foo'] }]);
@@ -286,7 +349,7 @@ test('gate_action clear forgets an answer, reverting to what the installation co
   const { gate, settings } = policy({ 'plugin.add': ['@configured/one'] });
   const tool = makeGateActionTool(settings);
 
-  await gate.decide(req({ subject: '@x/foo' }), recorder('always-subject').ask);
+  await gate.decide(req({ subject: '@x/foo' }), recorder('always-0').ask);
   assert.equal(await gate.decide(req({ subject: '@x/foo' }), recorder('Deny').ask), true);
 
   // One subject out of the stored list; the rest of the list stands.
@@ -297,7 +360,7 @@ test('gate_action clear forgets an answer, reverting to what the installation co
   assert.equal(await gate.decide(req({ subject: '@configured/one' }), asked.ask), true);
 
   // The whole gate: delete means "revert to the configured default", so the floor comes back.
-  await gate.decide(req({ subject: '@x/foo' }), recorder('always-subject').ask);
+  await gate.decide(req({ subject: '@x/foo' }), recorder('always-0').ask);
   const cleared = await run<{ cleared: string[]; message: string }>(tool, { action: 'clear', gate: 'plugin.add' });
   assert.deepEqual(cleared.cleared, ['plugin.add']);
   assert.equal(await gate.decide(req({ subject: '@configured/one' }), asked.ask), true,
