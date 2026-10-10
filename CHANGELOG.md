@@ -13,6 +13,23 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Optional
 
+- **`tool-types` / `cli`** — a `tool_function` body can `await import('node:…')`, and is type-checked
+  when it does. The vm runner compiles the body with `importModuleDynamically:
+  USE_MAIN_CONTEXT_DEFAULT_LOADER`, so dynamic import routes through the main context's own ESM
+  loader and the CLI's registered hooks apply unchanged — the `.js`→`.ts` remap, type stripping,
+  `?mbfresh=` propagation and `.plugins/` fetching. No capability is granted: running in this
+  context, a body already reached every builtin through `process.getBuiltinModule`, so `vm` was never
+  a boundary here. The bound on synchronous work is unaffected. `ToolTypeIndex.check` loads node's
+  types for a snippet that names a builtin — so a hallucinated `os.hstname()` is caught instead of
+  the specifier merely failing to resolve — which required `@types/node` as a dependency of
+  `tool-types`, the check program being rooted at the `matbot.yaml` directory, where neither a pnpm
+  workspace nor a published install has `node_modules/@types` in the lookup chain. Loading them also
+  declares `require`, `module`, `exports`, `__dirname` and `__filename`, none of which the runner
+  defines; a new structural rule (ENV-GATE, beside the cast gate) rejects those and `import.meta`
+  and names the working form, rather than letting `require('node:fs')` typecheck and fail at the
+  first call. `ToolCheckDiagnostic.label` now carries a per-rule name for a structural finding
+  instead of always `CAST-GATE`.
+
 - **`background-jobs` / `sessions`** — a job's reporting conversation is stated where the model reads
   it. Both tools described the append target as "this conversation" or "a default", which a model
   reads as the conversation it is in when it looks: it told the user a job would "report back here"

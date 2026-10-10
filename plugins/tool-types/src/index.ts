@@ -233,7 +233,11 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
     // hand-authored; `check()` uses this same string, so what a generator is shown is exactly what it is
     // graded against — which is also why `context` is declared here and not merely described in prose:
     // undeclared, every body reading it would fail the very check this string backs.
-    return `${this.registryBlock(this.cache!)}\ndeclare const tool: import('@matatbread/matbot-plugin-api').ToolProxy;\ndeclare const toolInContext: import('@matatbread/matbot-plugin-api').ToolBox;\ndeclare const context: import('@matatbread/matbot-plugin-api').ComposedCallContext;\n`;
+    // The node line is in the dts rather than in prose on the wire because this string is what a body is
+    // GRADED against: an author told elsewhere that `node:` imports work would still have to guess whether
+    // the checker agreed. It names the dynamic form specifically — `require` is not defined in a body, and
+    // is rejected by the env gate rather than left to fail at the first call.
+    return `${this.registryBlock(this.cache!)}\ndeclare const tool: import('@matatbread/matbot-plugin-api').ToolProxy;\ndeclare const toolInContext: import('@matatbread/matbot-plugin-api').ToolBox;\ndeclare const context: import('@matatbread/matbot-plugin-api').ComposedCallContext;\n// Node's builtins are available through a dynamic import: const fs = await import('node:fs/promises').\n// There is no require, module, __dirname, __filename or import.meta — a body is compiled as a bare\n// async function, not a module.\n`;
   }
 
   async wireContracts(): Promise<Record<string, { params: string; result: string }>> {

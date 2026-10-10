@@ -23,7 +23,7 @@ interface DiagnosticRecord {
   frame?:      string;
   sourceLine?: string;
   related?:    string[];
-  /** True for a cast-gate finding (a structural rule, not a tsc error) — labelled CAST-GATE, not TSnnnn. */
+  /** True for a structural-rule finding (not a tsc error) — labelled by {@link SYN_LABELS}, not TSnnnn. */
   syn?:        boolean;
 }
 
@@ -85,10 +85,15 @@ function hintFor(d: DiagnosticRecord): string | undefined {
 
 const MAX_FULL = 8;
 
+// A structural rule's label, by its private code. CAST-GATE is the default because it was the first and
+// is what the contract gate (90004) has always reported as; a rule about something other than types
+// needs its own name, or the label says the wrong thing about the finding under it.
+const SYN_LABELS: Record<number, string> = { 90005: 'ENV-GATE' };
+
 // One rule, one name, in every renderer: a per-rule label read off the record rather than spelled at
 // each render site, so a summary can never call a finding something its own entry did not.
 function label(d: DiagnosticRecord): string {
-  return d.syn ? 'CAST-GATE' : `TS${d.code}`;
+  return d.syn ? (SYN_LABELS[d.code] ?? 'CAST-GATE') : `TS${d.code}`;
 }
 
 function formatOne(d: DiagnosticRecord): string {
@@ -187,6 +192,21 @@ export async function checkProjectDir(
   return { ok: false, output: parts.join('\n').trim() };
 }
 
+/**
+ * Node's own type declarations, as a `typeRoots` entry — so a body reaching a builtin through the
+ * runner's dynamic `import()` is checked against the real signatures rather than failing to resolve.
+ *
+ * Resolved from THIS package, where `@types/node` is a dependency, not from the checked project: the
+ * program is rooted at the `matbot.yaml` directory, which under pnpm (and in any published install)
+ * has no `node_modules/@types` in its lookup chain at all — so the default typeRoots walk finds
+ * nothing and every `node:` specifier reports as unresolved.
+ */
+async function nodeTypeRoot(): Promise<string> {
+  const { createRequire } = await import('node:module');
+  const { dirname } = await import('node:path');
+  return dirname(dirname(createRequire(import.meta.url).resolve('@types/node/package.json')));
+}
+
 /** Typecheck a snippet against an ambient prefix (the derived tool dts) as one virtual module rooted
  *  at `root`. Returns one annotated block per diagnostic, positions snippet-relative — the shape
  *  {@link ToolTypeIndex.check} has always returned, upgraded from bare `line N: message` strings. */
@@ -197,6 +217,11 @@ export async function checkSnippetAgainst(opts: {
   prefixLines:   number;
   apiIndexPath?: string;
 }): Promise<ToolCheckReport> {
+  // Node's types roughly double a check's cost, so they are loaded only for a snippet that actually
+  // names a builtin. Read off the SNIPPET, never the whole source: the ambient prefix mentions `node:`
+  // itself, in the line that tells the author the imports are available. A miss costs an unresolved
+  // module — which fails the check rather than passing it, so the degradation is visible and safe.
+  const wantsNode = /(['"\u0060])node:/.test(opts.source.slice(opts.prefixLen));
   const diags = await runWorker({
     mode: 'snippet',
     root: opts.root,
@@ -205,6 +230,7 @@ export async function checkSnippetAgainst(opts: {
     prefixLines: opts.prefixLines,
     virtualPath: `${opts.root}/__mb_toolcheck_${crypto.randomUUID()}.ts`,
     ...(opts.apiIndexPath !== undefined ? { apiIndexPath: opts.apiIndexPath } : {}),
+    ...(wantsNode ? { nodeTypeRoot: await nodeTypeRoot() } : {}),
   });
   return reportOf(diags ?? []);
 }
@@ -256,6 +282,9 @@ try {
       strict: true, exactOptionalPropertyTypes: true, noEmit: true, skipLibCheck: true, baseUrl: baseDir,
     };
     if (workerData.apiIndexPath) options.paths = { '@matatbread/matbot-plugin-api': [workerData.apiIndexPath] };
+    // 'types' is required, not just the root: with typeRoots alone nothing is auto-included here and
+    // every 'node:' specifier still reports unresolved.
+    if (workerData.nodeTypeRoot) { options.typeRoots = [workerData.nodeTypeRoot]; options.types = ['node']; }
     const host = ts.createCompilerHost(options);
     const getSF = host.getSourceFile.bind(host);
     host.getSourceFile = function (f, lang, onErr, create) {
@@ -322,6 +351,53 @@ try {
     ts.forEachChild(node, function (c) { contractVisit(c, sf); });
   };
 
+  // ── env gate: a global that TypeScript resolves but the runner does not define ──
+  // A tool_function body is compiled as a bare async function expression, not a module and not a CJS
+  // wrapper, so 'require', 'module', 'exports', '__dirname' and '__filename' are all undefined at
+  // runtime and 'import.meta' will not even compile. Loading node's types to check await import('node:…')
+  // declares every one of them as a global, which makes the commonest wrong guess — require('node:fs') —
+  // typecheck clean and fail at the first call: correct against the types it was shown, so the repair loop
+  // cannot repair it. Rejected structurally for the same reason a cast is, with the working form named.
+  // Only in snippet mode: a compiled plugin IS a module and legitimately has 'import.meta'.
+  const ENV_GLOBALS = {
+    require:    "'require' is not defined in a function body — it is compiled as a bare async function, not a module. Use a dynamic import instead: 'const fs = await import('node:fs/promises')'.",
+    module:     "'module' is not defined in a function body — it is compiled as a bare async function, not a CommonJS module. Return a value instead of assigning to an export.",
+    exports:    "'exports' is not defined in a function body — it is compiled as a bare async function, not a CommonJS module. Return a value instead of assigning to an export.",
+    __dirname:  "'__dirname' is not defined in a function body. A relative dynamic import resolves against matbot's working directory, so 'await import('./x.ts')' works without it; for a path, use 'process.cwd()'.",
+    __filename: "'__filename' is not defined in a function body. There is no file — the body is compiled from source held in the session.",
+  };
+  const envGate = workerData.mode === 'snippet';
+  // Where the rule fired, so tsc's own 'Cannot find name' for the same identifier can be dropped: without
+  // node's types loaded both report, and two findings for one fix read as a cascade when the second says
+  // nothing the first did not — except which repair to make, which is the one this rule carries.
+  const envStarts = new Set();
+  // Declared by the author rather than inherited from node's globals: their own binding shadows it and
+  // works, so the rule must not fire. Decided on where the symbol's declaration IS, not on the parent
+  // node kind — that catches 'const require = …', a parameter and an import alias with one test.
+  const authorDeclared = function (node) {
+    const sym = checker.getSymbolAtLocation(node);
+    const decls = sym && sym.declarations;
+    if (!decls) return false;
+    return decls.some(function (d) {
+      return d.getSourceFile().fileName === virtual && d.getStart() >= minStart;
+    });
+  };
+  const envVisit = function (node, sf) {
+    if (envGate && node.getStart(sf) >= minStart) {
+      if (ts.isMetaProperty(node) && node.keywordToken === ts.SyntaxKind.ImportKeyword) {
+        synth.push(mk(sf, node, 90005,
+          "'import.meta' is only available in a module, and a function body is not one — this is a syntax error when the body is compiled, so it cannot run at all. Remove it."));
+      } else if (ts.isIdentifier(node) && Object.prototype.hasOwnProperty.call(ENV_GLOBALS, node.text)
+                 && !(node.parent && ts.isPropertyAccessExpression(node.parent) && node.parent.name === node)
+                 && !(node.parent && (ts.isPropertyAssignment(node.parent) || ts.isPropertySignature(node.parent)) && node.parent.name === node)
+                 && !authorDeclared(node)) {
+        synth.push(mk(sf, node, 90005, ENV_GLOBALS[node.text]));
+        envStarts.add(node.getStart(sf));
+      }
+    }
+    ts.forEachChild(node, function (c) { envVisit(c, sf); });
+  };
+
   const skip = new Set();
   const visit = function (node, sf) {
     const isAssertion = ts.isAsExpression(node) || (ts.isTypeAssertionExpression && ts.isTypeAssertionExpression(node));
@@ -346,9 +422,12 @@ try {
     }
     ts.forEachChild(node, function (c) { visit(c, sf); });
   };
-  for (const gf of gateFiles) { visit(gf, gf); contractVisit(gf, gf); }
+  for (const gf of gateFiles) { visit(gf, gf); contractVisit(gf, gf); envVisit(gf, gf); }
 
-  const errors = targets.filter(function (d) { return d.category === ts.DiagnosticCategory.Error; }).concat(synth);
+  const errors = targets.filter(function (d) {
+    if (d.category !== ts.DiagnosticCategory.Error) return false;
+    return !((d.code === 2304 || d.code === 2591) && envStarts.has(d.start));
+  }).concat(synth);
   errors.sort(function (a, b) {
     const fa = a.file ? a.file.fileName : '', fb = b.file ? b.file.fileName : '';
     return fa < fb ? -1 : fa > fb ? 1 : (a.start || 0) - (b.start || 0);

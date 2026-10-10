@@ -670,6 +670,9 @@ importers:
 
   plugins/tool-types:
     dependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 22.19.19
       typescript:
         specifier: 'catalog:'
         version: 6.0.3
@@ -680,9 +683,6 @@ importers:
       '@matatbread/matbot-plugin-api':
         specifier: workspace:^
         version: link:../../plugin-api
-      '@types/node':
-        specifier: 'catalog:'
-        version: 22.19.19
 
   plugins/triggers:
     devDependencies:

@@ -22,14 +22,28 @@ const invoke = new vm.Script(`globalThis[Symbol.for(${JSON.stringify(PENDING)})]
  * drain aborts the whole process whenever async hooks are enabled (nodejs/node#38503, closed unfixed).
  * matbot enables none, but the test runner does and any instrumentation might, and a guard that can kill
  * the daemon is worse than the freeze it prevents. An aborted call at least stops such a body's tool calls.
+ *
+ * A body reaches node through a dynamic `import()`, enabled by `USE_MAIN_CONTEXT_DEFAULT_LOADER` below.
+ * This grants nothing: running in this context, a body already reaches every builtin through
+ * `process.getBuiltinModule('node:fs')`. It makes the ergonomic form work and, with node's types loaded
+ * by the check gate, the typed one — `vm` is not and never was a capability boundary here.
  */
 export function createVmFunctionRunner(limitMs = FUNCTION_SYNC_LIMIT_MS): FunctionRunner {
   const slot = globalThis as unknown as Record<symbol, Array<() => Promise<unknown>> | undefined>;
   const stack = (slot[Symbol.for(PENDING)] ??= []);
   return {
     compile(params, body) {
-      const fn = vm.runInThisContext(`(async function (${params.join(', ')}) {\n${body}\n})`, { filename: 'tool_function' }) as
-        (...args: unknown[]) => Promise<unknown>;
+      // The option belongs on the compile of the BODY, not on `invoke`: the referrer of an `import()` is
+      // the script that created the enclosing function, not the one that happens to call it. It routes
+      // through the main context's own ESM loader, so the CLI's registered hooks apply — the .js→.ts
+      // remap, type stripping, `?mbfresh=` propagation and `.plugins/` fetching all behave as for a
+      // plugin import. `filename` stays a bare name: it is what a stack frame shows an author repairing
+      // the body, at the cost of relative specifiers resolving against the process working directory
+      // (the `matbot.yaml` directory) rather than against anything the body can see.
+      const fn = vm.runInThisContext(`(async function (${params.join(', ')}) {\n${body}\n})`, {
+        filename: 'tool_function',
+        importModuleDynamically: vm.constants.USE_MAIN_CONTEXT_DEFAULT_LOADER,
+      }) as (...args: unknown[]) => Promise<unknown>;
       return (...args) => {
         const depth = stack.length;
         let started: Promise<unknown> | undefined;

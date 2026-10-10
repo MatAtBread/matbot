@@ -47,7 +47,8 @@ export const FUNCTION_TIMEOUT = 'FUNCTION_TIMEOUT';
  * flattened `string[]` made every consumer do.
  */
 export interface ToolCheckDiagnostic {
-  /** The rule's one name, in every renderer: `TS2339`, or `CAST-GATE` for a structural cast-gate finding. */
+  /** The rule's one name, in every renderer: `TS2339`, or a structural rule's own name — `CAST-GATE`,
+   *  `ENV-GATE` for a global the runner does not define. */
   label:    string;
   /** The numeric code. Cast-gate findings use a private 9000x range — read {@link syn}, not the number. */
   code:     number;
