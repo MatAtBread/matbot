@@ -561,223 +561,169 @@ class SessionFunctions {
 
 const sessionMarker = (data: SessionFunctionMarker): ToolEvent => ({ type: 'marker', creator: MARKER_CREATOR, data });
 
-const DESCRIPTION = `WHEN TO USE THIS — judge it by the SIZE and SHAPE of the work, not by the number of calls:
+const DESCRIPTION = `Compile and run TypeScript in one pass across the registered tools. Inside a function you call them as
+\`await tool.x(params)\`, then filter, count, aggregate or loop, and return only the answer — so the
+listings, rows and file bodies it read on the way never enter the conversation.
 
-  1. A VERBOSE result you need a fraction of. A listing, a table, a file body, a search dump — where what
-     you actually want is a count, a total, an aggregate, a summary, or two fields. Reading it through the
-     conversation puts the whole thing in your context permanently in order to extract a line of it.
-  2. LOOPS AND CONDITIONALS. The same call over n items, read-each-and-decide, retry-until-it-works,
-     branch on what came back. A round per iteration, and every intermediate result kept for the session.
-
-NOT FOR THIS — the pathological case, and the tempting one: wrapping a SINGLE tool call whose result you
-are not reducing. If the body is one \`await tool.x(params)\` and a \`return\` of what came back, the lambda is
-strictly WORSE than the call it wraps — the same result reaches you either way, and the wrapper cost you a
-types call and a round to write it. There is no reason to wrap a single call whose result you are not going
-to aggregate, filter, count, loop over, or feed into another call. Call the tool.
-
-Authoring a lambda costs a call or two of its own (usually \`{ action: 'types' }\`, then the body), so two
-direct calls with small results are also fine as they are. It wins decisively the moment bulk would pass
-through the conversation to answer something small, or n grows.
-
-  Piping it yourself:  workspace_action(list) → 200 names in context → workspace_action(read) → contents
-                       in context → workspace_action(read) → … (a round each, all of it kept)
-  One lambda:          (args: { prefix: string }): number { … list, read each, count matches … } → the number
-  Pointless — do NOT: (args: { name: string }): string { return await tool.workspace_action({ action: 'read', name: args.name }); }
-                       ↑ reduces nothing, so it is the same result for more work: call workspace_action.
-
-Compose multiple tool calls — filter, count, reshape their results — without routing every intermediate result
-back through the model. Compositions are expressed as TypeScript functions that orchestrate other tools in a single pass.
-
-Inside a function, call any registered tool through the injected \`tool\` proxy:
-\`const r = await tool.<tool_name>(params)\` runs that tool and resolves to its structured result (the same
-value a direct call yields), inheriting this call's context. To run one call under a different context
-(e.g. another model), use the \`toolInContext\` factory: \`await toolInContext({ provider: 'fast-model' }).<tool_name>(params)\`
-— omitted fields are inherited. A tool name that doesn't exist is a compile error, so you can only call
-tools that are actually registered. Every tool call MUST be awaited — the whole body runs as an async
-function (so a recursive self-call must be awaited too). Return a JSON-serialisable value; that becomes
-the result the model sees. Each tool call is echoed to stdout, so the run is observable.
-
-THE INJECTED BINDINGS — three names are already in scope in every body. Use them directly; do NOT declare
-them as parameters, do NOT redeclare them with const/let, and do NOT try to import or construct them (a
-parameter of the same name is rejected, because it would shadow the injection):
-
-  tool           the proxy above — \`await tool.<tool_name>(params)\`
-  toolInContext  the factory above — \`await toolInContext({ provider }).<tool_name>(params)\`
-  context        the call you are running under, exactly:
-                   { callId: string; sessionId: string; provider?: string; workdir?: string; signal: AbortSignal;
-                     progress: (pct: number, message?: string) => void }
-
-\`context\` is how you answer "which session/turn am I in?" from inside a function — there is no tool that
-reports it (\`session_action\` takes a \`sessionId\` as an explicit param; \`whoami\` returns the principal, not
-the session). So the CURRENT session is \`context.sessionId\`:
-
-  const s = await tool.session_action({ action: 'get', sessionId: context.sessionId });
-
-Pass \`context.signal\` to any \`fetch\` you make so a long run stays cancellable. Note that \`context\`'s FIELDS
-are informational: a nested \`tool.<name>()\` call ALREADY inherits this session, signal and provider, so only
-pass its fields on where the callee takes them as explicit parameters (as \`session_action\` does above).
-
-TELL THE USER WHAT YOU ARE DOING while the body runs: \`context.progress(pct, message)\` — \`pct\` 0-100,
-\`message\` a short line of prose — draws a progress bar and caption against this call in the UI as it runs.
-It is not part of your result and is never sent back to you, so it costs you no context; it simply goes away
-when the call ends. Call it in any loop over n items, and between the stages of a multi-step body: a silent
-function that takes a minute is indistinguishable, to the person waiting, from a hung one.
-
-  const files = await tool.workspace_action({ action: 'list', prefix });
-  for (const [i, f] of files.entries()) {
-    context.progress((i / files.length) * 100, 'Reading ' + f.name);
-    if ((await tool.workspace_action({ action: 'read', name: f.name })).includes('TODO')) hits++;
-  }
-
-Before composing, run \`{ action: 'types' }\` to fetch TypeScript declarations of what the available tools'
-calls resolve to — write \`await tool.x(...)\` against those real return types instead of guessing shapes.
+WHEN TO USE IT — judge by the SIZE and SHAPE of the work, not the number of calls:
+  1. A VERBOSE result you need a fraction of — a count, a total, an aggregate, a summary, two fields.
+  2. A LOOP or a CONDITIONAL — the same call over n items, read-each-and-decide, retry-until, branch.
+  3. A multi-step chain that would otherwise cost a round per step, with no LLM turn between the steps.
+NOT FOR THIS — wrapping a SINGLE tool call whose result you are not reducing. A body that is one
+\`await tool.x(params)\` and a \`return\` of what came back is strictly WORSE than the call it wraps: the same
+result reaches you either way, and the wrapper cost you a round to write it. If the body would not filter,
+count, aggregate, loop, or feed its result into a second call, call the tool directly.
 
 ACTIONS
-  define — Persist a NAMED function as a new tool of the same name — in every conversation, or in this
-           one only (see \`scope\` below). Parameters are
-           derived from the signature and become the tool's inputs. You MUST declare an explicit return
-           type — it is verified against the body and becomes the tool's result contract (use void for a
-           side-effect-only tool). Pass an optional \`description\` to
-           document the new tool (shown to the model). Re-defining the same name recompiles it. Never
-           shadows a tool you didn't define here.
-           \`scope\` — WHO ASKED for the function decides it:
-             'global' (default): the user asked for a tool ("make me a tool that calculates Fibonacci
-                     numbers"). It is saved, survives restart, and is a tool in every conversation, over
-                     HTTP and to the tool presenter. Visible from the *next turn*.
-             'session': USE THIS for any function you define on your own initiative while working
-                     something out — a lambda you will call more than once, or a helper two lambdas share.
-                     Only THIS conversation sees it: call it directly, or as \`await tool.<name>(…)\` from
-                     your other functions, type-checked like any tool. Callable from your *next step*. A
-                     global tool in every conversation's list is a cost to every conversation, so do not
-                     make one the user did not ask for.
-           A global function cannot call a session one: it would fail in every other conversation. To
-           promote a session function, define it again with scope 'global' (it replaces the session one).
-  lambda — Compile and run an ANONYMOUS one-argument function once, now, against \`params\`. Nothing is
-           persisted or registered. This is the ordinary way to reduce a bulky or repetitive tool chain to
-           just its answer — but NOT a wrapper for a single call (see NOT FOR THIS above). If the same
-           chain is worth repeating later, define it instead. Type-checked against the live tool types before running (like define),
-           so a bad composition is caught before it runs; pass \`noTypeCheck: true\` to bypass.
-  package — Persist a PACKAGE: several tools plus private helpers they share, written as one TypeScript
-           module. Pass \`name\` (the package name) and \`definition\` (the module source). Every \`export\`ed
-           function becomes a tool named \`<package>__<function>\` — that exact name, with the double
-           underscore, is how you, other functions and HTTP call it: \`await tool.<package>__<function>(params)\`.
-           Everything NOT exported (helper functions, types, constants) is private to the package and is never
-           a tool. Use this instead of defining a helper as a tool of its own. An exported function takes ONE
-           object parameter (or none) and declares a return type, like a lambda, so calling it from inside the
-           package (directly — \`await my_helper(args)\`, never through \`tool\`) looks the same as calling it
-           from outside. A comment directly above an \`export\` becomes that tool's description. Type-checked
-           as a whole before registering (\`noTypeCheck\` bypasses). Re-defining a package replaces the whole
-           group — a function no longer exported stops being a tool — and \`remove { package }\` deletes it.
+  action   required          optional            what it makes
+  lambda   definition        params              one run now of an ANONYMOUS function; nothing is saved.
+  define   definition        description, scope  a NAMED tool of that name.
+  package  name, definition  —                   one tool per \`export\`, named <name>__<function>.
+  check    —                 name, package       a report; registers and persists nothing.
+  list     —                 —                   the functions, packages and session functions.
+  types    —                 —                   the d.ts a body is graded against.
+  remove   name, or package  —                   a defined function, or a whole package and its tools.
+\`noTypeCheck\` is accepted by lambda, define and package: it skips the
+type-check, and the definition is then recorded as \`definedUnchecked\`.
 
-           A PACKAGE IS NOT A MODULE INSTANCE, and it has NO STATE. It looks like a Node module but does not
-           behave like one: its whole top level is evaluated afresh on EVERY tool call, so nothing there
-           persists between calls and nothing there runs once. Two calls to \`<package>__inc\` share nothing,
-           and neither does a call through \`tool.<package>__x\` from inside the package. ONLY these may
-           appear at the top level: \`function\`, \`async function\`, \`export function\`, \`export async
-           function\`, \`const\` (for fixed values), \`interface\` and \`type\`. Anything else is REFUSED —
-           including \`let\`/\`var\`, \`class\`, \`enum\`, \`declare\`, \`import\`, a bare statement (\`n++\`,
-           \`await tool.x(...)\`) and a top-level \`await\` (\`const cfg = await ...\`).
-           WHAT A PACKAGE IS FOR: not polluting the global tool scope. Every tool is one entry in a single,
-           shared list that the model chooses from; a helper registered as a tool competes with the tools that
-           use it. A package lets related tools share private helpers without adding them to that list — and
-           that is ALL it does. It is NOT a substitute for a plugin. If what you are building needs to REMEMBER
-           anything between calls — a counter, a cache, a connection, one-time setup — or needs hooks,
-           services or background work, write a matbot PLUGIN, which has all of those capabilities.
-  check  — Re-run define's type-check over a function you already defined, without running or re-registering
-           it. Pass \`name\` for one function or \`package\` for one package, or omit both to check everything,
-           this conversation's session functions included. Use this after anything that
-           could move a contract a function was written against — a tool changing its parameters or result,
-           a plugin loading or unloading — since a defined function is compiled but NOT re-checked on
-           reload, so it keeps working until the moment it doesn't. Returns a row per function: \`total\` is
-           every finding, \`diagnostics\` the detailed ones (each with a \`rendered\` block to read and a
-           \`label\` such as \`TS2339\` or \`CAST-GATE\` to group on), and \`omitted\` the tally of any the
-           detail cap hid. Fix a failure by re-defining that function. A row also carries
-           \`definedUnchecked: true\` if that function was never type-checked when it was defined.
-           READ \`ok\` TOGETHER WITH \`checked\`, on the result and on each row: \`checked: false\` means
-           no type-checker could run here, so \`ok: true\` says only that nothing was examined.
-  list   — Show the functions and packages you've defined, with their source, and this conversation's
-           session functions (\`sessionFunctions\`). \`definedUnchecked: true\` marks one that
-           was registered without a type-check (it was defined with \`noTypeCheck\`, or no checker was
-           available) — run \`check\` on it, since a bypass hides errors that are still there.
-  types  — Return TypeScript declarations (a .d.ts) of what the available tools' calls resolve to, so you
-           can compose against real return types. Node only; \`available: false\` with an empty dts where
-           type info can't be derived (e.g. the browser) — fall back to inferring shapes and testing.
-  remove — Delete a defined function (\`name\`, global or this conversation's) and its tool, or a whole
-           package (\`package\`) and every tool it exports.
+HOW THE PARAMETERS RELATE
+  definition  function source for define and lambda; MODULE source for package.
+  scope       define only — 'global' (default) or 'session'. A package is always global.
+  name        the FUNCTION name for define / remove / check; the PACKAGE name for package.
+  package     a selector for check and remove, NOT the define action (that is action: 'package').
+  params      lambda only — the single object argument the body is called with.
 
-Functions use method-shorthand syntax — NOT arrow functions:
+WHAT A BODY IS
+A bare async function, NOT a module. It is compile-checked against the live tool types before it is
+registered or run (node; skip with \`noTypeCheck\`, which is recorded as \`definedUnchecked\`).
+Three names are injected — use them directly, and do NOT declare them as parameters or \`const\`/\`let\`
+(a parameter of the same name is rejected, because it would shadow the injection):
+  tool           \`await tool.<tool_name>(params)\` — any registered tool, inheriting this call's context.
+  toolInContext  \`await toolInContext({ provider }).<tool_name>(params)\` — one call under an override.
+  context        \`{ callId, sessionId, provider?, workdir?, signal, progress(pct, message?) }\` — the call
+                 you are running under. \`context.sessionId\` is THIS conversation; pass \`context.signal\`
+                 to any \`fetch\` so a long run stays cancellable; \`context.progress\` draws a progress bar
+                 for the person waiting, costs you no context and is never sent back to you.
+Every \`tool\` call MUST be awaited — the whole body runs as an async function, so a recursive self-call
+must be awaited too. Return a JSON-serialisable value; that becomes the result the model sees. Each tool
+call is echoed to stdout, so the run is observable.
 
-  define (definition):
-    count_plugins(check: string): string {
-      const p = await tool.plugin({ action: 'list' });
-      const n = p.loaded.filter(pl => pl.name.includes(check)).length;
-      return n + ' plugins match "' + check + '"';
-    }
-  → registers tool "count_plugins" taking { check: string }.
+NODE BUILTINS (node only). A body may reach the platform itself through a dynamic import:
+\`const fs = await import('node:fs/promises')\`. There is no \`require\`, \`module\`, \`exports\`, \`__dirname\`,
+\`__filename\` or \`import.meta\` — a body is not a module, and each is rejected rather than left to fail at
+the first call.
 
-  define (definition) using the injected \`context\` — no sessionId parameter needed, it knows where it is:
-    turn_count(): number {
-      const s = await tool.session_action({ action: 'get', sessionId: context.sessionId });
-      return s.messages.length;
-    }
-  → registers tool "turn_count" taking {}.
+SCOPE — WHO ASKED FOR THE FUNCTION DECIDES IT
+  'global' (default) — the user asked for a tool ("make me a tool that calculates Fibonacci numbers"). It
+     is saved, survives restart, and is a tool in every conversation, over HTTP and to the tool presenter.
+  'session' — you want a function of your own while working something out: a lambda you will call again,
+     or a helper two lambdas share. Only THIS conversation has it — call it directly from your next round,
+     or as \`await tool.<name>(…)\` from your other functions, type-checked like any tool. It is stored in
+     the conversation itself, so it survives a restart and follows the conversation through a fork, cut or
+     compact.
+A global tool in every conversation's list is a cost to every conversation, so do not make one the user did
+not ask for. A global function cannot call a session one — it would fail in every other conversation. To
+promote a session function, define it again with scope 'global' (it replaces the session one).
 
-  lambda (definition + params):
-    definition: (args: { names: string[] }): string[] { return args.names.map(n => n.toUpperCase()); }
-    params:     { "names": ["a", "b"] }
+PACKAGES
+Several tools plus the private helpers they share, as one TypeScript module. Every \`export\` becomes a tool
+named \`<package>__<function>\`, called as \`await tool.<package>__<function>(params)\`. Everything not
+exported (helpers, types, constants) stays private and is never registered. Use a package instead of
+defining a helper as a tool of its own: every tool is one entry in one shared list the model chooses from,
+so a helper registered as a tool competes with the tools that use it.
+A PACKAGE IS NOT A MODULE INSTANCE, and it has NO STATE. Its whole top level is evaluated afresh on EVERY
+call, so nothing there persists between calls and nothing there runs once; two calls to \`<package>__inc\`
+share nothing. ONLY these may appear at the top level: \`function\`, \`async function\`, \`export function\`,
+\`export async function\`, \`const\` (for fixed values), \`interface\` and \`type\`. Anything else is REFUSED —
+including \`let\`/\`var\`, \`class\`, \`enum\`, \`declare\`, \`import\`, a bare statement (\`n++\`, \`await tool.x(...)\`)
+and a top-level \`await\` (\`const cfg = await ...\`). Re-defining a package replaces the whole group, so a
+function no longer exported stops being a tool; \`remove\` with \`package\` deletes the group.
 
-  package (name + definition):
-    name:       Presence
-    definition:
-      interface Report { home: boolean; room?: string }
-      async function report(): Promise<Report> { … one private helper, shared below … }
-      // Whether Mat is at home, in one word.
-      export async function where(args: {}): Promise<string> { return (await report()).home ? 'home' : 'out'; }
-      // The room Mat was last seen in.
-      export async function room(args: {}): Promise<string> { return (await report()).room ?? 'unknown'; }
-  → registers tools "Presence__where" and "Presence__room"; \`report\` is not a tool.`;
+CHECK
+Re-runs define's type-check over source already defined, registering and persisting nothing. The tool
+types are LIVE, so a tool that changes its contract can invalidate a function that was sound when it was
+defined — and nothing else would notice, because a defined function is compiled, never re-checked, on
+reload. Pass \`name\` for one function or \`package\` for one package; omit both to check everything, this
+conversation's session functions included. One row per function: \`total\` is every finding, \`diagnostics\`
+the detail — each with a \`rendered\` block to read and a \`label\` to group on, either a tsc code such as
+\`TS2339\` or a structural rule (\`CAST-GATE\`, \`ENV-GATE\`, \`SHADOWED\`, \`PARSE\`) — and \`omitted\` the tally
+of any the detail cap hid. A row carrying \`definedUnchecked: true\` was registered without a type-check.
+READ \`ok\` TOGETHER WITH \`checked\`, on the result and on each row: \`checked: false\` means no type-checker
+could run here, so \`ok: true\` says only that nothing was examined. Fix a failure by re-defining.
+
+The definition is METHOD syntax, not an arrow function: \`name(params): ReturnType { body }\`, or the
+same with the name omitted for lambda. \`(args) => { … }\` is rejected — the action is called lambda, but
+the syntax is not one. A leading \`async\` or \`function\` is tolerated and stripped.
+
+  lambda — (args: { names: string[] }): string[] { return args.names.map(n => n.toUpperCase()); }
+           params: { "names": ["a", "b"] }
+
+  define — count_plugins(check: string): string {
+             const p = await tool.plugin({ action: 'list' });
+             const n = p.loaded.filter(pl => pl.name.includes(check)).length;
+             return n + ' plugins match "' + check + '"';
+           }
+           → registers tool "count_plugins" taking { check: string }.
+
+  define, reading the injected context — turn_count(): number {
+             const s = await tool.session_action({ action: 'get', sessionId: context.sessionId });
+             return s.messages.length;
+           }
+           → registers tool "turn_count" taking {}.
+
+  package — name: Presence
+            definition:
+              interface Report { home: boolean; room?: string }
+              async function report(): Promise<Report> { … one private helper, shared below … }
+              // Whether Mat is at home, in one word.
+              export async function where(args: {}): Promise<string> { return (await report()).home ? 'home' : 'out'; }
+              // The room Mat was last seen in.
+              export async function room(args: {}): Promise<string> { return (await report()).room ?? 'unknown'; }
+            → registers tools "Presence__where" and "Presence__room"; \`report\` is not a tool.
+
+Before composing, run \`{ action: 'types' }\` to fetch the declarations of what the available tools' calls
+resolve to — write \`await tool.x(...)\` against those real result types instead of guessing shapes.`;
 
 const INPUT_SCHEMA: JSONSchema = {
   type: 'object',
   required: ['action'],
   properties: {
-    action:     { type: 'string', enum: ['define', 'lambda', 'package', 'check', 'list', 'types', 'remove'], description: 'define: persist a named function as a tool. lambda: run an anonymous function once. package: persist a TypeScript module whose exported functions become tools <package>__<function>. check: re-type-check already-defined functions/packages against the current tool types. types: get TypeScript declarations of tool return types. list / remove: manage defined functions and packages.' },
-    definition:  { type: 'string', description: 'define/lambda: the function source (method-shorthand TypeScript, no arrow). package: the module source — exported functions become tools, the rest is private. Stateless: only declarations at the top level (no let/var, statements or top-level await).' },
-    package:     { type: 'string', description: 'remove / check (optional): the package to delete or check.' },
-    scope:       { type: 'string', enum: ['global', 'session'], description: "define only (optional, default 'global'): 'global' when the user asked for the tool — saved, and a tool in every conversation; 'session' for a function you define yourself while working something out (a lambda you need again, a helper two lambdas share) — only this conversation sees it, callable from your next step." },
+    action:     { type: 'string', enum: ['define', 'lambda', 'package', 'check', 'list', 'types', 'remove'], description: 'define: persist a named function as a tool. lambda: run an anonymous function once. package: persist a TypeScript module whose exported functions become tools <package>__<function>. check: re-type-check already-defined functions and packages against the current tool types. types: get TypeScript declarations of what a body is graded against. list / remove: manage defined functions and packages.' },
+    definition:  { type: 'string', description: 'define / lambda: the FUNCTION source. Write it in METHOD syntax — `name(params): ReturnType { body }` for define, or the same with the name omitted for lambda. There is NO `=>`: arrow syntax (`(args) => { … }`) is rejected as invalid TypeScript, and is the commonest first-attempt error here — the action is called lambda, but the syntax is not an arrow function. A leading `async` or `function` is tolerated and stripped. package: the MODULE source — its exported functions become tools and everything else stays private. Stateless: only declarations at the top level (no let/var, bare statements or top-level await).' },
+    package:     { type: 'string', description: 'check / remove (optional): the PACKAGE to check or delete — a selector, not the define action (for that, pass action: "package").' },
+    scope:       { type: 'string', enum: ['global', 'session'], description: "define only (optional, default 'global'): 'global' when the user asked for the function — saved, and a tool in every conversation; 'session' for a function of your own — only this conversation sees it, though it is stored in the conversation and so survives a restart, a fork, a cut and a compact. A package is always global." },
     description: { type: 'string', description: 'define only (optional): Describe the intent of the function from the context used to create it. Include a clause describing the use-cases for the function tool. Becomes the defined tool\'s description, and therefore it is important to make the description both specific in terms of intent and use-cases. Do not describe the mechanism or execution as this is already clear from the code.' },
-    params:      { type: 'object', description: 'lambda only: the single argument object passed to the function.' },
+    params:      { type: 'object', description: 'lambda only: the single argument object the body is called with.' },
     noTypeCheck: { type: 'boolean', description: 'define/lambda (optional, default false): skip the TypeScript type-check of the body against the live tool types. The check is a strong signal the composition is sound before it is registered/run — leave it on unless you must bypass a spurious error (e.g. composing a tool whose result type is `unknown`). A bypassed error does not go away: it is still there, and will surface later when something unrelated moves, so a function defined this way is marked `definedUnchecked` in `list` and `check` and should be checked again once the obstacle is gone. No effect where no type-checker is available (e.g. the browser) — a definition made there is marked the same way, being equally unverified.' },
-    name:       { type: 'string', description: 'package: the package name (an identifier, no "__"). remove: the defined function/tool name to delete. check (optional): the one function to check.' },
+    name:       { type: 'string', description: 'define: the name of the new tool. check / remove: the defined function to act on. For action "package" this carries the package name (an identifier, no "__").' },
   },
 };
 
 /**
- * Always-injected system-prompt guidance: prefer ONE lambda over a round-per-call chain when a turn's
- * work is multi-stage. It belongs in the system prompt rather than in this tool's own description
- * because it is advice about *when to reach for the tool at all* — a model that never considers
- * `tool_function` never reads its description, and by the time it does the round-per-call turn is
- * already under way. Constant text, so it is a stable cache prefix (see the `contribute` hook note in
- * CLAUDE.md) rather than something rebuilt per turn.
+ * Always-injected system-prompt guidance: WHEN to reach for `tool_function` at all, as opposed to how to
+ * call it — that detail lives in the tool's own DESCRIPTION, which is read only once the tool is being
+ * considered. Deliberately broad and brief: this text is paid for in every conversation, whether the work
+ * suits a function or not, and a long sales pitch biases a model towards a lambda on a case too weak to
+ * want one. It therefore covers the three lifetimes a function can have — anonymous `lambda`,
+ * `scope: 'session'`, `scope: 'global'` — rather than the lambda alone, and qualifies the platform
+ * access only a node body has. Constant text, so it is a stable cache prefix (see the `contribute` hook
+ * note in CLAUDE.md) rather than something rebuilt per turn.
  */
-const MULTI_STAGE_ADVICE =
-  "## tool_function { action: 'lambda' }\n\n" +
-  'Lambda functions allow you to run Javascript directly, which is often more efficient than shelling python ' +
-  'or bash, and works even if you have no shell tools available. You can call tools from lambda functions. ' +
-  'The test for lambda functions is whether you are REDUCING a result: (a) a tool ' +
-  'whose result is VERBOSE and you need a fraction of it — a count, a total, an aggregate, a summary, a ' +
-  'couple of fields; or (b) a LOOP or a CONDITIONAL — the same call over n items, read-each-and-decide, ' +
-  'retry-until, branch on what came back. There a lambda does the whole thing in one call and returns only ' +
-  'the answer, and the listings, rows and file bodies it read on the way are never sent to you. Run ' +
-  "`{ action: 'types' }` first and write `await tool.x(...)` against the real result types. " +
-  'DO NOT wrap a single tool call whose result you are not reducing. A lambda whose body is one ' +
-  '`await tool.x(params)` and a `return` of what came back is strictly WORSE than calling that tool: the ' +
-  'same result reaches you either way, and the wrapper cost you a types call and a round to write it. If ' +
-  'the body would not filter, count, aggregate, loop, or feed the result into a second call, it has ' +
-  'nothing to do — call the tool directly. ' +
-  "A lambda you will need again, or a helper two lambdas share, is `{ action: 'define', scope: 'session' }`: " +
-  'it is then a tool only in this conversation, callable by name from your next step and as ' +
-  '`await tool.<name>(…)` from your other functions — instead of a lambda written out twice.';
+const MULTI_STAGE_ADVICE = `## tool_function
+
+TypeScript functions that compose registered tools in one pass. Inside one, call any other tool as
+\`await tool.x(params)\` and return only what you need — so the listings, rows and file bodies it read on
+the way never reach the conversation.
+
+Reach for it when the work is a REDUCTION (a count, a total, an aggregate, a couple of fields out of a
+verbose result), a LOOP or a CONDITIONAL over n items, or a multi-step chain that would otherwise cost a
+round per step: the function does the whole thing in one call, with no LLM turn between the steps. A
+function can be anonymous and one-shot (\`lambda\`), or named and saved — for this conversation only
+(\`scope: 'session'\`) or for every conversation (\`scope: 'global'\`, the default, for a tool the user asked
+for). On node a body can also reach the platform itself, with \`await import('node:fs/promises')\`.
+
+Do NOT wrap a single tool call whose result you are not reducing — call the tool directly.
+`;
 
 const errorEvent = (message: string): ToolEvent => ({ type: 'error', message });
 
@@ -923,7 +869,7 @@ export function createFunctionToolsPlugin(): MatbotPluginSpec {
   let lifecycle: AbortController | undefined;
   return {
     apiVersion: PLUGIN_API_VERSION,
-    manifest: { description: 'Author and run TypeScript functions that compose registered tools (`tool_function`: define/lambda/check/list/remove).' },
+    manifest: { description: 'Author and run TypeScript functions that compose registered tools (`tool_function`: define/lambda/package/check/list/types/remove).' },
 
     async setup(services) {
       lifecycle = new AbortController();
