@@ -858,7 +858,12 @@ async function main(): Promise<void> {
   // replace it and unregistering reverts here. `function_timeout_ms: 0` seeds none: bodies then run directly
   // and unbounded — what a host with no runner does — which is kept reachable for testing.
   const functionTimeoutMs = matbotConfig.functionTimeoutMs ?? FUNCTION_SYNC_LIMIT_MS;
-  const functionRunner = functionTimeoutMs > 0 ? createVmFunctionRunner(functionTimeoutMs) : undefined;
+  const functionRunner = functionTimeoutMs > 0
+    ? createVmFunctionRunner(functionTimeoutMs, {
+        ...(matbotConfig.functionImports !== undefined ? { permit: matbotConfig.functionImports } : {}),
+        dotPlugins: path.join(configDir, '.plugins'),
+      })
+    : undefined;
   if (functionRunner === undefined) console.warn('[matbot] function_timeout_ms is 0: tool_function bodies run unbounded, and one that loops without awaiting will freeze this process.');
 
   const { services, makeRunner, loaded } = assembleMachine({

@@ -3,8 +3,8 @@ import type {
   JSONSchema, MatbotMachine, MatbotPluginSpec, MessageContent, Session, Store,
   Tool, ToolContext, ToolEvent, ToolContract, ToolResultOf, ToolCheckReport,
 } from '@matatbread/matbot-plugin-api';
-import { buildAsyncFn, buildBodyFn, runFunction, INJECTED, type CompiledFn } from './compile.js';
-import { parseSignature, paramsSchema, type ParsedParam, type ParsedSignature } from './signature.js';
+import { buildAsyncFn, buildBodyFn, runFunction, INJECTED, EXECUTE_SUBJECT, type CompiledFn } from './compile.js';
+import { parseSignature, paramsSchema, unwrapPromise, type ParsedParam, type ParsedSignature } from './signature.js';
 import { parsePackage, buildPackageFn, exportFn, type ParsedPackage } from './package.js';
 import { MARKER_CREATOR, sessionFunctions, turnContracts, shadowMessage, type SessionFunctionMarker, type SessionFunctionRecord } from './session.js';
 
@@ -82,8 +82,18 @@ function parseDefinition(definition: string): DefinedSignature {
   return { ...sig, name: sig.name, returnType: sig.returnType };
 }
 
-/** A defined function's contract, in the same shape as a `ToolContracts` arm. */
-const contractOf = (sig: ParsedSignature): string => `ToolContract<${sig.returnType ?? 'unknown'}, ${paramsTypeText(sig.params)}>`;
+/**
+ * A defined function's contract, in the same shape as a `ToolContracts` arm.
+ *
+ * `unwrapPromise`, because {@link checkSnippet} ADDS a `Promise<…>` to verify the body against, so both
+ * `f(): T` and `async f(): Promise<T>` describe one tool — and the wrapper prepends `async` anyway, which
+ * makes the second the form a TypeScript author reaches for first. Spliced verbatim, the two spellings
+ * disagreed on the way out: the declared `Promise<T>` became the RESULT, so `tool.f()` resolved to
+ * `Promise<T>`. `await` hid it (it unwraps recursively) and `.then(r => r.x)` did not, and tsc's own
+ * "Did you forget to use 'await'?" then pointed at the one thing that was already right.
+ */
+const contractOf = (sig: ParsedSignature): string =>
+  `ToolContract<${sig.returnType !== undefined ? unwrapPromise(sig.returnType) : 'unknown'}, ${paramsTypeText(sig.params)}>`;
 
 /** A global definition's failed type-check. A global function calling one of this session's functions
  *  fails the check (its check never sees them) and the bare diagnostic does not say why — it would run
@@ -108,7 +118,7 @@ function definedTool(
   // A registered tool's params/result text is folded in by the host at dispatch; a session one never
   // reaches that fold, so it carries the same two blocks itself.
   const wire = extra?.wire === true
-    ? `\n\nTypeScript params:\n\`\`\`\n${paramsTypeText(sig.params)}\n\`\`\`\n\nTypeScript result:\n\`\`\`\n${sig.returnType ?? 'unknown'}\n\`\`\``
+    ? `\n\nTypeScript params:\n\`\`\`\n${paramsTypeText(sig.params)}\n\`\`\`\n\nTypeScript result:\n\`\`\`\n${sig.returnType !== undefined ? unwrapPromise(sig.returnType) : 'unknown'}\n\`\`\``
     : '';
   return {
     name:        rec.name,
@@ -594,7 +604,8 @@ definition is then recorded as \`definedUnchecked\`.
 HOW THE PARAMETERS RELATE
   definition  the BODY for execute; a FUNCTION for define; MODULE source for package.
   scope       define only — 'global' (default) or 'session'. A package is always global.
-  name        the FUNCTION name for define / remove / check; the PACKAGE name for package.
+  name        the function or package to act on, for remove / check; the PACKAGE name for package. NOT
+              for define — a defined tool takes its name from its own source.
   package     a selector for check and remove, NOT the define action (that is action: 'package').
   There are no other parameters: an execute takes no arguments, so it declares no parameters, and a
 define takes its inputs from the parameter list written into its own signature.
@@ -615,10 +626,13 @@ Every \`tool\` call MUST be awaited — the whole body runs as an async function
 a function calling itself, must be awaited too. Return a JSON-serialisable value; that becomes the result the model sees. Each tool
 call is echoed to stdout, so the run is observable.
 
-NODE BUILTINS (node only). A body may reach the platform itself through a dynamic import:
-\`const fs = await import('node:fs/promises')\`. There is no \`require\`, \`module\`, \`exports\`, \`__dirname\`,
-\`__filename\` or \`import.meta\` — a body is not a module, and each is rejected rather than left to fail at
-the first call.
+MODULES (node only). A body may reach the platform through a dynamic import —
+\`const fs = await import('node:fs/promises')\` — and each import needs permission at the call: the user is
+asked, naming your function and the module, the first time. Ask for the narrowest thing that does the job.
+The \`types\` action states what is reachable here; a module outside that does not type-check, so do not
+guess, and do not reach for \`noTypeCheck\` to get past it. There is no \`require\`, \`module\`,
+\`exports\`, \`__dirname\`, \`__filename\` or \`import.meta\` — a body is not a module — and no \`process\`,
+\`Buffer\` or \`globalThis\`. Each is rejected rather than left to fail at the first call.
 
 SCOPE — WHO ASKED FOR THE FUNCTION DECIDES IT
   'global' (default) — the user asked for a tool ("make me a tool that calculates Fibonacci numbers"). It
@@ -666,9 +680,13 @@ TWO DEFINITION SHAPES — and neither is an arrow function
      which is rejected as invalid TypeScript and is the commonest first attempt, because the surrounding
      vocabulary suggests a function expression. Not the \`function\` keyword either, though a leading \`async\`
      or \`function\` is tolerated and stripped.
+A \`define\`'s tool NAME is the method name in the source — there is no \`name\` parameter on \`define\`
+(\`list\`, \`remove\` and \`check\` take one, to address a function that already exists). Asked for "a tool
+called X", write \`X(params): Result { … }\`.
 \`define\` must declare a return type: it becomes the tool's result contract — what other bodies are checked
-against — so state it exactly. An \`execute\` needs none: its result is stringified on its way back, and
-nothing else is ever checked against it.
+against — so state it exactly. The body is async here too, so \`Promise<T>\` and \`T\` mean the same thing:
+write whichever reads better, and \`await\` freely inside either. An \`execute\` needs no return type: its
+result is stringified on its way back, and nothing else is ever checked against it.
 
   execute — { const files = await tool.workspace_action({ action: 'list', prefix: 'charts' });
               return files.length; }
@@ -709,7 +727,7 @@ const INPUT_SCHEMA: JSONSchema = {
     scope:       { type: 'string', enum: ['global', 'session'], description: "define only (optional, default 'global'): 'global' when the user asked for the function — saved, and a tool in every conversation; 'session' for a function of your own — only this conversation sees it, though it is stored in the conversation and so survives a restart, a fork, a cut and a compact. A package is always global." },
     description: { type: 'string', description: 'define only (optional): Describe the intent of the function from the context used to create it. Include a clause describing the use-cases for the function tool. Becomes the defined tool\'s description, and therefore it is important to make the description both specific in terms of intent and use-cases. Do not describe the mechanism or execution as this is already clear from the code.' },
     noTypeCheck: { type: 'boolean', description: 'execute / define / package (optional, default false): skip the TypeScript type-check of the body against the live tool types. The check is a strong signal the composition is sound before it is registered/run — leave it on unless you must bypass a spurious error (e.g. composing a tool whose result type is `unknown`). A bypassed error does not go away: it is still there, and will surface later when something unrelated moves, so a function defined this way is marked `definedUnchecked` in `list` and `check` and should be checked again once the obstacle is gone. No effect where no type-checker is available (e.g. the browser) — a definition made there is marked the same way, being equally unverified.' },
-    name:       { type: 'string', description: 'define: the name of the new tool. check / remove: the defined function to act on. For action "package" this carries the package name (an identifier, no "__").' },
+    name:       { type: 'string', description: 'NOT for define — a defined tool is named by the method name in its own source. package: the package name (an identifier, no "__"). check / remove: the defined function or package to act on.' },
   },
 };
 
@@ -734,7 +752,7 @@ verbose result), a LOOP or a CONDITIONAL over n items, or a multi-step chain tha
 round per step: the function does the whole thing in one call, with no LLM turn between the steps. A
 body can be anonymous and one-shot (\`execute\`), or named and saved — for this conversation only
 (\`scope: 'session'\`) or for every conversation (\`scope: 'global'\`, the default, for a tool the user asked
-for). On node a body can also reach the platform itself, with \`await import('node:fs/promises')\`.
+for). On node a body may also import platform modules, with the user's permission — see MODULES.
 
 Do NOT wrap a single tool call whose result you are not reducing — call the tool directly.
 `;
@@ -787,7 +805,7 @@ function functionTool(machine: MatbotMachine, store: FunctionStore, packages: Pa
               const report = await index.check(`async function __fn() ${act.definition}` + turnContracts(ctx.turnTools));
               if (!report.ok) { yield errorEvent(`type error(s) — fix and re-run, or pass noTypeCheck to bypass:\n${renderCheck(report)}`); return; }
             }
-            yield* runFunction(machine, ctx, fn, [], { tool: `${TOOL_NAME} execute`, source: act.definition });
+            yield* runFunction(machine, ctx, fn, [], { tool: `${TOOL_NAME} execute`, source: act.definition, gateSubject: EXECUTE_SUBJECT });
             return;
           }
           case 'package': {

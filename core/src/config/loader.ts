@@ -27,6 +27,16 @@ export interface MatbotConfig {
    * directly, and a loop that never awaits freezes the process.
    */
   functionTimeoutMs?: number;
+   /**
+   * An optional RESTRICTION on what a `tool_function` body may import, as exact specifiers or prefixes
+   * (`function_imports: { permit: ['node:'] }`). **Absent ⇒ no restriction**: every specifier may be
+   * asked about, and the per-import `PermissionGate` decision is the control. `permit: []` is the
+   * opposite of absent — nothing may be imported and nobody is asked.
+   *
+   * It exists for the one thing a prompt cannot express: forbidding a module outright, with no human
+   * able to allow it. A policy has no stored "always deny", so this is the only way to say "never".
+   */
+  functionImports?: readonly string[];
 }
 
 function asString(v: YamlValue | undefined, label: string): string {
@@ -155,6 +165,16 @@ export function parseConfig(
     }
   }
 
+  const functionImportsRaw = doc['function_imports'];
+  let functionImports: readonly string[] | undefined;
+  if (functionImportsRaw !== undefined && functionImportsRaw !== null) {
+    const permitRaw = asRecord(functionImportsRaw, 'function_imports')['permit'];
+    if (permitRaw !== undefined && permitRaw !== null) {
+      if (!Array.isArray(permitRaw)) throw new Error('Config: "function_imports.permit" must be a list of module specifiers or prefixes');
+      functionImports = permitRaw.map((v, i) => asString(v, `function_imports.permit[${i}]`));
+    }
+  }
+
   const prompt           = typeof doc['prompt']            === 'string' ? doc['prompt']            : undefined;
   const ephemeral        = doc['ephemeral'] === true ? true : undefined;
   const defaultProvider  = typeof doc['default_provider'] === 'string' ? doc['default_provider']  : undefined;
@@ -169,6 +189,7 @@ export function parseConfig(
     ...(principal        !== undefined ? { principal        } : {}),
     ...(defaultSettings.size > 0       ? { defaultSettings  } : {}),
     ...(functionTimeoutMs !== undefined ? { functionTimeoutMs } : {}),
+    ...(functionImports   !== undefined ? { functionImports   } : {}),
   };
 }
 

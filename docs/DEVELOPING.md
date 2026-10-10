@@ -1315,7 +1315,7 @@ Store-backed index with optional Cloudflare BGE reranker.
 | `@matatbread/matbot-skills` | `skill_action`, `skills_config` | Cross-runtime skill CRUD (named markdown playbooks) |
 | `@matatbread/matbot-skills-node` | `skill_action` + file watch | Node specialization of `skills`: adds local `.md` import/watch |
 | `@matatbread/matbot-tool-skill-compiler` | `skill_compiler` | Compile procedural markdown skills into executable TypeScript tool plugins |
-| `@matatbread/matbot-function-tools` | `tool_function` | Author/run TypeScript functions that compose registered tools in one pass (define persists a named tool; lambda runs once) |
+| `@matatbread/matbot-function-tools` | `tool_function` | Author/run TypeScript functions that compose registered tools in one pass (define persists a named tool; execute runs a bare body once) |
 | `@matatbread/matbot-tool-router` | `ToolPresenter` (`tool_search`) | Serves a bounded per-turn tool window from a large library — pins + BM25-ranked tools + a `tool_search` entry point |
 | `@matatbread/matbot-tool-store` | `store_action` (+ `defineStore`) | Define and expose named persistent stores with generated CRUD tools |
 | `@matatbread/matbot-rumsfeld` | `contextual_search`, `find_fact` | Resolve unknown terms via the knowledge index (`contextual_search` returns a document; `find_fact` returns a precise answer) |
