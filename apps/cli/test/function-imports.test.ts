@@ -76,6 +76,43 @@ test('raw template text is not code: a URL in one is not a comment, nor an apost
   );
 });
 
+test('an ambiguous `}` resolves towards gating, not towards a regex', () => {
+  // `}` is the one predecessor that genuinely goes both ways: it ends a block (a `/` after it starts a
+  // regex) and it ends an object literal (a `/` after it divides). Read as a regex, the candidate ran to
+  // the NEXT slash and swallowed the import between them — inert under the vm runner, but a real,
+  // ungated `import()` under the `new AsyncFunction` fallback (`function_timeout_ms: 0`, and the
+  // browser). Where the two readings disagree about whether an import is gated, division wins.
+  assert.equal(
+    rewriteImportCalls(`const n = {} / a; import('node:fs') / b;`),
+    `const n = {} / a; __toolImportModule('node:fs') / b;`,
+  );
+  // A regex immediately after a block close still reads as a regex, as long as it is not the thing
+  // hiding an import.
+  assert.equal(rewriteImportCalls(`if (x) { y() }\n/re/.test(z); import('node:fs')`),
+               `if (x) { y() }\n/re/.test(z); __toolImportModule('node:fs')`);
+  // …and plain division after an object literal is untouched.
+  assert.equal(rewriteImportCalls(`const n = {}/a/2; import('x')`), `const n = {}/a/2; __toolImportModule('x')`);
+});
+
+test('`import` as a method name is refused, not silently renamed', () => {
+  // A property name may be a reserved word, so `{ import(x) {…} }` is legal — and renaming it broke
+  // every later `o.import(…)` with nothing said. A call whose statement is followed by a block
+  // (`import('node:fs')\n{}`) is indistinguishable from it without a parser, and leaving THAT alone
+  // would hand back an ungated import. So both are refused, which fails closed and names the fix.
+  for (const src of [`const o = { import(x) { return x; } }; o.import(1)`,
+                     `class C { import(x) { return x; } }`,
+                     `import('node:fs')\n{ }`]) {
+    assert.throws(() => rewriteImportCalls(src), /cannot be used as a method name/, src);
+  }
+  // A call followed by anything else is an ordinary import.
+  assert.equal(rewriteImportCalls(`const m = await import('x'); if (m) { use(m); }`),
+               `const m = await __toolImportModule('x'); if (m) { use(m); }`);
+  assert.equal(rewriteImportCalls(`import('x').then(m => { use(m); })`),
+               `__toolImportModule('x').then(m => { use(m); })`);
+  // A method name inside a STRING a body is generating is still none of our business.
+  assert.equal(rewriteImportCalls("const s = `{ import(x) { } }`"), "const s = `{ import(x) { } }`");
+});
+
 test('a keyword before a slash means regex, not division', () => {
   // `out` still carries the whitespace between the keyword and the `/`, so anchoring on the keyword alone
   // never matched: `return /x/` read as division, the second `/` opened a string that ran to EOF, and

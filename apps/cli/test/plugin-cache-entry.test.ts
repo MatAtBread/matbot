@@ -11,13 +11,14 @@ import { pathToFileURL } from 'node:url';
 // out the format itself. A mirrored path takes its name from the URL's pathname, which commonly carries
 // no extension at all (`https://esm.sh/lodash`) or a `.js` with no package.json above it to type it.
 //
-// Both work, on module-syntax detection, which this package's `engines` floor (node >= 24.12) has on by
-// default. Pinned here because it is the whole load path for a granted URL and nothing else exercises
-// it: without detection the first is ERR_UNKNOWN_FILE_EXTENSION and the second loads as CommonJS, so a
-// regression would surface as a granted import failing at the very last step.
+// Module-syntax detection covers both, but only while the format is AMBIGUOUS. A project whose own
+// package.json declares `"type": "commonjs"` makes it unambiguous and the cached ESM module fails
+// outright, which is the install this would be reported from. So the hooks name the format for anything
+// inside a cache tree, exactly as they already do for every import made from INSIDE one.
 
-async function cached(name: string, source: string): Promise<string> {
+async function cached(name: string, source: string, packageType?: string): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'mb-plugins-'));
+  if (packageType !== undefined) await writeFile(join(root, 'package.json'), `{"type":"${packageType}"}`, 'utf8');
   const dir = join(root, '.plugins', 'esm.sh');
   await mkdir(dir, { recursive: true });
   const file = join(dir, name);
@@ -42,4 +43,21 @@ test('a cached .ts module is still stripped', async () => {
   const url = await cached('y.ts', 'export const v: number = 7;\n');
   const m = await import(url) as { v: number };
   assert.equal(m.v, 7);
+});
+
+test('…and under a project that declares itself CommonJS, where detection does not apply', async () => {
+  // The case a report would come from. With `"type": "commonjs"` above it the format is no longer
+  // ambiguous, so syntax detection never runs and Node refuses the module on its first `export`.
+  for (const [name, source] of [['lodash', 'export const v = 1;\n'], ['x.js', 'export const v = 1;\n']] as const) {
+    const url = await cached(name, source, 'commonjs');
+    const m = await import(url) as { v: number };
+    assert.equal(m.v, 1, name);
+  }
+});
+
+test('a .cjs module in the cache is still CommonJS', async () => {
+  // The one extension that states the opposite of what an http origin serves, so it is left alone.
+  const url = await cached('legacy.cjs', 'module.exports = { v: 9 };\n');
+  const m = await import(url) as { default: { v: number } };
+  assert.equal(m.default.v, 9);
 });

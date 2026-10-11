@@ -298,3 +298,23 @@ test('a declared Promise<T> and a declared T register the same contract', async 
   assert.equal(unwrapPromise('Promise<Promise<number>>'), 'Promise<number>', 'one layer, not all');
   assert.equal(unwrapPromise('string'), 'string');
 });
+
+test('the brackets are MATCHED, so a union of promises is not mangled into nonsense', async () => {
+  const { unwrapPromise } = await import('@matatbread/matbot-function-tools');
+  // A greedy `/^Promise\s*<(.*)>$/` read this as one `Promise<…>` and returned `A> | Promise<B` — not a
+  // type at all, spliced verbatim into both the generated dts's ToolContracts arm and the wire text a
+  // model reads, where nothing downstream could recognise it as broken.
+  assert.equal(unwrapPromise('Promise<A> | Promise<B>'), 'A | B');
+  assert.equal(unwrapPromise('Promise<A> | undefined'), 'A | undefined');
+  assert.equal(unwrapPromise('| Promise<A>\n| Promise<B>'), 'A | B', 'the multi-line spelling');
+  // A `>` that closes an arrow is not a closing bracket.
+  assert.equal(unwrapPromise('Promise<(x: number) => string>'), '(x: number) => string');
+  assert.equal(unwrapPromise('Promise<Record<string, Array<number>>>'), 'Record<string, Array<number>>');
+  // A union member only PART of which is a promise keeps its shape: what a caller receives is not
+  // simply the argument.
+  assert.equal(unwrapPromise('Promise<A>[]'), 'Promise<A>[]');
+  assert.equal(unwrapPromise('Promise<A> & B'), 'Promise<A> & B');
+  // A union inside the promise is one arm, not two.
+  assert.equal(unwrapPromise('Promise<A | B>'), 'A | B');
+  assert.equal(unwrapPromise('Promise<{ a: 1 | 2 }>'), '{ a: 1 | 2 }');
+});

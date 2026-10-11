@@ -36,6 +36,8 @@ export function rewriteImportCalls(source: string): string {
   const WORD = /[A-Za-z0-9_$]/;
   // After one of these, a `/` begins a regex; after an identifier, number, `)` or `]` it divides.
   const REGEX_OK = new Set(['', '(', ',', '=', ':', '[', '!', '&', '|', '?', '{', '}', ';', '+', '-', '*', '%', '~', '^', '<', '>']);
+  // A whole-word `import` followed by `(`, used to decide an ambiguous `/` below.
+  const IMPORT_CALL = /(?<![\w$.])import\s*\(/;
   // `\s*$` because `out` still carries the whitespace between the keyword and the `/`: anchoring on the
   // keyword alone never matched, which read `return /x/.test(s)` as division and then swallowed the rest
   // of the body as a string. The lookbehind keeps `x.return` and `myreturn` out — a property access and
@@ -107,7 +109,19 @@ export function rewriteImportCalls(source: string): string {
       }
       if (closed) {
         while (j < source.length && WORD.test(source[j] as string)) j += 1;   // flags
-        out += source.slice(i, j); i = j; prev = '/'; continue;
+        // `}` is the one predecessor that is genuinely AMBIGUOUS: it ends a block (so a `/` after it
+        // begins a regex) and it ends an object literal or function expression (so a `/` after it
+        // divides). Nothing short of a parser tells them apart, so where the two readings disagree about
+        // whether an import is gated, this takes the gated one: a candidate regex that would swallow an
+        // `import(` is read as division instead. `const n = {} / a; import('node:fs') / b;` otherwise
+        // made the whole middle one regex literal, and the import went unrewritten — inert under the vm
+        // runner, but genuinely ungated under the `new AsyncFunction` fallback (`function_timeout_ms: 0`,
+        // and the browser), where a real `import()` resolves. The cost is that a regex mentioning
+        // `import(` immediately after a block close is read as division; a statement starting with a
+        // regex literal is already vanishingly rare, and that one is rarer still.
+        if (prev !== '}' || !IMPORT_CALL.test(source.slice(i, j))) {
+          out += source.slice(i, j); i = j; prev = '/'; continue;
+        }
       }
     }
 
@@ -117,6 +131,20 @@ export function rewriteImportCalls(source: string): string {
     if (c === 'i' && source.startsWith('import', i)
         && !WORD.test(source[i - 1] ?? '') && prev !== '.'
         && /^\s*\(/.test(source.slice(i + 6))) {
+      // A block immediately after the closing paren means this is NOT a call being rewritten — it is a
+      // method shorthand named `import` (`{ import(x) { … } }`, legal: a property name may be a reserved
+      // word), or a call whose statement happens to be followed by a block. Renaming the first breaks
+      // every later `o.import(…)`, silently; leaving the second alone would hand back an ungated import
+      // under the `new AsyncFunction` fallback. The two are indistinguishable without a parser, so both
+      // are REFUSED, which fails closed and names the fix — the same answer the injected names already
+      // get, being reserved.
+      if (blockFollows(source, i + 6)) {
+        throw new Error(
+          "`import` cannot be used as a method name in a tool_function body, and an `import(…)` statement "
+          + 'cannot be followed by a block: `import(…)` is rewritten onto the gated module loader, so the '
+          + 'name is reserved. Rename the method (e.g. `load(…)`), or separate the statement from the block.',
+        );
+      }
       out += IMPORT_FN; i += 6; prev = 't'; continue;
     }
 
@@ -124,4 +152,28 @@ export function rewriteImportCalls(source: string): string {
     if (!/\s/.test(c)) prev = c;
   }
   return out;
+}
+
+/** Whether the parenthesised group starting at or after `from` is immediately followed by `{`. Strings are
+ *  skipped so a brace inside one does not count; a group that never closes answers no. */
+function blockFollows(source: string, from: number): boolean {
+  let i = from;
+  while (i < source.length && /\s/.test(source[i] as string)) i += 1;
+  if (source[i] !== '(') return false;
+  let depth = 0;
+  while (i < source.length) {
+    const c = source[i] as string;
+    if (c === '"' || c === "'" || c === '`') {
+      i += 1;
+      while (i < source.length && source[i] !== c) i += source[i] === '\\' ? 2 : 1;
+      i += 1;
+      continue;
+    }
+    if (c === '(') depth += 1;
+    else if (c === ')') { depth -= 1; if (depth === 0) { i += 1; break; } }
+    i += 1;
+  }
+  if (depth !== 0) return false;
+  while (i < source.length && /\s/.test(source[i] as string)) i += 1;
+  return source[i] === '{';
 }

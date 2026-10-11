@@ -359,12 +359,35 @@ try {
   // typecheck clean and fail at the first call: correct against the types it was shown, so the repair loop
   // cannot repair it. Rejected structurally for the same reason a cast is, with the working form named.
   // Only in snippet mode: a compiled plugin IS a module and legitimately has 'import.meta'.
+  //
+  // The list must match what the runner WITHHOLDS, not just what a module wrapper would have supplied.
+  // The second half below are globals the runner shadows so that the import gate is the only route to a
+  // capability, and they are the worse half to omit: 'require' at least has no type without node's, while
+  // 'eval' and 'Function' are lib.es globals that typecheck in every configuration and fail at the first
+  // call, and 'process.cwd()' drew only tsc's 'install type definitions for node', which is advice to
+  // make a withheld global typecheck.
   const ENV_GLOBALS = {
     require:    "'require' is not defined in a function body — it is compiled as a bare async function, not a module. Use a dynamic import instead: 'const fs = await import('node:fs/promises')'.",
     module:     "'module' is not defined in a function body — it is compiled as a bare async function, not a CommonJS module. Return a value instead of assigning to an export.",
     exports:    "'exports' is not defined in a function body — it is compiled as a bare async function, not a CommonJS module. Return a value instead of assigning to an export.",
     __dirname:  "'__dirname' is not defined in a function body, and neither is 'process' — a body computes and calls tools, it does not navigate the filesystem by hand. 'context.workdir' is the directory a call was given, when it was given one.",
     __filename: "'__filename' is not defined in a function body. There is no file — the body is compiled from source held in the session.",
+    process:    "'process' is not defined in a function body — the runner withholds it, so there is no 'process.env', 'process.cwd()' or 'process.getBuiltinModule()'. A module comes from a gated 'await import('node:…')', and 'context.workdir' is the directory a call was given.",
+    Buffer:     "'Buffer' is not defined in a function body — the runner withholds it. Use a 'Uint8Array', or import it where the gate can be asked: 'const { Buffer } = await import('node:buffer')'.",
+    globalThis: "'globalThis' is not defined in a function body — the runner withholds it, so a host global cannot be reached by name. Everything a body is given is already in scope: 'tool', 'toolInContext' and 'context'.",
+    global:     "'global' is not defined in a function body — the runner withholds it, and it is node's older alias for 'globalThis', which is withheld too. Everything a body is given is already in scope: 'tool', 'toolInContext' and 'context'.",
+    eval:       "'eval' is not defined in a function body — the runner withholds it. There is nothing to evaluate at run time: write the code, or call another tool with 'await tool.<name>(…)'.",
+    Function:   "'Function' is not defined in a function body — the runner withholds the constructor, so 'new Function(…)' cannot build code at run time. Write the code directly. (As a TYPE annotation it is fine; this is about the value.)",
+  };
+  // A withheld global named in a TYPE is harmless: types are erased before the body is compiled, so
+  // 'args: Buffer' never reaches the runner. Only the VALUE is rejected. Needed because the second half of
+  // the list above — unlike 'require' and friends — are types as well as values.
+  const inTypePosition = function (node) {
+    for (let a = node.parent; a; a = a.parent) {
+      if (ts.isTypeNode(a)) return true;
+      if (ts.isBlock(a) || ts.isSourceFile(a)) return false;
+    }
+    return false;
   };
   const envGate = workerData.mode === 'snippet';
   // Where the rule fired, so tsc's own 'Cannot find name' for the same identifier can be dropped: without
@@ -419,6 +442,7 @@ try {
       } else if (ts.isIdentifier(node) && Object.prototype.hasOwnProperty.call(ENV_GLOBALS, node.text)
                  && !(node.parent && ts.isPropertyAccessExpression(node.parent) && node.parent.name === node)
                  && !(node.parent && (ts.isPropertyAssignment(node.parent) || ts.isPropertySignature(node.parent)) && node.parent.name === node)
+                 && !inTypePosition(node)
                  && !authorDeclared(node)) {
         synth.push(mk(sf, node, 90005, ENV_GLOBALS[node.text]));
         envStarts.add(node.getStart(sf));

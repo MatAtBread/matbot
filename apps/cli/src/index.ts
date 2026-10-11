@@ -15,7 +15,7 @@ import { appendMessage, createMessage,
          getPluginNameForSpecifier, getRegisteredPlugins,
          installPrincipalCarrier, installUsageCarrier, usageByProvider, enterPrincipal, currentPrincipal,
          assembleMachine, preScanStorage,
-         isMissingSecretError, optionValue, optionLabel,
+         isMissingSecretError,
          CONFIRM_YES, CONFIRM_NO,
          wireDescription}            from '@matatbread/matbot-core';
 import type { Vault, SessionRunner, PromptFn, FormField } from '@matatbread/matbot-core';
@@ -24,6 +24,7 @@ import { systemPrincipal }                 from '@matatbread/matbot-core';
 import { createAlsPrincipalCarrier }       from './principal-als.js';
 import { createAlsUsageCarrier }           from './usage-als.js';
 import { EnvFileVault }                     from './env-vault.js';
+import { renderSelect, resolveSelect }        from './select.js';
 import { createVmFunctionRunner, FUNCTION_SYNC_LIMIT_MS } from './function-runner.js';
 import { FilesystemStorageBackend }        from '@matatbread/matbot-storage-filesystem';
 import { createBuiltinTools, createProviderTool, classifySpecifier, materializeRemote, remoteDependencyNotes,
@@ -1074,19 +1075,24 @@ async function main(): Promise<void> {
       const def = p.default;
       if (p.type === 'select' || p.type === 'confirm') {
         const opts = p.type === 'confirm' ? [CONFIRM_YES, CONFIRM_NO] : (p.options ?? []);
-        // Typed against the LABEL (it is what was shown), answered with the VALUE (it is what the
-        // caller branches on). For a bare-string option the two are the same, which is every option
-        // in the repo bar the permission gate's — so this is one indirection, not a new mode.
-        const hint = opts.map(o => {
-          const label = optionLabel(o);
-          return def !== undefined && optionValue(o).toLowerCase() === def.toLowerCase() ? label.toUpperCase() : label;
-        }).join('/');
-        const raw  = (await ask(`${p.label} [${hint}] `)).trim();
-        if (!raw) return def ?? '';
-        const picked = opts.find(o => optionLabel(o).toLowerCase().startsWith(raw.toLowerCase()));
-        // An unmatched answer falls back to the default rather than being returned verbatim: the caller
-        // is branching on a token it published, and prose it never offered can only be a miss.
-        return picked !== undefined ? optionValue(picked) : def ?? raw;
+        // Typed against what was SHOWN, answered with the VALUE (it is what the caller branches on). For
+        // a bare-string option the two are the same, which is every option in the repo bar the permission
+        // gate's — so this is one indirection, not a new mode. Rendering and resolving live together in
+        // `select.ts`, because the two must agree on the addressing scheme: prose labels that share a long
+        // prefix made the middle options of a gate prompt untypeable.
+        const { lines, hint } = renderSelect(opts, def);
+        // Re-ask once on a miss rather than taking the default. An unmatched answer is not a decision, and
+        // for a gate the default is DENY — so a typo read as a refusal, with nothing said. Once only: a
+        // caller may be non-interactive, and an empty line is deliberately still the default.
+        for (let attempt = 0; ; attempt++) {
+          if (lines.length > 0) for (const l of lines) process.stderr.write(`${l}\n`);
+          const raw = (await ask(`${p.label} [${hint}] `)).trim();
+          if (!raw) return def ?? '';
+          const picked = resolveSelect(opts, raw);
+          if (picked !== undefined) return picked;
+          if (attempt > 0) return def ?? '';
+          process.stderr.write(yellow(`  "${raw}" is not one of the options — type its number.\n`));
+        }
       }
       const suffix = def !== undefined ? ` [${def}] ` : ' ';
       return (await ask(`${p.label}${suffix}`)).trim() || def || '';

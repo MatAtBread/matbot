@@ -89,6 +89,19 @@ export function createHooks({ exclude = [] } = {}) {
     const fetched = resolveFetchedSync(specifier, context.parentURL);
     if (fetched !== undefined) return { url: fetched, format: 'module', shortCircuit: true };
 
+    // (4b) ENTERING a fetched tree from outside it. A `tool_function` body whose granted http(s) URL was
+    // materialised imports the cached file by its own file: URL, from a parent nowhere near `.plugins/`,
+    // so (4) above does not fire and the format is left to Node. A mirrored path takes its name from the
+    // URL's pathname, so it commonly carries no extension (`https://esm.sh/lodash`) or a bare `.js` —
+    // neither of which says ESM. Module-syntax detection covers both only while the format is AMBIGUOUS:
+    // under a project whose own package.json declares `"type": "commonjs"`, a cached ESM module fails
+    // outright ('Unexpected token export'). What came off an http origin is ESM, and (4) already says so
+    // for every import made from INSIDE the tree, so a tree entered from outside must read the same way.
+    // `.cjs` is left alone, being the one extension that states the opposite.
+    if (specifier.startsWith('file:') && !/\.cjs(\?.*)?$/.test(specifier) && cacheLocation(specifier) !== undefined) {
+      return { url: specifier, format: 'module', shortCircuit: true };
+    }
+
     // (1) .js -> .ts remap.
     let result;
     if (specifier.endsWith('.js')) {

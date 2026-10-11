@@ -37,6 +37,34 @@ test('a module outside the permitted set does not resolve, so it fails the CHECK
   assert.match(out.join('\n'), /node:fs/);
 });
 
+test('ENV-GATE covers what the runner WITHHOLDS, not only what a module wrapper would supply', async () => {
+  // The list has to match the runner's shadows. The six below were missing, and they are the worse half
+  // to omit: `eval` and `Function` are lib.es globals, so they typecheck in every configuration and fail
+  // at the first call, and `process.cwd()` drew only tsc's "install type definitions for node" — advice
+  // to make a withheld global typecheck. The tool description promises none of them is there.
+  const index = indexFor(['node:']);
+  for (const [snippet, expected] of [
+    [`async function f() { return process.cwd(); }`,                 /'process' is not defined/],
+    [`async function f() { return eval('1'); }`,                     /'eval' is not defined/],
+    [`async function f() { return new Function('return 1')(); }`,    /'Function' is not defined/],
+    [`async function f() { return Buffer.from('x').length; }`,       /'Buffer' is not defined/],
+    [`async function f() { return typeof globalThis; }`,             /'globalThis' is not defined/],
+    [`async function f() { return typeof (global as never); }`,      /'global' is not defined/],
+  ] as const) {
+    const out = (await index.check(snippet)).diagnostics;
+    const env = out.filter(d => d.label === 'ENV-GATE');
+    assert.equal(env.length, 1, `${snippet} -> ${out.map(d => d.label).join(',')}`);
+    assert.match(env[0]!.message, expected);
+  }
+
+  // A withheld global named in a TYPE is harmless — types are erased before the body is compiled — and a
+  // binding the author declared shadows the global and works, so neither may fire.
+  for (const ok of [`async function f(cb: Function) { return typeof cb; }`,
+                    `async function f() { const process = { cwd: () => 'x' }; return process.cwd(); }`]) {
+    assert.deepEqual((await index.check(ok)).diagnostics.map(d => d.label), [], ok);
+  }
+});
+
 test('the phantom globals node types would otherwise declare are still rejected', async () => {
   // Loading node's types for `import('node:os')` also declares `require`, `__dirname` and friends, none
   // of which the runner defines. ENV-GATE rejects them structurally rather than letting them typecheck

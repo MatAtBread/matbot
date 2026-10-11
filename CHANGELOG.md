@@ -28,7 +28,10 @@ churn and less likely to affect a consumer who doesn't use them.
   `require`/`module`/`exports`/`__dirname`/`__filename`, because `process.getBuiltinModule` otherwise
   reaches every builtin with no import at all and the gate would be decorative. It is not a sandbox and
   is not described as one — `(()=>{}).constructor('return process')()` recovers the real `process`, and a
-  non-builtin module loads as host code that is not shadowed, which its gate label says.
+  non-builtin module loads as host code that is not shadowed, which its gate label says. Where the
+  scanner cannot be sure it resolves towards *gating*, since that is exactly what the two readings differ
+  on: a `/` after `}` that would make a candidate regex swallow an `import(` is read as division, and an
+  `import` that could be a method name is refused rather than silently renamed.
 
 ### API gaps filled
 
@@ -101,7 +104,27 @@ churn and less likely to affect a consumer who doesn't use them.
   the same boundary rule the gate uses, since `node:fs` admits `node:fs/promises` at the call and a
   permitted import that fails the check is reachable only with `noTypeCheck`. And the check program's
   root is now absolute: a relative one made `ts.createProgram` normalise the virtual file to a name the
-  host never matched, so nothing was checked and every snippet came back clean.
+  host never matched, so nothing was checked and every snippet came back clean. **ENV-GATE** covers every
+  global the runner withholds rather than only the ones a module wrapper would have supplied — `process`,
+  `Buffer`, `globalThis`, `global`, `eval` and `Function` join the five phantoms. That half is the worse
+  half to omit: `eval` and `Function` are `lib.es` globals, so they typecheck in every configuration and
+  fail at the first call. One named in a TYPE is exempt, types being erased before a body is compiled.
+
+- **`function-tools`** — `unwrapPromise` matches angle brackets instead of pattern-matching them, and
+  unwraps each arm of a top-level union. The greedy form read `Promise<A> | Promise<B>` as one
+  `Promise<…>` and produced `A> | Promise<B` — not a type at all, spliced verbatim into both the
+  generated dts's `ToolContracts` arm and the wire text a model reads, where nothing downstream could
+  recognise it as broken.
+
+- **`cli`** — the terminal numbers a `select` once its options no longer fit the prompt line, and
+  resolves a number, an exact value or label, or a *unique* prefix of either. It resolved a label prefix
+  only, falling back silently to the field's default, which was adequate while every select was two or
+  three short words: the import gate offers four standing answers whose labels share ~50 characters, so
+  the middle ones could not be typed at all and a near-miss read as a denial. An unmatched answer now
+  says so and re-asks once; an empty line is still the default. A granted `http(s)` URL also loads
+  reliably now: the hooks name the format for anything inside a `.plugins/` cache tree, as they already
+  did for every import made from inside one, because a mirrored path commonly has no extension or a bare
+  `.js` and syntax detection does not apply under a project that declares itself `"type": "commonjs"`.
 
 - **`background-jobs` / `sessions`** — a job's reporting conversation is stated where the model reads
   it. Both tools described the append target as "this conversation" or "a default", which a model

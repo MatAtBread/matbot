@@ -78,10 +78,18 @@ the first time it tries, you are asked, by name:
 
 > Allow function **"fetch_prices"** to import **node:fs/promises**?
 >
-> Deny / Allow / Always allow function "fetch_prices" to import node:fs/promises /
-> …to import anything under node:fs/ / …to import any node builtin /
-> Always allow ANY function to import node:fs/promises / Always allow every tool_function.import
+> ```
+>   1) Deny  (default)
+>   2) Allow
+>   3) Always allow function "fetch_prices" to import node:fs/promises
+>   4) Always allow function "fetch_prices" to import anything under node:fs/
+>   5) Always allow function "fetch_prices" to import any node builtin
+>   6) Always allow ANY function to import node:fs/promises
+>   7) Always allow every tool_function.import
+> ```
 
+Answer with the number — in the terminal a select is listed and numbered once its options
+no longer fit on the prompt line, while short ones still read `[yes/NO]` and take a prefix.
 Answer once, or stand an answer up for that function, for that directory or protocol, or
 for that module in any function. `gate_action get` lists what you have standing and
 `gate_action clear` forgets one. Nothing is remembered unless you pick an "Always".

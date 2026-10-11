@@ -750,6 +750,16 @@ Three parts, and only the first two enforce anything:
    source containing `import(` is ordinary, and template-literal nesting and regex-vs-division defeat a
    single pattern.
 
+   **Where a scanner cannot be sure, it resolves towards gating.** Two places are genuinely ambiguous
+   without a parser, and in both the two readings disagree about whether an import is gated — which is
+   what settles them, because an unrewritten `import(` is inert under the vm runner but a real, ungated
+   import under the `new AsyncFunction` fallback (`function_timeout_ms: 0`, and the browser). A `/` after
+   `}` may open a regex (`}` ended a block) or divide (`}` ended an object literal), so a candidate regex
+   that would *swallow* an `import(` is read as division instead. And `import` is legal as a method name
+   (a property name may be a reserved word), which the rewrite would silently rename — indistinguishable
+   from a call whose statement is followed by a block, so **both are refused** with a message naming the
+   fix, the same answer the other injected names get for being reserved.
+
 **Two tiers, and the label says which.** `node:os` genuinely cannot reach another capability. Anything
 else — a package, a path, a URL — is loaded as **host code**: it is not compiled by the runner, so none of
 a body's withheld globals apply to it and it can hand `process` straight back, and its own imports are
@@ -757,10 +767,15 @@ never gated again. So a non-builtin grant is `plugin.add`-grade and is worded th
 
 **What this is not.** `vm` is not a capability boundary — a body runs in this context, and
 `(()=>{}).constructor('return process')()` recovers the real `process` in one line. Withholding
-`process`/`globalThis`/`Buffer`/`eval`/`Function` (and the phantom `require`/`module`/`__dirname`, which
+`process`/`globalThis`/`global`/`Buffer`/`eval`/`Function` (and the phantom `require`/`module`/`__dirname`, which
 node's types would otherwise make typecheck and then fail at the first call) raises the cost from "call a
 documented API" to "know a published trick", and makes the intended path gated and revocable. A real
 boundary is another process.
+
+The withheld set and `ENV-GATE`'s list are **one list in two places**, and the checker's must track the
+runner's: a global that is shadowed but not rejected typechecks and fails at the first call, which is the
+one failure the check gate exists to prevent. The half that matters most is the half with no node types
+behind it — `eval` and `Function` are `lib.es` globals, so they resolve in every configuration.
 
 **Known weakness, accepted knowingly:** the grant keys on the function's NAME, so redefining a function
 under the same name inherits it — and redefinition is the one door the model controls. Keying the body
