@@ -416,25 +416,31 @@ try {
               : spec.indexOf(p + '/') === 0);
     });
   };
-  // Where a forbidden import was reported, so tsc's own complaint about the same specifier is dropped.
-  // Both fire whenever the module does not resolve, and tsc's is actively misleading here: it offers
-  // "Do you need to install type definitions for node?" about a module the INSTALLATION forbids, which
-  // is not a thing the author can fix. Which of the two tsc emits also depends on whether @types/node
-  // happens to be reachable from the program root, so this rule is the deterministic one.
+  // Where an import was reported on by a rule of ours, so tsc's own complaint about the same specifier is
+  // dropped. Both fire whenever the module does not resolve, and tsc's is actively misleading here: it
+  // offers "Do you need to install type definitions for node?" about a module the INSTALLATION forbids,
+  // which is not a thing the author can fix — or, for a specifier that lands on a declaration-only
+  // package, a path inside matbot's own node_modules. Which of the three tsc emits depends on whether
+  // @types/node happens to be reachable from the program root, so these rules are the deterministic ones.
   const importStarts = new Set();
+  // Every literal import()'s specifier and where it sits, recorded whether or not a restriction exists:
+  // the rewrite below is about SPELLING, which no permit decides.
+  const importSpecs = new Map();
   const envVisit = function (node, sf) {
     if (envGate && node.getStart(sf) >= minStart) {
-      if (permits !== undefined && ts.isCallExpression(node)
-          && node.expression.kind === ts.SyntaxKind.ImportKeyword
-          && node.arguments.length > 0 && ts.isStringLiteralLike(node.arguments[0])
-          && !permitted(node.arguments[0].text)) {
+      if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword
+          && node.arguments.length > 0 && ts.isStringLiteralLike(node.arguments[0])) {
         const spec = node.arguments[0].text;
-        synth.push(mk(sf, node.arguments[0], 90006,
-          permits.length === 0
-            ? "module imports are switched off on this installation, so '" + spec + "' cannot be imported. Compute with the tools available instead."
-            : "'" + spec + "' is not permitted on this installation, which allows only: " + permits.join(', ')
-              + ". This is configuration, not a permission anyone can grant at the call — use a permitted module, or none."));
-        importStarts.add(node.arguments[0].getStart(sf));
+        const at = node.arguments[0].getStart(sf);
+        importSpecs.set(at, spec);
+        if (permits !== undefined && !permitted(spec)) {
+          synth.push(mk(sf, node.arguments[0], 90006,
+            permits.length === 0
+              ? "module imports are switched off on this installation, so '" + spec + "' cannot be imported. Compute with the tools available instead."
+              : "'" + spec + "' is not permitted on this installation, which allows only: " + permits.join(', ')
+                + ". This is configuration, not a permission anyone can grant at the call — use a permitted module, or none."));
+          importStarts.add(at);
+        }
       }
       if (ts.isMetaProperty(node) && node.keywordToken === ts.SyntaxKind.ImportKeyword) {
         synth.push(mk(sf, node, 90005,
@@ -442,6 +448,12 @@ try {
       } else if (ts.isIdentifier(node) && Object.prototype.hasOwnProperty.call(ENV_GLOBALS, node.text)
                  && !(node.parent && ts.isPropertyAccessExpression(node.parent) && node.parent.name === node)
                  && !(node.parent && (ts.isPropertyAssignment(node.parent) || ts.isPropertySignature(node.parent)) && node.parent.name === node)
+                 // The SOURCE half of a renamed destructuring is a property of the thing being unpacked,
+                 // not the global: 'const { Buffer: B } = await import("node:buffer")' is the working
+                 // form, and firing on it recommended almost exactly the code it was rejecting. The
+                 // shorthand is already exempt by a different route — there the identifier IS the local
+                 // declaration, so 'authorDeclared' answers for it.
+                 && !(node.parent && ts.isBindingElement(node.parent) && node.parent.propertyName === node)
                  && !inTypePosition(node)
                  && !authorDeclared(node)) {
         synth.push(mk(sf, node, 90005, ENV_GLOBALS[node.text]));
@@ -477,9 +489,25 @@ try {
   };
   for (const gf of gateFiles) { visit(gf, gf); contractVisit(gf, gf); envVisit(gf, gf); }
 
+  // A bare 'node' is not the builtins namespace — it resolves to @types/node's index.d.ts, which is
+  // references and ambient blocks with no export, so tsc reports "File '<matbot's own node_modules>/
+  // @types/node/index.d.ts' is not a module": a path the body never named and its author cannot act on.
+  // Rewritten only where tsc ALREADY failed on it, so a package genuinely called 'node' is untouched,
+  // and only where no gate has spoken at that position, so one mistake stays one finding. It is also what
+  // 'function_imports: { permit: ["node"] }' permits — a package of that name, no builtin — which is why
+  // this fires with no restriction in force too.
+  for (const d of targets) {
+    if (d.code !== 2306 && d.code !== 2307) continue;
+    if (importSpecs.get(d.start) !== 'node' || importStarts.has(d.start)) continue;
+    synth.push({ file: d.file, start: d.start, length: d.length, code: 90006,
+                 category: ts.DiagnosticCategory.Error, __syn: true,
+                 messageText: "there is no module called 'node'. Node's builtins carry the 'node:' prefix — import 'node:fs/promises' or 'node:os', naming the one you need." });
+    importStarts.add(d.start);
+  }
+
   const errors = targets.filter(function (d) {
     if (d.category !== ts.DiagnosticCategory.Error) return false;
-    if ((d.code === 2307 || d.code === 2591) && importStarts.has(d.start)) return false;
+    if ((d.code === 2306 || d.code === 2307 || d.code === 2591) && importStarts.has(d.start)) return false;
     return !((d.code === 2304 || d.code === 2591) && envStarts.has(d.start));
   }).concat(synth);
   errors.sort(function (a, b) {

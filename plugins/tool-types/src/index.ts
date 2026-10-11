@@ -291,9 +291,14 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
     // `noTypeCheck` — the one divergence between what runs and what is graded.
     for (const m of builtinModules) {
       if (m.startsWith('_')) continue;
-      const spec = `node:${m}`;
+      // Some entries ALREADY carry the prefix — node:sea, node:sqlite, node:test, node:test/reporters,
+      // which have no unprefixed spelling — so prefixing unconditionally wrote `node:node:sqlite`, and
+      // those four got no entry at all. `await import('node:sqlite')` then failed the check with tsc's
+      // "install type definitions for node", which is the message IMPORT-GATE exists to replace.
+      const bare = m.startsWith('node:') ? m.slice('node:'.length) : m;
+      const spec = `node:${bare}`;
       if (!importPermitted(permit, spec)) continue;
-      const file = join(nodeTypes, `${m}.d.ts`);
+      const file = join(nodeTypes, `${bare}.d.ts`);
       if (existsSync(file)) out[spec] = [file];
     }
     return out;
@@ -315,9 +320,16 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
     // builtins exist, and `node:fs` hides that `node:fs/promises` came with it. Restriction entries that
     // admit no declaration at all are listed after it, marked — a bare package or a URL is untypeable
     // here, which is a stated refusal rather than a fake type, and the author needs to know which it is.
+    // A bare `node` is the one entry that is not merely untypeable but unimportable: the boundary rule
+    // reads it as a PACKAGE of that name (it admits `node/sub`, never `node:os`), so an install meaning
+    // the builtins and missing the colon permits nothing a body can use. Listing it as "untyped —
+    // import it only with noTypeCheck" invited exactly the attempt that cannot work, so it says what it is.
+    const mark = (p: string): string => p === 'node'
+      ? `${p}   (a PACKAGE of that name — not node's builtins, which are spelled 'node:fs'; nothing here can import it)`
+      : `${p}   (untyped — import it only with noTypeCheck)`;
     const listing = [
       ...[...typed].sort(),
-      ...(restricted ?? []).filter(p => !covered(p)).sort().map(p => `${p}   (untyped — import it only with noTypeCheck)`),
+      ...(restricted ?? []).filter(p => !covered(p)).sort().map(mark),
     ];
     const note = restricted !== undefined && restricted.length === 0
       ? '// Module imports are switched off on this installation.'

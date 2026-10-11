@@ -23,8 +23,12 @@ export interface MatbotConfig {
   defaultSettings?:  ReadonlyMap<string, Readonly<Record<string, unknown>>>;
   /**
    * Longest a `tool_function` body may run synchronously — without awaiting — before it is stopped
-   * (`function_timeout_ms`). Absent ⇒ the host's default. `0` ⇒ no limit at all, for testing: bodies run
-   * directly, and a loop that never awaits freezes the process.
+   * (`function_timeout_ms`). Absent ⇒ the host's default. `0` ⇒ no time limit at all, for testing: a loop
+   * that never awaits then freezes the process.
+   *
+   * It bounds TIME and nothing else. It is not a switch for the execution environment: the same runner
+   * still withholds the globals it withholds, still refuses an ungated `import()`, and still carries
+   * `function_imports.permit`. (It once seeded no runner at all, which silently took all three with it.)
    */
   functionTimeoutMs?: number;
    /**

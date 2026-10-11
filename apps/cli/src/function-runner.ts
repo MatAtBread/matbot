@@ -55,6 +55,12 @@ const invoke = new vm.Script(`globalThis[Symbol.for(${JSON.stringify(PENDING)})]
  * cost of unauthorised access from "call a documented API" to "know a published trick", and makes the
  * intended path gated, configurable and revocable. An install needing a real boundary runs bodies in
  * another process.
+ *
+ * `limitMs` of `0` removes the TIME bound and nothing else. That matters because the two were once the
+ * same switch: `function_timeout_ms: 0` seeded no runner at all, which is a documented way to run bodies
+ * unbounded — and silently took `function_imports.permit` with it, `permit: []` included, along with the
+ * withheld globals and the inert `import()`. One line of yaml about how long a body may compute is not
+ * an answer to what a body may reach.
  */
 export function createVmFunctionRunner(
   limitMs = FUNCTION_SYNC_LIMIT_MS,
@@ -95,7 +101,9 @@ export function createVmFunctionRunner(
         stack.push(() => (started = fn(...args)));
         let pending: Promise<unknown>;
         try {
-          pending = invoke.runInThisContext({ timeout: limitMs }) as Promise<unknown>;
+          // No `timeout` key at all when the bound is off: vm rejects a non-positive one, and this is the
+          // only thing `limitMs: 0` turns off.
+          pending = invoke.runInThisContext(limitMs > 0 ? { timeout: limitMs } : {}) as Promise<unknown>;
         } catch (e) {
           if ((e as { code?: unknown }).code !== 'ERR_SCRIPT_EXECUTION_TIMEOUT') return Promise.reject(e);
           pending = Promise.reject(Object.assign(

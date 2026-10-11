@@ -734,7 +734,11 @@ Three parts, and only the first two enforce anything:
    would multiply past what a prompt can carry; that is the gate-wide standing answer, and installation
    authoring.
 2. **An optional restriction** — `function_imports: { permit: [...] }` in `matbot.yaml`, read by the host
-   onto `FunctionRunner.permittedImports`. **Absent means no restriction**, because a gate that is never
+   onto `FunctionRunner.permittedImports`. It rides on the runner, so **the runner is always seeded**:
+   `function_timeout_ms: 0` removes the TIME bound and nothing else. It used to seed no runner at all,
+   which is a documented way to run bodies unbounded and silently discarded the restriction (`permit: []`
+   included), unshadowed every withheld global and made a raw `import()` work. One line of yaml about how
+   long a body may compute is not an answer to what a body may reach. **Absent means no restriction**, because a gate that is never
    reached is not a gate: an allow-list defaulting to empty refuses before anyone can be asked, which is
    exactly the behaviour a prompt exists to replace. `permit: []` is the opposite of absent and switches
    imports off. What it is FOR is the one thing a prompt cannot express — forbidding a module outright,
@@ -750,15 +754,18 @@ Three parts, and only the first two enforce anything:
    source containing `import(` is ordinary, and template-literal nesting and regex-vs-division defeat a
    single pattern.
 
-   **Where a scanner cannot be sure, it resolves towards gating.** Two places are genuinely ambiguous
-   without a parser, and in both the two readings disagree about whether an import is gated — which is
-   what settles them, because an unrewritten `import(` is inert under the vm runner but a real, ungated
-   import under the `new AsyncFunction` fallback (`function_timeout_ms: 0`, and the browser). A `/` after
-   `}` may open a regex (`}` ended a block) or divide (`}` ended an object literal), so a candidate regex
-   that would *swallow* an `import(` is read as division instead. And `import` is legal as a method name
-   (a property name may be a reserved word), which the rewrite would silently rename — indistinguishable
-   from a call whose statement is followed by a block, so **both are refused** with a message naming the
-   fix, the same answer the other injected names get for being reserved.
+   **Where a scanner cannot be sure, it refuses.** Two constructs are genuinely ambiguous without a
+   parser, and a wrong guess at either fails in the direction of an *ungated* import — which is not a
+   direction to be silently wrong in. A `/` after `}` may open a regex (`}` ended a block) or divide (`}`
+   ended an object literal), and picking wrong does not misread one token: the scanner **desyncs**, so a
+   quote further along can swallow an `import(` that neither reading mentions. So the body is scanned
+   BOTH ways and the outputs compared — agreeing means the ambiguity made no difference, differing is
+   refused. The second pass is skipped when no ambiguous `/` was reached, which is every body that does
+   not divide immediately after a brace. Sniffing the candidate for `import(` was tried first and caught
+   only the direct case. And `import` is legal as a method name (a property name may be a reserved word),
+   which the rewrite would silently rename, and is indistinguishable from a call whose statement is
+   followed by a block — so both are refused, naming the fix, the same answer the other injected names
+   get for being reserved.
 
 **Two tiers, and the label says which.** `node:os` genuinely cannot reach another capability. Anything
 else — a package, a path, a URL — is loaded as **host code**: it is not compiled by the runner, so none of

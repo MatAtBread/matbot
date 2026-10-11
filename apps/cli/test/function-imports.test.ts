@@ -76,22 +76,23 @@ test('raw template text is not code: a URL in one is not a comment, nor an apost
   );
 });
 
-test('an ambiguous `}` resolves towards gating, not towards a regex', () => {
+test('an ambiguous `}` is settled by agreement, and refused when the readings differ', () => {
   // `}` is the one predecessor that genuinely goes both ways: it ends a block (a `/` after it starts a
-  // regex) and it ends an object literal (a `/` after it divides). Read as a regex, the candidate ran to
-  // the NEXT slash and swallowed the import between them — inert under the vm runner, but a real,
-  // ungated `import()` under the `new AsyncFunction` fallback (`function_timeout_ms: 0`, and the
-  // browser). Where the two readings disagree about whether an import is gated, division wins.
-  assert.equal(
-    rewriteImportCalls(`const n = {} / a; import('node:fs') / b;`),
-    `const n = {} / a; __toolImportModule('node:fs') / b;`,
-  );
-  // A regex immediately after a block close still reads as a regex, as long as it is not the thing
-  // hiding an import.
+  // regex) and it ends an object literal (a `/` after it divides). Picking wrong does not misread one
+  // token — the scanner DESYNCS, so a quote further along can swallow an `import(` that neither reading
+  // mentions. So the body is scanned both ways: agreement means the ambiguity made no difference, and
+  // disagreement is refused rather than guessed at, the wrong guess being "ungated import".
+  for (const src of [`const n = {} / a; import('node:fs') / b;`,
+                     `{ const n = {} / 1; const s = "a/b"; const m = await import('node:fs'); return m; }`]) {
+    assert.throws(() => rewriteImportCalls(src), /cannot tell whether the `\/` after a `}`/, src);
+  }
+  // Where the two readings agree, nothing is refused and the import is rewritten: a regex immediately
+  // after a block close, plain division after an object literal, and a `/` after an ordinary value.
   assert.equal(rewriteImportCalls(`if (x) { y() }\n/re/.test(z); import('node:fs')`),
                `if (x) { y() }\n/re/.test(z); __toolImportModule('node:fs')`);
-  // …and plain division after an object literal is untouched.
   assert.equal(rewriteImportCalls(`const n = {}/a/2; import('x')`), `const n = {}/a/2; __toolImportModule('x')`);
+  assert.equal(rewriteImportCalls(`const o = { a: 1 }; const r = o.a / 2; import('x')`),
+               `const o = { a: 1 }; const r = o.a / 2; __toolImportModule('x')`);
 });
 
 test('`import` as a method name is refused, not silently renamed', () => {
@@ -282,4 +283,28 @@ test('the synchronous bound still holds with the shadow wrapper in place', async
   const runner = createVmFunctionRunner(150, { permit: [] });
   const spin = runner.compile([], `while (true) {}`);
   await assert.rejects(spin(), /synchronous work without an await/);
+});
+
+test('removing the time bound removes the TIME bound and nothing else', async () => {
+  // `function_timeout_ms: 0` used to seed no runner at all, so a line of yaml about how long a body may
+  // compute silently discarded `function_imports.permit` — `permit: []` included, documented as the only
+  // way to say never — along with every withheld global and the inert `import()`.
+  const unbounded = createVmFunctionRunner(0, { permit: ['node:crypto'] });
+  assert.deepEqual([...unbounded.permittedImports ?? []], ['node:crypto'], 'the restriction is still carried');
+
+  const typeofs = unbounded.compile([], `return [typeof process, typeof Buffer, typeof eval, typeof require].join(',');`);
+  assert.equal(await typeofs(), 'undefined,undefined,undefined,undefined', 'still withheld');
+
+  const raw = unbounded.compile([], `return import('node:os');`);
+  await assert.rejects(raw(), (e: { code?: string }) => e.code === 'ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING',
+                       'an ungated import is still inert');
+
+  // …and the bound really is off: this would be stopped under any positive limit.
+  const slow = unbounded.compile([], `const until = Date.now() + 250; while (Date.now() < until) {} return 'done';`);
+  assert.equal(await slow(), 'done');
+
+  // The gate still runs, and still refuses what the restriction excludes.
+  const ev = await run({ TypeScriptStripper: stripper, FunctionRunner: unbounded }, machine(unbounded),
+    `probe() { return import('node:fs'); }`);
+  assert.match((ev as { message: string }).message, /not permitted.*only: node:crypto/s);
 });

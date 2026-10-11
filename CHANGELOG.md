@@ -29,9 +29,19 @@ churn and less likely to affect a consumer who doesn't use them.
   reaches every builtin with no import at all and the gate would be decorative. It is not a sandbox and
   is not described as one — `(()=>{}).constructor('return process')()` recovers the real `process`, and a
   non-builtin module loads as host code that is not shadowed, which its gate label says. Where the
-  scanner cannot be sure it resolves towards *gating*, since that is exactly what the two readings differ
-  on: a `/` after `}` that would make a candidate regex swallow an `import(` is read as division, and an
-  `import` that could be a method name is refused rather than silently renamed.
+  scanner cannot be sure it *refuses*: a `/` after `}` may open a regex or divide, and picking wrong
+  desyncs it rather than misreading one token, so the body is scanned both ways and a disagreement is
+  refused; an `import` that could be a method name is refused for the same reason. `function_timeout_ms:
+  0` also now removes the time bound and **nothing else** — it seeded no runner at all, which silently
+  discarded `function_imports.permit` (`permit: []` included), unshadowed every withheld global and made
+  a raw `import()` work, because a line of yaml about how long a body may compute was answering what a
+  body may reach. A bare `node` is the one
+  specifier that is not merely untypeable but unimportable — the boundary rule reads it as a *package* of
+  that name, so `permit: ['node']` is a missing colon that permits nothing a body can use — and both
+  surfaces now say so: the dts lists it as a package rather than as "untyped, import it with
+  `noTypeCheck`", and `import('node')` is answered with the `node:` spelling instead of tsc's
+  `File '<…>/@types/node/index.d.ts' is not a module`, a path inside matbot's own `node_modules` that the
+  body never named and its author cannot act on.
 
 ### API gaps filled
 
@@ -108,7 +118,12 @@ churn and less likely to affect a consumer who doesn't use them.
   global the runner withholds rather than only the ones a module wrapper would have supplied — `process`,
   `Buffer`, `globalThis`, `global`, `eval` and `Function` join the five phantoms. That half is the worse
   half to omit: `eval` and `Function` are `lib.es` globals, so they typecheck in every configuration and
-  fail at the first call. One named in a TYPE is exempt, types being erased before a body is compiled.
+  fail at the first call. One named in a TYPE is exempt, types being erased before a body is compiled, and
+  so is the source half of a renamed destructuring (`const { Buffer: B } = await import('node:buffer')` is
+  a property of the module, not the global, and rejecting it recommended almost the same code). A builtin
+  whose name already carries the prefix is typed too: `module.builtinModules` lists `node:sea`,
+  `node:sqlite`, `node:test` and `node:test/reporters` with it, so prefixing unconditionally wrote
+  `node:node:sqlite` and left those four with no `paths` entry.
 
 - **`function-tools`** — `unwrapPromise` matches angle brackets instead of pattern-matching them, and
   unwraps each arm of a top-level union. The greedy form read `Promise<A> | Promise<B>` as one
@@ -117,11 +132,13 @@ churn and less likely to affect a consumer who doesn't use them.
   recognise it as broken.
 
 - **`cli`** — the terminal numbers a `select` once its options no longer fit the prompt line, and
-  resolves a number, an exact value or label, or a *unique* prefix of either. It resolved a label prefix
-  only, falling back silently to the field's default, which was adequate while every select was two or
-  three short words: the import gate offers four standing answers whose labels share ~50 characters, so
-  the middle ones could not be typed at all and a near-miss read as a denial. An unmatched answer now
-  says so and re-asks once; an empty line is still the default. A granted `http(s)` URL also loads
+  resolves an exact value or label, then a position (only where numbers were actually shown, since the
+  inline form displays none and `ask_user` may offer `['2', '4', '8']`), then a *unique* prefix of either.
+  It resolved a label prefix only, falling back silently to the field's default, which was adequate while
+  every select was two or three short words: the import gate offers four standing answers whose labels
+  share ~50 characters, so the middle ones could not be typed at all and a near-miss read as a denial. An
+  unmatched answer now says so and re-asks once, an empty line is still the default, and one matching
+  nothing is returned verbatim where the field allows free text (`allowOther`), as the web frontend does. A granted `http(s)` URL also loads
   reliably now: the hooks name the format for anything inside a `.plugins/` cache tree, as they already
   did for every import made from inside one, because a mirrored path commonly has no extension or a bare
   `.js` and syntax detection does not apply under a project that declares itself `"type": "commonjs"`.

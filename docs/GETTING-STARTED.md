@@ -71,6 +71,10 @@ Awaited work — tool calls, HTTP requests — never counts towards it. A loop t
 bodies run unbounded, as they did before the guard existed, and matbot warns at
 startup. Use it only for testing.
 
+It removes the *time* limit and nothing else. Everything below still applies with it
+set to `0`: the same globals are withheld, an import is still gated, and
+`function_imports` still restricts what may be asked for.
+
 ### When a function wants a module
 
 A body can compute and call tools. It can also import a node module — but not silently:

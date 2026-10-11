@@ -23,6 +23,31 @@ export const IMPORT_FN = '__toolImportModule';
  * appear in a function body at all.
  */
 export function rewriteImportCalls(source: string): string {
+  // One ambiguity cannot be settled by looking at the candidate alone, so it is settled by DISAGREEMENT.
+  // A `/` after `}` may open a regex (the `}` ended a block) or divide (it ended an object literal), and
+  // picking wrong does not merely misread that one token — the scanner desyncs from there on, so a quote
+  // or slash further along can swallow an `import(` that neither reading mentions:
+  // `{} / 1; const s = "a/b"; await import('node:fs')` read as a regex ends inside the string literal
+  // and loses the import. Sniffing the candidate for `import(` caught the direct case and not that one.
+  //
+  // So the body is scanned BOTH ways and the two outputs compared. Agreeing means the ambiguity made no
+  // difference and either output is correct. Differing means the scanner cannot tell what the body says,
+  // and it refuses rather than guess — the direction a wrong guess fails in is "ungated import", which is
+  // not a direction to be silently wrong in. The second pass is skipped entirely when no ambiguous `/`
+  // was reached, which is every body that does not divide immediately after a closing brace.
+  const first = scan(source, 'regex');
+  if (!first.ambiguous) return first.out;
+  const second = scan(source, 'divide');
+  if (second.out === first.out) return first.out;
+  throw new Error(
+    'cannot tell whether the `/` after a `}` starts a regular expression or divides, and the two readings '
+    + 'disagree about what this body imports — so it is refused rather than guessed at. Put the expression '
+    + 'before the `/` in parentheses, or give the regular expression a name of its own.',
+  );
+}
+
+function scan(source: string, ambiguousAs: 'regex' | 'divide'): { out: string; ambiguous: boolean } {
+  let ambiguous = false;
   let out = '';
   let i = 0;
   // The last significant (non-space, non-comment) character of code emitted so far. It decides whether a
@@ -35,17 +60,18 @@ export function rewriteImportCalls(source: string): string {
 
   const WORD = /[A-Za-z0-9_$]/;
   // After one of these, a `/` begins a regex; after an identifier, number, `)` or `]` it divides.
-  const REGEX_OK = new Set(['', '(', ',', '=', ':', '[', '!', '&', '|', '?', '{', '}', ';', '+', '-', '*', '%', '~', '^', '<', '>']);
-  // A whole-word `import` followed by `(`, used to decide an ambiguous `/` below.
-  const IMPORT_CALL = /(?<![\w$.])import\s*\(/;
+  // `}` is deliberately absent: it is the ambiguous one, answered above rather than by this set.
+  const REGEX_OK = new Set(['', '(', ',', '=', ':', '[', '!', '&', '|', '?', '{', ';', '+', '-', '*', '%', '~', '^', '<', '>']);
   // `\s*$` because `out` still carries the whitespace between the keyword and the `/`: anchoring on the
   // keyword alone never matched, which read `return /x/.test(s)` as division and then swallowed the rest
   // of the body as a string. The lookbehind keeps `x.return` and `myreturn` out — a property access and
   // an identifier that merely ends in a keyword both divide.
   const KEYWORD_BEFORE_REGEX = /(?<![.\w$])(?:return|typeof|instanceof|in|of|new|delete|void|case|do|else|yield|await)\s*$/;
 
-  const regexAllowed = (): boolean =>
-    REGEX_OK.has(prev) || KEYWORD_BEFORE_REGEX.test(out);
+  const regexAllowed = (): boolean => {
+    if (prev === '}') { ambiguous = true; return ambiguousAs === 'regex'; }
+    return REGEX_OK.has(prev) || KEYWORD_BEFORE_REGEX.test(out);
+  };
 
   while (i < source.length) {
     const c = source[i] as string;
@@ -109,19 +135,7 @@ export function rewriteImportCalls(source: string): string {
       }
       if (closed) {
         while (j < source.length && WORD.test(source[j] as string)) j += 1;   // flags
-        // `}` is the one predecessor that is genuinely AMBIGUOUS: it ends a block (so a `/` after it
-        // begins a regex) and it ends an object literal or function expression (so a `/` after it
-        // divides). Nothing short of a parser tells them apart, so where the two readings disagree about
-        // whether an import is gated, this takes the gated one: a candidate regex that would swallow an
-        // `import(` is read as division instead. `const n = {} / a; import('node:fs') / b;` otherwise
-        // made the whole middle one regex literal, and the import went unrewritten — inert under the vm
-        // runner, but genuinely ungated under the `new AsyncFunction` fallback (`function_timeout_ms: 0`,
-        // and the browser), where a real `import()` resolves. The cost is that a regex mentioning
-        // `import(` immediately after a block close is read as division; a statement starting with a
-        // regex literal is already vanishingly rare, and that one is rarer still.
-        if (prev !== '}' || !IMPORT_CALL.test(source.slice(i, j))) {
-          out += source.slice(i, j); i = j; prev = '/'; continue;
-        }
+        out += source.slice(i, j); i = j; prev = '/'; continue;
       }
     }
 
@@ -151,7 +165,7 @@ export function rewriteImportCalls(source: string): string {
     out += c; i += 1;
     if (!/\s/.test(c)) prev = c;
   }
-  return out;
+  return { out, ambiguous };
 }
 
 /** Whether the parenthesised group starting at or after `from` is immediately followed by `{`. Strings are

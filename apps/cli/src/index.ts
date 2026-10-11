@@ -24,7 +24,7 @@ import { systemPrincipal }                 from '@matatbread/matbot-core';
 import { createAlsPrincipalCarrier }       from './principal-als.js';
 import { createAlsUsageCarrier }           from './usage-als.js';
 import { EnvFileVault }                     from './env-vault.js';
-import { renderSelect, resolveSelect }        from './select.js';
+import { answerSelect, renderSelect }        from './select.js';
 import { createVmFunctionRunner, FUNCTION_SYNC_LIMIT_MS } from './function-runner.js';
 import { FilesystemStorageBackend }        from '@matatbread/matbot-storage-filesystem';
 import { createBuiltinTools, createProviderTool, classifySpecifier, materializeRemote, remoteDependencyNotes,
@@ -856,16 +856,16 @@ async function main(): Promise<void> {
 
   // Model-authored code shares the one event loop with every session and frontend, so a loop in a
   // tool_function that never awaits would freeze the daemon. Seeded, like MediaStore, so a plugin may
-  // replace it and unregistering reverts here. `function_timeout_ms: 0` seeds none: bodies then run directly
-  // and unbounded — what a host with no runner does — which is kept reachable for testing.
+  // replace it and unregistering reverts here. `function_timeout_ms: 0` removes the time bound and
+  // NOTHING else: it used to seed no runner, which silently discarded `function_imports.permit` (and so
+  // the scoped types and IMPORT-GATE with it), unshadowed every withheld global, and made a raw
+  // `import()` work — one line of yaml about how long a body may compute answering what it may reach.
   const functionTimeoutMs = matbotConfig.functionTimeoutMs ?? FUNCTION_SYNC_LIMIT_MS;
-  const functionRunner = functionTimeoutMs > 0
-    ? createVmFunctionRunner(functionTimeoutMs, {
-        ...(matbotConfig.functionImports !== undefined ? { permit: matbotConfig.functionImports } : {}),
-        dotPlugins: path.join(configDir, '.plugins'),
-      })
-    : undefined;
-  if (functionRunner === undefined) console.warn('[matbot] function_timeout_ms is 0: tool_function bodies run unbounded, and one that loops without awaiting will freeze this process.');
+  const functionRunner = createVmFunctionRunner(functionTimeoutMs, {
+    ...(matbotConfig.functionImports !== undefined ? { permit: matbotConfig.functionImports } : {}),
+    dotPlugins: path.join(configDir, '.plugins'),
+  });
+  if (functionTimeoutMs === 0) console.warn('[matbot] function_timeout_ms is 0: tool_function bodies run unbounded, and one that loops without awaiting will freeze this process.');
 
   const { services, makeRunner, loaded } = assembleMachine({
     // The same layout the filesystem storage plugin names: a directory per namespace under `.data`.
@@ -875,7 +875,7 @@ async function main(): Promise<void> {
     providers,
     gate:            defaultGate,
     defaultSettings: matbotConfig.defaultSettings,
-    ...(functionRunner !== undefined ? { seed: { FunctionRunner: functionRunner } } : {}),
+    seed:            { FunctionRunner: functionRunner },
     builtinTools:    createBuiltinTools(),
     version:         selfVersion(),
     host: machine => ({
@@ -1080,18 +1080,19 @@ async function main(): Promise<void> {
         // gate's — so this is one indirection, not a new mode. Rendering and resolving live together in
         // `select.ts`, because the two must agree on the addressing scheme: prose labels that share a long
         // prefix made the middle options of a gate prompt untypeable.
-        const { lines, hint } = renderSelect(opts, def);
-        // Re-ask once on a miss rather than taking the default. An unmatched answer is not a decision, and
-        // for a gate the default is DENY — so a typo read as a refusal, with nothing said. Once only: a
-        // caller may be non-interactive, and an empty line is deliberately still the default.
+        // Rendering and the answer's resolution are one module, because what was SHOWN is the only
+        // addressing scheme the reader has — `numbered` is passed back for exactly that reason.
+        const { lines, hint, numbered } = renderSelect(opts, def);
         for (let attempt = 0; ; attempt++) {
           if (lines.length > 0) for (const l of lines) process.stderr.write(`${l}\n`);
-          const raw = (await ask(`${p.label} [${hint}] `)).trim();
-          if (!raw) return def ?? '';
-          const picked = resolveSelect(opts, raw);
-          if (picked !== undefined) return picked;
-          if (attempt > 0) return def ?? '';
-          process.stderr.write(yellow(`  "${raw}" is not one of the options — type its number.\n`));
+          const raw = await ask(`${p.label} [${hint}] `);
+          const outcome = answerSelect(opts, raw, {
+            numbered, again: attempt > 0,
+            ...(def !== undefined        ? { def }             : {}),
+            ...(p.allowOther === true    ? { allowOther: true } : {}),
+          });
+          if ('answer' in outcome) return outcome.answer;
+          process.stderr.write(yellow(outcome.retry));
         }
       }
       const suffix = def !== undefined ? ` [${def}] ` : ' ';
