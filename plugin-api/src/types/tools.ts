@@ -304,6 +304,18 @@ export interface Tool<R = unknown> {
    *  its contract as a `ToolContracts` augmentation instead and omits this. Foreign tools (e.g. MCP proxies)
    *  that have neither fall back to the loose `inputSchema`. */
   toolContract?: string;
+  /** Which gate namespace this tool's `ctx.gate` suffixes are qualified with, when it is not the tool's
+   *  own name. The same category of field as {@link toolContract}, for the same reason: a tool whose NAME
+   *  is chosen at RUN TIME cannot carry a gate vocabulary either, and a model-chosen name would mint a
+   *  fresh gate id per definition — so a remembered answer could never generalise across them, and an
+   *  installation would have nothing stable to key `default_settings:` by. A `function-tools` function
+   *  declares `tool_function`, so every body's import decision lands on `tool_function.import` and the
+   *  per-function dimension stays where it belongs, in the subject. Omit it on a tool with a fixed name.
+   *
+   *  It is as trusted as the name beside it — the registering plugin chooses both, and a loaded plugin has
+   *  full host capability regardless. What it withholds is the only part a MODEL controls: naming its own
+   *  function can no longer move the gate. */
+  gateNamespace?: string;
   executor:     ToolExecutor<R>;
   pluginName?:  string;
 }

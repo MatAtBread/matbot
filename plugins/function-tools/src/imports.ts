@@ -36,7 +36,11 @@ export function rewriteImportCalls(source: string): string {
   const WORD = /[A-Za-z0-9_$]/;
   // After one of these, a `/` begins a regex; after an identifier, number, `)` or `]` it divides.
   const REGEX_OK = new Set(['', '(', ',', '=', ':', '[', '!', '&', '|', '?', '{', '}', ';', '+', '-', '*', '%', '~', '^', '<', '>']);
-  const KEYWORD_BEFORE_REGEX = /\b(?:return|typeof|instanceof|in|of|new|delete|void|case|do|else|yield|await)$/;
+  // `\s*$` because `out` still carries the whitespace between the keyword and the `/`: anchoring on the
+  // keyword alone never matched, which read `return /x/.test(s)` as division and then swallowed the rest
+  // of the body as a string. The lookbehind keeps `x.return` and `myreturn` out — a property access and
+  // an identifier that merely ends in a keyword both divide.
+  const KEYWORD_BEFORE_REGEX = /(?<![.\w$])(?:return|typeof|instanceof|in|of|new|delete|void|case|do|else|yield|await)\s*$/;
 
   const regexAllowed = (): boolean =>
     REGEX_OK.has(prev) || KEYWORD_BEFORE_REGEX.test(out);
@@ -44,6 +48,27 @@ export function rewriteImportCalls(source: string): string {
   while (i < source.length) {
     const c = source[i] as string;
     const next = source[i + 1];
+
+    // ── template literals, with interpolations treated as code ──────────────
+    // AHEAD of comments and strings, because raw template text has no such context: `//` in a URL is
+    // part of the string, and so is an apostrophe. Tested first, a comment branch ate the rest of the
+    // line INCLUDING the closing backtick, and every later `import(` went unrewritten — a clean type
+    // check followed by ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING, or an ungated import with no runner.
+    if (c === '`') {
+      if (templates.length > 0 && braces === 0) { templates.pop(); braces = templates.pop() ?? 0; }
+      else { templates.push(braces); templates.push(0); braces = 0; }
+      out += c; i += 1; prev = '`'; continue;
+    }
+    if (templates.length > 0) {
+      if (c === '$' && next === '{') { braces += 1; out += '${'; i += 2; prev = '{'; continue; }
+      if (c === '{' && braces > 0) { braces += 1; out += c; i += 1; prev = '{'; continue; }
+      if (c === '}' && braces > 0) { braces -= 1; out += c; i += 1; prev = '}'; continue; }
+      if (braces === 0) {
+        // Raw template text: copy it verbatim, escapes included, until a `${` or the closing backtick.
+        if (c === '\\') { out += source.slice(i, i + 2); i += 2; continue; }
+        out += c; i += 1; continue;
+      }
+    }
 
     // ── comments ────────────────────────────────────────────────────────────
     if (c === '/' && next === '/') {
@@ -66,23 +91,6 @@ export function rewriteImportCalls(source: string): string {
         j += 1;
       }
       out += source.slice(i, j); i = j; prev = c; continue;
-    }
-
-    // ── template literals, with interpolations treated as code ──────────────
-    if (c === '`') {
-      if (templates.length > 0 && braces === 0) { templates.pop(); braces = templates.pop() ?? 0; }
-      else { templates.push(braces); templates.push(0); braces = 0; }
-      out += c; i += 1; prev = '`'; continue;
-    }
-    if (templates.length > 0) {
-      if (c === '$' && next === '{') { braces += 1; out += '${'; i += 2; prev = '{'; continue; }
-      if (c === '{' && braces > 0) { braces += 1; out += c; i += 1; prev = '{'; continue; }
-      if (c === '}' && braces > 0) { braces -= 1; out += c; i += 1; prev = '}'; continue; }
-      if (braces === 0) {
-        // Raw template text: copy it verbatim, escapes included, until a `${` or the closing backtick.
-        if (c === '\\') { out += source.slice(i, i + 2); i += 2; continue; }
-        out += c; i += 1; continue;
-      }
     }
 
     // ── regex literals ──────────────────────────────────────────────────────

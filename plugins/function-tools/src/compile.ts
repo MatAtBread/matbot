@@ -1,4 +1,4 @@
-import { FUNCTION_TIMEOUT, makeToolBox } from '@matatbread/matbot-plugin-api';
+import { FUNCTION_TIMEOUT, importPermitted, makeToolBox } from '@matatbread/matbot-plugin-api';
 import { stripLeadingTrivia } from './signature.js';
 import { IMPORT_FN, rewriteImportCalls } from './imports.js';
 import type { MatbotMachine, ComposedCallContext, FunctionRunner, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
@@ -144,18 +144,10 @@ function gatedImport(machine: MatbotMachine, ctx: ToolContext, fnName: string): 
   };
 }
 
-/** Whether a configured restriction covers `spec`. A prefix must end at a BOUNDARY: `node:fs` covers
- *  `node:fs/promises` but not `node:fsx`, and `https://esm.sh/lodash` does not cover
- *  `https://esm.sh/lodashhack/x.js`. A bare `startsWith` let a permit admit a sibling whose name merely
- *  begins the same way, which is the whole value of naming one. */
-const covers = (permit: string, spec: string): boolean =>
-  spec === permit
-  || (permit.endsWith('/') || permit.endsWith(':') ? spec.startsWith(permit) : spec.startsWith(`${permit}/`));
-
 async function load(machine: MatbotMachine, ctx: ToolContext, fnName: string, spec: string): Promise<unknown> {
   const runner  = machine.FunctionRunner;
   const permits = runner?.permittedImports;
-  if (permits !== undefined && !permits.some(p => covers(p, spec))) {
+  if (permits !== undefined && !importPermitted(permits, spec)) {
     throw new Error(
       `Import of '${spec}' is not permitted on this installation` +
       (permits.length === 0

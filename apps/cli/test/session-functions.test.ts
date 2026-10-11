@@ -189,6 +189,9 @@ test('promoting to global retires the session function; remove retires one too',
     [{ name: 'tool_function', input: { action: 'list' } }],
   ]);
   assert.ok(machine.tools.resolve('half'), 'promoted into the registry');
+  // Registered under the model's chosen name, gated under tool_function's — so a remembered import
+  // answer is not stranded under a gate id that exists for one definition of one function.
+  assert.equal(machine.tools.resolve('half')!.gateNamespace, 'tool_function');
   const listed = await turn(machine, store, s.id, [[{ name: 'tool_function', input: { action: 'list' } }]]);
   const value = ends(listed.events)[0]!.result as { functions: { name: string }[]; sessionFunctions: { name: string }[] };
   assert.deepEqual(value.functions.map(f => f.name), ['half']);

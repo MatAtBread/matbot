@@ -668,7 +668,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
         // default, so a gate handed it could never tell "no human is reachable" from "a human answered
         // with the default" — and would get the fallback back one layer too late to reason about.
         // `ToolContext.prompt` keeps the stand-in exactly as before; only the gate sees the truth.
-        ...bindGate(opts.permissionGate, tc.name, opts.prompt),
+        ...bindGate(opts.permissionGate, tool, opts.prompt),
         ...(opts.workdir     !== undefined ? { workdir:     opts.workdir     } : {}),
         ...(opts.configPath  !== undefined ? { configPath:  opts.configPath  } : {}),
         ...(opts.files       !== undefined ? { files:       opts.files       } : {}),

@@ -40,6 +40,17 @@ churn and less likely to affect a consumer who doesn't use them.
   `#execute node:fs/` is a correct key and an unusable question. A policy stores only a subject that was
   actually offered, so no other gate's memory semantics change, and with none offered it falls back to
   naming the subject — right for a gate whose subject is already prose (`@x/foo` for `plugin.add`).
+- **`Tool.gateNamespace`** — the fixed gate namespace a tool whose NAME is built at run time declares,
+  since `ctx.gate`'s suffix is qualified with the tool's registered name. A `function-tools` function
+  says `tool_function`, so every body's import decision lands on `tool_function.import`. Qualified by the
+  function's own name, each definition would mint its own gate id: nothing stable for `default_settings:`
+  to key, no remembered answer able to generalise across functions, one settings key per name the model
+  ever picks, and the only part of this a model controls sitting between it and the gate. `bindGate` takes
+  the resolved tool rather than its name, so the rule lives in one place instead of at each door; a bare
+  name is still accepted for a caller that has only one.
+- **`importPermitted`** — the `permittedImports` boundary rule as a function, beside the interface that
+  documents it, because two packages read the same list and must agree: `function-tools` decides whether
+  to ask about an import, `tool-types` decides which modules to type.
 - **`FunctionRunner.permittedImports` and `FunctionRunner.import()`** — the optional restriction (absent
   ⇒ unrestricted; `[]` ⇒ none), and how a granted specifier becomes a module. The restriction is on the
   runner because the runner is the execution environment and two consumers need one answer: the capability
@@ -81,7 +92,16 @@ churn and less likely to affect a consumer who doesn't use them.
   typecheck and fail at the first call. `ToolCheckDiagnostic.label` now carries a per-rule name for a
   structural finding instead of always `CAST-GATE`. An `http(s)` module gets no types at all:
   TypeScript cannot express "a module with arbitrary named exports", and an untypeable thing is a
-  stated refusal here, not a fake type.
+  stated refusal here, not a fake type. `paths` cannot *enforce* the restriction, so a second structural
+  rule (**IMPORT-GATE**) does: loading one builtin's declaration file drags in the ambient
+  `declare module 'node:…'` blocks of everything its own declarations reference, and whether a forbidden
+  specifier then resolves depends on what `@types/node` is reachable from the program root — so `paths`
+  decides what is typed and the rule decides what is allowed, replacing tsc's "Do you need to install
+  type definitions for node?" about a module the installation forbids. The permitted set is expanded by
+  the same boundary rule the gate uses, since `node:fs` admits `node:fs/promises` at the call and a
+  permitted import that fails the check is reachable only with `noTypeCheck`. And the check program's
+  root is now absolute: a relative one made `ts.createProgram` normalise the virtual file to a name the
+  host never matched, so nothing was checked and every snippet came back clean.
 
 - **`background-jobs` / `sessions`** — a job's reporting conversation is stated where the model reads
   it. Both tools described the append target as "this conversation" or "a default", which a model

@@ -1,7 +1,7 @@
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { PLUGIN_API_VERSION, RegistryChangeKind } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, RegistryChangeKind, importPermitted } from '@matatbread/matbot-plugin-api';
 import type { MatbotMachine, MatbotPluginSpec, ToolCheckReport, ToolTypeIndex } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins } from '@matatbread/matbot-core';
 import { buildToolTypesData, compileToolValidators, type ToolTypesData } from './build-dts.js';
@@ -238,7 +238,7 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
     // checker agreed. It names what is permitted HERE, from the live set, rather than claiming imports
     // work in general — a module outside the set does not resolve, which is the whole point of scoping
     // the types to it. `require` and the rest are rejected by the env gate, not left to fail at a call.
-    return `${this.registryBlock(this.cache!)}\ndeclare const tool: import('@matatbread/matbot-plugin-api').ToolProxy;\ndeclare const toolInContext: import('@matatbread/matbot-plugin-api').ToolBox;\ndeclare const context: import('@matatbread/matbot-plugin-api').ComposedCallContext;${await this.importNote()}`;
+    return `${this.registryBlock(this.cache!)}\ndeclare const tool: import('@matatbread/matbot-plugin-api').ToolProxy;\ndeclare const toolInContext: import('@matatbread/matbot-plugin-api').ToolBox;\ndeclare const context: import('@matatbread/matbot-plugin-api').ComposedCallContext;\n${await this.importNote()}`;
   }
 
   async wireContracts(): Promise<Record<string, { params: string; result: string }>> {
@@ -285,16 +285,16 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
     const req = createRequire(import.meta.url);
     const nodeTypes = dirname(req.resolve('@types/node/package.json'));
     const out: Record<string, string[]> = {};
-    const addBuiltin = (spec: string): void => {
-      const file = join(nodeTypes, `${spec.slice('node:'.length)}.d.ts`);
+    // Every builtin tested against the shared boundary rule, rather than an entry's own spelling being
+    // expanded here: `node:fs` admits `node:fs/promises` at the gate, so it must TYPE the submodule too.
+    // Emitting the exact specifier alone left a permitted import failing the check, reachable only with
+    // `noTypeCheck` — the one divergence between what runs and what is graded.
+    for (const m of builtinModules) {
+      if (m.startsWith('_')) continue;
+      const spec = `node:${m}`;
+      if (!importPermitted(permit, spec)) continue;
+      const file = join(nodeTypes, `${m}.d.ts`);
       if (existsSync(file)) out[spec] = [file];
-    };
-    for (const p of permit) {
-      const isPrefix = p.endsWith('/') || p.endsWith(':');
-      if (p.startsWith('node:')) {
-        if (isPrefix) for (const m of builtinModules) { if (!m.startsWith('_') && `node:${m}`.startsWith(p)) addBuiltin(`node:${m}`); }
-        else addBuiltin(p);
-      }
     }
     return out;
   }
@@ -303,23 +303,40 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
    *  Every import is still a per-function decision, which is why this says "may" rather than "can". */
   private async importNote(): Promise<string> {
     const restricted = this.machine.FunctionRunner?.permittedImports;
-    const permitted = Object.keys(await this.importPaths()).sort();
-    // Unrestricted is the common case and listing 49 builtins would be most of this file, so it says the
-    // rule instead. A restriction is listed, because then the set is the thing an author cannot guess.
-    const note = permitted.length === 0
+    const typed = new Set(Object.keys(await this.importPaths()));
+    // "Switched off" is `permit: []` and nothing else — the one configured "never". Derived from the
+    // TYPED set instead, it fired for any restriction naming no builtin (`permit: ['lodash']`), telling
+    // an author imports were off while the gate was perfectly willing to ask about one.
+    // An entry is typed if it names a declaration itself or admits one — `node:` and `node:fs` both do,
+    // through their submodules. A bare package or a URL admits none, which is a stated refusal rather
+    // than a fake type, so the listing says so where the author will read it.
+    const covered = (p: string): boolean => typed.has(p) || [...typed].some(t => importPermitted([p], t));
+    // The EXPANDED set, because a prefix is not an answer: `node:` tells an author nothing about which
+    // builtins exist, and `node:fs` hides that `node:fs/promises` came with it. Restriction entries that
+    // admit no declaration at all are listed after it, marked — a bare package or a URL is untypeable
+    // here, which is a stated refusal rather than a fake type, and the author needs to know which it is.
+    const listing = [
+      ...[...typed].sort(),
+      ...(restricted ?? []).filter(p => !covered(p)).sort().map(p => `${p}   (untyped — import it only with noTypeCheck)`),
+    ];
+    const note = restricted !== undefined && restricted.length === 0
       ? '// Module imports are switched off on this installation.'
       : restricted === undefined
         ? `// A body may import node builtins, each subject to permission at the call — you will be asked\n`
           + `// the first time: const fs = await import('node:fs/promises');`
         : `// A body may import these, each subject to permission at the call:\n`
-          + `${permitted.map(p => `//   ${p}`).join('\n')}`;
+          + `${listing.map(p => `//   ${p}`).join('\n')}`;
     return `${note}\n`
       + `// There is no require, module, __dirname, __filename or import.meta — a body is compiled as a\n`
       + `// bare async function, not a module — and no process, Buffer or globalThis.\n`;
   }
 
   async check(snippet: string): Promise<ToolCheckReport> {
-    const root = this.machine.configPath !== undefined ? dirname(this.machine.configPath) : '.';
+    // ABSOLUTE, always. The virtual file is named `<root>/…`, and `ts.createProgram` normalises a
+    // relative one to a different string than the hook compares against — so `getSourceFile(virtual)`
+    // missed, there were no files to check, and the snippet came back clean whatever was in it. A
+    // checker that silently passes everything is the one failure mode this path must not have.
+    const root = resolve(this.machine.configPath !== undefined ? dirname(this.machine.configPath) : '.');
     const prefix = `${await this.dts()}\n`;
     const source = `${prefix}${snippet}\nexport {};\n`;           // trailing export ⇒ this file is a module
 
@@ -335,12 +352,18 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
     // Worker-hosted check (see checker.ts) — off the main loop, and each diagnostic comes back as an
     // annotated block (caret-anchored frame, related locations, HINT) with snippet-relative positions.
     const importPaths = await this.importPaths();
+    // The restriction goes too, and not only its `paths`: one builtin's declaration file drags in the
+    // ambient `declare module 'node:…'` blocks of everything its own declarations reference, so a
+    // forbidden specifier resolves through the back door and typechecks clean. The checker closes that
+    // structurally. Absent stays absent — unrestricted means nothing to enforce.
+    const restricted = this.machine.FunctionRunner?.permittedImports;
     return checkSnippetAgainst({
       root, source,
       prefixLen: prefix.length,
       prefixLines: prefix.split('\n').length - 1,
       ...(apiIndex !== undefined ? { apiIndexPath: apiIndex } : {}),
       ...(Object.keys(importPaths).length > 0 ? { importPaths } : {}),
+      ...(restricted !== undefined ? { permittedImports: restricted } : {}),
     });
   }
 

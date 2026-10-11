@@ -57,6 +57,23 @@ test('a tool supplies the suffix; the host qualifies it with the tool it is regi
   assert.deepEqual(seen.map(r => r.gate), ['plugin.add', 'mcp_action.remove']);
 });
 
+test('a tool whose NAME is chosen at run time declares the gate namespace instead', async () => {
+  const seen: PermissionRequest[] = [];
+  const gate: PermissionGate = { async decide(r) { seen.push(r); return true; } };
+
+  // A `function-tools` function is registered under the name the MODEL gave it, so qualifying by that
+  // name would mint a gate id per definition: nothing an installation could key `default_settings:` by,
+  // no remembered answer able to generalise across functions, and one settings key per name the model
+  // ever picks. The per-function dimension belongs in the subject, which already carries it.
+  const fn = { name: 'scrape_prices', gateNamespace: 'tool_function' };
+  await bindGate(gate, fn, undefined).gate({ gate: 'import', subject: `${fn.name} node:fs`, label: 'l', fallback: false });
+  // A tool with a fixed name omits the field and is qualified by the name, exactly as before.
+  await bindGate(gate, { name: 'plugin' }, undefined).gate({ gate: 'add', subject: '@x/foo', label: 'l', fallback: false });
+
+  assert.deepEqual(seen.map(r => r.gate), ['tool_function.import', 'plugin.add']);
+  assert.equal(seen[0]?.subject, 'scrape_prices node:fs', 'which function asked is still the subject');
+});
+
 test('with no gate registered at all, the binding still asks rather than allowing', async () => {
   const { asked, ask } = recorder('no');
   const bound = bindGate(undefined, 'plugin', ask);

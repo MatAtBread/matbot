@@ -218,6 +218,9 @@ test('define, call, redefine, collide, remove and reload a package through tool_
   assert.equal(resultOf(await run(machine, 'Presence__where', {})), 'out');
   assert.equal(resultOf(await run(machine, 'Presence__room', { fallback: 'nowhere' })), 'nowhere');
   assert.match(machine.tools.resolve('Presence__where')!.description, /^Whether Mat is at home/);
+  // Its gates are `tool_function`'s. The name here is the MODEL's, so a gate qualified by it would be a
+  // fresh id per package — nothing an install could key, and no remembered answer able to generalise.
+  assert.equal(machine.tools.resolve('Presence__where')!.gateNamespace, 'tool_function');
 
   // One export cannot be removed from under its siblings.
   const byTool = resultOf(await run(machine, 'tool_function', { action: 'remove', name: 'Presence__where' })) as { message: string };

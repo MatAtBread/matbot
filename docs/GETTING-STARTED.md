@@ -78,8 +78,9 @@ the first time it tries, you are asked, by name:
 
 > Allow function **"fetch_prices"** to import **node:fs/promises**?
 >
-> Deny / Allow / Always allow "fetch_prices node:fs/" / Always allow "fetch_prices node:" /
-> Always allow "* node:fs/promises" / Always allow every tool_function.import
+> Deny / Allow / Always allow function "fetch_prices" to import node:fs/promises /
+> …to import anything under node:fs/ / …to import any node builtin /
+> Always allow ANY function to import node:fs/promises / Always allow every tool_function.import
 
 Answer once, or stand an answer up for that function, for that directory or protocol, or
 for that module in any function. `gate_action get` lists what you have standing and

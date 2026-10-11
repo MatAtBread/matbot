@@ -56,6 +56,44 @@ test('import( is rewritten only in code context', () => {
   assert.equal(rewriteImportCalls(`const q = a / b; import('x')`), `const q = a / b; __toolImportModule('x')`);
 });
 
+test('raw template text is not code: a URL in one is not a comment, nor an apostrophe a string', () => {
+  // Tested after the comment branch, a `//` inside a template ate the rest of the line INCLUDING the
+  // closing backtick, so the scanner never left template context and every later import( went
+  // unrewritten — a clean type check, then ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING at run time. Any URL
+  // in a template does it, which is most of them.
+  assert.equal(
+    rewriteImportCalls("const u = `https://esm.sh/x`;\nawait import(u);"),
+    "const u = `https://esm.sh/x`;\nawait __toolImportModule(u);",
+  );
+  assert.equal(
+    rewriteImportCalls("const s = `it's fine`; await import('node:os');"),
+    "const s = `it's fine`; await __toolImportModule('node:os');",
+  );
+  // …and an interpolation is still code, even after raw text containing both.
+  assert.equal(
+    rewriteImportCalls("`// it's ${await import('a')}`"),
+    "`// it's ${await __toolImportModule('a')}`",
+  );
+});
+
+test('a keyword before a slash means regex, not division', () => {
+  // `out` still carries the whitespace between the keyword and the `/`, so anchoring on the keyword alone
+  // never matched: `return /x/` read as division, the second `/` opened a string that ran to EOF, and
+  // every rewrite after it was lost.
+  assert.equal(
+    rewriteImportCalls(`return /["']/.test(m) ? import('node:os') : null;`),
+    `return /["']/.test(m) ? __toolImportModule('node:os') : null;`,
+  );
+  assert.equal(rewriteImportCalls(`if (typeof /a/ === 'object') import('x');`),
+               `if (typeof /a/ === 'object') __toolImportModule('x');`);
+  // A property access and an identifier merely ending in a keyword both DIVIDE, so the slash pair is
+  // arithmetic and the text between them is code.
+  assert.equal(rewriteImportCalls(`const n = o.return / b / c; import('x')`),
+               `const n = o.return / b / c; __toolImportModule('x')`);
+  assert.equal(rewriteImportCalls(`const n = myreturn / b / c; import('x')`),
+               `const n = myreturn / b / c; __toolImportModule('x')`);
+});
+
 test('a permitted import is gated, and the subject names the function as well as the module', async () => {
   const runner = createVmFunctionRunner(2000, { permit: ['node:'] });
   const host: CompileHost = { TypeScriptStripper: stripper, FunctionRunner: runner };

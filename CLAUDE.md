@@ -629,6 +629,16 @@ route), and one policy covers both runtimes' implementations of a tool — node'
 browser's `plugin-tool` both register `plugin`; `mcp` and `mcp-http` both register `mcp_action`. The
 host reserves `tools.*` for core's own gates.
 
+A tool whose NAME is built at run time declares its namespace instead, on the registered `Tool` as
+`gateNamespace` — the same category of field as `toolContract`, for the same reason: a model-chosen name
+cannot carry a vocabulary either. A `function-tools` function says `tool_function`, so every body's
+import decision lands on `tool_function.import`. Qualified by the name, each definition would mint its
+own gate id: nothing stable for `default_settings:` to key, no remembered answer able to generalise
+across functions, one settings key per name the model ever picks, and the only part a model controls
+sitting between it and the gate. It is as trusted as the name beside it — the registering plugin chooses
+both, and a loaded plugin has full host capability regardless — so what it withholds is the model's
+reach, not a plugin's.
+
 **`subject` is a field, never folded into `gate`.** A composite id makes the vocabulary unbounded,
 which collides with "an unknown gate id must default to asking" — every newly-named tool would be an
 unknown gate, and "ask about new overwrites, accept the ones already decided" would be unwritable,
@@ -759,10 +769,21 @@ the broadest standing answer on offer. It is the thing to revisit first.
 
 **Types follow the reachable set, via `paths`** — one entry per module, never `types: ['node']`. With no
 restriction that is every builtin, so a body can be graded on what it may legitimately ask for; with one,
-it is that subset, which is what makes a forbidden module a COMPILE error rather than something that
-typechecks and is refused later. `paths` also pulls 65 files where `types` pulls 168. An `http(s)` module gets no types
+it is that subset, expanded by the same boundary rule the gate uses (`importPermitted`, in `plugin-api`),
+because `node:fs` admits `node:fs/promises` at the call and a permitted import that fails the check is
+reachable only with `noTypeCheck`. `paths` also pulls 65 files where `types` pulls 168. An `http(s)` module gets no types
 at all: TypeScript cannot express "a module with arbitrary named exports", and an untypeable thing is a
 stated refusal here, not a fake type.
+
+**`paths` cannot ENFORCE the restriction, though, so a structural rule does** — `IMPORT-GATE`, beside
+the cast gate and `ENV-GATE` in the one checker. Loading a single builtin's declaration file drags in the
+ambient `declare module 'node:…'` blocks of everything its own declarations reference (`node:fs` reaches
+most of the rest through `node:stream`), and whether a forbidden specifier then resolves depends on what
+`@types/node` is reachable from the program root — so the `paths` set decides what is TYPED and the rule
+decides what is allowed. It also replaces what tsc says when the module genuinely does not resolve:
+"Do you need to install type definitions for node?", about a module the installation forbids, which the
+author cannot act on. Only a literal specifier can be checked; a computed one is the gate's at the call,
+which is where it was always going to be decided.
 
 ---
 

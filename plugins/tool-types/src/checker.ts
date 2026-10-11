@@ -93,7 +93,7 @@ const MAX_FULL = 8;
 // A structural rule's label, by its private code. CAST-GATE is the default because it was the first and
 // is what the contract gate (90004) has always reported as; a rule about something other than types
 // needs its own name, or the label says the wrong thing about the finding under it.
-const SYN_LABELS: Record<number, string> = { 90005: 'ENV-GATE' };
+const SYN_LABELS: Record<number, string> = { 90005: 'ENV-GATE', 90006: 'IMPORT-GATE' };
 
 // One rule, one name, in every renderer: a per-rule label read off the record rather than spelled at
 // each render site, so a summary can never call a finding something its own entry did not.
@@ -210,6 +210,13 @@ export async function checkSnippetAgainst(opts: {
    *  permitted module, so a module outside the set does not resolve and is a compile error rather than
    *  something that typechecks and is refused at run time. Built by the caller, which knows the set. */
   importPaths?: Record<string, string[]>;
+  /** The restriction itself, when there is one — `paths` cannot enforce it. Loading ONE builtin's
+   *  declaration file pulls in the ambient `declare module 'node:…'` blocks of everything its own
+   *  declarations reference (`node:fs` reaches `node:stream`, which reaches most of the rest), so a
+   *  forbidden specifier resolves anyway and typechecks clean. A literal `import('…')` is therefore
+   *  checked STRUCTURALLY against this list, the way the cast gate and ENV-GATE close the other holes
+   *  the type system cannot. Absent ⇒ unrestricted, and nothing is checked. */
+  permittedImports?: readonly string[];
 }): Promise<ToolCheckReport> {
   const diags = await runWorker({
     mode: 'snippet',
@@ -220,6 +227,7 @@ export async function checkSnippetAgainst(opts: {
     virtualPath: `${opts.root}/__mb_toolcheck_${crypto.randomUUID()}.ts`,
     ...(opts.apiIndexPath !== undefined ? { apiIndexPath: opts.apiIndexPath } : {}),
     ...(opts.importPaths  !== undefined ? { importPaths:  opts.importPaths  } : {}),
+    ...(opts.permittedImports !== undefined ? { permittedImports: opts.permittedImports } : {}),
   });
   return reportOf(diags ?? []);
 }
@@ -374,8 +382,37 @@ try {
       return d.getSourceFile().fileName === virtual && d.getStart() >= minStart;
     });
   };
+  // The permit's boundary rule, inlined: the worker is a CommonJS realm with no loader hooks, so it
+  // cannot import 'importPermitted' from plugin-api, which is where the rule lives and is documented.
+  const permits = workerData.permittedImports;
+  const permitted = function (spec) {
+    return permits.some(function (p) {
+      return spec === p
+        || (p.charAt(p.length - 1) === '/' || p.charAt(p.length - 1) === ':'
+              ? spec.indexOf(p) === 0
+              : spec.indexOf(p + '/') === 0);
+    });
+  };
+  // Where a forbidden import was reported, so tsc's own complaint about the same specifier is dropped.
+  // Both fire whenever the module does not resolve, and tsc's is actively misleading here: it offers
+  // "Do you need to install type definitions for node?" about a module the INSTALLATION forbids, which
+  // is not a thing the author can fix. Which of the two tsc emits also depends on whether @types/node
+  // happens to be reachable from the program root, so this rule is the deterministic one.
+  const importStarts = new Set();
   const envVisit = function (node, sf) {
     if (envGate && node.getStart(sf) >= minStart) {
+      if (permits !== undefined && ts.isCallExpression(node)
+          && node.expression.kind === ts.SyntaxKind.ImportKeyword
+          && node.arguments.length > 0 && ts.isStringLiteralLike(node.arguments[0])
+          && !permitted(node.arguments[0].text)) {
+        const spec = node.arguments[0].text;
+        synth.push(mk(sf, node.arguments[0], 90006,
+          permits.length === 0
+            ? "module imports are switched off on this installation, so '" + spec + "' cannot be imported. Compute with the tools available instead."
+            : "'" + spec + "' is not permitted on this installation, which allows only: " + permits.join(', ')
+              + ". This is configuration, not a permission anyone can grant at the call — use a permitted module, or none."));
+        importStarts.add(node.arguments[0].getStart(sf));
+      }
       if (ts.isMetaProperty(node) && node.keywordToken === ts.SyntaxKind.ImportKeyword) {
         synth.push(mk(sf, node, 90005,
           "'import.meta' is only available in a module, and a function body is not one — this is a syntax error when the body is compiled, so it cannot run at all. Remove it."));
@@ -418,6 +455,7 @@ try {
 
   const errors = targets.filter(function (d) {
     if (d.category !== ts.DiagnosticCategory.Error) return false;
+    if ((d.code === 2307 || d.code === 2591) && importStarts.has(d.start)) return false;
     return !((d.code === 2304 || d.code === 2591) && envStarts.has(d.start));
   }).concat(synth);
   errors.sort(function (a, b) {

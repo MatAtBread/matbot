@@ -74,6 +74,22 @@ export interface FunctionRunner {
 export const FUNCTION_TIMEOUT = 'FUNCTION_TIMEOUT';
 
 /**
+ * Whether {@link FunctionRunner.permittedImports} admits `spec` — the boundary rule that interface
+ * documents, as a function, because two packages read the same list and must agree: `function-tools`
+ * decides whether to ask about an import, and `tool-types` decides which modules to TYPE. They had a copy
+ * each, and they drifted exactly where it hurts — `node:fs` admitted `node:fs/promises` at the gate while
+ * the checker declared only `node:fs`, so a permitted subpath failed the check and needed `noTypeCheck`
+ * to run at all.
+ *
+ * A prefix must end at a boundary: its own trailing `/` or `:`, or the next `/` in the specifier. A bare
+ * `startsWith` let an entry admit a sibling whose name merely begins the same way, which is the whole
+ * value of naming one.
+ */
+export const importPermitted = (permits: readonly string[], spec: string): boolean =>
+  permits.some(p => spec === p
+    || (p.endsWith('/') || p.endsWith(':') ? spec.startsWith(p) : spec.startsWith(`${p}/`)));
+
+/**
  * One finding from {@link ToolTypeIndex.check} — the record, not a rendering of it.
  *
  * `rendered` travels WITH the record rather than being left for the consumer to rebuild: the annotated

@@ -129,6 +129,10 @@ function definedTool(
     // it into the dts registry block (bare `ToolContract` rewritten to an inline import) and derives the
     // wire text from it, exactly as it does from a source tool's arms.
     toolContract: contract,
+    // Every function's gates are `tool_function`'s, not its own: the name here is the MODEL's, so a gate
+    // qualified by it would mint a fresh id per definition — no remembered answer could generalise and an
+    // install would have nothing stable to key. The per-function dimension lives in the subject instead.
+    gateNamespace: TOOL_NAME,
     pluginName:  PLUGIN_NAME,
     executor: {
       execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
@@ -445,6 +449,7 @@ class PackageStore {
         description:  `${e.description ?? `${PLACEHOLDER_DESCRIPTION}\n\nSource:\n${e.source}`}\n\nExported by package "${name}", defined via ${TOOL_NAME}.`,
         inputSchema:  e.inputSchema,
         toolContract: e.toolContract,
+        gateNamespace: TOOL_NAME,
         pluginName:   PLUGIN_NAME,
         executor: {
           execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {

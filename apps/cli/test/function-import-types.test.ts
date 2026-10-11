@@ -84,9 +84,52 @@ test('`permit: []` is the one way to say never, and the dts says so', async () =
   assert.match(dts, /Module imports are switched off on this installation/);
 });
 
-test('a specifier with no declaration file is left out, so it cannot typecheck', async () => {
-  // Silently skipping is right: an entry we cannot type must not resolve. A bare package is left to
-  // ordinary resolution, and an http(s) module is deliberately untyped.
+test('a specifier with no declaration file is listed as untyped, not as imports being off', async () => {
+  // Leaving it out of `paths` is right: an entry we cannot type must not resolve, and a fake type is a
+  // worse answer than an honest refusal. But the NOTE is the author's only account of what this install
+  // allows, and deriving "switched off" from the typed set said imports were off whenever a restriction
+  // named no builtin — while the gate was perfectly willing to ask about `lodash`.
   const dts = await indexFor(['node:nope', 'lodash', 'https://esm.sh/x/']).dts();
-  assert.match(dts, /Module imports are switched off on this installation/);
+  assert.doesNotMatch(dts, /switched off/);
+  assert.match(dts, /A body may import these/);
+  for (const p of ['lodash', 'https://esm.sh/x/']) assert.ok(dts.includes(`//   ${p}   (untyped`), p);
+});
+
+test('a permitted builtin types its submodules, so what runs is what is graded', async () => {
+  // `node:fs` admits `node:fs/promises` at the gate (the boundary rule the runner documents), so the
+  // check must type it too. Emitting the exact specifier alone left a permitted import failing the
+  // check, reachable only with `noTypeCheck` — the one divergence between running and grading.
+  const dts = await indexFor(['node:fs']).dts();
+  assert.match(dts, /\/\/\s+node:fs$/m);
+  assert.match(dts, /\/\/\s+node:fs\/promises$/m, 'the submodule the permit admits is listed too');
+  assert.doesNotMatch(dts, /node:fs\s+\(untyped/);
+
+  // Through the real index, so the `paths` it derives is what grades the snippet — the submodule is not
+  // in the restriction and must still resolve.
+  const report = await indexFor(['node:fs']).check(
+    `async function f() { const fs = await import('node:fs/promises'); return fs.readFile('x'); }`);
+  assert.deepEqual(report.diagnostics.map(d => `${d.label}: ${d.message}`), []);
+});
+
+test('a forbidden module is rejected STRUCTURALLY, and not as advice to install types', async () => {
+  // `paths` alone cannot carry the restriction: one builtin's declaration file drags in the ambient
+  // `declare module 'node:…'` blocks of everything its own declarations reference, and whether tsc then
+  // resolves a forbidden specifier depends on what is reachable from the program root. So the rule is
+  // structural, like ENV-GATE and the cast gate — and it replaces a message that told the author to
+  // install type definitions for a module their INSTALLATION forbids, which they cannot act on.
+  const out = await indexFor(['node:fs']).check(
+    `async function f() { const os = await import('node:os'); return os.hostname(); }`);
+  assert.equal(out.diagnostics.length, 1, out.diagnostics.map(d => d.label).join(', '));
+  assert.equal(out.diagnostics[0]?.label, 'IMPORT-GATE');
+  assert.match(out.diagnostics[0]!.message, /not permitted on this installation, which allows only: node:fs/);
+  assert.doesNotMatch(out.diagnostics[0]!.message, /install type definitions/);
+
+  // With imports switched off the message says that instead: there is no permitted module to suggest.
+  const off = await indexFor([]).check(`async function f() { return import('node:os'); }`);
+  assert.match(off.diagnostics[0]!.message, /switched off on this installation/);
+
+  // Unrestricted ⇒ nothing to enforce, and the gate at the call is the control.
+  const open = await indexFor(undefined).check(
+    `async function f() { const os = await import('node:os'); return os.hostname(); }`);
+  assert.deepEqual(open.diagnostics.map(d => d.label), []);
 });

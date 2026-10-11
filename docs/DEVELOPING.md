@@ -737,7 +737,10 @@ Four rules, all of which follow from the seam rather than from taste:
 
 - **The gate is the SUFFIX.** `ctx.gate({ gate: 'add' })` from a tool registered as `plugin` asks
   `plugin.add`. You cannot address another tool's gate, and a same-named tool in the other runtime
-  reaches the same id — which is the point: one policy answer covers both.
+  reaches the same id — which is the point: one policy answer covers both. If your tool's NAME is
+  built at run time, set `gateNamespace` on the registered `Tool` to the fixed name its gates belong
+  to (a `function-tools` function says `tool_function`): otherwise each instance invents a gate id
+  nobody can configure and no remembered answer can generalise over.
 - **`fallback` is your call site's non-interactive answer**, not a preference. `false` for anything
   that installs, rewrites or connects. `true` only where proceeding with nobody present is the
   documented behaviour (core's `tools.overwrite` is the one such site in the repo).
