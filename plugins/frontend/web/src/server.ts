@@ -407,7 +407,7 @@ export function createWebServer(deps: WebServerDeps) {
     if (!tool) return;
     const ac = new AbortController();
     try {
-      for await (const ev of tool.executor.execute({}, makeToolCtx(ac, 'about_matbot'))) {
+      for await (const ev of tool.executor.execute({}, makeToolCtx(ac, tool))) {
         if (ev.type === 'result') {
           const v = (ev.value as { version?: unknown }).version;
           if (typeof v === 'string') harnessVersion = v;
@@ -463,7 +463,7 @@ export function createWebServer(deps: WebServerDeps) {
     }
   });
 
-  function makeToolCtx(ac: AbortController, toolName: string) {
+  function makeToolCtx(ac: AbortController, tool: Pick<Tool, 'name' | 'gateNamespace'>) {
     const now = new Date().toISOString();
     const stubSession: Session = {
       id: crypto.randomUUID(), version: crypto.randomUUID(),
@@ -480,7 +480,7 @@ export function createWebServer(deps: WebServerDeps) {
       prompt:       nonInteractivePrompt,
       // `undefined`, never `nonInteractivePrompt`: the stand-in answers with a field's own default, so a
       // gate handed it could not tell "nobody is here" from "a human answered". This route has no human.
-      ...bindGate(deps.permissionGate?.(), toolName, undefined),
+      ...bindGate(deps.permissionGate?.(), tool, undefined),
       ...(deps.workdir    !== undefined ? { workdir:    deps.workdir    } : {}),
       ...(deps.files      !== undefined ? { files:      deps.files      } : {}),
       ...(deps.configPath !== undefined ? { configPath: deps.configPath } : {}),
@@ -884,7 +884,7 @@ export function createWebServer(deps: WebServerDeps) {
       const tool = await resolveToolReady(toolName, ac.signal);
       if (!tool) { json(res, 404, { error: `Tool "${toolName}" not found` }); return; }
 
-      const toolCtx = makeToolCtx(ac, toolName);
+      const toolCtx = makeToolCtx(ac, tool);
       let stdout = '';
       let stderr = '';
       try {
@@ -941,7 +941,7 @@ export function createWebServer(deps: WebServerDeps) {
       res.write(sseComment('tool stream open'));
 
       try {
-        for await (const ev of tool.executor.execute(input, makeToolCtx(ac, toolName))) {
+        for await (const ev of tool.executor.execute(input, makeToolCtx(ac, tool))) {
           if (!res.writable) break;
           res.write(sseEvent(ev.type, ev));
         }

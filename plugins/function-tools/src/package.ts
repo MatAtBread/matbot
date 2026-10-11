@@ -1,6 +1,7 @@
 import type { JSONSchema } from '@matatbread/matbot-plugin-api';
-import { INJECTED, compileUnder, type CompileHost, type CompiledFn } from './compile.js';
-import { inertEnd, matchBrace, matchParen, parseSignature, tsTypeToSchema, type ParsedParam } from './signature.js';
+import { INJECTED, compileUnder, type CompileHost, type CompiledFn, type ImportFn } from './compile.js';
+import { inertEnd, matchBrace, matchParen, parseSignature, tsTypeToSchema, unwrapPromise, type ParsedParam } from './signature.js';
+import { rewriteImportCalls } from './imports.js';
 
 /** The separator between a package name and an export's name in the registered tool name. Not `.`, which
  *  Anthropic and OpenAI reject in a tool name, and not `-`, which is not an identifier character: the name
@@ -29,7 +30,7 @@ export interface ParsedPackage {
   exportAt: number[];
 }
 
-export type PackageFn = (tool: unknown, toolInContext: unknown, context: unknown, exportName: string, arg: unknown) => Promise<unknown>;
+export type PackageFn = (tool: unknown, toolInContext: unknown, context: unknown, importModule: ImportFn, exportName: string, arg: unknown) => Promise<unknown>;
 
 const IDENT_CHAR = /[\w$]/;
 
@@ -267,7 +268,6 @@ function leadingComment(s: string, at: number): string | undefined {
   return text === '' ? undefined : text;
 }
 
-const unwrapPromise = (t: string): string => t.match(/^Promise\s*<([\s\S]*)>$/)?.[1]?.trim() ?? t;
 
 /**
  * Find a package module's top-level `export`ed functions and derive each one's tool: its name, schema and
@@ -326,7 +326,7 @@ function deriveExport(packageName: string, name: string, fnSource: string, descr
   if (toolName.length > MAX_TOOL_NAME) throw new Error(`tool name "${toolName}" is longer than ${MAX_TOOL_NAME} characters, which providers reject — shorten the package or function name.`);
 
   const sig = parseSignature(fnSource);
-  // One object parameter (or none) — the lambda convention, so a call to it from inside the package and
+  // One object parameter (or none) — the single-argument convention, so a call to it from inside the package and
   // `tool.<package>__<name>(…)` from outside take the same argument.
   if (sig.params.length > 1) throw new Error(`exported function "${name}" takes ${sig.params.length} parameters — a tool takes ONE object parameter, e.g. \`${name}(args: { a: string; b: number })\`.`);
   const param = sig.params[0];
@@ -369,11 +369,14 @@ export async function buildPackageFn(host: CompileHost, source: string, parsed: 
   let stripped: string;
   try { stripped = await host.TypeScriptStripper.strip(blanked); }
   catch (e) { throw new Error(`not valid TypeScript (${msg(e)})`); }
-  const body = `${stripped}\n;return ({ ${parsed.exports.map(e => e.name).join(', ')} })[${EXPORT_NAME}](${EXPORT_ARG});`;
+  const body = `${rewriteImportCalls(stripped)}\n;return ({ ${parsed.exports.map(e => e.name).join(', ')} })[${EXPORT_NAME}](${EXPORT_ARG});`;
   return compileUnder(host, [...INJECTED, EXPORT_NAME, EXPORT_ARG], body) as PackageFn;
 }
 
 /** One export of a compiled package, in the calling convention `runFunction` drives. */
 export function exportFn(pkg: PackageFn, name: string): CompiledFn {
-  return (tool, toolInContext, context, arg) => pkg(tool, toolInContext, context, name, arg);
+  // Positional, and in `INJECTED` order — the injected names come first and a package adds two of its
+  // own after them. Typed `unknown`, so an argument in the wrong slot is not a compile error: when the
+  // injected list grew by one, this silently handed a package's own `arg` to the import slot.
+  return (tool, toolInContext, context, importModule, arg) => pkg(tool, toolInContext, context, importModule, name, arg);
 }

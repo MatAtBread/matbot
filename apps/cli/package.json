@@ -3,7 +3,7 @@
   "matbotRuntime": [
     "node"
   ],
-  "version": "0.4.19",
+  "version": "0.4.20",
   "engines": {
     "node": ">=24.12.0"
   },
@@ -12,7 +12,8 @@
     "bin.js",
     "register.js",
     "ts-hooks.js",
-    "remote-loader.js"
+    "remote-loader.js",
+    "remote-loader.d.ts"
   ],
   "description": "matbot CLI: interactive REPL and single-turn runner for the matbot AI harness, with hot-loadable plugins.",
   "keywords": [

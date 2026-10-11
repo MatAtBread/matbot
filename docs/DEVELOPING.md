@@ -737,7 +737,10 @@ Four rules, all of which follow from the seam rather than from taste:
 
 - **The gate is the SUFFIX.** `ctx.gate({ gate: 'add' })` from a tool registered as `plugin` asks
   `plugin.add`. You cannot address another tool's gate, and a same-named tool in the other runtime
-  reaches the same id — which is the point: one policy answer covers both.
+  reaches the same id — which is the point: one policy answer covers both. If your tool's NAME is
+  built at run time, set `gateNamespace` on the registered `Tool` to the fixed name its gates belong
+  to (a `function-tools` function says `tool_function`): otherwise each instance invents a gate id
+  nobody can configure and no remembered answer can generalise over.
 - **`fallback` is your call site's non-interactive answer**, not a preference. `false` for anything
   that installs, rewrites or connects. `true` only where proceeding with nobody present is the
   documented behaviour (core's `tools.overwrite` is the one such site in the repo).
@@ -1315,7 +1318,7 @@ Store-backed index with optional Cloudflare BGE reranker.
 | `@matatbread/matbot-skills` | `skill_action`, `skills_config` | Cross-runtime skill CRUD (named markdown playbooks) |
 | `@matatbread/matbot-skills-node` | `skill_action` + file watch | Node specialization of `skills`: adds local `.md` import/watch |
 | `@matatbread/matbot-tool-skill-compiler` | `skill_compiler` | Compile procedural markdown skills into executable TypeScript tool plugins |
-| `@matatbread/matbot-function-tools` | `tool_function` | Author/run TypeScript functions that compose registered tools in one pass (define persists a named tool; lambda runs once) |
+| `@matatbread/matbot-function-tools` | `tool_function` | Author/run TypeScript functions that compose registered tools in one pass (define persists a named tool; execute runs a bare body once) |
 | `@matatbread/matbot-tool-router` | `ToolPresenter` (`tool_search`) | Serves a bounded per-turn tool window from a large library — pins + BM25-ranked tools + a `tool_search` entry point |
 | `@matatbread/matbot-tool-store` | `store_action` (+ `defineStore`) | Define and expose named persistent stores with generated CRUD tools |
 | `@matatbread/matbot-rumsfeld` | `contextual_search`, `find_fact` | Resolve unknown terms via the knowledge index (`contextual_search` returns a document; `find_fact` returns a precise answer) |

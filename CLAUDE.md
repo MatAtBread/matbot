@@ -232,7 +232,7 @@ All runtime state under `.data/` **next to `matbot.yaml`**, never in source:
 
 `.data/` is gitignored. Plugins may add subdirectories. Other storage providers (e.g. SQLite) differ.
 
-**`.plugins/`** — fetched remote-plugin cache, **separate** from `.data/`. `.data/` is LLM read-write runtime state; `.plugins/` is matbot-writes / LLM-reads-only (mounted read-only into docker-bash). Never relocate it. Gitignored.
+**`.plugins/`** — fetched remote-module cache, **separate** from `.data/`. `.data/` is LLM read-write runtime state; `.plugins/` is matbot-writes / LLM-reads-only (mounted read-only into docker-bash). Never relocate it. Gitignored. It holds remote *plugins* and, by the same mechanism, a URL a `tool_function` body was granted (node refuses an `http(s)` specifier outright, so materialising and importing from disk is the only route). One cache, because a second fetch-and-materialise directory is the thing that drifts — and the contract is unchanged either way: matbot writes it, the model only reads it.
 
 ---
 
@@ -629,6 +629,16 @@ route), and one policy covers both runtimes' implementations of a tool — node'
 browser's `plugin-tool` both register `plugin`; `mcp` and `mcp-http` both register `mcp_action`. The
 host reserves `tools.*` for core's own gates.
 
+A tool whose NAME is built at run time declares its namespace instead, on the registered `Tool` as
+`gateNamespace` — the same category of field as `toolContract`, for the same reason: a model-chosen name
+cannot carry a vocabulary either. A `function-tools` function says `tool_function`, so every body's
+import decision lands on `tool_function.import`. Qualified by the name, each definition would mint its
+own gate id: nothing stable for `default_settings:` to key, no remembered answer able to generalise
+across functions, one settings key per name the model ever picks, and the only part a model controls
+sitting between it and the gate. It is as trusted as the name beside it — the registering plugin chooses
+both, and a loaded plugin has full host capability regardless — so what it withholds is the model's
+reach, not a plugin's.
+
 **`subject` is a field, never folded into `gate`.** A composite id makes the vocabulary unbounded,
 which collides with "an unknown gate id must default to asking" — every newly-named tool would be an
 unknown gate, and "ask about new overwrites, accept the ones already decided" would be unwritable,
@@ -703,6 +713,77 @@ why the per-subject form is offered first and is the one to reach for. Two other
 author should be told rather than discover: the provider path **chains two gates**
 (`add-unverified` → `add`), so one user-visible operation can cost two decisions; and a collision
 raised while a *replacement* policy plugin is itself loading falls to the host's seeded default.
+
+---
+
+## Module access from a `tool_function`
+
+A body is a *constrained* place to compute, which is the reason to prefer it over a shell for data work:
+an install that chose `docker-bash` over `bash` has not thereby handed `node:fs` to model-authored code.
+Three parts, and only the first two enforce anything:
+
+1. **A per-call gate** — the control, and the default. `tool_function.import`, subject `"<function> <specifier>"`. The pair, not the
+   specifier alone: *why is THIS function asking for `node:fs`* is the question being put, and a
+   specifier-only key would let a brand-new function inherit every grant a reviewed one earned.
+   `standing` carries the answers it may be remembered as (the exact pair, the module's directory, its
+   protocol, then the module across every function) narrowest first, **each with its own prose**: a
+   subject is a key, and `#execute node:fs/` is a correct key and an unusable question — only the call
+   site knows that `#` means a one-off body or that `node:` means any builtin. The policy does set
+   membership over strings it never parses, and renders the label without rewriting it. What
+   is NOT offered is the product of the two axes — "any function, any builtin" — because the options
+   would multiply past what a prompt can carry; that is the gate-wide standing answer, and installation
+   authoring.
+2. **An optional restriction** — `function_imports: { permit: [...] }` in `matbot.yaml`, read by the host
+   onto `FunctionRunner.permittedImports`. **Absent means no restriction**, because a gate that is never
+   reached is not a gate: an allow-list defaulting to empty refuses before anyone can be asked, which is
+   exactly the behaviour a prompt exists to replace. `permit: []` is the opposite of absent and switches
+   imports off. What it is FOR is the one thing a prompt cannot express — forbidding a module outright,
+   with no human able to allow it, since a policy has no stored "always deny". It lives on the runner
+   because the runner IS the execution environment and two consumers need one answer: the capability that
+   imports, and `ToolTypeIndex`, which types the reachable set.
+3. **The spelling** — `import(…)` is rewritten onto an injected, gated loader by a scanner in
+   `function-tools` (`imports.ts`). `import` is a reserved word, so there is no binding to shadow; the
+   rewrite keeps the spelling a model reaches for first, keeps a **computed** specifier working (the
+   argument passes through, so the gate sees the string the body built — which a static scan could never
+   do), and leaves the type-check reading the source as WRITTEN, so a diagnostic's caret stays over text
+   its author recognises. It is a scanner and not one regular expression because a body that *generates*
+   source containing `import(` is ordinary, and template-literal nesting and regex-vs-division defeat a
+   single pattern.
+
+**Two tiers, and the label says which.** `node:os` genuinely cannot reach another capability. Anything
+else — a package, a path, a URL — is loaded as **host code**: it is not compiled by the runner, so none of
+a body's withheld globals apply to it and it can hand `process` straight back, and its own imports are
+never gated again. So a non-builtin grant is `plugin.add`-grade and is worded that way.
+
+**What this is not.** `vm` is not a capability boundary — a body runs in this context, and
+`(()=>{}).constructor('return process')()` recovers the real `process` in one line. Withholding
+`process`/`globalThis`/`Buffer`/`eval`/`Function` (and the phantom `require`/`module`/`__dirname`, which
+node's types would otherwise make typecheck and then fail at the first call) raises the cost from "call a
+documented API" to "know a published trick", and makes the intended path gated and revocable. A real
+boundary is another process.
+
+**Known weakness, accepted knowingly:** the grant keys on the function's NAME, so redefining a function
+under the same name inherits it — and redefinition is the one door the model controls. Keying the body
+instead would re-ask on each of the two or three attempts a model commonly needs, pushing a human towards
+the broadest standing answer on offer. It is the thing to revisit first.
+
+**Types follow the reachable set, via `paths`** — one entry per module, never `types: ['node']`. With no
+restriction that is every builtin, so a body can be graded on what it may legitimately ask for; with one,
+it is that subset, expanded by the same boundary rule the gate uses (`importPermitted`, in `plugin-api`),
+because `node:fs` admits `node:fs/promises` at the call and a permitted import that fails the check is
+reachable only with `noTypeCheck`. `paths` also pulls 65 files where `types` pulls 168. An `http(s)` module gets no types
+at all: TypeScript cannot express "a module with arbitrary named exports", and an untypeable thing is a
+stated refusal here, not a fake type.
+
+**`paths` cannot ENFORCE the restriction, though, so a structural rule does** — `IMPORT-GATE`, beside
+the cast gate and `ENV-GATE` in the one checker. Loading a single builtin's declaration file drags in the
+ambient `declare module 'node:…'` blocks of everything its own declarations reference (`node:fs` reaches
+most of the rest through `node:stream`), and whether a forbidden specifier then resolves depends on what
+`@types/node` is reachable from the program root — so the `paths` set decides what is TYPED and the rule
+decides what is allowed. It also replaces what tsc says when the module genuinely does not resolve:
+"Do you need to install type definitions for node?", about a module the installation forbids, which the
+author cannot act on. Only a literal specifier can be checked; a computed one is the gate's at the call,
+which is where it was always going to be decided.
 
 ---
 

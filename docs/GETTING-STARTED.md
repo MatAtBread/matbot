@@ -71,6 +71,48 @@ Awaited work — tool calls, HTTP requests — never counts towards it. A loop t
 bodies run unbounded, as they did before the guard existed, and matbot warns at
 startup. Use it only for testing.
 
+### When a function wants a module
+
+A body can compute and call tools. It can also import a node module — but not silently:
+the first time it tries, you are asked, by name:
+
+> Allow function **"fetch_prices"** to import **node:fs/promises**?
+>
+> Deny / Allow / Always allow function "fetch_prices" to import node:fs/promises /
+> …to import anything under node:fs/ / …to import any node builtin /
+> Always allow ANY function to import node:fs/promises / Always allow every tool_function.import
+
+Answer once, or stand an answer up for that function, for that directory or protocol, or
+for that module in any function. `gate_action get` lists what you have standing and
+`gate_action clear` forgets one. Nothing is remembered unless you pick an "Always".
+
+Two things are worth knowing before you say yes to something that is not a builtin.
+`node:os` is a narrow grant — it cannot reach the filesystem. A **package or URL** is not:
+it loads as ordinary host code with matbot's full access, and its own imports are not asked
+about again, so allowing one is closer to installing a plugin than to granting a capability.
+And a standing answer follows a function's *name*, so redefining a function under the same
+name inherits it.
+
+With nobody to ask — a tool call over HTTP, a trigger, a background job — an import is
+denied unless you had already stood an answer up for it.
+
+If you want a module forbidden outright, so that nobody is even asked, narrow what may be
+requested:
+
+```yaml
+function_imports:
+  permit:
+    - 'node:'        # builtins may be asked for; packages and URLs may not
+```
+
+Leave `function_imports` out and anything may be *asked* for. `permit: []` is the other
+end: imports are switched off and no prompt appears. This is the only way to say "never",
+because a standing answer is always a yes — there is no remembered no.
+
+A remote URL is fetched into `.plugins/` and imported from there, because node cannot
+import a URL directly. It has no type declarations, so a body importing one needs
+`noTypeCheck: true`.
+
 ---
 
 ## Auto-configuration

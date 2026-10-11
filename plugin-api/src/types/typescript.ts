@@ -31,11 +31,63 @@ export interface FunctionRunner {
   /** Compile `body` as the body of an async function taking `params`. Throws on a syntax error. A call
    *  stopped at the limit rejects with an error whose `code` is {@link FUNCTION_TIMEOUT}. */
   compile(params: readonly string[], body: string): (...args: unknown[]) => Promise<unknown>;
+  /**
+   * An optional RESTRICTION on what a body may import, as exact specifiers or prefixes (`['node:']`).
+   *
+   * **Absent ⇒ no restriction**, which is the default: every specifier may be asked about, and the
+   * per-import {@link PermissionGate} decision is the control. That way round because a gate that is
+   * never reached is not a gate — an allow-list defaulting to empty refuses before anyone can be asked,
+   * which is precisely the behaviour a permission prompt exists to replace. An empty array means the
+   * opposite of absent: nothing may be imported, and nobody is asked.
+   *
+   * What it is FOR is the case a prompt cannot express: a deployment that wants a module forbidden
+   * outright, with no human able to allow it. A policy has no stored "always deny" — a refusal is a
+   * decision about one act — so this is the only way to say "never", and it is installation authoring.
+   *
+   * It lives on the runner because the runner IS the execution environment, and because two consumers
+   * need one answer: the capability that performs the import, and the type index that declares the
+   * reachable set to the author. Spelled as a plugin setting instead, each would have to read the other
+   * plugin's namespace.
+   *
+   * An entry matches a specifier exactly, or as a prefix ending at a BOUNDARY — its own trailing `/` or
+   * `:`, or the next `/` in the specifier. So `node:` admits every builtin and `node:fs` admits
+   * `node:fs/promises`, while `https://esm.sh/lodash` does NOT admit `https://esm.sh/lodashhack/x.js`:
+   * a bare string prefix would let an entry admit a sibling whose name merely begins the same way,
+   * which is the whole value of naming one. It bounds what may be ASKED — it grants nothing by itself.
+   */
+  readonly permittedImports?: readonly string[];
+  /**
+   * Turn a granted specifier into a module. Platform-specific, which is why it is the runner's and not a
+   * plain `import()` at the call site: node cannot import an `http(s)` URL at all
+   * (`ERR_UNSUPPORTED_ESM_URL_SCHEME`), so it materialises one and imports from disk, while a browser
+   * imports the URL directly. Absent ⇒ the caller falls back to a dynamic import, which reaches whatever
+   * the platform natively resolves.
+   *
+   * It is reached only after the gate has allowed this specifier for this function, and it performs no
+   * check of its own — a capability, not a policy.
+   */
+  import?(spec: string): Promise<unknown>;
 }
 
 /** The `code` on the error a {@link FunctionRunner} rejects with when it stops a run at its limit, so a
  *  consumer can tell a stopped runaway from an ordinary failure without matching message text. */
 export const FUNCTION_TIMEOUT = 'FUNCTION_TIMEOUT';
+
+/**
+ * Whether {@link FunctionRunner.permittedImports} admits `spec` — the boundary rule that interface
+ * documents, as a function, because two packages read the same list and must agree: `function-tools`
+ * decides whether to ask about an import, and `tool-types` decides which modules to TYPE. They had a copy
+ * each, and they drifted exactly where it hurts — `node:fs` admitted `node:fs/promises` at the gate while
+ * the checker declared only `node:fs`, so a permitted subpath failed the check and needed `noTypeCheck`
+ * to run at all.
+ *
+ * A prefix must end at a boundary: its own trailing `/` or `:`, or the next `/` in the specifier. A bare
+ * `startsWith` let an entry admit a sibling whose name merely begins the same way, which is the whole
+ * value of naming one.
+ */
+export const importPermitted = (permits: readonly string[], spec: string): boolean =>
+  permits.some(p => spec === p
+    || (p.endsWith('/') || p.endsWith(':') ? spec.startsWith(p) : spec.startsWith(`${p}/`)));
 
 /**
  * One finding from {@link ToolTypeIndex.check} — the record, not a rendering of it.
@@ -47,7 +99,8 @@ export const FUNCTION_TIMEOUT = 'FUNCTION_TIMEOUT';
  * flattened `string[]` made every consumer do.
  */
 export interface ToolCheckDiagnostic {
-  /** The rule's one name, in every renderer: `TS2339`, or `CAST-GATE` for a structural cast-gate finding. */
+  /** The rule's one name, in every renderer: `TS2339`, or a structural rule's own name — `CAST-GATE`,
+   *  `ENV-GATE` for a global the runner does not define. */
   label:    string;
   /** The numeric code. Cast-gate findings use a private 9000x range — read {@link syn}, not the number. */
   code:     number;

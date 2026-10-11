@@ -23,7 +23,7 @@ interface DiagnosticRecord {
   frame?:      string;
   sourceLine?: string;
   related?:    string[];
-  /** True for a cast-gate finding (a structural rule, not a tsc error) — labelled CAST-GATE, not TSnnnn. */
+  /** True for a structural-rule finding (not a tsc error) — labelled by {@link SYN_LABELS}, not TSnnnn. */
   syn?:        boolean;
 }
 
@@ -49,6 +49,11 @@ const HINTS: { codes: number[]; pattern?: RegExp; hint: string }[] = [
     codes: [2322, 2345],
     pattern: /\| undefined' is not assignable/,
     hint: 'the value may be undefined — often an indexed access (array[i], record[key]) under noUncheckedIndexedAccess. Guard it (if (v !== undefined) …) rather than asserting.',
+  },
+  {
+    codes: [90003],
+    pattern: /Object\.(?:keys|values|entries|assign)\s*\(/,
+    hint: "Object.keys/values/entries already accept a precisely-typed object — drop the cast and pass the value itself. (If you wanted the key names as a type, that is `keyof typeof x`.)",
   },
   {
     codes: [1484, 1485],
@@ -85,10 +90,15 @@ function hintFor(d: DiagnosticRecord): string | undefined {
 
 const MAX_FULL = 8;
 
+// A structural rule's label, by its private code. CAST-GATE is the default because it was the first and
+// is what the contract gate (90004) has always reported as; a rule about something other than types
+// needs its own name, or the label says the wrong thing about the finding under it.
+const SYN_LABELS: Record<number, string> = { 90005: 'ENV-GATE', 90006: 'IMPORT-GATE' };
+
 // One rule, one name, in every renderer: a per-rule label read off the record rather than spelled at
 // each render site, so a summary can never call a finding something its own entry did not.
 function label(d: DiagnosticRecord): string {
-  return d.syn ? 'CAST-GATE' : `TS${d.code}`;
+  return d.syn ? (SYN_LABELS[d.code] ?? 'CAST-GATE') : `TS${d.code}`;
 }
 
 function formatOne(d: DiagnosticRecord): string {
@@ -196,6 +206,17 @@ export async function checkSnippetAgainst(opts: {
   prefixLen:     number;
   prefixLines:   number;
   apiIndexPath?: string;
+  /** `paths` entries for the module specifiers this installation permits a body to import — one per
+   *  permitted module, so a module outside the set does not resolve and is a compile error rather than
+   *  something that typechecks and is refused at run time. Built by the caller, which knows the set. */
+  importPaths?: Record<string, string[]>;
+  /** The restriction itself, when there is one — `paths` cannot enforce it. Loading ONE builtin's
+   *  declaration file pulls in the ambient `declare module 'node:…'` blocks of everything its own
+   *  declarations reference (`node:fs` reaches `node:stream`, which reaches most of the rest), so a
+   *  forbidden specifier resolves anyway and typechecks clean. A literal `import('…')` is therefore
+   *  checked STRUCTURALLY against this list, the way the cast gate and ENV-GATE close the other holes
+   *  the type system cannot. Absent ⇒ unrestricted, and nothing is checked. */
+  permittedImports?: readonly string[];
 }): Promise<ToolCheckReport> {
   const diags = await runWorker({
     mode: 'snippet',
@@ -205,6 +226,8 @@ export async function checkSnippetAgainst(opts: {
     prefixLines: opts.prefixLines,
     virtualPath: `${opts.root}/__mb_toolcheck_${crypto.randomUUID()}.ts`,
     ...(opts.apiIndexPath !== undefined ? { apiIndexPath: opts.apiIndexPath } : {}),
+    ...(opts.importPaths  !== undefined ? { importPaths:  opts.importPaths  } : {}),
+    ...(opts.permittedImports !== undefined ? { permittedImports: opts.permittedImports } : {}),
   });
   return reportOf(diags ?? []);
 }
@@ -255,7 +278,13 @@ try {
       target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.NodeNext, moduleResolution: ts.ModuleResolutionKind.NodeNext,
       strict: true, exactOptionalPropertyTypes: true, noEmit: true, skipLibCheck: true, baseUrl: baseDir,
     };
-    if (workerData.apiIndexPath) options.paths = { '@matatbread/matbot-plugin-api': [workerData.apiIndexPath] };
+    // Module types come in through 'paths', one entry per PERMITTED specifier, never through
+    // types:['node'] — which is all-or-nothing (it makes every builtin resolve, so a module the install
+    // forbids typechecks clean and is refused only at run time) and pulls 168 files where this pulls 65.
+    options.paths = {
+      ...(workerData.apiIndexPath ? { '@matatbread/matbot-plugin-api': [workerData.apiIndexPath] } : {}),
+      ...(workerData.importPaths ?? {}),
+    };
     const host = ts.createCompilerHost(options);
     const getSF = host.getSourceFile.bind(host);
     host.getSourceFile = function (f, lang, onErr, create) {
@@ -322,6 +351,82 @@ try {
     ts.forEachChild(node, function (c) { contractVisit(c, sf); });
   };
 
+  // ── env gate: a global that TypeScript resolves but the runner does not define ──
+  // A tool_function body is compiled as a bare async function expression, not a module and not a CJS
+  // wrapper, so 'require', 'module', 'exports', '__dirname' and '__filename' are all undefined at
+  // runtime and 'import.meta' will not even compile. Loading node's types to check await import('node:…')
+  // declares every one of them as a global, which makes the commonest wrong guess — require('node:fs') —
+  // typecheck clean and fail at the first call: correct against the types it was shown, so the repair loop
+  // cannot repair it. Rejected structurally for the same reason a cast is, with the working form named.
+  // Only in snippet mode: a compiled plugin IS a module and legitimately has 'import.meta'.
+  const ENV_GLOBALS = {
+    require:    "'require' is not defined in a function body — it is compiled as a bare async function, not a module. Use a dynamic import instead: 'const fs = await import('node:fs/promises')'.",
+    module:     "'module' is not defined in a function body — it is compiled as a bare async function, not a CommonJS module. Return a value instead of assigning to an export.",
+    exports:    "'exports' is not defined in a function body — it is compiled as a bare async function, not a CommonJS module. Return a value instead of assigning to an export.",
+    __dirname:  "'__dirname' is not defined in a function body, and neither is 'process' — a body computes and calls tools, it does not navigate the filesystem by hand. 'context.workdir' is the directory a call was given, when it was given one.",
+    __filename: "'__filename' is not defined in a function body. There is no file — the body is compiled from source held in the session.",
+  };
+  const envGate = workerData.mode === 'snippet';
+  // Where the rule fired, so tsc's own 'Cannot find name' for the same identifier can be dropped: without
+  // node's types loaded both report, and two findings for one fix read as a cascade when the second says
+  // nothing the first did not — except which repair to make, which is the one this rule carries.
+  const envStarts = new Set();
+  // Declared by the author rather than inherited from node's globals: their own binding shadows it and
+  // works, so the rule must not fire. Decided on where the symbol's declaration IS, not on the parent
+  // node kind — that catches 'const require = …', a parameter and an import alias with one test.
+  const authorDeclared = function (node) {
+    const sym = checker.getSymbolAtLocation(node);
+    const decls = sym && sym.declarations;
+    if (!decls) return false;
+    return decls.some(function (d) {
+      return d.getSourceFile().fileName === virtual && d.getStart() >= minStart;
+    });
+  };
+  // The permit's boundary rule, inlined: the worker is a CommonJS realm with no loader hooks, so it
+  // cannot import 'importPermitted' from plugin-api, which is where the rule lives and is documented.
+  const permits = workerData.permittedImports;
+  const permitted = function (spec) {
+    return permits.some(function (p) {
+      return spec === p
+        || (p.charAt(p.length - 1) === '/' || p.charAt(p.length - 1) === ':'
+              ? spec.indexOf(p) === 0
+              : spec.indexOf(p + '/') === 0);
+    });
+  };
+  // Where a forbidden import was reported, so tsc's own complaint about the same specifier is dropped.
+  // Both fire whenever the module does not resolve, and tsc's is actively misleading here: it offers
+  // "Do you need to install type definitions for node?" about a module the INSTALLATION forbids, which
+  // is not a thing the author can fix. Which of the two tsc emits also depends on whether @types/node
+  // happens to be reachable from the program root, so this rule is the deterministic one.
+  const importStarts = new Set();
+  const envVisit = function (node, sf) {
+    if (envGate && node.getStart(sf) >= minStart) {
+      if (permits !== undefined && ts.isCallExpression(node)
+          && node.expression.kind === ts.SyntaxKind.ImportKeyword
+          && node.arguments.length > 0 && ts.isStringLiteralLike(node.arguments[0])
+          && !permitted(node.arguments[0].text)) {
+        const spec = node.arguments[0].text;
+        synth.push(mk(sf, node.arguments[0], 90006,
+          permits.length === 0
+            ? "module imports are switched off on this installation, so '" + spec + "' cannot be imported. Compute with the tools available instead."
+            : "'" + spec + "' is not permitted on this installation, which allows only: " + permits.join(', ')
+              + ". This is configuration, not a permission anyone can grant at the call — use a permitted module, or none."));
+        importStarts.add(node.arguments[0].getStart(sf));
+      }
+      if (ts.isMetaProperty(node) && node.keywordToken === ts.SyntaxKind.ImportKeyword) {
+        synth.push(mk(sf, node, 90005,
+          "'import.meta' is only available in a module, and a function body is not one — this is a syntax error when the body is compiled, so it cannot run at all. Remove it."));
+      } else if (ts.isIdentifier(node) && Object.prototype.hasOwnProperty.call(ENV_GLOBALS, node.text)
+                 && !(node.parent && ts.isPropertyAccessExpression(node.parent) && node.parent.name === node)
+                 && !(node.parent && (ts.isPropertyAssignment(node.parent) || ts.isPropertySignature(node.parent)) && node.parent.name === node)
+                 && !authorDeclared(node)) {
+        synth.push(mk(sf, node, 90005, ENV_GLOBALS[node.text]));
+        envStarts.add(node.getStart(sf));
+      }
+    }
+    ts.forEachChild(node, function (c) { envVisit(c, sf); });
+  };
+
   const skip = new Set();
   const visit = function (node, sf) {
     const isAssertion = ts.isAsExpression(node) || (ts.isTypeAssertionExpression && ts.isTypeAssertionExpression(node));
@@ -346,9 +451,13 @@ try {
     }
     ts.forEachChild(node, function (c) { visit(c, sf); });
   };
-  for (const gf of gateFiles) { visit(gf, gf); contractVisit(gf, gf); }
+  for (const gf of gateFiles) { visit(gf, gf); contractVisit(gf, gf); envVisit(gf, gf); }
 
-  const errors = targets.filter(function (d) { return d.category === ts.DiagnosticCategory.Error; }).concat(synth);
+  const errors = targets.filter(function (d) {
+    if (d.category !== ts.DiagnosticCategory.Error) return false;
+    if ((d.code === 2307 || d.code === 2591) && importStarts.has(d.start)) return false;
+    return !((d.code === 2304 || d.code === 2591) && envStarts.has(d.start));
+  }).concat(synth);
   errors.sort(function (a, b) {
     const fa = a.file ? a.file.fileName : '', fb = b.file ? b.file.fileName : '';
     return fa < fb ? -1 : fa > fb ? 1 : (a.start || 0) - (b.start || 0);

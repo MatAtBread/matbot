@@ -153,7 +153,10 @@ function makeSessionActionTool(store: Store<Session>, env: SessionToolEnv): Tool
       'covers the lifecycle: list sessions, search their contents (query), fetch one in full (get), ' +
       'rename one, hide (archive) one, unhide (unarchive) one, or append a message to one.\n\n' +
       '"append" posts "text" into a conversation as a message from the assistant, without starting a turn. ' +
-      'With no "sessionId" it goes to a deafult (the current session, or one specified for background job) ' +
+      'With no "sessionId" it goes to the conversation the run reports to — for a background job, the one ' +
+      'the job was created with; in an ordinary turn, the one this call is made from. A job\'s own session ' +
+      'is a throwaway nobody reads, so it is never the target; a run with no conversation to report to ' +
+      'must name one. ' +
       'Use it when the user should be able to follow up on what you say: it becomes part of ' +
       'that conversation, so a later question there has it as context. It lands once no turn is running in ' +
       'that conversation — at once if none is — and while it waits the result says "deferred": true (always, ' +
@@ -178,7 +181,7 @@ function makeSessionActionTool(store: Store<Session>, env: SessionToolEnv): Tool
       required:   ['action'],
       properties: {
         action:          { type: 'string', enum: ['list', 'query', 'get', 'rename', 'hide', 'unhide', 'append'], description: 'The operation to perform.' },
-        sessionId:       { type: 'string', description: 'ID of the target session. Required for get/rename/hide/unhide; optional for append (default: this conversation, or a background job\'s own).' },
+        sessionId:       { type: 'string', description: 'ID of the target session. Required for get/rename/hide/unhide. For append it is optional, and when given it wins outright; when omitted the default is the conversation the run reports to — never a background job\'s own session, which is a throwaway.' },
         text:            { type: 'string', description: 'append only: the message to post.' },
         title:           { type: 'string', description: 'New title — required for action "rename".' },
         includeArchived: { type: 'boolean', description: 'list only: include archived sessions. Default false.' },

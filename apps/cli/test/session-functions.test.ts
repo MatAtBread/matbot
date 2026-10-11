@@ -121,7 +121,7 @@ test('a session function is offered and callable from the next round, in its own
   const first = await turn(machine, store, mine.id, [
     [{ name: 'tool_function', input: { action: 'define', scope: 'session', definition: FIB } }],
     [{ name: 'fib', input: { n: 10 } }],
-    [{ name: 'tool_function', input: { action: 'lambda', definition: '(args: {}): number { return (await tool.fib({ n: 6 })) * 2; }' } }],
+    [{ name: 'tool_function', input: { action: 'execute', definition: '{ return (await tool.fib({ n: 6 })) * 2; }' } }],
     [{ name: 'fib', input: { m: 3 } }],
   ]);
   assert.ok(!first.offered[0]!.includes('fib'), 'not offered before it was defined');
@@ -129,7 +129,7 @@ test('a session function is offered and callable from the next round, in its own
   const results = ends(first.events);
   assert.match(String((results[0]!.result as { message: string }).message), /Defined session function "fib"/);
   assert.equal(results[1]!.result, 55, 'recursion through `tool.fib` resolves the session function');
-  assert.equal(results[2]!.result, 16, 'a lambda calls it by name');
+  assert.equal(results[2]!.result, 16, 'an execute body calls it by name');
   assert.equal(results[3]!.isError, true);
   assert.match(JSON.stringify(results[3]!.result), /unknown property \\"m\\"; missing required property \\"n\\"/);
   assert.equal(machine.tools.resolve('fib'), null, 'never in the registry');
@@ -189,6 +189,9 @@ test('promoting to global retires the session function; remove retires one too',
     [{ name: 'tool_function', input: { action: 'list' } }],
   ]);
   assert.ok(machine.tools.resolve('half'), 'promoted into the registry');
+  // Registered under the model's chosen name, gated under tool_function's — so a remembered import
+  // answer is not stranded under a gate id that exists for one definition of one function.
+  assert.equal(machine.tools.resolve('half')!.gateNamespace, 'tool_function');
   const listed = await turn(machine, store, s.id, [[{ name: 'tool_function', input: { action: 'list' } }]]);
   const value = ends(listed.events)[0]!.result as { functions: { name: string }[]; sessionFunctions: { name: string }[] };
   assert.deepEqual(value.functions.map(f => f.name), ['half']);
@@ -226,11 +229,11 @@ test('session functions type-check like registered tools, and a global function 
   const turnTools = new Map((await screened.tools[0]!(session)).map(t => [t.name, t]));
   assert.equal(turnTools.get('fib')?.toolContract, 'ToolContract<number, { n: number }>');
 
-  const good = await call({ action: 'lambda', definition: '(args: {}): number { return await tool.fib({ n: 5 }); }' }, turnTools);
+  const good = await call({ action: 'execute', definition: '{ return await tool.fib({ n: 5 }); }' }, turnTools);
   assert.deepEqual(good.at(-1), { type: 'result', value: 5 });
-  const wrongUse = await call({ action: 'lambda', definition: '(args: {}): string { return (await tool.fib({ n: 5 })).toUpperCase(); }' }, turnTools);
+  const wrongUse = await call({ action: 'execute', definition: '{ return (await tool.fib({ n: 5 })).toUpperCase(); }' }, turnTools);
   assert.match(String((wrongUse.at(-1) as { message?: string }).message), /TS2339/);
-  const noTurn = await call({ action: 'lambda', definition: '(args: {}): number { return await tool.fib({ n: 5 }); }' });
+  const noTurn = await call({ action: 'execute', definition: '{ return await tool.fib({ n: 5 }); }' });
   assert.equal(noTurn.at(-1)?.type, 'error', 'no turn tools ⇒ not callable, and the check says so');
 
   const types = await call({ action: 'types' }, turnTools);
@@ -251,4 +254,61 @@ test('session functions type-check like registered tools, and a global function 
   const after = await call({ action: 'check', name: 'fib2' }, new Map([...turnTools].filter(([n]) => n !== 'fib')));
   assert.equal((after.at(-1) as { value: { ok: boolean } }).value.ok, false);
 
+});
+
+// The definition shapes. `execute` takes a bare body and `define` a named function, and the mistake a
+// model actually makes — an arrow function — must be a reported error rather than a silent null. An
+// unbraced body is refused for the same reason, and the retired `lambda` action is refused outright.
+test('execute takes a bare body, and an arrow definition is refused rather than run', { timeout: 60000 }, async () => {
+  let index: ToolTypeIndex | undefined;
+  const machine = machineWith({
+    configPath: join(import.meta.dirname, '..', '..', '..', 'matbot.yaml'),
+    register: async (k: string, v: unknown) => { if (k === 'ToolTypeIndex') index = v as ToolTypeIndex; },
+  });
+  await createToolTypesPlugin().setup?.(machine);
+  Object.assign(machine, { ToolTypeIndex: index });
+  await createFunctionToolsPlugin().setup?.(machine);
+  const fn = machine.tools.resolve('tool_function')!;
+
+  const session = createSession();
+  const call = async (input: unknown): Promise<ToolEvent[]> => {
+    const ctx = { callId: 'c', session, signal: new AbortController().signal, prompt: async () => { throw new Error('no'); } } as unknown as ToolContext;
+    const out: ToolEvent[] = [];
+    for await (const ev of fn.executor.execute(input, ctx)) out.push(ev);
+    return out;
+  };
+  const errOf = (evs: ToolEvent[]): string => String((evs.at(-1) as { message?: string }).message ?? '');
+
+  // A body runs, and its return value is the result. No head, no parameters, no return type.
+  const body = `{ return 6 * 7; }`;
+  assert.deepEqual((await call({ action: 'execute', definition: body })).at(-1), { type: 'result', value: 42 });
+
+  // Nothing is persisted and nothing is registered — an execute leaves no tool behind.
+  assert.deepEqual(await call({ action: 'list' }),
+    [{ type: 'result', value: { functions: [], packages: [], sessionFunctions: [] } }]);
+
+  // The arrow form is refused by name, with the working shape spelled out: that is the whole point of the
+  // no-head form, so it must not compile — and must not silently run and return undefined either.
+  const arrow = await call({ action: 'execute', definition: `(args) => { return 1; }` });
+  assert.equal(arrow.at(-1)?.type, 'error');
+  assert.match(errOf(arrow), /bare BODY, not a function/);
+  assert.match(errOf(arrow), /no .=>./);
+
+  // A bare statement with no braces is the same class of mistake, caught the same way.
+  assert.match(errOf(await call({ action: 'execute', definition: 'return 1;' })), /bare BODY, not a function/);
+
+  // The body is still type-checked against the live tool types — a missing head does not bypass that.
+  const noSuchField = `{ return (await tool.plugin({ action: 'list' })).nope; }`;
+  assert.match(errOf(await call({ action: 'execute', definition: noSuchField })), /TS2339|type error/);
+  // …and `noTypeCheck` is the documented way past it.
+  assert.deepEqual((await call({ action: 'execute', definition: `{ return 1; }`, noTypeCheck: true })).at(-1),
+    { type: 'result', value: 1 });
+
+  // An empty definition is refused before anything is compiled.
+  assert.match(errOf(await call({ action: 'execute', definition: '   ' })), /requires a "definition"/);
+
+  // `lambda` is retired: the contract union no longer accepts it, so the action is refused outright.
+  const retired = await call({ action: 'lambda', definition: 'x' });
+  assert.equal(retired.at(-1)?.type, 'error');
+  assert.match(errOf(retired), /[Uu]nknown tool_function action/);
 });
