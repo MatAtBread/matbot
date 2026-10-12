@@ -14,16 +14,17 @@ const root = join(import.meta.dirname, '..', '..', '..');
 const nodeTypes = dirname(createRequire(import.meta.url).resolve('@types/node/package.json'));
 const PREFIX = `declare const tool: unknown;\n`;
 
-async function check(snippet: string, permitted: string[]): Promise<string[]> {
+async function check(snippet: string, permitted: string[], apiIndexPath?: string): Promise<string[]> {
   const source = `${PREFIX}${snippet}\nexport {};\n`;
   const report = await checkSnippetAgainst({
     root, source, prefixLen: PREFIX.length, prefixLines: PREFIX.split('\n').length - 1,
+    ...(apiIndexPath !== undefined ? { apiIndexPath } : {}),
     importPaths: Object.fromEntries(permitted.map(p => [p, [join(nodeTypes, `${p.slice('node:'.length)}.d.ts`)]])),
     // ENV-GATE rejects what the RUNNER withholds, so the list comes from the runner rather than from a
     // copy here: a name shadowed but not rejected typechecks and fails at the first call.
     withheldGlobals: createVmFunctionRunner(0).withheldGlobals!,
   });
-  return report.diagnostics.map(d => `${d.label}: ${d.message}`);
+  return report.diagnostics.map(d => `${d.label}: ${d.message}${d.hint !== undefined ? ` | HINT: ${d.hint}` : ''}`);
 }
 
 test('a permitted builtin is typed for real, not loosened to any', async () => {
@@ -225,4 +226,56 @@ test('a forbidden module is rejected STRUCTURALLY, and not as advice to install 
   const open = await indexFor(undefined).check(
     `async function f() { const os = await import('node:os'); return os.hostname(); }`);
   assert.deepEqual(open.diagnostics.map(d => d.label), []);
+});
+
+// ── the type side and the gate must agree, in both directions ────────────────
+// Each of these was a case where a body typechecked clean and then failed at the first call, or was
+// refused by the checker and then permitted at run time. Either way the check gate reports something
+// that is not what happens.
+
+test('the unresolvable-module hint does not claim there are no modules', async () => {
+  // A constant hint said "only '@matatbread/matbot-plugin-api' is importable here; there are no other
+  // modules." It was written for a compiled plugin — which is a module, has a top of file, and really
+  // does import only plugin-api — and fired for function bodies too, where it is false for any install
+  // that permits a builtin, and where the count it implies is config-dependent anyway.
+  const out = (await check(`async function f() { await import('node:defnotamodule'); }`, ['node:os'])).join('\n');
+  assert.doesNotMatch(out, /there are no other modules/);
+  assert.match(out, /not typed here/, 'it says what IS true: this module has no types here');
+  assert.match(out, /noTypeCheck/, 'and how to proceed if the module is real');
+});
+
+test('a body is refused plugin-api, which resolves for types and not at run time', async () => {
+  // It compiled clean and then died at the first call: the runner's import resolves from the CLI's own
+  // module, where under pnpm the package is not present. Withholding the `paths` entry is NOT the fix —
+  // the declarations refer to their own types through it, so every one of them would collapse to `any`
+  // and bad snippets would pass silently. So it stays resolvable and a body is refused structurally.
+  const api = join(root, 'plugin-api', 'src', 'index.ts');
+  const out = (await check(`async function f() { await import('@matatbread/matbot-plugin-api'); }`, ['node:os'], api)).join('\n');
+  assert.match(out, /IMPORT-GATE/);
+  assert.match(out, /in scope for TYPES only/);
+  assert.match(out, /already ambient/, 'and says why there is nothing to import');
+
+  // A subpath is the same answer, and the declarations themselves still typecheck — which is what the
+  // entry is there for.
+  const sub = (await check(`async function f() { await import('@matatbread/matbot-plugin-api/host'); }`, ['node:os'], api)).join('\n');
+  assert.match(sub, /IMPORT-GATE/);
+  const clean = await check(`async function f() { const os = await import('node:os'); return os.hostname(); }`, ['node:os'], api);
+  assert.deepEqual(clean, [], 'nothing collapsed to any');
+});
+
+test('a builtin is typed under either spelling, because the runtime takes either', async () => {
+  // `import('os')` resolves to `node:os` at run time, so typing only the prefixed form refused at the
+  // check what the gate then permitted. With a restriction the bare form is correctly absent from both,
+  // the boundary rule not admitting it either.
+  const unrestricted = await indexFor(undefined).dts();
+  assert.match(unrestricted, /A body may import node builtins/);
+
+  const index = indexFor(undefined);
+  const paths = await (index as unknown as { importPaths(): Promise<Record<string, string[]>> }).importPaths();
+  assert.ok(paths['node:os'] !== undefined, 'the prefixed spelling');
+  assert.ok(paths['os'] !== undefined, 'and the bare one, which the runtime accepts');
+
+  const restricted = await (indexFor(['node:']) as unknown as { importPaths(): Promise<Record<string, string[]>> }).importPaths();
+  assert.ok(restricted['node:os'] !== undefined);
+  assert.equal(restricted['os'], undefined, "a `node:` restriction does not admit the bare spelling, so it is not typed");
 });

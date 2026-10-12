@@ -117,7 +117,7 @@ export function createVmFunctionRunner(
         catch {
           // Replaces node's own, which names this file as the importer: a path inside matbot that the
           // body's author never wrote and cannot act on.
-          throw new Error(`Cannot import "${spec}": it is not installed where matbot can see it. Install it in ${imports.configDir} (where matbot.yaml is), or import it by URL.`);
+          throw new Error(`Cannot import "${spec}": it is not installed where matbot can see it. Install it in ${imports.configDir}, where matbot.yaml is.`);
         }
       }
       try { return await import(target); }

@@ -94,6 +94,24 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Bug fixes
 
+- **The type gate and the runtime gate agreed in neither direction, in three places.** A constant hint on
+  TS2307 said "only '@matatbread/matbot-plugin-api' is importable here; there are no other modules", which
+  is false for any install that permits a builtin and fired even for a mistyped `node:` specifier, where
+  the reason is simply that the module does not exist. `@matatbread/matbot-plugin-api` was typed for a
+  function body and cannot be imported by one — the runner resolves from the CLI's own module, where under
+  pnpm the package is not present — so it compiled clean and died at the first call. And a bare builtin
+  (`os` rather than `node:os`) was refused by the types while the runtime resolved it happily.
+
+  The first two share a cause: the hint table and that `paths` entry were written for `checkProjectDir` —
+  a compiled plugin, which IS a module, has a top of file to add an import to, and really does import only
+  plugin-api — and applied unconditionally in `checkSnippetAgainst`, where a body is
+  `async function __fn(…) { … }` with no top of file, no static imports and a different permitted set. The
+  entry mode is now a property of a hint, and snippet mode gets one derived from what the checker knows.
+  The `paths` entry STAYS in both modes, because the declarations refer to their own types through it and
+  withholding it would collapse every one of them to `any` and pass bad snippets silently; a body is
+  refused the package structurally instead, naming the reason. The bare spelling is now typed wherever the
+  gate would permit it, so `import('os')` and `import('node:os')` are graded as they run — and under a
+  `['node:']` restriction neither the types nor the gate admit the bare form, which already agreed.
 - **A granted import of a PATH resolves against the project.** `apps/cli`'s runner resolved it against its
   own module, so a granted `./x.js` named a path inside matbot's own source — not a place a body's author
   can have put anything. It now resolves against the directory holding `matbot.yaml`, the same base as

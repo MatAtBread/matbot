@@ -30,7 +30,14 @@ interface DiagnosticRecord {
 // Hints keyed on error code plus (optionally) a pattern over the offending source line or message —
 // the pattern is what makes them directed rather than generic. Kept few and high-confidence: a wrong
 // hint is worse than none.
-const HINTS: { codes: number[]; pattern?: RegExp; hint: string }[] = [
+//
+// `only` is which entry MODE an entry is true in, and it is load-bearing rather than tidy. A compiled
+// plugin is a module: it has a top of file to add an import to, `@matatbread/matbot-plugin-api` is a real
+// dependency of its build dir, and nothing else is importable. A `tool_function` body is
+// `async function __fn(…) { … }`: no top of file, no static imports, and a different importable set
+// entirely — whatever this installation permits. These were written for the first and fired in both, so
+// a body that mistyped `node:fs` was told there are no modules here.
+const HINTS: { codes: number[]; pattern?: RegExp; only?: 'project' | 'snippet'; hint: string }[] = [
   {
     codes: [2739, 2322],
     pattern: /ReturnType\s*<\s*typeof\s+tool\./,
@@ -65,23 +72,37 @@ const HINTS: { codes: number[]; pattern?: RegExp; hint: string }[] = [
   },
   {
     codes: [2307],
+    only: 'project',
     hint: "only '@matatbread/matbot-plugin-api' is importable here; there are no other modules.",
   },
   {
+    codes: [2307],
+    only: 'snippet',
+    // No list: the declarations above already carry one, derived from the same permitted set, and a
+    // second copy here would be the thing that goes stale. What this adds is WHY a specifier can be
+    // absent, since "not permitted" and "has no declarations" are repaired differently.
+    hint: 'this module is not typed here. The comment block at the top of these declarations says what this installation permits; a node builtin has real types (either spelling: `node:os` or `os`), while a bare package or an http(s) URL has none, and importing one of those needs noTypeCheck.',
+  },
+  {
     codes: [2305],
+    only: 'project',
     pattern: /@matatbread\/matbot-plugin-api/,
     hint: 'the package exports only the plugin API surface (ToolContract, ToolResultOf, ToolExecutor, ToolEvent, ToolContext, MatbotPluginSpec, MatbotMachine, makeToolBox, PLUGIN_API_VERSION). Types that appear inside tool contracts (SkillSummary, Trigger, …) are ambient in the tool dts and must NOT be imported — remove them from the import list and let inference carry the values (const r = await tool.x(...)), or inline the structural shape where you need a name.',
   },
   {
     codes: [2304, 2552],
+    only: 'project',
     pattern: /\b(ToolContract|ToolResultOf|ToolExecutor|ToolEvent|ToolContext|MatbotPluginSpec|MatbotMachine|makeToolBox|PLUGIN_API_VERSION)\b/,
     hint: "this name IS a real export of '@matatbread/matbot-plugin-api' — add it to the `import`/`import type { … }` list at the top of the file. Ignore any \"Did you mean\" suggestion pointing at a different name.",
   },
 ];
 
-function hintFor(d: DiagnosticRecord): string | undefined {
+type Mode = 'project' | 'snippet';
+
+function hintFor(d: DiagnosticRecord, mode: Mode): string | undefined {
   for (const h of HINTS) {
     if (!h.codes.includes(d.code)) continue;
+    if (h.only !== undefined && h.only !== mode) continue;
     if (h.pattern && !h.pattern.test(d.sourceLine ?? '') && !h.pattern.test(d.message)) continue;
     return h.hint;
   }
@@ -101,13 +122,13 @@ function label(d: DiagnosticRecord): string {
   return d.syn ? (SYN_LABELS[d.code] ?? 'CAST-GATE') : `TS${d.code}`;
 }
 
-function formatOne(d: DiagnosticRecord): string {
+function formatOne(d: DiagnosticRecord, mode: Mode): string {
   const loc = d.file !== undefined ? `${d.file}(${d.line},${d.col})`
     : d.line !== undefined ? `line ${d.line}` : '(project)';
   const parts = [`${loc} ${label(d)}: ${d.message}`];
   if (d.frame !== undefined) parts.push(d.frame);
   if (d.related) for (const r of d.related) parts.push(`  related: ${r}`);
-  const hint = hintFor(d);
+  const hint = hintFor(d, mode);
   if (hint !== undefined) parts.push(`  HINT: ${hint}`);
   return parts.join('\n');
 }
@@ -131,7 +152,7 @@ function omittedOf(diags: DiagnosticRecord[]): { count: number; byLabel: Record<
  * The typed record existed upstream all along and was discarded at render time; it is kept now, and the
  * text is one field of it.
  */
-function reportOf(diags: DiagnosticRecord[]): ToolCheckReport {
+function reportOf(diags: DiagnosticRecord[], mode: Mode): ToolCheckReport {
   const omitted = omittedOf(diags);
   const detailed: ToolCheckDiagnostic[] = diags.slice(0, MAX_FULL).map(d => ({
     label:   label(d),
@@ -142,9 +163,9 @@ function reportOf(diags: DiagnosticRecord[]): ToolCheckReport {
     ...(d.col     !== undefined ? { col:     d.col     } : {}),
     ...(d.frame   !== undefined ? { frame:   d.frame   } : {}),
     ...(d.related !== undefined ? { related: d.related } : {}),
-    ...(hintFor(d) !== undefined ? { hint: hintFor(d)! } : {}),
+    ...(hintFor(d, mode) !== undefined ? { hint: hintFor(d, mode)! } : {}),
     ...(d.syn === true ? { syn: true as const } : {}),
-    rendered: formatOne(d),
+    rendered: formatOne(d, mode),
   }));
   return {
     ok:      diags.length === 0,
@@ -189,7 +210,7 @@ export async function checkProjectDir(
     ...(opts?.ownContracts !== undefined ? { ownContracts: [...opts.ownContracts] } : {}),
   });
   if (diags === null) return { ok: true, output: '' };
-  const report = reportOf(diags);
+  const report = reportOf(diags, 'project');
   const parts: string[] = [];
   if (report.total > 1) parts.push(`${report.total} errors. Fix the FIRST error first — later errors often cascade from it.\n`);
   for (const d of report.diagnostics) { parts.push(d.rendered); parts.push(''); }
@@ -235,7 +256,7 @@ export async function checkSnippetAgainst(opts: {
     ...(opts.permittedImports !== undefined ? { permittedImports: opts.permittedImports } : {}),
     ...(opts.withheldGlobals !== undefined ? { withheldGlobals: opts.withheldGlobals } : {}),
   });
-  return reportOf(diags ?? []);
+  return reportOf(diags ?? [], 'snippet');
 }
 
 // The worker body: plain CommonJS (Worker eval mode is CJS, so `require` exists and no loader hooks
@@ -287,6 +308,11 @@ try {
     // Module types come in through 'paths', one entry per PERMITTED specifier, never through
     // types:['node'] — which is all-or-nothing (it makes every builtin resolve, so a module the install
     // forbids typechecks clean and is refused only at run time) and pulls 168 files where this pulls 65.
+    // The plugin-api entry is needed in BOTH modes, and in snippet mode it is not about a body's imports
+    // at all: the generated declarations refer to their own types inline as
+    // import('@matatbread/matbot-plugin-api').ToolProxy, so without it every one of them collapses to any
+    // and bad snippets pass silently. That a BODY must not import the package is a separate fact,
+    // enforced structurally below — it cannot be expressed by withholding the resolution.
     options.paths = {
       ...(workerData.apiIndexPath ? { '@matatbread/matbot-plugin-api': [workerData.apiIndexPath] } : {}),
       ...(workerData.importPaths ?? {}),
@@ -416,6 +442,7 @@ try {
   // The permit's boundary rule, inlined: the worker is a CommonJS realm with no loader hooks, so it
   // cannot import 'importPermitted' from plugin-api, which is where the rule lives and is documented.
   const permits = workerData.permittedImports;
+  const API_PKG = '@matatbread/matbot-plugin-api';
   const withheld = new Set<string>(workerData.withheldGlobals ?? []);
   const permitted = function (spec) {
     return permits.some(function (p) {
@@ -442,7 +469,15 @@ try {
         const spec = node.arguments[0].text;
         const at = node.arguments[0].getStart(sf);
         importSpecs.set(at, spec);
-        if (permits !== undefined && !permitted(spec)) {
+        // Resolvable for TYPES (the declarations above refer to it) and not at run time: the runner's
+        // import resolves from the CLI's own module, where under pnpm this package is not present. So it
+        // typechecked clean and died at the first call — exactly the hole this gate exists to close —
+        // and nothing a body needs is in there anyway.
+        if (spec === API_PKG || spec.indexOf(API_PKG + '/') === 0) {
+          synth.push(mk(sf, node.arguments[0], 90006,
+            "'" + spec + "' cannot be imported by a function body: it is in scope for TYPES only. Everything a body is given is already ambient — 'tool', 'toolInContext' and 'context' — so there is nothing to import from it."));
+          importStarts.add(at);
+        } else if (permits !== undefined && !permitted(spec)) {
           synth.push(mk(sf, node.arguments[0], 90006,
             permits.length === 0
               ? "module imports are switched off on this installation, so '" + spec + "' cannot be imported. Compute with the tools available instead."

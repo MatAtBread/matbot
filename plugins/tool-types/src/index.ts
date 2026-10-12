@@ -293,8 +293,8 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
     // Absent ⇒ unrestricted, so every builtin is typed and the gate decides each import at the call. A
     // configured restriction narrows this to its own subset, which is what makes a forbidden module a
     // COMPILE error rather than something that typechecks and is refused later.
-    const permit = this.machine.FunctionRunner?.permittedImports ?? ['node:'];
-    if (permit.length === 0) return {};
+    const restricted = this.machine.FunctionRunner?.permittedImports;
+    if (restricted?.length === 0) return {};
     const { builtinModules } = await import('node:module');
     const req = createRequire(import.meta.url);
     const nodeTypes = dirname(req.resolve('@types/node/package.json'));
@@ -303,17 +303,27 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
     // expanded here: `node:fs` admits `node:fs/promises` at the gate, so it must TYPE the submodule too.
     // Emitting the exact specifier alone left a permitted import failing the check, reachable only with
     // `noTypeCheck` — the one divergence between what runs and what is graded.
+    // What the GATE would allow, which is the only set worth typing: unrestricted admits any spelling, a
+    // restriction admits what its boundary rule admits. Anything else is a divergence between what runs
+    // and what is graded, in one direction or the other.
+    const allowed = (spec: string): boolean => restricted === undefined || importPermitted(restricted, spec);
     for (const m of builtinModules) {
       if (m.startsWith('_')) continue;
       // Some entries ALREADY carry the prefix — node:sea, node:sqlite, node:test, node:test/reporters,
       // which have no unprefixed spelling — so prefixing unconditionally wrote `node:node:sqlite`, and
       // those four got no entry at all. `await import('node:sqlite')` then failed the check with tsc's
       // "install type definitions for node", which is the message IMPORT-GATE exists to replace.
-      const bare = m.startsWith('node:') ? m.slice('node:'.length) : m;
-      const spec = `node:${bare}`;
-      if (!importPermitted(permit, spec)) continue;
+      const prefixed = m.startsWith('node:');
+      const bare = prefixed ? m.slice('node:'.length) : m;
       const file = join(nodeTypes, `${bare}.d.ts`);
-      if (existsSync(file)) out[spec] = [file];
+      if (!existsSync(file)) continue;
+      if (allowed(`node:${bare}`)) out[`node:${bare}`] = [file];
+      // The UNPREFIXED spelling too, where node has one and the gate would allow it: `import('os')`
+      // resolves to `node:os` at run time, so typing only the prefixed form refused at the check what
+      // the gate then permitted — and a bare specifier is the spelling a model reaches for first. With a
+      // restriction of `['node:']` it is correctly absent from both, since the boundary rule does not
+      // admit it either.
+      if (!prefixed && allowed(bare)) out[bare] = [file];
     }
     return out;
   }
