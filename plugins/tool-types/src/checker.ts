@@ -539,8 +539,8 @@ try {
   // @types/node/index.d.ts' is not a module": a path the body never named and its author cannot act on.
   // Rewritten only where tsc ALREADY failed on it, so a package genuinely called 'node' is untouched,
   // and only where no gate has spoken at that position, so one mistake stays one finding. It is also what
-  // 'function_imports: { permit: ["node"] }' permits — a package of that name, no builtin — which is why
-  // this fires with no restriction in force too.
+  // a restriction of ["node"] permits — a package of that name, no builtin — which is why this fires with
+  // no restriction in force too.
   for (const d of targets) {
     if (d.code !== 2306 && d.code !== 2307) continue;
     if (importSpecs.get(d.start) !== 'node' || importStarts.has(d.start)) continue;

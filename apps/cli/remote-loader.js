@@ -148,21 +148,6 @@ export async function resolveFetched(specifier, parent) {
   return fetchPlan(plan, specifier, `imported by ${parent}`);
 }
 
-/**
- * Fetch an absolute http(s) module into the cache and return its file: URL.
- *
- * Separate from `resolveFetched` because that one answers "a module inside the fetched tree imported
- * something" and keys everything off that parent; this one is driven, by a host that has already decided
- * to load a URL — a `tool_function` body whose import the gate allowed. Node cannot import an http(s) URL
- * at all (ERR_UNSUPPORTED_ESM_URL_SCHEME, before any network access), so materialising and importing from
- * disk is the only route, and it is the route `.plugins/` already exists to serve. Sharing that cache is
- * deliberate: a second fetch-and-materialise directory is the thing that drifts, and the contract is
- * unchanged — matbot writes it, the model only reads it.
- */
-export async function materialiseUrl(url, dotPlugins) {
-  if (!/^https?:/i.test(url)) throw Object.assign(new Error(`"${url}" is not an http(s) URL.`), { code: 'ERR_UNSUPPORTED_ESM_URL_SCHEME' });
-  return fetchPlan({ dotPlugins, candidates: candidatesFor(url) }, url, 'requested by a tool_function body');
-}
 
 async function fetchPlan(plan, specifier, by) {
   const cached = onDisk(plan);

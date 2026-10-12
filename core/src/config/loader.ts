@@ -21,26 +21,6 @@ export interface MatbotConfig {
    * config rather than data. A stored value always wins; `delete` reverts to the default here.
    */
   defaultSettings?:  ReadonlyMap<string, Readonly<Record<string, unknown>>>;
-  /**
-   * Longest a `tool_function` body may run synchronously — without awaiting — before it is stopped
-   * (`function_timeout_ms`). Absent ⇒ the host's default. `0` ⇒ no time limit at all, for testing: a loop
-   * that never awaits then freezes the process.
-   *
-   * It bounds TIME and nothing else. It is not a switch for the execution environment: the same runner
-   * still withholds the globals it withholds, still refuses an ungated `import()`, and still carries
-   * `function_imports.permit`. (It once seeded no runner at all, which silently took all three with it.)
-   */
-  functionTimeoutMs?: number;
-   /**
-   * An optional RESTRICTION on what a `tool_function` body may import, as exact specifiers or prefixes
-   * (`function_imports: { permit: ['node:'] }`). **Absent ⇒ no restriction**: every specifier may be
-   * asked about, and the per-import `PermissionGate` decision is the control. `permit: []` is the
-   * opposite of absent — nothing may be imported and nobody is asked.
-   *
-   * It exists for the one thing a prompt cannot express: forbidding a module outright, with no human
-   * able to allow it. A policy has no stored "always deny", so this is the only way to say "never".
-   */
-  functionImports?: readonly string[];
 }
 
 function asString(v: YamlValue | undefined, label: string): string {
@@ -158,31 +138,6 @@ export function parseConfig(
     }
   }
 
-  const functionTimeoutRaw = doc['function_timeout_ms'];
-  // `function_timeout_ms` and `function_imports` are no longer read by any host: they are settings of
-  // `@matatbread/matbot-function-runner-node`, which owns what a tool_function body may reach. They are
-  // still PARSED, and still validated, so that a host can tell an install carrying them where they went
-  // — a key that silently stops being honoured is the thing that reads as "my config does nothing".
-  let functionTimeoutMs: number | undefined;
-  if (functionTimeoutRaw !== undefined && functionTimeoutRaw !== null) {
-    functionTimeoutMs = asNumber(functionTimeoutRaw, 'function_timeout_ms');
-    // Refused rather than clamped, like maxRounds: a negative or fractional limit is a typo, and `0` already
-    // means something of its own.
-    if (!Number.isInteger(functionTimeoutMs) || functionTimeoutMs < 0) {
-      throw new Error(`Config: "function_timeout_ms" must be a non-negative integer (milliseconds; 0 removes the limit), got ${functionTimeoutMs}`);
-    }
-  }
-
-  const functionImportsRaw = doc['function_imports'];
-  let functionImports: readonly string[] | undefined;
-  if (functionImportsRaw !== undefined && functionImportsRaw !== null) {
-    const permitRaw = asRecord(functionImportsRaw, 'function_imports')['permit'];
-    if (permitRaw !== undefined && permitRaw !== null) {
-      if (!Array.isArray(permitRaw)) throw new Error('Config: "function_imports.permit" must be a list of module specifiers or prefixes');
-      functionImports = permitRaw.map((v, i) => asString(v, `function_imports.permit[${i}]`));
-    }
-  }
-
   const prompt           = typeof doc['prompt']            === 'string' ? doc['prompt']            : undefined;
   const ephemeral        = doc['ephemeral'] === true ? true : undefined;
   const defaultProvider  = typeof doc['default_provider'] === 'string' ? doc['default_provider']  : undefined;
@@ -196,8 +151,6 @@ export function parseConfig(
     ...(defaultProvider  !== undefined ? { defaultProvider  } : {}),
     ...(principal        !== undefined ? { principal        } : {}),
     ...(defaultSettings.size > 0       ? { defaultSettings  } : {}),
-    ...(functionTimeoutMs !== undefined ? { functionTimeoutMs } : {}),
-    ...(functionImports   !== undefined ? { functionImports   } : {}),
   };
 }
 

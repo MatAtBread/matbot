@@ -58,22 +58,35 @@ effect even if `--session` is passed on the command line. Background sub-agents 
 this to avoid leaving session traces.
 
 A `tool_function` body runs inside the matbot process, so one that loops without
-awaiting would freeze every session. matbot stops such a body after **10 seconds** of
-synchronous work, reporting the likely runaway loop. Change the limit with
-`function_timeout_ms` in `matbot.yaml`:
+awaiting would freeze every session. **matbot does not stop it unless you ask it to.**
+Bounding a body, keeping host globals away from it and gating its imports are all one
+plugin's job, and it is not installed by default:
 
 ```yaml
-function_timeout_ms: 30000   # milliseconds
+plugins:
+  - '@matatbread/matbot-function-runner-node'
+```
+
+With it, a body is stopped after **10 seconds** of synchronous work, reporting the likely
+runaway loop. Without it, a body runs unbounded, reaches `process` and everything else the
+process can, and imports whatever node resolves with nobody asked. Everything in the rest
+of this section describes what that plugin does; none of it applies if you leave it out.
+
+Change the limit, or lift it, through its settings:
+
+```yaml
+default_settings:
+  '@matatbread/matbot-function-runner-node':
+    timeout_ms: 30000        # milliseconds
 ```
 
 Awaited work — tool calls, HTTP requests — never counts towards it. A loop that runs
-*after* an `await` is not caught. `function_timeout_ms: 0` removes the limit entirely:
-bodies run unbounded, as they did before the guard existed, and matbot warns at
-startup. Use it only for testing.
+*after* an `await` is not caught. `timeout_ms: 0` removes the limit entirely: bodies run
+unbounded and matbot warns at startup. Use it only for testing.
 
-It removes the *time* limit and nothing else. Everything below still applies with it
-set to `0`: the same globals are withheld, an import is still gated, and
-`function_imports` still restricts what may be asked for.
+It removes the *time* limit and nothing else. The rest still applies with it set to `0`:
+the same globals are withheld, an import is still gated, and `permit_imports` still
+restricts what may be asked for.
 
 ### When a function wants a module
 
@@ -112,18 +125,20 @@ If you want a module forbidden outright, so that nobody is even asked, narrow wh
 requested:
 
 ```yaml
-function_imports:
-  permit:
-    - 'node:'        # builtins may be asked for; packages and URLs may not
+default_settings:
+  '@matatbread/matbot-function-runner-node':
+    permit_imports:
+      - 'node:'      # builtins may be asked for; packages may not
 ```
 
-Leave `function_imports` out and anything may be *asked* for. `permit: []` is the other
-end: imports are switched off and no prompt appears. This is the only way to say "never",
-because a standing answer is always a yes — there is no remembered no.
+Leave `permit_imports` out and anything may be *asked* for. `[]` is the other end: imports
+are switched off and no prompt appears. This is the only way to say "never", because a
+standing answer is always a yes — there is no remembered no.
 
-A remote URL is fetched into `.plugins/` and imported from there, because node cannot
-import a URL directly. It has no type declarations, so a body importing one needs
-`noTypeCheck: true`.
+A **remote URL cannot be imported** by this runner: fetching a module to disk is the host's
+machinery, not a plugin's. Install the package where matbot can see it and import it by
+name. A body's relative path (`./lib.js`) resolves against the directory holding your
+`matbot.yaml`.
 
 ---
 

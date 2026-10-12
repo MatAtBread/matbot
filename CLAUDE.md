@@ -145,7 +145,7 @@ was simply absent from the other with nothing to fail.
 
 A host passes only what is genuinely its own: its carriers (installed first), its boot `StorageBackend`
 (the CLI's filesystem one, the browser's IndexedDB + OPFS), its boot `Vault`, how a secret is resolved
-(the browser prompts for a missing one), extra seeded services, and the
+(the browser prompts for a missing one), and the
 members that acquire a plugin (`loadPlugin`, `unloadPlugin`, `resolver`). `preScanStorage` opens a
 configured storage plugin's backend before any store exists, and `loaded()` runs the post-load checks.
 
@@ -736,9 +736,9 @@ Three parts, and only the first two enforce anything:
    is NOT offered is the product of the two axes — "any function, any builtin" — because the options
    would multiply past what a prompt can carry; that is the gate-wide standing answer, and installation
    authoring.
-2. **An optional restriction** — `function_imports: { permit: [...] }` in `matbot.yaml`, read by the host
-   onto `FunctionRunner.permittedImports`. It rides on the runner, so **the runner is always seeded**:
-   `function_timeout_ms: 0` removes the TIME bound and nothing else. It used to seed no runner at all,
+2. **An optional restriction** — `permit_imports` in the runner plugin's settings, carried on
+   `FunctionRunner.permittedImports`. It rides on the runner, so **the runner is always seeded**:
+   `timeout_ms: 0` removes the TIME bound and nothing else. It used to seed no runner at all,
    which is a documented way to run bodies unbounded and silently discarded the restriction (`permit: []`
    included), unshadowed every withheld global and made a raw `import()` work. One line of yaml about how
    long a body may compute is not an answer to what a body may reach. **Absent means no restriction**, because a gate that is never

@@ -2,7 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { stripTypeScriptTypes } from 'node:module';
 import { buildAsyncFn, runFunction, parsePackage, buildPackageFn, exportFn, type CompileHost } from '@matatbread/matbot-function-tools';
-import { invokeTool, parseConfig } from '@matatbread/matbot-core';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { invokeTool } from '@matatbread/matbot-core';
+import { loadConfig } from '../src/config.ts';
 import type { FunctionRunner, MatbotMachine, Tool, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
 import { createVmFunctionRunner, FUNCTION_SYNC_LIMIT_MS } from '@matatbread/matbot-function-runner-node';
 
@@ -152,15 +156,26 @@ test('a tool call on a cancelled call is refused before the tool starts', async 
   assert.equal(started, false);
 });
 
-test('function_timeout_ms comes from matbot.yaml: absent is the default, 0 is a value, a typo is refused', () => {
-  assert.equal(FUNCTION_SYNC_LIMIT_MS, 10_000);
-  assert.equal(parseConfig('ephemeral: true\n').functionTimeoutMs, undefined, 'absent ⇒ the host default applies');
-  assert.equal(parseConfig('function_timeout_ms: 2500\n').functionTimeoutMs, 2500);
-  // 0 must survive parsing as a value: it is what turns the runner off, not what leaves it at the default.
-  assert.equal(parseConfig('function_timeout_ms: 0\n').functionTimeoutMs, 0);
-  for (const bad of ['-1', '1.5', 'soon']) {
-    assert.throws(() => parseConfig(`function_timeout_ms: ${bad}\n`), /function_timeout_ms/, bad);
-  }
+test('a retired config key is named, and where it went', async () => {
+  // `function_timeout_ms` and `function_imports` are settings of the runner PLUGIN now, so core carries no
+  // field for either — a plugin's option has no business in `MatbotConfig`. The host still looks for them
+  // in the config text, because the warning has to fire when that plugin is NOT installed, which is
+  // exactly when it cannot warn for itself, and a key that silently stops working is what reads as "my
+  // config does nothing".
+  assert.equal(FUNCTION_SYNC_LIMIT_MS, 10_000, 'the default lives with the runner');
+  const dir = await mkdtemp(join(tmpdir(), 'matbot-retired-'));
+  try {
+    await writeFile(join(dir, 'matbot.yaml'), 'ephemeral: true\nfunction_timeout_ms: 2500\nfunction_imports:\n  permit: [node:]\n');
+    const { config, retired } = await loadConfig(join(dir, 'matbot.yaml'));
+    assert.deepEqual(Object.keys(config).filter(k => k.startsWith('function')), [], 'nothing of it reaches core');
+    assert.equal(retired.length, 2);
+    assert.match(retired.join(' '), /function_timeout_ms.*timeout_ms/);
+    assert.match(retired.join(' '), /function_imports.*permit_imports/);
+
+    // A key it does not carry, and one that only LOOKS like it, are both left alone.
+    await writeFile(join(dir, 'matbot.yaml'), 'ephemeral: true\nprompt: |\n  function_imports: not a key\n');
+    assert.deepEqual((await loadConfig(join(dir, 'matbot.yaml'))).retired, [], 'nested or quoted text is not a top-level key');
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
 test('a stopped run is logged, naming the tool, session, call and definition; an ordinary failure is not', async (t) => {

@@ -179,7 +179,7 @@ async function load(machine: MatbotMachine, ctx: ToolContext, fnName: string, sp
     throw new Error(
       `Import of '${spec}' is not permitted on this installation` +
       (permits.length === 0
-        ? ' — module imports are switched off here (`function_imports.permit` in matbot.yaml).'
+        ? ' — module imports are switched off on this installation.'
         : `, which allows only: ${permits.join(', ')}.`),
     );
   }
@@ -223,7 +223,7 @@ export const EXECUTE_SUBJECT = '#execute';
  * while `node:os` offered the reverse.
  *
  * What is NOT offered is the product of the two axes: there is no "any function, any builtin", because
- * the options would multiply past what a prompt can carry. Install-wide breadth is `function_imports`
+ * the options would multiply past what a prompt can carry. Install-wide breadth is the runner's import restriction
  * and, for a policy, the gate-wide standing answer — both installation authoring, which belongs in yaml
  * rather than in an answer to a prompt.
  */

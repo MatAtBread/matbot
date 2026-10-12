@@ -4,7 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { FUNCTION_TIMEOUT, type FunctionRunner } from '@matatbread/matbot-plugin-api';
 import { ROUTE, transformBody } from './body-transform.js';
 
-// The default, when `function_timeout_ms` is absent from matbot.yaml. Far past any legitimate stretch of
+// The default, when this plugin's `timeout_ms` setting is absent. Far past any legitimate stretch of
 // computation between two awaits, and short enough that the daemon is back before anyone concludes it died.
 export const FUNCTION_SYNC_LIMIT_MS = 10_000;
 
@@ -68,8 +68,8 @@ const invoke = new vm.Script(`globalThis[Symbol.for(${JSON.stringify(PENDING)})]
  * another process.
  *
  * `limitMs` of `0` removes the TIME bound and nothing else. That matters because the two were once the
- * same switch: `function_timeout_ms: 0` seeded no runner at all, which is a documented way to run bodies
- * unbounded — and silently took `function_imports.permit` with it, `permit: []` included, along with the
+ * same switch: a timeout of `0` seeded no runner at all, which is a documented way to run bodies
+ * unbounded — and silently took the import restriction with it, the empty list included, along with the
  * withheld globals and the inert `import()`. One line of yaml about how long a body may compute is not
  * an answer to what a body may reach.
  */

@@ -769,6 +769,7 @@ async function main(): Promise<void> {
   // ── Config loading ────────────────────────────────────────────────────────────
 
   let matbotConfig!: import('./config.js').MatbotConfig;
+  let retiredConfigKeys: string[] = [];
   let configPath: string;
 
   if (opts.config === '-') {
@@ -779,8 +780,9 @@ async function main(): Promise<void> {
       process.stdin.on('end',  () => resolve(Buffer.concat(chunks).toString('utf8')));
       process.stdin.on('error', reject);
     });
-    const { config, projectDir } = await loadConfigFromText(text, process.cwd());
+    const { config, projectDir, retired } = await loadConfigFromText(text, process.cwd());
     matbotConfig = config;
+    retiredConfigKeys = retired;
     configPath   = path.join(projectDir, 'matbot.yaml'); // virtual — used for plugin resolution
     process.chdir(projectDir);
     await loadDotEnv(projectDir);
@@ -794,7 +796,7 @@ async function main(): Promise<void> {
       : path.isAbsolute(opts.config) ? opts.config : path.resolve(userCwd, opts.config);
     process.chdir(path.dirname(configPath));
     await loadDotEnv(path.dirname(configPath));
-    let loadResult: { config: import('./config.js').MatbotConfig; projectDir: string } | null = null;
+    let loadResult: { config: import('./config.js').MatbotConfig; projectDir: string; retired: string[] } | null = null;
     try {
       loadResult = await loadConfig(configPath);
     } catch (err) {
@@ -803,6 +805,7 @@ async function main(): Promise<void> {
     }
     if (loadResult !== null) {
       matbotConfig = loadResult.config;
+      retiredConfigKeys = loadResult.retired;
       if (loadResult.projectDir !== path.dirname(configPath)) {
         process.chdir(loadResult.projectDir);
         configPath = path.join(loadResult.projectDir, 'matbot.yaml');
@@ -858,12 +861,13 @@ async function main(): Promise<void> {
   // Absent, a body compiles with `new AsyncFunction` and runs unbounded, unshadowed and ungated — which
   // is what matbot does without opinions, and what the declarations a body is written against then say.
   //
-  // These two keys used to be read here. They are the runner's settings now, so an install that still
-  // carries them is told where they went rather than having them silently ignored — the same courtesy
-  // `__matbot_core__.overwriteToolsOnCollision` got when it moved to the gate policy.
-  if (matbotConfig.functionTimeoutMs !== undefined || matbotConfig.functionImports !== undefined) {
-    console.warn('[matbot] `function_timeout_ms` and `function_imports` are no longer read here: they belong to'
-      + ' @matatbread/matbot-function-runner-node, as `timeout_ms` and `permit_imports` under'
+  // Keys this host used to read and no longer does. They are the runner's settings now, so an install
+  // that still carries them is told where they went rather than having them silently ignored — the same
+  // courtesy `__matbot_core__.overwriteToolsOnCollision` got when it moved to the gate policy. Found in
+  // the config TEXT by `loadConfig`, because core has no business declaring a field for a plugin's option.
+  if (retiredConfigKeys.length > 0) {
+    console.warn(`[matbot] ${retiredConfigKeys.join(', ')}: no longer read here. These are settings of`
+      + ' @matatbread/matbot-function-runner-node, authored under'
       + ' `default_settings: { "@matatbread/matbot-function-runner-node": { … } }`. Add that plugin to'
       + ' `plugins:` to bound a tool_function body, withhold host globals from it, and gate its imports.');
   }
