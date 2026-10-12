@@ -1,7 +1,6 @@
 import type { JSONSchema } from '@matatbread/matbot-plugin-api';
-import { INJECTED, compileUnder, type CompileHost, type CompiledFn, type ImportFn } from './compile.js';
+import { INJECTED, compileUnder, erase, type CompileHost, type CompiledFn } from './compile.js';
 import { inertEnd, matchBrace, matchParen, parseSignature, tsTypeToSchema, unwrapPromise, type ParsedParam } from './signature.js';
-import { rewriteImportCalls } from './imports.js';
 
 /** The separator between a package name and an export's name in the registered tool name. Not `.`, which
  *  Anthropic and OpenAI reject in a tool name, and not `-`, which is not an identifier character: the name
@@ -30,7 +29,7 @@ export interface ParsedPackage {
   exportAt: number[];
 }
 
-export type PackageFn = (tool: unknown, toolInContext: unknown, context: unknown, importModule: ImportFn, exportName: string, arg: unknown) => Promise<unknown>;
+export type PackageFn = (importModule: unknown, tool: unknown, toolInContext: unknown, context: unknown, exportName: string, arg: unknown) => Promise<unknown>;
 
 const IDENT_CHAR = /[\w$]/;
 
@@ -366,11 +365,8 @@ const EXPORT_ARG  = '__matbotExportArg';
 export async function buildPackageFn(host: CompileHost, source: string, parsed: ParsedPackage): Promise<PackageFn> {
   let blanked = source;
   for (const at of parsed.exportAt) blanked = `${blanked.slice(0, at)}      ${blanked.slice(at + 6)}`;
-  let stripped: string;
-  try { stripped = await host.TypeScriptStripper.strip(blanked); }
-  catch (e) { throw new Error(`not valid TypeScript (${msg(e)})`); }
-  const body = `${rewriteImportCalls(stripped)}\n;return ({ ${parsed.exports.map(e => e.name).join(', ')} })[${EXPORT_NAME}](${EXPORT_ARG});`;
-  return compileUnder(host, [...INJECTED, EXPORT_NAME, EXPORT_ARG], body) as PackageFn;
+  return compileUnder(host, [...INJECTED, EXPORT_NAME, EXPORT_ARG], await erase(host, blanked),
+    code => `${code}\n;return ({ ${parsed.exports.map(e => e.name).join(', ')} })[${EXPORT_NAME}](${EXPORT_ARG});`) as PackageFn;
 }
 
 /** One export of a compiled package, in the calling convention `runFunction` drives. */
@@ -378,5 +374,5 @@ export function exportFn(pkg: PackageFn, name: string): CompiledFn {
   // Positional, and in `INJECTED` order — the injected names come first and a package adds two of its
   // own after them. Typed `unknown`, so an argument in the wrong slot is not a compile error: when the
   // injected list grew by one, this silently handed a package's own `arg` to the import slot.
-  return (tool, toolInContext, context, importModule, arg) => pkg(tool, toolInContext, context, importModule, name, arg);
+  return (importModule, tool, toolInContext, context, arg) => pkg(importModule, tool, toolInContext, context, name, arg);
 }

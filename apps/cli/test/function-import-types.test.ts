@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { checkSnippetAgainst, ToolTypeIndexImpl } from '@matatbread/matbot-tool-types';
 import type { MatbotMachine } from '@matatbread/matbot-plugin-api';
+import { createVmFunctionRunner } from '../src/function-runner.ts';
 
 // The permitted set is expressed as `paths`, one entry per module, NOT as `types: ['node']`. The
 // difference is the whole point: with `types` every builtin resolves, so a module the install forbids
@@ -18,6 +19,9 @@ async function check(snippet: string, permitted: string[]): Promise<string[]> {
   const report = await checkSnippetAgainst({
     root, source, prefixLen: PREFIX.length, prefixLines: PREFIX.split('\n').length - 1,
     importPaths: Object.fromEntries(permitted.map(p => [p, [join(nodeTypes, `${p.slice('node:'.length)}.d.ts`)]])),
+    // ENV-GATE rejects what the RUNNER withholds, so the list comes from the runner rather than from a
+    // copy here: a name shadowed but not rejected typechecks and fails at the first call.
+    withheldGlobals: createVmFunctionRunner(0).withheldGlobals!,
   });
   return report.diagnostics.map(d => `${d.label}: ${d.message}`);
 }
@@ -98,10 +102,13 @@ test('the phantom globals node types would otherwise declare are still rejected'
 // body is GRADED against: an author told elsewhere that imports work would still have to guess whether
 // the checker agreed.
 
+// The REAL runner, not a stand-in: the environment half of this text is its own words and the withheld
+// list is its own list, so a fake one here would be testing a fake's prose and would not notice the two
+// drifting apart — which is the failure the division exists to prevent.
 const indexFor = (permit: string[] | undefined): ToolTypeIndexImpl => new ToolTypeIndexImpl({
   tools: { list: () => [], resolve: () => null },
   Notifier: { consume: () => {} },
-  FunctionRunner: { compile: () => () => Promise.resolve(), ...(permit !== undefined ? { permittedImports: permit } : {}) },
+  FunctionRunner: createVmFunctionRunner(0, permit !== undefined ? { permit } : {}),
 } as unknown as MatbotMachine, () => Promise.resolve(null));
 
 test('the dts lists the modules this installation permits, expanding a prefix', async () => {
@@ -121,7 +128,11 @@ test('unrestricted says the rule rather than listing 49 builtins', async () => {
   const dts = await indexFor(undefined).dts();
   assert.match(dts, /may import node builtins, each subject to permission at the call/);
   assert.doesNotMatch(dts, /\/\/\s+node:crypto/, 'the list would be most of the file');
-  assert.match(dts, /no process, Buffer or globalThis/);
+  // Every withheld name is named, and from the runner's own list rather than prose repeated here: the
+  // note and what is actually bound cannot drift apart.
+  for (const g of createVmFunctionRunner(0).withheldGlobals ?? []) {
+    assert.match(dts, new RegExp(`\\b${g}\\b`), `${g} is named in the note`);
+  }
 });
 
 test('`permit: []` is the one way to say never, and the dts says so', async () => {

@@ -1,15 +1,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { stripTypeScriptTypes } from 'node:module';
-import { buildAsyncFn, buildBodyFn, runFunction, rewriteImportCalls, EXECUTE_SUBJECT, type CompileHost } from '@matatbread/matbot-function-tools';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { buildAsyncFn, buildBodyFn, runFunction, EXECUTE_SUBJECT, type CompileHost } from '@matatbread/matbot-function-tools';
 import type { MatbotMachine, PermissionRequest, Tool, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
 import { createVmFunctionRunner } from '../src/function-runner.ts';
+import { ROUTE, transformBody } from '../src/body-transform.ts';
 
 // A tool_function body is meant to be a constrained place to compute: an install that chose `docker-bash`
 // over `bash` has not thereby handed `node:fs` to model-authored code. These pin the three parts of that —
 // the rewrite that routes `import(…)` through a gate, the globals the runner withholds, and the fact that
 // a real `import()` is inert so the gated loader is the only door.
 
+const noLoader = (): Promise<never> => Promise.reject(new Error('no loader in this test'));
 const stripper = { strip: (s: string) => stripTypeScriptTypes(s) };
 const machine = (runner: ReturnType<typeof createVmFunctionRunner>): MatbotMachine => ({
   tools: { list: () => [] as Tool[], resolve: () => null, register: () => {}, remove: () => false },
@@ -35,101 +40,107 @@ const run = async (host: CompileHost, m: MatbotMachine, def: string, allow = tru
   return result(runFunction(m, ctxFor(allow), fn, [], { tool: 'probe', source: def }));
 };
 
-test('import( is rewritten only in code context', () => {
+// ── the rewrite ────────────────────────────────────────────────────────────────
+// The transform is the runner's own — erase the types, route `import(…)` onto a private name — and it
+// PARSES. These pin the cases a hand-written scanner got
+// wrong — each one silently, by desyncing and leaving a later `import(` unrewritten and so ungated.
+
+// Wrapped the way `compileUnder` wraps — newline-delimited, which is load-bearing: a body ending in a
+// line comment would otherwise swallow the closing brace — then unwrapped, so these read as what a
+// body's `import(…)` became.
+const PRE = '(async function () {\n', POST = '\n})';
+const rw = (src: string): string => transformBody(`${PRE}${src}${POST}`)
+  .replace(new RegExp(ROUTE.replace('$', '\\$'), 'g'), '__toolImportModule')
+  .slice(PRE.length, -POST.length);
+
+test('import( is rewritten in code and nowhere else', () => {
   // The realistic hazard is a body that GENERATES source: rewriting inside its string would corrupt what
-  // it emits, silently. A single regex cannot see template nesting or tell a regex literal from division.
-  const same = (src: string): void => assert.equal(rewriteImportCalls(src), src, src);
-  assert.equal(rewriteImportCalls(`await import('node:os')`), `await __toolImportModule('node:os')`);
-  assert.equal(rewriteImportCalls(`import("node:"+n)`), `__toolImportModule("node:"+n)`);
-  assert.equal(rewriteImportCalls("`${await import('a')}`"), "`${await __toolImportModule('a')}`");
-  assert.equal(rewriteImportCalls("`${`${await import('a')}`}`"), "`${`${await __toolImportModule('a')}`}`");
-  same(`const s = "import('node:fs')"`);
-  same("const s = `import('node:fs')`");
-  same("const s = `${ \"`\" }import('x')`");
-  same(`// import('node:fs')`);
-  same(`/* import('node:fs') */`);
-  same(`const r = /import\\(/g`);
-  same(`import.meta.url`);
-  same(`m.import('x')`);
-  same(`reimport('x')`);
-  same("await tool.x({ definition: `f(){ return import('node:fs'); }` })");
-  assert.equal(rewriteImportCalls(`const q = a / b; import('x')`), `const q = a / b; __toolImportModule('x')`);
+  // it emits, silently.
+  const same = (src: string): void => assert.equal(rw(src), src, src);
+  assert.equal(rw(`await import('node:os')`), `await __toolImportModule('node:os')`);
+  assert.equal(rw(`import("node:"+n)`), `__toolImportModule("node:"+n)`);
+  assert.equal(rw("`${await import('a')}`"), "`${await __toolImportModule('a')}`");
+  assert.equal(rw("`${`${await import('a')}`}`"), "`${`${await __toolImportModule('a')}`}`");
+  same(`const s = "await import('x')"`);
+  same(`const s = 'await import("x")'`);
+  same("const s = `await import('x')`");
+  same(`// await import('x')`);
+  same(`/* await import('x') */`);
+  same(`const u = import.meta.url`);
+  // A property named `import` is some object's own method and none of our business. This had to be
+  // REFUSED before, being indistinguishable from a call without a parser.
+  assert.equal(rw(`const o = { import(x) { return x } }; o.import(1); import('y')`),
+               `const o = { import(x) { return x } }; o.import(1); __toolImportModule('y')`);
 });
 
-test('raw template text is not code: a URL in one is not a comment, nor an apostrophe a string', () => {
-  // Tested after the comment branch, a `//` inside a template ate the rest of the line INCLUDING the
-  // closing backtick, so the scanner never left template context and every later import( went
-  // unrewritten — a clean type check, then ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING at run time. Any URL
-  // in a template does it, which is most of them.
-  assert.equal(
-    rewriteImportCalls("const u = `https://esm.sh/x`;\nawait import(u);"),
-    "const u = `https://esm.sh/x`;\nawait __toolImportModule(u);",
-  );
-  assert.equal(
-    rewriteImportCalls("const s = `it's fine`; await import('node:os');"),
-    "const s = `it's fine`; await __toolImportModule('node:os');",
-  );
-  // …and an interpolation is still code, even after raw text containing both.
-  assert.equal(
-    rewriteImportCalls("`// it's ${await import('a')}`"),
-    "`// it's ${await __toolImportModule('a')}`",
-  );
-});
-
-test('an ambiguous `}` is settled by agreement, and refused when the readings differ', () => {
-  // `}` is the one predecessor that genuinely goes both ways: it ends a block (a `/` after it starts a
-  // regex) and it ends an object literal (a `/` after it divides). Picking wrong does not misread one
-  // token — the scanner DESYNCS, so a quote further along can swallow an `import(` that neither reading
-  // mentions. So the body is scanned both ways: agreement means the ambiguity made no difference, and
-  // disagreement is refused rather than guessed at, the wrong guess being "ungated import".
-  for (const src of [`const n = {} / a; import('node:fs') / b;`,
-                     `{ const n = {} / 1; const s = "a/b"; const m = await import('node:fs'); return m; }`]) {
-    assert.throws(() => rewriteImportCalls(src), /cannot tell whether the `\/` after a `}`/, src);
-  }
-  // Where the two readings agree, nothing is refused and the import is rewritten: a regex immediately
-  // after a block close, plain division after an object literal, and a `/` after an ordinary value.
-  assert.equal(rewriteImportCalls(`if (x) { y() }\n/re/.test(z); import('node:fs')`),
+test('a slash that divides does not swallow the rest of the body', () => {
+  // Each of these read the `/` as opening a regex, whose own quote then opened a string that ran past
+  // the import — which came out unrewritten, and so ungated, with nothing reporting it.
+  assert.equal(rw(`let i = 0; const r = i++ / 2; const s = 'a/b'; import('node:fs')`),
+               `let i = 0; const r = i++ / 2; const s = 'a/b'; __toolImportModule('node:fs')`);
+  assert.equal(rw(`let i = 1; const r = i-- / 2; const s = "a/b"; import('node:fs')`),
+               `let i = 1; const r = i-- / 2; const s = "a/b"; __toolImportModule('node:fs')`);
+  // After `}` a slash may divide (the brace ended an object literal) or open a regex (it ended a block).
+  // Both readings used to be tried and the body refused when they disagreed; the parser just knows.
+  assert.equal(rw(`const o = {}; const q = o.a / 1; const s = "a/b"; import('node:fs')`),
+               `const o = {}; const q = o.a / 1; const s = "a/b"; __toolImportModule('node:fs')`);
+  assert.equal(rw(`const n = {}/a/2; import('x')`), `const n = {}/a/2; __toolImportModule('x')`);
+  assert.equal(rw(`if (x) { y() }\n/re/.test(z); import('node:fs')`),
                `if (x) { y() }\n/re/.test(z); __toolImportModule('node:fs')`);
-  assert.equal(rewriteImportCalls(`const n = {}/a/2; import('x')`), `const n = {}/a/2; __toolImportModule('x')`);
-  assert.equal(rewriteImportCalls(`const o = { a: 1 }; const r = o.a / 2; import('x')`),
-               `const o = { a: 1 }; const r = o.a / 2; __toolImportModule('x')`);
 });
 
-test('`import` as a method name is refused, not silently renamed', () => {
-  // A property name may be a reserved word, so `{ import(x) {…} }` is legal — and renaming it broke
-  // every later `o.import(…)` with nothing said. A call whose statement is followed by a block
-  // (`import('node:fs')\n{}`) is indistinguishable from it without a parser, and leaving THAT alone
-  // would hand back an ungated import. So both are refused, which fails closed and names the fix.
-  for (const src of [`const o = { import(x) { return x; } }; o.import(1)`,
-                     `class C { import(x) { return x; } }`,
-                     `import('node:fs')\n{ }`]) {
-    assert.throws(() => rewriteImportCalls(src), /cannot be used as a method name/, src);
-  }
-  // A call followed by anything else is an ordinary import.
-  assert.equal(rewriteImportCalls(`const m = await import('x'); if (m) { use(m); }`),
-               `const m = await __toolImportModule('x'); if (m) { use(m); }`);
-  assert.equal(rewriteImportCalls(`import('x').then(m => { use(m); })`),
-               `__toolImportModule('x').then(m => { use(m); })`);
-  // A method name inside a STRING a body is generating is still none of our business.
-  assert.equal(rewriteImportCalls("const s = `{ import(x) { } }`"), "const s = `{ import(x) { } }`");
+test('a regex that follows a close-paren is a regex, not division', () => {
+  // The undecidable pair for a scanner: a regex legally follows a braceless `if (…)`, and division
+  // legally follows `(a + b)`. Treating `)` as division lost the import below; treating it as a regex
+  // would have refused `(a + b) / 2`, which is ordinary code.
+  assert.equal(rw(`if (f(x)) /a'b/.test(s); import('node:fs')`),
+               `if (f(x)) /a'b/.test(s); __toolImportModule('node:fs')`);
+  assert.equal(rw(`while (g()) /x"y/.exec(s); import('node:fs')`),
+               `while (g()) /x"y/.exec(s); __toolImportModule('node:fs')`);
+  assert.equal(rw(`const r = (a + b) / 2; const s = 'a/b'; import('x')`),
+               `const r = (a + b) / 2; const s = 'a/b'; __toolImportModule('x')`);
 });
 
-test('a keyword before a slash means regex, not division', () => {
-  // `out` still carries the whitespace between the keyword and the `/`, so anchoring on the keyword alone
-  // never matched: `return /x/` read as division, the second `/` opened a string that ran to EOF, and
-  // every rewrite after it was lost.
-  assert.equal(
-    rewriteImportCalls(`return /["']/.test(m) ? import('node:os') : null;`),
-    `return /["']/.test(m) ? __toolImportModule('node:os') : null;`,
-  );
-  assert.equal(rewriteImportCalls(`if (typeof /a/ === 'object') import('x');`),
+test('a keyword before a slash means regex, and an identifier ending in one divides', () => {
+  assert.equal(rw(`return /["']/.test(m) ? import('node:os') : null;`),
+               `return /["']/.test(m) ? __toolImportModule('node:os') : null;`);
+  assert.equal(rw(`if (typeof /a/ === 'object') import('x');`),
                `if (typeof /a/ === 'object') __toolImportModule('x');`);
-  // A property access and an identifier merely ending in a keyword both DIVIDE, so the slash pair is
-  // arithmetic and the text between them is code.
-  assert.equal(rewriteImportCalls(`const n = o.return / b / c; import('x')`),
+  assert.equal(rw(`const n = o.return / b / c; import('x')`),
                `const n = o.return / b / c; __toolImportModule('x')`);
-  assert.equal(rewriteImportCalls(`const n = myreturn / b / c; import('x')`),
+  assert.equal(rw(`const n = myreturn / b / c; import('x')`),
                `const n = myreturn / b / c; __toolImportModule('x')`);
+});
+
+test('a body that cannot be parsed is refused, not passed through', () => {
+  // TypeScript's parser is error tolerant: it returns a tree for input it could not make sense of, and a
+  // call inside the part it gave up on is one the walk never sees. Passing the source back unchanged
+  // would hand over an ungated import, so it throws.
+  assert.throws(() => rw(`const x = ; import('node:fs')`), /not valid TypeScript/);
+});
+
+test('a body is recompiled against the current runner, so one arriving later gates its imports', async () => {
+  // The whole environment rides on this — the bound, the withheld globals, and whether `import(…)`
+  // reaches the given loader at all — so a body defined before a runner arrived must not keep what it
+  // was compiled under. Asserted as the PROPERTY rather than by inspecting what the runner was handed:
+  // how a runner routes an import is its own business, and only that it routed is observable.
+  let current: ReturnType<typeof createVmFunctionRunner> | undefined;
+  const host: CompileHost = { TypeScriptStripper: stripper, get FunctionRunner() { return current; } };
+  const fn = await buildAsyncFn(host, `(): Promise<unknown> { return import('node:os'); }`, []);
+
+  const asked: string[] = [];
+  const loader = async (spec: string): Promise<unknown> => { asked.push(spec); return { tagged: spec }; };
+
+  // No runner: nothing is routed. The body's own `import(…)` reaches node's loader and the gated one it
+  // was handed is never consulted — ungated, which is what the declarations a body is written against say.
+  const direct = await fn(loader, null, null, {} as never) as Record<string, unknown>;
+  assert.equal(asked.length, 0, 'not routed with no runner');
+  assert.equal(typeof direct['arch'], 'function', 'it imported node:os itself');
+
+  // A runner registered afterwards must reach the same compiled function.
+  current = createVmFunctionRunner(0, { permit: ['node:'] });
+  assert.deepEqual(await fn(loader, null, null, {} as never), { tagged: 'node:os' });
+  assert.deepEqual(asked, ['node:os'], 'routed to the loader this call supplied');
 });
 
 test('a permitted import is gated, and the subject names the function as well as the module', async () => {
@@ -270,19 +281,28 @@ test('a function NAMED execute does not share a one-off body\'s standing answers
 
 test('the withheld globals are undefined, and a real import() is inert', async () => {
   const runner = createVmFunctionRunner(2000, { permit: ['node:'] });
-  const typeofs = runner.compile([], `return [typeof process, typeof globalThis, typeof Buffer, typeof require, typeof eval].join(',');`);
-  assert.equal(await typeofs(), 'undefined,undefined,undefined,undefined,undefined');
+  const typeofs = runner.compile(`(async function () { return [typeof process, typeof globalThis, typeof Buffer, typeof require, typeof eval].join(','); })`);
+  assert.equal(await typeofs(noLoader), 'undefined,undefined,undefined,undefined,undefined');
+  assert.deepEqual([...runner.withheldGlobals ?? []].slice(0, 2), ['process', 'globalThis'],
+                   'and the list is published, so a checker need not keep its own');
 
-  // Nothing is injected here, so the rewrite's target is absent — which is what a body reaches if it
-  // somehow gets a real import() past the rewrite: no vm import callback is installed, so it is dead.
-  const raw = runner.compile([], `return import('node:os');`);
-  await assert.rejects(raw(), (e: { code?: string }) => e.code === 'ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING');
+  // The routed import reaches whatever was passed in that argument slot, and nothing else — so a call
+  // handed nothing there fails on the call rather than reaching node's own loader.
+  // The routed import reaches the loader the CALL was handed and nothing else, so a call given none
+  // fails on the call rather than reaching node's own loader.
+  const routed = runner.compile(`(async function () { return import('node:os'); })`);
+  await assert.rejects(routed(undefined as never), /not a function/);
+
+  // And an import that gets past the routing — the published escape, since `Function` is only shadowed —
+  // is dead anyway: no vm import callback is installed.
+  const escaped = runner.compile(`(async function () { return (() => {}).constructor('return import("node:os")')(); })`);
+  await assert.rejects(escaped(noLoader), (e: { code?: string }) => e.code === 'ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING');
 });
 
 test('the synchronous bound still holds with the shadow wrapper in place', async () => {
   const runner = createVmFunctionRunner(150, { permit: [] });
-  const spin = runner.compile([], `while (true) {}`);
-  await assert.rejects(spin(), /synchronous work without an await/);
+  const spin = runner.compile(`(async function () { while (true) {} })`);
+  await assert.rejects(spin(noLoader), /synchronous work without an await/);
 });
 
 test('removing the time bound removes the TIME bound and nothing else', async () => {
@@ -292,19 +312,49 @@ test('removing the time bound removes the TIME bound and nothing else', async ()
   const unbounded = createVmFunctionRunner(0, { permit: ['node:crypto'] });
   assert.deepEqual([...unbounded.permittedImports ?? []], ['node:crypto'], 'the restriction is still carried');
 
-  const typeofs = unbounded.compile([], `return [typeof process, typeof Buffer, typeof eval, typeof require].join(',');`);
-  assert.equal(await typeofs(), 'undefined,undefined,undefined,undefined', 'still withheld');
+  const typeofs = unbounded.compile(`(async function () { return [typeof process, typeof Buffer, typeof eval, typeof require].join(','); })`);
+  assert.equal(await typeofs(noLoader), 'undefined,undefined,undefined,undefined', 'still withheld');
 
-  const raw = unbounded.compile([], `return import('node:os');`);
-  await assert.rejects(raw(), (e: { code?: string }) => e.code === 'ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING',
-                       'an ungated import is still inert');
+  const escaped = unbounded.compile(`(async function () { return (() => {}).constructor('return import("node:os")')(); })`);
+  await assert.rejects(escaped(noLoader), (e: { code?: string }) => e.code === 'ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING',
+                       'an unrouted import is still inert');
 
   // …and the bound really is off: this would be stopped under any positive limit.
-  const slow = unbounded.compile([], `const until = Date.now() + 250; while (Date.now() < until) {} return 'done';`);
-  assert.equal(await slow(), 'done');
+  const slow = unbounded.compile(`(async function () { const until = Date.now() + 250; while (Date.now() < until) {} return 'done'; })`);
+  assert.equal(await slow(noLoader), 'done');
 
   // The gate still runs, and still refuses what the restriction excludes.
   const ev = await run({ TypeScriptStripper: stripper, FunctionRunner: unbounded }, machine(unbounded),
     `probe() { return import('node:fs'); }`);
   assert.match((ev as { message: string }).message, /not permitted.*only: node:crypto/s);
+});
+
+test('a granted path resolves against the project, not against matbot', async () => {
+  // `./x.js` used to name a path inside matbot's own source, which is not a place a body's author can
+  // have put anything. A bare specifier is deliberately NOT redirected: ordinary resolution from the
+  // runner reaches the project's node_modules whenever matbot is installed inside it, and nothing here
+  // compensates for a pnpm layout, where it is not.
+  const proj = await mkdtemp(join(tmpdir(), 'matbot-fnimport-'));
+  await writeFile(join(proj, 'helper.js'), 'export const local = 2;');
+  const runner = createVmFunctionRunner(0, { configDir: proj, dotPlugins: join(proj, '.plugins') });
+
+  assert.equal((await runner.import!('./helper.js') as { local: number }).local, 2, 'relative, rooted at the project');
+  assert.equal((await runner.import!(join(proj, 'helper.js')) as { local: number }).local, 2, 'absolute path');
+  assert.ok(typeof (await runner.import!('node:os') as { arch: unknown }).arch === 'function', 'a builtin is untouched');
+  // The message names where to install it, rather than node's own, which names a file inside matbot that
+  // the body never mentioned.
+  await assert.rejects(() => runner.import!('nope-not-installed'),
+                       (e: Error) => e.message.includes(proj) && /not installed where matbot can see it/.test(e.message));
+  await assert.rejects(() => runner.import!('./nope.js'),
+                       (e: Error) => e.message.includes(proj) && /no such file/.test(e.message));
+
+  // A module that resolves and then fails on its OWN missing dependency keeps its own error: reporting it
+  // as absent itself would send its author looking for the wrong thing.
+  await mkdir(join(proj, 'node_modules', 'broken'), { recursive: true });
+  await writeFile(join(proj, 'node_modules', 'broken', 'package.json'),
+                  '{"name":"broken","version":"1.0.0","type":"module","main":"i.js"}');
+  await writeFile(join(proj, 'node_modules', 'broken', 'i.js'), "import 'absolutely-not-here';");
+  await assert.rejects(() => runner.import!(join(proj, 'node_modules', 'broken', 'i.js')),
+                       (e: Error) => /absolutely-not-here/.test(e.message));
+  await rm(proj, { recursive: true, force: true });
 });

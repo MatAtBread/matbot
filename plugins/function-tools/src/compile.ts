@@ -1,22 +1,20 @@
 import { FUNCTION_TIMEOUT, importPermitted, makeToolBox } from '@matatbread/matbot-plugin-api';
 import { stripLeadingTrivia } from './signature.js';
-import { IMPORT_FN, rewriteImportCalls } from './imports.js';
 import type { MatbotMachine, ComposedCallContext, FunctionRunner, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
 
-export type CompiledFn = (tool: unknown, toolInContext: unknown, context: ComposedCallContext, importModule: ImportFn, ...args: unknown[]) => Promise<unknown>;
+/** The gated loader first — it is the runner's to wire, not a binding the body names — then the ambient
+ *  values a body has in scope, then its own arguments. */
+export type CompiledFn = (importModule: ImportFn, tool: unknown, toolInContext: unknown, context: ComposedCallContext, ...args: unknown[]) => Promise<unknown>;
 
-/** What a rewritten `import(…)` resolves to: the gated loader this call was handed. */
+/** The gated loader a body's `import(…)` reaches, whatever the runner resolves it to. */
 export type ImportFn = (spec: string) => Promise<unknown>;
 
-/** The identifiers injected ahead of a function's own parameters — reserved, hence unusable as param names.
- *  {@link IMPORT_FN} is never written by an author: `import(…)` is rewritten onto it (see `imports.ts`). */
-export const INJECTED = ['tool', 'toolInContext', 'context', IMPORT_FN] as const;
+/** The ambient values a body has in scope, and so the names its own parameters may not take. Declared in
+ *  the generated `.d.ts` as globals of the matching type, which is how an author knows they exist. */
+export const INJECTED = ['tool', 'toolInContext', 'context'] as const;
 
-const AsyncFunction = Object.getPrototypeOf(async function () { /* */ }).constructor as
-  new (...names: string[]) => (...args: unknown[]) => Promise<unknown>;
-
-/** What compiling and running model-authored code reads from the host: the stripper once, at build, and the
- *  runner at every call. */
+/** What compiling and running model-authored code reads from the host: the runner, at every call — and the
+ *  stripper, used only where there is no runner, since `new AsyncFunction` cannot take TypeScript. */
 export type CompileHost = Pick<MatbotMachine, 'TypeScriptStripper' | 'FunctionRunner'>;
 
 const LEADING = /^\s*(?:async\s+)?(?:function\s+)?/;
@@ -37,10 +35,8 @@ export async function buildAsyncFn(host: CompileHost, definition: string, paramN
   // Leading trivia goes first: a doc comment ahead of the definition would otherwise land between
   // `function` and the name, which is a syntax error rather than the harmless prose it looks like.
   const wrapped = `(async function ${stripLeadingTrivia(definition).replace(LEADING, '')})`;
-  let stripped: string;
-  try { stripped = await host.TypeScriptStripper.strip(wrapped); }
-  catch (e) { throw new Error(`not valid TypeScript (${msg(e)})`); }
-  return compileUnder(host, [...INJECTED, ...paramNames], `return ${rewriteImportCalls(stripped)}(${paramNames.join(', ')});`) as CompiledFn;
+  return compileUnder(host, [...INJECTED, ...paramNames], await erase(host, wrapped),
+                      code => `return ${code}(${paramNames.join(', ')});`) as CompiledFn;
 }
 
 /**
@@ -74,20 +70,52 @@ export async function buildBodyFn(host: CompileHost, definition: string): Promis
     );
   }
   const wrapped = `(async function () ${src})`;
-  let stripped: string;
-  try { stripped = await host.TypeScriptStripper.strip(wrapped); }
-  catch (e) { throw new Error(`not valid TypeScript (${msg(e)})`); }
-  return compileUnder(host, INJECTED, `return ${rewriteImportCalls(stripped)}();`) as CompiledFn;
+  return compileUnder(host, INJECTED, await erase(host, wrapped), code => `return ${code}();`) as CompiledFn;
 }
 
-export function compileUnder(host: Pick<MatbotMachine, 'FunctionRunner'>, params: readonly string[], body: string): (...args: unknown[]) => Promise<unknown> {
-  const compile = (runner: FunctionRunner | undefined): ((...args: unknown[]) => Promise<unknown>) => {
-    try { return runner !== undefined ? runner.compile(params, body) : new AsyncFunction(...params, body); }
-    catch (e) { throw new Error(`could not compile (${msg(e)})`); }
+/**
+ * One definition in both forms: as written, and erased. A {@link FunctionRunner} is handed the TypeScript,
+ * because erasure is part of running it and the runner may not even do it that way. The erased form is
+ * kept for the case where there is no runner — `new AsyncFunction` cannot take TypeScript — and because
+ * erasing is what reports "not valid TypeScript" at DEFINITION, naming the real fault, instead of a
+ * "could not compile" from whatever a runner makes of it later.
+ */
+export interface Definition { ts: string; js: string }
+
+export async function erase(host: CompileHost, ts: string): Promise<Definition> {
+  try { return { ts, js: await host.TypeScriptStripper.strip(ts) }; }
+  catch (e) { throw new Error(`not valid TypeScript (${msg(e)})`); }
+}
+
+export function compileUnder(
+  host: Pick<MatbotMachine, 'FunctionRunner'>,
+  names: readonly string[],
+  def: Definition,
+  buildBody: (code: string) => string,
+): CompiledFn {
+  // What a runner is handed: one self-contained async-function EXPRESSION, parameters and all, so it is
+  // strippable and parseable as it stands. The callable's own argument list is this package's convention
+  // and appears nowhere in the contract.
+  // Only the ambient names. The loader is not a parameter here: it reaches each call through the runner,
+  // which binds it to an identifier of its own choosing — so this package never names it and an author
+  // never sees it.
+  const expr = (code: string): string => `(async function (${names.join(', ')}) {\n${buildBody(code)}\n})`;
+  const compile = (runner: FunctionRunner | undefined): CompiledFn => {
+    try {
+      if (runner !== undefined) return runner.compile(expr(def.ts)) as CompiledFn;
+      // No runner: nothing bounds the body, nothing is withheld from it, and nothing rewrites its
+      // `import(…)` — so the loader is never reached and the body's import gets whatever the platform
+      // resolves. The ambient values are ordinary arguments, so the loader is dropped in front of them.
+      const plain = (new Function(`return ${expr(def.js)};`) as () => (...args: unknown[]) => Promise<unknown>)();
+      return (_importModule, ...args) => plain(...args);
+    } catch (e) { throw new Error(`could not compile (${msg(e)})`); }
   };
   let runner = host.FunctionRunner;
   let fn = compile(runner);
-  return (...args) => {
+  return (...args: Parameters<CompiledFn>) => {
+    // Recompiled against whatever runner is current, not the one at definition: a runner registered later
+    // must reach a body already defined, and one withdrawn must not stay on. Its whole environment rides
+    // on this — the bound, the withheld globals, and whether `import(…)` reaches the gate at all.
     const current = host.FunctionRunner;
     if (current !== runner) {
       try { fn = compile(current); } catch (e) { return Promise.reject(e); }
@@ -263,7 +291,8 @@ export async function* runFunction(
   ctx.signal.addEventListener('abort', onAbort, { once: true });
   // `gateSubject` rather than `tool`: a gate subject is split on a space, and an anonymous body's label
   // ("tool_function execute") is prose, not an identifier. A defined function's name IS one.
-  void fn(tool, toolInContext, context, gatedImport(machine, ctx, label?.gateSubject ?? label?.tool ?? EXECUTE_SUBJECT), ...argValues)
+  void fn(gatedImport(machine, ctx, label?.gateSubject ?? label?.tool ?? EXECUTE_SUBJECT),
+          tool, toolInContext, context, ...argValues)
     .then(v => { result = v; }, e => { errored = true; error = e; })
     .finally(() => { done = true; settle(); });
 

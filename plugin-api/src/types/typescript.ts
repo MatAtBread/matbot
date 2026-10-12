@@ -18,19 +18,42 @@ export interface TypeScriptStripper {
 }
 
 /**
- * Optional, host-supplied: compiles already-stripped JavaScript into an async function whose SYNCHRONOUS
- * execution is bounded. Model-authored code (a `tool_function` body) runs on the one event loop every
- * session, frontend and schedule shares, so a loop that never awaits freezes all of them — and nothing
- * in-process can stop it, an abort signal included, since stopping needs the loop to yield. Only the
- * stretches between awaits are bounded: a body waiting on a slow tool call is not doing work.
+ * Optional, host-supplied: turns model-authored TypeScript into something runnable, and is the
+ * environment it runs in. How it gets there — strip and compile, transform, interpret — is its own
+ * business; the rest of this interface is one value it is GIVEN per call, and two facts about its
+ * environment that nothing else can know.
  *
- * Absent ⇒ a consumer compiles with `new AsyncFunction` and runs unbounded, which is all a platform with
- * no way to interrupt synchronous code (the browser) can do. An embedder may register its own.
+ * Its first job is bounding a body's SYNCHRONOUS execution. Model-authored code runs on the one event
+ * loop every session, frontend and schedule shares, so a loop that never awaits freezes all of them —
+ * and nothing in-process can stop it, an abort signal included, since stopping needs the loop to yield.
+ * Only the stretches between awaits are bounded: a body waiting on a slow tool call is not doing work.
+ *
+ * Absent ⇒ a consumer compiles the code itself however it can, which drops every part of this at once
+ * and not just the bound: nothing is withheld from the body, `import()` reaches whatever the platform
+ * natively resolves rather than the loader it was passed, and {@link permittedImports} has no carrier and
+ * so restricts nothing. That is all a platform with no way to interrupt synchronous code
+ * and no module hook (the browser) can do, and it is the browser's permanent state rather than a
+ * misconfiguration — so a node host seeds one unconditionally. An embedder may register its own.
  */
 export interface FunctionRunner {
-  /** Compile `body` as the body of an async function taking `params`. Throws on a syntax error. A call
-   *  stopped at the limit rejects with an error whose `code` is {@link FUNCTION_TIMEOUT}. */
-  compile(params: readonly string[], body: string): (...args: unknown[]) => Promise<unknown>;
+  /**
+   * Compile `source` — a TypeScript expression evaluating to an async function — and return something
+   * that calls it. Throws on a syntax error. A call stopped at the limit rejects with an error whose
+   * `code` is {@link FUNCTION_TIMEOUT}.
+   *
+   * An EXPRESSION, complete with its own parameter list, rather than a body plus names to bind: a body is
+   * not valid alone — `return` at its top level is a syntax error — so every runner would have to wrap it
+   * before it could strip or parse it.
+   *
+   * TypeScript, not erased JavaScript, because erasing is part of running it.
+   *
+   * `importModule` is handed to each call, and is what a body's `import(…)` should reach: the consumer's
+   * gated loader, which closes over that invocation. A runner that rewrites `import(…)` resolves it to
+   * this; one that does not simply ignores the argument. How it gets into scope — a parameter the runner
+   * names itself, a closure — is internal, and nothing outside declares or sees it: the type-check runs
+   * on the source as the author wrote it, before any of this.
+   */
+  compile(source: string): (importModule: (spec: string) => Promise<unknown>, ...args: unknown[]) => Promise<unknown>;
   /**
    * An optional RESTRICTION on what a body may import, as exact specifiers or prefixes (`['node:']`).
    *
@@ -67,11 +90,26 @@ export interface FunctionRunner {
    * check of its own — a capability, not a policy.
    */
   import?(spec: string): Promise<unknown>;
+  /**
+   * Identifiers a body does NOT have — anything this runner withholds, shadows or never binds (node's
+   * withholds `process`, `globalThis`, `Buffer`, `eval` and `Function`, and names the phantom
+   * `require`/`module`/`__dirname` too, which never existed in a bare function expression but whose node
+   * types would otherwise make one typecheck and then fail at the first call).
+   *
+   * Stated here because only the runner knows, and a checker grading a body must REJECT them: a name
+   * shadowed but not rejected typechecks and fails at the first call, which is the one failure a check
+   * gate exists to prevent. The second consumer of a list is why it is not kept privately, exactly as
+   * for {@link permittedImports}.
+   *
+   * Absent ⇒ nothing is claimed, not that nothing is withheld.
+   */
+  readonly withheldGlobals?: readonly string[];
 }
 
 /** The `code` on the error a {@link FunctionRunner} rejects with when it stops a run at its limit, so a
  *  consumer can tell a stopped runaway from an ordinary failure without matching message text. */
 export const FUNCTION_TIMEOUT = 'FUNCTION_TIMEOUT';
+
 
 /**
  * Whether {@link FunctionRunner.permittedImports} admits `spec` — the boundary rule that interface

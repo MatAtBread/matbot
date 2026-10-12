@@ -217,6 +217,11 @@ export async function checkSnippetAgainst(opts: {
    *  checked STRUCTURALLY against this list, the way the cast gate and ENV-GATE close the other holes
    *  the type system cannot. Absent ⇒ unrestricted, and nothing is checked. */
   permittedImports?: readonly string[];
+  /** The identifiers the RUNNER does not bind, from `FunctionRunner.withheldGlobals` — the list ENV-GATE
+   *  rejects. It comes from the runner because a copy here could not be kept in step with it, and a name
+   *  that is shadowed but not rejected typechecks and then fails at the first call. Absent ⇒ nothing is
+   *  rejected: with no runner there is no claim about what a body does not have. */
+  withheldGlobals?: readonly string[];
 }): Promise<ToolCheckReport> {
   const diags = await runWorker({
     mode: 'snippet',
@@ -228,6 +233,7 @@ export async function checkSnippetAgainst(opts: {
     ...(opts.apiIndexPath !== undefined ? { apiIndexPath: opts.apiIndexPath } : {}),
     ...(opts.importPaths  !== undefined ? { importPaths:  opts.importPaths  } : {}),
     ...(opts.permittedImports !== undefined ? { permittedImports: opts.permittedImports } : {}),
+    ...(opts.withheldGlobals !== undefined ? { withheldGlobals: opts.withheldGlobals } : {}),
   });
   return reportOf(diags ?? []);
 }
@@ -360,13 +366,15 @@ try {
   // cannot repair it. Rejected structurally for the same reason a cast is, with the working form named.
   // Only in snippet mode: a compiled plugin IS a module and legitimately has 'import.meta'.
   //
-  // The list must match what the runner WITHHOLDS, not just what a module wrapper would have supplied.
-  // The second half below are globals the runner shadows so that the import gate is the only route to a
-  // capability, and they are the worse half to omit: 'require' at least has no type without node's, while
-  // 'eval' and 'Function' are lib.es globals that typecheck in every configuration and fail at the first
-  // call, and 'process.cwd()' drew only tsc's 'install type definitions for node', which is advice to
-  // make a withheld global typecheck.
-  const ENV_GLOBALS = {
+  // WHICH names are withheld comes from the runner's withheldGlobals, because it is the only thing that
+  // knows and a copy here could not be kept in step: a name shadowed but not rejected typechecks and
+  // fails at the first call, which is the one failure this gate exists to prevent. 'eval' and 'Function'
+  // are the worst to miss, being lib.es globals that typecheck in every configuration.
+  //
+  // The ADVICE stays here, because it is about repairing a snippet and that is this file's job, not the
+  // runner's. A withheld name with no entry below still fires, with a generic line — the list is the
+  // runner's to grow, and a new one must not pass silently for want of prose.
+  const ADVICE: Record<string, string> = {
     require:    "'require' is not defined in a function body — it is compiled as a bare async function, not a module. Use a dynamic import instead: 'const fs = await import('node:fs/promises')'.",
     module:     "'module' is not defined in a function body — it is compiled as a bare async function, not a CommonJS module. Return a value instead of assigning to an export.",
     exports:    "'exports' is not defined in a function body — it is compiled as a bare async function, not a CommonJS module. Return a value instead of assigning to an export.",
@@ -408,6 +416,7 @@ try {
   // The permit's boundary rule, inlined: the worker is a CommonJS realm with no loader hooks, so it
   // cannot import 'importPermitted' from plugin-api, which is where the rule lives and is documented.
   const permits = workerData.permittedImports;
+  const withheld = new Set<string>(workerData.withheldGlobals ?? []);
   const permitted = function (spec) {
     return permits.some(function (p) {
       return spec === p
@@ -445,7 +454,7 @@ try {
       if (ts.isMetaProperty(node) && node.keywordToken === ts.SyntaxKind.ImportKeyword) {
         synth.push(mk(sf, node, 90005,
           "'import.meta' is only available in a module, and a function body is not one — this is a syntax error when the body is compiled, so it cannot run at all. Remove it."));
-      } else if (ts.isIdentifier(node) && Object.prototype.hasOwnProperty.call(ENV_GLOBALS, node.text)
+      } else if (ts.isIdentifier(node) && withheld.has(node.text)
                  && !(node.parent && ts.isPropertyAccessExpression(node.parent) && node.parent.name === node)
                  && !(node.parent && (ts.isPropertyAssignment(node.parent) || ts.isPropertySignature(node.parent)) && node.parent.name === node)
                  // The SOURCE half of a renamed destructuring is a property of the thing being unpacked,
@@ -456,7 +465,8 @@ try {
                  && !(node.parent && ts.isBindingElement(node.parent) && node.parent.propertyName === node)
                  && !inTypePosition(node)
                  && !authorDeclared(node)) {
-        synth.push(mk(sf, node, 90005, ENV_GLOBALS[node.text]));
+        synth.push(mk(sf, node, 90005, ADVICE[node.text]
+          ?? ("'" + node.text + "' is not defined in a function body — the runner withholds it.")));
         envStarts.add(node.getStart(sf));
       }
     }

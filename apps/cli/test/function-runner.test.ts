@@ -83,11 +83,13 @@ test('a package export is bounded too, being called inside the timed run', async
 });
 
 test('a run started inside another takes its own call, and a loop there is still stopped', async () => {
-  const inner = runner.compile([], 'return 7;');
-  assert.equal(await runner.compile(['inner'], 'return inner();')(inner), 7);
-  const spinning = runner.compile([], 'for (;;) {}');
-  await assert.rejects(runner.compile(['inner'], 'return inner();')(spinning), LIMIT);
-  assert.equal(await runner.compile(['a', 'b'], 'return a + b;')(2, 3), 5, 'the runner is usable after a stopped run');
+  const none = (): Promise<never> => Promise.reject(new Error('no loader'));
+  const inner = () => runner.compile('(async function () { return 7; })')(none);
+  assert.equal(await runner.compile('(async function (inner) { return inner(); })')(none, inner), 7);
+  const spinning = () => runner.compile('(async function () { for (;;) {} })')(none);
+  await assert.rejects(runner.compile('(async function (inner) { return inner(); })')(none, spinning), LIMIT);
+  assert.equal(await runner.compile('(async function (a, b) { return a + b; })')(none, 2, 3), 5,
+               'the runner is usable after a stopped run');
 });
 
 test('with no runner the body runs directly, as it did before', async () => {
@@ -98,10 +100,12 @@ test('with no runner the body runs directly, as it did before', async () => {
 test('a body compiles under the runner current at each call, and only again when it changes', async () => {
   const compiled: string[] = [];
   const tagging = (tag: string): FunctionRunner => ({
-    compile(params, body) {
+    compile(source) {
       compiled.push(tag);
-      const fn = new Function(...params, body) as (...a: unknown[]) => Promise<unknown>;
-      return async (...a) => `${tag}:${String(await fn(...a))}`;
+      // A runner is handed a TypeScript EXPRESSION and erasure is part of running it — so even a spy
+      // does both, and needs no wrapper of its own to do either.
+      const fn = (new Function(`return ${stripTypeScriptTypes(source)};`) as () => (...a: unknown[]) => Promise<unknown>)();
+      return async (_importModule, ...a) => `${tag}:${String(await fn(...a))}`;
     },
   });
   const host: CompileHost = { TypeScriptStripper: stripper, FunctionRunner: tagging('A') };

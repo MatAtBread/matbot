@@ -864,6 +864,7 @@ async function main(): Promise<void> {
   const functionRunner = createVmFunctionRunner(functionTimeoutMs, {
     ...(matbotConfig.functionImports !== undefined ? { permit: matbotConfig.functionImports } : {}),
     dotPlugins: path.join(configDir, '.plugins'),
+    configDir,
   });
   if (functionTimeoutMs === 0) console.warn('[matbot] function_timeout_ms is 0: tool_function bodies run unbounded, and one that loops without awaiting will freeze this process.');
 

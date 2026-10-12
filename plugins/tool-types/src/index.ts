@@ -275,7 +275,21 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
    * runtime gate still permits such an import; the check does not type it, so it needs `noTypeCheck`
    * until a per-prefix declaration file can be named in config.
    */
+  /** {@link importPaths} is read twice per check — once for the program's `paths`, once by {@link
+   *  importNote} through `dts()` — and it walks every builtin with a stat apiece. Cached against the
+   *  permit list it was computed from, BY REFERENCE: a registered runner brings its own array, so a swap
+   *  invalidates this without anything having to remember to. */
+  private pathsFor?: { permit: readonly string[] | undefined; paths: Record<string, string[]> };
+
   private async importPaths(): Promise<Record<string, string[]>> {
+    const permitNow = this.machine.FunctionRunner?.permittedImports;
+    if (this.pathsFor !== undefined && this.pathsFor.permit === permitNow) return this.pathsFor.paths;
+    const paths = await this.computeImportPaths();
+    this.pathsFor = { permit: permitNow, paths };
+    return paths;
+  }
+
+  private async computeImportPaths(): Promise<Record<string, string[]>> {
     // Absent ⇒ unrestricted, so every builtin is typed and the gate decides each import at the call. A
     // configured restriction narrows this to its own subset, which is what makes a forbidden module a
     // COMPILE error rather than something that typechecks and is refused later.
@@ -304,8 +318,9 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
     return out;
   }
 
-  /** The one line of the dts that is about imports: what this install permits, or that it permits none.
-   *  Every import is still a per-function decision, which is why this says "may" rather than "can". */
+  /** The part of the dts that is about imports: which modules this install permits AND which of those
+   *  have types, that second half being this package's own knowledge. Everything else about the
+   *  environment — the gate, what is not in scope — is the runner's to state, and is appended verbatim. */
   private async importNote(): Promise<string> {
     const restricted = this.machine.FunctionRunner?.permittedImports;
     const typed = new Set(Object.keys(await this.importPaths()));
@@ -332,15 +347,20 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
       ...(restricted ?? []).filter(p => !covered(p)).sort().map(mark),
     ];
     const note = restricted !== undefined && restricted.length === 0
-      ? '// Module imports are switched off on this installation.'
+      ? `// Module imports are switched off on this installation.\n`
       : restricted === undefined
         ? `// A body may import node builtins, each subject to permission at the call — you will be asked\n`
-          + `// the first time: const fs = await import('node:fs/promises');`
+          + `// the first time: const fs = await import('node:fs/promises');\n`
         : `// A body may import these, each subject to permission at the call:\n`
-          + `${listing.map(p => `//   ${p}`).join('\n')}`;
-    return `${note}\n`
-      + `// There is no require, module, __dirname, __filename or import.meta — a body is compiled as a\n`
-      + `// bare async function, not a module — and no process, Buffer or globalThis.\n`;
+          + `${listing.map(p => `//   ${p}`).join('\n')}\n`;
+    // Composed from what the runner STATES — the permitted set above, and the identifiers it does not
+    // bind — never from prose it supplies: the facts are the runner's, the wording is this file's, and
+    // the same two arrays are what IMPORT-GATE and ENV-GATE enforce, so the note cannot drift from them.
+    const withheld = this.machine.FunctionRunner?.withheldGlobals ?? [];
+    return `${note}`
+      + (withheld.length > 0
+          ? `// A body is a bare async function, not a module, and not every global is in scope. Absent: ${withheld.join(', ')}, import.meta.\n`
+          : '');
   }
 
   async check(snippet: string): Promise<ToolCheckReport> {
@@ -369,6 +389,7 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
     // forbidden specifier resolves through the back door and typechecks clean. The checker closes that
     // structurally. Absent stays absent — unrestricted means nothing to enforce.
     const restricted = this.machine.FunctionRunner?.permittedImports;
+    const withheld   = this.machine.FunctionRunner?.withheldGlobals;
     return checkSnippetAgainst({
       root, source,
       prefixLen: prefix.length,
@@ -376,6 +397,9 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
       ...(apiIndex !== undefined ? { apiIndexPath: apiIndex } : {}),
       ...(Object.keys(importPaths).length > 0 ? { importPaths } : {}),
       ...(restricted !== undefined ? { permittedImports: restricted } : {}),
+      // ENV-GATE's list, from the runner that withholds them. Absent with no runner, which is correct:
+      // nothing is withheld there either, so there is nothing to reject.
+      ...(withheld !== undefined ? { withheldGlobals: withheld } : {}),
     });
   }
 

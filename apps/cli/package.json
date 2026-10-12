@@ -55,11 +55,11 @@
     "@matatbread/matbot-provider-google": "workspace:^",
     "@matatbread/matbot-provider-customer-services": "workspace:^",
     "@matatbread/matbot-provider-chatjimmy": "workspace:^",
-    "@matatbread/matbot-provenance": "workspace:^"
+    "@matatbread/matbot-provenance": "workspace:^",
+    "typescript": "catalog:"
   },
   "devDependencies": {
     "@types/node": "catalog:",
-    "typescript": "catalog:",
     "@matatbread/matbot-function-tools": "workspace:^",
     "@matatbread/matbot-tool-types": "workspace:^",
     "@matatbread/matbot-caching-tool-types": "workspace:^",

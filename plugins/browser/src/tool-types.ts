@@ -201,7 +201,29 @@ class BrowserToolTypeIndex implements ToolTypeIndex {
       + `declare module '@matatbread/matbot-plugin-api' {\n  interface ToolContracts {\n${arms.join('\n')}\n  }\n}\n`
       + `declare const tool: import('@matatbread/matbot-plugin-api').ToolProxy;\n`
       + `declare const toolInContext: import('@matatbread/matbot-plugin-api').ToolBox;\n`
-      + `declare const context: import('@matatbread/matbot-plugin-api').ComposedCallContext;\n`;
+      + `declare const context: import('@matatbread/matbot-plugin-api').ComposedCallContext;\n`
+      + this.importNote();
+  }
+
+  /**
+   * What a body can rely on about imports here, composed from what the registered {@link FunctionRunner}
+   * states — its permitted set and the identifiers it does not bind. Derived rather than written as prose
+   * about "the browser", so an install that registers a runner gets a note matching it. With no runner
+   * nothing is restricted, nothing is withheld and no import is gated, and the note says only the one
+   * concrete thing a body here needs told: there are no node builtins.
+   */
+  private importNote(): string {
+    const runner = this.machine.FunctionRunner;
+    const permit = runner?.permittedImports;
+    if (permit?.length === 0) return `// Module imports are switched off on this installation.\n`;
+    const what = permit !== undefined
+      ? `// A body may import these:\n${permit.map(p => `//   ${p}`).join('\n')}\n`
+      : `// A body may import a URL or a package the page can load. There are no node builtins here:\n`
+        + `//   'node:fs' and the rest do not exist.\n`;
+    const withheld = runner?.withheldGlobals ?? [];
+    return what
+      + (withheld.length > 0 ? `// Not in scope: ${withheld.join(', ')}.\n` : '')
+      + `// Imports are not type-checked here, so an import's shape is whatever it turns out to be.\n`;
   }
 
   // No TypeScript program here, so nothing can be checked. `checked: false` is what says so: reporting

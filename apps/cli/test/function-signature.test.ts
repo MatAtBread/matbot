@@ -299,6 +299,21 @@ test('a declared Promise<T> and a declared T register the same contract', async 
   assert.equal(unwrapPromise('string'), 'string');
 });
 
+test('a string-literal type is text, not brackets and not a union', async () => {
+  const { unwrapPromise } = await import('@matatbread/matbot-function-tools');
+  // Both walkers counted brackets inside a string literal, which is an ordinary thing for a contract to
+  // contain. A `>` in one closed nothing, so the `Promise<…>` stayed on — the very defect matching the
+  // brackets was meant to fix — and a `|` in one split one arm into two. Either way the result is spliced
+  // verbatim into the dts arm and the wire text a model reads, where nothing downstream can tell.
+  assert.equal(unwrapPromise(`Promise<'a>b'>`), `'a>b'`);
+  assert.equal(unwrapPromise(`Promise<'a|b'>`), `'a|b'`);
+  assert.equal(unwrapPromise(`Promise<'a' | 'b'>`), `'a' | 'b'`);
+  assert.equal(unwrapPromise(`Promise<{ 'a}b': number }>`), `{ 'a}b': number }`);
+  // Each arm is unwrapped, as above — the point here is that the `>` inside the literal arm neither
+  // closes the other arm's bracket nor splits this one.
+  assert.equal(unwrapPromise(`Promise<A> | 'x>y'`), `A | 'x>y'`);
+});
+
 test('the brackets are MATCHED, so a union of promises is not mangled into nonsense', async () => {
   const { unwrapPromise } = await import('@matatbread/matbot-function-tools');
   // A greedy `/^Promise\s*<(.*)>$/` read this as one `Promise<…>` and returned `A> | Promise<B` — not a

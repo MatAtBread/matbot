@@ -24,6 +24,23 @@ export interface ParsedParam {
 export const unwrapPromise = (t: string): string =>
   splitUnion(t).map(unwrapOne).join(' | ');
 
+/**
+ * The index just past a string literal starting at `i`, or `i` itself if none starts there. Both walkers
+ * below count brackets, and a string-literal TYPE is ordinary in a contract (`'a' | 'b'`, an index
+ * signature's key), so its contents must not be counted: `Promise<'a>b'>` has a `>` that closes nothing,
+ * and `'a|b'` is one arm rather than two. Getting either wrong is silent — the result is spliced verbatim
+ * into the dts arm and the wire text a model reads.
+ */
+function skipString(t: string, i: number): number {
+  const q = t[i];
+  if (q !== "'" && q !== '"' && q !== '`') return i;
+  for (let j = i + 1; j < t.length; j++) {
+    if (t[j] === '\\') { j += 1; continue; }
+    if (t[j] === q) return j + 1;
+  }
+  return t.length;   // unterminated: the rest is inside it, which is still not bracket text
+}
+
 /** One arm, with its own `Promise<…>` removed if that is the whole of it. */
 function unwrapOne(arm: string): string {
   const open = /^Promise\s*</.exec(arm);
@@ -31,6 +48,8 @@ function unwrapOne(arm: string): string {
   const from = open[0].length - 1;
   let depth = 0;
   for (let i = from; i < arm.length; i++) {
+    const skipped = skipString(arm, i);
+    if (skipped !== i) { i = skipped - 1; continue; }
     const c = arm[i];
     if (c === '<') depth += 1;
     else if (c === '>' && arm[i - 1] !== '=') {
@@ -48,6 +67,8 @@ function splitUnion(t: string): string[] {
   const arms: string[] = [];
   let depth = 0, start = 0;
   for (let i = 0; i < t.length; i++) {
+    const skipped = skipString(t, i);
+    if (skipped !== i) { i = skipped - 1; continue; }
     const c = t[i];
     if (c === '<' || c === '(' || c === '[' || c === '{') depth += 1;
     else if (c === '>' ? t[i - 1] !== '=' : c === ')' || c === ']' || c === '}') depth -= 1;

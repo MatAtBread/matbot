@@ -745,27 +745,65 @@ Three parts, and only the first two enforce anything:
    with no human able to allow it, since a policy has no stored "always deny". It lives on the runner
    because the runner IS the execution environment and two consumers need one answer: the capability that
    imports, and `ToolTypeIndex`, which types the reachable set.
-3. **The spelling** — `import(…)` is rewritten onto an injected, gated loader by a scanner in
-   `function-tools` (`imports.ts`). `import` is a reserved word, so there is no binding to shadow; the
-   rewrite keeps the spelling a model reaches for first, keeps a **computed** specifier working (the
-   argument passes through, so the gate sees the string the body built — which a static scan could never
-   do), and leaves the type-check reading the source as WRITTEN, so a diagnostic's caret stays over text
-   its author recognises. It is a scanner and not one regular expression because a body that *generates*
-   source containing `import(` is ordinary, and template-literal nesting and regex-vs-division defeat a
-   single pattern.
+3. **The spelling** — a body writes `import(…)`, the real thing. `import` is a reserved word, so there is
+   no binding to shadow; keeping the spelling a model reaches for first also keeps a **computed**
+   specifier working (the argument passes through, so the gate sees the string the body built), and leaves
+   the type-check reading the source as WRITTEN.
 
-   **Where a scanner cannot be sure, it refuses.** Two constructs are genuinely ambiguous without a
-   parser, and a wrong guess at either fails in the direction of an *ungated* import — which is not a
-   direction to be silently wrong in. A `/` after `}` may open a regex (`}` ended a block) or divide (`}`
-   ended an object literal), and picking wrong does not misread one token: the scanner **desyncs**, so a
-   quote further along can swallow an `import(` that neither reading mentions. So the body is scanned
-   BOTH ways and the outputs compared — agreeing means the ambiguity made no difference, differing is
-   refused. The second pass is skipped when no ambiguous `/` was reached, which is every body that does
-   not divide immediately after a brace. Sniffing the candidate for `import(` was tried first and caught
-   only the direct case. And `import` is legal as a method name (a property name may be a reserved word),
-   which the rewrite would silently rename, and is indistinguishable from a call whose statement is
-   followed by a block — so both are refused, naming the fix, the same answer the other injected names
-   get for being reserved.
+   **A `FunctionRunner` is handed TypeScript and is the environment it runs in.** `compile(source)` takes a
+   self-contained async-function expression — parameters and all, because a bare body is not valid alone
+   (`return` at its top level is a syntax error) and every runner would otherwise have to wrap it before
+   it could strip or parse it. What the runner does to get to something runnable is its own business.
+
+   **The rewrite is internal and needs no typing.** The type-check runs at definition, on the source as
+   the author wrote it (`ToolTypeIndex.check`), and compilation is separate and later — so substituting
+   `import(spec)` for a private function is invisible to the type system, and there is nothing to declare.
+   The consumer's gated loader is handed to each call as the compiled callable's first argument, because it
+   closes over that invocation (the gate, the tool context, the function's name — the key a decision is
+   remembered under). How it reaches the body — a parameter the runner names itself, a closure — is
+   internal: node's binds it in a wrapper of its own per call, which is also why interleaved calls cannot
+   tread on one another. Three shapes were tried before this and all three leaked the mechanism outward: an
+   injected NAME the runner had to splice, SPANS it had to report, and a `RunnerProvisions` bag; the last
+   dragged `function-tools`' calling convention into `plugin-api` as a declared symbol set, which was worse
+   again.
+
+   **Node's runner** (`apps/cli/body-transform.ts`) erases with node's own `stripTypeScriptTypes` — which
+   BLANKS types in place, so every line number in what runs is the one the author wrote
+   (`transpileModule` reprints from the AST, inserting a `"use strict"` prologue and normalising
+   formatting) — then walks TypeScript's AST for call expressions whose callee is the `import` keyword and
+   splices each keyword's span. The compiler loads with `createRequire` on first use, which keeps
+   `compile` synchronous and the ~250ms paid by the first body that compiles rather than at startup.
+
+   **This was a hand-written scanner, and that is the thing to not do again.** Telling an `import(` in
+   code from one inside a string, a template, a comment or a regex literal needs the previous significant
+   token, and getting it wrong does not misread one token — it **desyncs**, so a quote further along
+   swallows an `import(` that neither reading mentions, leaving an import with no gate in front of it and
+   nothing reporting that. Two cases are undecidable without having parsed: a `/` after `)` may follow
+   `if (…)` or `(a + b)`, and after `}` it may end a block or an object literal. Each patch bought one
+   more case and left the class open — `)` was assumed to divide and silently lost the import after
+   `if (f(x)) /a'b/.test(s)`, while routing it into the existing refusal path would have rejected
+   `(a + b) / 2`. A parser also tells a method shorthand named `import` and a type-position
+   `import('x').Foo` from a call, both of which had to be refused outright.
+
+   **What a runner tells the type-checker is two arrays, and no text.** `import('node:os')` gets its types
+   from `compilerOptions.paths` — one entry per permitted specifier, pointing at the real
+   `@types/node/*.d.ts` — never from the dts, which says nothing about modules. `paths` cannot ENFORCE the
+   restriction (one builtin's declarations drag in the ambient `declare module 'node:…'` blocks of
+   everything they reference), and TypeScript cannot un-declare a global, so two structural rules close
+   both holes: `IMPORT-GATE` from `permittedImports`, and `ENV-GATE` from **`withheldGlobals`** — the
+   identifiers the runner does not bind. That second list is on the runner because a copy in the checker
+   could not be kept in step, and a name shadowed but not rejected typechecks and then fails at the first
+   call. The dts's prose is composed by the type index from those same two arrays, so it cannot drift from
+   what is enforced; a runner supplying prose of its own was tried and removed, text being the one part
+   that needs no seam.
+
+   **Absent ⇒ no runner, so none of it.** Nothing bounds the body, nothing is withheld, nothing rewrites
+   its `import(…)`, and the loader handed to the call is never reached — so the body's import gets
+   whatever the platform resolves. That is the **browser**, which could not enforce the gate anyway: with
+   nothing withheld, `new Function('s', 'return import(s)')` reaches the platform loader whatever a
+   transform concludes, and `permittedImports` has no carrier. The browser's own sandbox and permission UX
+   is the boundary there, and its `ToolTypeIndex` says only the one concrete thing a body needs told —
+   there are no node builtins. An install wanting the gate registers a `FunctionRunner`.
 
 **Two tiers, and the label says which.** `node:os` genuinely cannot reach another capability. Anything
 else — a package, a path, a URL — is loaded as **host code**: it is not compiled by the runner, so none of

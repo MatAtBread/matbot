@@ -28,10 +28,31 @@ churn and less likely to affect a consumer who doesn't use them.
   `require`/`module`/`exports`/`__dirname`/`__filename`, because `process.getBuiltinModule` otherwise
   reaches every builtin with no import at all and the gate would be decorative. It is not a sandbox and
   is not described as one — `(()=>{}).constructor('return process')()` recovers the real `process`, and a
-  non-builtin module loads as host code that is not shadowed, which its gate label says. Where the
-  scanner cannot be sure it *refuses*: a `/` after `}` may open a regex or divide, and picking wrong
-  desyncs it rather than misreading one token, so the body is scanned both ways and a disagreement is
-  refused; an `import` that could be a method name is refused for the same reason. `function_timeout_ms:
+  non-builtin module loads as host code that is not shadowed, which its gate label says. A `FunctionRunner` is now handed the
+  TypeScript and is the environment it runs in: `compile(source)` takes a self-contained async-function
+  expression and returns something that calls it, and what the runner does to get there — strip and
+  compile, transform, interpret — is its own business. The consumer's gated loader is the compiled
+  callable's first argument, since it closes over that invocation; how it reaches the body is internal, and
+  because the type-check runs at definition on the source as written, the rewrite needs no typing and
+  declares nothing. Finding the calls **parses**: node's runner erases with `stripTypeScriptTypes`, which
+  blanks types in place so every line number in what runs is the one the author wrote, then walks
+  TypeScript's AST for call expressions whose callee is the `import` keyword. It was a hand-written
+  scanner, which could not be made correct — telling an `import(` in code from one in a string, template,
+  comment or regex literal needs the previous significant token, and a wrong answer desyncs the reader
+  rather than misreading one token, so a quote further along swallows an `import(` that neither reading
+  mentions and that import is never gated, silently. Two cases are undecidable without a parser (a `/`
+  after `)` may follow `if (…)` or `(a + b)`; after `}` it may end a block or an object literal), and
+  bodies that divide after `i++` or use a regex after `if (…)` lost their imports to exactly that. A parser
+  also removes two refusals the scanner needed, for a method shorthand named `import` and a type-position
+  `import('x').Foo`. A runner also now publishes **`withheldGlobals`**, the identifiers it does not bind,
+  which the checker's `ENV-GATE` rejects instead of keeping its own copy that could not be kept in step;
+  the dts's prose about the environment is composed from that and `permittedImports`, so it cannot drift
+  from what `ENV-GATE` and `IMPORT-GATE` enforce. **No runner ⇒ none of it**, which is the browser:
+  nothing bounds a body, nothing is withheld from it, and its `import(…)` reaches whatever the platform
+  resolves. The gate could not be a boundary there regardless — with nothing withheld,
+  `new Function('s', 'return import(s)')` reaches the platform loader whatever a transform concludes, and
+  `permittedImports` has no carrier — so the browser's own sandbox is the boundary, and its tool dts says
+  only that there are no node builtins. An install wanting the gate there registers a `FunctionRunner`. `function_timeout_ms:
   0` also now removes the time bound and **nothing else** — it seeded no runner at all, which silently
   discarded `function_imports.permit` (`permit: []` included), unshadowed every withheld global and made
   a raw `import()` work, because a line of yaml about how long a body may compute was answering what a
@@ -70,6 +91,32 @@ churn and less likely to affect a consumer who doesn't use them.
   that imports, and the type index that declares the reachable set. `import()` is platform-specific because node refuses an `http(s)` specifier
   outright (`ERR_UNSUPPORTED_ESM_URL_SCHEME`), so it materialises one under `.plugins/` and imports from
   disk, while a browser imports the URL directly.
+
+### Bug fixes
+
+- **A granted import of a PATH resolves against the project.** `apps/cli`'s runner resolved it against its
+  own module, so a granted `./x.js` named a path inside matbot's own source — not a place a body's author
+  can have put anything. It now resolves against the directory holding `matbot.yaml`, the same base as
+  `.data`, `.plugins` and the type-checker's program root, and a bare specifier that resolves nowhere is
+  answered with a message naming that directory instead of node's own, which named a file inside matbot
+  that the body never mentioned. A bare specifier is deliberately not redirected: ordinary resolution
+  reaches the project's `node_modules` whenever matbot is installed inside it, which a flat npm or yarn
+  install is; under pnpm the CLI sits outside the project tree and a package installed beside the config
+  is not reachable, and nothing here compensates for that (a CJS resolve rooted at the project refuses a
+  package whose `exports` offers only an `import` condition — most of them now — and
+  `import.meta.resolve`'s second argument is silently ignored).
+- **A string-literal type no longer breaks a tool's contract text.** `function-tools`' type-text walkers
+  counted brackets inside string literals, so `Promise<'a>b'>` kept its `Promise<…>` wrapper (the defect
+  this release fixed elsewhere) and `'a|b'` was split into two union arms. Both are spliced verbatim into
+  the generated dts arm and the wire text a model reads, where nothing downstream could recognise them as
+  broken.
+- **The browser's tool dts says what a body may import.** It said nothing at all, so a body was as likely
+  to reach for `node:fs` as anything else; it now states that there are no node builtins, and whether
+  imports are gated, derived from the registered `FunctionRunner` rather than written as prose about "the
+  browser".
+- `tool-types` computed the permitted-import `paths` twice per type-check — once for the program, once for
+  the dts note — each walking every builtin with a stat apiece. Cached against the permit list it was
+  computed from, by reference, so a runner swap invalidates it.
 
 ### Optional
 
