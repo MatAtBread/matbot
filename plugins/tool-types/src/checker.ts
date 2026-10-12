@@ -593,6 +593,16 @@ try {
     for (const d of targets) {
       if (d.code !== 2591 || !d.file || typeof d.start !== 'number') continue;
       if (envStarts.has(d.start) || importStarts.has(d.start)) continue;
+      // tsc raises the same code for an import() of a builtin it has no declarations for, at the
+      // specifier — which is a module, not a global, and is repaired differently.
+      const spec = importSpecs.get(d.start);
+      if (spec !== undefined) {
+        synth.push({ file: d.file, start: d.start, length: d.length, code: 90006,
+                     category: ts.DiagnosticCategory.Error, __syn: true,
+                     messageText: "'" + spec + "' has no type declarations here, so nothing it returns can be checked. The comment block at the top of these declarations lists the modules this installation types — use one of those, or define this function with noTypeCheck." });
+        importStarts.add(d.start);
+        continue;
+      }
       const name = d.file.text.substr(d.start, d.length);
       synth.push({ file: d.file, start: d.start, length: d.length, code: 90005,
                    category: ts.DiagnosticCategory.Error, __syn: true,

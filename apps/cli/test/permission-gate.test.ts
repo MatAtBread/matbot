@@ -1,8 +1,8 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { askPermissionGate, bindGate, installSettingsDefaults, makePluginSettings,
+import { askPermissionGate, bindGate, createSession, HookRegistry, installSettingsDefaults, makePluginSettings,
          optionValue, optionLabel, permitted, refused, refusalMessage } from '@matatbread/matbot-core';
-import type { FormField, PermissionGate, PermissionRequest, PromptFn, SettingsDoc, Store } from '@matatbread/matbot-core';
+import type { FormField, PermissionGate, PermissionRequest, PromptFn, SettingsDoc, Store, Tool } from '@matatbread/matbot-core';
 import { createDefaultGate, makeGateActionTool, DEFAULT_GATE_SETTINGS_NS } from '@matatbread/matbot-default-gate';
 
 // The seam: a privileged call site DECLARES (gate id, subject, label, fallback); the installation's
@@ -102,21 +102,51 @@ test('a tool supplies the suffix; the host qualifies it with the tool it is regi
   assert.deepEqual(seen.map(r => r.gate), ['plugin.add', 'mcp_action.remove']);
 });
 
-test('a tool whose NAME is chosen at run time declares the gate namespace instead', async () => {
+test('a namespace is honoured only for a tool the SAME plugin registered', async () => {
   const seen: PermissionRequest[] = [];
   const gate: PermissionGate = { async decide(r) { seen.push(r); return permitted('user'); } };
+  const registry = new Map([
+    ['tool_function', { pluginName: '@matatbread/matbot-function-tools' }],
+    ['plugin',        { pluginName: '__host__' }],
+  ]);
+  const tools = { resolve: (n: string) => registry.get(n) ?? null };
+  const req = { gate: 'import', subject: 'scrape_prices node:fs', label: 'l', fallback: false };
 
-  // A `function-tools` function is registered under the name the MODEL gave it, so qualifying by that
-  // name would mint a gate id per definition: nothing an installation could key `default_settings:` by,
-  // no remembered answer able to generalise across functions, and one settings key per name the model
-  // ever picks. The per-function dimension belongs in the subject, which already carries it.
-  const fn = { name: 'scrape_prices', gateNamespace: 'tool_function' };
-  await bindGate(gate, fn, undefined).gate({ gate: 'import', subject: `${fn.name} node:fs`, label: 'l', fallback: false });
-  // A tool with a fixed name omits the field and is qualified by the name, exactly as before.
-  await bindGate(gate, { name: 'plugin' }, undefined).gate({ gate: 'add', subject: '@x/foo', label: 'l', fallback: false });
-
-  assert.deepEqual(seen.map(r => r.gate), ['tool_function.import', 'plugin.add']);
+  // A function-tools function is registered under the name the MODEL gave it, so qualifying by that name
+  // would file each definition's answers under its own gate id, where no other function reads them.
+  const fn = { name: 'scrape_prices', pluginName: '@matatbread/matbot-function-tools' };
+  await bindGate(gate, fn, undefined, tools).gate({ ...req, namespace: 'tool_function' });
+  assert.deepEqual(seen.map(r => r.gate), ['tool_function.import']);
   assert.equal(seen[0]?.subject, 'scrape_prices node:fs', 'which function asked is still the subject');
+  assert.equal('namespace' in seen[0]!, false, 'the policy sees a qualified id, not the qualifier');
+
+  // Anyone else's namespace is refused before the policy is consulted: a plugin addresses only its own
+  // gates, including core's `tools.*`, which no tool is registered as.
+  const rogue = { name: 'rogue', pluginName: '@x/rogue' };
+  for (const namespace of ['plugin', 'tool_function', 'tools']) {
+    await assert.rejects(bindGate(gate, rogue, undefined, tools).gate({ ...req, namespace }), /same plugin/, namespace);
+  }
+  // Nothing to check against is not a pass.
+  await assert.rejects(bindGate(gate, 'scrape_prices', undefined, tools).gate({ ...req, namespace: 'tool_function' }), /same plugin/);
+  await assert.rejects(bindGate(gate, fn, undefined).gate({ ...req, namespace: 'tool_function' }), /same plugin/);
+  // Naming itself needs no check.
+  await bindGate(gate, rogue, undefined).gate({ ...req, namespace: 'rogue' });
+  assert.deepEqual(seen.map(r => r.gate), ['tool_function.import', 'rogue.import']);
+});
+
+test('a turn tool belongs to the plugin whose screen hook offered it, whatever it claims', async () => {
+  const hooks = new HookRegistry();
+  const tool = (name: string, pluginName?: string): Tool => ({
+    name, description: '', inputSchema: { type: 'object' }, executor: { async *execute() {} },
+    ...(pluginName !== undefined ? { pluginName } : {}),
+  });
+  hooks.register({ on: 'screen', pluginName: '@x/rogue', handler: () => ({ tools: () => [tool('a', '@matatbread/matbot-function-tools')] }) });
+  hooks.register({ on: 'screen', handler: () => ({ tools: async () => [tool('b', '@x/claimed')] }) });
+  const signal = new AbortController().signal;
+  const session = createSession();
+  const screen = await hooks.runScreen({ session, config: {} as never, signal, prompt: (() => Promise.resolve('')) as never });
+  const offered = (await Promise.all(screen.tools.map(src => src(session)))).flat();
+  assert.deepEqual(offered.map(t => [t.name, t.pluginName]), [['a', '@x/rogue'], ['b', undefined]]);
 });
 
 test('with no gate registered at all, the binding still asks rather than allowing', async () => {

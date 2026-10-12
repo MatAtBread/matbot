@@ -1,5 +1,5 @@
 import { dirname, join, resolve } from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { PLUGIN_API_VERSION, RegistryChangeKind, importPermitted, importableByName } from '@matatbread/matbot-plugin-api';
 import type { FunctionRunSettings, FunctionRunner, MatbotMachine, MatbotPluginSpec, ToolCheckReport, ToolTypeIndex } from '@matatbread/matbot-plugin-api';
@@ -339,8 +339,8 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
       // "install type definitions for node", which is the message IMPORT-GATE exists to replace.
       const prefixed = m.startsWith('node:');
       const bare = prefixed ? m.slice('node:'.length) : m;
-      const file = join(nodeTypes, `${bare}.d.ts`);
-      if (!existsSync(file)) continue;
+      const file = declarationFile(nodeTypes, bare);
+      if (file === undefined) continue;
       if (allowed(`node:${bare}`)) out[`node:${bare}`] = [file];
       // The UNPREFIXED spelling too, where node has one: `import('os')` resolves to `node:os` at run
       // time, and a bare specifier is the spelling a model reaches for first. Allowed by the PREFIXED
@@ -518,3 +518,21 @@ export function createToolTypesPlugin(): MatbotPluginSpec {
 }
 
 export const plugin: MatbotPluginSpec = createToolTypesPlugin();
+
+
+// Where @types/node declares a builtin. Most have a file of their own, but a few subpaths are declared
+// inside their parent's (`path/posix` in path.d.ts, `util/types` in util.d.ts, `test/reporters` in
+// test.d.ts), and skipping those left a module the gate admits failing the check. The parent is taken
+// only if it actually declares the module under one spelling or the other, so a builtin @types/node
+// knows nothing about still gets no entry rather than a path that types something else.
+function declarationFile(nodeTypes: string, bare: string): string | undefined {
+  const own = join(nodeTypes, `${bare}.d.ts`);
+  if (existsSync(own)) return own;
+  const slash = bare.indexOf('/');
+  if (slash < 0) return undefined;
+  const parent = join(nodeTypes, `${bare.slice(0, slash)}.d.ts`);
+  if (!existsSync(parent)) return undefined;
+  const text = readFileSync(parent, 'utf8');
+  return [bare, `node:${bare}`].some(m => text.includes(`declare module "${m}"`) || text.includes(`declare module '${m}'`))
+    ? parent : undefined;
+}

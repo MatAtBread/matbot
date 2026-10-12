@@ -3,12 +3,11 @@ import type {
   JSONSchema, MatbotMachine, MatbotPluginSpec, MessageContent, Session, Store,
   Tool, ToolContext, ToolEvent, ToolContract, ToolResultOf, ToolCheckReport,
 } from '@matatbread/matbot-plugin-api';
-import { buildAsyncFn, buildBodyFn, runFunction, INJECTED, EXECUTE_SUBJECT, type CompiledFn } from './compile.js';
+import { buildAsyncFn, buildBodyFn, runFunction, INJECTED, EXECUTE_SUBJECT, TOOL_NAME, type CompiledFn } from './compile.js';
 import { parseSignature, paramsSchema, unwrapPromise, type ParsedParam, type ParsedSignature } from './signature.js';
 import { parsePackage, buildPackageFn, exportFn, type ParsedPackage } from './package.js';
 import { MARKER_CREATOR, sessionFunctions, turnContracts, shadowMessage, type SessionFunctionMarker, type SessionFunctionRecord, type SessionFunctionRow } from './session.js';
 
-const TOOL_NAME         = 'tool_function';
 const PLUGIN_NAME       = 'function-tools';
 const NAMESPACE         = 'functions';
 const PACKAGE_NAMESPACE = 'function-packages';
@@ -176,10 +175,6 @@ function definedTool(
     // it into the dts registry block (bare `ToolContract` rewritten to an inline import) and derives the
     // wire text from it, exactly as it does from a source tool's arms.
     toolContract: contract,
-    // Every function's gates are `tool_function`'s, not its own: the name here is the MODEL's, so a gate
-    // qualified by it would mint a fresh id per definition — no remembered answer could generalise and an
-    // install would have nothing stable to key. The per-function dimension lives in the subject instead.
-    gateNamespace: TOOL_NAME,
     pluginName:  PLUGIN_NAME,
     executor: {
       execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
@@ -261,9 +256,8 @@ class FunctionStore {
     for (const name of seen) this.registered.add(name);
   }
 
-  async list(): Promise<FunctionRecord[]> {
+  async list(env: string | undefined): Promise<FunctionRecord[]> {
     const { items } = await this.store.query({ sort: [{ field: 'id', dir: 'asc' }], immutable: true });
-    const env = await this.machine.ToolTypeIndex?.environment?.();
     return items.map(doc => recordOf(doc, env));
   }
 
@@ -404,9 +398,8 @@ class PackageStore {
     for (const name of [...this.owned.keys()]) if (!seen.has(name)) this.unregister(name);
   }
 
-  async list(): Promise<PackageRecord[]> {
+  async list(env: string | undefined): Promise<PackageRecord[]> {
     const { items } = await this.store.query({ sort: [{ field: 'id', dir: 'asc' }], immutable: true });
-    const env = await this.machine.ToolTypeIndex?.environment?.();
     return items.map(doc => {
       let tools: string[] = [];
       try { tools = parsePackage(doc.id, doc.definition).exports.map(e => e.toolName); } catch { /* reported by check */ }
@@ -512,7 +505,6 @@ class PackageStore {
         description:  `${e.description ?? `${PLACEHOLDER_DESCRIPTION}\n\nSource:\n${e.source}`}\n\nExported by package "${name}", defined via ${TOOL_NAME}.`,
         inputSchema:  e.inputSchema,
         toolContract: e.toolContract,
-        gateNamespace: TOOL_NAME,
         pluginName:   PLUGIN_NAME,
         executor: {
           execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
@@ -653,7 +645,7 @@ listings, rows and file bodies it read on the way never enter the conversation.
 
 An \`execute\` runs once, now, and saves nothing. A \`define\` saves the function as a tool you can call by
 name. A \`package\` saves several tools that share private helpers. You are not limited to the tools: on
-node a body can reach the platform itself (see NODE BUILTINS), and it is often an efficient substitute
+node a body can reach the platform itself (see MODULES), and it is often an efficient substitute
 for a shell one-liner.
 
 WHEN TO USE IT — judge by the SIZE and SHAPE of the work, not the number of calls:
@@ -937,10 +929,11 @@ function functionTool(machine: MatbotMachine, store: FunctionStore, packages: Pa
             return;
           }
           case 'list': {
+            // One reading for every row, so the three kinds are compared against the same environment.
             const env = await machine.ToolTypeIndex?.environment?.();
             yield { type: 'result', value: {
-              functions: await store.list(),
-              packages:  await packages.list(),
+              functions: await store.list(env),
+              packages:  await packages.list(env),
               sessionFunctions: [...sessionFunctions(ctx.session).values()].map(r => sessionRow(r, env)),
             } };
             return;

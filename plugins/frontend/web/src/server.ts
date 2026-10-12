@@ -463,7 +463,7 @@ export function createWebServer(deps: WebServerDeps) {
     }
   });
 
-  function makeToolCtx(ac: AbortController, tool: Pick<Tool, 'name' | 'gateNamespace'>) {
+  function makeToolCtx(ac: AbortController, tool: Pick<Tool, 'name' | 'pluginName'>) {
     const now = new Date().toISOString();
     const stubSession: Session = {
       id: crypto.randomUUID(), version: crypto.randomUUID(),
@@ -480,7 +480,7 @@ export function createWebServer(deps: WebServerDeps) {
       prompt:       nonInteractivePrompt,
       // `undefined`, never `nonInteractivePrompt`: the stand-in answers with a field's own default, so a
       // gate handed it could not tell "nobody is here" from "a human answered". This route has no human.
-      ...bindGate(deps.permissionGate?.(), tool, undefined),
+      ...bindGate(deps.permissionGate?.(), tool, undefined, deps.tools),
       ...(deps.workdir    !== undefined ? { workdir:    deps.workdir    } : {}),
       ...(deps.files      !== undefined ? { files:      deps.files      } : {}),
       ...(deps.configPath !== undefined ? { configPath: deps.configPath } : {}),

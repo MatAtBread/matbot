@@ -238,11 +238,17 @@ export interface ToolContext {
    * plugin cannot address a gate it does not own. `fallback` is what happens when no human is
    * reachable and no policy decides.
    *
+   * `namespace` replaces the tool's name as the qualifier, for a tool whose NAME is chosen at run time
+   * (a `function-tools` function asks under `tool_function`): qualified by a model-chosen name, every
+   * definition would mint its own gate id, so a standing answer filed under one could never cover
+   * another. It must name a tool registered by the SAME plugin as this one — the host checks, against
+   * the plugin it stamped on both — so it widens nothing: a plugin still cannot address another's gate.
+   *
    * The outcome is `allowed`; `source` names the layer that answered, for the refusal to REPORT (see
    * {@link refusalMessage}) — never to branch on. NOTE the shape: this resolves to an object, so
    * `if (!await ctx.gate(…))` is always false. Test `.allowed`.
    */
-  gate(req: PermissionRequest): Promise<PermissionDecision>;
+  gate(req: PermissionRequest & { namespace?: string }): Promise<PermissionDecision>;
   /** Hot-load a plugin by specifier without restarting the process. Returns the loaded plugin.
    *  `refresh` (default false) forces a remote (github/http) plugin to be re-downloaded rather than
    *  re-loaded from its `.plugins/` cache — pass true to pick up changed upstream source. */
@@ -308,18 +314,6 @@ export interface Tool<R = unknown> {
    *  its contract as a `ToolContracts` augmentation instead and omits this. Foreign tools (e.g. MCP proxies)
    *  that have neither fall back to the loose `inputSchema`. */
   toolContract?: string;
-  /** Which gate namespace this tool's `ctx.gate` suffixes are qualified with, when it is not the tool's
-   *  own name. The same category of field as {@link toolContract}, for the same reason: a tool whose NAME
-   *  is chosen at RUN TIME cannot carry a gate vocabulary either, and a model-chosen name would mint a
-   *  fresh gate id per definition — so a remembered answer could never generalise across them, and an
-   *  installation would have nothing stable to key `default_settings:` by. A `function-tools` function
-   *  declares `tool_function`, so every body's import decision lands on `tool_function.import` and the
-   *  per-function dimension stays where it belongs, in the subject. Omit it on a tool with a fixed name.
-   *
-   *  It is as trusted as the name beside it — the registering plugin chooses both, and a loaded plugin has
-   *  full host capability regardless. What it withholds is the only part a MODEL controls: naming its own
-   *  function can no longer move the gate. */
-  gateNamespace?: string;
   executor:     ToolExecutor<R>;
   pluginName?:  string;
 }

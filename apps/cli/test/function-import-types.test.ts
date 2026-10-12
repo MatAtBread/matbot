@@ -341,3 +341,24 @@ test('a builtin is typed under either spelling, because the runtime takes either
   const no = await indexFor(['node:fs']).check(`async function f() { const os = await import('os'); return os.hostname(); }`);
   assert.ok(no.diagnostics.some(d => d.label === 'IMPORT-GATE'), no.diagnostics.map(d => d.label).join(','));
 });
+
+test('a builtin declared inside its parent file is typed, under either spelling and under a parent permit', async () => {
+  // @types/node gives most builtins a file of their own, but declares a few subpaths inside the parent's
+  // (path/posix in path.d.ts, util/types in util.d.ts, test/reporters in test.d.ts). Looking only for an
+  // own file left these failing the check while the gate admitted them.
+  for (const permit of [undefined, ['node:path', 'node:util', 'node:test']]) {
+    for (const spec of ['node:path/posix', 'path/win32', 'node:util/types', 'node:test/reporters']) {
+      const out = await indexFor(permit).check(`async function f() { const m = await import('${spec}'); return m; }`);
+      assert.deepEqual(out.diagnostics.map(d => `${d.label}: ${d.message}`), [], `${spec} under ${JSON.stringify(permit)}`);
+    }
+  }
+});
+
+test('an untyped builtin is reported as a module, not as a missing global', async () => {
+  // tsc's TS2591 fires at the specifier as well as at a global, and the globals rewrite called the
+  // module "not declared for a function body", quoted twice over.
+  const out = await check(`async function f() { const os = await import('node:os'); return os; }`, ['node:fs']);
+  assert.equal(out.length, 1, out.join('\n'));
+  assert.match(out[0]!, /^IMPORT-GATE: 'node:os' has no type declarations here/);
+  assert.doesNotMatch(out[0]!, /''|install type definitions|already in scope/);
+});

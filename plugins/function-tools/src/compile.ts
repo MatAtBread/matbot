@@ -19,6 +19,8 @@ export const INJECTED = ['tool', 'toolInContext', 'context'] as const;
  *  stripper, used only where there is no runner, since `new AsyncFunction` cannot take TypeScript. */
 export type CompileHost = Pick<MatbotMachine, 'TypeScriptStripper' | 'FunctionRunner'>;
 
+export const TOOL_NAME = 'tool_function';
+
 const LEADING = /^\s*(?:async\s+)?(?:function\s+)?/;
 const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 const CANCELLED = 'Cancelled: the call was aborted while the function was still running.';
@@ -212,7 +214,10 @@ async function decide(ctx: ToolContext, fnName: string, spec: string, permits: r
   const label = builtin
     ? `Allow ${who} to import **${spec}**? It gets whatever that module can do, with matbot's full access.`
     : `Allow ${who} to import **${spec}** and everything it imports? Imported code runs with matbot's full access, not the function's.`;
-  const permit = await ctx.gate({ gate: 'import', subject: `${fnName} ${spec}`, label, fallback: false,
+  // Asked under `tool_function`, not the function's own name: that name is the MODEL's, so a gate qualified
+  // by it would mint a fresh id per definition, and a standing answer for "any function" filed under one
+  // would never be read by another. Which function asked lives in the subject instead.
+  const permit = await ctx.gate({ namespace: TOOL_NAME, gate: 'import', subject: `${fnName} ${spec}`, label, fallback: false,
                                   standing: standingAnswers(fnName, who, spec) });
   if (!permit.allowed) {
     // The source rides in the message because this one surfaces as a thrown error inside a body the
@@ -297,6 +302,15 @@ export async function* runFunction(
     ...(ctx.workdir  !== undefined ? { workdir:  ctx.workdir  } : {}),
   };
 
+  // The runner's settings, read ONCE for this whole invocation and held here: the gate and the runner's
+  // own bound then answer from the same reading, under the one principal an invocation has throughout.
+  // Not cached beyond it, because whose settings they are is the settings store's business — partitioned
+  // by principal or not at all — and the next invocation may be someone else's. Read ahead of the abort
+  // check and the listener, so an abort during the read still stops the body starting, and a read that
+  // throws has no listener to leave behind.
+  let settings: FunctionRunSettings | undefined;
+  try { settings = await machine.FunctionRunner?.settings?.(); }
+  catch (e) { yield { type: 'error', message: `could not read the function runner's settings (${msg(e)})` }; return; }
   if (ctx.signal.aborted) { yield { type: 'error', message: CANCELLED }; return; }
   let done = false;
   let cancelled = false;
@@ -308,13 +322,6 @@ export async function* runFunction(
   // is not interruptible — but its tool calls now refuse to start, and nothing waits on it any longer.
   const onAbort = (): void => { cancelled = true; settle(); };
   ctx.signal.addEventListener('abort', onAbort, { once: true });
-  // The runner's settings, read ONCE for this whole invocation and held here: the gate and the runner's
-  // own bound then answer from the same reading, under the one principal an invocation has throughout.
-  // Not cached beyond it, because whose settings they are is the settings store's business — partitioned
-  // by principal or not at all — and the next invocation may be someone else's.
-  let settings: FunctionRunSettings | undefined;
-  try { settings = await machine.FunctionRunner?.settings?.(); }
-  catch (e) { yield { type: 'error', message: `could not read the function runner's settings (${msg(e)})` }; return; }
   // `gateSubject` rather than `tool`: a gate subject is split on a space, and an anonymous body's label
   // ("tool_function execute") is prose, not an identifier. A defined function's name IS one.
   const importModule = gatedImport(machine, ctx, label?.gateSubject ?? label?.tool ?? EXECUTE_SUBJECT, settings);

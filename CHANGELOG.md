@@ -142,14 +142,14 @@ churn and less likely to affect a consumer who doesn't use them.
   reader is told, and `check` remains the way to re-verify. The tool types are deliberately not in it:
   those are live, and `check` is how a caller re-verifies against them. Optional, so an index written
   before it existed degrades to storing and comparing nothing instead of throwing.
-- **`Tool.gateNamespace`** — the fixed gate namespace a tool whose NAME is built at run time declares,
-  since `ctx.gate`'s suffix is qualified with the tool's registered name. A `function-tools` function
-  says `tool_function`, so every body's import decision lands on `tool_function.import`. Qualified by the
-  function's own name, each definition would mint its own gate id: nothing stable for `default_settings:`
-  to key, no remembered answer able to generalise across functions, one settings key per name the model
-  ever picks, and the only part of this a model controls sitting between it and the gate. `bindGate` takes
-  the resolved tool rather than its name, so the rule lives in one place instead of at each door; a bare
-  name is still accepted for a caller that has only one.
+- **`ctx.gate({ namespace })`** — a tool whose NAME is built at run time asks under a fixed namespace,
+  since `ctx.gate`'s suffix is otherwise qualified with the tool's registered name. A `function-tools`
+  function asks under `tool_function`, so every body's import decision lands on `tool_function.import`:
+  qualified by the function's own name, each definition would get its own gate id, and a standing answer
+  for "any function" stored under one would never be read by another. The namespace must name a tool
+  registered by the same plugin as the caller, checked against the host's own `pluginName` stamps — a
+  turn tool now takes its plugin from the `screen` hook that offered it — so a plugin still cannot
+  address another's gate. `bindGate` takes the resolved tool and the registry to check against.
 - **`importPermitted`** — the `permittedImports` boundary rule as a function, beside the interface that
   documents it, because two packages read the same list and must agree: `function-tools` decides whether
   to ask about an import, `tool-types` decides which modules to type.

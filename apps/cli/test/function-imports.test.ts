@@ -18,11 +18,11 @@ const machine = (runner: ReturnType<typeof createVmFunctionRunner>): MatbotMachi
   FunctionRunner: runner,
 } as unknown as MatbotMachine);
 
-const asked: PermissionRequest[] = [];
+const asked: (PermissionRequest & { namespace?: string })[] = [];
 const ctxFor = (allow: boolean): ToolContext => ({
   callId: 'c1', session: { id: 's1' }, signal: new AbortController().signal,
   prompt: () => Promise.reject(new Error('non-interactive')),
-  gate: (req: PermissionRequest) => { asked.push(req); return Promise.resolve(allow ? permitted('user') : refused('user')); },
+  gate: (req: PermissionRequest & { namespace?: string }) => { asked.push(req); return Promise.resolve(allow ? permitted('user') : refused('user')); },
 }) as unknown as ToolContext;
 
 async function result(events: AsyncIterable<ToolEvent>): Promise<ToolEvent | undefined> {
@@ -148,6 +148,8 @@ test('a permitted import is gated, and the subject names the function as well as
   assert.equal(asked.length, 1);
   const req = asked[0]!;
   assert.equal(req.gate, 'import');
+  // Under `tool_function`, not the function's own name, so an answer for "any function" is read by all of them.
+  assert.equal(req.namespace, 'tool_function');
   // Two-dimensional: a brand-new function must not inherit what a reviewed one earned.
   assert.equal(req.subject, 'probe node:os');
   assert.equal(req.fallback, false);

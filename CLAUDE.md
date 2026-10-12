@@ -633,15 +633,15 @@ route), and one policy covers both runtimes' implementations of a tool — node'
 browser's `plugin-tool` both register `plugin`; `mcp` and `mcp-http` both register `mcp_action`. The
 host reserves `tools.*` for core's own gates.
 
-A tool whose NAME is built at run time declares its namespace instead, on the registered `Tool` as
-`gateNamespace` — the same category of field as `toolContract`, for the same reason: a model-chosen name
-cannot carry a vocabulary either. A `function-tools` function says `tool_function`, so every body's
-import decision lands on `tool_function.import`. Qualified by the name, each definition would mint its
-own gate id: nothing stable for `default_settings:` to key, no remembered answer able to generalise
-across functions, one settings key per name the model ever picks, and the only part a model controls
-sitting between it and the gate. It is as trusted as the name beside it — the registering plugin chooses
-both, and a loaded plugin has full host capability regardless — so what it withholds is the model's
-reach, not a plugin's.
+A tool whose NAME is built at run time asks under a fixed `namespace` instead, on the request
+(`ctx.gate({ namespace: 'tool_function', gate: 'import', … })`). A `function-tools` function's name is the
+model's, and the default policy files standing answers by gate id: qualified by that name, each definition
+would get its own id, so "allow ANY function to import node:fs", answered in one, would be stored where no
+other function reads it. The host honours a namespace only when it names a tool registered by the **same
+plugin** as the caller — both `pluginName`s being host stamps (`register`, and for a turn tool the `screen`
+hook that offered it, whatever the tool claims) — so it widens nothing: a plugin still addresses only its
+own gates. It was a `Tool.gateNamespace` field first, which needed explaining to every reader of `Tool`,
+was relevant to one plugin, and let any tool claim any namespace including `tools`.
 
 **`subject` is a field, never folded into `gate`.** A composite id makes the vocabulary unbounded,
 which collides with "an unknown gate id must default to asking" — every newly-named tool would be an
