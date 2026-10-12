@@ -1,10 +1,11 @@
 import { FUNCTION_TIMEOUT, importPermitted, importableByName, makeToolBox, refusalMessage } from '@matatbread/matbot-plugin-api';
 import { stripLeadingTrivia } from './signature.js';
-import type { MatbotMachine, ComposedCallContext, FunctionRunner, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
+import type { MatbotMachine, ComposedCallContext, FunctionCall, FunctionRunSettings, FunctionRunner, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
 
-/** The gated loader first — it is the runner's to wire, not a binding the body names — then the ambient
- *  values a body has in scope, then its own arguments. */
-export type CompiledFn = (importModule: ImportFn, tool: unknown, toolInContext: unknown, context: ComposedCallContext, ...args: unknown[]) => Promise<unknown>;
+/** The invocation's own part first — the gated loader and the settings read for it, which are the
+ *  runner's to wire, not bindings the body names — then the ambient values a body has in scope, then its
+ *  own arguments. */
+export type CompiledFn = (call: FunctionCall, tool: unknown, toolInContext: unknown, context: ComposedCallContext, ...args: unknown[]) => Promise<unknown>;
 
 /** The gated loader a body's `import(…)` reaches, whatever the runner resolves it to. `options` is the
  *  import's own second argument (import attributes), carried through untouched. */
@@ -35,7 +36,9 @@ const CANCELLED = 'Cancelled: the call was aborted while the function was still 
 export async function buildAsyncFn(host: CompileHost, definition: string, paramNames: string[]): Promise<CompiledFn> {
   // Leading trivia goes first: a doc comment ahead of the definition would otherwise land between
   // `function` and the name, which is a syntax error rather than the harmless prose it looks like.
-  const wrapped = `(async function ${stripLeadingTrivia(definition).replace(LEADING, '')})`;
+  // The newline before `)` here and in buildBodyFn: a definition ending in a line comment would otherwise
+  // comment out the closing parenthesis, and a body that typechecked would be refused as invalid.
+  const wrapped = `(async function ${stripLeadingTrivia(definition).replace(LEADING, '')}\n)`;
   return compileUnder(host, [...INJECTED, ...paramNames], await erase(host, wrapped),
                       code => `return ${code}(${paramNames.join(', ')});`) as CompiledFn;
 }
@@ -70,7 +73,7 @@ export async function buildBodyFn(host: CompileHost, definition: string): Promis
       '. There is no function head, no parameter list and no `=>` — an arrow form would compile and then return nothing at all.',
     );
   }
-  const wrapped = `(async function () ${src})`;
+  const wrapped = `(async function () ${src}\n)`;
   return compileUnder(host, INJECTED, await erase(host, wrapped), code => `return ${code}();`) as CompiledFn;
 }
 
@@ -108,7 +111,7 @@ export function compileUnder(
       // `import(…)` — so the loader is never reached and the body's import gets whatever the platform
       // resolves. The ambient values are ordinary arguments, so the loader is dropped in front of them.
       const plain = (new Function(`return ${expr(def.js)};`) as () => (...args: unknown[]) => Promise<unknown>)();
-      return (_importModule, ...args) => plain(...args);
+      return (_call, ...args) => plain(...args);
     } catch (e) { throw new Error(`could not compile (${msg(e)})`); }
   };
   let runner = host.FunctionRunner;
@@ -159,18 +162,20 @@ export function compileUnder(
  * is the default, every specifier reaches the gate: a restriction that defaulted to empty would refuse
  * before anyone could be asked, which is the behaviour a permission prompt exists to replace.
  */
-function gatedImport(machine: MatbotMachine, ctx: ToolContext, fnName: string): ImportFn {
+function gatedImport(machine: MatbotMachine, ctx: ToolContext, fnName: string, settings: FunctionRunSettings | undefined): ImportFn {
   // One decision per specifier per invocation. A body that imports inside a loop would otherwise ask —
   // and read the policy's settings document — once per iteration, and a DENIED one would re-prompt a
   // human on every pass. Scoped to this closure, which `runFunction` builds per call, so a standing
   // answer given or withdrawn between calls is still seen. Only the DECISION is kept: the load itself
   // takes this call's options, and the module cache already makes a repeat import cheap.
   const decided = new Map<string, Promise<void>>();
-  return async (spec: string, options?: ImportCallOptions): Promise<unknown> => {
-    if (typeof spec !== 'string' || spec === '') throw new Error('import needs a module specifier.');
+  return async (written: string, options?: ImportCallOptions): Promise<unknown> => {
+    if (typeof written !== 'string' || written === '') throw new Error('import needs a module specifier.');
+    // Canonical before anything decides, so `os` and `node:os` are one question, one grant and one label.
+    const spec = machine.FunctionRunner?.canonicalImport?.(written) ?? written;
     let decision = decided.get(spec);
     if (decision === undefined) {
-      decision = decide(machine, ctx, fnName, spec);
+      decision = decide(ctx, fnName, spec, settings?.permittedImports);
       decided.set(spec, decision);
     }
     await decision;
@@ -179,7 +184,7 @@ function gatedImport(machine: MatbotMachine, ctx: ToolContext, fnName: string): 
   };
 }
 
-async function decide(machine: MatbotMachine, ctx: ToolContext, fnName: string, spec: string): Promise<void> {
+async function decide(ctx: ToolContext, fnName: string, spec: string, permits: readonly string[] | undefined): Promise<void> {
   if (!importableByName(spec)) {
     throw new Error(
       `Cannot import '${spec}': a function body imports only node builtins ('node:fs') and packages already ` +
@@ -187,7 +192,6 @@ async function decide(machine: MatbotMachine, ctx: ToolContext, fnName: string, 
       'package, or as a matbot plugin with the `plugin` tool.',
     );
   }
-  const permits = machine.FunctionRunner?.permittedImports;
   if (permits !== undefined && !importPermitted(permits, spec)) {
     throw new Error(
       `Import of '${spec}' is not permitted on this installation` +
@@ -242,7 +246,10 @@ export const EXECUTE_SUBJECT = '#execute';
  * rather than in an answer to a prompt.
  */
 function standingAnswers(fnName: string, who: string, spec: string): { subject: string; label: string }[] {
-  const dir = spec.includes('/') ? spec.slice(0, spec.lastIndexOf('/') + 1) : undefined;
+  // Only for a SUBPATH, cut at its last `/`. A scoped package's root has a `/` of its own, and cutting
+  // `@aws-sdk/client-s3` there offered every package in the `@aws-sdk` scope as "anything under".
+  const root = spec.split('/', spec.startsWith('@') ? 2 : 1).join('/');
+  const dir = spec !== root ? spec.slice(0, spec.lastIndexOf('/') + 1) : undefined;
   const out = [{ subject: `${fnName} ${spec}`, label: `Always allow ${who} to import ${spec}` }];
   if (dir !== undefined) {
     out.push({ subject: `${fnName} ${dir}`, label: `Always allow ${who} to import anything under ${dir}` });
@@ -301,9 +308,17 @@ export async function* runFunction(
   // is not interruptible — but its tool calls now refuse to start, and nothing waits on it any longer.
   const onAbort = (): void => { cancelled = true; settle(); };
   ctx.signal.addEventListener('abort', onAbort, { once: true });
+  // The runner's settings, read ONCE for this whole invocation and held here: the gate and the runner's
+  // own bound then answer from the same reading, under the one principal an invocation has throughout.
+  // Not cached beyond it, because whose settings they are is the settings store's business — partitioned
+  // by principal or not at all — and the next invocation may be someone else's.
+  let settings: FunctionRunSettings | undefined;
+  try { settings = await machine.FunctionRunner?.settings?.(); }
+  catch (e) { yield { type: 'error', message: `could not read the function runner's settings (${msg(e)})` }; return; }
   // `gateSubject` rather than `tool`: a gate subject is split on a space, and an anonymous body's label
   // ("tool_function execute") is prose, not an identifier. A defined function's name IS one.
-  void fn(gatedImport(machine, ctx, label?.gateSubject ?? label?.tool ?? EXECUTE_SUBJECT),
+  const importModule = gatedImport(machine, ctx, label?.gateSubject ?? label?.tool ?? EXECUTE_SUBJECT, settings);
+  void fn({ importModule, ...(settings !== undefined ? { settings } : {}) },
           tool, toolInContext, context, ...argValues)
     .then(v => { result = v; }, e => { errored = true; error = e; })
     .finally(() => { done = true; settle(); });

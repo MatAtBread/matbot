@@ -182,7 +182,16 @@ async function runWorker(data: Record<string, unknown>): Promise<DiagnosticRecor
   const typescriptPath = createRequire(import.meta.url).resolve('typescript');
 
   const result = await new Promise<{ ok?: boolean; diagnostics?: DiagnosticRecord[]; error?: string }>((resolve, reject) => {
-    const w = new Worker(TS_WORKER_JS, { eval: true, workerData: { ...data, typescriptPath } });
+    // Parsed AS TypeScript, never left to node to guess: without the flag eval'd code runs as JS and is
+    // retried as TS only if it fails to parse, and `new Set<string>(x)` parses fine as two comparisons —
+    // so it would have thrown `string is not defined` but for an unrelated annotation elsewhere in the
+    // source happening to be a JS syntax error. It REPLACES the inherited flags rather than adding to
+    // them: node refuses process-wide ones in a worker's execArgv (the test runner passes several), and
+    // the worker needs none of them — it loads no hooks, by design.
+    const w = new Worker(TS_WORKER_JS, {
+      eval: true, workerData: { ...data, typescriptPath },
+      execArgv: ['--input-type=commonjs-typescript'],
+    });
     const timer = setTimeout(() => { void w.terminate(); reject(new Error('typecheck worker timed out')); }, 120_000);
     w.once('message', m => { clearTimeout(timer); resolve(m as never); void w.terminate(); });
     w.once('error', e => { clearTimeout(timer); reject(e); });
@@ -261,8 +270,9 @@ export async function checkSnippetAgainst(opts: {
 
 // The worker body: CommonJS (Worker eval mode is CJS, so `require` exists and no loader hooks are
 // needed — the host's .ts strip-hooks do not reliably reach worker threads). Type annotations are
-// fine here: Node strips them from eval'd code natively, which every Node matbot supports does by
-// default. Anything beyond erasable syntax is not — no enums, no parameter properties. It loads the SAME
+// fine here because the worker is started with `--input-type=commonjs-typescript`, so node strips them
+// rather than guessing whether the source is TS (see runWorker). Anything beyond erasable syntax is not —
+// no enums, no parameter properties. It loads the SAME
 // typescript module the main thread resolved and posts back JSON-safe records: flattened message
 // chains, related-information locations (e.g. which contract arm an expected type came from), and a
 // caret-anchored source frame per error. In snippet mode every position is remapped to be
@@ -445,9 +455,15 @@ try {
   // loader hooks, so it cannot import 'importPermitted' or 'importableByName' from plugin-api, which is
   // where both rules live and are documented.
   const byName = function (spec) {
-    return spec !== '' && !/^[./\\\\]/.test(spec) && spec.indexOf('\\\\') < 0
+    return spec !== '' && !/[^\\w@.~+!$&'()*,;=:/-]/.test(spec) && !/^[./]/.test(spec)
       && (spec.indexOf('node:') === 0 || !/^[a-z][a-z0-9+.-]*:/i.test(spec))
       && !spec.split('/').some(function (seg) { return seg === '.' || seg === '..'; });
+  };
+  // The node runner's canonicalImport, which is what the gate asks about: 'os' is 'node:os', so a
+  // restriction of 'node:' admits it at both.
+  const isBuiltin = require('node:module').isBuiltin;
+  const canonical = function (spec) {
+    return spec.indexOf(':') < 0 && isBuiltin(spec) ? 'node:' + spec : spec;
   };
   const permits = workerData.permittedImports;
   const API_PKG = '@matatbread/matbot-plugin-api';
@@ -491,7 +507,7 @@ try {
           synth.push(mk(sf, node.arguments[0], 90006,
             "'" + spec + "' cannot be imported by a function body, which imports only node builtins ('node:fs') and packages already installed where matbot runs, by name — never a path or a URL. To use other code, install it as a package, or as a matbot plugin with the 'plugin' tool."));
           importStarts.add(at);
-        } else if (permits !== undefined && !permitted(spec)) {
+        } else if (permits !== undefined && !permitted(canonical(spec))) {
           synth.push(mk(sf, node.arguments[0], 90006,
             permits.length === 0
               ? "module imports are switched off on this installation, so '" + spec + "' cannot be imported. Compute with the tools available instead."

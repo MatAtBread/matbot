@@ -30,30 +30,21 @@ export interface TypeScriptStripper {
  *
  * Absent ⇒ a consumer compiles the code itself however it can, which drops every part of this at once
  * and not just the bound: nothing is withheld from the body, `import()` reaches whatever the platform
- * natively resolves rather than the loader it was passed, and {@link permittedImports} has no carrier and
+ * natively resolves rather than the loader it was passed, and {@link FunctionRunSettings.permittedImports} has no carrier and
  * so restricts nothing. That is all a platform with no way to interrupt synchronous code
  * and no module hook (the browser) can do, and it is the browser's permanent state rather than a
- * misconfiguration — so a node host seeds one unconditionally. An embedder may register its own.
+ * misconfiguration. It is node's DEFAULT too: no host seeds a runner, so until an installation loads one
+ * (`@matatbread/matbot-function-runner-node`, or its own) a body runs in the host's process with full
+ * access — unbounded, with every global, and with `import()` reaching node's own loader unasked. Nothing
+ * warns about that at boot, because it is the configured behaviour rather than a fault.
  */
-export interface FunctionRunner {
-  /**
-   * Compile `source` — a TypeScript expression evaluating to an async function — and return something
-   * that calls it. Throws on a syntax error. A call stopped at the limit rejects with an error whose
-   * `code` is {@link FUNCTION_TIMEOUT}.
-   *
-   * An EXPRESSION, complete with its own parameter list, rather than a body plus names to bind: a body is
-   * not valid alone — `return` at its top level is a syntax error — so every runner would have to wrap it
-   * before it could strip or parse it.
-   *
-   * TypeScript, not erased JavaScript, because erasing is part of running it.
-   *
-   * `importModule` is handed to each call, and is what a body's `import(…)` should reach: the consumer's
-   * gated loader, which closes over that invocation. A runner that rewrites `import(…)` resolves it to
-   * this; one that does not simply ignores the argument. How it gets into scope — a parameter the runner
-   * names itself, a closure — is internal, and nothing outside declares or sees it: the type-check runs
-   * on the source as the author wrote it, before any of this.
-   */
-  compile(source: string): (importModule: (spec: string, options?: ImportCallOptions) => Promise<unknown>, ...args: unknown[]) => Promise<unknown>;
+/**
+ * One invocation's reading of a {@link FunctionRunner}'s configuration ({@link FunctionRunner.settings}).
+ * A runner may carry its own fields beside these — the node runner's time bound — and reads them back
+ * off the value handed to {@link FunctionRunner.compile}'s callable; a consumer reads only what is
+ * declared here and otherwise passes the value through untouched.
+ */
+export interface FunctionRunSettings {
   /**
    * An optional RESTRICTION on what a body may import, as exact specifiers or prefixes (`['node:']`).
    *
@@ -67,10 +58,9 @@ export interface FunctionRunner {
    * outright, with no human able to allow it. A policy has no stored "always deny" — a refusal is a
    * decision about one act — so this is the only way to say "never", and it is installation authoring.
    *
-   * It lives on the runner because the runner IS the execution environment, and because two consumers
-   * need one answer: the capability that performs the import, and the type index that declares the
-   * reachable set to the author. Spelled as a plugin setting instead, each would have to read the other
-   * plugin's namespace.
+   * It comes from the runner because the runner IS the execution environment, and because two consumers
+   * need one answer: the gate in front of the import, and the type index that declares the reachable set
+   * to the author. Each reads it once per invocation, through {@link FunctionRunner.settings}.
    *
    * An entry matches a specifier exactly, or as a prefix ending at a BOUNDARY — its own trailing `/` or
    * `:`, or the next `/` in the specifier. So `node:` admits every builtin and `node:fs` admits
@@ -80,6 +70,51 @@ export interface FunctionRunner {
    * {@link importableByName} admits, so an entry naming a path or a URL admits nothing.
    */
   readonly permittedImports?: readonly string[];
+}
+
+/** What one call of a compiled function is handed besides its own arguments. */
+export interface FunctionCall {
+  /** The consumer's gated loader for this invocation; see {@link FunctionRunner.compile}. */
+  readonly importModule: (spec: string, options?: ImportCallOptions) => Promise<unknown>;
+  /** What {@link FunctionRunner.settings} returned at the start of this invocation. Absent ⇒ the runner
+   *  applies its own defaults, as it must for a value it did not produce. */
+  readonly settings?: FunctionRunSettings;
+}
+
+export interface FunctionRunner {
+  /**
+   * Compile `source` — a TypeScript expression evaluating to an async function — and return something
+   * that calls it. Throws on a syntax error. A call stopped at the limit rejects with an error whose
+   * `code` is {@link FUNCTION_TIMEOUT}.
+   *
+   * An EXPRESSION, complete with its own parameter list, rather than a body plus names to bind: a body is
+   * not valid alone — `return` at its top level is a syntax error — so every runner would have to wrap it
+   * before it could strip or parse it.
+   *
+   * TypeScript, not erased JavaScript, because erasing is part of running it.
+   *
+   * `call` is this one invocation's: the loader a body's `import(…)` should reach (the consumer's gated
+   * loader, which closes over that invocation) and the {@link FunctionRunSettings} the consumer read for
+   * it. A runner that rewrites `import(…)` resolves it to `importModule`; one that does not simply ignores
+   * it. How it gets into scope — a parameter the runner names itself, a closure — is internal, and nothing
+   * outside declares or sees it: the type-check runs on the source as the author wrote it, before any of
+   * this.
+   */
+  compile(source: string): (call: FunctionCall, ...args: unknown[]) => Promise<unknown>;
+  /**
+   * Read this runner's configuration for ONE invocation — a run, or a check — which the caller then holds
+   * for that invocation's whole extent and hands back on {@link FunctionCall.settings}.
+   *
+   * Read per invocation rather than once at boot, because whose settings they are is not something a
+   * runner can know: the settings store may be partitioned by principal or by nothing, which is the
+   * storage implementation's business. A boot read answered for the boot principal for ever after, and a
+   * per-principal cache would assume a partitioning nobody promised. An invocation, by contrast, has one
+   * principal throughout, so one read at its start is correct by construction, and every part of it — the
+   * gate, the type-check, the time bound — sees the same answer.
+   *
+   * Absent ⇒ nothing to configure: no restriction.
+   */
+  settings?(): Promise<FunctionRunSettings>;
   /**
    * Turn a granted specifier into a module — a builtin or an installed package, never a path or a URL
    * (see {@link importableByName}). The runner's rather than a plain `import()` at the call site because
@@ -92,6 +127,17 @@ export interface FunctionRunner {
    */
   import?(spec: string, options?: ImportCallOptions): Promise<unknown>;
   /**
+   * The spelling `spec` loads as, where the runner's platform has two for one module: node loads `os` as
+   * `node:os` whatever is installed, so asking about `os` and `node:os` separately asked twice about one
+   * module, and described a builtin as a package that "runs with matbot's full access" along with
+   * everything it imports. A consumer canonicalises BEFORE deciding, so one grant, one restriction and
+   * one label cover both spellings. Only a runner can answer, because the set of builtins is its
+   * platform's — `test` is a package to node, `node:test` the builtin.
+   *
+   * Absent ⇒ `spec` is taken as written.
+   */
+  canonicalImport?(spec: string): string;
+  /**
    * Identifiers a body does NOT have — anything this runner withholds, shadows or never binds (node's
    * withholds `process`, `globalThis`, `Buffer`, `eval` and `Function`, and names the phantom
    * `require`/`module`/`__dirname` too, which never existed in a bare function expression but whose node
@@ -100,7 +146,7 @@ export interface FunctionRunner {
    * Stated here because only the runner knows, and a checker grading a body must REJECT them: a name
    * shadowed but not rejected typechecks and fails at the first call, which is the one failure a check
    * gate exists to prevent. The second consumer of a list is why it is not kept privately, exactly as
-   * for {@link permittedImports}.
+   * for {@link FunctionRunSettings.permittedImports}.
    *
    * Absent ⇒ nothing is claimed, not that nothing is withheld.
    */
@@ -122,17 +168,23 @@ export const FUNCTION_TIMEOUT = 'FUNCTION_TIMEOUT';
  * `./lib/` and resolves outside it. A `.` or `..` segment in a package subpath is refused for the same
  * reason, because a package with no `exports` map resolves it as a path.
  *
+ * The characters are an ALLOWLIST, because the resolver is a URL parser and decides what a dot segment is
+ * by its own rules: `%2e%2e`, `.%2E` and `.<tab>.` are all `..` to it (the parser strips tabs and
+ * newlines), and each one escaped the package from `typescript/…/package.json`. Enumerating encodings
+ * is a race against that spec; refusing `%`, whitespace and anything outside a package name's alphabet
+ * is not. No npm name contains any of them, and a subpath that needs one is not worth the hole.
+ *
  * Shared because three places must agree: the gate in `function-tools`, the runner, and the type-check.
  */
 export const importableByName = (spec: string): boolean =>
   spec !== ''
-  && !/^[./\\]/.test(spec)
-  && !spec.includes('\\')
+  && !/[^\w@.~+!$&'()*,;=:/-]/.test(spec)
+  && !/^[./]/.test(spec)
   && (spec.startsWith('node:') || !/^[a-z][a-z0-9+.-]*:/i.test(spec))
   && !spec.split('/').some(seg => seg === '.' || seg === '..');
 
 /**
- * Whether {@link FunctionRunner.permittedImports} admits `spec` — the boundary rule that interface
+ * Whether {@link FunctionRunSettings.permittedImports} admits `spec` — the boundary rule that interface
  * documents, as a function, because two packages read the same list and must agree: `function-tools`
  * decides whether to ask about an import, and `tool-types` decides which modules to TYPE. They had a copy
  * each, and they drifted exactly where it hurts — `node:fs` admitted `node:fs/promises` at the gate while

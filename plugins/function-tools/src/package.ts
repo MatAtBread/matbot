@@ -1,4 +1,4 @@
-import type { JSONSchema } from '@matatbread/matbot-plugin-api';
+import type { FunctionCall, JSONSchema } from '@matatbread/matbot-plugin-api';
 import { INJECTED, compileUnder, erase, type CompileHost, type CompiledFn } from './compile.js';
 import { inertEnd, matchBrace, matchParen, parseSignature, tsTypeToSchema, unwrapPromise, type ParsedParam } from './signature.js';
 
@@ -29,7 +29,7 @@ export interface ParsedPackage {
   exportAt: number[];
 }
 
-export type PackageFn = (importModule: unknown, tool: unknown, toolInContext: unknown, context: unknown, exportName: string, arg: unknown) => Promise<unknown>;
+export type PackageFn = (call: FunctionCall, tool: unknown, toolInContext: unknown, context: unknown, exportName: string, arg: unknown) => Promise<unknown>;
 
 const IDENT_CHAR = /[\w$]/;
 
@@ -374,5 +374,5 @@ export function exportFn(pkg: PackageFn, name: string): CompiledFn {
   // Positional, and in `INJECTED` order — the injected names come first and a package adds two of its
   // own after them. Typed `unknown`, so an argument in the wrong slot is not a compile error: when the
   // injected list grew by one, this silently handed a package's own `arg` to the import slot.
-  return (importModule, tool, toolInContext, context, arg) => pkg(importModule, tool, toolInContext, context, name, arg);
+  return (call, tool, toolInContext, context, arg) => pkg(call, tool, toolInContext, context, name, arg);
 }

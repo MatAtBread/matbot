@@ -108,16 +108,14 @@ function labelFor(key: string, now: RunnerConfig): string {
  * restriction nothing in-process can lift does not reach for this plugin at all: it replaces the runner
  * package, which is what the `FunctionRunner` seam is for.
  *
- * Two further things a reader should know rather than discover. A settings override is per PRINCIPAL and
- * the runner is one object per process, so a change made by one principal is the environment every
- * principal in that process then gets — installation-grade configuration reached through a tool. And a
- * write by another process (or a hand-edited settings document) is not seen here: the runner is built
- * from these values when it is registered, so only a change made through this tool, or a restart, takes
- * effect.
+ * Whose settings a change is depends on how the settings store is partitioned, which is the storage's
+ * business: by principal (a profiles backend), so a change is that principal's environment alone, or not
+ * at all, so it is every principal's. The runner reads them at the start of each invocation, under that
+ * invocation's principal, so either way a change applies from the next run or check — made here, by
+ * another process, or in a hand-edited document — with nothing rebuilt and no restart.
  */
 export function createRunnerConfigTool(
   services: MatbotMachine,
-  install:  () => Promise<RunnerConfig>,
   codeDefaultMs: number,
 ): Tool<ToolResultOf<'function_runner_config'>> {
   const current = async (): Promise<RunnerConfig> => {
@@ -193,11 +191,9 @@ export function createRunnerConfigTool(
             if (value === null) await settings.delete(key);
             else await settings.set(key, value);
           }
-          // The runner is REBUILT from the settings and re-registered, so the change takes effect without
-          // a restart: everything downstream reads `services.FunctionRunner` at the point of use, and the
-          // type index's `paths` cache keys on the permitted array by identity, so a new runner is a new
-          // key and invalidates it with nothing having to remember to.
-          yield { type: 'result', value: await install() };
+          // Nothing to rebuild: the runner reads these at the start of every invocation, so the next run or
+          // check sees them. Reported as read back, which is what that invocation will get.
+          yield { type: 'result', value: await current() };
           return;
         }
 
@@ -220,8 +216,8 @@ export function createRunnerConfigTool(
       + 'WITHOUT awaiting; 0 removes that bound and nothing else (the withheld globals and the import gate '
       + 'are unaffected). `get` reports what is in effect, the coded default, and the globals the runner '
       + 'does not bind. `set` takes either or both; passing null for one reverts it to the installation '
-      + 'default, and `clear` reverts both. A change applies at once, to every conversation and every '
-      + 'principal in this process, and asking to make one requires permission. Stored function '
+      + 'default, and `clear` reverts both. A change applies from the next run or check, and asking to make '
+      + 'one requires permission. Stored function '
       + 'definitions are NOT re-checked when this changes: `tool_function` with action `check` reports '
       + 'which of them passed in a different environment.',
     inputSchema: {

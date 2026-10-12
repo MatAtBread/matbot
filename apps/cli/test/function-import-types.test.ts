@@ -319,17 +319,25 @@ test('a body is refused plugin-api, which resolves for types and not at run time
 
 test('a builtin is typed under either spelling, because the runtime takes either', async () => {
   // `import('os')` resolves to `node:os` at run time, so typing only the prefixed form refused at the
-  // check what the gate then permitted. With a restriction the bare form is correctly absent from both,
-  // the boundary rule not admitting it either.
+  // check what the gate then permitted. Under a restriction the bare form follows the prefixed one,
+  // because that is the spelling the gate asks about (`canonicalImport`).
   const unrestricted = await indexFor(undefined).dts();
   assert.match(unrestricted, /A body may import node builtins/);
 
   const index = indexFor(undefined);
-  const paths = await (index as unknown as { importPaths(): Promise<Record<string, string[]>> }).importPaths();
+  const paths = await (index as unknown as { importPaths(r?: readonly string[]): Promise<Record<string, string[]>> }).importPaths(undefined);
   assert.ok(paths['node:os'] !== undefined, 'the prefixed spelling');
   assert.ok(paths['os'] !== undefined, 'and the bare one, which the runtime accepts');
 
-  const restricted = await (indexFor(['node:']) as unknown as { importPaths(): Promise<Record<string, string[]>> }).importPaths();
+  const restricted = await (indexFor(['node:']) as unknown as { importPaths(r?: readonly string[]): Promise<Record<string, string[]>> }).importPaths(['node:']);
   assert.ok(restricted['node:os'] !== undefined);
-  assert.equal(restricted['os'], undefined, "a `node:` restriction does not admit the bare spelling, so it is not typed");
+  assert.ok(restricted['os'] !== undefined, 'a `node:` restriction admits `os` at the gate, so it is typed');
+  const other = await (indexFor(['node:fs']) as unknown as { importPaths(r?: readonly string[]): Promise<Record<string, string[]>> }).importPaths(['node:fs']);
+  assert.equal(other['os'], undefined, 'and one that does not admit node:os does not type os');
+
+  // IMPORT-GATE judges the spelling the gate asks about, so it agrees with `paths` on both.
+  const ok = await indexFor(['node:']).check(`async function f() { const os = await import('os'); return os.hostname(); }`);
+  assert.deepEqual(ok.diagnostics.map(d => `${d.label}: ${d.message}`), []);
+  const no = await indexFor(['node:fs']).check(`async function f() { const os = await import('os'); return os.hostname(); }`);
+  assert.ok(no.diagnostics.some(d => d.label === 'IMPORT-GATE'), no.diagnostics.map(d => d.label).join(','));
 });

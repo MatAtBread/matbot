@@ -11,7 +11,11 @@ export const MARKER_CREATOR = '@matatbread/matbot-function-tools';
  */
 export type SessionFunctionMarker =
   | { op: 'define'; name: string; definition: string; description?: string; definedUnchecked?: true; checkedAgainst?: string }
-  | { op: 'remove'; name: string };
+  | { op: 'remove'; name: string }
+  /** A later `check` passed under `checkedAgainst`. Applies only while `definition` is still the one in
+   *  force, so a stamp recorded before a redefinition — or carried to a fork that replaced it — cannot
+   *  vouch for source it never saw. */
+  | { op: 'checked'; name: string; definition: string; checkedAgainst: string };
 
 declare module '@matatbread/matbot-plugin-api' {
   interface MarkerData {
@@ -40,6 +44,13 @@ export function sessionFunctions(session: Session): Map<string, SessionFunctionR
       const d = c.data as Partial<SessionFunctionMarker> | null;
       if (d === null || typeof d !== 'object' || typeof d.name !== 'string') continue;
       if (d.op === 'remove') { out.delete(d.name); continue; }
+      if (d.op === 'checked') {
+        const cur = out.get(d.name);
+        if (cur !== undefined && cur.definition === d.definition && typeof d.checkedAgainst === 'string') {
+          out.set(d.name, { ...cur, checkedAgainst: d.checkedAgainst });
+        }
+        continue;
+      }
       if (d.op !== 'define' || typeof d.definition !== 'string') continue;
       out.set(d.name, {
         name: d.name, definition: d.definition,

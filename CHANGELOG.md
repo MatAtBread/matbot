@@ -31,14 +31,20 @@ churn and less likely to affect a consumer who doesn't use them.
   and routing its `import(…)` through the gate all move out of `apps/cli` into
   `@matatbread/matbot-function-runner-node`. **Without it a body is compiled with `new AsyncFunction` and
   runs unbounded, unshadowed and ungated** — add the package to `plugins:` to get the previous behaviour.
+  An upgrading install is not warned: one that set neither retired key below has nothing to be told
+  about, so its bodies simply lose the 10s bound, the withheld globals and the inert `import()` at the
+  next start.
   Nothing in matbot requires any of it, which is the point: every feature the node runner has is reachable
   through the `FunctionRunner` seam alone, so an installation wanting a worker, a subprocess or another
   language replaces one package and touches no core.
 
   Its two options are its own settings — `timeout_ms` and `permit_imports`, authored under
   `default_settings: { "@matatbread/matbot-function-runner-node": { … } }`, and read and changed at run
-  time with its own `function_runner_config` tool (`get`/`set`/`clear`): a `set` rebuilds the runner, so
-  narrowing what a body may import no longer waits for a restart, and each key is gated separately. Being
+  time with its own `function_runner_config` tool (`get`/`set`/`clear`). They are read once per
+  invocation — at the start of each run or check, never at boot — so narrowing what a body may import no
+  longer waits for a restart, a change made by another process or in a hand-edited document is seen too,
+  and an installation that partitions settings by principal gets each principal's own. Each key is gated
+  separately. Being
   an ordinary settings override it beats the configured floor, so `permit_imports` is what no answer at
   the import prompt can lift rather than something out of a running actor's reach — an installation
   needing that ships a runner with the list compiled in, which is a package swap and no core change. The old top-level
@@ -57,7 +63,7 @@ churn and less likely to affect a consumer who doesn't use them.
 
   `ToolTypeIndex` subscribes to nothing of the runner's, deliberately: everything derived from it — the
   note in the dts, the two lists a check enforces — is derived at the point of use, and the one cache over
-  them keys on the permit array by identity, so a different runner is a different key. What IS cached is
+  them keys on the permit list's content, so a different list is a different key. What IS cached is
   the source scan, which the runner has no part in.
 
   What a stored VERDICT needed instead is the environment it was reached in — see
@@ -128,8 +134,10 @@ churn and less likely to affect a consumer who doesn't use them.
   type-check depends on besides the snippet and the live tool types: whether a `FunctionRunner` is loaded,
   what it permits a body to import, and which globals it does not bind. Opaque; a consumer compares it for
   equality and never parses it. It exists because a stored verdict is a claim about an environment, and
-  the environment is a plugin: `function-tools` stores it beside each definition and reports
-  `checkedElsewhere: true` where it no longer matches. Nothing re-checks on load — that is a worker program
+  the environment is a plugin: `function-tools` stores it beside each definition and `list` reports
+  `checkedElsewhere: true` where it no longer matches. A `check` row is the verdict reached here and now,
+  so it carries neither that flag nor the fingerprint, and a pass records the new fingerprint, clearing
+  the flag without a redefinition. Nothing re-checks on load — that is a worker program
   per stored function at boot, and would turn a report into a boot failure — so what changes is that a
   reader is told, and `check` remains the way to re-verify. The tool types are deliberately not in it:
   those are live, and `check` is how a caller re-verifies against them. Optional, so an index written
@@ -147,9 +155,16 @@ churn and less likely to affect a consumer who doesn't use them.
   to ask about an import, `tool-types` decides which modules to type.
 - **`importableByName`** — whether a specifier names a builtin or a package rather than a path or a URL:
   the one rule the gate, the runner and the type-check apply before anything else. `importPermitted`
-  admits nothing it refuses.
-- **`FunctionRunner.permittedImports` and `FunctionRunner.import()`** — the optional restriction (absent
-  ⇒ unrestricted; `[]` ⇒ none), and how a granted specifier becomes a module. The restriction is on the
+  admits nothing it refuses. Its characters are an allowlist, because the resolver is a URL parser with
+  its own idea of a dot segment: `%2e%2e`, `.%2E` and `.<tab>.` are each `..` to it, and each escaped a
+  package to an arbitrary file on disk.
+- **`FunctionRunner.canonicalImport()`** — the spelling a specifier loads as, where the platform has two
+  for one module: node loads `os` as `node:os`. The gate, the restriction and the type-check all judge the
+  canonical form, so `os` and `node:os` are one question and one grant, and a builtin is no longer
+  described as a package that "runs with everything it imports".
+- **`FunctionRunner.settings()` (`FunctionRunSettings.permittedImports`) and `FunctionRunner.import()`**
+  — the optional restriction (absent ⇒ unrestricted; `[]` ⇒ none), read once per invocation and handed
+  back to the compiled callable on `FunctionCall`, and how a granted specifier becomes a module. The restriction is on the
   runner because the runner is the execution environment and two consumers need one answer: the capability
   that imports, and the type index that declares the reachable set. `import()` is the runner's because
   where a package resolves FROM is; it takes the import's second argument too, so an import attribute

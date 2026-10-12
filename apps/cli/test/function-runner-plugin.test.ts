@@ -13,6 +13,9 @@ import { permitted, refused } from '@matatbread/matbot-core';
 // and gating its imports are all optional, and reachable through the `FunctionRunner` seam alone. These
 // pin the two things that moving it out of the host actually changed.
 
+const permitOf = async (r: FunctionRunner): Promise<readonly string[] | undefined> =>
+  (await r.settings?.())?.permittedImports;
+
 interface Setup {
   registered: Record<string, unknown>;
   tools:      Map<string, Tool>;
@@ -41,11 +44,22 @@ async function setupWith(
     delete: (k: string) => { delete stored[k]; return Promise.resolve(); },
   };
   const warn = console.warn;
+  const capturing = async <T>(fn: () => Promise<T>): Promise<T> => {
+    const prev = console.warn;
+    console.warn = (...a: unknown[]) => { warnings.push(a.join(' ')); };
+    try { return await fn(); } finally { console.warn = prev; }
+  };
+  // The runner reads — and so warns — per invocation, long after setup has returned.
+  const capturedRunner = (r: FunctionRunner): FunctionRunner => r.settings === undefined ? r
+    : Object.assign(Object.create(r) as FunctionRunner, { settings: () => capturing(() => r.settings!()) });
   console.warn = (...a: unknown[]) => { warnings.push(a.join(' ')); };
   try {
     await plugin.setup!({
       settings: () => settings,
-      register: (k: string, v: unknown) => { registered[k] = v; return Promise.resolve(); },
+      register: (k: string, v: unknown) => {
+        registered[k] = k === 'FunctionRunner' ? capturedRunner(v as FunctionRunner) : v;
+        return Promise.resolve();
+      },
       tools: { register: (t: Tool) => { tools.set(t.name, t); } },
       get FunctionRunner() { return registered['FunctionRunner'] as FunctionRunner | undefined; },
       ...(opts.configPath !== undefined ? { configPath: opts.configPath } : {}),
@@ -70,24 +84,28 @@ test('the plugin registers a runner built from its own settings', async () => {
   const { registered } = await setupWith({ permit_imports: ['node:os'] }, { configPath: '/tmp/proj/matbot.yaml' });
   const runner = registered['FunctionRunner'] as FunctionRunner;
   assert.ok(runner !== undefined, 'registered under the service key, like any other plugin');
-  assert.deepEqual([...runner.permittedImports ?? []], ['node:os']);
+  assert.deepEqual([...await permitOf(runner) ?? []], ['node:os']);
   assert.ok((runner.withheldGlobals ?? []).includes('process'), 'and it publishes what it withholds');
 
   // Absent settings are the defaults, and `permittedImports` must stay ABSENT rather than becoming []:
   // an empty list is the configured "never", while no key at all means unrestricted-and-ask.
   const bare = (await setupWith({})).registered['FunctionRunner'] as FunctionRunner;
-  assert.equal(bare.permittedImports, undefined, 'no restriction configured ⇒ none claimed');
+  assert.equal(await permitOf(bare), undefined, 'no restriction configured ⇒ none claimed');
 });
 
 test('timeout_ms: 0 is warned about, and removes the TIME bound only', async () => {
   const { registered, warnings } = await setupWith({ timeout_ms: 0 });
+  const runner = registered['FunctionRunner'] as FunctionRunner;
+  assert.deepEqual(warnings, [], 'setup reads nothing: whose settings they are is not known until an invocation');
+  const settings = await runner.settings!();
+  await runner.settings!();
   assert.match(warnings.join('\n'), /run unbounded/);
   assert.match(warnings.join('\n'), /withheld globals and the import gate are unaffected/);
-  const runner = registered['FunctionRunner'] as FunctionRunner;
+  assert.equal(warnings.length, 1, 'warned once, not on every read');
   assert.ok((runner.withheldGlobals ?? []).includes('eval'), 'still withheld');
   // And the bound really is off: this would be stopped under any positive limit.
   const slow = runner.compile(`(async function () { const u = Date.now() + 250; while (Date.now() < u) {} return 'done'; })`);
-  assert.equal(await slow(() => Promise.reject(new Error('no loader'))), 'done');
+  assert.equal(await slow({ importModule: () => Promise.reject(new Error('no loader')), settings }), 'done');
   assert.ok(FUNCTION_SYNC_LIMIT_MS > 0, 'while the default is a real bound');
 });
 
@@ -95,7 +113,7 @@ test('the declarations follow the runner with nothing to invalidate', async () =
   // The obvious thing to reach for, now that the runner is a plugin that can arrive after a dts has been
   // handed out, is a subscription that rebuilds on a `services` registry change. It would be dead weight:
   // nothing derived from the runner is held. The note is composed on every call, `check` passes the two
-  // lists fresh to each run, and the one cache over them keys on the permit array by identity. What IS
+  // lists fresh to each run, and the one cache over them keys on the permit list's content. What IS
   // cached is the source scan, which the runner has no part in — so subscribing would discard a good
   // TypeScript build to recompute something that was never stale.
   //
@@ -155,28 +173,29 @@ test('the config tool reports what is in effect, floor included', async () => {
   } }, 'the override for one key and the install floor for the other — nothing says which is which');
 });
 
-test('a change rebuilds the runner, so it applies without a restart', async () => {
+test('a change applies from the next invocation, with nothing rebuilt', async () => {
+  // The settings are read per invocation, so the runner registered at setup is the runner for good — and
+  // a change written anywhere (this tool, another process, a hand-edited document) is simply read next.
   const s = await setupWith({});
-  const first = s.registered['FunctionRunner'] as FunctionRunner;
-  assert.equal(first.permittedImports, undefined, 'unrestricted to begin with');
+  const runner = s.registered['FunctionRunner'] as FunctionRunner;
+  assert.equal(await permitOf(runner), undefined, 'unrestricted to begin with');
 
   const set = await call_ok(await s.call({ action: 'set', permitImports: ['node:os'] }));
   assert.deepEqual(set.permitImports, ['node:os']);
-  const second = s.registered['FunctionRunner'] as FunctionRunner;
-  assert.notEqual(second, first, 'a new runner, registered over the old one');
-  assert.deepEqual([...second.permittedImports ?? []], ['node:os']);
-  // The type index keys its `paths` cache on this array BY IDENTITY, so a rebuild invalidates it with
-  // nothing having to remember to.
-  assert.notEqual(second.permittedImports, first.permittedImports);
+  assert.equal(s.registered['FunctionRunner'], runner, 'the same runner');
+  assert.deepEqual([...await permitOf(runner) ?? []], ['node:os']);
+
+  s.stored['timeout_ms'] = 25;
+  assert.equal(((await runner.settings!()) as { timeoutMs?: number }).timeoutMs, 25, 'a write that bypassed the tool too');
 
   // `[]` is the configured "never" and must not read as absent.
   assert.deepEqual((await call_ok(await s.call({ action: 'set', permitImports: [] }))).permitImports, []);
-  assert.deepEqual([...(s.registered['FunctionRunner'] as FunctionRunner).permittedImports ?? []], []);
+  assert.deepEqual([...await permitOf(runner) ?? ['absent']], []);
 });
 
 test('null reverts to the installation default, which is not the same as no restriction', async () => {
   const s = await setupWith({ permit_imports: ['node:os'] }, { stored: { permit_imports: [] } });
-  assert.deepEqual([...(s.registered['FunctionRunner'] as FunctionRunner).permittedImports ?? []], []);
+  assert.deepEqual([...await permitOf(s.registered['FunctionRunner'] as FunctionRunner) ?? []], []);
   // Not "unrestricted": `delete` means "revert to the configured default", and this install configured one.
   assert.deepEqual((await call_ok(await s.call({ action: 'set', permitImports: null }))).permitImports, ['node:os']);
   assert.equal('permit_imports' in s.stored, false, 'the override is gone, not overwritten with the floor');
@@ -219,6 +238,7 @@ test('settings that reach the runner without the tool are checked too', async ()
   // run bodies unbounded without the timeout_ms: 0 warning, and a scalar restriction made every import
   // throw `permits.some is not a function`.
   const neg = await setupWith({ timeout_ms: -1 });
+  await (neg.registered['FunctionRunner'] as FunctionRunner).settings!();
   assert.match(neg.warnings.join('\n'), /timeout_ms must be a non-negative integer/);
   const got = await call_ok(await neg.call({ action: 'get' }));
   assert.equal(got.timeoutMs, FUNCTION_SYNC_LIMIT_MS, 'the coded default, not unbounded');
@@ -228,7 +248,7 @@ test('settings that reach the runner without the tool are checked too', async ()
   // setting there is.
   for (const bad of ['node:', { permit: ['node:'] }, ['./lib/'], ['https://esm.sh/'], null]) {
     const s = await setupWith({ permit_imports: bad });
-    assert.deepEqual([...(s.registered['FunctionRunner'] as FunctionRunner).permittedImports ?? ['absent']], [], JSON.stringify(bad));
+    assert.deepEqual([...await permitOf(s.registered['FunctionRunner'] as FunctionRunner) ?? ['absent']], [], JSON.stringify(bad));
     assert.match(s.warnings.join('\n'), /switched off until it is corrected/, JSON.stringify(bad));
   }
 });

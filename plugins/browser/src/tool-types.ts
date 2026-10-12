@@ -202,7 +202,7 @@ class BrowserToolTypeIndex implements ToolTypeIndex {
       + `declare const tool: import('@matatbread/matbot-plugin-api').ToolProxy;\n`
       + `declare const toolInContext: import('@matatbread/matbot-plugin-api').ToolBox;\n`
       + `declare const context: import('@matatbread/matbot-plugin-api').ComposedCallContext;\n`
-      + this.importNote();
+      + await this.importNote();
   }
 
   /**
@@ -212,9 +212,11 @@ class BrowserToolTypeIndex implements ToolTypeIndex {
    * nothing is restricted, nothing is withheld and no import is gated, and the note says only the one
    * concrete thing a body here needs told: there are no node builtins.
    */
-  private importNote(): string {
+  private async importNote(): Promise<string> {
+    // Read once, for this one dts: per invocation, because whose settings they are is the settings
+    // store's business.
     const runner = this.machine.FunctionRunner;
-    const permit = runner?.permittedImports;
+    const permit = (await runner?.settings?.())?.permittedImports;
     if (permit?.length === 0) return `// Module imports are switched off on this installation.\n`;
     const what = permit !== undefined
       ? `// A body may import these:\n${permit.map(p => `//   ${p}`).join('\n')}\n`

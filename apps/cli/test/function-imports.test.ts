@@ -11,7 +11,7 @@ import { ROUTE, createVmFunctionRunner, transformBody } from '@matatbread/matbot
 // the rewrite that routes `import(…)` through a gate, the globals the runner withholds, and the fact that
 // a real `import()` is inert so the gated loader is the only door.
 
-const noLoader = (): Promise<never> => Promise.reject(new Error('no loader in this test'));
+const noLoader = { importModule: (): Promise<never> => Promise.reject(new Error('no loader in this test')) };
 const stripper = { strip: (s: string) => stripTypeScriptTypes(s) };
 const machine = (runner: ReturnType<typeof createVmFunctionRunner>): MatbotMachine => ({
   tools: { list: () => [] as Tool[], resolve: () => null, register: () => {}, remove: () => false },
@@ -130,13 +130,13 @@ test('a body is recompiled against the current runner, so one arriving later gat
 
   // No runner: nothing is routed. The body's own `import(…)` reaches node's loader and the gated one it
   // was handed is never consulted — ungated, which is what the declarations a body is written against say.
-  const direct = await fn(loader, null, null, {} as never) as Record<string, unknown>;
+  const direct = await fn({ importModule: loader }, null, null, {} as never) as Record<string, unknown>;
   assert.equal(asked.length, 0, 'not routed with no runner');
   assert.equal(typeof direct['arch'], 'function', 'it imported node:os itself');
 
   // A runner registered afterwards must reach the same compiled function.
   current = createVmFunctionRunner(0, { permit: ['node:'] });
-  assert.deepEqual(await fn(loader, null, null, {} as never), { tagged: 'node:os' });
+  assert.deepEqual(await fn({ importModule: loader }, null, null, {} as never), { tagged: 'node:os' });
   assert.deepEqual(asked, ['node:os'], 'routed to the loader this call supplied');
 });
 
@@ -292,12 +292,20 @@ test('the withheld globals are undefined, and a real import() is inert', async (
   // The routed import reaches the loader the CALL was handed and nothing else, so a call given none
   // fails on the call rather than reaching node's own loader.
   const routed = runner.compile(`(async function () { return import('node:os'); })`);
-  await assert.rejects(routed(undefined as never), /not a function/);
+  await assert.rejects(routed({} as never), /not a function/);
 
   // And an import that gets past the routing — the published escape, since `Function` is only shadowed —
   // is dead anyway: no vm import callback is installed.
   const escaped = runner.compile(`(async function () { return (() => {}).constructor('return import("node:os")')(); })`);
   await assert.rejects(escaped(noLoader), (e: { code?: string }) => e.code === 'ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING');
+});
+
+test('a body has no `this`, so the global it would be cannot hand back what is withheld', async () => {
+  // Called with no receiver, a sloppy body's `this` is the real global, and `this.process` reached every
+  // builtin with no import — easier than the published `.constructor` escape.
+  const runner = createVmFunctionRunner(2000);
+  const probe = runner.compile(`(async function () { return [typeof this, typeof (function () { return this; })()].join(','); })`);
+  assert.equal(await probe(noLoader), 'undefined,undefined');
 });
 
 test('the synchronous bound still holds with the shadow wrapper in place', async () => {
@@ -311,7 +319,7 @@ test('removing the time bound removes the TIME bound and nothing else', async ()
   // compute silently discarded `function_imports.permit` — `permit: []` included, documented as the only
   // way to say never — along with every withheld global and the inert `import()`.
   const unbounded = createVmFunctionRunner(0, { permit: ['node:crypto'] });
-  assert.deepEqual([...unbounded.permittedImports ?? []], ['node:crypto'], 'the restriction is still carried');
+  assert.deepEqual([...(await unbounded.settings!()).permittedImports ?? []], ['node:crypto'], 'the restriction is still carried');
 
   const typeofs = unbounded.compile(`(async function () { return [typeof process, typeof Buffer, typeof eval, typeof require].join(','); })`);
   assert.equal(await typeofs(noLoader), 'undefined,undefined,undefined,undefined', 'still withheld');
@@ -336,7 +344,10 @@ test('a path or a URL is refused without asking, whatever the restriction says',
   const runner = createVmFunctionRunner(2000, { permit: ['./lib/', 'lodash', 'https:'] });
   const host: CompileHost = { TypeScriptStripper: stripper, FunctionRunner: runner };
   for (const spec of ['./lib/../../etc/x.mjs', '../x.js', '/etc/x.mjs', 'C:\\x.mjs', 'https://esm.sh/lodash',
-                      'file:///etc/x.mjs', 'data:text/javascript,1', 'lodash/../../x', 'lodash/./x']) {
+                      'file:///etc/x.mjs', 'data:text/javascript,1', 'lodash/../../x', 'lodash/./x',
+                      // The resolver is a URL parser: each of these is a `..` segment to it, and each
+                      // escaped the package from `typescript/…` before the characters became an allowlist.
+                      'lodash/%2e%2e/%2e%2e/x', 'lodash/.%2E/x', 'lodash/%2e./x', 'lodash/.\t./x', 'lodash/.\n./x']) {
     const ev = await run(host, machine(runner), `probe() { return import(${JSON.stringify(spec)}); }`);
     assert.match((ev as { message: string }).message, /only node builtins .*by name/, spec);
     assert.equal(asked.length, 0, `${spec} must not even be asked about`);
@@ -364,4 +375,79 @@ test("an import's second argument reaches the loader, so an import attribute wor
     `probe() { return import('typescript/package.json', { with: { type: 'json' } }).then(m => m.default.name); }`);
   assert.deepEqual(ev, { type: 'result', value: 'typescript' });
   assert.deepEqual(seen, [{ with: { type: 'json' } }]);
+});
+
+test('a definition ending in a line comment compiles, in both shapes', async () => {
+  // A one-line wrapper let the comment swallow its closing parenthesis, so a body that typechecked was
+  // refused as invalid TypeScript.
+  const runner = createVmFunctionRunner(2000);
+  const host: CompileHost = { TypeScriptStripper: stripper, FunctionRunner: runner };
+  for (const h of [host, { TypeScriptStripper: stripper }]) {
+    const body = await buildBodyFn(h, '{ return 1 } // count');
+    assert.equal(await body(noLoader, {}, () => ({}), {} as never), 1);
+    const fn = await buildAsyncFn(h, 'probe(): number { return 2 } // two', []);
+    assert.equal(await fn(noLoader, {}, () => ({}), {} as never), 2);
+  }
+});
+
+test('an unprefixed builtin is asked about as the builtin it loads', async () => {
+  // Node loads `os` as `node:os` whatever is installed. Asked about as written, it was described as a
+  // package running "with everything it imports", offered no "any builtin", and was a second question
+  // about one module.
+  const runner = createVmFunctionRunner(2000);
+  const host: CompileHost = { TypeScriptStripper: stripper, FunctionRunner: runner };
+  const ev = await run(host, machine(runner), `probe() { return import('os').then(m => typeof m.platform()); }`);
+  assert.deepEqual(ev, { type: 'result', value: 'string' });
+  assert.equal(asked[0]?.subject, 'probe node:os');
+  assert.doesNotMatch(asked[0]?.label ?? '', /everything it imports/);
+  assert.ok(asked[0]?.standing?.some(o => o.subject === 'probe node:'), 'any-builtin is offered');
+
+  // A prefix-only builtin is a package without its prefix, so it is left alone.
+  assert.equal(runner.canonicalImport?.('test'), 'test');
+  assert.equal(runner.canonicalImport?.('fs/promises'), 'node:fs/promises');
+
+  // A restriction covers both spellings, written either way.
+  for (const permit of [['node:'], ['os'], ['node:os']]) {
+    const narrowed = createVmFunctionRunner(2000, { permit });
+    const h: CompileHost = { TypeScriptStripper: stripper, FunctionRunner: narrowed };
+    for (const spec of ['os', 'node:os']) {
+      const out = await run(h, machine(narrowed), `probe() { return import('${spec}').then(m => typeof m.platform()); }`);
+      assert.deepEqual(out, { type: 'result', value: 'string' }, `${spec} under ${permit.join(',')}`);
+    }
+  }
+});
+
+test('a scoped package root is not offered as its whole scope', async () => {
+  // Cut at its last `/`, `@aws-sdk/client-s3` offered "anything under @aws-sdk/" — every package in it.
+  const runner = createVmFunctionRunner(2000);
+  const host: CompileHost = { TypeScriptStripper: stripper, FunctionRunner: runner };
+  await run(host, machine(runner), `probe() { return import('@aws-sdk/client-s3'); }`, false);
+  assert.deepEqual(asked[0]?.standing?.map(o => o.subject), ['probe @aws-sdk/client-s3', '* @aws-sdk/client-s3']);
+  await run(host, machine(runner), `probe() { return import('@aws-sdk/client-s3/dist/x'); }`, false);
+  assert.deepEqual(asked[0]?.standing?.map(o => o.subject),
+    ['probe @aws-sdk/client-s3/dist/x', 'probe @aws-sdk/client-s3/dist/', '* @aws-sdk/client-s3/dist/x']);
+});
+
+test('one invocation reads the settings once, and both the gate and the bound answer from that read', async () => {
+  // Whose settings they are is the settings store's business — by principal, or not at all — so nothing
+  // may be read at boot or cached across invocations. One read per invocation is correct by construction,
+  // since an invocation has one principal throughout.
+  let reads = 0;
+  let permit: readonly string[] | undefined = ['node:os'];
+  const runner = createVmFunctionRunner(2000, {}, () => { reads++; return Promise.resolve({ timeoutMs: 150, permit }); });
+  const host: CompileHost = { TypeScriptStripper: stripper, FunctionRunner: runner };
+  const ok = await run(host, machine(runner),
+    `probe() { return Promise.all([import('node:os'), import('os'), import('node:os')]).then(ms => ms.length); }`);
+  assert.deepEqual(ok, { type: 'result', value: 3 });
+  assert.equal(reads, 1, 'one read for the whole invocation, however many imports it makes');
+
+  // The next invocation reads again, so a change applies with nothing rebuilt.
+  permit = ['node:crypto'];
+  const refused = await run(host, machine(runner), `probe() { return import('node:os'); }`);
+  assert.match((refused as { message: string }).message, /not permitted.*only: node:crypto/s);
+  assert.equal(reads, 2);
+
+  // The bound is the one that invocation read, not the one the runner was built with.
+  const spun = await run(host, machine(runner), `probe() { for (;;) {} }`);
+  assert.match((spun as { message: string }).message, /Stopped after 0.15s/);
 });

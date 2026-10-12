@@ -37,6 +37,13 @@ function machineWith(extra: Record<string, unknown>): MatbotMachine {
         set: async (id: string, v: never) => { docs.set(id, v); },
         delete: async (id: string) => docs.delete(id),
         query: async () => ({ items: [...docs.values()], total: docs.size }),
+        cas: async (id: string, expected: string, next: never) => {
+          const cur = docs.get(id) as { version?: string } | undefined;
+          if (cur?.version !== expected) return { ok: false, current: cur ?? null };
+          const doc = { ...(next as object), version: `${expected}+` } as never;
+          docs.set(id, doc);
+          return { ok: true, doc };
+        },
       };
     },
   }, extra) as unknown as MatbotMachine;
@@ -91,8 +98,39 @@ test('a stored verdict carries the environment it was reached in, and says when 
   runner(['node:os']);
   assert.equal((await row()).checkedElsewhere, undefined);
 
-  // A `check` re-run says the same, beside its own verdict.
+  // A `check` row is the verdict reached HERE, so it says nothing about where an older one was reached,
+  // and hands out no fingerprint. Beside a fresh pass, `checkedElsewhere` read as "passed now, and passed
+  // somewhere else".
   runner(['node:fs']);
-  const rows = ((await call({ action: 'check' })).at(-1) as { value: { results: Row[] } }).value.results;
-  assert.deepEqual(rows.map(r => [r.name, r.checkedElsewhere]), [['sum', true]]);
+  assert.equal((await row()).checkedElsewhere, true);
+  const rows = ((await call({ action: 'check' })).at(-1) as { value: { results: (Row & { ok: boolean; environment?: string })[] } }).value.results;
+  assert.deepEqual(rows.map(r => [r.name, r.ok, r.checkedElsewhere, r.environment]), [['sum', true, undefined, undefined]]);
+  // And the pass is recorded, so `list` stops flagging a function that was just re-verified — otherwise
+  // the only way to clear the flag was to redefine a correct function.
+  assert.equal((await row()).checkedElsewhere, undefined);
+});
+
+test('a session check stamp applies only to the definition it checked', async () => {
+  // A session function lives in its markers, so a passing re-check is recorded as one too. It must not
+  // vouch for a later redefinition — nor, on a fork that replaced the function, for source it never saw.
+  const { sessionFunctions, MARKER_CREATOR } = await import('../../../plugins/function-tools/src/session.ts');
+  const marker = (data: unknown) => ({ role: 'marker', content: [{ type: 'marker', creator: MARKER_CREATOR, data }] });
+  const session = (...data: unknown[]) => ({ id: 's', messages: data.map(marker) }) as never;
+  const v1 = 'f(): number { return 1; }', v2 = 'f(): number { return 2; }';
+
+  const stamped = sessionFunctions(session(
+    { op: 'define', name: 'f', definition: v1, checkedAgainst: 'old' },
+    { op: 'checked', name: 'f', definition: v1, checkedAgainst: 'new' }));
+  assert.equal(stamped.get('f')?.checkedAgainst, 'new');
+
+  const stale = sessionFunctions(session(
+    { op: 'define', name: 'f', definition: v1, checkedAgainst: 'old' },
+    { op: 'define', name: 'f', definition: v2, checkedAgainst: 'v2' },
+    { op: 'checked', name: 'f', definition: v1, checkedAgainst: 'new' }));
+  assert.equal(stale.get('f')?.checkedAgainst, 'v2', 'a stamp for v1 does not apply to v2');
+
+  const gone = sessionFunctions(session(
+    { op: 'define', name: 'f', definition: v1 }, { op: 'remove', name: 'f' },
+    { op: 'checked', name: 'f', definition: v1, checkedAgainst: 'new' }));
+  assert.equal(gone.has('f'), false, 'a stamp does not bring a removed function back');
 });

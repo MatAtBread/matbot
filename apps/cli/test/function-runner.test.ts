@@ -87,7 +87,7 @@ test('a package export is bounded too, being called inside the timed run', async
 });
 
 test('a run started inside another takes its own call, and a loop there is still stopped', async () => {
-  const none = (): Promise<never> => Promise.reject(new Error('no loader'));
+  const none = { importModule: (): Promise<never> => Promise.reject(new Error('no loader')) };
   const inner = () => runner.compile('(async function () { return 7; })')(none);
   assert.equal(await runner.compile('(async function (inner) { return inner(); })')(none, inner), 7);
   const spinning = () => runner.compile('(async function () { for (;;) {} })')(none);

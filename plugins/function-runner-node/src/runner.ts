@@ -1,5 +1,6 @@
+import { isBuiltin } from 'node:module';
 import vm from 'node:vm';
-import { FUNCTION_TIMEOUT, importableByName, type FunctionRunner } from '@matatbread/matbot-plugin-api';
+import { FUNCTION_TIMEOUT, importableByName, type FunctionRunSettings, type FunctionRunner } from '@matatbread/matbot-plugin-api';
 import { ROUTE, transformBody } from './body-transform.js';
 
 // The default, when this plugin's `timeout_ms` setting is absent. Far past any legitimate stretch of
@@ -31,6 +32,15 @@ const SHADOWED = [...WITHHELD, ...PHANTOM] as const;
 // thunk pushed just before it runs. LIFO is what makes a nested call safe — one body's tool call can start
 // another function before its first await, inside the outer script — each run taking its own thunk.
 const invoke = new vm.Script(`globalThis[Symbol.for(${JSON.stringify(PENDING)})].pop()()`, { filename: 'tool_function' });
+
+/** This runner's reading of its settings: the declared restriction, plus the time bound only it reads. */
+export interface VmRunSettings extends FunctionRunSettings {
+  readonly timeoutMs: number;
+}
+
+/** Where the settings come from, if not the fixed values the runner was built with. Called once per
+ *  invocation ({@link FunctionRunner.settings}); `permit` undefined means no restriction. */
+export type ReadRunnerSettings = () => Promise<{ timeoutMs: number; permit: readonly string[] | undefined }>;
 
 /**
  * A {@link FunctionRunner} over `node:vm`: runs in THIS context, so a body keeps the globals it has today
@@ -73,15 +83,32 @@ const invoke = new vm.Script(`globalThis[Symbol.for(${JSON.stringify(PENDING)})]
 export function createVmFunctionRunner(
   limitMs = FUNCTION_SYNC_LIMIT_MS,
   imports: { permit?: readonly string[]; projectDir?: string } = {},
+  read?: ReadRunnerSettings,
 ): FunctionRunner {
   const projectDir = imports.projectDir;
+  // `isBuiltin` and not a `builtinModules` lookup, because a subpath counts (`fs/promises`) and the
+  // prefix-only builtins do not (`test` is a package; only `node:test` is the builtin).
+  const canonical = (spec: string): string => !spec.includes(':') && isBuiltin(spec) ? `node:${spec}` : spec;
   const slot = globalThis as unknown as Record<symbol, Array<() => Promise<unknown>> | undefined>;
   const stack = (slot[Symbol.for(PENDING)] ??= []);
-  return {
+  const settingsOf = (timeoutMs: number, permit: readonly string[] | undefined): VmRunSettings => ({
+    timeoutMs,
     // Absent must stay ABSENT, not become `[]`: an empty list is the configured "never", while no key at
     // all means unrestricted-and-ask. Collapsing the two is what made an unconfigured install refuse
     // every import without a prompt.
-    ...(imports.permit !== undefined ? { permittedImports: imports.permit } : {}),
+    // Entries are canonicalised as specifiers are, or `['os']` would stop admitting the `os` the gate now
+    // asks about as `node:os`. A trailing `/` is the entry's boundary marker, so it is kept off and back on.
+    ...(permit !== undefined
+      ? { permittedImports: permit.map(p => p.endsWith('/') ? `${canonical(p.slice(0, -1))}/` : canonical(p)) }
+      : {}),
+  });
+  const fixed = settingsOf(limitMs, imports.permit);
+  return {
+    async settings() {
+      if (read === undefined) return fixed;
+      const { timeoutMs, permit } = await read();
+      return settingsOf(timeoutMs, permit);
+    },
     // Reached only after the gate has allowed this specifier for this function, so it checks nothing of
     // the gate's. It does refuse a path or a URL, which the gate never passes: a body imports builtins and
     // installed packages by name, and placing or downloading code is a plugin install's job.
@@ -109,6 +136,7 @@ export function createVmFunctionRunner(
       }
       return import(target, options);
     },
+    canonicalImport: canonical,
     withheldGlobals: SHADOWED,
     compile(source) {
       // Erasure and the import routing are both this runner's: it is handed a TypeScript expression and
@@ -119,27 +147,37 @@ export function createVmFunctionRunner(
       // global lexically for the whole body. The inner binds the loader this runner was handed to the
       // name its own rewrite used; that name is private to this file, which is why a body may have a
       // parameter called the same thing.
+      //
+      // The inner one is strict, so the body is: called with no receiver, a sloppy body's `this` is the
+      // real global, and `this.process` would hand back everything the outer one shadows. Strictness goes
+      // on the INNER wrapper because a strict function may not bind `eval` as a parameter, and nests
+      // into every function the body declares. The newline keeps a trailing line comment in the body
+      // from swallowing the closing parenthesis.
       const outer = vm.runInThisContext(
-        `(function (${SHADOWED.join(', ')}) { return function (${ROUTE}) { return (${fnExpr}); }; })`,
+        `(function (${SHADOWED.join(', ')}) { return function (${ROUTE}) { 'use strict'; return (${fnExpr}\n); }; })`,
         { filename: 'tool_function' },
       ) as (...shadows: undefined[]) => (route: unknown) => (...args: unknown[]) => Promise<unknown>;
       const bind = outer();
-      return (importModule, ...args) => {
+      return (call, ...args) => {
         // A fresh inner function per call, so interleaved calls cannot tread on one another — a body's
         // tool call can start another function before its first await, which a mutable slot would lose.
-        const fn = bind(importModule);
+        const fn = bind(call.importModule);
+        // The bound this invocation read at its start. A value this runner did not produce — or none —
+        // carries no `timeoutMs`, and gets the bound the runner was built with.
+        const ms = (call.settings as Partial<VmRunSettings> | undefined)?.timeoutMs;
+        const limit = typeof ms === 'number' ? ms : limitMs;
         const depth = stack.length;
         let started: Promise<unknown> | undefined;
         stack.push(() => (started = fn(...args)));
         let pending: Promise<unknown>;
         try {
           // No `timeout` key at all when the bound is off: vm rejects a non-positive one, and this is the
-          // only thing `limitMs: 0` turns off.
-          pending = invoke.runInThisContext(limitMs > 0 ? { timeout: limitMs } : {}) as Promise<unknown>;
+          // only thing a bound of 0 turns off.
+          pending = invoke.runInThisContext(limit > 0 ? { timeout: limit } : {}) as Promise<unknown>;
         } catch (e) {
           if ((e as { code?: unknown }).code !== 'ERR_SCRIPT_EXECUTION_TIMEOUT') return Promise.reject(e);
           pending = Promise.reject(Object.assign(
-            new Error(`Stopped after ${limitMs / 1000}s of synchronous work without an await — most likely a loop that never ends. A function may compute between awaits, but not for this long.`),
+            new Error(`Stopped after ${limit / 1000}s of synchronous work without an await — most likely a loop that never ends. A function may compute between awaits, but not for this long.`),
             { code: FUNCTION_TIMEOUT },
           ));
         } finally {

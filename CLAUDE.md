@@ -770,8 +770,8 @@ Within that, three parts, and only the first two enforce anything:
    would multiply past what a prompt can carry; that is the gate-wide standing answer, and installation
    authoring.
 2. **An optional restriction** — `permit_imports` in the runner plugin's settings, carried on
-   `FunctionRunner.permittedImports`. It rides on the runner, so **the runner is always seeded**:
-   `timeout_ms: 0` removes the TIME bound and nothing else. It used to seed no runner at all,
+   `FunctionRunSettings.permittedImports`. It rides on the runner, so it holds exactly while a runner is
+   loaded — **and no host seeds one** (point 3): `timeout_ms: 0` removes the TIME bound and nothing else. It used to seed no runner at all,
    which is a documented way to run bodies unbounded and silently discarded the restriction (`permit: []`
    included), unshadowed every withheld global and made a raw `import()` work. One line of yaml about how
    long a body may compute is not an answer to what a body may reach. **Absent means no restriction**, because a gate that is never
@@ -807,17 +807,23 @@ Within that, three parts, and only the first two enforce anything:
 
    **Its settings are reached the ordinary way, which means a tool** — `function_runner_config`
    (`get`/`set`/`clear`), because a plugin's settings are the plugin's to expose and the alternative was a
-   restart per change. `set` rebuilds the runner through the same one function `setup` uses, so the two
-   cannot disagree about what a value means, and the swap needs no invalidation anywhere: every consumer
-   reads `services.FunctionRunner` at the point of use, and the type index's `paths` cache keys on the
-   permitted array by identity, so a new runner is a new key. `null` for a key means *revert to the
-   installation default*, which is what `delete` means on a layered setting — not "no restriction", which
-   is only what an absent default happens to mean. Each key is gated separately (`tool_function`'s import
-   gate is one decision; what a body may reach and how long it may compute are two), and two consequences
-   are stated rather than left to be discovered: a settings override is per PRINCIPAL while the runner is
-   one object per process, so a change is the environment everyone in that process gets; and the runner is
-   built from these values when it is registered, so a write by another process or a hand-edited document
-   needs a restart.
+   restart per change. `set` only WRITES: nothing is rebuilt, because the settings are read per invocation
+   (below), so the next run or check sees a change however it was made — this tool, another process, a
+   hand-edited document. `null` for a key means *revert to the installation default*, which is what
+   `delete` means on a layered setting — not "no restriction", which is only what an absent default
+   happens to mean. Each key is gated separately (`tool_function`'s import gate is one decision; what a
+   body may reach and how long it may compute are two).
+
+   **The settings are read once per INVOCATION — never at boot, never cached across invocations**
+   (`FunctionRunner.settings()`, held for a run by `runFunction` and for a check by `ToolTypeIndex`, and
+   handed back to the runner on `FunctionCall.settings`). Whose settings they are is not the runner's to
+   know: the settings store may be partitioned by principal (a profiles backend) or not at all, which is
+   the storage implementation's business. A boot read answered for the boot principal for ever after, so
+   one principal's narrowing was lost on restart and another's unrelated write could discard it; a
+   per-principal cache would assume a partitioning nobody promised. An invocation, by contrast, has one
+   principal throughout, so one read at its start is correct by construction, and the gate, the
+   type-check and the time bound all answer from the same reading. The same goes for a function's
+   *definition* — a store may hold it globally or per principal — so nothing about it is assumed either.
 
    **A `FunctionRunner` is handed TypeScript and is the environment it runs in.** `compile(source)` takes a
    self-contained async-function expression — parameters and all, because a bare body is not valid alone
@@ -858,7 +864,7 @@ Within that, three parts, and only the first two enforce anything:
    runner is a plugin that can arrive after a dts has been handed out, is for `ToolTypeIndex` to rebuild on
    a `services` registry change for the key. It was tried and reverted: the note is composed on every
    `dts()`, `check()` passes the two lists fresh to each run, and the single cache over them keys on the
-   permit array by identity, so a different runner is a different key. What IS cached is the source scan,
+   permit list's content, so a different list is a different key. What IS cached is the source scan,
    which the runner has no part in — so subscribing discards a good TypeScript build to recompute
    something that was never stale. `function-tools` likewise recompiles a body against whichever runner is
    current, and the browser index rebuilds its note per call. **The rule that falls out: derive from the
@@ -874,7 +880,10 @@ Within that, three parts, and only the first two enforce anything:
    business; all a reader needs is that the claim is about somewhere else). It is sorted and printed
    rather than identity-derived, because unlike the `paths` cache it has to survive a restart. Nothing
    re-checks on load — that is a worker program per stored function at boot, turning a report into a boot
-   failure — so the report says `checkedElsewhere: true` and `check` remains the way to re-verify. The
+   failure — so `list` says `checkedElsewhere: true` and `check` remains the way to re-verify. A `check`
+   row is the verdict reached here and now, so it carries neither the flag nor the fingerprint, and a pass
+   RECORDS the new fingerprint (a CAS on a stored definition, a `checked` marker for a session one) —
+   otherwise the only way to clear the flag was to redefine a correct function. The
    tool types are deliberately NOT in the fingerprint: they are live, and `check` is how a caller
    re-verifies against them, whereas this names the thing a re-check cannot otherwise be prompted by.
 

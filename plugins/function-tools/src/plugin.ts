@@ -17,7 +17,7 @@ interface FunctionRecord { name: string; definition: string; description?: strin
 
 /** One function's row in a `check` sweep: the service's report, plus who it is about. `diagnostics`
  *  carries each finding's own `rendered` text, so a reader displays that and counts on `total`. */
-interface CheckResult extends ToolCheckReport { name: string; package?: true; session?: true; definedUnchecked?: true; checkedElsewhere?: true }
+interface CheckResult extends Omit<ToolCheckReport, 'environment'> { name: string; package?: true; session?: true; definedUnchecked?: true }
 
 interface PackageRecord { name: string; tools: string[]; definition: string; definedUnchecked?: true; checkedElsewhere?: true }
 
@@ -53,6 +53,28 @@ interface FunctionDoc {
  */
 const elsewhere = (against: string | undefined, env: string | undefined): { checkedElsewhere?: true } =>
   against !== undefined && env !== undefined && against !== env ? { checkedElsewhere: true } : {};
+
+/**
+ * A `check` row is the verdict just reached, HERE — so it carries neither the stored fingerprint's
+ * `checkedElsewhere` (that compares an OLDER verdict, and set beside a fresh pass it read as "passed now,
+ * and passed somewhere else") nor the raw `environment`, which is ours to compare and never a reader's to
+ * interpret (see {@link sessionRow}).
+ */
+const verdict = (report: ToolCheckReport): Omit<ToolCheckReport, 'environment'> => {
+  const { environment, ...rest } = report;
+  return rest;
+};
+
+/**
+ * Whether a check that just passed should replace the stored fingerprint. `check` otherwise persists
+ * nothing, and without this a function `list` flags as `checkedElsewhere` stayed flagged after it was
+ * re-verified — until it was redefined, which is a model rewriting a correct function to clear a flag.
+ * A pass is the only verdict recorded: a failure here says the stored definition no longer holds, and
+ * that is `check`'s report to make, not a fingerprint's.
+ */
+const restampWith = (report: ToolCheckReport, against: string | undefined): string | undefined =>
+  report.ok && report.checked && report.environment !== undefined && report.environment !== against
+    ? report.environment : undefined;
 
 const recordOf = (doc: FunctionDoc, env?: string): FunctionRecord => ({
   name: doc.id, definition: doc.definition,
@@ -312,7 +334,6 @@ class FunctionStore {
       docs = [doc];
     }
 
-    const env = await index.environment?.();
     const results: CheckResult[] = [];
     for (const doc of docs) {
       let report: ToolCheckReport;
@@ -325,10 +346,12 @@ class FunctionStore {
         report = { ok: false, checked: false, total: 1, diagnostics: [{ label: 'PARSE', code: 0, message, rendered: message }] };
       }
       results.push({
-        name: doc.id, ...report,
+        name: doc.id, ...verdict(report),
         ...(doc.definedUnchecked === true ? { definedUnchecked: true as const } : {}),
-        ...elsewhere(doc.checkedAgainst, env),
       });
+      // A lost CAS is a redefinition that landed meanwhile, whose own fingerprint is the one to keep.
+      const stamp = restampWith(report, doc.checkedAgainst);
+      if (stamp !== undefined) await this.store.cas(doc.id, doc.version, { ...doc, checkedAgainst: stamp });
     }
     return results;
   }
@@ -434,7 +457,6 @@ class PackageStore {
       if (doc === null) throw new Error(`No package named "${name}" was defined here.`);
       docs = [doc];
     }
-    const env = await index.environment?.();
     const results: CheckResult[] = [];
     for (const doc of docs) {
       let report: ToolCheckReport;
@@ -444,10 +466,11 @@ class PackageStore {
         report = { ok: false, checked: false, total: 1, diagnostics: [{ label: 'PARSE', code: 0, message, rendered: message }] };
       }
       results.push({
-        name: doc.id, package: true, ...report,
+        name: doc.id, package: true, ...verdict(report),
         ...(doc.definedUnchecked === true ? { definedUnchecked: true as const } : {}),
-        ...elsewhere(doc.checkedAgainst, env),
       });
+      const stamp = restampWith(report, doc.checkedAgainst);
+      if (stamp !== undefined) await this.store.cas(doc.id, doc.version, { ...doc, checkedAgainst: stamp });
     }
     return results;
   }
@@ -575,11 +598,13 @@ class SessionFunctions {
 
   /** define's check, re-run against the tools as they stand now — which is how a function left calling
    *  one a `split` took away, or one a global tool has since shadowed, is found before it is called. */
-  async check(ctx: ToolContext, recs: Iterable<SessionFunctionRecord>): Promise<CheckResult[]> {
+  /** `restamps` are the markers recording a pass under a new fingerprint — the session's equivalent of the
+   *  stores' CAS, emitted by the caller as ordinary marker events so the runner owns the write. */
+  async check(ctx: ToolContext, recs: Iterable<SessionFunctionRecord>): Promise<{ results: CheckResult[]; restamps: SessionFunctionMarker[] }> {
     const index = this.machine.ToolTypeIndex;
     if (index === undefined) throw new Error('No type-checker is available here (e.g. the browser), so nothing can be checked.');
-    const env = await index.environment?.();
     const results: CheckResult[] = [];
+    const restamps: SessionFunctionMarker[] = [];
     for (const rec of recs) {
       let report: ToolCheckReport;
       if (this.machine.tools.resolve(rec.name) !== null) report = findingRow('SHADOWED', shadowMessage(rec.name));
@@ -590,12 +615,13 @@ class SessionFunctions {
         } catch (e) { report = findingRow('PARSE', e instanceof Error ? e.message : String(e)); }
       }
       results.push({
-        name: rec.name, session: true, ...report,
+        name: rec.name, session: true, ...verdict(report),
         ...(rec.definedUnchecked === true ? { definedUnchecked: true as const } : {}),
-        ...elsewhere(rec.checkedAgainst, env),
       });
+      const stamp = restampWith(report, rec.checkedAgainst);
+      if (stamp !== undefined) restamps.push({ op: 'checked', name: rec.name, definition: rec.definition, checkedAgainst: stamp });
     }
-    return results;
+    return { results, restamps };
   }
 
   private build(rec: SessionFunctionRecord): Promise<Tool | Error> {
@@ -676,14 +702,22 @@ Every \`tool\` call MUST be awaited — the whole body runs as an async function
 a function calling itself, must be awaited too. Return a JSON-serialisable value; that becomes the result the model sees. Each tool
 call is echoed to stdout, so the run is observable.
 
+WHERE A BODY RUNS
+By default a body is a plain async function inside matbot's own process: nothing bounds how long it runs,
+every global is in scope, and an import reaches the platform's own loader with nobody asked. Checks and
+limits come from a \`FunctionRunner\` — the service an installation registers to compile and run every
+body — which may bound its running time, withhold globals, restrict what it may import, and route each
+import through a permission prompt. The \`types\` action states which of these are in force HERE, and a
+body is type-checked against exactly that: what is not reachable does not type-check, so do not guess,
+and do not reach for \`noTypeCheck\` to get past it.
+
 MODULES (node only). A body may reach the platform through a dynamic import —
-\`const fs = await import('node:fs/promises')\` — and each import needs permission at the call: the user is
-asked, naming your function and the module, the first time. Ask for the narrowest thing that does the job.
-Import by NAME only — a node builtin or a package already installed; a path or a URL is refused outright.
-The \`types\` action states what is reachable here; a module outside that does not type-check, so do not
-guess, and do not reach for \`noTypeCheck\` to get past it. There is no \`require\`, \`module\`,
-\`exports\`, \`__dirname\`, \`__filename\` or \`import.meta\` — a body is not a module — and no \`process\`,
-\`Buffer\` or \`globalThis\`. Each is rejected rather than left to fail at the first call.
+\`const fs = await import('node:fs/promises')\`. Import by NAME only — a node builtin or a package already
+installed; a path or a URL fails the check. Ask for the narrowest thing that does the job: where imports
+are gated, the user is asked the first time, naming your function and the module. A body is not a module,
+so there is no \`require\`, \`module\`, \`exports\`, \`__dirname\`, \`__filename\` or \`import.meta\`; any
+global a runner withholds as well is listed by \`types\`, and using one fails the check rather than the
+first call.
 
 SCOPE — WHO ASKED FOR THE FUNCTION DECIDES IT
   'global' (default) — the user asked for a tool ("make me a tool that calculates Fibonacci numbers"). It
@@ -723,9 +757,10 @@ the detail — each with a \`rendered\` block to read and a \`label\` to group o
 of any the detail cap hid. A row carrying \`definedUnchecked: true\` was registered without a type-check.
 READ \`ok\` TOGETHER WITH \`checked\`, on the result and on each row: \`checked: false\` means no type-checker
 could run here, so \`ok: true\` says only that nothing was examined. Fix a failure by re-defining.
-A row carrying \`checkedElsewhere: true\` DID pass, but in a different environment from this one — what a
-body may import, or whether an import is gated at all, has changed since it was defined. Nothing is
-re-checked on load, so \`check\` it to find out where it stands now.
+In \`list\`, a row carrying \`checkedElsewhere: true\` DID pass, but in a different environment from this
+one — what a body may import, or whether an import is gated at all, has changed since. Nothing is
+re-checked on load, so \`check\` it: a \`check\` row is always the verdict reached here and now, and a
+pass records this environment, which clears the flag. There is no need to redefine a function to clear it.
 
 TWO DEFINITION SHAPES — and neither is an arrow function
   execute — the BODY alone, between braces. There is no function head, so there is nothing to declare and
@@ -880,10 +915,16 @@ function functionTool(machine: MatbotMachine, store: FunctionStore, packages: Pa
             try {
               const mine = sessionFunctions(ctx.session);
               const own  = act.name !== undefined ? mine.get(act.name) : undefined;
+              const none = { results: [] as CheckResult[], restamps: [] as SessionFunctionMarker[] };
+              const session = act.package !== undefined ? none
+                : act.name !== undefined
+                  ? (own !== undefined && !await store.has(act.name) ? await sessions.check(ctx, [own]) : none)
+                  : await sessions.check(ctx, mine.values());
               const results = act.package !== undefined ? await packages.check(act.package)
                 : act.name !== undefined
-                  ? (own !== undefined && !await store.has(act.name) ? await sessions.check(ctx, [own]) : await store.check(act.name))
-                  : [...await store.check(), ...await packages.check(), ...await sessions.check(ctx, mine.values())];
+                  ? (session.results.length > 0 ? session.results : await store.check(act.name))
+                  : [...await store.check(), ...await packages.check(), ...session.results];
+              for (const m of session.restamps) yield sessionMarker(m);
               // `ok` is qualified by `checked` here exactly as it is on a row: where no type-checker can
               // run (the browser registers an index that supplies types but checks nothing), every row
               // comes back clean and a bare `ok: true` would report success for work nothing did.

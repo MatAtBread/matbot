@@ -1,42 +1,44 @@
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import { dirname } from 'node:path';
 import { FUNCTION_SYNC_LIMIT_MS, createVmFunctionRunner } from './runner.js';
-import { createRunnerConfigTool, readRunnerConfig, type RunnerConfig } from './config.js';
-import type { MatbotMachine, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
+import { createRunnerConfigTool, readRunnerConfig } from './config.js';
+import type { FunctionRunner, MatbotMachine, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
 
-export { createVmFunctionRunner, FUNCTION_SYNC_LIMIT_MS } from './runner.js';
+export { createVmFunctionRunner, FUNCTION_SYNC_LIMIT_MS, type ReadRunnerSettings, type VmRunSettings } from './runner.js';
 export { transformBody, ROUTE } from './body-transform.js';
 export { createRunnerConfigTool, IMPORTS_KEY, TIMEOUT_KEY, type RunnerConfig } from './config.js';
 
 /**
- * Build the runner from this plugin's settings and register it, returning what is now in effect.
+ * The runner this plugin registers: one object for the process, whose settings are READ per invocation
+ * rather than baked in at setup. Whose settings they are depends on how the settings store is partitioned
+ * — by principal, or not at all — which is the storage's business and not something to assume here, so
+ * setup reads nothing: a boot read would answer for the boot principal for ever after. An invocation has
+ * one principal throughout, so the consumer reads once at its start (`FunctionRunner.settings`) and holds
+ * that answer for the whole run or check.
  *
- * The ONE place the settings become a runner, so `setup` and `function_runner_config` cannot disagree
- * about what a value means — the tool re-runs this rather than constructing a runner of its own, which
- * is also what makes a change take effect without a restart.
+ * The same function is what `function_runner_config` reports through, so the tool and the runner cannot
+ * disagree about what a value means — and a change, from the tool, another process or a hand-edited
+ * document, applies from the next invocation with nothing rebuilt.
  */
-async function installRunner(services: MatbotMachine): Promise<RunnerConfig> {
-  const { timeoutMs: limitMs, permit, problems } = await readRunnerConfig(services.settings(), FUNCTION_SYNC_LIMIT_MS);
-  for (const p of problems) console.warn(`[matbot] function-runner-node: ${p}`);
+function createRunner(services: MatbotMachine): FunctionRunner {
+  // Read per invocation, so a bad value would otherwise be reported on every call.
+  const warned = new Set<string>();
+  const warnOnce = (m: string): void => {
+    if (warned.has(m)) return;
+    warned.add(m);
+    console.warn(`[matbot] function-runner-node: ${m}`);
+  };
   // The directory holding matbot.yaml, named when a package a body asks for is not installed: it is where
   // the user would install it. Absent in a host that has no config file.
   const projectDir = services.configPath !== undefined ? dirname(services.configPath) : undefined;
-
-  if (limitMs === 0) {
-    console.warn('[matbot] function-runner-node: timeout_ms is 0 — tool_function bodies run unbounded, and one that loops without awaiting will freeze this process. The withheld globals and the import gate are unaffected.');
-  }
-  const runner = createVmFunctionRunner(limitMs, {
-    ...(permit !== undefined ? { permit } : {}),
-    ...(projectDir !== undefined ? { projectDir } : {}),
+  return createVmFunctionRunner(FUNCTION_SYNC_LIMIT_MS, projectDir !== undefined ? { projectDir } : {}, async () => {
+    const { timeoutMs, permit, problems } = await readRunnerConfig(services.settings(), FUNCTION_SYNC_LIMIT_MS);
+    for (const p of problems) warnOnce(p);
+    if (timeoutMs === 0) {
+      warnOnce('timeout_ms is 0 — tool_function bodies run unbounded, and one that loops without awaiting will freeze this process. The withheld globals and the import gate are unaffected.');
+    }
+    return { timeoutMs, permit };
   });
-  await services.register('FunctionRunner', runner);
-  return {
-    timeoutMs:        limitMs,
-    timeoutMsDefault: FUNCTION_SYNC_LIMIT_MS,
-    permitImports:    permit === undefined ? null : [...permit],
-    withheldGlobals:  [...(runner.withheldGlobals ?? [])],
-    ...(problems.length > 0 ? { problems } : {}),
-  };
 }
 
 /**
@@ -51,8 +53,8 @@ async function installRunner(services: MatbotMachine): Promise<RunnerConfig> {
  * language — replaces this package and touches nothing else.
  *
  * Its two settings are its own, authored under `default_settings:` keyed by this package name, and
- * readable and writable at run time through `function_runner_config` — which rebuilds the runner, so
- * narrowing what a body may import no longer waits for a restart. They were `function_timeout_ms` and
+ * readable and writable at run time through `function_runner_config`. They are read at the start of
+ * each invocation, so narrowing what a body may import no longer waits for a restart. They were `function_timeout_ms` and
  * `function_imports` in the host's config, which could not work: the default runner has no way to
  * implement either, so the host was parsing a question only a plugin could answer.
  */
@@ -60,7 +62,7 @@ export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,
 
   async setup(services) {
-    await installRunner(services);
-    services.tools.register(createRunnerConfigTool(services, () => installRunner(services), FUNCTION_SYNC_LIMIT_MS));
+    await services.register('FunctionRunner', createRunner(services));
+    services.tools.register(createRunnerConfigTool(services, FUNCTION_SYNC_LIMIT_MS));
   },
 };
