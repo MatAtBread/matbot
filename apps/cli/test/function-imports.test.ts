@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { stripTypeScriptTypes } from 'node:module';
 import { buildAsyncFn, buildBodyFn, runFunction, EXECUTE_SUBJECT, type CompileHost } from '@matatbread/matbot-function-tools';
 import type { FunctionRunner, MatbotMachine, PermissionRequest, Tool, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
+import { permitted, refused } from '@matatbread/matbot-core';
 import { ROUTE, createVmFunctionRunner, transformBody } from '@matatbread/matbot-function-runner-node';
 
 // A tool_function body is meant to be a constrained place to compute: an install that chose `docker-bash`
@@ -21,7 +22,7 @@ const asked: PermissionRequest[] = [];
 const ctxFor = (allow: boolean): ToolContext => ({
   callId: 'c1', session: { id: 's1' }, signal: new AbortController().signal,
   prompt: () => Promise.reject(new Error('non-interactive')),
-  gate: (req: PermissionRequest) => { asked.push(req); return Promise.resolve(allow); },
+  gate: (req: PermissionRequest) => { asked.push(req); return Promise.resolve(allow ? permitted('user') : refused('user')); },
 }) as unknown as ToolContext;
 
 async function result(events: AsyncIterable<ToolEvent>): Promise<ToolEvent | undefined> {
@@ -186,7 +187,9 @@ test('a refused gate stops the import', async () => {
   const runner = createVmFunctionRunner(2000);
   const ev = await run({ TypeScriptStripper: stripper, FunctionRunner: runner }, machine(runner),
     `probe() { return import('node:os'); }`, false);
-  assert.match((ev as { message: string }).message, /was not permitted/);
+  // The thrown message names the module AND the layer that refused: inside a body the model wrote,
+  // "not permitted" alone reads as something to debug or route around.
+  assert.match((ev as { message: string }).message, /Import of 'node:os': cancelled — the user declined/);
   assert.equal(asked.length, 1, 'the gate was consulted');
 });
 

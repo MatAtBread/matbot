@@ -1,7 +1,7 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { askPermissionGate, bindGate, installSettingsDefaults, makePluginSettings,
-         optionValue, optionLabel } from '@matatbread/matbot-core';
+         optionValue, optionLabel, permitted, refused, refusalMessage } from '@matatbread/matbot-core';
 import type { FormField, PermissionGate, PermissionRequest, PromptFn, SettingsDoc, Store } from '@matatbread/matbot-core';
 import { createDefaultGate, makeGateActionTool, DEFAULT_GATE_SETTINGS_NS } from '@matatbread/matbot-default-gate';
 
@@ -27,27 +27,72 @@ function recorder(answer: string): { asked: FormField[]; ask: PromptFn } {
 
 test('the boot default asks through the channel in scope, as a confirm field', async () => {
   const { asked, ask } = recorder('yes');
-  assert.equal(await askPermissionGate.decide(req(), ask), true);
+  assert.equal((await askPermissionGate.decide(req(), ask)).allowed, true);
   assert.equal(asked[0]?.type, 'confirm');
   assert.equal(asked[0]?.label, 'Install plugin **"@x/foo"**?');
 
   const no = recorder('no');
-  assert.equal(await askPermissionGate.decide(req(), no.ask), false);
+  assert.equal((await askPermissionGate.decide(req(), no.ask)).allowed, false);
 });
 
 test('no channel means no human is reachable, and the SITE says what happens then', async () => {
   // Reproduces today's non-interactive behaviour exactly: a tool-name collision at boot overwrites,
   // everything else declines — stated once per site rather than implied at each.
-  assert.equal(await askPermissionGate.decide(req({ fallback: false }), undefined), false);
-  assert.equal(await askPermissionGate.decide(
-    req({ gate: 'tools.overwrite', subject: 'bash', fallback: true }), undefined), true);
+  assert.equal((await askPermissionGate.decide(req({ fallback: false }), undefined)).allowed, false);
+  assert.equal((await askPermissionGate.decide(
+    req({ gate: 'tools.overwrite', subject: 'bash', fallback: true }), undefined)).allowed, true);
+});
+
+// ── The source on the answer ──────────────────────────────────────────────────
+// `source` names which test in the cascade produced the answer — a human, a standing answer out of
+// configuration, or the site's own fallback. It exists for the REPORT, not the control flow: a refusal
+// that says only "Cancelled." reads to a model as a malfunction, so it hunts for a workaround or a bug.
+
+test('the boot default distinguishes a human answering from nobody being there', async () => {
+  assert.deepEqual(await askPermissionGate.decide(req(), recorder('yes').ask), permitted('user'));
+  assert.deepEqual(await askPermissionGate.decide(req(), recorder('no').ask), refused('user'),
+    'a no is still the user\'s answer — the source is who decided, not what they decided');
+  assert.deepEqual(await askPermissionGate.decide(req(), undefined), refused('fallback'));
+  assert.deepEqual(await askPermissionGate.decide(req({ fallback: true }), undefined), permitted('fallback'));
+});
+
+test('a standing answer reports as configuration, and a prompt as the user', async () => {
+  const configured = policy({ 'plugin.add': ['@x/foo'] });
+  assert.deepEqual(await configured.gate.decide(req(), recorder('Deny').ask), permitted('configuration'),
+    'a stored answer and an installation floor are one layer: settings reads are layered, so nothing '
+    + 'here can tell them apart, and claiming `user` for a configured floor would be a lie half the time');
+
+  const asked = policy();
+  assert.deepEqual(await asked.gate.decide(req(), recorder('allow').ask), permitted('user'));
+  assert.deepEqual(await asked.gate.decide(req(), recorder('deny').ask), refused('user'));
+});
+
+test('a delegated decision keeps the SOURCE of the gate that made it', async () => {
+  // Rewriting it here would erase the one fact `source` carries: the layer that answered.
+  const previous: PermissionGate = { async decide() { return refused('acme-directory'); } };
+  const { gate } = policy(undefined, previous);
+  assert.deepEqual(await gate.decide(req({ fallback: true }), undefined), refused('acme-directory'));
+});
+
+test('the refusal prose names the layer, and an unknown source is reported as itself', async () => {
+  // A policy this build never compiled against has layers of its own, so the vocabulary is open.
+  assert.match(refusalMessage(refused('user')), /the user declined/);
+  assert.match(refusalMessage(refused('configuration')), /permission policy does not allow it/);
+  assert.match(refusalMessage(refused('fallback')), /nobody could be asked/);
+  assert.match(refusalMessage(refused('acme-directory')), /\(acme-directory\)/);
+  // The two a model can do nothing about say so, so it stops looking for a fault to fix.
+  assert.match(refusalMessage(refused('user')), /do not retry it/);
+  assert.doesNotMatch(refusalMessage(refused('fallback')), /do not retry it/,
+    'the one source that CAN change: it needs a human present, or a standing answer');
+  // The caller's own words for the act, when it has them.
+  assert.match(refusalMessage(refused('user'), 'Import of \'node:fs\''), /^Import of 'node:fs': cancelled/);
 });
 
 // ── ctx.gate binding ──────────────────────────────────────────────────────────
 
 test('a tool supplies the suffix; the host qualifies it with the tool it is registered under', async () => {
   const seen: PermissionRequest[] = [];
-  const gate: PermissionGate = { async decide(r) { seen.push(r); return true; } };
+  const gate: PermissionGate = { async decide(r) { seen.push(r); return permitted('user'); } };
 
   // Both runtimes register a tool named `plugin`, so both reach the same gate id — which is the whole
   // reason the qualifier is the TOOL name and not the package's.
@@ -59,7 +104,7 @@ test('a tool supplies the suffix; the host qualifies it with the tool it is regi
 
 test('a tool whose NAME is chosen at run time declares the gate namespace instead', async () => {
   const seen: PermissionRequest[] = [];
-  const gate: PermissionGate = { async decide(r) { seen.push(r); return true; } };
+  const gate: PermissionGate = { async decide(r) { seen.push(r); return permitted('user'); } };
 
   // A `function-tools` function is registered under the name the MODEL gave it, so qualifying by that
   // name would mint a gate id per definition: nothing an installation could key `default_settings:` by,
@@ -77,7 +122,8 @@ test('a tool whose NAME is chosen at run time declares the gate namespace instea
 test('with no gate registered at all, the binding still asks rather than allowing', async () => {
   const { asked, ask } = recorder('no');
   const bound = bindGate(undefined, 'plugin', ask);
-  assert.equal(await bound.gate({ gate: 'add', subject: '@x/foo', label: 'l', fallback: false }), false);
+  assert.deepEqual(await bound.gate({ gate: 'add', subject: '@x/foo', label: 'l', fallback: false }),
+    refused('user'));
   assert.equal(asked.length, 1);
 });
 
@@ -120,16 +166,16 @@ test('a stored generalisation covers a subject it was never written for', async 
   const { gate } = policy({ 'tool_function.import': ['probe node:'] });
   // Nobody stored "probe node:os", and nobody is asked: the suggestion matched.
   const { asked } = recorder('deny');
-  assert.equal(await gate.decide(importReq(), asked.length === 0 ? undefined : undefined), true);
+  assert.equal((await gate.decide(importReq(), asked.length === 0 ? undefined : undefined)).allowed, true);
   // A different function is NOT covered by the first one's standing answer.
-  assert.equal(await gate.decide(importReq({ subject: 'other node:os', standing: [
-    { subject: 'other node:', label: 'x' }, { subject: '* node:os', label: 'y' }] }), undefined), false);
+  assert.equal((await gate.decide(importReq({ subject: 'other node:os', standing: [
+    { subject: 'other node:', label: 'x' }, { subject: '* node:os', label: 'y' }] }), undefined)).allowed, false);
 });
 
 test('each standing answer is offered in order, labelled by the CALL SITE, and the chosen one is stored', async () => {
   const { gate, settings } = policy();
   const { asked, ask } = recorder('always-1');
-  assert.equal(await gate.decide(importReq(), ask), true);
+  assert.equal((await gate.decide(importReq(), ask)).allowed, true);
   // The policy renders the call site's prose and never rewrites it — the same rule `label` follows.
   // Rendering `Always allow "<subject>"` could only ever show the key, which is what made the prompt
   // unreadable: nothing outside the call site knows that `node:` means "any builtin".
@@ -148,7 +194,7 @@ test('with none offered, the policy still offers the exact subject', async () =>
   // the subject is all a policy can honestly do.
   const { gate, settings } = policy();
   const { asked, ask } = recorder('always-0');
-  assert.equal(await gate.decide(req(), ask), true);
+  assert.equal((await gate.decide(req(), ask)).allowed, true);
   assert.deepEqual(asked[0]?.options?.map(optionLabel),
     ['Deny', 'Allow', 'Always allow "@x/foo"', 'Always allow every plugin.add']);
   assert.deepEqual(await settings.get('plugin.add'), ['@x/foo']);
@@ -159,35 +205,35 @@ test('a policy stores only a subject it actually offered', async () => {
   // otherwise a call site could widen any gate's memory by what it puts in one field.
   const { gate, docs } = policy();
   const { ask } = recorder('always-9');
-  assert.equal(await gate.decide(importReq(), ask), false, 'an unrecognised answer grants nothing');
+  assert.equal((await gate.decide(importReq(), ask)).allowed, false, 'an unrecognised answer grants nothing');
   assert.equal(docs.size, 0);
 });
 
 test('an unknown gate id is asked about, never allowed', async () => {
   const { gate } = policy({ 'plugin.add': ['@x/foo'] });
   const { asked, ask } = recorder('Deny');
-  assert.equal(await gate.decide(req({ gate: '@fnarr/jobs.run', subject: 'nightly' }), ask), false);
+  assert.equal((await gate.decide(req({ gate: '@fnarr/jobs.run', subject: 'nightly' }), ask)).allowed, false);
   assert.equal(asked.length, 1, 'a gate this build never compiled against still reaches a human');
 });
 
 test('a configured subject is allowed; a sibling subject of the same gate is not', async () => {
   const { gate } = policy({ 'plugin.add': ['@x/foo'] });
   const silent = recorder('Deny');
-  assert.equal(await gate.decide(req({ subject: '@x/foo' }), silent.ask), true);
+  assert.equal((await gate.decide(req({ subject: '@x/foo' }), silent.ask)).allowed, true);
   assert.equal(silent.asked.length, 0);
 
-  assert.equal(await gate.decide(req({ subject: 'https://evil/foo.ts' }), silent.ask), false);
+  assert.equal((await gate.decide(req({ subject: 'https://evil/foo.ts' }), silent.ask)).allowed, false);
   assert.equal(silent.asked.length, 1, 'the subject is the spelling the call site has, not a canonical identity');
 });
 
 test('"Always allow every <gate>" stores true, and every later subject rides on it', async () => {
   const { gate, settings } = policy();
   const every = recorder('always-gate');
-  assert.equal(await gate.decide(req(), every.ask), true);
+  assert.equal((await gate.decide(req(), every.ask)).allowed, true);
   assert.equal(await settings.get('plugin.add'), true);
 
   const later = recorder('Deny');
-  assert.equal(await gate.decide(req({ subject: '@y/bar' }), later.ask), true);
+  assert.equal((await gate.decide(req({ subject: '@y/bar' }), later.ask)).allowed, true);
   assert.equal(later.asked.length, 0);
 });
 
@@ -197,19 +243,19 @@ test('a plain "Allow" permits this act and remembers NOTHING', async () => {
   // standing answer the user never gave, and every later add of that subject proceeded with no prompt.
   const { gate, settings } = policy();
   const once = recorder('allow');
-  assert.equal(await gate.decide(req(), once.ask), true);
+  assert.equal((await gate.decide(req(), once.ask)).allowed, true);
   assert.deepEqual(await settings.entries(), {}, 'a one-off Allow persists nothing at all');
 
   // So the same subject is asked about again, and a Deny is still a Deny.
   const again = recorder('Deny');
-  assert.equal(await gate.decide(req(), again.ask), false);
+  assert.equal((await gate.decide(req(), again.ask)).allowed, false);
   assert.equal(again.asked.length, 1);
 });
 
 test('an answer matching no option is a refusal, not an allow', async () => {
   const { gate } = policy();
-  assert.equal(await gate.decide(req({ fallback: true }), recorder('').ask), false);
-  assert.equal(await gate.decide(req(), recorder('a').ask), false, 'a bare prefix is not an answer');
+  assert.equal((await gate.decide(req({ fallback: true }), recorder('').ask)).allowed, false);
+  assert.equal((await gate.decide(req(), recorder('a').ask)).allowed, false, 'a bare prefix is not an answer');
 });
 
 test('echoing a rendered "Always allow …" label remembers nothing', async () => {
@@ -217,7 +263,7 @@ test('echoing a rendered "Always allow …" label remembers nothing', async () =
   // of the option's value cannot author a standing answer — the failure mode this whole split exists
   // to make unreachable. (It reads as "no option matched", i.e. a refusal.)
   const { gate, settings } = policy();
-  assert.equal(await gate.decide(req(), recorder('Always allow "@x/foo"').ask), false);
+  assert.equal((await gate.decide(req(), recorder('Always allow "@x/foo"').ask)).allowed, false);
   assert.equal(await settings.get('plugin.add'), undefined);
 });
 
@@ -240,16 +286,16 @@ test('with nobody to ask, the policy delegates to the gate it displaced', async 
   // Composition is the ToolCallValidator idiom: the pair composes in either load order, because the
   // displaced gate is captured rather than shadowed.
   const seen: PermissionRequest[] = [];
-  const previous: PermissionGate = { async decide(r) { seen.push(r); return true; } };
+  const previous: PermissionGate = { async decide(r) { seen.push(r); return permitted('user'); } };
   const { gate } = policy(undefined, previous);
 
-  assert.equal(await gate.decide(req({ fallback: false }), undefined), true, 'the predecessor decides');
+  assert.equal((await gate.decide(req({ fallback: false }), undefined)).allowed, true, 'the predecessor decides');
   assert.deepEqual(seen.map(r => r.subject), ['@x/foo']);
 
   // And with no predecessor it is the site's own fallback, which is what the host default answers too.
   const alone = policy();
-  assert.equal(await alone.gate.decide(req({ fallback: true }), undefined), true);
-  assert.equal(await alone.gate.decide(req({ fallback: false }), undefined), false);
+  assert.equal((await alone.gate.decide(req({ fallback: true }), undefined)).allowed, true);
+  assert.equal((await alone.gate.decide(req({ fallback: false }), undefined)).allowed, false);
 });
 
 // ── Composition against a host-shaped registry ────────────────────────────────
@@ -273,36 +319,36 @@ function hostRegistry(boot: PermissionGate) {
 
 test('a policy that displaces another can delegate to it', async () => {
   const asked: string[] = [];
-  const boot: PermissionGate = { async decide(r) { asked.push(`boot:${r.gate}`); return r.fallback; } };
+  const boot: PermissionGate = { async decide(r) { asked.push(`boot:${r.gate}`); return r.fallback ? permitted('fallback') : refused('fallback'); } };
   const host = hostRegistry(boot);
 
   // Exactly what a policy plugin's setup() does, and what the docblock tells it to do.
   const previous = host.PermissionGate;
   host.register({
     async decide(r, ask) {
-      if (r.gate === 'plugin.add') return false;
+      if (r.gate === 'plugin.add') return refused('configuration');
       return previous.decide(r, ask);        // must reach `boot`, not recurse into this gate
     },
   });
 
-  assert.equal(await host.PermissionGate.decide(req(), undefined), false);
-  assert.equal(await host.PermissionGate.decide(req({ gate: 'tools.overwrite', fallback: true }), undefined), true);
+  assert.equal((await host.PermissionGate.decide(req(), undefined)).allowed, false);
+  assert.equal((await host.PermissionGate.decide(req({ gate: 'tools.overwrite', fallback: true }), undefined)).allowed, true);
   assert.deepEqual(asked, ['boot:tools.overwrite'], 'the displaced gate decided, exactly once');
 
   // And unloading the policy reverts to the host's boot default rather than dangling on the gone impl.
   host.unregister();
-  assert.equal(await host.PermissionGate.decide(req({ gate: 'plugin.add', fallback: true }), undefined), true);
+  assert.equal((await host.PermissionGate.decide(req({ gate: 'plugin.add', fallback: true }), undefined)).allowed, true);
 });
 
 test('the shipped policy delegates without recursing when it displaces a live one', async () => {
   // The same shape with the real policy in the middle: createDefaultGate(settings, previous) is the
   // documented composition, and `previous` here is captured from the registry the way a plugin does.
-  const host = hostRegistry({ async decide() { return true; } });
+  const host = hostRegistry({ async decide() { return permitted('user'); } });
   const { settings } = policy();
   host.register(createDefaultGate(settings, host.PermissionGate));
 
   // No channel, nothing stored: the policy defers, and the deferral must terminate.
-  assert.equal(await host.PermissionGate.decide(req({ fallback: false }), undefined), true);
+  assert.equal((await host.PermissionGate.decide(req({ fallback: false }), undefined)).allowed, true);
 });
 
 test('two "Always allow" answers at once keep both subjects', async () => {
@@ -367,20 +413,20 @@ test('gate_action clear forgets an answer, reverting to what the installation co
   const tool = makeGateActionTool(settings);
 
   await gate.decide(req({ subject: '@x/foo' }), recorder('always-0').ask);
-  assert.equal(await gate.decide(req({ subject: '@x/foo' }), recorder('Deny').ask), true);
+  assert.equal((await gate.decide(req({ subject: '@x/foo' }), recorder('Deny').ask)).allowed, true);
 
   // One subject out of the stored list; the rest of the list stands.
   await run(tool, { action: 'clear', gate: 'plugin.add', subject: '@x/foo' });
   const asked = recorder('Deny');
-  assert.equal(await gate.decide(req({ subject: '@x/foo' }), asked.ask), false);
+  assert.equal((await gate.decide(req({ subject: '@x/foo' }), asked.ask)).allowed, false);
   assert.equal(asked.asked.length, 1);
-  assert.equal(await gate.decide(req({ subject: '@configured/one' }), asked.ask), true);
+  assert.equal((await gate.decide(req({ subject: '@configured/one' }), asked.ask)).allowed, true);
 
   // The whole gate: delete means "revert to the configured default", so the floor comes back.
   await gate.decide(req({ subject: '@x/foo' }), recorder('always-0').ask);
   const cleared = await run<{ cleared: string[]; message: string }>(tool, { action: 'clear', gate: 'plugin.add' });
   assert.deepEqual(cleared.cleared, ['plugin.add']);
-  assert.equal(await gate.decide(req({ subject: '@configured/one' }), asked.ask), true,
+  assert.equal((await gate.decide(req({ subject: '@configured/one' }), asked.ask)).allowed, true,
     'the installation floor is not a stored answer, so clearing cannot delete it');
   assert.match(cleared.message, /configured defaults/,
     'and the result says so, since the gate is still allowed for what config named');

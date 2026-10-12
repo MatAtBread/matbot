@@ -669,8 +669,30 @@ construction rather than by luck, because the value-returning prompts are exclud
 `ask_user`, `store-key` secret entry and credential entry stay on `ctx.prompt` and are not routed —
 not by an exemption list, but because they do not call a gate. Splitting authorization out of the
 prompt channel is what deletes the routing rules a `gate?:` flag on `FormField` would have needed.
-`false` is "not permitted" whether a human just said so or a stored answer did, so there is nothing
-to branch on and no distinct denial error; call sites yield their existing `Cancelled.` result.
+`allowed: false` is "not permitted" whether a human just said so or a stored answer did, so there is
+nothing to branch on and no distinct denial error.
+
+**The answer carries `source`, and it is for the REPORT, not the control flow.** A decision is
+`{ allowed, source }`, where `source` names *which test in the cascade produced the answer* — not who
+the actor was: `user` (a human was asked and answered, a no included), `configuration` (a standing
+answer in force), `fallback` (nothing decided and nobody was reachable). It exists because a refusal
+that says only `Cancelled.` reads to a model as a malfunction, so it goes looking for the malfunction:
+it retries under another spelling, probes for a bug, or reaches for a route around the gate. Call sites
+therefore render `refusalMessage(decision)`, which names the layer and — for the two sources nothing in
+the turn can change — says there is nothing here to work around. `fallback` deliberately says the
+opposite, because that one *can* change: a human present, or a standing answer.
+
+The vocabulary is **open** (`PermissionSource` is `… | (string & {})`): a replacement policy has layers
+of its own (`user-stored-preference`, an org directory, a rule table) and a closed union would mean a
+policy could not report truthfully without a plugin-api change. So nothing switches on `source` for an
+outcome, and a delegating gate passes the displaced gate's source back out unrewritten — rewriting it
+would erase the one fact it carries. The default policy reports one `configuration` for both an
+installation floor and a remembered answer, because settings reads are layered and nothing can tell the
+two apart (see *Default plugin settings*); claiming `user` for a configured floor would be a lie half
+the time.
+
+The shape's one hazard is stated where it is read (`ToolContext.gate`): the decision is an object, so
+`if (!await ctx.gate(…))` is always false. Test `.allowed`.
 
 **The default policy is host-seeded, not a configured plugin** — `matbot-default-gate` is a library
 in the `tool-plugin` mould: each host passes its `defaultGate` to `assembleMachine`, which boots it as

@@ -1,4 +1,4 @@
-import type { FormField, PermissionGate, PluginSettings } from '@matatbread/matbot-plugin-api';
+import { permitted, refused, type FormField, type PermissionGate, type PluginSettings } from '@matatbread/matbot-plugin-api';
 
 /** The settings namespace standing answers live in, and what an installation keys `default_settings:`
  *  by. This package's own name, though it is seeded by the host rather than loaded as a plugin — the
@@ -83,11 +83,21 @@ export function createDefaultGate(settings: PluginSettings, previous?: Permissio
   return {
     async decide(req, ask) {
       const standing = req.standing ?? [];
-      if (allows(await read(req.gate), req.subject, standing)) return true;
+      // A standing answer is `configuration` whether it came from `default_settings:` or from a
+      // "always allow" a human gave earlier — settings reads are layered, so nothing here can tell
+      // the two apart, and a source that claimed `user` for a configured floor would be a lie half
+      // the time. What a reader needs is that this was decided in advance, not at this prompt.
+      if (allows(await read(req.gate), req.subject, standing)) return permitted('configuration');
 
       // Nothing stored and nobody to ask: the displaced gate answers, which for the host default means
       // `req.fallback` — today's non-interactive behaviour at each site, stated by the site itself.
-      if (ask === undefined) return previous?.decide(req, ask) ?? req.fallback;
+      // The predecessor's own source rides back out: it is the layer that answered, and rewriting it
+      // here would erase the one fact `source` carries.
+      if (ask === undefined) {
+        return previous !== undefined
+          ? previous.decide(req, ask)
+          : req.fallback ? permitted('fallback') : refused('fallback');
+      }
 
       // Each option carries a VALUE distinct from its label, and the answer is matched against the
       // value. A label is cosmetic — rendered, rewordable, localisable — so using it as the identity
@@ -123,7 +133,7 @@ export function createDefaultGate(settings: PluginSettings, previous?: Permissio
       };
       const answer = (await ask(field)).trim().toLowerCase();
 
-      if (answer === ALWAYS_GATE) { await serialised(() => settings.set(req.gate, true)); return true; }
+      if (answer === ALWAYS_GATE) { await serialised(() => settings.set(req.gate, true)); return permitted('user'); }
       // Only a subject that was OFFERED can be stored: the remembered value is looked up in the options
       // this prompt rendered, never taken from the answer text. A policy that stored an arbitrary string
       // back would let a call site widen every other gate's memory by what it puts in one field.
@@ -139,11 +149,11 @@ export function createDefaultGate(settings: PluginSettings, previous?: Permissio
           const subjects = current === undefined || current === true ? [chosen] : [...new Set([...current, chosen])];
           await settings.set(req.gate, subjects);
         });
-        return true;
+        return permitted('user');
       }
       // Deny, an answer a frontend resolved to no option, or anything unrecognised: permission is what
       // has to be given, so only the two allow answers grant it — and a plain Allow remembers nothing.
-      return answer === ALLOW_ONCE;
+      return answer === ALLOW_ONCE ? permitted('user') : refused('user');
     },
   };
 }

@@ -3,6 +3,7 @@ import type { Tool, ToolExecutor, ToolResultOf, ToolContext, MatbotPlugin, Runti
 import { getRegisteredPlugins, getRegisteredTools, getRegisteredFrontendPlugins,
          getRegisteredServiceKeys, getHookPlugins, getSystemContextPlugins,
          getSpecifierForPlugin, getFailedPlugins, clearFailedPlugin } from '@matatbread/matbot-core';
+import { refusalMessage } from '@matatbread/matbot-plugin-api';
 
 /**
  * Persistence of user-added plugin specifiers across realm reloads. The browser has no matbot.yaml,
@@ -168,9 +169,10 @@ export function createBrowserPluginTool(extras: ExtraPlugins): Tool<ToolResultOf
         // break the LLM's execution chain so a malicious prompt cannot self-install plugins. The gate id
         // is qualified by the TOOL name, which is `plugin` here as it is on node, so one policy covers
         // both runtimes' implementations.
-        if (!await ctx.gate({ gate: 'add', subject: specifier, fallback: false,
-                              label: `Install plugin **"${specifier}"**?` })) {
-          yield { type: 'result', value: { message: 'Cancelled.' } };
+        const permit = await ctx.gate({ gate: 'add', subject: specifier, fallback: false,
+                                        label: `Install plugin **"${specifier}"**?` });
+        if (!permit.allowed) {
+          yield { type: 'result', value: { message: refusalMessage(permit) } };
           return;
         }
         yield { type: 'stdout', chunk: `Activating "${specifier}"...\n` };
@@ -210,9 +212,10 @@ export function createBrowserPluginTool(extras: ExtraPlugins): Tool<ToolResultOf
           yield { type: 'result', value: { message: `"${specifier}" is not an installed plugin — pass its package name or its configured specifier (see \`plugin list\`).` } };
           return;
         }
-        if (!await ctx.gate({ gate: 'remove', subject: entry, fallback: false,
-                              label: `Remove plugin **"${entry}"**?` })) {
-          yield { type: 'result', value: { message: 'Cancelled.' } };
+        const permit = await ctx.gate({ gate: 'remove', subject: entry, fallback: false,
+                                        label: `Remove plugin **"${entry}"**?` });
+        if (!permit.allowed) {
+          yield { type: 'result', value: { message: refusalMessage(permit) } };
           return;
         }
         yield { type: 'stdout', chunk: `Deactivating "${entry}"...\n` };
@@ -238,10 +241,13 @@ export function createBrowserPluginTool(extras: ExtraPlugins): Tool<ToolResultOf
           yield { type: 'stderr', chunk: `${String(e)}\n` };
           wasLoaded = true;
         }
-        if (!wasLoaded && !await ctx.gate({ gate: 'load', subject: entry, fallback: false,
-                                           label: `Plugin **"${entry}"** is not currently loaded — load it now?` })) {
-          yield { type: 'result', value: { message: 'Cancelled.' } };
-          return;
+        if (!wasLoaded) {
+          const permit = await ctx.gate({ gate: 'load', subject: entry, fallback: false,
+                                          label: `Plugin **"${entry}"** is not currently loaded — load it now?` });
+          if (!permit.allowed) {
+            yield { type: 'result', value: { message: refusalMessage(permit) } };
+            return;
+          }
         }
         const reloaded = await ctx.loadPlugin(entry);
         const welcome  = await reloaded.installationMessage?.();

@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { setupPlugin, PLUGIN_API_VERSION } from '@matatbread/matbot-core';
 import type { MatbotMachine, MatbotPlugin, PermissionGate, PermissionRequest } from '@matatbread/matbot-core';
+import { permitted, refused } from '@matatbread/matbot-core';
 
 /**
  * What a plugin reads through its own scoped machine must be the LIVE policy, not a copy taken when it
@@ -18,7 +19,7 @@ import type { MatbotMachine, MatbotPlugin, PermissionGate, PermissionRequest } f
  */
 
 const gateNamed = (name: string): PermissionGate =>
-  ({ async decide(_req: PermissionRequest) { return name === 'allow'; } });
+  ({ async decide(_req: PermissionRequest) { return name === 'allow' ? permitted('user') : refused('user'); } });
 
 function hostMachine(boot: PermissionGate) {
   let active = boot;
@@ -59,13 +60,13 @@ test('a plugin reads the live gate through its scoped machine, not a load-time c
   await setupPlugin(plugin, machine);
 
   const req: PermissionRequest = { gate: 'plugin.add', subject: '@x/foo', label: 'l', fallback: false };
-  assert.equal(await scoped.PermissionGate.decide(req, undefined), false, 'the boot policy decides');
+  assert.equal((await scoped.PermissionGate.decide(req, undefined)).allowed, false, 'the boot policy decides');
 
   // A policy registered AFTER this plugin loaded must be the one it consults.
   swap(gateNamed('allow'));
-  assert.equal(await scoped.PermissionGate.decide(req, undefined), true);
+  assert.equal((await scoped.PermissionGate.decide(req, undefined)).allowed, true);
 
   // And unloading that policy must land back on the host's boot default, not on the gone impl.
   revert();
-  assert.equal(await scoped.PermissionGate.decide(req, undefined), false);
+  assert.equal((await scoped.PermissionGate.decide(req, undefined)).allowed, false);
 });

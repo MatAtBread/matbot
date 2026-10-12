@@ -1,4 +1,4 @@
-import { importableByName } from '@matatbread/matbot-plugin-api';
+import { importableByName, refusalMessage } from '@matatbread/matbot-plugin-api';
 import type { MatbotMachine, PluginSettings, Tool, ToolContext, ToolContract, ToolExecutor, ToolResultOf } from '@matatbread/matbot-plugin-api';
 
 /**
@@ -176,14 +176,15 @@ export function createRunnerConfigTool(
           // other. Narrowest first — this key, then any setting of this runner.
           const now = await current();
           for (const key of writes.keys()) {
-            if (!await ctx.gate({
+            const permit = await ctx.gate({
               gate: 'set', subject: key, label: labelFor(key, now), fallback: false,
               standing: [
                 { subject: key, label: `Always allow changing \`${key}\`` },
                 { subject: '*', label: 'Always allow changing this runner\'s settings' },
               ],
-            })) {
-              yield { type: 'error', message: `Cancelled. \`${key}\` was not changed.` };
+            });
+            if (!permit.allowed) {
+              yield { type: 'error', message: `${refusalMessage(permit)} \`${key}\` was not changed.` };
               return;
             }
           }

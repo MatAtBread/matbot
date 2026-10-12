@@ -12,6 +12,20 @@ churn and less likely to affect a consumer who doesn't use them.
 ## 0.4.20
 
 ### Breaking changes
+- **A permission decision says which test produced it.** `PermissionGate.decide` and `ctx.gate` now
+  resolve `{ allowed, source }` rather than a bare boolean, where `source` names the layer of the
+  cascade that answered — `user` (a human was asked), `configuration` (a standing answer in force),
+  `fallback` (nobody reachable, so the call site's own default stood), or a name a replacement policy
+  invented; the type is deliberately open. Call sites render `refusalMessage(decision)` instead of
+  `Cancelled.`, which names the layer and, where it is true, says there is nothing here to work around:
+  a bare cancellation reads to a model as a malfunction, so it retried under another spelling, hunted
+  for the bug, or looked for a route around the gate. Nothing branches on `source`, and a delegating
+  gate passes the displaced gate's source back out unrewritten.
+
+  Migrating a call site or a gate of your own: test `.allowed` — the decision is an object, so
+  `if (!await ctx.gate(…))` is always false, which the compiler cannot tell you. A gate returns
+  `permitted(source)` / `refused(source)` (both exported from plugin-api and core).
+
 - **The node `FunctionRunner` is a plugin, and not in a default install.** Bounding a `tool_function`
   body's synchronous stretches, withholding the host globals that reach a capability without an import,
   and routing its `import(…)` through the gate all move out of `apps/cli` into
