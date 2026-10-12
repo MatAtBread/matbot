@@ -2,10 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
-import { RegistryChangeKind } from '@matatbread/matbot-core';
 import { ToolTypeIndexImpl } from '@matatbread/matbot-tool-types';
 import { plugin, FUNCTION_SYNC_LIMIT_MS, createVmFunctionRunner } from '@matatbread/matbot-function-runner-node';
-import type { FunctionRunner, MatbotMachine, Notification } from '@matatbread/matbot-plugin-api';
+import type { FunctionRunner, MatbotMachine } from '@matatbread/matbot-plugin-api';
 
 // The node runner is a PLUGIN, not part of the host: bounding a body, withholding host globals from it
 // and gating its imports are all optional, and reachable through the `FunctionRunner` seam alone. These
@@ -55,36 +54,52 @@ test('timeout_ms: 0 is warned about, and removes the TIME bound only', async () 
   assert.ok(FUNCTION_SYNC_LIMIT_MS > 0, 'while the default is a real bound');
 });
 
-test('the tool dts is rebuilt when a FunctionRunner arrives, not just when tools change', async () => {
-  // What the type index derives from the runner is CACHED — the permitted set becomes the program's
-  // `paths` and IMPORT-GATE's list, the withheld globals become ENV-GATE's, and the note is composed
-  // from both. While the runner was seeded by the host that could not go stale; it is a plugin now, so
-  // it can arrive after a dts has been built and handed out. The index therefore watches the SERVICES
-  // registry for this key as well as the tool registry.
-  let sink: ((n: Notification) => void) | undefined;
+test('the declarations follow the runner with nothing to invalidate', async () => {
+  // The obvious thing to reach for, now that the runner is a plugin that can arrive after a dts has been
+  // handed out, is a subscription that rebuilds on a `services` registry change. It would be dead weight:
+  // nothing derived from the runner is held. The note is composed on every call, `check` passes the two
+  // lists fresh to each run, and the one cache over them keys on the permit array by identity. What IS
+  // cached is the source scan, which the runner has no part in — so subscribing would discard a good
+  // TypeScript build to recompute something that was never stale.
+  //
+  // Asserted by building a dts BEFORE the runner exists and reading it again after, with no event fired.
   let runner: FunctionRunner | undefined;
   const machine = {
     tools: { list: () => [], resolve: () => null },
-    Notifier: { consume: (fn: (n: Notification) => void) => { sink = fn; } },
+    Notifier: { consume: () => {} },
     get FunctionRunner() { return runner; },
   } as unknown as MatbotMachine;
 
   const index = new ToolTypeIndexImpl(machine, () => Promise.resolve(null));
   const before = await index.dts();
-  assert.doesNotMatch(before, /Absent:/, 'no runner ⇒ nothing is claimed about the environment');
+  assert.doesNotMatch(before, /Absent:/, 'no runner ⇒ nothing is claimed about what is out of scope');
 
   runner = createVmFunctionRunner(0, { permit: ['node:os'] });
-  assert.ok(sink !== undefined, 'the index subscribed');
-  sink!({ kind: RegistryChangeKind, registry: 'services', name: 'FunctionRunner', operation: 'added' } as unknown as Notification);
-
   const after = await index.dts();
-  assert.match(after, /Absent: process[^\n]*\beval\b/, 'the withheld list reached the note, and so ENV-GATE');
-  assert.match(after, /node:os/, 'and the permitted set reached the listing');
-
-  // A change to some OTHER service does not invalidate it — the cache is a TypeScript program, and
-  // rebuilding it on every registration would make boot quadratic in the plugins loaded.
-  const cached = await index.dts();
-  sink!({ kind: RegistryChangeKind, registry: 'services', name: 'MediaStore', operation: 'added' } as unknown as Notification);
-  assert.equal(await index.dts(), cached);
+  assert.match(after, /Absent: process[^\n]*\beval\b/, 'the withheld list is there, with no event fired');
+  assert.match(after, /node:os/, 'and so is the permitted set');
   index.close();
+});
+
+test('the declarations do not promise a prompt that nothing will raise', async () => {
+  // Whether an import is GATED is whether a runner routes it, not whether a restriction exists. With no
+  // runner nothing rewrites `import(…)` — it reaches node's own loader, unasked — so a body told "you
+  // will be asked the first time" discovers the contradiction the first time it imports anything.
+  const dtsFor = async (runner: FunctionRunner | undefined): Promise<string> => {
+    const index = new ToolTypeIndexImpl({
+      tools: { list: () => [], resolve: () => null },
+      Notifier: { consume: () => {} },
+      FunctionRunner: runner,
+    } as unknown as MatbotMachine, () => Promise.resolve(null));
+    try { return await index.dts(); } finally { index.close(); }
+  };
+
+  const guarded = await dtsFor(createVmFunctionRunner(0));
+  assert.match(guarded, /subject to permission at the call/);
+  assert.match(guarded, /you will be asked/);
+
+  const bare = await dtsFor(undefined);
+  assert.match(bare, /A body may import node builtins/, 'still true: they resolve natively');
+  assert.doesNotMatch(bare, /subject to permission/, 'nothing routes the import, so nothing decides it');
+  assert.doesNotMatch(bare, /you will be asked/);
 });

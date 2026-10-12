@@ -171,15 +171,17 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
   constructor(machine: MatbotMachine, fill: ToolTypesFill = buildToolTypes) {
     this.machine = machine;
     this.fill = fill;
-    // Any tool CRUD invalidates the generated dts; the event itself carries nothing we need. So does the
-    // `FunctionRunner` arriving or leaving, because what this derives from it is CACHED: the permitted
-    // import set becomes the program's `paths` and IMPORT-GATE's list, its withheld globals become
-    // ENV-GATE's, and the note at the top of the declarations is composed from both. That was safe to
-    // ignore only while the runner was seeded by the host before anything could read a dts; it is a
-    // plugin now, so it can arrive after one has been built and handed out.
+    // Any tool CRUD invalidates the generated dts; the event itself carries nothing we need.
+    //
+    // A `FunctionRunner` arriving or leaving deliberately does NOT, though it is the obvious thing to
+    // reach for now that the runner is a plugin and can appear after a dts has been handed out. Nothing
+    // derived from it is held: {@link importNote} reads it on every call, {@link check} passes its two
+    // lists fresh to each run, and the one cache over it — {@link importPaths} — keys on the permit array
+    // by identity, so a different runner is a different key. What IS cached is the source scan, which the
+    // runner has no part in. Subscribing would throw away a good TypeScript build every time the runner
+    // was registered or hot-reloaded, to recompute something that was never stale.
     machine.Notifier.consume(() => { this.generation++; }, this.ac.signal,
-      n => n.kind === RegistryChangeKind
-        && (n.registry === 'tools' || (n.registry === 'services' && n.name === 'FunctionRunner')));
+      n => n.kind === RegistryChangeKind && n.registry === 'tools');
   }
 
   close(): void { this.ac.abort(); }
@@ -362,12 +364,17 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
       ...[...typed].sort(),
       ...(restricted ?? []).filter(p => !covered(p)).sort().map(mark),
     ];
+    // Whether an import is GATED is whether a runner routes it, not whether a restriction exists. With no
+    // runner nothing rewrites `import(…)`: it reaches node's own loader, unasked and unchecked. Saying
+    // "you will be asked" there is a promise nothing keeps, and a body discovers the contradiction the
+    // first time it imports something.
+    const gated = this.machine.FunctionRunner !== undefined;
+    const subject = gated ? ', each subject to permission at the call' : '';
     const note = restricted !== undefined && restricted.length === 0
       ? `// Module imports are switched off on this installation.\n`
       : restricted === undefined
-        ? `// A body may import node builtins, each subject to permission at the call — you will be asked\n`
-          + `// the first time: const fs = await import('node:fs/promises');\n`
-        : `// A body may import these, each subject to permission at the call:\n`
+        ? `// A body may import node builtins${subject}${gated ? ' — you will be asked\n// the first time' : ''}: const fs = await import('node:fs/promises');\n`
+        : `// A body may import these${subject}:\n`
           + `${listing.map(p => `//   ${p}`).join('\n')}\n`;
     // Composed from what the runner STATES — the permitted set above, and the identifiers it does not
     // bind — never from prose it supplies: the facts are the runner's, the wording is this file's, and

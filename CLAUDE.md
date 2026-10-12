@@ -797,15 +797,21 @@ Three parts, and only the first two enforce anything:
    `(a + b) / 2`. A parser also tells a method shorthand named `import` and a type-position
    `import('x').Foo` from a call, both of which had to be refused outright.
 
-   **A consumer that CACHES what the runner says must watch for it.** `ToolTypeIndex` derives the
-   program's `paths`, IMPORT-GATE's list, ENV-GATE's list and the note at the top of the declarations from
-   `permittedImports` and `withheldGlobals`, and caches the result — so it consumes the `services`
-   registry change for the `FunctionRunner` key alongside the tool-registry one it already watched. While
-   the runner was host-seeded that could not go stale, because it was in place before anything could read
-   a dts; as a plugin it can arrive after one has been built and handed out. Consumers that resolve the
-   runner per call need nothing — `function-tools` recompiles a body against whichever runner is current,
-   and the browser's index rebuilds its note on each `dts()` — and adding a subscription to either would
-   be the speculative kind.
+   **Nothing derived from the runner is cached, so nothing subscribes to it.** The obvious reflex, once the
+   runner is a plugin that can arrive after a dts has been handed out, is for `ToolTypeIndex` to rebuild on
+   a `services` registry change for the key. It was tried and reverted: the note is composed on every
+   `dts()`, `check()` passes the two lists fresh to each run, and the single cache over them keys on the
+   permit array by identity, so a different runner is a different key. What IS cached is the source scan,
+   which the runner has no part in — so subscribing discards a good TypeScript build to recompute
+   something that was never stale. `function-tools` likewise recompiles a body against whichever runner is
+   current, and the browser index rebuilds its note per call. **The rule that falls out: derive from the
+   runner at the point of use, and there is nothing to invalidate.**
+
+   **Whether an import is GATED is whether a runner routes it** — not whether a restriction exists. The
+   declarations said "each subject to permission at the call — you will be asked the first time" whenever
+   no restriction was configured, which is a promise nothing keeps when there is no runner at all: the
+   `import(…)` reaches the platform's loader unasked, and a body discovers the contradiction the first
+   time it imports anything.
 
    **What a runner tells the type-checker is two arrays, and no text.** `import('node:os')` gets its types
    from `compilerOptions.paths` — one entry per permitted specifier, pointing at the real
