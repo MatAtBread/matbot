@@ -719,10 +719,12 @@ answer is re-offered the first time that collision comes round again, so adopt-o
 exist to save one keystroke; an install still authoring it is warned, naming where it went.
 
 **Honest statement of the property, and its limit.** The gate makes a privileged operation *pass
-through a decision*; it does not put that decision out of the model's reach. Where the standing
-answers live — `.data/settings/`, per the default policy — is read-write to `bash`, and `docker-bash`
-mounts `.data` read-write too, so on any install that loads a shell tool the model can write
-`{"plugin.add": true}` itself and every later install proceeds unasked (reads are not cached, so it
+through a decision*; it does not put that decision out of the model's reach. The default policy keeps
+its standing answers in plugin settings, so they live wherever the active `StorageBackend` keeps
+settings — on the filesystem and SQLite backends, under `.data` (`.data/settings/`, `.data/matbot.db`).
+That is read-write to `bash`, and `docker-bash` mounts `.data` read-write too, so on any install that
+loads a shell tool the model can write `{"plugin.add": true}` itself (or the SQLite row holding it) and
+every later install proceeds unasked (reads are not cached, so it
 takes effect at once, not at the next restart). The same was true of the `__matbot_core__` key this
 replaces, over a narrower blast radius. So the property is **"a privileged operation is decided
 somewhere replaceable, and by default that means a human is asked"** — not "the LLM cannot change
