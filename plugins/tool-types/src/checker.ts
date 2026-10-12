@@ -550,6 +550,27 @@ try {
     importStarts.add(d.start);
   }
 
+  // ── TS2591's repair is never actionable in a snippet ──
+  // "Cannot find name 'process'. Do you need to install type definitions for node? Try 'npm i --save-dev
+  // @types/node'" is tsc telling a function body to run a package manager: there is no package.json to
+  // install into, and what a body is typed against is fixed by the runner, not by what happens to be
+  // installed. It fires for any global node declares that this configuration did not type — most often
+  // 'process', which ENV-GATE does not reach when NO runner is loaded, because then nothing is withheld.
+  // The finding is right and only the advice is wrong, so the message is replaced and the position
+  // suppressed exactly as a withheld name's is. No list of names here, deliberately: the trigger is
+  // tsc's own code, so this cannot drift out of step with what the runner withholds.
+  if (envGate) {
+    for (const d of targets) {
+      if (d.code !== 2591 || !d.file || typeof d.start !== 'number') continue;
+      if (envStarts.has(d.start) || importStarts.has(d.start)) continue;
+      const name = d.file.text.substr(d.start, d.length);
+      synth.push({ file: d.file, start: d.start, length: d.length, code: 90005,
+                   category: ts.DiagnosticCategory.Error, __syn: true,
+                   messageText: "'" + name + "' is not declared for a function body: the declarations above are the whole of the environment a body is typed against, and there are no type definitions to install from here. A node builtin comes from an 'await import' of a 'node:…' specifier; everything else a body is given is already in scope — 'tool', 'toolInContext' and 'context'." });
+      envStarts.add(d.start);
+    }
+  }
+
   const errors = targets.filter(function (d) {
     if (d.category !== ts.DiagnosticCategory.Error) return false;
     if ((d.code === 2306 || d.code === 2307 || d.code === 2591) && importStarts.has(d.start)) return false;

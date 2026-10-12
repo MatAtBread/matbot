@@ -6,24 +6,24 @@ import type {
 import { buildAsyncFn, buildBodyFn, runFunction, INJECTED, EXECUTE_SUBJECT, type CompiledFn } from './compile.js';
 import { parseSignature, paramsSchema, unwrapPromise, type ParsedParam, type ParsedSignature } from './signature.js';
 import { parsePackage, buildPackageFn, exportFn, type ParsedPackage } from './package.js';
-import { MARKER_CREATOR, sessionFunctions, turnContracts, shadowMessage, type SessionFunctionMarker, type SessionFunctionRecord } from './session.js';
+import { MARKER_CREATOR, sessionFunctions, turnContracts, shadowMessage, type SessionFunctionMarker, type SessionFunctionRecord, type SessionFunctionRow } from './session.js';
 
 const TOOL_NAME         = 'tool_function';
 const PLUGIN_NAME       = 'function-tools';
 const NAMESPACE         = 'functions';
 const PACKAGE_NAMESPACE = 'function-packages';
 
-interface FunctionRecord { name: string; definition: string; description?: string; definedUnchecked?: true }
+interface FunctionRecord { name: string; definition: string; description?: string; definedUnchecked?: true; checkedElsewhere?: true }
 
 /** One function's row in a `check` sweep: the service's report, plus who it is about. `diagnostics`
  *  carries each finding's own `rendered` text, so a reader displays that and counts on `total`. */
-interface CheckResult extends ToolCheckReport { name: string; package?: true; session?: true; definedUnchecked?: true }
+interface CheckResult extends ToolCheckReport { name: string; package?: true; session?: true; definedUnchecked?: true; checkedElsewhere?: true }
 
-interface PackageRecord { name: string; tools: string[]; definition: string; definedUnchecked?: true }
+interface PackageRecord { name: string; tools: string[]; definition: string; definedUnchecked?: true; checkedElsewhere?: true }
 
 /** A stored package, keyed by package name: the unit of declaration AND of removal, so an internal helper
  *  can never outlive the exports calling it, nor an export the helper it calls. */
-interface PackageDoc { id: string; version: string; definition: string; definedUnchecked?: true }
+interface PackageDoc { id: string; version: string; definition: string; definedUnchecked?: true; checkedAgainst?: string }
 
 /** A stored function. Its `id` IS its name — names are already unique (they are tool-registry keys),
  *  so there is no second identity to keep in step, and a rename is a delete plus an add. */
@@ -34,13 +34,38 @@ interface FunctionDoc {
    *  (check registers and persists nothing, and the fact it records stays true), which is what keeps the
    *  flag from ever becoming a lie people learn to ignore. */
   definedUnchecked?: true;
+  /** The {@link ToolTypeIndex.environment} fingerprint the check was reached under, when one was. */
+  checkedAgainst?: string;
 }
 
-const recordOf = (doc: FunctionDoc): FunctionRecord => ({
+/**
+ * A verdict is a claim about an environment, and the environment can be swapped out from under it: a
+ * body that passed with the node `FunctionRunner` loaded is still marked as having passed once the
+ * runner plugin is gone, or once its permitted imports are narrowed — while its `import(…)` is no
+ * longer gated, or no longer allowed at all. Nothing re-checks on load (that would be a worker program
+ * per stored function at boot, and would turn a report into a boot failure), so the stored fingerprint
+ * is compared instead, and `check` remains the way to re-verify.
+ *
+ * String equality, never parsed: WHAT differs is the runner's business, and all a reader needs is that
+ * the claim is about somewhere else. Absent on either side means there is nothing to say — a definition
+ * that was never checked already carries `definedUnchecked`, and an index that cannot check cannot date
+ * one either.
+ */
+const elsewhere = (against: string | undefined, env: string | undefined): { checkedElsewhere?: true } =>
+  against !== undefined && env !== undefined && against !== env ? { checkedElsewhere: true } : {};
+
+const recordOf = (doc: FunctionDoc, env?: string): FunctionRecord => ({
   name: doc.id, definition: doc.definition,
   ...(doc.description !== undefined ? { description: doc.description } : {}),
   ...(doc.definedUnchecked === true ? { definedUnchecked: true } : {}),
+  ...elsewhere(doc.checkedAgainst, env),
 });
+
+/** A session function's row: the fingerprint compared and dropped (see {@link elsewhere}). */
+const sessionRow = (rec: SessionFunctionRecord, env?: string): SessionFunctionRow => {
+  const { checkedAgainst, ...rest } = rec;
+  return { ...rest, ...elsewhere(checkedAgainst, env) };
+};
 
 // Placeholder used as a defined tool's description when the caller supplies none — fill in as desired.
 const PLACEHOLDER_DESCRIPTION = 'A user-defined function tool.';
@@ -166,7 +191,7 @@ declare module '@matatbread/matbot-plugin-api' {
       | ToolContract<unknown,                                                      { action: 'execute'; definition: string; noTypeCheck?: boolean }>
       | ToolContract<{ message: string; package: string; tools: string[] },         { action: 'package'; name: string; definition: string; noTypeCheck?: boolean }>
       | ToolContract<{ ok: boolean; checked: boolean; results: CheckResult[] },    { action: 'check';  name?: string; package?: string }>
-      | ToolContract<{ functions: FunctionRecord[]; packages: PackageRecord[]; sessionFunctions: SessionFunctionRecord[] }, { action: 'list' }>
+      | ToolContract<{ functions: FunctionRecord[]; packages: PackageRecord[]; sessionFunctions: SessionFunctionRow[] }, { action: 'list' }>
       | ToolContract<{ available: boolean; dts: string },                         { action: 'types'  }>
       | ToolContract<{ message: string },                                         { action: 'remove'; name: string } | { action: 'remove'; package: string }>;
   }
@@ -216,7 +241,8 @@ class FunctionStore {
 
   async list(): Promise<FunctionRecord[]> {
     const { items } = await this.store.query({ sort: [{ field: 'id', dir: 'asc' }], immutable: true });
-    return items.map(recordOf);
+    const env = await this.machine.ToolTypeIndex?.environment();
+    return items.map(doc => recordOf(doc, env));
   }
 
   async has(name: string): Promise<boolean> {
@@ -235,6 +261,7 @@ class FunctionStore {
     // browser — the function still compiles and runs), or when the caller opts out with noTypeCheck.
     const index = this.machine.ToolTypeIndex;
     let checked = false;
+    let checkedAgainst: string | undefined;
     if (index !== undefined && !noTypeCheck) {
       const report = await index.check(checkSnippet(sig));
       if (!report.ok) throw new Error(globalTypeError(report, sessionNames));
@@ -242,6 +269,7 @@ class FunctionStore {
       // registers such an index (for `dts()`), so trusting "an index was present" marked its definitions
       // verified when nothing had read them.
       checked = report.checked;
+      checkedAgainst = report.environment;
     }
     const doc: FunctionDoc = {
       id:      sig.name,
@@ -253,6 +281,9 @@ class FunctionStore {
       // an unrelated contract change made them impossible to ignore. Both bypass routes are recorded —
       // the explicit flag and the implicit "no checker here" — since the function is equally unverified.
       ...(checked ? {} : { definedUnchecked: true as const }),
+      // WHERE it passed, so a later reader can tell that the environment has moved under it — stored
+      // only when there is a verdict to qualify.
+      ...(checkedAgainst !== undefined ? { checkedAgainst } : {}),
     };
     await this.registerTool(recordOf(doc));   // compiles; throws on bad source before anything is persisted
     // No CAS: a define is an unconditional "this name now means this source", not a read-modify-write,
@@ -281,6 +312,7 @@ class FunctionStore {
       docs = [doc];
     }
 
+    const env = await index.environment();
     const results: CheckResult[] = [];
     for (const doc of docs) {
       let report: ToolCheckReport;
@@ -295,6 +327,7 @@ class FunctionStore {
       results.push({
         name: doc.id, ...report,
         ...(doc.definedUnchecked === true ? { definedUnchecked: true as const } : {}),
+        ...elsewhere(doc.checkedAgainst, env),
       });
     }
     return results;
@@ -350,12 +383,14 @@ class PackageStore {
 
   async list(): Promise<PackageRecord[]> {
     const { items } = await this.store.query({ sort: [{ field: 'id', dir: 'asc' }], immutable: true });
+    const env = await this.machine.ToolTypeIndex?.environment();
     return items.map(doc => {
       let tools: string[] = [];
       try { tools = parsePackage(doc.id, doc.definition).exports.map(e => e.toolName); } catch { /* reported by check */ }
       return {
         name: doc.id, tools, definition: doc.definition,
         ...(doc.definedUnchecked === true ? { definedUnchecked: true as const } : {}),
+        ...elsewhere(doc.checkedAgainst, env),
       };
     });
   }
@@ -371,15 +406,18 @@ class PackageStore {
     // The whole module is the snippet, so a private helper's signature is checked against its callers too.
     const index = this.machine.ToolTypeIndex;
     let checked = false;
+    let checkedAgainst: string | undefined;
     if (index !== undefined && !noTypeCheck) {
       const report = await index.check(definition);
       if (!report.ok) throw new Error(globalTypeError(report, sessionNames));
       checked = report.checked;
+      checkedAgainst = report.environment;
     }
     await this.install(name, parsed, definition);
     const doc: PackageDoc = {
       id: name, version: crypto.randomUUID(), definition,
       ...(checked ? {} : { definedUnchecked: true as const }),
+      ...(checkedAgainst !== undefined ? { checkedAgainst } : {}),
     };
     await this.store.set(doc.id, doc);
     return parsed.exports.map(e => e.toolName);
@@ -396,6 +434,7 @@ class PackageStore {
       if (doc === null) throw new Error(`No package named "${name}" was defined here.`);
       docs = [doc];
     }
+    const env = await index.environment();
     const results: CheckResult[] = [];
     for (const doc of docs) {
       let report: ToolCheckReport;
@@ -407,6 +446,7 @@ class PackageStore {
       results.push({
         name: doc.id, package: true, ...report,
         ...(doc.definedUnchecked === true ? { definedUnchecked: true as const } : {}),
+        ...elsewhere(doc.checkedAgainst, env),
       });
     }
     return results;
@@ -515,15 +555,18 @@ class SessionFunctions {
     if (this.machine.tools.resolve(sig.name) !== null) throw new Error(shadowMessage(sig.name));
     const index = this.machine.ToolTypeIndex;
     let checked = false;
+    let checkedAgainst: string | undefined;
     if (index !== undefined && !noTypeCheck) {
       const report = await index.check(checkSnippet(sig) + turnContracts(ctx.turnTools, { name: sig.name, contract: contractOf(sig) }));
       if (!report.ok) throw new Error(`type error(s) — fix and re-define, or pass noTypeCheck to bypass:\n${renderCheck(report)}`);
       checked = report.checked;
+      checkedAgainst = report.environment;
     }
     const rec: SessionFunctionRecord = {
       name: sig.name, definition,
       ...(description !== undefined && description.trim() !== '' ? { description: description.trim() } : {}),
       ...(checked ? {} : { definedUnchecked: true as const }),
+      ...(checkedAgainst !== undefined ? { checkedAgainst } : {}),
     };
     const built = await this.build(rec);   // compiles: a bad source fails here, before any marker exists
     if (built instanceof Error) throw built;
@@ -535,6 +578,7 @@ class SessionFunctions {
   async check(ctx: ToolContext, recs: Iterable<SessionFunctionRecord>): Promise<CheckResult[]> {
     const index = this.machine.ToolTypeIndex;
     if (index === undefined) throw new Error('No type-checker is available here (e.g. the browser), so nothing can be checked.');
+    const env = await index.environment();
     const results: CheckResult[] = [];
     for (const rec of recs) {
       let report: ToolCheckReport;
@@ -548,6 +592,7 @@ class SessionFunctions {
       results.push({
         name: rec.name, session: true, ...report,
         ...(rec.definedUnchecked === true ? { definedUnchecked: true as const } : {}),
+        ...elsewhere(rec.checkedAgainst, env),
       });
     }
     return results;
@@ -677,6 +722,9 @@ the detail — each with a \`rendered\` block to read and a \`label\` to group o
 of any the detail cap hid. A row carrying \`definedUnchecked: true\` was registered without a type-check.
 READ \`ok\` TOGETHER WITH \`checked\`, on the result and on each row: \`checked: false\` means no type-checker
 could run here, so \`ok: true\` says only that nothing was examined. Fix a failure by re-defining.
+A row carrying \`checkedElsewhere: true\` DID pass, but in a different environment from this one — what a
+body may import, or whether an import is gated at all, has changed since it was defined. Nothing is
+re-checked on load, so \`check\` it to find out where it stands now.
 
 TWO DEFINITION SHAPES — and neither is an arrow function
   execute — the BODY alone, between braces. There is no function head, so there is nothing to declare and
@@ -846,9 +894,15 @@ function functionTool(machine: MatbotMachine, store: FunctionStore, packages: Pa
             } catch (e) { yield errorEvent(e instanceof Error ? e.message : String(e)); }
             return;
           }
-          case 'list':
-            yield { type: 'result', value: { functions: await store.list(), packages: await packages.list(), sessionFunctions: [...sessionFunctions(ctx.session).values()] } };
+          case 'list': {
+            const env = await machine.ToolTypeIndex?.environment();
+            yield { type: 'result', value: {
+              functions: await store.list(),
+              packages:  await packages.list(),
+              sessionFunctions: [...sessionFunctions(ctx.session).values()].map(r => sessionRow(r, env)),
+            } };
             return;
+          }
           case 'types': {
             const index = machine.ToolTypeIndex;
             if (index === undefined) {

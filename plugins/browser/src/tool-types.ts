@@ -231,6 +231,11 @@ class BrowserToolTypeIndex implements ToolTypeIndex {
   // recording "this was verified" off the back of it would be recording something false.
   async check(): Promise<ToolCheckReport> { return { ok: true, checked: false, total: 0, diagnostics: [] }; }
 
+  // Answered for the contract's sake, and never compared against anything: `check` reaches no verdict
+  // here, so nothing stores a fingerprint to compare. It still names what it would be about — a
+  // `FunctionRunner`, where this index would read one if a browser install ever registered one.
+  async environment(): Promise<string> { return this.machine.FunctionRunner === undefined ? 'no-runner' : 'runner'; }
+
   async wireContracts(): Promise<Record<string, { params: string; result: string }>> {
     const out: Record<string, { params: string; result: string }> = {};
     for (const t of this.machine.tools.list()) {

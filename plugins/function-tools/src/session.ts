@@ -10,7 +10,7 @@ export const MARKER_CREATOR = '@matatbread/matbot-function-tools';
  * half; `check` finds that.
  */
 export type SessionFunctionMarker =
-  | { op: 'define'; name: string; definition: string; description?: string; definedUnchecked?: true }
+  | { op: 'define'; name: string; definition: string; description?: string; definedUnchecked?: true; checkedAgainst?: string }
   | { op: 'remove'; name: string };
 
 declare module '@matatbread/matbot-plugin-api' {
@@ -19,7 +19,15 @@ declare module '@matatbread/matbot-plugin-api' {
   }
 }
 
-export interface SessionFunctionRecord { name: string; definition: string; description?: string; definedUnchecked?: true }
+export interface SessionFunctionRecord {
+  name: string; definition: string; description?: string; definedUnchecked?: true;
+  /** The {@link ToolTypeIndex.environment} fingerprint the check passed under, when one did. */
+  checkedAgainst?: string;
+}
+
+/** A record as `list` reports it. The fingerprint is ours to COMPARE — a reader gets the conclusion
+ *  (`checkedElsewhere`), never an opaque string it would have to interpret. */
+export type SessionFunctionRow = Omit<SessionFunctionRecord, 'checkedAgainst'> & { checkedElsewhere?: true };
 
 /** The session's functions as they stand at its last message: every define, less every later remove. */
 export function sessionFunctions(session: Session): Map<string, SessionFunctionRecord> {
@@ -37,6 +45,7 @@ export function sessionFunctions(session: Session): Map<string, SessionFunctionR
         name: d.name, definition: d.definition,
         ...(typeof d.description === 'string' ? { description: d.description } : {}),
         ...(d.definedUnchecked === true ? { definedUnchecked: true as const } : {}),
+        ...(typeof d.checkedAgainst === 'string' ? { checkedAgainst: d.checkedAgainst } : {}),
       });
     }
   }

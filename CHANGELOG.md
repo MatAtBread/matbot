@@ -33,9 +33,13 @@ churn and less likely to affect a consumer who doesn't use them.
   of — and that path crashes on a versioned URL anyway (#89). A builtin, a package and a path all work as
   before. `apps/cli` also loses its `typescript` dependency, which moves to the plugin.
 
-  `ToolTypeIndex` now invalidates its cached dts when a `FunctionRunner` arrives or leaves, not only when
-  the tool registry changes: the permitted set, the withheld globals and the note composed from them are
-  cached, which was safe only while the runner was seeded by the host before anything could read a dts.
+  `ToolTypeIndex` subscribes to nothing of the runner's, deliberately: everything derived from it — the
+  note in the dts, the two lists a check enforces — is derived at the point of use, and the one cache over
+  them keys on the permit array by identity, so a different runner is a different key. What IS cached is
+  the source scan, which the runner has no part in.
+
+  What a stored VERDICT needed instead is the environment it was reached in — see
+  `ToolTypeIndex.environment()` below.
 
 - **A `tool_function` body's imports are asked about.** The dynamic `import()` added earlier in this
   release was unconditional and advertised in the generated tool dts; the first time a body imports
@@ -98,6 +102,15 @@ churn and less likely to affect a consumer who doesn't use them.
   `#execute node:fs/` is a correct key and an unusable question. A policy stores only a subject that was
   actually offered, so no other gate's memory semantics change, and with none offered it falls back to
   naming the subject — right for a gate whose subject is already prose (`@x/foo` for `plugin.add`).
+- **`ToolTypeIndex.environment()`**, carried on `ToolCheckReport.environment` — a fingerprint of what a
+  type-check depends on besides the snippet and the live tool types: whether a `FunctionRunner` is loaded,
+  what it permits a body to import, and which globals it does not bind. Opaque; a consumer compares it for
+  equality and never parses it. It exists because a stored verdict is a claim about an environment, and
+  the environment is a plugin: `function-tools` stores it beside each definition and reports
+  `checkedElsewhere: true` where it no longer matches. Nothing re-checks on load — that is a worker program
+  per stored function at boot, and would turn a report into a boot failure — so what changes is that a
+  reader is told, and `check` remains the way to re-verify. The tool types are deliberately not in it:
+  those are live, and `check` is how a caller re-verifies against them.
 - **`Tool.gateNamespace`** — the fixed gate namespace a tool whose NAME is built at run time declares,
   since `ctx.gate`'s suffix is qualified with the tool's registered name. A `function-tools` function
   says `tool_function`, so every body's import decision lands on `tool_function.import`. Qualified by the
@@ -117,6 +130,13 @@ churn and less likely to affect a consumer who doesn't use them.
   disk, while a browser imports the URL directly.
 
 ### Bug fixes
+
+- **tsc told a `tool_function` body to install type definitions.** With no `FunctionRunner` loaded nothing
+  is withheld, so ENV-GATE has no list to fire from and a withheld global fell through to tsc's TS2591:
+  "Do you need to install type definitions for node? Try `npm i --save-dev @types/node`" — a package
+  manager, for an author with no package.json and no say in what the runner declares. The finding stands
+  and only the repair is rewritten, keyed on tsc's own diagnostic code rather than on a second list of
+  names, so it cannot drift out of step with what the runner withholds.
 
 - **The type gate and the runtime gate agreed in neither direction, in three places.** A constant hint on
   TS2307 said "only '@matatbread/matbot-plugin-api' is importable here; there are no other modules", which

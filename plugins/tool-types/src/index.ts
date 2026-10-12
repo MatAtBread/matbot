@@ -2,7 +2,7 @@ import { dirname, join, resolve } from 'node:path';
 import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { PLUGIN_API_VERSION, RegistryChangeKind, importPermitted } from '@matatbread/matbot-plugin-api';
-import type { MatbotMachine, MatbotPluginSpec, ToolCheckReport, ToolTypeIndex } from '@matatbread/matbot-plugin-api';
+import type { FunctionRunner, MatbotMachine, MatbotPluginSpec, ToolCheckReport, ToolTypeIndex } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins } from '@matatbread/matbot-core';
 import { buildToolTypesData, compileToolValidators, type ToolTypesData } from './build-dts.js';
 import { checkSnippetAgainst } from './checker.js';
@@ -155,6 +155,18 @@ export const buildToolTypes: ToolTypesFill = i =>
  * already declares is skipped, so nothing is declared twice. `declare const tool: ToolProxy` (mapped over
  * the merged `ToolContracts`) plus its override factory `toolInContext` is what generators call.
  */
+/** The two arrays a runner states, printed: a stable fingerprint of the environment a check's verdict
+ *  was reached under, for a caller that PERSISTS the verdict (`function-tools` stores one beside each
+ *  definition and compares it). Sorted and printed rather than identity-derived, because it has to
+ *  survive a restart — unlike the `paths` cache, whose job is the opposite and which keys on the array
+ *  itself. */
+function fingerprintOf(runner: FunctionRunner | undefined): string {
+  if (runner === undefined) return 'no-runner';
+  const permit = runner.permittedImports;
+  return `permit=${permit === undefined ? '*' : [...permit].sort().join(',')};`
+       + `withheld=${[...(runner.withheldGlobals ?? [])].sort().join(',')}`;
+}
+
 export class ToolTypeIndexImpl implements ToolTypeIndex {
   private readonly machine: MatbotMachine;
   private readonly fill: ToolTypesFill;
@@ -386,6 +398,12 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
           : '');
   }
 
+  /** The two arrays again, printed: a stable fingerprint of the environment a check's verdict was
+   *  reached under, for a caller that PERSISTS the verdict (`function-tools` stores one beside each
+   *  definition). Sorted and printed rather than identity-derived, because it has to survive a restart
+   *  — unlike {@link pathsFor}, whose job is the opposite and which keys on the array itself. */
+  async environment(): Promise<string> { return fingerprintOf(this.machine.FunctionRunner); }
+
   async check(snippet: string): Promise<ToolCheckReport> {
     // ABSOLUTE, always. The virtual file is named `<root>/…`, and `ts.createProgram` normalises a
     // relative one to a different string than the hook compares against — so `getSourceFile(virtual)`
@@ -411,9 +429,12 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
     // ambient `declare module 'node:…'` blocks of everything its own declarations reference, so a
     // forbidden specifier resolves through the back door and typechecks clean. The checker closes that
     // structurally. Absent stays absent — unrestricted means nothing to enforce.
-    const restricted = this.machine.FunctionRunner?.permittedImports;
-    const withheld   = this.machine.FunctionRunner?.withheldGlobals;
-    return checkSnippetAgainst({
+    // Read ONCE: the fingerprint stamped below has to describe the runner this was graded against, not
+    // whichever one is current by the time the worker answers.
+    const runner     = this.machine.FunctionRunner;
+    const restricted = runner?.permittedImports;
+    const withheld   = runner?.withheldGlobals;
+    const report = await checkSnippetAgainst({
       root, source,
       prefixLen: prefix.length,
       prefixLines: prefix.split('\n').length - 1,
@@ -424,6 +445,10 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
       // nothing is withheld there either, so there is nothing to reject.
       ...(withheld !== undefined ? { withheldGlobals: withheld } : {}),
     });
+    // Stamped here and nowhere else, from the same two lists that were just passed to the worker, so the
+    // fingerprint cannot describe an environment other than the one graded against. Only on a verdict
+    // that exists: `checked: false` has nothing to be stale.
+    return report.checked ? { ...report, environment: fingerprintOf(runner) } : report;
   }
 
   // Every live tool the source scan didn't already declare: a source-less tool that carries its contract as

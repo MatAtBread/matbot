@@ -807,6 +807,20 @@ Three parts, and only the first two enforce anything:
    current, and the browser index rebuilds its note per call. **The rule that falls out: derive from the
    runner at the point of use, and there is nothing to invalidate.**
 
+   **The one thing stored is a verdict, so a verdict names its environment.** A type-check is a claim
+   about the environment it ran in, and that environment is a plugin: unload the runner or narrow
+   `permit_imports`, and a body that passed is still marked as having passed while its `import(…)` is no
+   longer gated, or no longer allowed at all. `ToolTypeIndex.environment()` is a fingerprint of exactly
+   what a check depended on besides the snippet and the tool types — runner presence, the permitted set,
+   the withheld set — stamped on the `ToolCheckReport` and stored by `function-tools` beside each
+   definition, which compares it for **equality** and never parses it (what differs is the runner's
+   business; all a reader needs is that the claim is about somewhere else). It is sorted and printed
+   rather than identity-derived, because unlike the `paths` cache it has to survive a restart. Nothing
+   re-checks on load — that is a worker program per stored function at boot, turning a report into a boot
+   failure — so the report says `checkedElsewhere: true` and `check` remains the way to re-verify. The
+   tool types are deliberately NOT in the fingerprint: they are live, and `check` is how a caller
+   re-verifies against them, whereas this names the thing a re-check cannot otherwise be prompted by.
+
    **Whether an import is GATED is whether a runner routes it** — not whether a restriction exists. The
    declarations said "each subject to permission at the call — you will be asked the first time" whenever
    no restriction was configured, which is a promise nothing keeps when there is no runner at all: the
@@ -871,7 +885,11 @@ most of the rest through `node:stream`), and whether a forbidden specifier then 
 `@types/node` is reachable from the program root — so the `paths` set decides what is TYPED and the rule
 decides what is allowed. It also replaces what tsc says when the module genuinely does not resolve:
 "Do you need to install type definitions for node?", about a module the installation forbids, which the
-author cannot act on. Only a literal specifier can be checked; a computed one is the gate's at the call,
+author cannot act on. The same advice reaches a GLOBAL (TS2591 for `process`, where ENV-GATE has no list
+to fire from because no runner is loaded), and is replaced by the same reasoning: there is no
+package.json to install into and the environment is the runner's, so the finding stands and only the
+repair is rewritten. No second list of names does it — the trigger is tsc's own code, so it cannot drift
+out of step with what the runner withholds. Only a literal specifier can be checked; a computed one is the gate's at the call,
 which is where it was always going to be decided.
 
 ---

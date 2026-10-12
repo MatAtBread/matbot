@@ -112,6 +112,46 @@ const indexFor = (permit: string[] | undefined): ToolTypeIndexImpl => new ToolTy
   FunctionRunner: createVmFunctionRunner(0, permit !== undefined ? { permit } : {}),
 } as unknown as MatbotMachine, () => Promise.resolve(null));
 
+// No runner at all — any install that did not add the plugin, and the browser. Nothing is withheld and
+// nothing is gated, so the gates fall silent and only tsc is left talking.
+const indexNoRunner = (): ToolTypeIndexImpl => new ToolTypeIndexImpl({
+  tools: { list: () => [], resolve: () => null },
+  Notifier: { consume: () => {} },
+} as unknown as MatbotMachine, () => Promise.resolve(null));
+
+test('tsc never tells a body to install type definitions', async () => {
+  // With no runner ENV-GATE has no list to fire from, so `process` fell through to tsc's TS2591: "Do you
+  // need to install type definitions for node? Try `npm i --save-dev @types/node`". There is no
+  // package.json to install into, and what a body is typed against is fixed by the runner — so the
+  // finding stands and the repair is replaced.
+  const out = (await indexNoRunner().check(`async function f() { return process.cwd(); }`)).diagnostics;
+  assert.equal(out.length, 1, JSON.stringify(out));
+  assert.doesNotMatch(out[0]!.message, /install type definitions|npm i|@types\/node/);
+  assert.match(out[0]!.message, /'process' is not declared for a function body/);
+  assert.match(out[0]!.message, /already in scope/, 'and it names what a body does have');
+
+  // With a runner the withheld-globals wording is the one that fires, not this fallback: one rule speaks
+  // per mistake, and the one that knows most about it goes first.
+  const withRunner = (await indexFor(['node:']).check(`async function f() { return process.cwd(); }`)).diagnostics;
+  assert.equal(withRunner.length, 1, JSON.stringify(withRunner));
+  assert.match(withRunner[0]!.message, /the runner withholds it/);
+});
+
+test('the environment fingerprint is stable, and a verdict carries it', async () => {
+  // Content-derived, never identity-derived: a stored verdict is compared against this across a restart.
+  assert.equal(await indexFor(['node:os']).environment(), await indexFor(['node:os']).environment());
+  assert.notEqual(await indexFor(['node:os']).environment(), await indexFor(['node:fs']).environment());
+  assert.notEqual(await indexFor(['node:os']).environment(), await indexFor(undefined).environment());
+  assert.notEqual(await indexFor(undefined).environment(), await indexNoRunner().environment());
+  // Order is not an environment.
+  assert.equal(await indexFor(['node:os', 'node:fs']).environment(), await indexFor(['node:fs', 'node:os']).environment());
+
+  const index = indexFor(['node:os']);
+  const report = await index.check(`async function f() { return 1; }`);
+  assert.deepEqual(report.diagnostics, []);
+  assert.equal(report.environment, await index.environment());
+});
+
 test('the dts lists the modules this installation permits, expanding a prefix', async () => {
   const dts = await indexFor(['node:fs/promises', 'node:os']).dts();
   assert.match(dts, /A body may import these, each subject to permission at the call/);

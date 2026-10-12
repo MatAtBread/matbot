@@ -182,6 +182,13 @@ export interface ToolCheckReport {
   diagnostics:  ToolCheckDiagnostic[];
   /** Present only when the cap hid some, tallied by the same `label` the detailed ones carry. */
   omitted?:     { count: number; byLabel: Record<string, number> };
+  /**
+   * The {@link ToolTypeIndex.environment} fingerprint this verdict was reached under — what the check
+   * depended on besides the snippet and the live tool types. A caller that PERSISTS a verdict stores it
+   * beside the source and compares it (string equality, never parsed) against the index's current one,
+   * so "this passed" can say which environment it passed in. Absent when nothing was checked.
+   */
+  environment?: string;
 }
 
 /**
@@ -241,4 +248,20 @@ export interface ToolTypeIndex {
    *  outgoing tool descriptions at the turn's dispatch edge. A tool with only a loose `inputSchema` (no
    *  contract) is absent. */
   wireContracts(): Promise<Record<string, { params: string; result: string }>>;
+  /**
+   * A fingerprint of everything a {@link check} verdict depends on APART from the snippet and the live
+   * tool types — in practice the `FunctionRunner` that will run the code: whether there is one, what it
+   * permits a body to import, and which globals it does not bind. Opaque: a consumer compares it for
+   * equality and never parses it.
+   *
+   * It exists because a stored verdict is a claim about an environment, and the environment can be
+   * swapped out from under it — unload the runner plugin, or narrow its permitted imports, and a body
+   * that passed stays marked as having passed while its `import(…)` is no longer gated, or no longer
+   * allowed at all. The tool types are deliberately NOT in it: those are live and `check` is how a
+   * caller re-verifies against them, whereas this names the thing a re-check cannot be prompted by.
+   *
+   * Stable across restarts, so never identity-derived, and derived at the point of use like everything
+   * else read off the runner — there is nothing here to invalidate or subscribe to.
+   */
+  environment(): Promise<string>;
 }

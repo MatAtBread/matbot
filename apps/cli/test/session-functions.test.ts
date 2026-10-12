@@ -220,8 +220,11 @@ test('session functions type-check like registered tools, and a global function 
 
   const defined = await call({ action: 'define', scope: 'session', definition: FIB });
   assert.equal(defined.at(-1)?.type, 'result', JSON.stringify(defined.at(-1)));
+  // `checkedAgainst` is where it passed — no FunctionRunner here, which is as much an environment as a
+  // configured one: install the runner later and what a body may import changes under the stored verdict.
   assert.deepEqual(defined[0], { type: 'marker', creator: '@matatbread/matbot-function-tools',
-    data: { op: 'define', name: 'fib', definition: FIB } }, 'checked: recursion types against its own contract, and no definedUnchecked');
+    data: { op: 'define', name: 'fib', definition: FIB, checkedAgainst: 'no-runner' } },
+    'checked: recursion types against its own contract, and no definedUnchecked');
 
   // What the runner would hand the next round: the tool built from that marker.
   session.messages.push({ id: 'm', role: 'marker', traceId: 't', createdAt: '', content: [defined[0] as never] } as Message);
