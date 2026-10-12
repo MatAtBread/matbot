@@ -236,7 +236,7 @@ All runtime state under `.data/` **next to `matbot.yaml`**, never in source:
 
 `.data/` is gitignored. Plugins may add subdirectories. Other storage providers (e.g. SQLite) differ.
 
-**`.plugins/`** — fetched remote-module cache, **separate** from `.data/`. `.data/` is LLM read-write runtime state; `.plugins/` is matbot-writes / LLM-reads-only (mounted read-only into docker-bash). Never relocate it. Gitignored. It holds remote *plugins* and, by the same mechanism, a URL a `tool_function` body was granted (node refuses an `http(s)` specifier outright, so materialising and importing from disk is the only route). One cache, because a second fetch-and-materialise directory is the thing that drifts — and the contract is unchanged either way: matbot writes it, the model only reads it.
+**`.plugins/`** — fetched remote-module cache, **separate** from `.data/`. `.data/` is LLM read-write runtime state; `.plugins/` is matbot-writes / LLM-reads-only (mounted read-only into docker-bash). Never relocate it. Gitignored. It holds remote *plugins* — and only those: a `tool_function` body cannot import a URL (see *Module access from a `tool_function`*). One cache, because a second fetch-and-materialise directory is the thing that drifts — and the contract is unchanged either way: matbot writes it, the model only reads it.
 
 ---
 
@@ -746,13 +746,23 @@ raised while a *replacement* policy plugin is itself loading falls to the host's
 
 A body is a *constrained* place to compute, which is the reason to prefer it over a shell for data work:
 an install that chose `docker-bash` over `bash` has not thereby handed `node:fs` to model-authored code.
-Three parts, and only the first two enforce anything:
+
+**By name only.** A body imports a node builtin (`node:fs`) or a package already installed where matbot
+runs (`lodash`, `@scope/pkg/sub`), never a path or a URL (`importableByName`, in `plugin-api`).
+Downloading or placing code is what a *plugin* install is for: it is reviewed and versioned, and it has its
+own gate. A body is too lightweight a thing to recommend it from. The rule is checked before anything is
+asked, so nobody is offered a grant that cannot work. Paths were also what defeated the restriction below,
+which matches strings: `./lib/../../x` "starts with" `./lib/` and resolves outside it. So a `.`/`..`
+segment is refused in a package subpath too, since a package with no `exports` map resolves one as a path.
+The gate, the runner and `IMPORT-GATE` each apply the rule.
+
+Within that, three parts, and only the first two enforce anything:
 
 1. **A per-call gate** — the control, and the default. `tool_function.import`, subject `"<function> <specifier>"`. The pair, not the
    specifier alone: *why is THIS function asking for `node:fs`* is the question being put, and a
    specifier-only key would let a brand-new function inherit every grant a reviewed one earned.
-   `standing` carries the answers it may be remembered as (the exact pair, the module's directory, its
-   protocol, then the module across every function) narrowest first, **each with its own prose**: a
+   `standing` carries the answers it may be remembered as (the exact pair, the module's directory, any
+   builtin for a `node:` one, then the module across every function) narrowest first, **each with its own prose**: a
    subject is a key, and `#execute node:fs/` is a correct key and an unusable question — only the call
    site knows that `#` means a one-off body or that `node:` means any builtin. The policy does set
    membership over strings it never parses, and renders the label without rewriting it. What
@@ -895,10 +905,11 @@ Three parts, and only the first two enforce anything:
    is the boundary there, and its `ToolTypeIndex` says only the one concrete thing a body needs told —
    there are no node builtins. An install wanting the gate registers a `FunctionRunner`.
 
-**Two tiers, and the label says which.** `node:os` genuinely cannot reach another capability. Anything
-else — a package, a path, a URL — is loaded as **host code**: it is not compiled by the runner, so none of
-a body's withheld globals apply to it and it can hand `process` straight back, and its own imports are
-never gated again. So a non-builtin grant is `plugin.add`-grade and is worded that way.
+**No grant is narrow, and the label says so.** A builtin is not a safe tier: `node:child_process` runs
+programs, `node:module` hands back `require`, and `node:process` is the very global the runner withholds.
+A package is broader again, being loaded as **host code**: it is not compiled by the runner, so none of a
+body's withheld globals apply to it, and its own imports are never gated again. So every import label
+says it carries matbot's full access, and a package's also says it covers everything that package imports.
 
 **What this is not.** `vm` is not a capability boundary — a body runs in this context, and
 `(()=>{}).constructor('return process')()` recovers the real `process` in one line. Withholding
@@ -921,9 +932,8 @@ the broadest standing answer on offer. It is the thing to revisit first.
 restriction that is every builtin, so a body can be graded on what it may legitimately ask for; with one,
 it is that subset, expanded by the same boundary rule the gate uses (`importPermitted`, in `plugin-api`),
 because `node:fs` admits `node:fs/promises` at the call and a permitted import that fails the check is
-reachable only with `noTypeCheck`. `paths` also pulls 65 files where `types` pulls 168. An `http(s)` module gets no types
-at all: TypeScript cannot express "a module with arbitrary named exports", and an untypeable thing is a
-stated refusal here, not a fake type.
+reachable only with `noTypeCheck`. `paths` also pulls 65 files where `types` pulls 168. A path or a URL gets no types,
+being unimportable; `IMPORT-GATE` refuses it at the check.
 
 **`paths` cannot ENFORCE the restriction, though, so a structural rule does** — `IMPORT-GATE`, beside
 the cast gate and `ENV-GATE` in the one checker. Loading a single builtin's declaration file drags in the

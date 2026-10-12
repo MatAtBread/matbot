@@ -213,3 +213,31 @@ function call_ok(ev: ToolEvent): Promise<{ permitImports: string[] | null; timeo
   assert.equal(ev.type, 'result', JSON.stringify(ev));
   return Promise.resolve((ev as { value: { permitImports: string[] | null; timeoutMs: number } }).value);
 }
+
+test('settings that reach the runner without the tool are checked too', async () => {
+  // `default_settings:` and a hand-edited document never pass through `set`. A negative bound used to
+  // run bodies unbounded without the timeout_ms: 0 warning, and a scalar restriction made every import
+  // throw `permits.some is not a function`.
+  const neg = await setupWith({ timeout_ms: -1 });
+  assert.match(neg.warnings.join('\n'), /timeout_ms must be a non-negative integer/);
+  const got = await call_ok(await neg.call({ action: 'get' }));
+  assert.equal(got.timeoutMs, FUNCTION_SYNC_LIMIT_MS, 'the coded default, not unbounded');
+  assert.equal(got.problems?.length, 1, 'and get says why');
+
+  // A bad RESTRICTION fails closed: falling back to "no restriction" would turn a typo into the widest
+  // setting there is.
+  for (const bad of ['node:', { permit: ['node:'] }, ['./lib/'], ['https://esm.sh/'], null]) {
+    const s = await setupWith({ permit_imports: bad });
+    assert.deepEqual([...(s.registered['FunctionRunner'] as FunctionRunner).permittedImports ?? ['absent']], [], JSON.stringify(bad));
+    assert.match(s.warnings.join('\n'), /switched off until it is corrected/, JSON.stringify(bad));
+  }
+});
+
+test('set refuses a restriction entry naming a path or a URL', async () => {
+  const s = await setupWith({});
+  const ev = await s.call({ action: 'set', permitImports: ['node:os', './lib/'] });
+  assert.equal(ev.type, 'error');
+  assert.match((ev as { message: string }).message, /\.\/lib\/.*never paths or URLs/);
+  assert.equal(s.asked.length, 0, 'refused before anyone is asked');
+  assert.deepEqual(s.stored, {});
+});

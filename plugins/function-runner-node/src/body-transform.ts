@@ -10,15 +10,6 @@ export const ROUTE = '__matbotImport$';
  * Erase a body's types and route its `import(…)` calls onto {@link ROUTE} — the whole transform the node
  * runner applies before compiling, in one pass of one compiler.
  *
- * Finding the calls needs a parser, rather than a scan over the text, because the question — is this
- * `import(` in code, or inside a string, a template, a comment or a regex literal? — is not answerable by
- * looking at the candidate. It needs the previous significant token, and two of those cases are
- * undecidable without having parsed: a `/` after `)` may follow `if (…)` or `(a + b)`, and after `}` it
- * may end a block or an object literal. A wrong answer does not misread one token, it desyncs the reader,
- * so a quote further along swallows an `import(` that neither reading mentions — leaving an import with no
- * gate in front of it and nothing reporting that. The parser also tells a method shorthand named `import`
- * and a type-position `import('x').Foo` from a call, both of which had to be refused outright before.
- *
  * A parser rather than a scan over the text because the question — is this `import(` in code, or inside a
  * string, a template, a comment or a regex literal? — is not answerable by looking at the candidate. It
  * needs the previous significant token, and two of those cases are undecidable without having parsed:
@@ -80,7 +71,8 @@ export function transformBody(source: string): string {
   };
   walk(file);
 
-  // Back to front, so an earlier replacement cannot move a later span.
+  // Only the keyword is replaced, so the arguments reach the loader as written — a second one carrying
+  // import attributes included. Back to front, so an earlier replacement cannot move a later span.
   let code = erased;
   for (const [start, end] of spans.reverse()) code = code.slice(0, start) + ROUTE + code.slice(end);
   return code;

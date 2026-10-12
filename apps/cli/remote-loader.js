@@ -145,11 +145,6 @@ function onDisk({ dotPlugins, candidates }) {
 export async function resolveFetched(specifier, parent) {
   const plan = candidatesOf(specifier, parent);
   if (plan === undefined) return undefined;
-  return fetchPlan(plan, specifier, `imported by ${parent}`);
-}
-
-
-async function fetchPlan(plan, specifier, by) {
   const cached = onDisk(plan);
   if (cached !== undefined) return cached;
 
@@ -176,7 +171,7 @@ async function fetchPlan(plan, specifier, by) {
   const reason = unreachable !== undefined
     ? `could not be reached (${unreachable.message})`
     : `was not found at ${plan.candidates.join(' or ')}`;
-  throw Object.assign(new Error(`Cannot fetch "${specifier}" ${by}: it ${reason}.`),
+  throw Object.assign(new Error(`Cannot fetch "${specifier}" imported by ${parent}: it ${reason}.`),
                       { code: 'ERR_MODULE_NOT_FOUND' });
 }
 

@@ -189,7 +189,21 @@ test('a specifier with no declaration file is listed as untyped, not as imports 
   const dts = await indexFor(['node:nope', 'lodash', 'https://esm.sh/x/']).dts();
   assert.doesNotMatch(dts, /switched off/);
   assert.match(dts, /A body may import these/);
-  for (const p of ['lodash', 'https://esm.sh/x/']) assert.ok(dts.includes(`//   ${p}   (untyped`), p);
+  assert.ok(dts.includes('//   lodash   (untyped'));
+  // A URL is not merely untyped: no body can import it, so noTypeCheck must not be offered as the way in.
+  assert.ok(dts.includes('//   https://esm.sh/x/   (a path or a URL'));
+});
+
+test('a path or a URL is refused at the check, whatever is permitted', async () => {
+  // The gate refuses these without asking, so a body naming one would otherwise pass the check and fail
+  // at its first call.
+  for (const spec of ['./helper.js', '/etc/x.mjs', 'https://esm.sh/lodash', 'lodash/../../x']) {
+    const out = (await check(`async function f() { await import(${JSON.stringify(spec)}); }`, ['node:os'])).join('\n');
+    assert.match(out, /IMPORT-GATE/, spec);
+    assert.match(out, /never a path or a URL/, spec);
+    assert.doesNotMatch(out, /TS2307/, `one finding, not tsc's as well: ${spec}`);
+  }
+  assert.deepEqual(await check(`async function f() { const os = await import('node:os'); return os.hostname(); }`, ['node:os']), []);
 });
 
 test('a permitted builtin types its submodules, so what runs is what is graded', async () => {

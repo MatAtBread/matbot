@@ -1,7 +1,7 @@
 import { dirname, join, resolve } from 'node:path';
 import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { PLUGIN_API_VERSION, RegistryChangeKind, importPermitted } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, RegistryChangeKind, importPermitted, importableByName } from '@matatbread/matbot-plugin-api';
 import type { FunctionRunner, MatbotMachine, MatbotPluginSpec, ToolCheckReport, ToolTypeIndex } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins } from '@matatbread/matbot-core';
 import { buildToolTypesData, compileToolValidators, type ToolTypesData } from './build-dts.js';
@@ -287,13 +287,8 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
    * A builtin gets its real declaration file. A bare package name is left to ordinary resolution: if it
    * is installed it types properly, and if it is not, the error is honest.
    *
-   * An http(s) module gets NOTHING, deliberately. TypeScript cannot express "a module with arbitrary
-   * named exports": an ambient wildcard (`declare module 'https://esm.sh/*'`) resolves the specifier,
-   * but `export default` leaves every named export a TS2339 and `export =` only moves an index signature
-   * under `.default` — so any declaration we could write would be wrong about the runtime shape. The rule
-   * this path follows elsewhere applies: an untypeable thing is a stated refusal, not a fake type. The
-   * runtime gate still permits such an import; the check does not type it, so it needs `noTypeCheck`
-   * until a per-prefix declaration file can be named in config.
+   * A path or a URL gets nothing, because a body cannot import one at all (`importableByName`), and
+   * IMPORT-GATE says so at the check.
    */
   /** {@link importPaths} is read twice per check — once for the program's `paths`, once by {@link
    *  importNote} through `dts()` — and it walks every builtin with a stat apiece. Cached against the
@@ -358,20 +353,23 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
     // TYPED set instead, it fired for any restriction naming no builtin (`permit: ['lodash']`), telling
     // an author imports were off while the gate was perfectly willing to ask about one.
     // An entry is typed if it names a declaration itself or admits one — `node:` and `node:fs` both do,
-    // through their submodules. A bare package or a URL admits none, which is a stated refusal rather
-    // than a fake type, so the listing says so where the author will read it.
+    // through their submodules. A bare package admits none, which is a stated refusal rather than a fake
+    // type, so the listing says so where the author will read it.
     const covered = (p: string): boolean => typed.has(p) || [...typed].some(t => importPermitted([p], t));
     // The EXPANDED set, because a prefix is not an answer: `node:` tells an author nothing about which
     // builtins exist, and `node:fs` hides that `node:fs/promises` came with it. Restriction entries that
-    // admit no declaration at all are listed after it, marked — a bare package or a URL is untypeable
-    // here, which is a stated refusal rather than a fake type, and the author needs to know which it is.
+    // admit no declaration at all are listed after it, marked — a bare package is untypeable here, which
+    // is a stated refusal rather than a fake type, and the author needs to know which it is.
     // A bare `node` is the one entry that is not merely untypeable but unimportable: the boundary rule
     // reads it as a PACKAGE of that name (it admits `node/sub`, never `node:os`), so an install meaning
     // the builtins and missing the colon permits nothing a body can use. Listing it as "untyped —
     // import it only with noTypeCheck" invited exactly the attempt that cannot work, so it says what it is.
+    // A path or a URL is unimportable outright, whoever's runner listed it: the gate never asks about one.
     const mark = (p: string): string => p === 'node'
       ? `${p}   (a PACKAGE of that name — not node's builtins, which are spelled 'node:fs'; nothing here can import it)`
-      : `${p}   (untyped — import it only with noTypeCheck)`;
+      : !importableByName(p.replace(/\/$/, ''))
+        ? `${p}   (a path or a URL — a body imports only builtins and packages, by name; nothing here can import it)`
+        : `${p}   (untyped — import it only with noTypeCheck)`;
     const listing = [
       ...[...typed].sort(),
       ...(restricted ?? []).filter(p => !covered(p)).sort().map(mark),

@@ -259,8 +259,10 @@ export async function checkSnippetAgainst(opts: {
   return reportOf(diags ?? [], 'snippet');
 }
 
-// The worker body: plain CommonJS (Worker eval mode is CJS, so `require` exists and no loader hooks
-// are needed — the host's .ts strip-hooks do not reliably reach worker threads). It loads the SAME
+// The worker body: CommonJS (Worker eval mode is CJS, so `require` exists and no loader hooks are
+// needed — the host's .ts strip-hooks do not reliably reach worker threads). Type annotations are
+// fine here: Node strips them from eval'd code natively, which every Node matbot supports does by
+// default. Anything beyond erasable syntax is not — no enums, no parameter properties. It loads the SAME
 // typescript module the main thread resolved and posts back JSON-safe records: flattened message
 // chains, related-information locations (e.g. which contract arm an expected type came from), and a
 // caret-anchored source frame per error. In snippet mode every position is remapped to be
@@ -439,8 +441,14 @@ try {
       return d.getSourceFile().fileName === virtual && d.getStart() >= minStart;
     });
   };
-  // The permit's boundary rule, inlined: the worker is a CommonJS realm with no loader hooks, so it
-  // cannot import 'importPermitted' from plugin-api, which is where the rule lives and is documented.
+  // The permit's boundary rule and the by-name rule, inlined: the worker is a CommonJS realm with no
+  // loader hooks, so it cannot import 'importPermitted' or 'importableByName' from plugin-api, which is
+  // where both rules live and are documented.
+  const byName = function (spec) {
+    return spec !== '' && !/^[./\\\\]/.test(spec) && spec.indexOf('\\\\') < 0
+      && (spec.indexOf('node:') === 0 || !/^[a-z][a-z0-9+.-]*:/i.test(spec))
+      && !spec.split('/').some(function (seg) { return seg === '.' || seg === '..'; });
+  };
   const permits = workerData.permittedImports;
   const API_PKG = '@matatbread/matbot-plugin-api';
   const withheld = new Set<string>(workerData.withheldGlobals ?? []);
@@ -476,6 +484,12 @@ try {
         if (spec === API_PKG || spec.indexOf(API_PKG + '/') === 0) {
           synth.push(mk(sf, node.arguments[0], 90006,
             "'" + spec + "' cannot be imported by a function body: it is in scope for TYPES only. Everything a body is given is already ambient — 'tool', 'toolInContext' and 'context' — so there is nothing to import from it."));
+          importStarts.add(at);
+        } else if (!byName(spec)) {
+          // Whatever the runner: the gate refuses these without asking, so a body naming one is refused
+          // at definition rather than at its first call.
+          synth.push(mk(sf, node.arguments[0], 90006,
+            "'" + spec + "' cannot be imported by a function body, which imports only node builtins ('node:fs') and packages already installed where matbot runs, by name — never a path or a URL. To use other code, install it as a package, or as a matbot plugin with the 'plugin' tool."));
           importStarts.add(at);
         } else if (permits !== undefined && !permitted(spec)) {
           synth.push(mk(sf, node.arguments[0], 90006,

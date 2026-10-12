@@ -1,7 +1,7 @@
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import { dirname } from 'node:path';
 import { FUNCTION_SYNC_LIMIT_MS, createVmFunctionRunner } from './runner.js';
-import { IMPORTS_KEY, TIMEOUT_KEY, createRunnerConfigTool, type RunnerConfig } from './config.js';
+import { createRunnerConfigTool, readRunnerConfig, type RunnerConfig } from './config.js';
 import type { MatbotMachine, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
 
 export { createVmFunctionRunner, FUNCTION_SYNC_LIMIT_MS } from './runner.js';
@@ -16,12 +16,10 @@ export { createRunnerConfigTool, IMPORTS_KEY, TIMEOUT_KEY, type RunnerConfig } f
  * is also what makes a change take effect without a restart.
  */
 async function installRunner(services: MatbotMachine): Promise<RunnerConfig> {
-  const settings = services.settings();
-  const limitMs  = await settings.get<number>(TIMEOUT_KEY) ?? FUNCTION_SYNC_LIMIT_MS;
-  const permit   = await settings.get<readonly string[]>(IMPORTS_KEY);
-  // The directory holding matbot.yaml: the base a granted relative import resolves against, and the
-  // one every other part of an install already uses. Absent in a host that has no config file, where a
-  // path import is then left to ordinary resolution.
+  const { timeoutMs: limitMs, permit, problems } = await readRunnerConfig(services.settings(), FUNCTION_SYNC_LIMIT_MS);
+  for (const p of problems) console.warn(`[matbot] function-runner-node: ${p}`);
+  // The directory holding matbot.yaml, named when a package a body asks for is not installed: it is where
+  // the user would install it. Absent in a host that has no config file.
   const projectDir = services.configPath !== undefined ? dirname(services.configPath) : undefined;
 
   if (limitMs === 0) {
@@ -37,6 +35,7 @@ async function installRunner(services: MatbotMachine): Promise<RunnerConfig> {
     timeoutMsDefault: FUNCTION_SYNC_LIMIT_MS,
     permitImports:    permit === undefined ? null : [...permit],
     withheldGlobals:  [...(runner.withheldGlobals ?? [])],
+    ...(problems.length > 0 ? { problems } : {}),
   };
 }
 

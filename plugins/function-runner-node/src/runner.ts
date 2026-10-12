@@ -1,7 +1,5 @@
 import vm from 'node:vm';
-import path from 'node:path';
-import { pathToFileURL } from 'node:url';
-import { FUNCTION_TIMEOUT, type FunctionRunner } from '@matatbread/matbot-plugin-api';
+import { FUNCTION_TIMEOUT, importableByName, type FunctionRunner } from '@matatbread/matbot-plugin-api';
 import { ROUTE, transformBody } from './body-transform.js';
 
 // The default, when this plugin's `timeout_ms` setting is absent. Far past any legitimate stretch of
@@ -53,10 +51,9 @@ const invoke = new vm.Script(`globalThis[Symbol.for(${JSON.stringify(PENDING)})]
  *     reaches every builtin with no import at all, so without this the import gate would be decorative.
  *   - no `importModuleDynamically` is installed, which makes `import()` itself inert — measurably through
  *     every route, including `eval` and both Function constructors, since dynamically-constructed code
- *     inherits the absence. A body's own `import(…)` is routed onto an injected, gated loader — this
- *     runner finds the calls ({@link importCallSpans}), its consumer names them — and arrives at
- *     {@link import} below, so the decision happens in matbot's
- *     own code. (Installing the hook and gating THERE — letting the engine's own parser find the calls,
+ *     inherits the absence. A body's own `import(…)` is rewritten onto the gated loader each call is
+ *     handed ({@link transformBody}), which reaches {@link import} below once the gate allows it, so the
+ *     decision happens in matbot's own code. (Installing the hook and gating THERE — letting the engine's own parser find the calls,
  *     with no rewrite at all — would be better still, and is not available: a function callback needs
  *     `--experimental-vm-modules`, and `USE_MAIN_CONTEXT_DEFAULT_LOADER` is accepted only as the option
  *     itself, where it gates nothing.)
@@ -85,50 +82,32 @@ export function createVmFunctionRunner(
     // all means unrestricted-and-ask. Collapsing the two is what made an unconfigured install refuse
     // every import without a prompt.
     ...(imports.permit !== undefined ? { permittedImports: imports.permit } : {}),
-    // Reached only after the gate has allowed this specifier for this function; it checks nothing itself.
-    // An http(s) URL is materialised under `.plugins/` and imported from disk, because node refuses the
-    // scheme outright. Everything else goes to a dynamic import, which picks up the CLI's own hooks — so
-    // a granted `.ts` path is stripped and a `.js` one remaps, exactly as a plugin's import does.
-    async import(spec: string): Promise<unknown> {
-      // An http(s) URL is refused here, not materialised. Fetching one to disk and importing it from
-      // there is the host's machinery (`apps/cli`'s remote cache, which the module hooks also read), and
-      // a plugin cannot reach into an app — nor should it keep a second copy of the URL-to-path mapping,
-      // which has a known collision of its own. So this says so plainly instead of half-doing it.
-      if (/^https?:/i.test(spec)) {
-        throw new Error(`Cannot import "${spec}": this runner does not fetch remote modules. Install the package where matbot can see it and import it by name.`);
+    // Reached only after the gate has allowed this specifier for this function, so it checks nothing of
+    // the gate's. It does refuse a path or a URL, which the gate never passes: a body imports builtins and
+    // installed packages by name, and placing or downloading code is a plugin install's job.
+    async import(spec: string, options?: ImportCallOptions): Promise<unknown> {
+      if (!importableByName(spec)) {
+        throw new Error(`Cannot import "${spec}": a function body imports only node builtins and installed packages, by name.`);
       }
-      // A PATH is resolved against the PROJECT — the directory holding matbot.yaml — and not against this
-      // file, which is what it would otherwise mean: a path inside the runner's own source, where a body's
-      // author cannot have put anything.
+      // Resolved from HERE, which reaches the project's own `node_modules` whenever matbot is installed
+      // inside it — a flat npm or yarn install — and matbot's own packages either way. Under pnpm this
+      // file sits outside the project's tree, so a package the user installed beside their config is not
+      // reachable; the alternatives are a CJS resolve rooted at the project, which refuses a package whose
+      // `exports` offers only an `import` condition (most of them now), or performing the import from a
+      // module written into the project, which is a lot of machinery for a package manager's layout.
+      // `import.meta.resolve`'s second argument would settle it and is silently ignored, resolving against
+      // the wrong base and reporting nothing.
       //
-      // A BARE specifier is left to ordinary resolution from here, which reaches the project's own
-      // `node_modules` whenever matbot is installed inside it — a flat npm or yarn install — and matbot's
-      // own packages either way. Under pnpm this file sits outside the project's tree, so a package the
-      // user installed beside their config is not reachable; the alternatives are a CJS resolve rooted at
-      // the project, which refuses a package whose `exports` offers only an `import` condition (most of
-      // them now), or performing the import from a module written into the project, which is a lot of
-      // machinery for a package manager's layout. `import.meta.resolve`'s second argument would settle it
-      // and is silently ignored, resolving against the wrong base and reporting nothing.
-      let target = projectTarget(projectDir, spec);
-      if (target === spec && projectDir !== undefined) {
-        // Resolved before importing so that "this specifier names nothing" is told apart from "the module
-        // loaded and failed": both are ERR_MODULE_NOT_FOUND from an `import`, and a module whose OWN
-        // dependency is missing would otherwise be reported as not installed itself.
-        try { target = import.meta.resolve(spec); }
-        catch {
-          throw new Error(`Cannot import "${spec}": it is not installed where matbot can see it. Install it in ${projectDir}, where matbot.yaml is.`);
-        }
+      // Resolved before importing so that "this specifier names nothing" is told apart from "the module
+      // loaded and failed": both are ERR_MODULE_NOT_FOUND from an `import`, and a module whose OWN
+      // dependency is missing would otherwise be reported as not installed itself.
+      let target: string;
+      try { target = import.meta.resolve(spec); }
+      catch {
+        throw new Error(`Cannot import "${spec}": it is not installed where matbot can see it.${
+          projectDir !== undefined ? ` Install it in ${projectDir}, where matbot.yaml is.` : ''}`);
       }
-      try { return await import(target); }
-      catch (e) {
-        // Only when the missing thing IS what was asked for: `url` is the specifier node could not find,
-        // so a module whose own dependency is missing keeps its own error rather than being reported as
-        // absent itself.
-        if ((e as { code?: unknown }).code === 'ERR_MODULE_NOT_FOUND' && (e as { url?: unknown }).url === target) {
-          throw new Error(`Cannot import "${spec}": there is no such file. Paths are resolved against ${projectDir ?? 'the working directory'}, where matbot.yaml is.`);
-        }
-        throw e;
-      }
+      return import(target, options);
     },
     withheldGlobals: SHADOWED,
     compile(source) {
@@ -179,16 +158,4 @@ export function createVmFunctionRunner(
       };
     },
   };
-}
-
-/**
- * `spec` as the project would spell it: a relative or absolute path becomes a `file:` URL rooted at the
- * project, and everything else — a bare package, a builtin — is passed through to resolve as it ordinarily
- * would. Returning `spec` unchanged is also what tells the caller it was not a path, so a "not installed"
- * message is only produced for the case it fits.
- */
-function projectTarget(projectDir: string | undefined, spec: string): string {
-  if (path.isAbsolute(spec)) return pathToFileURL(spec).href;
-  if (projectDir === undefined || !/^\.\.?[/\\]/.test(spec)) return spec;
-  return pathToFileURL(path.resolve(projectDir, spec)).href;
 }

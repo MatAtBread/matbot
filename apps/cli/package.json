@@ -12,8 +12,7 @@
     "bin.js",
     "register.js",
     "ts-hooks.js",
-    "remote-loader.js",
-    "remote-loader.d.ts"
+    "remote-loader.js"
   ],
   "description": "matbot CLI: interactive REPL and single-turn runner for the matbot AI harness, with hot-loadable plugins.",
   "keywords": [

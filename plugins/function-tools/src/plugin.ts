@@ -241,7 +241,7 @@ class FunctionStore {
 
   async list(): Promise<FunctionRecord[]> {
     const { items } = await this.store.query({ sort: [{ field: 'id', dir: 'asc' }], immutable: true });
-    const env = await this.machine.ToolTypeIndex?.environment();
+    const env = await this.machine.ToolTypeIndex?.environment?.();
     return items.map(doc => recordOf(doc, env));
   }
 
@@ -312,7 +312,7 @@ class FunctionStore {
       docs = [doc];
     }
 
-    const env = await index.environment();
+    const env = await index.environment?.();
     const results: CheckResult[] = [];
     for (const doc of docs) {
       let report: ToolCheckReport;
@@ -383,7 +383,7 @@ class PackageStore {
 
   async list(): Promise<PackageRecord[]> {
     const { items } = await this.store.query({ sort: [{ field: 'id', dir: 'asc' }], immutable: true });
-    const env = await this.machine.ToolTypeIndex?.environment();
+    const env = await this.machine.ToolTypeIndex?.environment?.();
     return items.map(doc => {
       let tools: string[] = [];
       try { tools = parsePackage(doc.id, doc.definition).exports.map(e => e.toolName); } catch { /* reported by check */ }
@@ -434,7 +434,7 @@ class PackageStore {
       if (doc === null) throw new Error(`No package named "${name}" was defined here.`);
       docs = [doc];
     }
-    const env = await index.environment();
+    const env = await index.environment?.();
     const results: CheckResult[] = [];
     for (const doc of docs) {
       let report: ToolCheckReport;
@@ -578,7 +578,7 @@ class SessionFunctions {
   async check(ctx: ToolContext, recs: Iterable<SessionFunctionRecord>): Promise<CheckResult[]> {
     const index = this.machine.ToolTypeIndex;
     if (index === undefined) throw new Error('No type-checker is available here (e.g. the browser), so nothing can be checked.');
-    const env = await index.environment();
+    const env = await index.environment?.();
     const results: CheckResult[] = [];
     for (const rec of recs) {
       let report: ToolCheckReport;
@@ -679,6 +679,7 @@ call is echoed to stdout, so the run is observable.
 MODULES (node only). A body may reach the platform through a dynamic import —
 \`const fs = await import('node:fs/promises')\` — and each import needs permission at the call: the user is
 asked, naming your function and the module, the first time. Ask for the narrowest thing that does the job.
+Import by NAME only — a node builtin or a package already installed; a path or a URL is refused outright.
 The \`types\` action states what is reachable here; a module outside that does not type-check, so do not
 guess, and do not reach for \`noTypeCheck\` to get past it. There is no \`require\`, \`module\`,
 \`exports\`, \`__dirname\`, \`__filename\` or \`import.meta\` — a body is not a module — and no \`process\`,
@@ -895,7 +896,7 @@ function functionTool(machine: MatbotMachine, store: FunctionStore, packages: Pa
             return;
           }
           case 'list': {
-            const env = await machine.ToolTypeIndex?.environment();
+            const env = await machine.ToolTypeIndex?.environment?.();
             yield { type: 'result', value: {
               functions: await store.list(),
               packages:  await packages.list(),
