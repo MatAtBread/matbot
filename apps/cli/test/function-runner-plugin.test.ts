@@ -7,6 +7,7 @@ import { plugin, FUNCTION_SYNC_LIMIT_MS, createVmFunctionRunner } from '@matatbr
 import type {
   FunctionRunner, MatbotMachine, PermissionRequest, Tool, ToolContext, ToolEvent,
 } from '@matatbread/matbot-plugin-api';
+import { permitted, refused } from '@matatbread/matbot-core';
 
 // The node runner is a PLUGIN, not part of the host: bounding a body, withholding host globals from it
 // and gating its imports are all optional, and reachable through the `FunctionRunner` seam alone. These
@@ -54,7 +55,7 @@ async function setupWith(
   const call = async (input: unknown, allow = true): Promise<ToolEvent> => {
     const ctx = {
       callId: 'c', session: { id: 's' }, signal: new AbortController().signal,
-      gate: (req: PermissionRequest) => { asked.push(req); return Promise.resolve(allow); },
+      gate: (req: PermissionRequest) => { asked.push(req); return Promise.resolve(allow ? permitted('user') : refused('user')); },
     } as unknown as ToolContext;
     let last: ToolEvent | undefined;
     for await (const ev of tools.get('function_runner_config')!.executor.execute(input, ctx)) last = ev;

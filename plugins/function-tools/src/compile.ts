@@ -1,4 +1,4 @@
-import { FUNCTION_TIMEOUT, importPermitted, makeToolBox } from '@matatbread/matbot-plugin-api';
+import { FUNCTION_TIMEOUT, importPermitted, makeToolBox, refusalMessage } from '@matatbread/matbot-plugin-api';
 import { stripLeadingTrivia } from './signature.js';
 import type { MatbotMachine, ComposedCallContext, FunctionRunner, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
 
@@ -196,9 +196,12 @@ async function load(machine: MatbotMachine, ctx: ToolContext, fnName: string, sp
   const label = builtin
     ? `Allow ${who} to import **${spec}**?`
     : `Allow ${who} to import **${spec}** and everything it imports? Imported code runs with matbot's full access, not the function's.`;
-  if (!await ctx.gate({ gate: 'import', subject: `${fnName} ${spec}`, label, fallback: false,
-                        standing: standingAnswers(fnName, who, spec) })) {
-    throw new Error(`Import of '${spec}' was not permitted.`);
+  const permit = await ctx.gate({ gate: 'import', subject: `${fnName} ${spec}`, label, fallback: false,
+                                  standing: standingAnswers(fnName, who, spec) });
+  if (!permit.allowed) {
+    // The source rides in the message because this one surfaces as a thrown error inside a body the
+    // model wrote, where "not permitted" alone reads as something to be debugged or routed around.
+    throw new Error(refusalMessage(permit, `Import of '${spec}'`));
   }
   return runner?.import !== undefined ? runner.import(spec) : import(spec);
 }

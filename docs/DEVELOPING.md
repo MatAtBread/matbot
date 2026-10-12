@@ -722,18 +722,19 @@ installing code, rewriting config, connecting a remote party, replacing another 
 does not ask the user itself. It declares what it needs and lets the installation's policy decide:
 
 ```ts
-if (!await ctx.gate({
+const permit = await ctx.gate({
   gate:     'add',                       // the SUFFIX; the host qualifies it with your tool's name
   subject:  specifier,                   // what is acted on — the policy keys its memory on this
   label:    `Install plugin **"${specifier}"**?`,   // the prose naming the act; rendered verbatim
   fallback: false,                       // what happens with nobody to ask and no policy
-})) {
-  yield { type: 'result', value: { message: 'Cancelled.' } };
+});
+if (!permit.allowed) {
+  yield { type: 'result', value: { message: refusalMessage(permit) } };
   return;
 }
 ```
 
-Four rules, all of which follow from the seam rather than from taste:
+Five rules, all of which follow from the seam rather than from taste:
 
 - **The gate is the SUFFIX.** `ctx.gate({ gate: 'add' })` from a tool registered as `plugin` asks
   `plugin.add`. You cannot address another tool's gate, and a same-named tool in the other runtime
@@ -747,8 +748,15 @@ Four rules, all of which follow from the seam rather than from taste:
 - **Gate only what is allow-or-not.** A gate is boolean by construction. Anything that *elicits a
   value* — a secret, an API key, a question for the user — is `ctx.prompt` and never a gate; this is
   what keeps authorization from needing routing rules.
-- **A refusal has one shape.** `false` is "not permitted", whether a human just said so or a stored
-  answer did. Yield your ordinary cancelled result; there is no denial error to catch.
+- **A refusal has one shape.** `allowed: false` is "not permitted", whether a human just said so or a
+  stored answer did. Yield your ordinary cancelled result; there is no denial error to catch.
+- **Report the `source`; never branch on it.** The decision is an object, so `if (!await ctx.gate(…))`
+  is always false — test `.allowed`. `source` names which test in the cascade answered (`user`,
+  `configuration`, `fallback`, or a layer name a replacement policy invented — the vocabulary is open),
+  and `refusalMessage(permit)` turns it into the sentence to hand back. Do that rather than writing
+  `Cancelled.`: a bare cancellation reads to a model as a malfunction, so it retries under another
+  spelling, hunts for the bug, or looks for a route around the gate. Pass your own words for the act
+  where you have them — `refusalMessage(permit, \`Import of '${spec}'\`)`.
 
 Adding a gate id is adding to a small documented vocabulary — list it in the default policy's README
 (and in GETTING-STARTED's table) so an installation can author an answer for it up front. An id no
@@ -762,8 +770,9 @@ order:
 const previous = services.PermissionGate;        // the CONCRETE gate you are displacing
 await services.register('PermissionGate', {
   async decide(req, ask) {
-    if (req.gate === 'plugin.add') return roster.allows(req.subject);
-    return previous.decide(req, ask);            // everything else keeps behaving as it did
+    // `source` names YOUR layer, in your own words: it is what the refusal reported to the caller says.
+    if (req.gate === 'plugin.add') return { allowed: roster.allows(req.subject), source: 'acme-roster' };
+    return previous.decide(req, ask);            // everything else keeps behaving as it did, SOURCE included
   },
 });
 ```

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseYaml, applyProviderPatch, patchedFields, ProviderRegistryImpl, bindGate,
+import { parseYaml, applyProviderPatch, patchedFields, ProviderRegistryImpl, bindGate, refused, refusalMessage,
          CONFIRM_YES, CONFIRM_NO } from '@matatbread/matbot-core';
 import { writeProviderBlock, createProviderTool } from '@matatbread/matbot-tool-plugin';
 import type { ProviderConfig, PromptFn, ToolContext, ToolEvent, FormField } from '@matatbread/matbot-plugin-api';
@@ -206,7 +206,11 @@ test('declining the confirmation changes neither the file nor the registry', asy
   const before = await readFile(file, 'utf8');
   const { events, providers } = await runUpdate(file, { action: 'update', name: 'deepseek', model: 'nope' }, CONFIRM_NO);
 
-  assert.deepEqual(resultOf(events), { type: 'result', value: { message: 'Cancelled.' } });
+  // The refusal NAMES the layer that refused: a bare "Cancelled." reads to a model as a malfunction,
+  // and a model that reads a decision as a malfunction goes looking for a way round it.
+  assert.deepEqual(resultOf(events),
+    { type: 'result', value: { message: refusalMessage(refused('user')) } });
+  assert.match((resultOf(events) as { value: { message: string } }).value.message, /the user declined/);
   assert.equal(providers.get('deepseek')!.model, 'deepseek-chat');
   assert.equal(await readFile(file, 'utf8'), before);
 });

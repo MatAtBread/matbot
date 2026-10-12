@@ -1,5 +1,5 @@
 import type { Tool, ToolContract, ToolResultOf, ToolContext, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
-import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, refusalMessage } from '@matatbread/matbot-plugin-api';
 import { RemoteMcpManager } from './manager.js';
 
 // Connecting a server is privileged — it registers a remote party's tools for the rest of the session —
@@ -62,9 +62,10 @@ ACTIONS
         switch (act.action) {
           case 'add': {
             if (!act.name || !act.endpoint) { yield { type: 'error', message: 'add requires "name" and "endpoint".' }; return; }
-            if (!await ctx.gate({ gate: 'add', subject: act.name, fallback: false,
-              label: `Connect to MCP server **"${act.name}"** at ${act.endpoint}?\n\n_Its tools are registered and callable until you remove it._` })) {
-              yield { type: 'result', value: { message: 'Cancelled.' } };
+            const permit = await ctx.gate({ gate: 'add', subject: act.name, fallback: false,
+                                            label: `Connect to MCP server **"${act.name}"** at ${act.endpoint}?\n\n_Its tools are registered and callable until you remove it._` });
+            if (!permit.allowed) {
+              yield { type: 'result', value: { message: refusalMessage(permit) } };
               return;
             }
             yield { type: 'stdout', chunk: `Connecting to MCP server "${act.name}"...\n` };
@@ -79,7 +80,8 @@ ACTIONS
             return;
           case 'remove': {
             if (!act.name) { yield { type: 'error', message: 'remove requires "name".' }; return; }
-            if (!await ctx.gate({ gate: 'remove', subject: act.name, fallback: false, label: `Remove MCP server **"${act.name}"**?` })) { yield { type: 'result', value: { message: 'Cancelled.' } }; return; }
+            const permit = await ctx.gate({ gate: 'remove', subject: act.name, fallback: false, label: `Remove MCP server **"${act.name}"**?` });
+            if (!permit.allowed) { yield { type: 'result', value: { message: refusalMessage(permit) } }; return; }
             const ok = await manager.remove(act.name);
             yield { type: 'result', value: { message: ok ? `"${act.name}" disconnected and removed.` : `No MCP server named "${act.name}".` } };
             return;

@@ -21,6 +21,14 @@ This one reproduces matbot's historical behaviour:
 - with nobody to ask, answer the request's own `fallback` (which is what the *call site* says its
   non-interactive behaviour is — `true` for a tool-name collision at boot, `false` everywhere else).
 
+Each answer carries the `source` that produced it, which is what the caller's refusal message names:
+`user` for anything a human answered at the prompt (a refusal included — the source is which test
+decided, not what it decided), `configuration` for a standing answer in force, and `fallback` when it
+deferred with nobody to ask. A standing answer is one source whether it came from `default_settings:`
+or from an *Always allow* a human gave earlier: settings reads are layered, so nothing here can tell
+the two apart, and reporting `user` for a configured floor would be wrong half the time. A gate this
+one displaces keeps its own source when it is delegated to.
+
 ## Configuring it
 
 Standing answers live in this package's own settings namespace, one key per gate id, so an

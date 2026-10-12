@@ -1,6 +1,6 @@
 import { CONFIRM_NO, CONFIRM_YES } from './types/messages.js';
 import type { FormField } from './types/messages.js';
-import type { PermissionGate } from './types/permission.js';
+import { permitted, refused, type PermissionGate } from './types/permission.js';
 
 /**
  * The bare asking `PermissionGate`: ask through the channel in scope, and answer `req.fallback` when
@@ -17,8 +17,11 @@ import type { PermissionGate } from './types/permission.js';
  */
 export const askPermissionGate: PermissionGate = {
   async decide(req, ask) {
-    if (ask === undefined) return req.fallback;
+    // Two layers, so two sources: nobody to ask is `fallback`, and anything a human answered — a no
+    // included — is `user`.
+    if (ask === undefined) return req.fallback ? permitted('fallback') : refused('fallback');
     const field: FormField = { name: 'confirm', label: req.label, type: 'confirm', default: CONFIRM_NO };
-    return (await ask(field)).trim().toLowerCase() === CONFIRM_YES;
+    const yes = (await ask(field)).trim().toLowerCase() === CONFIRM_YES;
+    return yes ? permitted('user') : refused('user');
   },
 };

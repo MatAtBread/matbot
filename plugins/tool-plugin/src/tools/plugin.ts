@@ -1,6 +1,6 @@
 import type { Tool, ToolExecutor, ToolResultOf, ToolContext, MatbotPlugin, Runtime, PluginSource,
               PluginToolContract, DiscoveredPlugin } from '@matatbread/matbot-plugin-api';
-import { isIncompatibleRuntimeError, isNotAPluginError } from '@matatbread/matbot-plugin-api';
+import { isIncompatibleRuntimeError, isNotAPluginError, refusalMessage } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins, getRegisteredTools, getRegisteredFrontendPlugins,
          getRegisteredServiceKeys, getHookPlugins, getSystemContextPlugins,
          getSpecifierForPlugin, getPluginNameForSpecifier, getFailedPlugins, clearFailedPlugin } from '@matatbread/matbot-core';
@@ -632,9 +632,9 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
         fallback: false,
         label:    `Install plugin **"${specifier}"**?${description !== undefined ? `\n_${description}_` : ''}${deps}`,
       });
-      if (!confirmed) {
+      if (!confirmed.allowed) {
         if (plan !== undefined) await discardProvision(plan);
-        yield { type: 'result', value: { message: 'Cancelled.' } };
+        yield { type: 'result', value: { message: refusalMessage(confirmed) } };
         return;
       }
 
@@ -788,7 +788,7 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
                 `package(s) into its cache directory?\n${depPlan.packages.map(pkg => `- ${pkg}`).join('\n')}`,
             });
 
-            if (!offer) {
+            if (!offer.allowed) {
               await discardProvision(depPlan);
             } else {
               yield { type: 'stdout', chunk: `Installing ${depPlan.packages.length} package(s) with npm...\n` };
@@ -848,9 +848,10 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
       }
 
       // Same security rationale as add: out-of-band prompt, not a confirmable parameter.
-      if (!await ctx.gate({ gate: 'remove', subject: entry, fallback: false,
-                            label: `Remove plugin **"${entry}"**?` })) {
-        yield { type: 'result', value: { message: 'Cancelled.' } };
+      const permit = await ctx.gate({ gate: 'remove', subject: entry, fallback: false,
+                                      label: `Remove plugin **"${entry}"**?` });
+      if (!permit.allowed) {
+        yield { type: 'result', value: { message: refusalMessage(permit) } };
         return;
       }
 
@@ -882,8 +883,8 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
       // plugins live under .plugins/; neither was `pnpm add`-ed, so `pnpm remove` is a no-op at best.
       // Mirrors the add path, which only shells out for npm / tarball-or-git specifiers.
       if (pkgName !== undefined && (await readDependencyNames(projectDir)).has(pkgName)
-          && await ctx.gate({ gate: 'npm-uninstall', subject: pkgName, fallback: false,
-                              label: `Also uninstall the npm package **"${pkgName}"**?` })) {
+          && (await ctx.gate({ gate: 'npm-uninstall', subject: pkgName, fallback: false,
+                               label: `Also uninstall the npm package **"${pkgName}"**?` })).allowed) {
         const pm = await detectPackageManager(projectDir);
         try {
           const out = await runCommand(pm, ['remove', pkgName], projectDir);
@@ -916,10 +917,13 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
       // Reloading a resident plugin needs no confirmation — the user already trusts it. But if
       // nothing was unloaded, "reload" is really a first-time load of code they haven't consented
       // to, so gate it with the same confirmation as add/remove.
-      if (!wasLoaded && !await ctx.gate({ gate: 'load', subject: entry, fallback: false,
-                                         label: `Plugin **"${entry}"** is not currently loaded — load it now?` })) {
-        yield { type: 'result', value: { message: 'Cancelled.' } };
-        return;
+      if (!wasLoaded) {
+        const permit = await ctx.gate({ gate: 'load', subject: entry, fallback: false,
+                                        label: `Plugin **"${entry}"** is not currently loaded — load it now?` });
+        if (!permit.allowed) {
+          yield { type: 'result', value: { message: refusalMessage(permit) } };
+          return;
+        }
       }
 
       // Default refresh=true: for a remote (github/http) plugin, reload means "pick up the latest
