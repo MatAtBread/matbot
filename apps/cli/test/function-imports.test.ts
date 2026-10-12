@@ -6,8 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildAsyncFn, buildBodyFn, runFunction, EXECUTE_SUBJECT, type CompileHost } from '@matatbread/matbot-function-tools';
 import type { MatbotMachine, PermissionRequest, Tool, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
-import { createVmFunctionRunner } from '../src/function-runner.ts';
-import { ROUTE, transformBody } from '../src/body-transform.ts';
+import { ROUTE, createVmFunctionRunner, transformBody } from '@matatbread/matbot-function-runner-node';
 
 // A tool_function body is meant to be a constrained place to compute: an install that chose `docker-bash`
 // over `bash` has not thereby handed `node:fs` to model-authored code. These pin the three parts of that —
@@ -336,7 +335,7 @@ test('a granted path resolves against the project, not against matbot', async ()
   // compensates for a pnpm layout, where it is not.
   const proj = await mkdtemp(join(tmpdir(), 'matbot-fnimport-'));
   await writeFile(join(proj, 'helper.js'), 'export const local = 2;');
-  const runner = createVmFunctionRunner(0, { configDir: proj, dotPlugins: join(proj, '.plugins') });
+  const runner = createVmFunctionRunner(0, { projectDir: proj });
 
   assert.equal((await runner.import!('./helper.js') as { local: number }).local, 2, 'relative, rooted at the project');
   assert.equal((await runner.import!(join(proj, 'helper.js')) as { local: number }).local, 2, 'absolute path');

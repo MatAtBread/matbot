@@ -12,6 +12,30 @@ churn and less likely to affect a consumer who doesn't use them.
 ## 0.4.20
 
 ### Breaking changes
+- **The node `FunctionRunner` is a plugin, and not in a default install.** Bounding a `tool_function`
+  body's synchronous stretches, withholding the host globals that reach a capability without an import,
+  and routing its `import(…)` through the gate all move out of `apps/cli` into
+  `@matatbread/matbot-function-runner-node`. **Without it a body is compiled with `new AsyncFunction` and
+  runs unbounded, unshadowed and ungated** — add the package to `plugins:` to get the previous behaviour.
+  Nothing in matbot requires any of it, which is the point: every feature the node runner has is reachable
+  through the `FunctionRunner` seam alone, so an installation wanting a worker, a subprocess or another
+  language replaces one package and touches no core.
+
+  Its two options are its own settings — `timeout_ms` and `permit_imports`, authored under
+  `default_settings: { "@matatbread/matbot-function-runner-node": { … } }`. The old top-level
+  `function_timeout_ms` and `function_imports` keys are still parsed and validated, and an install
+  carrying them is now WARNED, naming where they went, rather than having them silently ignored. One
+  consequence worth stating: `permit_imports` is a plugin setting, so it no longer has the property its
+  yaml predecessor had of being unoverridable by anything at run time.
+
+  `import()` of an `http(s)` URL is refused by this runner rather than materialised: fetching a remote
+  module to disk is the host's machinery, which a plugin cannot reach and should not keep a second copy
+  of — and that path crashes on a versioned URL anyway (#89). A builtin, a package and a path all work as
+  before. `apps/cli` also loses its `typescript` dependency, which moves to the plugin.
+
+  `ToolTypeIndex` now invalidates its cached dts when a `FunctionRunner` arrives or leaves, not only when
+  the tool registry changes: the permitted set, the withheld globals and the note composed from them are
+  cached, which was safe only while the runner was seeded by the host before anything could read a dts.
 
 - **A `tool_function` body's imports are asked about.** The dynamic `import()` added earlier in this
   release was unconditional and advertised in the generated tool dts; the first time a body imports

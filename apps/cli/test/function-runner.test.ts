@@ -4,7 +4,7 @@ import { stripTypeScriptTypes } from 'node:module';
 import { buildAsyncFn, runFunction, parsePackage, buildPackageFn, exportFn, type CompileHost } from '@matatbread/matbot-function-tools';
 import { invokeTool, parseConfig } from '@matatbread/matbot-core';
 import type { FunctionRunner, MatbotMachine, Tool, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
-import { createVmFunctionRunner, FUNCTION_SYNC_LIMIT_MS } from '../src/function-runner.ts';
+import { createVmFunctionRunner, FUNCTION_SYNC_LIMIT_MS } from '@matatbread/matbot-function-runner-node';
 
 // A tool_function body runs on the daemon's one event loop. 18da1564 (2026-09-15) froze every session for
 // 260s on a model-authored `while` whose step never advanced; it ended only because the array it grew hit

@@ -171,9 +171,15 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
   constructor(machine: MatbotMachine, fill: ToolTypesFill = buildToolTypes) {
     this.machine = machine;
     this.fill = fill;
-    // Any tool CRUD invalidates the generated dts; the event itself carries nothing we need.
+    // Any tool CRUD invalidates the generated dts; the event itself carries nothing we need. So does the
+    // `FunctionRunner` arriving or leaving, because what this derives from it is CACHED: the permitted
+    // import set becomes the program's `paths` and IMPORT-GATE's list, its withheld globals become
+    // ENV-GATE's, and the note at the top of the declarations is composed from both. That was safe to
+    // ignore only while the runner was seeded by the host before anything could read a dts; it is a
+    // plugin now, so it can arrive after one has been built and handed out.
     machine.Notifier.consume(() => { this.generation++; }, this.ac.signal,
-      n => n.kind === RegistryChangeKind && n.registry === 'tools');
+      n => n.kind === RegistryChangeKind
+        && (n.registry === 'tools' || (n.registry === 'services' && n.name === 'FunctionRunner')));
   }
 
   close(): void { this.ac.abort(); }

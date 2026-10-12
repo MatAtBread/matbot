@@ -25,7 +25,6 @@ import { createAlsPrincipalCarrier }       from './principal-als.js';
 import { createAlsUsageCarrier }           from './usage-als.js';
 import { EnvFileVault }                     from './env-vault.js';
 import { answerSelect, renderSelect }        from './select.js';
-import { createVmFunctionRunner, FUNCTION_SYNC_LIMIT_MS } from './function-runner.js';
 import { FilesystemStorageBackend }        from '@matatbread/matbot-storage-filesystem';
 import { createBuiltinTools, createProviderTool, classifySpecifier, materializeRemote, remoteDependencyNotes,
          findDuplicateSingletons, describeDuplicateSingleton, type MaterializedRemote } from '@matatbread/matbot-tool-plugin';
@@ -854,19 +853,20 @@ async function main(): Promise<void> {
   const resolvedPluginMods   = await resolvePluginSpecifiers(matbotConfig.plugins, configDir);
   const preScanned           = await preScanStorage([...resolvedProviderMods, ...resolvedPluginMods], dotData);
 
-  // Model-authored code shares the one event loop with every session and frontend, so a loop in a
-  // tool_function that never awaits would freeze the daemon. Seeded, like MediaStore, so a plugin may
-  // replace it and unregistering reverts here. `function_timeout_ms: 0` removes the time bound and
-  // NOTHING else: it used to seed no runner, which silently discarded `function_imports.permit` (and so
-  // the scoped types and IMPORT-GATE with it), unshadowed every withheld global, and made a raw
-  // `import()` work — one line of yaml about how long a body may compute answering what it may reach.
-  const functionTimeoutMs = matbotConfig.functionTimeoutMs ?? FUNCTION_SYNC_LIMIT_MS;
-  const functionRunner = createVmFunctionRunner(functionTimeoutMs, {
-    ...(matbotConfig.functionImports !== undefined ? { permit: matbotConfig.functionImports } : {}),
-    dotPlugins: path.join(configDir, '.plugins'),
-    configDir,
-  });
-  if (functionTimeoutMs === 0) console.warn('[matbot] function_timeout_ms is 0: tool_function bodies run unbounded, and one that loops without awaiting will freeze this process.');
+  // What a `tool_function` body may reach, and for how long, is NOT this host's business: it is a
+  // `FunctionRunner`, which `@matatbread/matbot-function-runner-node` registers as an ordinary plugin.
+  // Absent, a body compiles with `new AsyncFunction` and runs unbounded, unshadowed and ungated — which
+  // is what matbot does without opinions, and what the declarations a body is written against then say.
+  //
+  // These two keys used to be read here. They are the runner's settings now, so an install that still
+  // carries them is told where they went rather than having them silently ignored — the same courtesy
+  // `__matbot_core__.overwriteToolsOnCollision` got when it moved to the gate policy.
+  if (matbotConfig.functionTimeoutMs !== undefined || matbotConfig.functionImports !== undefined) {
+    console.warn('[matbot] `function_timeout_ms` and `function_imports` are no longer read here: they belong to'
+      + ' @matatbread/matbot-function-runner-node, as `timeout_ms` and `permit_imports` under'
+      + ' `default_settings: { "@matatbread/matbot-function-runner-node": { … } }`. Add that plugin to'
+      + ' `plugins:` to bound a tool_function body, withhold host globals from it, and gate its imports.');
+  }
 
   const { services, makeRunner, loaded } = assembleMachine({
     // The same layout the filesystem storage plugin names: a directory per namespace under `.data`.
@@ -876,7 +876,6 @@ async function main(): Promise<void> {
     providers,
     gate:            defaultGate,
     defaultSettings: matbotConfig.defaultSettings,
-    seed:            { FunctionRunner: functionRunner },
     builtinTools:    createBuiltinTools(),
     version:         selfVersion(),
     host: machine => ({

@@ -51,6 +51,9 @@ plugins/            — one directory per package, flat but for the frontend/pro
     skills-node/   — node specialization: .md import/watch
     skills_compiler/— compiles a procedural skill into a TS tool plugin
     function-tools/— tool_function: TS lambdas/named tools composing registered tools
+    function-runner-node/— the node FunctionRunner: bounds a body, withholds host globals, routes its
+                     imports onto the gate. OPTIONAL and not in a default install — without it a body
+                     runs unbounded, unshadowed and ungated
     tool-types/    — ToolTypeIndex: derives the tool dts + hosts the codegen checker (node)
     caching-tool-types/— tool-types + its build persisted in settings across restarts (node)
     tool-router/   — ToolPresenter: bounded per-turn tool window + tool_search
@@ -142,7 +145,7 @@ was simply absent from the other with nothing to fail.
 
 A host passes only what is genuinely its own: its carriers (installed first), its boot `StorageBackend`
 (the CLI's filesystem one, the browser's IndexedDB + OPFS), its boot `Vault`, how a secret is resolved
-(the browser prompts for a missing one), extra seeded services (the CLI's `FunctionRunner`), and the
+(the browser prompts for a missing one), extra seeded services, and the
 members that acquire a plugin (`loadPlugin`, `unloadPlugin`, `resolver`). `preScanStorage` opens a
 configured storage plugin's backend before any store exists, and `loaded()` runs the post-load checks.
 
@@ -750,6 +753,15 @@ Three parts, and only the first two enforce anything:
    specifier working (the argument passes through, so the gate sees the string the body built), and leaves
    the type-check reading the source as WRITTEN.
 
+   **The runner is a PLUGIN** (`@matatbread/matbot-function-runner-node`), not part of the host, and not
+   in a default install. That is the point: nothing in matbot requires a bound, withheld globals or a
+   gated import, and everything this one does is reachable through the `FunctionRunner` seam alone — so an
+   installation wanting different behaviour (a worker, a subprocess, another language) replaces the
+   package and touches nothing else. Its two settings are its own (`timeout_ms`, `permit_imports`, under
+   `default_settings:` keyed by its package name); they were `function_timeout_ms` and `function_imports`
+   read by `apps/cli`, which core still PARSES so a host can tell an install carrying them where they
+   went rather than ignoring them silently.
+
    **A `FunctionRunner` is handed TypeScript and is the environment it runs in.** `compile(source)` takes a
    self-contained async-function expression — parameters and all, because a bare body is not valid alone
    (`return` at its top level is a syntax error) and every runner would otherwise have to wrap it before
@@ -785,6 +797,16 @@ Three parts, and only the first two enforce anything:
    `(a + b) / 2`. A parser also tells a method shorthand named `import` and a type-position
    `import('x').Foo` from a call, both of which had to be refused outright.
 
+   **A consumer that CACHES what the runner says must watch for it.** `ToolTypeIndex` derives the
+   program's `paths`, IMPORT-GATE's list, ENV-GATE's list and the note at the top of the declarations from
+   `permittedImports` and `withheldGlobals`, and caches the result — so it consumes the `services`
+   registry change for the `FunctionRunner` key alongside the tool-registry one it already watched. While
+   the runner was host-seeded that could not go stale, because it was in place before anything could read
+   a dts; as a plugin it can arrive after one has been built and handed out. Consumers that resolve the
+   runner per call need nothing — `function-tools` recompiles a body against whichever runner is current,
+   and the browser's index rebuilds its note on each `dts()` — and adding a subscription to either would
+   be the speculative kind.
+
    **What a runner tells the type-checker is two arrays, and no text.** `import('node:os')` gets its types
    from `compilerOptions.paths` — one entry per permitted specifier, pointing at the real
    `@types/node/*.d.ts` — never from the dts, which says nothing about modules. `paths` cannot ENFORCE the
@@ -799,7 +821,8 @@ Three parts, and only the first two enforce anything:
 
    **Absent ⇒ no runner, so none of it.** Nothing bounds the body, nothing is withheld, nothing rewrites
    its `import(…)`, and the loader handed to the call is never reached — so the body's import gets
-   whatever the platform resolves. That is the **browser**, which could not enforce the gate anyway: with
+   whatever the platform resolves. That is any install that did not add the plugin, and it is the
+   **browser**, which could not enforce the gate anyway: with
    nothing withheld, `new Function('s', 'return import(s)')` reaches the platform loader whatever a
    transform concludes, and `permittedImports` has no carrier. The browser's own sandbox and permission UX
    is the boundary there, and its `ToolTypeIndex` says only the one concrete thing a body needs told —

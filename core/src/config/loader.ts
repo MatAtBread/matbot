@@ -159,6 +159,10 @@ export function parseConfig(
   }
 
   const functionTimeoutRaw = doc['function_timeout_ms'];
+  // `function_timeout_ms` and `function_imports` are no longer read by any host: they are settings of
+  // `@matatbread/matbot-function-runner-node`, which owns what a tool_function body may reach. They are
+  // still PARSED, and still validated, so that a host can tell an install carrying them where they went
+  // — a key that silently stops being honoured is the thing that reads as "my config does nothing".
   let functionTimeoutMs: number | undefined;
   if (functionTimeoutRaw !== undefined && functionTimeoutRaw !== null) {
     functionTimeoutMs = asNumber(functionTimeoutRaw, 'function_timeout_ms');

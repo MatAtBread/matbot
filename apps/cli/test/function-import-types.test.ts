@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { checkSnippetAgainst, ToolTypeIndexImpl } from '@matatbread/matbot-tool-types';
 import type { MatbotMachine } from '@matatbread/matbot-plugin-api';
-import { createVmFunctionRunner } from '../src/function-runner.ts';
+import { createVmFunctionRunner } from '@matatbread/matbot-function-runner-node';
 
 // The permitted set is expressed as `paths`, one entry per module, NOT as `types: ['node']`. The
 // difference is the whole point: with `types` every builtin resolves, so a module the install forbids
