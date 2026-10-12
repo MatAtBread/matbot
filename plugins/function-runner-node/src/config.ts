@@ -1,4 +1,5 @@
-import type { MatbotMachine, Tool, ToolContext, ToolContract, ToolExecutor, ToolResultOf } from '@matatbread/matbot-plugin-api';
+import { importableByName } from '@matatbread/matbot-plugin-api';
+import type { MatbotMachine, PluginSettings, Tool, ToolContext, ToolContract, ToolExecutor, ToolResultOf } from '@matatbread/matbot-plugin-api';
 
 /**
  * How long a body may compute without awaiting, in milliseconds. `0` removes the TIME bound and nothing
@@ -24,6 +25,55 @@ export interface RunnerConfig {
   permitImports:    string[] | null;
   /** The identifiers the runner does not bind. Fixed, and reported so a reader need not guess. */
   withheldGlobals:  string[];
+  /** A stored or configured value that could not be used, and what was used instead. */
+  problems?:        string[];
+}
+
+/** Why `value` cannot be a `timeout_ms`, or `undefined` if it can. */
+export function timeoutProblem(value: unknown): string | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0
+    ? undefined : 'must be a non-negative integer (0 removes the time bound)';
+}
+
+/** Why `value` cannot be a `permit_imports`, or `undefined` if it can. An entry naming a path or a URL
+ *  is refused rather than kept, since it could never admit anything a body is allowed to import. */
+export function permitProblem(value: unknown): string | undefined {
+  if (!Array.isArray(value) || !value.every(s => typeof s === 'string' && s !== '')) {
+    return 'must be an array of non-empty specifiers or prefixes (e.g. ["node:", "node:fs"]), or [] to switch imports off';
+  }
+  const bad = value.filter(p => !importableByName(p.replace(/\/$/, '')));
+  return bad.length > 0
+    ? `names something a body can never import (${bad.join(', ')}): entries are node builtins or package names, never paths or URLs`
+    : undefined;
+}
+
+/**
+ * The two settings as they will be USED. They are checked here, and not only by `set`, because
+ * `default_settings:` and a hand-edited document reach the runner without passing through the tool.
+ * A bad time bound falls back to the coded default. A bad restriction falls back to `[]`, so imports are
+ * off: falling back to "no restriction" would turn a typo in a restriction into the widest setting.
+ */
+export async function readRunnerConfig(settings: PluginSettings, codeDefaultMs: number):
+    Promise<{ timeoutMs: number; permit: readonly string[] | undefined; problems: string[] }> {
+  const problems: string[] = [];
+  const rawTimeout = await settings.get<unknown>(TIMEOUT_KEY);
+  const rawPermit  = await settings.get<unknown>(IMPORTS_KEY);
+  let timeoutMs = codeDefaultMs;
+  if (rawTimeout !== undefined) {
+    const why = timeoutProblem(rawTimeout);
+    if (why === undefined) timeoutMs = rawTimeout as number;
+    else problems.push(`${TIMEOUT_KEY} ${why}, but is ${JSON.stringify(rawTimeout)}; using ${codeDefaultMs}ms.`);
+  }
+  let permit: readonly string[] | undefined;
+  if (rawPermit !== undefined) {
+    const why = permitProblem(rawPermit);
+    if (why === undefined) permit = rawPermit as readonly string[];
+    else {
+      permit = [];
+      problems.push(`${IMPORTS_KEY} ${why}, but is ${JSON.stringify(rawPermit)}; imports are switched off until it is corrected.`);
+    }
+  }
+  return { timeoutMs, permit, problems };
 }
 
 declare module '@matatbread/matbot-plugin-api' {
@@ -71,13 +121,13 @@ export function createRunnerConfigTool(
   codeDefaultMs: number,
 ): Tool<ToolResultOf<'function_runner_config'>> {
   const current = async (): Promise<RunnerConfig> => {
-    const settings = services.settings();
-    const stored   = await settings.get<readonly string[]>(IMPORTS_KEY);
+    const { timeoutMs, permit, problems } = await readRunnerConfig(services.settings(), codeDefaultMs);
     return {
-      timeoutMs:        await settings.get<number>(TIMEOUT_KEY) ?? codeDefaultMs,
+      timeoutMs,
       timeoutMsDefault: codeDefaultMs,
-      permitImports:    stored === undefined ? null : [...stored],
+      permitImports:    permit === undefined ? null : [...permit],
       withheldGlobals:  [...(services.FunctionRunner?.withheldGlobals ?? [])],
+      ...(problems.length > 0 ? { problems } : {}),
     };
   };
 
@@ -100,18 +150,17 @@ export function createRunnerConfigTool(
             writes.set(IMPORTS_KEY, null);
           } else {
             if (args.timeoutMs !== undefined) {
-              if (args.timeoutMs !== null
-                  && (typeof args.timeoutMs !== 'number' || !Number.isInteger(args.timeoutMs) || args.timeoutMs < 0)) {
-                yield { type: 'error', message: '"timeoutMs" must be a non-negative integer (0 removes the time bound), or null to revert to the installation default.' };
+              const why = args.timeoutMs === null ? undefined : timeoutProblem(args.timeoutMs);
+              if (why !== undefined) {
+                yield { type: 'error', message: `"timeoutMs" ${why}, or null to revert to the installation default.` };
                 return;
               }
-              writes.set(TIMEOUT_KEY, args.timeoutMs);
+              writes.set(TIMEOUT_KEY, args.timeoutMs as number | null);
             }
             if (args.permitImports !== undefined) {
-              if (args.permitImports !== null
-                  && (!Array.isArray(args.permitImports)
-                      || !args.permitImports.every(s => typeof s === 'string' && s !== ''))) {
-                yield { type: 'error', message: '"permitImports" must be an array of non-empty specifiers or prefixes (e.g. ["node:", "node:fs"]), [] to switch imports off, or null to revert to the installation default.' };
+              const why = args.permitImports === null ? undefined : permitProblem(args.permitImports);
+              if (why !== undefined) {
+                yield { type: 'error', message: `"permitImports" ${why}, or null to revert to the installation default.` };
                 return;
               }
               writes.set(IMPORTS_KEY, args.permitImports as readonly string[] | null);
@@ -162,7 +211,8 @@ export function createRunnerConfigTool(
     description:
       'Read or change how `tool_function` bodies are run by this installation (the node FunctionRunner). '
       + 'Two settings. `permitImports` is an optional RESTRICTION on what a body may import, as exact '
-      + 'specifiers or prefixes (["node:"] is every builtin, ["node:fs", "node:path"] just those two): '
+      + 'specifiers or prefixes of builtins and package names (["node:"] is every builtin, ["node:fs", '
+      + '"node:path"] just those two; a path or a URL is never importable, so cannot be an entry): '
       + 'null means no restriction, so every import is asked about at the call; [] switches imports off '
       + 'entirely. A specifier outside the restriction cannot be allowed by anyone at the call, and it '
       + 'fails the type-check rather than being refused later. `timeoutMs` is how long a body may compute '

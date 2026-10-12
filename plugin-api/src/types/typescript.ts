@@ -53,7 +53,7 @@ export interface FunctionRunner {
    * names itself, a closure — is internal, and nothing outside declares or sees it: the type-check runs
    * on the source as the author wrote it, before any of this.
    */
-  compile(source: string): (importModule: (spec: string) => Promise<unknown>, ...args: unknown[]) => Promise<unknown>;
+  compile(source: string): (importModule: (spec: string, options?: ImportCallOptions) => Promise<unknown>, ...args: unknown[]) => Promise<unknown>;
   /**
    * An optional RESTRICTION on what a body may import, as exact specifiers or prefixes (`['node:']`).
    *
@@ -74,22 +74,23 @@ export interface FunctionRunner {
    *
    * An entry matches a specifier exactly, or as a prefix ending at a BOUNDARY — its own trailing `/` or
    * `:`, or the next `/` in the specifier. So `node:` admits every builtin and `node:fs` admits
-   * `node:fs/promises`, while `https://esm.sh/lodash` does NOT admit `https://esm.sh/lodashhack/x.js`:
-   * a bare string prefix would let an entry admit a sibling whose name merely begins the same way,
-   * which is the whole value of naming one. It bounds what may be ASKED — it grants nothing by itself.
+   * `node:fs/promises`, while `lodash` does NOT admit `lodashhack`: a bare string prefix would let an
+   * entry admit a sibling whose name merely begins the same way, which is the whole value of naming one.
+   * It bounds what may be ASKED — it grants nothing by itself — and only ever among what
+   * {@link importableByName} admits, so an entry naming a path or a URL admits nothing.
    */
   readonly permittedImports?: readonly string[];
   /**
-   * Turn a granted specifier into a module. Platform-specific, which is why it is the runner's and not a
-   * plain `import()` at the call site: node cannot import an `http(s)` URL at all
-   * (`ERR_UNSUPPORTED_ESM_URL_SCHEME`), so it materialises one and imports from disk, while a browser
-   * imports the URL directly. Absent ⇒ the caller falls back to a dynamic import, which reaches whatever
-   * the platform natively resolves.
+   * Turn a granted specifier into a module — a builtin or an installed package, never a path or a URL
+   * (see {@link importableByName}). The runner's rather than a plain `import()` at the call site because
+   * where a package resolves FROM is the runner's business: node's resolves from the runner's own module.
+   * `options` is the import's second argument, passed through as written, so an import attribute
+   * (`{ with: { type: 'json' } }`) reaches the loader. Absent ⇒ the caller falls back to a dynamic import.
    *
    * It is reached only after the gate has allowed this specifier for this function, and it performs no
    * check of its own — a capability, not a policy.
    */
-  import?(spec: string): Promise<unknown>;
+  import?(spec: string, options?: ImportCallOptions): Promise<unknown>;
   /**
    * Identifiers a body does NOT have — anything this runner withholds, shadows or never binds (node's
    * withholds `process`, `globalThis`, `Buffer`, `eval` and `Function`, and names the phantom
@@ -112,6 +113,25 @@ export const FUNCTION_TIMEOUT = 'FUNCTION_TIMEOUT';
 
 
 /**
+ * Whether `spec` names a module the way a `tool_function` body may import one: a node builtin (`node:fs`)
+ * or an installed package (`lodash`, `@scope/pkg/sub`). Never a path, a URL or any other scheme.
+ *
+ * Downloading or placing code is what a plugin install is for. It is reviewed and versioned, and it has
+ * its own gate. A body is too lightweight a thing to recommend it from. Paths are refused for a second
+ * reason: they defeat {@link importPermitted}, which matches strings, so `./lib/../../x` "starts with"
+ * `./lib/` and resolves outside it. A `.` or `..` segment in a package subpath is refused for the same
+ * reason, because a package with no `exports` map resolves it as a path.
+ *
+ * Shared because three places must agree: the gate in `function-tools`, the runner, and the type-check.
+ */
+export const importableByName = (spec: string): boolean =>
+  spec !== ''
+  && !/^[./\\]/.test(spec)
+  && !spec.includes('\\')
+  && (spec.startsWith('node:') || !/^[a-z][a-z0-9+.-]*:/i.test(spec))
+  && !spec.split('/').some(seg => seg === '.' || seg === '..');
+
+/**
  * Whether {@link FunctionRunner.permittedImports} admits `spec` — the boundary rule that interface
  * documents, as a function, because two packages read the same list and must agree: `function-tools`
  * decides whether to ask about an import, and `tool-types` decides which modules to TYPE. They had a copy
@@ -121,10 +141,11 @@ export const FUNCTION_TIMEOUT = 'FUNCTION_TIMEOUT';
  *
  * A prefix must end at a boundary: its own trailing `/` or `:`, or the next `/` in the specifier. A bare
  * `startsWith` let an entry admit a sibling whose name merely begins the same way, which is the whole
- * value of naming one.
+ * value of naming one. A specifier {@link importableByName} refuses is never admitted, whatever the list
+ * says, since string matching cannot see what `..` does.
  */
 export const importPermitted = (permits: readonly string[], spec: string): boolean =>
-  permits.some(p => spec === p
+  importableByName(spec) && permits.some(p => spec === p
     || (p.endsWith('/') || p.endsWith(':') ? spec.startsWith(p) : spec.startsWith(`${p}/`)));
 
 /**
@@ -262,6 +283,9 @@ export interface ToolTypeIndex {
    *
    * Stable across restarts, so never identity-derived, and derived at the point of use like everything
    * else read off the runner — there is nothing here to invalidate or subscribe to.
+   *
+   * Optional, because an index written before it existed must degrade rather than throw: a caller with
+   * no fingerprint stores none, and compares nothing.
    */
-  environment(): Promise<string>;
+  environment?(): Promise<string>;
 }

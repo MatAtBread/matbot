@@ -33,10 +33,13 @@ churn and less likely to affect a consumer who doesn't use them.
   consequence worth stating: `permit_imports` is a plugin setting, so it no longer has the property its
   yaml predecessor had of being unoverridable by anything at run time.
 
-  `import()` of an `http(s)` URL is refused by this runner rather than materialised: fetching a remote
-  module to disk is the host's machinery, which a plugin cannot reach and should not keep a second copy
-  of — and that path crashes on a versioned URL anyway (#89). A builtin, a package and a path all work as
-  before. `apps/cli` also loses its `typescript` dependency, which moves to the plugin.
+  **A body imports by name only**: a node builtin (`node:fs`) or a package already installed where
+  matbot runs. A path or a URL is refused before anyone is asked, by the gate, the runner and IMPORT-GATE
+  alike (`importableByName`). Downloading or placing code is what a plugin install is for, and a body is
+  too lightweight a thing to recommend it from. Paths also defeated `permit_imports`, which matches
+  strings: `./lib/../../x` "starts with" `./lib/` and resolves outside it, so a `.`/`..` segment is refused
+  in a package subpath too. A `permit_imports` entry naming a path or a URL is rejected, since it could
+  never admit anything. `apps/cli` also loses its `typescript` dependency, which moves to the plugin.
 
   `ToolTypeIndex` subscribes to nothing of the runner's, deliberately: everything derived from it — the
   note in the dts, the two lists a check enforces — is derived at the point of use, and the one cache over
@@ -115,7 +118,8 @@ churn and less likely to affect a consumer who doesn't use them.
   `checkedElsewhere: true` where it no longer matches. Nothing re-checks on load — that is a worker program
   per stored function at boot, and would turn a report into a boot failure — so what changes is that a
   reader is told, and `check` remains the way to re-verify. The tool types are deliberately not in it:
-  those are live, and `check` is how a caller re-verifies against them.
+  those are live, and `check` is how a caller re-verifies against them. Optional, so an index written
+  before it existed degrades to storing and comparing nothing instead of throwing.
 - **`Tool.gateNamespace`** — the fixed gate namespace a tool whose NAME is built at run time declares,
   since `ctx.gate`'s suffix is qualified with the tool's registered name. A `function-tools` function
   says `tool_function`, so every body's import decision lands on `tool_function.import`. Qualified by the
@@ -127,12 +131,15 @@ churn and less likely to affect a consumer who doesn't use them.
 - **`importPermitted`** — the `permittedImports` boundary rule as a function, beside the interface that
   documents it, because two packages read the same list and must agree: `function-tools` decides whether
   to ask about an import, `tool-types` decides which modules to type.
+- **`importableByName`** — whether a specifier names a builtin or a package rather than a path or a URL:
+  the one rule the gate, the runner and the type-check apply before anything else. `importPermitted`
+  admits nothing it refuses.
 - **`FunctionRunner.permittedImports` and `FunctionRunner.import()`** — the optional restriction (absent
   ⇒ unrestricted; `[]` ⇒ none), and how a granted specifier becomes a module. The restriction is on the
   runner because the runner is the execution environment and two consumers need one answer: the capability
-  that imports, and the type index that declares the reachable set. `import()` is platform-specific because node refuses an `http(s)` specifier
-  outright (`ERR_UNSUPPORTED_ESM_URL_SCHEME`), so it materialises one under `.plugins/` and imports from
-  disk, while a browser imports the URL directly.
+  that imports, and the type index that declares the reachable set. `import()` is the runner's because
+  where a package resolves FROM is; it takes the import's second argument too, so an import attribute
+  (`{ with: { type: 'json' } }`) reaches the loader.
 
 ### Bug fixes
 
@@ -161,17 +168,26 @@ churn and less likely to affect a consumer who doesn't use them.
   refused the package structurally instead, naming the reason. The bare spelling is now typed wherever the
   gate would permit it, so `import('os')` and `import('node:os')` are graded as they run — and under a
   `['node:']` restriction neither the types nor the gate admit the bare form, which already agreed.
-- **A granted import of a PATH resolves against the project.** `apps/cli`'s runner resolved it against its
-  own module, so a granted `./x.js` named a path inside matbot's own source — not a place a body's author
-  can have put anything. It now resolves against the directory holding `matbot.yaml`, the same base as
-  `.data`, `.plugins` and the type-checker's program root, and a bare specifier that resolves nowhere is
-  answered with a message naming that directory instead of node's own, which named a file inside matbot
-  that the body never mentioned. A bare specifier is deliberately not redirected: ordinary resolution
-  reaches the project's `node_modules` whenever matbot is installed inside it, which a flat npm or yarn
-  install is; under pnpm the CLI sits outside the project tree and a package installed beside the config
-  is not reachable, and nothing here compensates for that (a CJS resolve rooted at the project refuses a
-  package whose `exports` offers only an `import` condition — most of them now — and
-  `import.meta.resolve`'s second argument is silently ignored).
+- **A package a body asks for that is not installed is reported with where to install it** — the
+  directory holding `matbot.yaml` — instead of node's own message, which named a file inside matbot that
+  the body never mentioned. Resolution is ordinary resolution from the runner, which reaches the project's
+  `node_modules` whenever matbot is installed inside it (a flat npm or yarn install). Under pnpm the runner
+  sits outside the project tree and a package installed beside the config is not reachable; nothing here
+  compensates for that (a CJS resolve rooted at the project refuses a package whose `exports` offers only
+  an `import` condition — most of them now — and `import.meta.resolve`'s second argument is silently
+  ignored).
+- **An import attribute reached the gate and was dropped.** `import('./x.json', { with: … })` kept its
+  second argument through the rewrite, but the loader took a specifier alone, so a JSON module failed
+  with `ERR_IMPORT_ATTRIBUTE_MISSING` after the user had already granted it.
+- **The runner's settings are checked wherever they come from.** `function_runner_config set` validated
+  them, but `default_settings:` and a hand-edited document reached the runner unchecked: a negative
+  `timeout_ms` ran bodies unbounded without the `timeout_ms: 0` warning, and a scalar `permit_imports`
+  made every import throw `permits.some is not a function`. A bad bound now falls back to the default and
+  a bad restriction to `[]` (imports off, never "no restriction"), each warned at boot and reported by
+  `get` as `problems`.
+- **An import label no longer implies a builtin is a narrow grant.** `node:child_process` runs programs,
+  `node:module` hands back `require` and `node:process` is the global the runner withholds, so a builtin's
+  label now says it carries matbot's full access, as a package's always did.
 - **A string-literal type no longer breaks a tool's contract text.** `function-tools`' type-text walkers
   counted brackets inside string literals, so `Promise<'a>b'>` kept its `Promise<…>` wrapper (the defect
   this release fixed elsewhere) and `'a|b'` was split into two union arms. Both are spliced verbatim into
@@ -217,9 +233,8 @@ churn and less likely to affect a consumer who doesn't use them.
   `__filename`, none of which a body has, so a new structural rule (**ENV-GATE**, beside the cast gate)
   rejects those and `import.meta` with the working form named, rather than letting `require('node:fs')`
   typecheck and fail at the first call. `ToolCheckDiagnostic.label` now carries a per-rule name for a
-  structural finding instead of always `CAST-GATE`. An `http(s)` module gets no types at all:
-  TypeScript cannot express "a module with arbitrary named exports", and an untypeable thing is a
-  stated refusal here, not a fake type. `paths` cannot *enforce* the restriction, so a second structural
+  structural finding instead of always `CAST-GATE`. A path or a URL gets no types, being
+  unimportable; IMPORT-GATE refuses it at the check. `paths` cannot *enforce* the restriction, so a second structural
   rule (**IMPORT-GATE**) does: loading one builtin's declaration file drags in the ambient
   `declare module 'node:…'` blocks of everything its own declarations reference, and whether a forbidden
   specifier then resolves depends on what `@types/node` is reachable from the program root — so `paths`
@@ -252,10 +267,7 @@ churn and less likely to affect a consumer who doesn't use them.
   every select was two or three short words: the import gate offers four standing answers whose labels
   share ~50 characters, so the middle ones could not be typed at all and a near-miss read as a denial. An
   unmatched answer now says so and re-asks once, an empty line is still the default, and one matching
-  nothing is returned verbatim where the field allows free text (`allowOther`), as the web frontend does. A granted `http(s)` URL also loads
-  reliably now: the hooks name the format for anything inside a `.plugins/` cache tree, as they already
-  did for every import made from inside one, because a mirrored path commonly has no extension or a bare
-  `.js` and syntax detection does not apply under a project that declares itself `"type": "commonjs"`.
+  nothing is returned verbatim where the field allows free text (`allowOther`), as the web frontend does.
 
 - **`background-jobs` / `sessions`** — a job's reporting conversation is stated where the model reads
   it. Both tools described the append target as "this conversation" or "a default", which a model

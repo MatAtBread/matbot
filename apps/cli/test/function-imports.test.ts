@@ -1,11 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { stripTypeScriptTypes } from 'node:module';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { buildAsyncFn, buildBodyFn, runFunction, EXECUTE_SUBJECT, type CompileHost } from '@matatbread/matbot-function-tools';
-import type { MatbotMachine, PermissionRequest, Tool, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
+import type { FunctionRunner, MatbotMachine, PermissionRequest, Tool, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
 import { ROUTE, createVmFunctionRunner, transformBody } from '@matatbread/matbot-function-runner-node';
 
 // A tool_function body is meant to be a constrained place to compute: an install that chose `docker-bash`
@@ -153,6 +150,8 @@ test('a permitted import is gated, and the subject names the function as well as
   // Two-dimensional: a brand-new function must not inherit what a reviewed one earned.
   assert.equal(req.subject, 'probe node:os');
   assert.equal(req.fallback, false);
+  // A builtin is no narrow grant: node:child_process runs programs, node:process is the withheld global.
+  assert.match(req.label, /full access/);
   // Narrowest first, so a frontend resolving a typed prefix lands on the narrower answer. Each carries
   // its own prose: a subject is a key, and `#execute node:fs/` is a correct key and an unusable question.
   assert.deepEqual(req.standing, [
@@ -239,14 +238,14 @@ test('a non-builtin grant says it covers the whole import closure and runs unsha
 test('a permit must match at a boundary, not as a bare string prefix', async () => {
   // A permit names a thing; a bare startsWith let it admit a sibling whose name merely begins the same
   // way, which is the whole value of naming one.
-  const runner = createVmFunctionRunner(2000, { permit: ['https://esm.sh/lodash', 'node:fs'] });
+  const runner = createVmFunctionRunner(2000, { permit: ['lodash', 'node:fs'] });
   const host: CompileHost = { TypeScriptStripper: stripper, FunctionRunner: runner };
   const refused = async (spec: string): Promise<void> => {
     const ev = await run(host, machine(runner), `probe() { return import(${JSON.stringify(spec)}); }`);
     assert.match((ev as { message: string }).message, /not permitted/, spec);
     assert.equal(asked.length, 0, `${spec} must not even be asked about`);
   };
-  await refused('https://esm.sh/lodashhack/x.js');
+  await refused('lodashhack/x.js');
   await refused('node:fsx');
   // …while the subpaths the permit does name still reach the gate.
   await run(host, machine(runner), `probe() { return import('node:fs/promises').then(() => 1); }`);
@@ -328,32 +327,38 @@ test('removing the time bound removes the TIME bound and nothing else', async ()
   assert.match((ev as { message: string }).message, /not permitted.*only: node:crypto/s);
 });
 
-test('a granted path resolves against the project, not against matbot', async () => {
-  // `./x.js` used to name a path inside matbot's own source, which is not a place a body's author can
-  // have put anything. A bare specifier is deliberately NOT redirected: ordinary resolution from the
-  // runner reaches the project's node_modules whenever matbot is installed inside it, and nothing here
-  // compensates for a pnpm layout, where it is not.
-  const proj = await mkdtemp(join(tmpdir(), 'matbot-fnimport-'));
-  await writeFile(join(proj, 'helper.js'), 'export const local = 2;');
-  const runner = createVmFunctionRunner(0, { projectDir: proj });
+test('a path or a URL is refused without asking, whatever the restriction says', async () => {
+  // Downloading or placing code is a plugin install's job, not a body's. A path also defeats the permit's
+  // string match: `./lib/../../x` "starts with" `./lib/` and resolves outside it.
+  const runner = createVmFunctionRunner(2000, { permit: ['./lib/', 'lodash', 'https:'] });
+  const host: CompileHost = { TypeScriptStripper: stripper, FunctionRunner: runner };
+  for (const spec of ['./lib/../../etc/x.mjs', '../x.js', '/etc/x.mjs', 'C:\\x.mjs', 'https://esm.sh/lodash',
+                      'file:///etc/x.mjs', 'data:text/javascript,1', 'lodash/../../x', 'lodash/./x']) {
+    const ev = await run(host, machine(runner), `probe() { return import(${JSON.stringify(spec)}); }`);
+    assert.match((ev as { message: string }).message, /only node builtins .*by name/, spec);
+    assert.equal(asked.length, 0, `${spec} must not even be asked about`);
+    // The runner refuses it too, should anything reach it without the gate.
+    await assert.rejects(() => runner.import!(spec), /only node builtins and installed packages/, spec);
+  }
+});
 
-  assert.equal((await runner.import!('./helper.js') as { local: number }).local, 2, 'relative, rooted at the project');
-  assert.equal((await runner.import!(join(proj, 'helper.js')) as { local: number }).local, 2, 'absolute path');
+test('a package that is not installed is reported with where to install it', async () => {
+  const runner = createVmFunctionRunner(0, { projectDir: '/tmp/proj' });
   assert.ok(typeof (await runner.import!('node:os') as { arch: unknown }).arch === 'function', 'a builtin is untouched');
-  // The message names where to install it, rather than node's own, which names a file inside matbot that
-  // the body never mentioned.
+  // Node's own message names a file inside matbot that the body never mentioned.
   await assert.rejects(() => runner.import!('nope-not-installed'),
-                       (e: Error) => e.message.includes(proj) && /not installed where matbot can see it/.test(e.message));
-  await assert.rejects(() => runner.import!('./nope.js'),
-                       (e: Error) => e.message.includes(proj) && /no such file/.test(e.message));
+                       (e: Error) => e.message.includes('/tmp/proj') && /not installed where matbot can see it/.test(e.message));
+});
 
-  // A module that resolves and then fails on its OWN missing dependency keeps its own error: reporting it
-  // as absent itself would send its author looking for the wrong thing.
-  await mkdir(join(proj, 'node_modules', 'broken'), { recursive: true });
-  await writeFile(join(proj, 'node_modules', 'broken', 'package.json'),
-                  '{"name":"broken","version":"1.0.0","type":"module","main":"i.js"}');
-  await writeFile(join(proj, 'node_modules', 'broken', 'i.js'), "import 'absolutely-not-here';");
-  await assert.rejects(() => runner.import!(join(proj, 'node_modules', 'broken', 'i.js')),
-                       (e: Error) => /absolutely-not-here/.test(e.message));
-  await rm(proj, { recursive: true, force: true });
+test("an import's second argument reaches the loader, so an import attribute works", async () => {
+  // Only the keyword is rewritten, so the attributes survive the transform; they were then dropped by a
+  // loader that took a specifier alone, and a JSON module failed AFTER the user had granted it.
+  const runner = createVmFunctionRunner(2000);
+  const seen: unknown[] = [];
+  const spy: FunctionRunner = { ...runner, import: (spec, options) => { seen.push(options); return runner.import!(spec, options); } };
+  const host: CompileHost = { TypeScriptStripper: stripper, FunctionRunner: spy };
+  const ev = await run(host, machine(spy),
+    `probe() { return import('typescript/package.json', { with: { type: 'json' } }).then(m => m.default.name); }`);
+  assert.deepEqual(ev, { type: 'result', value: 'typescript' });
+  assert.deepEqual(seen, [{ with: { type: 'json' } }]);
 });

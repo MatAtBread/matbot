@@ -1,4 +1,4 @@
-import { FUNCTION_TIMEOUT, importPermitted, makeToolBox } from '@matatbread/matbot-plugin-api';
+import { FUNCTION_TIMEOUT, importPermitted, importableByName, makeToolBox } from '@matatbread/matbot-plugin-api';
 import { stripLeadingTrivia } from './signature.js';
 import type { MatbotMachine, ComposedCallContext, FunctionRunner, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
 
@@ -6,8 +6,9 @@ import type { MatbotMachine, ComposedCallContext, FunctionRunner, ToolContext, T
  *  values a body has in scope, then its own arguments. */
 export type CompiledFn = (importModule: ImportFn, tool: unknown, toolInContext: unknown, context: ComposedCallContext, ...args: unknown[]) => Promise<unknown>;
 
-/** The gated loader a body's `import(…)` reaches, whatever the runner resolves it to. */
-export type ImportFn = (spec: string) => Promise<unknown>;
+/** The gated loader a body's `import(…)` reaches, whatever the runner resolves it to. `options` is the
+ *  import's own second argument (import attributes), carried through untouched. */
+export type ImportFn = (spec: string, options?: ImportCallOptions) => Promise<unknown>;
 
 /** The ambient values a body has in scope, and so the names its own parameters may not take. Declared in
  *  the generated `.d.ts` as globals of the matching type, which is how an author knows they exist. */
@@ -151,8 +152,10 @@ export function compileUnder(
  * the body would re-ask on each, pushing a human towards the broadest standing answer on offer. It is
  * the weakest link here and is the thing to revisit first.
  *
- * A configured `permittedImports` RESTRICTION is checked first, so a specifier an installation forbids
- * outright is refused without a prompt — there is nothing to ask about there. With none configured, which
+ * Only a builtin or an installed package is ever asked about ({@link importableByName}): a path or a URL
+ * is refused without a prompt, because downloading or placing code is a plugin install's job, not a
+ * body's. A configured `permittedImports` RESTRICTION is checked next, so a specifier an installation
+ * forbids outright is refused without a prompt too — there is nothing to ask about there. With none configured, which
  * is the default, every specifier reaches the gate: a restriction that defaulted to empty would refuse
  * before anyone could be asked, which is the behaviour a permission prompt exists to replace.
  */
@@ -160,21 +163,31 @@ function gatedImport(machine: MatbotMachine, ctx: ToolContext, fnName: string): 
   // One decision per specifier per invocation. A body that imports inside a loop would otherwise ask —
   // and read the policy's settings document — once per iteration, and a DENIED one would re-prompt a
   // human on every pass. Scoped to this closure, which `runFunction` builds per call, so a standing
-  // answer given or withdrawn between calls is still seen.
-  const decided = new Map<string, Promise<unknown>>();
-  return async (spec: string): Promise<unknown> => {
+  // answer given or withdrawn between calls is still seen. Only the DECISION is kept: the load itself
+  // takes this call's options, and the module cache already makes a repeat import cheap.
+  const decided = new Map<string, Promise<void>>();
+  return async (spec: string, options?: ImportCallOptions): Promise<unknown> => {
     if (typeof spec !== 'string' || spec === '') throw new Error('import needs a module specifier.');
-    const already = decided.get(spec);
-    if (already !== undefined) return already;
-    const settled = load(machine, ctx, fnName, spec);
-    decided.set(spec, settled);
-    return settled;
+    let decision = decided.get(spec);
+    if (decision === undefined) {
+      decision = decide(machine, ctx, fnName, spec);
+      decided.set(spec, decision);
+    }
+    await decision;
+    const runner = machine.FunctionRunner;
+    return runner?.import !== undefined ? runner.import(spec, options) : import(spec, options);
   };
 }
 
-async function load(machine: MatbotMachine, ctx: ToolContext, fnName: string, spec: string): Promise<unknown> {
-  const runner  = machine.FunctionRunner;
-  const permits = runner?.permittedImports;
+async function decide(machine: MatbotMachine, ctx: ToolContext, fnName: string, spec: string): Promise<void> {
+  if (!importableByName(spec)) {
+    throw new Error(
+      `Cannot import '${spec}': a function body imports only node builtins ('node:fs') and packages already ` +
+      'installed where matbot runs, by name — never a path or a URL. To use other code, install it as a ' +
+      'package, or as a matbot plugin with the `plugin` tool.',
+    );
+  }
+  const permits = machine.FunctionRunner?.permittedImports;
   if (permits !== undefined && !importPermitted(permits, spec)) {
     throw new Error(
       `Import of '${spec}' is not permitted on this installation` +
@@ -183,24 +196,22 @@ async function load(machine: MatbotMachine, ctx: ToolContext, fnName: string, sp
         : `, which allows only: ${permits.join(', ')}.`),
     );
   }
-  // A builtin is the one narrow grant: `node:os` cannot reach another capability. Anything else — a
-  // package, a path, a URL — is a MODULE, which the runner loads as host code: it is not compiled by
-  // the runner, so none of a body's shadowed globals apply to it and it can hand `process` straight
-  // back. Its own imports load through the normal loader and are never gated again, so one answer
-  // covers the whole closure. The label says both.
+  // Every grant is a broad one, builtins included: `node:child_process` runs programs, `node:module` hands
+  // back `require`, and `node:process` is the very global the runner withholds. A package is broader again,
+  // being loaded as host code: the runner does not compile it, so none of a body's withheld globals apply
+  // to it, and its own imports are never gated, so one answer covers the whole closure. The label says so.
   const builtin = spec.startsWith('node:');
   // Prose, not the subject. The subject names an `execute` body `#execute` so a function legitimately
   // CALLED `execute` cannot share its answers — exactly the sort of thing nobody should need to know to
   // answer a question about their own machine.
   const who   = fnName === EXECUTE_SUBJECT ? 'a one-off function body' : `function "${fnName}"`;
   const label = builtin
-    ? `Allow ${who} to import **${spec}**?`
+    ? `Allow ${who} to import **${spec}**? It gets whatever that module can do, with matbot's full access.`
     : `Allow ${who} to import **${spec}** and everything it imports? Imported code runs with matbot's full access, not the function's.`;
   if (!await ctx.gate({ gate: 'import', subject: `${fnName} ${spec}`, label, fallback: false,
                         standing: standingAnswers(fnName, who, spec) })) {
     throw new Error(`Import of '${spec}' was not permitted.`);
   }
-  return runner?.import !== undefined ? runner.import(spec) : import(spec);
 }
 
 /** The function part of a subject for an `execute` body, which has no name of its own. Not a bare
@@ -210,14 +221,14 @@ export const EXECUTE_SUBJECT = '#execute';
 
 /**
  * The standing answers this import may be remembered as, narrowest first: this exact module, anything
- * under its directory, anything on its protocol, then the module across every function.
+ * under its directory, any builtin (for a `node:` one), then the module across every function.
  *
  * Each carries its own prose. A subject is a KEY — stable, unambiguous, and parsed by nobody — and keys
  * make terrible questions: `#execute node:fs/` is correct and unreadable. Only here is it known that `#`
  * means "a one-off body", that `node:` means "any builtin" and that a trailing slash means "anything
  * under"; a policy rendering the raw subject can only ever show the key.
  *
- * Both the directory AND the protocol are offered where they differ, rather than one chosen by the
+ * Both the directory AND `node:` are offered where they differ, rather than one chosen by the
  * specifier's shape — picking by shape made the available answer depend on which module a function
  * happened to import first, so `node:fs/promises` offered "any fs submodule" and never "any builtin",
  * while `node:os` offered the reverse.
@@ -228,15 +239,13 @@ export const EXECUTE_SUBJECT = '#execute';
  * rather than in an answer to a prompt.
  */
 function standingAnswers(fnName: string, who: string, spec: string): { subject: string; label: string }[] {
-  const scheme = /^([a-z][a-z0-9+.-]*:)/i.exec(spec)?.[1];
-  const dir    = spec.includes('/') ? spec.slice(0, spec.lastIndexOf('/') + 1) : undefined;
+  const dir = spec.includes('/') ? spec.slice(0, spec.lastIndexOf('/') + 1) : undefined;
   const out = [{ subject: `${fnName} ${spec}`, label: `Always allow ${who} to import ${spec}` }];
-  if (dir !== undefined && dir !== scheme) {
+  if (dir !== undefined) {
     out.push({ subject: `${fnName} ${dir}`, label: `Always allow ${who} to import anything under ${dir}` });
   }
-  if (scheme !== undefined) {
-    const what = scheme === 'node:' ? 'any node builtin' : `anything over ${scheme.slice(0, -1)}`;
-    out.push({ subject: `${fnName} ${scheme}`, label: `Always allow ${who} to import ${what}` });
+  if (spec.startsWith('node:')) {
+    out.push({ subject: `${fnName} node:`, label: `Always allow ${who} to import any node builtin` });
   }
   out.push({ subject: `* ${spec}`, label: `Always allow ANY function to import ${spec}` });
   return out;

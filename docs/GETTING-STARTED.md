@@ -107,16 +107,16 @@ the first time it tries, you are asked, by name:
 
 Answer with the number — in the terminal a select is listed and numbered once its options
 no longer fit on the prompt line, while short ones still read `[yes/NO]` and take a prefix.
-Answer once, or stand an answer up for that function, for that directory or protocol, or
-for that module in any function. `gate_action get` lists what you have standing and
+Answer once, or stand an answer up for that function, for that directory or for any
+builtin, or for that module in any function. `gate_action get` lists what you have standing and
 `gate_action clear` forgets one. Nothing is remembered unless you pick an "Always".
 
-Two things are worth knowing before you say yes to something that is not a builtin.
-`node:os` is a narrow grant — it cannot reach the filesystem. A **package or URL** is not:
-it loads as ordinary host code with matbot's full access, and its own imports are not asked
-about again, so allowing one is closer to installing a plugin than to granting a capability.
-And a standing answer follows a function's *name*, so redefining a function under the same
-name inherits it.
+Three things are worth knowing before you say yes. **No import is a narrow grant**: a
+builtin can do whatever it exposes — `node:child_process` runs programs, `node:fs` reads and
+writes your files — with matbot's full access. A **package** is broader again: it loads as
+ordinary host code and its own imports are not asked about, so allowing one is closer to
+installing a plugin than to granting a capability. And a standing answer follows a function's
+*name*, so redefining a function under the same name inherits it.
 
 With nobody to ask — a tool call over HTTP, a trigger, a background job — an import is
 denied unless you had already stood an answer up for it.
@@ -145,10 +145,10 @@ process, so a change made in one conversation is what every conversation then ge
 need a restriction that nothing running can lift, the runner is a plugin — write your own
 with the list compiled in, and matbot will use it instead.
 
-A **remote URL cannot be imported** by this runner: fetching a module to disk is the host's
-machinery, not a plugin's. Install the package where matbot can see it and import it by
-name. A body's relative path (`./lib.js`) resolves against the directory holding your
-`matbot.yaml`.
+A body imports **by name only** — a node builtin or a package already installed where
+matbot runs. A path (`./lib.js`) or a URL is refused before you are asked: downloading or
+placing code is what installing a plugin is for. To use other code, install it as a package
+beside your `matbot.yaml`, or as a matbot plugin with the `plugin` tool.
 
 ---
 
