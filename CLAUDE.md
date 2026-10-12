@@ -52,8 +52,9 @@ plugins/            — one directory per package, flat but for the frontend/pro
     skills_compiler/— compiles a procedural skill into a TS tool plugin
     function-tools/— tool_function: TS lambdas/named tools composing registered tools
     function-runner-node/— the node FunctionRunner: bounds a body, withholds host globals, routes its
-                     imports onto the gate. OPTIONAL and not in a default install — without it a body
-                     runs unbounded, unshadowed and ungated
+                     imports onto the gate; function_runner_config reads and changes its two settings.
+                     OPTIONAL and not in a default install — without it a body runs unbounded,
+                     unshadowed and ungated
     tool-types/    — ToolTypeIndex: derives the tool dts + hosts the codegen checker (node)
     caching-tool-types/— tool-types + its build persisted in settings across restarts (node)
     tool-router/   — ToolPresenter: bounded per-turn tool window + tool_search
@@ -745,9 +746,18 @@ Three parts, and only the first two enforce anything:
    reached is not a gate: an allow-list defaulting to empty refuses before anyone can be asked, which is
    exactly the behaviour a prompt exists to replace. `permit: []` is the opposite of absent and switches
    imports off. What it is FOR is the one thing a prompt cannot express — forbidding a module outright,
-   with no human able to allow it, since a policy has no stored "always deny". It lives on the runner
+   so that nobody is asked, since a policy has no stored "always deny". It lives on the runner
    because the runner IS the execution environment and two consumers need one answer: the capability that
    imports, and `ToolTypeIndex`, which types the reachable set.
+
+   Being a plugin SETTING, it is also writable at run time (`function_runner_config`, below), and reads
+   are layered — so a stored override beats the `default_settings:` floor and can widen it. The honest
+   statement is therefore the gate's own, one layer up: the restriction is what no answer *at the import
+   prompt* can lift, not something out of a running actor's reach. An installation needing a floor that
+   nothing in-process can raise does not express it here at all; it ships a runner with the list compiled
+   in, which is a package swap and no core change. Pretending otherwise would need a lock read from the
+   floor alone, and `PluginSettings` has no such read by construction — the override always wins, which is
+   the property the whole settings design rests on.
 3. **The spelling** — a body writes `import(…)`, the real thing. `import` is a reserved word, so there is
    no binding to shadow; keeping the spelling a model reaches for first also keeps a **computed**
    specifier working (the argument passes through, so the gate sees the string the body built), and leaves
@@ -759,8 +769,23 @@ Three parts, and only the first two enforce anything:
    installation wanting different behaviour (a worker, a subprocess, another language) replaces the
    package and touches nothing else. Its two settings are its own (`timeout_ms`, `permit_imports`, under
    `default_settings:` keyed by its package name); they were `function_timeout_ms` and `function_imports`
-   read by `apps/cli`, which core still PARSES so a host can tell an install carrying them where they
-   went rather than ignoring them silently.
+   in the host's config, which could not work — the default runner has no way to implement either, so the
+   host was parsing a question only a plugin can answer. `apps/cli` now recognises the retired spellings
+   in the config TEXT and says where they went, rather than core carrying fields nothing reads.
+
+   **Its settings are reached the ordinary way, which means a tool** — `function_runner_config`
+   (`get`/`set`/`clear`), because a plugin's settings are the plugin's to expose and the alternative was a
+   restart per change. `set` rebuilds the runner through the same one function `setup` uses, so the two
+   cannot disagree about what a value means, and the swap needs no invalidation anywhere: every consumer
+   reads `services.FunctionRunner` at the point of use, and the type index's `paths` cache keys on the
+   permitted array by identity, so a new runner is a new key. `null` for a key means *revert to the
+   installation default*, which is what `delete` means on a layered setting — not "no restriction", which
+   is only what an absent default happens to mean. Each key is gated separately (`tool_function`'s import
+   gate is one decision; what a body may reach and how long it may compute are two), and two consequences
+   are stated rather than left to be discovered: a settings override is per PRINCIPAL while the runner is
+   one object per process, so a change is the environment everyone in that process gets; and the runner is
+   built from these values when it is registered, so a write by another process or a hand-edited document
+   needs a restart.
 
    **A `FunctionRunner` is handed TypeScript and is the environment it runs in.** `compile(source)` takes a
    self-contained async-function expression — parameters and all, because a bare body is not valid alone

@@ -132,8 +132,18 @@ default_settings:
 ```
 
 Leave `permit_imports` out and anything may be *asked* for. `[]` is the other end: imports
-are switched off and no prompt appears. This is the only way to say "never", because a
-standing answer is always a yes — there is no remembered no.
+are switched off and no prompt appears. This is the only way to say "never" at the prompt,
+because a standing answer is always a yes — there is no remembered no.
+
+Both settings are also readable and writable at run time, with `function_runner_config`:
+`get` reports what is in effect, `set` takes `permitImports` and/or `timeoutMs`, and `clear`
+puts both back to what the yaml above says. A change applies at once — the runner is rebuilt
+— and you are asked before each setting is written. Two things follow from it being an
+ordinary setting override rather than a second config file. It **wins over the yaml**, so
+`permit_imports` above is a starting point and not a ceiling; and it applies to the whole
+process, so a change made in one conversation is what every conversation then gets. If you
+need a restriction that nothing running can lift, the runner is a plugin — write your own
+with the list compiled in, and matbot will use it instead.
 
 A **remote URL cannot be imported** by this runner: fetching a module to disk is the host's
 machinery, not a plugin's. Install the package where matbot can see it and import it by

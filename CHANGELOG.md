@@ -22,7 +22,12 @@ churn and less likely to affect a consumer who doesn't use them.
   language replaces one package and touches no core.
 
   Its two options are its own settings — `timeout_ms` and `permit_imports`, authored under
-  `default_settings: { "@matatbread/matbot-function-runner-node": { … } }`. The old top-level
+  `default_settings: { "@matatbread/matbot-function-runner-node": { … } }`, and read and changed at run
+  time with its own `function_runner_config` tool (`get`/`set`/`clear`): a `set` rebuilds the runner, so
+  narrowing what a body may import no longer waits for a restart, and each key is gated separately. Being
+  an ordinary settings override it beats the configured floor, so `permit_imports` is what no answer at
+  the import prompt can lift rather than something out of a running actor's reach — an installation
+  needing that ships a runner with the list compiled in, which is a package swap and no core change. The old top-level
   `function_timeout_ms` and `function_imports` keys are still parsed and validated, and an install
   carrying them is now WARNED, naming where they went, rather than having them silently ignored. One
   consequence worth stating: `permit_imports` is a plugin setting, so it no longer has the property its
