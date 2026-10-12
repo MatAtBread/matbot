@@ -2,7 +2,7 @@ import type { FileHandle, FileStore } from './files.js';
 import type { FormField, MessageContent, Session } from './messages.js';
 import type { MatbotPlugin } from '../plugin.js';
 import type { JSONSchema } from './primitives.js';
-import type { PermissionRequest } from './permission.js';
+import type { PermissionDecision, PermissionRequest } from './permission.js';
 import type { Vault } from './vault.js';
 import type { SessionAppender } from './session-append.js';
 
@@ -230,15 +230,25 @@ export interface ToolContext {
   prompt:      PromptFn;
   /**
    * Ask permission for a privileged operation — install a plugin, remove a provider profile, add an
-   * MCP server. Resolves `true` to proceed. The call site declares *that* acceptance is needed; the
-   * registered {@link PermissionGate} decides *how* it is obtained (the default asks the user).
+   * MCP server. The call site declares *that* acceptance is needed; the registered
+   * {@link PermissionGate} decides *how* it is obtained (the default asks the user).
    *
    * `gate` is the SUFFIX (`'add'`): the host qualifies it with this tool's registered name, so one
    * policy covers both runtimes' implementations of a tool (node's `plugin` and the browser's) and a
    * plugin cannot address a gate it does not own. `fallback` is what happens when no human is
    * reachable and no policy decides.
+   *
+   * `namespace` replaces the tool's name as the qualifier, for a tool whose NAME is chosen at run time
+   * (a `function-tools` function asks under `tool_function`): qualified by a model-chosen name, every
+   * definition would mint its own gate id, so a standing answer filed under one could never cover
+   * another. It must name a tool registered by the SAME plugin as this one — the host checks, against
+   * the plugin it stamped on both — so it widens nothing: a plugin still cannot address another's gate.
+   *
+   * The outcome is `allowed`; `source` names the layer that answered, for the refusal to REPORT (see
+   * {@link refusalMessage}) — never to branch on. NOTE the shape: this resolves to an object, so
+   * `if (!await ctx.gate(…))` is always false. Test `.allowed`.
    */
-  gate(req: PermissionRequest): Promise<boolean>;
+  gate(req: PermissionRequest & { namespace?: string }): Promise<PermissionDecision>;
   /** Hot-load a plugin by specifier without restarting the process. Returns the loaded plugin.
    *  `refresh` (default false) forces a remote (github/http) plugin to be re-downloaded rather than
    *  re-loaded from its `.plugins/` cache — pass true to pick up changed upstream source. */

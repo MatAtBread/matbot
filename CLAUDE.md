@@ -51,6 +51,10 @@ plugins/            — one directory per package, flat but for the frontend/pro
     skills-node/   — node specialization: .md import/watch
     skills_compiler/— compiles a procedural skill into a TS tool plugin
     function-tools/— tool_function: TS lambdas/named tools composing registered tools
+    function-runner-node/— the node FunctionRunner: bounds a body, withholds host globals, routes its
+                     imports onto the gate; function_runner_config reads and changes its two settings.
+                     OPTIONAL and not in a default install — without it a body runs unbounded,
+                     unshadowed and ungated
     tool-types/    — ToolTypeIndex: derives the tool dts + hosts the codegen checker (node)
     caching-tool-types/— tool-types + its build persisted in settings across restarts (node)
     tool-router/   — ToolPresenter: bounded per-turn tool window + tool_search
@@ -142,7 +146,7 @@ was simply absent from the other with nothing to fail.
 
 A host passes only what is genuinely its own: its carriers (installed first), its boot `StorageBackend`
 (the CLI's filesystem one, the browser's IndexedDB + OPFS), its boot `Vault`, how a secret is resolved
-(the browser prompts for a missing one), extra seeded services (the CLI's `FunctionRunner`), and the
+(the browser prompts for a missing one), and the
 members that acquire a plugin (`loadPlugin`, `unloadPlugin`, `resolver`). `preScanStorage` opens a
 configured storage plugin's backend before any store exists, and `loaded()` runs the post-load checks.
 
@@ -232,7 +236,7 @@ All runtime state under `.data/` **next to `matbot.yaml`**, never in source:
 
 `.data/` is gitignored. Plugins may add subdirectories. Other storage providers (e.g. SQLite) differ.
 
-**`.plugins/`** — fetched remote-plugin cache, **separate** from `.data/`. `.data/` is LLM read-write runtime state; `.plugins/` is matbot-writes / LLM-reads-only (mounted read-only into docker-bash). Never relocate it. Gitignored.
+**`.plugins/`** — fetched remote-module cache, **separate** from `.data/`. `.data/` is LLM read-write runtime state; `.plugins/` is matbot-writes / LLM-reads-only (mounted read-only into docker-bash). Never relocate it. Gitignored. It holds remote *plugins* — and only those: a `tool_function` body cannot import a URL (see *Module access from a `tool_function`*). One cache, because a second fetch-and-materialise directory is the thing that drifts — and the contract is unchanged either way: matbot writes it, the model only reads it.
 
 ---
 
@@ -629,6 +633,16 @@ route), and one policy covers both runtimes' implementations of a tool — node'
 browser's `plugin-tool` both register `plugin`; `mcp` and `mcp-http` both register `mcp_action`. The
 host reserves `tools.*` for core's own gates.
 
+A tool whose NAME is built at run time asks under a fixed `namespace` instead, on the request
+(`ctx.gate({ namespace: 'tool_function', gate: 'import', … })`). A `function-tools` function's name is the
+model's, and the default policy files standing answers by gate id: qualified by that name, each definition
+would get its own id, so "allow ANY function to import node:fs", answered in one, would be stored where no
+other function reads it. The host honours a namespace only when it names a tool registered by the **same
+plugin** as the caller — both `pluginName`s being host stamps (`register`, and for a turn tool the `screen`
+hook that offered it, whatever the tool claims) — so it widens nothing: a plugin still addresses only its
+own gates. It was a `Tool.gateNamespace` field first, which needed explaining to every reader of `Tool`,
+was relevant to one plugin, and let any tool claim any namespace including `tools`.
+
 **`subject` is a field, never folded into `gate`.** A composite id makes the vocabulary unbounded,
 which collides with "an unknown gate id must default to asking" — every newly-named tool would be an
 unknown gate, and "ask about new overwrites, accept the ones already decided" would be unwritable,
@@ -655,8 +669,30 @@ construction rather than by luck, because the value-returning prompts are exclud
 `ask_user`, `store-key` secret entry and credential entry stay on `ctx.prompt` and are not routed —
 not by an exemption list, but because they do not call a gate. Splitting authorization out of the
 prompt channel is what deletes the routing rules a `gate?:` flag on `FormField` would have needed.
-`false` is "not permitted" whether a human just said so or a stored answer did, so there is nothing
-to branch on and no distinct denial error; call sites yield their existing `Cancelled.` result.
+`allowed: false` is "not permitted" whether a human just said so or a stored answer did, so there is
+nothing to branch on and no distinct denial error.
+
+**The answer carries `source`, and it is for the REPORT, not the control flow.** A decision is
+`{ allowed, source }`, where `source` names *which test in the cascade produced the answer* — not who
+the actor was: `user` (a human was asked and answered, a no included), `configuration` (a standing
+answer in force), `fallback` (nothing decided and nobody was reachable). It exists because a refusal
+that says only `Cancelled.` reads to a model as a malfunction, so it goes looking for the malfunction:
+it retries under another spelling, probes for a bug, or reaches for a route around the gate. Call sites
+therefore render `refusalMessage(decision)`, which names the layer and — for the two sources nothing in
+the turn can change — says there is nothing here to work around. `fallback` deliberately says the
+opposite, because that one *can* change: a human present, or a standing answer.
+
+The vocabulary is **open** (`PermissionSource` is `… | (string & {})`): a replacement policy has layers
+of its own (`user-stored-preference`, an org directory, a rule table) and a closed union would mean a
+policy could not report truthfully without a plugin-api change. So nothing switches on `source` for an
+outcome, and a delegating gate passes the displaced gate's source back out unrewritten — rewriting it
+would erase the one fact it carries. The default policy reports one `configuration` for both an
+installation floor and a remembered answer, because settings reads are layered and nothing can tell the
+two apart (see *Default plugin settings*); claiming `user` for a configured floor would be a lie half
+the time.
+
+The shape's one hazard is stated where it is read (`ToolContext.gate`): the decision is an object, so
+`if (!await ctx.gate(…))` is always false. Test `.allowed`.
 
 **The default policy is host-seeded, not a configured plugin** — `matbot-default-gate` is a library
 in the `tool-plugin` mould: each host passes its `defaultGate` to `assembleMachine`, which boots it as
@@ -683,10 +719,12 @@ answer is re-offered the first time that collision comes round again, so adopt-o
 exist to save one keystroke; an install still authoring it is warned, naming where it went.
 
 **Honest statement of the property, and its limit.** The gate makes a privileged operation *pass
-through a decision*; it does not put that decision out of the model's reach. Where the standing
-answers live — `.data/settings/`, per the default policy — is read-write to `bash`, and `docker-bash`
-mounts `.data` read-write too, so on any install that loads a shell tool the model can write
-`{"plugin.add": true}` itself and every later install proceeds unasked (reads are not cached, so it
+through a decision*; it does not put that decision out of the model's reach. The default policy keeps
+its standing answers in plugin settings, so they live wherever the active `StorageBackend` keeps
+settings — on the filesystem and SQLite backends, under `.data` (`.data/settings/`, `.data/matbot.db`).
+That is read-write to `bash`, and `docker-bash` mounts `.data` read-write too, so on any install that
+loads a shell tool the model can write `{"plugin.add": true}` itself (or the SQLite row holding it) and
+every later install proceeds unasked (reads are not cached, so it
 takes effect at once, not at the next restart). The same was true of the `__matbot_core__` key this
 replaces, over a narrower blast radius. So the property is **"a privileged operation is decided
 somewhere replaceable, and by default that means a human is asked"** — not "the LLM cannot change
@@ -703,6 +741,224 @@ why the per-subject form is offered first and is the one to reach for. Two other
 author should be told rather than discover: the provider path **chains two gates**
 (`add-unverified` → `add`), so one user-visible operation can cost two decisions; and a collision
 raised while a *replacement* policy plugin is itself loading falls to the host's seeded default.
+
+---
+
+## Module access from a `tool_function`
+
+A body is a *constrained* place to compute, which is the reason to prefer it over a shell for data work:
+an install that chose `docker-bash` over `bash` has not thereby handed `node:fs` to model-authored code.
+
+**By name only.** A body imports a node builtin (`node:fs`) or a package already installed where matbot
+runs (`lodash`, `@scope/pkg/sub`), never a path or a URL (`importableByName`, in `plugin-api`).
+Downloading or placing code is what a *plugin* install is for: it is reviewed and versioned, and it has its
+own gate. A body is too lightweight a thing to recommend it from. The rule is checked before anything is
+asked, so nobody is offered a grant that cannot work. Paths were also what defeated the restriction below,
+which matches strings: `./lib/../../x` "starts with" `./lib/` and resolves outside it. So a `.`/`..`
+segment is refused in a package subpath too, since a package with no `exports` map resolves one as a path.
+The gate, the runner and `IMPORT-GATE` each apply the rule.
+
+Within that, three parts, and only the first two enforce anything:
+
+1. **A per-call gate** — the control, and the default. `tool_function.import`, subject `"<function> <specifier>"`. The pair, not the
+   specifier alone: *why is THIS function asking for `node:fs`* is the question being put, and a
+   specifier-only key would let a brand-new function inherit every grant a reviewed one earned.
+   `standing` carries the answers it may be remembered as (the exact pair, the module's directory, any
+   builtin for a `node:` one, then the module across every function) narrowest first, **each with its own prose**: a
+   subject is a key, and `#execute node:fs/` is a correct key and an unusable question — only the call
+   site knows that `#` means a one-off body or that `node:` means any builtin. The policy does set
+   membership over strings it never parses, and renders the label without rewriting it. What
+   is NOT offered is the product of the two axes — "any function, any builtin" — because the options
+   would multiply past what a prompt can carry; that is the gate-wide standing answer, and installation
+   authoring.
+2. **An optional restriction** — `permit_imports` in the runner plugin's settings, carried on
+   `FunctionRunSettings.permittedImports`. It rides on the runner, so it holds exactly while a runner is
+   loaded — **and no host seeds one** (point 3): `timeout_ms: 0` removes the TIME bound and nothing else. It used to seed no runner at all,
+   which is a documented way to run bodies unbounded and silently discarded the restriction (`permit: []`
+   included), unshadowed every withheld global and made a raw `import()` work. One line of yaml about how
+   long a body may compute is not an answer to what a body may reach. **Absent means no restriction**, because a gate that is never
+   reached is not a gate: an allow-list defaulting to empty refuses before anyone can be asked, which is
+   exactly the behaviour a prompt exists to replace. `permit: []` is the opposite of absent and switches
+   imports off. What it is FOR is the one thing a prompt cannot express — forbidding a module outright,
+   so that nobody is asked, since a policy has no stored "always deny". It lives on the runner
+   because the runner IS the execution environment and two consumers need one answer: the capability that
+   imports, and `ToolTypeIndex`, which types the reachable set.
+
+   Being a plugin SETTING, it is also writable at run time (`function_runner_config`, below), and reads
+   are layered — so a stored override beats the `default_settings:` floor and can widen it. The honest
+   statement is therefore the gate's own, one layer up: the restriction is what no answer *at the import
+   prompt* can lift, not something out of a running actor's reach. An installation needing a floor that
+   nothing in-process can raise does not express it here at all; it ships a runner with the list compiled
+   in, which is a package swap and no core change. Pretending otherwise would need a lock read from the
+   floor alone, and `PluginSettings` has no such read by construction — the override always wins, which is
+   the property the whole settings design rests on.
+3. **The spelling** — a body writes `import(…)`, the real thing. `import` is a reserved word, so there is
+   no binding to shadow; keeping the spelling a model reaches for first also keeps a **computed**
+   specifier working (the argument passes through, so the gate sees the string the body built), and leaves
+   the type-check reading the source as WRITTEN.
+
+   **The runner is a PLUGIN** (`@matatbread/matbot-function-runner-node`), not part of the host, and not
+   in a default install. That is the point: nothing in matbot requires a bound, withheld globals or a
+   gated import, and everything this one does is reachable through the `FunctionRunner` seam alone — so an
+   installation wanting different behaviour (a worker, a subprocess, another language) replaces the
+   package and touches nothing else. Its two settings are its own (`timeout_ms`, `permit_imports`, under
+   `default_settings:` keyed by its package name); they were `function_timeout_ms` and `function_imports`
+   in the host's config, which could not work — the default runner has no way to implement either, so the
+   host was parsing a question only a plugin can answer. `apps/cli` now recognises the retired spellings
+   in the config TEXT and says where they went, rather than core carrying fields nothing reads.
+
+   **Its settings are reached the ordinary way, which means a tool** — `function_runner_config`
+   (`get`/`set`/`clear`), because a plugin's settings are the plugin's to expose and the alternative was a
+   restart per change. `set` only WRITES: nothing is rebuilt, because the settings are read per invocation
+   (below), so the next run or check sees a change however it was made — this tool, another process, a
+   hand-edited document. `null` for a key means *revert to the installation default*, which is what
+   `delete` means on a layered setting — not "no restriction", which is only what an absent default
+   happens to mean. Each key is gated separately (`tool_function`'s import gate is one decision; what a
+   body may reach and how long it may compute are two).
+
+   **The settings are read once per INVOCATION — never at boot, never cached across invocations**
+   (`FunctionRunner.settings()`, held for a run by `runFunction` and for a check by `ToolTypeIndex`, and
+   handed back to the runner on `FunctionCall.settings`). Whose settings they are is not the runner's to
+   know: the settings store may be partitioned by principal (a profiles backend) or not at all, which is
+   the storage implementation's business. A boot read answered for the boot principal for ever after, so
+   one principal's narrowing was lost on restart and another's unrelated write could discard it; a
+   per-principal cache would assume a partitioning nobody promised. An invocation, by contrast, has one
+   principal throughout, so one read at its start is correct by construction, and the gate, the
+   type-check and the time bound all answer from the same reading. The same goes for a function's
+   *definition* — a store may hold it globally or per principal — so nothing about it is assumed either.
+
+   **A `FunctionRunner` is handed TypeScript and is the environment it runs in.** `compile(source)` takes a
+   self-contained async-function expression — parameters and all, because a bare body is not valid alone
+   (`return` at its top level is a syntax error) and every runner would otherwise have to wrap it before
+   it could strip or parse it. What the runner does to get to something runnable is its own business.
+
+   **The rewrite is internal and needs no typing.** The type-check runs at definition, on the source as
+   the author wrote it (`ToolTypeIndex.check`), and compilation is separate and later — so substituting
+   `import(spec)` for a private function is invisible to the type system, and there is nothing to declare.
+   The consumer's gated loader is handed to each call as the compiled callable's first argument, because it
+   closes over that invocation (the gate, the tool context, the function's name — the key a decision is
+   remembered under). How it reaches the body — a parameter the runner names itself, a closure — is
+   internal: node's binds it in a wrapper of its own per call, which is also why interleaved calls cannot
+   tread on one another. Three shapes were tried before this and all three leaked the mechanism outward: an
+   injected NAME the runner had to splice, SPANS it had to report, and a `RunnerProvisions` bag; the last
+   dragged `function-tools`' calling convention into `plugin-api` as a declared symbol set, which was worse
+   again.
+
+   **Node's runner** (`apps/cli/body-transform.ts`) erases with node's own `stripTypeScriptTypes` — which
+   BLANKS types in place, so every line number in what runs is the one the author wrote
+   (`transpileModule` reprints from the AST, inserting a `"use strict"` prologue and normalising
+   formatting) — then walks TypeScript's AST for call expressions whose callee is the `import` keyword and
+   splices each keyword's span. The compiler loads with `createRequire` on first use, which keeps
+   `compile` synchronous and the ~250ms paid by the first body that compiles rather than at startup.
+
+   **This was a hand-written scanner, and that is the thing to not do again.** Telling an `import(` in
+   code from one inside a string, a template, a comment or a regex literal needs the previous significant
+   token, and getting it wrong does not misread one token — it **desyncs**, so a quote further along
+   swallows an `import(` that neither reading mentions, leaving an import with no gate in front of it and
+   nothing reporting that. Two cases are undecidable without having parsed: a `/` after `)` may follow
+   `if (…)` or `(a + b)`, and after `}` it may end a block or an object literal. Each patch bought one
+   more case and left the class open — `)` was assumed to divide and silently lost the import after
+   `if (f(x)) /a'b/.test(s)`, while routing it into the existing refusal path would have rejected
+   `(a + b) / 2`. A parser also tells a method shorthand named `import` and a type-position
+   `import('x').Foo` from a call, both of which had to be refused outright.
+
+   **Nothing derived from the runner is cached, so nothing subscribes to it.** The obvious reflex, once the
+   runner is a plugin that can arrive after a dts has been handed out, is for `ToolTypeIndex` to rebuild on
+   a `services` registry change for the key. It was tried and reverted: the note is composed on every
+   `dts()`, `check()` passes the two lists fresh to each run, and the single cache over them keys on the
+   permit list's content, so a different list is a different key. What IS cached is the source scan,
+   which the runner has no part in — so subscribing discards a good TypeScript build to recompute
+   something that was never stale. `function-tools` likewise recompiles a body against whichever runner is
+   current, and the browser index rebuilds its note per call. **The rule that falls out: derive from the
+   runner at the point of use, and there is nothing to invalidate.**
+
+   **The one thing stored is a verdict, so a verdict names its environment.** A type-check is a claim
+   about the environment it ran in, and that environment is a plugin: unload the runner or narrow
+   `permit_imports`, and a body that passed is still marked as having passed while its `import(…)` is no
+   longer gated, or no longer allowed at all. `ToolTypeIndex.environment()` is a fingerprint of exactly
+   what a check depended on besides the snippet and the tool types — runner presence, the permitted set,
+   the withheld set — stamped on the `ToolCheckReport` and stored by `function-tools` beside each
+   definition, which compares it for **equality** and never parses it (what differs is the runner's
+   business; all a reader needs is that the claim is about somewhere else). It is sorted and printed
+   rather than identity-derived, because unlike the `paths` cache it has to survive a restart. Nothing
+   re-checks on load — that is a worker program per stored function at boot, turning a report into a boot
+   failure — so `list` says `checkedElsewhere: true` and `check` remains the way to re-verify. A `check`
+   row is the verdict reached here and now, so it carries neither the flag nor the fingerprint, and a pass
+   RECORDS the new fingerprint (a CAS on a stored definition, a `checked` marker for a session one) —
+   otherwise the only way to clear the flag was to redefine a correct function. The
+   tool types are deliberately NOT in the fingerprint: they are live, and `check` is how a caller
+   re-verifies against them, whereas this names the thing a re-check cannot otherwise be prompted by.
+
+   **Whether an import is GATED is whether a runner routes it** — not whether a restriction exists. The
+   declarations said "each subject to permission at the call — you will be asked the first time" whenever
+   no restriction was configured, which is a promise nothing keeps when there is no runner at all: the
+   `import(…)` reaches the platform's loader unasked, and a body discovers the contradiction the first
+   time it imports anything.
+
+   **What a runner tells the type-checker is two arrays, and no text.** `import('node:os')` gets its types
+   from `compilerOptions.paths` — one entry per permitted specifier, pointing at the real
+   `@types/node/*.d.ts` — never from the dts, which says nothing about modules. `paths` cannot ENFORCE the
+   restriction (one builtin's declarations drag in the ambient `declare module 'node:…'` blocks of
+   everything they reference), and TypeScript cannot un-declare a global, so two structural rules close
+   both holes: `IMPORT-GATE` from `permittedImports`, and `ENV-GATE` from **`withheldGlobals`** — the
+   identifiers the runner does not bind. That second list is on the runner because a copy in the checker
+   could not be kept in step, and a name shadowed but not rejected typechecks and then fails at the first
+   call. The dts's prose is composed by the type index from those same two arrays, so it cannot drift from
+   what is enforced; a runner supplying prose of its own was tried and removed, text being the one part
+   that needs no seam.
+
+   **Absent ⇒ no runner, so none of it.** Nothing bounds the body, nothing is withheld, nothing rewrites
+   its `import(…)`, and the loader handed to the call is never reached — so the body's import gets
+   whatever the platform resolves. That is any install that did not add the plugin, and it is the
+   **browser**, which could not enforce the gate anyway: with
+   nothing withheld, `new Function('s', 'return import(s)')` reaches the platform loader whatever a
+   transform concludes, and `permittedImports` has no carrier. The browser's own sandbox and permission UX
+   is the boundary there, and its `ToolTypeIndex` says only the one concrete thing a body needs told —
+   there are no node builtins. An install wanting the gate registers a `FunctionRunner`.
+
+**No grant is narrow, and the label says so.** A builtin is not a safe tier: `node:child_process` runs
+programs, `node:module` hands back `require`, and `node:process` is the very global the runner withholds.
+A package is broader again, being loaded as **host code**: it is not compiled by the runner, so none of a
+body's withheld globals apply to it, and its own imports are never gated again. So every import label
+says it carries matbot's full access, and a package's also says it covers everything that package imports.
+
+**What this is not.** `vm` is not a capability boundary — a body runs in this context, and
+`(()=>{}).constructor('return process')()` recovers the real `process` in one line. Withholding
+`process`/`globalThis`/`global`/`Buffer`/`eval`/`Function` (and the phantom `require`/`module`/`__dirname`, which
+node's types would otherwise make typecheck and then fail at the first call) raises the cost from "call a
+documented API" to "know a published trick", and makes the intended path gated and revocable. A real
+boundary is another process.
+
+The withheld set and `ENV-GATE`'s list are **one list in two places**, and the checker's must track the
+runner's: a global that is shadowed but not rejected typechecks and fails at the first call, which is the
+one failure the check gate exists to prevent. The half that matters most is the half with no node types
+behind it — `eval` and `Function` are `lib.es` globals, so they resolve in every configuration.
+
+**Known weakness, accepted knowingly:** the grant keys on the function's NAME, so redefining a function
+under the same name inherits it — and redefinition is the one door the model controls. Keying the body
+instead would re-ask on each of the two or three attempts a model commonly needs, pushing a human towards
+the broadest standing answer on offer. It is the thing to revisit first.
+
+**Types follow the reachable set, via `paths`** — one entry per module, never `types: ['node']`. With no
+restriction that is every builtin, so a body can be graded on what it may legitimately ask for; with one,
+it is that subset, expanded by the same boundary rule the gate uses (`importPermitted`, in `plugin-api`),
+because `node:fs` admits `node:fs/promises` at the call and a permitted import that fails the check is
+reachable only with `noTypeCheck`. `paths` also pulls 65 files where `types` pulls 168. A path or a URL gets no types,
+being unimportable; `IMPORT-GATE` refuses it at the check.
+
+**`paths` cannot ENFORCE the restriction, though, so a structural rule does** — `IMPORT-GATE`, beside
+the cast gate and `ENV-GATE` in the one checker. Loading a single builtin's declaration file drags in the
+ambient `declare module 'node:…'` blocks of everything its own declarations reference (`node:fs` reaches
+most of the rest through `node:stream`), and whether a forbidden specifier then resolves depends on what
+`@types/node` is reachable from the program root — so the `paths` set decides what is TYPED and the rule
+decides what is allowed. It also replaces what tsc says when the module genuinely does not resolve:
+"Do you need to install type definitions for node?", about a module the installation forbids, which the
+author cannot act on. The same advice reaches a GLOBAL (TS2591 for `process`, where ENV-GATE has no list
+to fire from because no runner is loaded), and is replaced by the same reasoning: there is no
+package.json to install into and the environment is the runner's, so the finding stands and only the
+repair is rewritten. No second list of names does it — the trigger is tsc's own code, so it cannot drift
+out of step with what the runner withholds. Only a literal specifier can be checked; a computed one is the gate's at the call,
+which is where it was always going to be decided.
 
 ---
 

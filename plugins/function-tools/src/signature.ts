@@ -6,6 +6,79 @@ export interface ParsedParam {
   type?:     string;
 }
 
+/**
+ * Strip one `Promise<…>` from a declared return type, giving the RESULT a caller receives.
+ *
+ * Every body is compiled as an async function, so a declared `Promise<T>` and a declared `T` describe the
+ * same tool: the first is what an author writes when thinking about the function, the second when thinking
+ * about the result. Both must land on the same contract, or the two spellings silently disagree about what
+ * `tool.x()` resolves to.
+ *
+ * Each arm of a top-level union is unwrapped on its own, and the angle brackets are MATCHED rather than
+ * pattern-matched. A greedy `/^Promise\s*<(.*)>$/` read `Promise<A> | Promise<B>` as one `Promise<…>` and
+ * produced `A> | Promise<B` — not a type at all, and spliced verbatim into both the generated dts's
+ * `ToolContracts` arm and the wire text a model reads, where nothing downstream could recognise it as
+ * broken. A `>` preceded by `=` is part of an arrow, not a closing bracket, so `Promise<(x: number) => T>`
+ * still unwraps.
+ */
+export const unwrapPromise = (t: string): string =>
+  splitUnion(t).map(unwrapOne).join(' | ');
+
+/**
+ * The index just past a string literal starting at `i`, or `i` itself if none starts there. Both walkers
+ * below count brackets, and a string-literal TYPE is ordinary in a contract (`'a' | 'b'`, an index
+ * signature's key), so its contents must not be counted: `Promise<'a>b'>` has a `>` that closes nothing,
+ * and `'a|b'` is one arm rather than two. Getting either wrong is silent — the result is spliced verbatim
+ * into the dts arm and the wire text a model reads.
+ */
+function skipString(t: string, i: number): number {
+  const q = t[i];
+  if (q !== "'" && q !== '"' && q !== '`') return i;
+  for (let j = i + 1; j < t.length; j++) {
+    if (t[j] === '\\') { j += 1; continue; }
+    if (t[j] === q) return j + 1;
+  }
+  return t.length;   // unterminated: the rest is inside it, which is still not bracket text
+}
+
+/** One arm, with its own `Promise<…>` removed if that is the whole of it. */
+function unwrapOne(arm: string): string {
+  const open = /^Promise\s*</.exec(arm);
+  if (open === null) return arm;
+  const from = open[0].length - 1;
+  let depth = 0;
+  for (let i = from; i < arm.length; i++) {
+    const skipped = skipString(arm, i);
+    if (skipped !== i) { i = skipped - 1; continue; }
+    const c = arm[i];
+    if (c === '<') depth += 1;
+    else if (c === '>' && arm[i - 1] !== '=') {
+      depth -= 1;
+      // Closed before the end ⇒ the `Promise<…>` is only a PART of this arm (`Promise<A>[]`,
+      // `Promise<A> & B`), and what a caller receives is not simply its argument. Left alone.
+      if (depth === 0) return i === arm.length - 1 ? arm.slice(from + 1, i).trim() : arm;
+    }
+  }
+  return arm;
+}
+
+/** Top-level `|` arms, ignoring any inside brackets. A leading `|` (the multi-line spelling) is dropped. */
+function splitUnion(t: string): string[] {
+  const arms: string[] = [];
+  let depth = 0, start = 0;
+  for (let i = 0; i < t.length; i++) {
+    const skipped = skipString(t, i);
+    if (skipped !== i) { i = skipped - 1; continue; }
+    const c = t[i];
+    if (c === '<' || c === '(' || c === '[' || c === '{') depth += 1;
+    else if (c === '>' ? t[i - 1] !== '=' : c === ')' || c === ']' || c === '}') depth -= 1;
+    else if (c === '|' && depth === 0) { arms.push(t.slice(start, i)); start = i + 1; }
+  }
+  arms.push(t.slice(start));
+  const out = arms.map(a => a.trim()).filter(a => a !== '');
+  return out.length > 0 ? out : [t.trim()];
+}
+
 export interface ParsedSignature {
   name?:       string;
   params:      ParsedParam[];
@@ -174,7 +247,8 @@ function parseParam(seg: string): ParsedParam | null {
   };
 }
 
-/** Parse a method-shorthand function head (`name(params): ret { … }`). `name` is absent for a lambda. */
+/** Parse a method-shorthand function head (`name(params): ret { … }`). `name` is absent when the head has
+ *  none — `define` requires one, so an anonymous head reaching here is the caller's form, not the parser's. */
 export function parseSignature(source: string): ParsedSignature {
   const src  = stripLeadingTrivia(source);
   const head = src.match(/^\s*(?:async\s+)?(?:function\s+)?([A-Za-z_$][\w$]*)?\s*\(/);

@@ -201,13 +201,42 @@ class BrowserToolTypeIndex implements ToolTypeIndex {
       + `declare module '@matatbread/matbot-plugin-api' {\n  interface ToolContracts {\n${arms.join('\n')}\n  }\n}\n`
       + `declare const tool: import('@matatbread/matbot-plugin-api').ToolProxy;\n`
       + `declare const toolInContext: import('@matatbread/matbot-plugin-api').ToolBox;\n`
-      + `declare const context: import('@matatbread/matbot-plugin-api').ComposedCallContext;\n`;
+      + `declare const context: import('@matatbread/matbot-plugin-api').ComposedCallContext;\n`
+      + await this.importNote();
+  }
+
+  /**
+   * What a body can rely on about imports here, composed from what the registered {@link FunctionRunner}
+   * states — its permitted set and the identifiers it does not bind. Derived rather than written as prose
+   * about "the browser", so an install that registers a runner gets a note matching it. With no runner
+   * nothing is restricted, nothing is withheld and no import is gated, and the note says only the one
+   * concrete thing a body here needs told: there are no node builtins.
+   */
+  private async importNote(): Promise<string> {
+    // Read once, for this one dts: per invocation, because whose settings they are is the settings
+    // store's business.
+    const runner = this.machine.FunctionRunner;
+    const permit = (await runner?.settings?.())?.permittedImports;
+    if (permit?.length === 0) return `// Module imports are switched off on this installation.\n`;
+    const what = permit !== undefined
+      ? `// A body may import these:\n${permit.map(p => `//   ${p}`).join('\n')}\n`
+      : `// A body may import a URL or a package the page can load. There are no node builtins here:\n`
+        + `//   'node:fs' and the rest do not exist.\n`;
+    const withheld = runner?.withheldGlobals ?? [];
+    return what
+      + (withheld.length > 0 ? `// Not in scope: ${withheld.join(', ')}.\n` : '')
+      + `// Imports are not type-checked here, so an import's shape is whatever it turns out to be.\n`;
   }
 
   // No TypeScript program here, so nothing can be checked. `checked: false` is what says so: reporting
   // `ok: true` alone would be a checker that passes everything while claiming success, and a caller
   // recording "this was verified" off the back of it would be recording something false.
   async check(): Promise<ToolCheckReport> { return { ok: true, checked: false, total: 0, diagnostics: [] }; }
+
+  // Answered for the contract's sake, and never compared against anything: `check` reaches no verdict
+  // here, so nothing stores a fingerprint to compare. It still names what it would be about — a
+  // `FunctionRunner`, where this index would read one if a browser install ever registered one.
+  async environment(): Promise<string> { return this.machine.FunctionRunner === undefined ? 'no-runner' : 'runner'; }
 
   async wireContracts(): Promise<Record<string, { params: string; result: string }>> {
     const out: Record<string, { params: string; result: string }> = {};

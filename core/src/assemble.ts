@@ -69,8 +69,6 @@ export interface AssembleOptions {
   providers:        ProviderRegistryImpl;
   gate:             HostGate;
   defaultSettings?: ReadonlyMap<string, Readonly<Record<string, unknown>>> | undefined;
-  /** Registry values present from boot, which an unregister reverts to rather than deleting. */
-  seed?:            Partial<MatbotServices>;
   builtinTools?:    Tool[];
   /** Resolve one `${NAME}` reference; the browser prompts for a missing secret. Defaults to the vault. */
   resolveSecret?(ref: string, vault: Vault): Promise<string>;
@@ -183,6 +181,9 @@ export function assembleMachine(opts: AssembleOptions): AssembledMachine {
   // registers its own (forwarding to its parent) over it — and unloading that reverts to refusing, which
   // is the honest answer for a job with no channel. Late-bound, as `services` is built below. It writes
   // through the shared runner, the one writer of the sessions in `services.sessions`.
+  // Not a host-supplied set: an embedder with a service of its own registers it on the returned
+  // `services` before `loaded()`, which is the same moment and one mechanism rather than two. A `seed`
+  // option existed for the node `FunctionRunner`, and went with it when that became a plugin.
   const seed: Partial<MatbotServices> = {
     MediaStore:      fileStore,
     SessionAppender: createSessionAppender({
@@ -191,7 +192,6 @@ export function assembleMachine(opts: AssembleOptions): AssembledMachine {
       notifier:   () => services.Notifier,
       isSubAgent: () => services.isSubAgent(),
     }),
-    ...opts.seed,
   };
   const serviceRegistry = new Map<string, unknown>(Object.entries(seed));
   // The validator lookup is late-bound and read per call: one is registered by a plugin long after the

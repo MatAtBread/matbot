@@ -3,7 +3,7 @@
   "matbotRuntime": [
     "node"
   ],
-  "version": "0.4.19",
+  "version": "0.4.20",
   "engines": {
     "node": ">=24.12.0"
   },
@@ -58,13 +58,14 @@
   },
   "devDependencies": {
     "@types/node": "catalog:",
-    "typescript": "catalog:",
-    "@matatbread/matbot-function-tools": "workspace:^",
-    "@matatbread/matbot-tool-types": "workspace:^",
     "@matatbread/matbot-caching-tool-types": "workspace:^",
-    "@matatbread/matbot-tool-ts-validation": "workspace:^",
-    "@matatbread/matbot-storage-profiles": "workspace:^",
+    "@matatbread/matbot-function-runner-node": "workspace:^",
+    "@matatbread/matbot-function-tools": "workspace:^",
     "@matatbread/matbot-sessions": "workspace:^",
-    "@matatbread/matbot-tool-skill-compiler": "workspace:^"
+    "@matatbread/matbot-storage-profiles": "workspace:^",
+    "@matatbread/matbot-tool-skill-compiler": "workspace:^",
+    "@matatbread/matbot-tool-ts-validation": "workspace:^",
+    "@matatbread/matbot-tool-types": "workspace:^",
+    "typescript": "catalog:"
   }
 }

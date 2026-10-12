@@ -1,5 +1,5 @@
 import type { MatbotMachine, MatbotPlugin } from './plugin.js';
-import type { ToolContext, ToolEvent, ToolResultFor, ToolProxy, PromptFn, FormField, PermissionGate } from './types.js';
+import type { Tool, ToolContext, ToolEvent, ToolResultFor, ToolProxy, PromptFn, FormField, PermissionGate } from './types.js';
 import { askPermissionGate } from './permission-gate.js';
 
 /** The host's plugin hot-load ops, as both the runner and {@link invokeTool} hold them. */
@@ -33,18 +33,33 @@ export function bindPluginOps(host: PluginOps, prompt: PromptFn): Pick<ToolConte
  * stops a plugin addressing a gate it does not own — tool-name collision on `register` is already
  * resolved, so the name is not something a second plugin can quietly claim.
  *
+ * A request may name a `namespace` in place of the tool's name — for a tool whose name is chosen at RUN
+ * TIME, which is a function-tools function — and it is honoured only if `tools` resolves it to a tool
+ * stamped with the same plugin as this one. Both stamps are the host's (`register`, and the `screen` hook
+ * that offered a turn tool), so a plugin can name only a gate it already owns. Without `tools`, or for a
+ * tool known only by a bare name, there is nothing to check against, so a namespace is refused.
+ *
  * `ask` is the RAW per-turn prompt, never a stand-in that answers with a field's default: `undefined`
  * is how "no human is reachable" reaches the policy, and a substitute would make that undecidable.
  * `gate` is the registered `PermissionGate`; it is a non-optional service, but a hand-assembled
  * machine (a test, a minimal embedder) may still have none, so the asking default stands in.
  */
 export function bindGate(
-  gate:     PermissionGate | undefined,
-  toolName: string,
-  ask:      PromptFn | undefined,
+  gate:   PermissionGate | undefined,
+  tool:   string | Pick<Tool, 'name' | 'pluginName'>,
+  ask:    PromptFn | undefined,
+  tools?: { resolve(name: string): Pick<Tool, 'pluginName'> | null },
 ): Pick<ToolContext, 'gate'> {
+  const name  = typeof tool === 'string' ? tool : tool.name;
+  const owner = typeof tool === 'string' ? undefined : tool.pluginName;
   return {
-    gate: req => (gate ?? askPermissionGate).decide({ ...req, gate: `${toolName}.${req.gate}` }, ask),
+    gate: async ({ namespace, ...req }) => {
+      if (namespace !== undefined && namespace !== name
+          && (owner === undefined || tools?.resolve(namespace)?.pluginName !== owner)) {
+        throw new Error(`Tool "${name}" cannot ask permission under "${namespace}": a gate namespace must be a tool registered by the same plugin.`);
+      }
+      return (gate ?? askPermissionGate).decide({ ...req, gate: `${namespace ?? name}.${req.gate}` }, ask);
+    },
   };
 }
 
@@ -97,7 +112,7 @@ export function invokeTool<K extends string, const P>(
     // The raw `opts.prompt`, not the rejecting stand-in above: a gate must be able to tell "nobody is
     // here" from "a human answered", and `POST /tools/:name` reaching a privileged tool is exactly the
     // non-interactive case the request's `fallback` exists to answer.
-    ...bindGate(machine.PermissionGate, name, opts.prompt),
+    ...bindGate(machine.PermissionGate, tool, opts.prompt, machine.tools),
     ...(opts.provider      !== undefined ? { provider:   opts.provider      } : {}),
     ...(opts.turnTools     !== undefined ? { turnTools:  opts.turnTools     } : {}),
     ...(machine.workdir    !== undefined ? { workdir:    machine.workdir    } : {}),

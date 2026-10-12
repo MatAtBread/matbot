@@ -281,3 +281,55 @@ test('a body calling context.progress passes the type-check gate', async () => {
   `);
   assert.ok(diags.length > 0, 'a message passed as the percentage should be rejected');
 });
+
+// A declared return type is the tool's RESULT, and every body is async — so `f(): T` and
+// `async f(): Promise<T>` describe one tool. Spliced verbatim they disagreed on the way out: the second
+// made `tool.f()` resolve to `Promise<T>`, which `await` hid (it unwraps recursively) and `.then(r => r.x)`
+// did not, while tsc's own "Did you forget to use 'await'?" pointed at the one thing already correct.
+test('a declared Promise<T> and a declared T register the same contract', async () => {
+  const { buildAsyncFn: _b } = await import('@matatbread/matbot-function-tools');
+  const { parseSignature, unwrapPromise } = await import('@matatbread/matbot-function-tools');
+  const bare = parseSignature(`f(p: string): { bytes: number } { return { bytes: p.length }; }`);
+  const prom = parseSignature(`async f(p: string): Promise<{ bytes: number }> { return { bytes: p.length }; }`);
+  assert.equal(unwrapPromise(prom.returnType!), unwrapPromise(bare.returnType!));
+  assert.equal(unwrapPromise(prom.returnType!), '{ bytes: number }');
+  // Not over-eager: a result that merely MENTIONS Promise keeps its shape.
+  assert.equal(unwrapPromise('{ p: Promise<number> }'), '{ p: Promise<number> }');
+  assert.equal(unwrapPromise('Promise<Promise<number>>'), 'Promise<number>', 'one layer, not all');
+  assert.equal(unwrapPromise('string'), 'string');
+});
+
+test('a string-literal type is text, not brackets and not a union', async () => {
+  const { unwrapPromise } = await import('@matatbread/matbot-function-tools');
+  // Both walkers counted brackets inside a string literal, which is an ordinary thing for a contract to
+  // contain. A `>` in one closed nothing, so the `Promise<…>` stayed on — the very defect matching the
+  // brackets was meant to fix — and a `|` in one split one arm into two. Either way the result is spliced
+  // verbatim into the dts arm and the wire text a model reads, where nothing downstream can tell.
+  assert.equal(unwrapPromise(`Promise<'a>b'>`), `'a>b'`);
+  assert.equal(unwrapPromise(`Promise<'a|b'>`), `'a|b'`);
+  assert.equal(unwrapPromise(`Promise<'a' | 'b'>`), `'a' | 'b'`);
+  assert.equal(unwrapPromise(`Promise<{ 'a}b': number }>`), `{ 'a}b': number }`);
+  // Each arm is unwrapped, as above — the point here is that the `>` inside the literal arm neither
+  // closes the other arm's bracket nor splits this one.
+  assert.equal(unwrapPromise(`Promise<A> | 'x>y'`), `A | 'x>y'`);
+});
+
+test('the brackets are MATCHED, so a union of promises is not mangled into nonsense', async () => {
+  const { unwrapPromise } = await import('@matatbread/matbot-function-tools');
+  // A greedy `/^Promise\s*<(.*)>$/` read this as one `Promise<…>` and returned `A> | Promise<B` — not a
+  // type at all, spliced verbatim into both the generated dts's ToolContracts arm and the wire text a
+  // model reads, where nothing downstream could recognise it as broken.
+  assert.equal(unwrapPromise('Promise<A> | Promise<B>'), 'A | B');
+  assert.equal(unwrapPromise('Promise<A> | undefined'), 'A | undefined');
+  assert.equal(unwrapPromise('| Promise<A>\n| Promise<B>'), 'A | B', 'the multi-line spelling');
+  // A `>` that closes an arrow is not a closing bracket.
+  assert.equal(unwrapPromise('Promise<(x: number) => string>'), '(x: number) => string');
+  assert.equal(unwrapPromise('Promise<Record<string, Array<number>>>'), 'Record<string, Array<number>>');
+  // A union member only PART of which is a promise keeps its shape: what a caller receives is not
+  // simply the argument.
+  assert.equal(unwrapPromise('Promise<A>[]'), 'Promise<A>[]');
+  assert.equal(unwrapPromise('Promise<A> & B'), 'Promise<A> & B');
+  // A union inside the promise is one arm, not two.
+  assert.equal(unwrapPromise('Promise<A | B>'), 'A | B');
+  assert.equal(unwrapPromise('Promise<{ a: 1 | 2 }>'), '{ a: 1 | 2 }');
+});

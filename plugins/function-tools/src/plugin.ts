@@ -3,27 +3,26 @@ import type {
   JSONSchema, MatbotMachine, MatbotPluginSpec, MessageContent, Session, Store,
   Tool, ToolContext, ToolEvent, ToolContract, ToolResultOf, ToolCheckReport,
 } from '@matatbread/matbot-plugin-api';
-import { buildAsyncFn, runFunction, INJECTED, type CompiledFn } from './compile.js';
-import { parseSignature, paramsSchema, type ParsedParam, type ParsedSignature } from './signature.js';
+import { buildAsyncFn, buildBodyFn, runFunction, INJECTED, EXECUTE_SUBJECT, TOOL_NAME, type CompiledFn } from './compile.js';
+import { parseSignature, paramsSchema, unwrapPromise, type ParsedParam, type ParsedSignature } from './signature.js';
 import { parsePackage, buildPackageFn, exportFn, type ParsedPackage } from './package.js';
-import { MARKER_CREATOR, sessionFunctions, turnContracts, shadowMessage, type SessionFunctionMarker, type SessionFunctionRecord } from './session.js';
+import { MARKER_CREATOR, sessionFunctions, turnContracts, shadowMessage, type SessionFunctionMarker, type SessionFunctionRecord, type SessionFunctionRow } from './session.js';
 
-const TOOL_NAME         = 'tool_function';
 const PLUGIN_NAME       = 'function-tools';
 const NAMESPACE         = 'functions';
 const PACKAGE_NAMESPACE = 'function-packages';
 
-interface FunctionRecord { name: string; definition: string; description?: string; definedUnchecked?: true }
+interface FunctionRecord { name: string; definition: string; description?: string; definedUnchecked?: true; checkedElsewhere?: true }
 
 /** One function's row in a `check` sweep: the service's report, plus who it is about. `diagnostics`
  *  carries each finding's own `rendered` text, so a reader displays that and counts on `total`. */
-interface CheckResult extends ToolCheckReport { name: string; package?: true; session?: true; definedUnchecked?: true }
+interface CheckResult extends Omit<ToolCheckReport, 'environment'> { name: string; package?: true; session?: true; definedUnchecked?: true }
 
-interface PackageRecord { name: string; tools: string[]; definition: string; definedUnchecked?: true }
+interface PackageRecord { name: string; tools: string[]; definition: string; definedUnchecked?: true; checkedElsewhere?: true }
 
 /** A stored package, keyed by package name: the unit of declaration AND of removal, so an internal helper
  *  can never outlive the exports calling it, nor an export the helper it calls. */
-interface PackageDoc { id: string; version: string; definition: string; definedUnchecked?: true }
+interface PackageDoc { id: string; version: string; definition: string; definedUnchecked?: true; checkedAgainst?: string }
 
 /** A stored function. Its `id` IS its name — names are already unique (they are tool-registry keys),
  *  so there is no second identity to keep in step, and a rename is a delete plus an add. */
@@ -34,13 +33,60 @@ interface FunctionDoc {
    *  (check registers and persists nothing, and the fact it records stays true), which is what keeps the
    *  flag from ever becoming a lie people learn to ignore. */
   definedUnchecked?: true;
+  /** The {@link ToolTypeIndex.environment} fingerprint the check was reached under, when one was. */
+  checkedAgainst?: string;
 }
 
-const recordOf = (doc: FunctionDoc): FunctionRecord => ({
+/**
+ * A verdict is a claim about an environment, and the environment can be swapped out from under it: a
+ * body that passed with the node `FunctionRunner` loaded is still marked as having passed once the
+ * runner plugin is gone, or once its permitted imports are narrowed — while its `import(…)` is no
+ * longer gated, or no longer allowed at all. Nothing re-checks on load (that would be a worker program
+ * per stored function at boot, and would turn a report into a boot failure), so the stored fingerprint
+ * is compared instead, and `check` remains the way to re-verify.
+ *
+ * String equality, never parsed: WHAT differs is the runner's business, and all a reader needs is that
+ * the claim is about somewhere else. Absent on either side means there is nothing to say — a definition
+ * that was never checked already carries `definedUnchecked`, and an index that cannot check cannot date
+ * one either.
+ */
+const elsewhere = (against: string | undefined, env: string | undefined): { checkedElsewhere?: true } =>
+  against !== undefined && env !== undefined && against !== env ? { checkedElsewhere: true } : {};
+
+/**
+ * A `check` row is the verdict just reached, HERE — so it carries neither the stored fingerprint's
+ * `checkedElsewhere` (that compares an OLDER verdict, and set beside a fresh pass it read as "passed now,
+ * and passed somewhere else") nor the raw `environment`, which is ours to compare and never a reader's to
+ * interpret (see {@link sessionRow}).
+ */
+const verdict = (report: ToolCheckReport): Omit<ToolCheckReport, 'environment'> => {
+  const { environment, ...rest } = report;
+  return rest;
+};
+
+/**
+ * Whether a check that just passed should replace the stored fingerprint. `check` otherwise persists
+ * nothing, and without this a function `list` flags as `checkedElsewhere` stayed flagged after it was
+ * re-verified — until it was redefined, which is a model rewriting a correct function to clear a flag.
+ * A pass is the only verdict recorded: a failure here says the stored definition no longer holds, and
+ * that is `check`'s report to make, not a fingerprint's.
+ */
+const restampWith = (report: ToolCheckReport, against: string | undefined): string | undefined =>
+  report.ok && report.checked && report.environment !== undefined && report.environment !== against
+    ? report.environment : undefined;
+
+const recordOf = (doc: FunctionDoc, env?: string): FunctionRecord => ({
   name: doc.id, definition: doc.definition,
   ...(doc.description !== undefined ? { description: doc.description } : {}),
   ...(doc.definedUnchecked === true ? { definedUnchecked: true } : {}),
+  ...elsewhere(doc.checkedAgainst, env),
 });
+
+/** A session function's row: the fingerprint compared and dropped (see {@link elsewhere}). */
+const sessionRow = (rec: SessionFunctionRecord, env?: string): SessionFunctionRow => {
+  const { checkedAgainst, ...rest } = rec;
+  return { ...rest, ...elsewhere(checkedAgainst, env) };
+};
 
 // Placeholder used as a defined tool's description when the caller supplies none — fill in as desired.
 const PLACEHOLDER_DESCRIPTION = 'A user-defined function tool.';
@@ -63,7 +109,7 @@ function assertNoInjectedClash(params: ParsedParam[]): void {
 
 /** The type-check snippet for a parsed function: its body as an async fn, checked against the live tool
  *  types via {@link ToolTypeIndex.check}. A declared return type is Promise-wrapped and verified against the
- *  body; without one (a lambda may omit it) TS infers it, still checking the body and its `tool` calls. */
+ *  body; without one (a session function may omit it) TS infers it, still checking the body and its `tool` calls. */
 function checkSnippet(sig: ParsedSignature): string {
   if (sig.returnType === undefined) return `async function __fn(${sig.paramsText}) ${sig.body}`;
   const ret = /^Promise\s*</.test(sig.returnType) ? sig.returnType : `Promise<${sig.returnType}>`;
@@ -82,8 +128,18 @@ function parseDefinition(definition: string): DefinedSignature {
   return { ...sig, name: sig.name, returnType: sig.returnType };
 }
 
-/** A defined function's contract, in the same shape as a `ToolContracts` arm. */
-const contractOf = (sig: ParsedSignature): string => `ToolContract<${sig.returnType ?? 'unknown'}, ${paramsTypeText(sig.params)}>`;
+/**
+ * A defined function's contract, in the same shape as a `ToolContracts` arm.
+ *
+ * `unwrapPromise`, because {@link checkSnippet} ADDS a `Promise<…>` to verify the body against, so both
+ * `f(): T` and `async f(): Promise<T>` describe one tool — and the wrapper prepends `async` anyway, which
+ * makes the second the form a TypeScript author reaches for first. Spliced verbatim, the two spellings
+ * disagreed on the way out: the declared `Promise<T>` became the RESULT, so `tool.f()` resolved to
+ * `Promise<T>`. `await` hid it (it unwraps recursively) and `.then(r => r.x)` did not, and tsc's own
+ * "Did you forget to use 'await'?" then pointed at the one thing that was already right.
+ */
+const contractOf = (sig: ParsedSignature): string =>
+  `ToolContract<${sig.returnType !== undefined ? unwrapPromise(sig.returnType) : 'unknown'}, ${paramsTypeText(sig.params)}>`;
 
 /** A global definition's failed type-check. A global function calling one of this session's functions
  *  fails the check (its check never sees them) and the bare diagnostic does not say why — it would run
@@ -108,7 +164,7 @@ function definedTool(
   // A registered tool's params/result text is folded in by the host at dispatch; a session one never
   // reaches that fold, so it carries the same two blocks itself.
   const wire = extra?.wire === true
-    ? `\n\nTypeScript params:\n\`\`\`\n${paramsTypeText(sig.params)}\n\`\`\`\n\nTypeScript result:\n\`\`\`\n${sig.returnType ?? 'unknown'}\n\`\`\``
+    ? `\n\nTypeScript params:\n\`\`\`\n${paramsTypeText(sig.params)}\n\`\`\`\n\nTypeScript result:\n\`\`\`\n${sig.returnType !== undefined ? unwrapPromise(sig.returnType) : 'unknown'}\n\`\`\``
     : '';
   return {
     name:        rec.name,
@@ -149,10 +205,10 @@ declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
     tool_function:
       | ToolContract<{ message: string; tool: string; parameters: ParsedParam[] }, { action: 'define'; definition: string; description?: string; scope?: 'global' | 'session'; noTypeCheck?: boolean }>
-      | ToolContract<unknown,                                                      { action: 'lambda'; definition: string; params?: object; noTypeCheck?: boolean }>
+      | ToolContract<unknown,                                                      { action: 'execute'; definition: string; noTypeCheck?: boolean }>
       | ToolContract<{ message: string; package: string; tools: string[] },         { action: 'package'; name: string; definition: string; noTypeCheck?: boolean }>
       | ToolContract<{ ok: boolean; checked: boolean; results: CheckResult[] },    { action: 'check';  name?: string; package?: string }>
-      | ToolContract<{ functions: FunctionRecord[]; packages: PackageRecord[]; sessionFunctions: SessionFunctionRecord[] }, { action: 'list' }>
+      | ToolContract<{ functions: FunctionRecord[]; packages: PackageRecord[]; sessionFunctions: SessionFunctionRow[] }, { action: 'list' }>
       | ToolContract<{ available: boolean; dts: string },                         { action: 'types'  }>
       | ToolContract<{ message: string },                                         { action: 'remove'; name: string } | { action: 'remove'; package: string }>;
   }
@@ -160,7 +216,7 @@ declare module '@matatbread/matbot-plugin-api' {
 
 type ToolFunctionAction =
   | { action: 'define'; definition: string; description?: string; scope?: 'global' | 'session'; noTypeCheck?: boolean }
-  | { action: 'lambda'; definition: string; params?: unknown; noTypeCheck?: boolean }
+  | { action: 'execute'; definition: string; noTypeCheck?: boolean }
   | { action: 'package'; name: string; definition: string; noTypeCheck?: boolean }
   | { action: 'check'; name?: string; package?: string }
   | { action: 'list' }
@@ -200,9 +256,9 @@ class FunctionStore {
     for (const name of seen) this.registered.add(name);
   }
 
-  async list(): Promise<FunctionRecord[]> {
+  async list(env: string | undefined): Promise<FunctionRecord[]> {
     const { items } = await this.store.query({ sort: [{ field: 'id', dir: 'asc' }], immutable: true });
-    return items.map(recordOf);
+    return items.map(doc => recordOf(doc, env));
   }
 
   async has(name: string): Promise<boolean> {
@@ -221,6 +277,7 @@ class FunctionStore {
     // browser — the function still compiles and runs), or when the caller opts out with noTypeCheck.
     const index = this.machine.ToolTypeIndex;
     let checked = false;
+    let checkedAgainst: string | undefined;
     if (index !== undefined && !noTypeCheck) {
       const report = await index.check(checkSnippet(sig));
       if (!report.ok) throw new Error(globalTypeError(report, sessionNames));
@@ -228,6 +285,7 @@ class FunctionStore {
       // registers such an index (for `dts()`), so trusting "an index was present" marked its definitions
       // verified when nothing had read them.
       checked = report.checked;
+      checkedAgainst = report.environment;
     }
     const doc: FunctionDoc = {
       id:      sig.name,
@@ -239,6 +297,9 @@ class FunctionStore {
       // an unrelated contract change made them impossible to ignore. Both bypass routes are recorded —
       // the explicit flag and the implicit "no checker here" — since the function is equally unverified.
       ...(checked ? {} : { definedUnchecked: true as const }),
+      // WHERE it passed, so a later reader can tell that the environment has moved under it — stored
+      // only when there is a verdict to qualify.
+      ...(checkedAgainst !== undefined ? { checkedAgainst } : {}),
     };
     await this.registerTool(recordOf(doc));   // compiles; throws on bad source before anything is persisted
     // No CAS: a define is an unconditional "this name now means this source", not a read-modify-write,
@@ -279,9 +340,12 @@ class FunctionStore {
         report = { ok: false, checked: false, total: 1, diagnostics: [{ label: 'PARSE', code: 0, message, rendered: message }] };
       }
       results.push({
-        name: doc.id, ...report,
+        name: doc.id, ...verdict(report),
         ...(doc.definedUnchecked === true ? { definedUnchecked: true as const } : {}),
       });
+      // A lost CAS is a redefinition that landed meanwhile, whose own fingerprint is the one to keep.
+      const stamp = restampWith(report, doc.checkedAgainst);
+      if (stamp !== undefined) await this.store.cas(doc.id, doc.version, { ...doc, checkedAgainst: stamp });
     }
     return results;
   }
@@ -334,7 +398,7 @@ class PackageStore {
     for (const name of [...this.owned.keys()]) if (!seen.has(name)) this.unregister(name);
   }
 
-  async list(): Promise<PackageRecord[]> {
+  async list(env: string | undefined): Promise<PackageRecord[]> {
     const { items } = await this.store.query({ sort: [{ field: 'id', dir: 'asc' }], immutable: true });
     return items.map(doc => {
       let tools: string[] = [];
@@ -342,6 +406,7 @@ class PackageStore {
       return {
         name: doc.id, tools, definition: doc.definition,
         ...(doc.definedUnchecked === true ? { definedUnchecked: true as const } : {}),
+        ...elsewhere(doc.checkedAgainst, env),
       };
     });
   }
@@ -357,15 +422,18 @@ class PackageStore {
     // The whole module is the snippet, so a private helper's signature is checked against its callers too.
     const index = this.machine.ToolTypeIndex;
     let checked = false;
+    let checkedAgainst: string | undefined;
     if (index !== undefined && !noTypeCheck) {
       const report = await index.check(definition);
       if (!report.ok) throw new Error(globalTypeError(report, sessionNames));
       checked = report.checked;
+      checkedAgainst = report.environment;
     }
     await this.install(name, parsed, definition);
     const doc: PackageDoc = {
       id: name, version: crypto.randomUUID(), definition,
       ...(checked ? {} : { definedUnchecked: true as const }),
+      ...(checkedAgainst !== undefined ? { checkedAgainst } : {}),
     };
     await this.store.set(doc.id, doc);
     return parsed.exports.map(e => e.toolName);
@@ -391,9 +459,11 @@ class PackageStore {
         report = { ok: false, checked: false, total: 1, diagnostics: [{ label: 'PARSE', code: 0, message, rendered: message }] };
       }
       results.push({
-        name: doc.id, package: true, ...report,
+        name: doc.id, package: true, ...verdict(report),
         ...(doc.definedUnchecked === true ? { definedUnchecked: true as const } : {}),
       });
+      const stamp = restampWith(report, doc.checkedAgainst);
+      if (stamp !== undefined) await this.store.cas(doc.id, doc.version, { ...doc, checkedAgainst: stamp });
     }
     return results;
   }
@@ -500,15 +570,18 @@ class SessionFunctions {
     if (this.machine.tools.resolve(sig.name) !== null) throw new Error(shadowMessage(sig.name));
     const index = this.machine.ToolTypeIndex;
     let checked = false;
+    let checkedAgainst: string | undefined;
     if (index !== undefined && !noTypeCheck) {
       const report = await index.check(checkSnippet(sig) + turnContracts(ctx.turnTools, { name: sig.name, contract: contractOf(sig) }));
       if (!report.ok) throw new Error(`type error(s) — fix and re-define, or pass noTypeCheck to bypass:\n${renderCheck(report)}`);
       checked = report.checked;
+      checkedAgainst = report.environment;
     }
     const rec: SessionFunctionRecord = {
       name: sig.name, definition,
       ...(description !== undefined && description.trim() !== '' ? { description: description.trim() } : {}),
       ...(checked ? {} : { definedUnchecked: true as const }),
+      ...(checkedAgainst !== undefined ? { checkedAgainst } : {}),
     };
     const built = await this.build(rec);   // compiles: a bad source fails here, before any marker exists
     if (built instanceof Error) throw built;
@@ -517,10 +590,13 @@ class SessionFunctions {
 
   /** define's check, re-run against the tools as they stand now — which is how a function left calling
    *  one a `split` took away, or one a global tool has since shadowed, is found before it is called. */
-  async check(ctx: ToolContext, recs: Iterable<SessionFunctionRecord>): Promise<CheckResult[]> {
+  /** `restamps` are the markers recording a pass under a new fingerprint — the session's equivalent of the
+   *  stores' CAS, emitted by the caller as ordinary marker events so the runner owns the write. */
+  async check(ctx: ToolContext, recs: Iterable<SessionFunctionRecord>): Promise<{ results: CheckResult[]; restamps: SessionFunctionMarker[] }> {
     const index = this.machine.ToolTypeIndex;
     if (index === undefined) throw new Error('No type-checker is available here (e.g. the browser), so nothing can be checked.');
     const results: CheckResult[] = [];
+    const restamps: SessionFunctionMarker[] = [];
     for (const rec of recs) {
       let report: ToolCheckReport;
       if (this.machine.tools.resolve(rec.name) !== null) report = findingRow('SHADOWED', shadowMessage(rec.name));
@@ -531,11 +607,13 @@ class SessionFunctions {
         } catch (e) { report = findingRow('PARSE', e instanceof Error ? e.message : String(e)); }
       }
       results.push({
-        name: rec.name, session: true, ...report,
+        name: rec.name, session: true, ...verdict(report),
         ...(rec.definedUnchecked === true ? { definedUnchecked: true as const } : {}),
       });
+      const stamp = restampWith(report, rec.checkedAgainst);
+      if (stamp !== undefined) restamps.push({ op: 'checked', name: rec.name, definition: rec.definition, checkedAgainst: stamp });
     }
-    return results;
+    return { results, restamps };
   }
 
   private build(rec: SessionFunctionRecord): Promise<Tool | Error> {
@@ -561,223 +639,204 @@ class SessionFunctions {
 
 const sessionMarker = (data: SessionFunctionMarker): ToolEvent => ({ type: 'marker', creator: MARKER_CREATOR, data });
 
-const DESCRIPTION = `WHEN TO USE THIS — judge it by the SIZE and SHAPE of the work, not by the number of calls:
+const DESCRIPTION = `Compile and run TypeScript in one pass across the registered tools. Inside a body you call them as
+\`await tool.x(params)\`, then filter, count, aggregate or loop, and return only the answer — so the
+listings, rows and file bodies it read on the way never enter the conversation.
 
-  1. A VERBOSE result you need a fraction of. A listing, a table, a file body, a search dump — where what
-     you actually want is a count, a total, an aggregate, a summary, or two fields. Reading it through the
-     conversation puts the whole thing in your context permanently in order to extract a line of it.
-  2. LOOPS AND CONDITIONALS. The same call over n items, read-each-and-decide, retry-until-it-works,
-     branch on what came back. A round per iteration, and every intermediate result kept for the session.
+An \`execute\` runs once, now, and saves nothing. A \`define\` saves the function as a tool you can call by
+name. A \`package\` saves several tools that share private helpers. You are not limited to the tools: on
+node a body can reach the platform itself (see MODULES), and it is often an efficient substitute
+for a shell one-liner.
 
-NOT FOR THIS — the pathological case, and the tempting one: wrapping a SINGLE tool call whose result you
-are not reducing. If the body is one \`await tool.x(params)\` and a \`return\` of what came back, the lambda is
-strictly WORSE than the call it wraps — the same result reaches you either way, and the wrapper cost you a
-types call and a round to write it. There is no reason to wrap a single call whose result you are not going
-to aggregate, filter, count, loop over, or feed into another call. Call the tool.
-
-Authoring a lambda costs a call or two of its own (usually \`{ action: 'types' }\`, then the body), so two
-direct calls with small results are also fine as they are. It wins decisively the moment bulk would pass
-through the conversation to answer something small, or n grows.
-
-  Piping it yourself:  workspace_action(list) → 200 names in context → workspace_action(read) → contents
-                       in context → workspace_action(read) → … (a round each, all of it kept)
-  One lambda:          (args: { prefix: string }): number { … list, read each, count matches … } → the number
-  Pointless — do NOT: (args: { name: string }): string { return await tool.workspace_action({ action: 'read', name: args.name }); }
-                       ↑ reduces nothing, so it is the same result for more work: call workspace_action.
-
-Compose multiple tool calls — filter, count, reshape their results — without routing every intermediate result
-back through the model. Compositions are expressed as TypeScript functions that orchestrate other tools in a single pass.
-
-Inside a function, call any registered tool through the injected \`tool\` proxy:
-\`const r = await tool.<tool_name>(params)\` runs that tool and resolves to its structured result (the same
-value a direct call yields), inheriting this call's context. To run one call under a different context
-(e.g. another model), use the \`toolInContext\` factory: \`await toolInContext({ provider: 'fast-model' }).<tool_name>(params)\`
-— omitted fields are inherited. A tool name that doesn't exist is a compile error, so you can only call
-tools that are actually registered. Every tool call MUST be awaited — the whole body runs as an async
-function (so a recursive self-call must be awaited too). Return a JSON-serialisable value; that becomes
-the result the model sees. Each tool call is echoed to stdout, so the run is observable.
-
-THE INJECTED BINDINGS — three names are already in scope in every body. Use them directly; do NOT declare
-them as parameters, do NOT redeclare them with const/let, and do NOT try to import or construct them (a
-parameter of the same name is rejected, because it would shadow the injection):
-
-  tool           the proxy above — \`await tool.<tool_name>(params)\`
-  toolInContext  the factory above — \`await toolInContext({ provider }).<tool_name>(params)\`
-  context        the call you are running under, exactly:
-                   { callId: string; sessionId: string; provider?: string; workdir?: string; signal: AbortSignal;
-                     progress: (pct: number, message?: string) => void }
-
-\`context\` is how you answer "which session/turn am I in?" from inside a function — there is no tool that
-reports it (\`session_action\` takes a \`sessionId\` as an explicit param; \`whoami\` returns the principal, not
-the session). So the CURRENT session is \`context.sessionId\`:
-
-  const s = await tool.session_action({ action: 'get', sessionId: context.sessionId });
-
-Pass \`context.signal\` to any \`fetch\` you make so a long run stays cancellable. Note that \`context\`'s FIELDS
-are informational: a nested \`tool.<name>()\` call ALREADY inherits this session, signal and provider, so only
-pass its fields on where the callee takes them as explicit parameters (as \`session_action\` does above).
-
-TELL THE USER WHAT YOU ARE DOING while the body runs: \`context.progress(pct, message)\` — \`pct\` 0-100,
-\`message\` a short line of prose — draws a progress bar and caption against this call in the UI as it runs.
-It is not part of your result and is never sent back to you, so it costs you no context; it simply goes away
-when the call ends. Call it in any loop over n items, and between the stages of a multi-step body: a silent
-function that takes a minute is indistinguishable, to the person waiting, from a hung one.
-
-  const files = await tool.workspace_action({ action: 'list', prefix });
-  for (const [i, f] of files.entries()) {
-    context.progress((i / files.length) * 100, 'Reading ' + f.name);
-    if ((await tool.workspace_action({ action: 'read', name: f.name })).includes('TODO')) hits++;
-  }
-
-Before composing, run \`{ action: 'types' }\` to fetch TypeScript declarations of what the available tools'
-calls resolve to — write \`await tool.x(...)\` against those real return types instead of guessing shapes.
+WHEN TO USE IT — judge by the SIZE and SHAPE of the work, not the number of calls:
+  1. A VERBOSE result you need a fraction of — a count, a total, an aggregate, a summary, two fields.
+  2. A LOOP or a CONDITIONAL — the same call over n items, read-each-and-decide, retry-until, branch.
+  3. A multi-step chain that would otherwise cost a round per step, with no LLM turn between the steps.
+NOT FOR THIS — wrapping a SINGLE tool call whose result you are not reducing. A body that is one
+\`await tool.x(params)\` and a \`return\` of what came back is strictly WORSE than the call it wraps: the same
+result reaches you either way, and the wrapper cost you a round to write it. If the body would not filter,
+count, aggregate, loop, or feed its result into a second call, call the tool directly.
 
 ACTIONS
-  define — Persist a NAMED function as a new tool of the same name — in every conversation, or in this
-           one only (see \`scope\` below). Parameters are
-           derived from the signature and become the tool's inputs. You MUST declare an explicit return
-           type — it is verified against the body and becomes the tool's result contract (use void for a
-           side-effect-only tool). Pass an optional \`description\` to
-           document the new tool (shown to the model). Re-defining the same name recompiles it. Never
-           shadows a tool you didn't define here.
-           \`scope\` — WHO ASKED for the function decides it:
-             'global' (default): the user asked for a tool ("make me a tool that calculates Fibonacci
-                     numbers"). It is saved, survives restart, and is a tool in every conversation, over
-                     HTTP and to the tool presenter. Visible from the *next turn*.
-             'session': USE THIS for any function you define on your own initiative while working
-                     something out — a lambda you will call more than once, or a helper two lambdas share.
-                     Only THIS conversation sees it: call it directly, or as \`await tool.<name>(…)\` from
-                     your other functions, type-checked like any tool. Callable from your *next step*. A
-                     global tool in every conversation's list is a cost to every conversation, so do not
-                     make one the user did not ask for.
-           A global function cannot call a session one: it would fail in every other conversation. To
-           promote a session function, define it again with scope 'global' (it replaces the session one).
-  lambda — Compile and run an ANONYMOUS one-argument function once, now, against \`params\`. Nothing is
-           persisted or registered. This is the ordinary way to reduce a bulky or repetitive tool chain to
-           just its answer — but NOT a wrapper for a single call (see NOT FOR THIS above). If the same
-           chain is worth repeating later, define it instead. Type-checked against the live tool types before running (like define),
-           so a bad composition is caught before it runs; pass \`noTypeCheck: true\` to bypass.
-  package — Persist a PACKAGE: several tools plus private helpers they share, written as one TypeScript
-           module. Pass \`name\` (the package name) and \`definition\` (the module source). Every \`export\`ed
-           function becomes a tool named \`<package>__<function>\` — that exact name, with the double
-           underscore, is how you, other functions and HTTP call it: \`await tool.<package>__<function>(params)\`.
-           Everything NOT exported (helper functions, types, constants) is private to the package and is never
-           a tool. Use this instead of defining a helper as a tool of its own. An exported function takes ONE
-           object parameter (or none) and declares a return type, like a lambda, so calling it from inside the
-           package (directly — \`await my_helper(args)\`, never through \`tool\`) looks the same as calling it
-           from outside. A comment directly above an \`export\` becomes that tool's description. Type-checked
-           as a whole before registering (\`noTypeCheck\` bypasses). Re-defining a package replaces the whole
-           group — a function no longer exported stops being a tool — and \`remove { package }\` deletes it.
+  action   required          optional            what it makes
+  execute  definition        noTypeCheck         one run now of the BODY between braces; nothing is saved.
+  define   definition        description, scope  a NAMED tool of that name.
+  package  name, definition  noTypeCheck         one tool per \`export\`, named <name>__<function>.
+  check    —                 name, package       a report; registers and persists nothing.
+  list     —                 —                   the functions, packages and session functions.
+  types    —                 —                   the d.ts a body is graded against.
+  remove   name, or package  —                   a defined function, or a whole package and its tools.
+\`noTypeCheck\` is accepted by execute, define and package: it skips the type-check, and a persisted
+definition is then recorded as \`definedUnchecked\`.
 
-           A PACKAGE IS NOT A MODULE INSTANCE, and it has NO STATE. It looks like a Node module but does not
-           behave like one: its whole top level is evaluated afresh on EVERY tool call, so nothing there
-           persists between calls and nothing there runs once. Two calls to \`<package>__inc\` share nothing,
-           and neither does a call through \`tool.<package>__x\` from inside the package. ONLY these may
-           appear at the top level: \`function\`, \`async function\`, \`export function\`, \`export async
-           function\`, \`const\` (for fixed values), \`interface\` and \`type\`. Anything else is REFUSED —
-           including \`let\`/\`var\`, \`class\`, \`enum\`, \`declare\`, \`import\`, a bare statement (\`n++\`,
-           \`await tool.x(...)\`) and a top-level \`await\` (\`const cfg = await ...\`).
-           WHAT A PACKAGE IS FOR: not polluting the global tool scope. Every tool is one entry in a single,
-           shared list that the model chooses from; a helper registered as a tool competes with the tools that
-           use it. A package lets related tools share private helpers without adding them to that list — and
-           that is ALL it does. It is NOT a substitute for a plugin. If what you are building needs to REMEMBER
-           anything between calls — a counter, a cache, a connection, one-time setup — or needs hooks,
-           services or background work, write a matbot PLUGIN, which has all of those capabilities.
-  check  — Re-run define's type-check over a function you already defined, without running or re-registering
-           it. Pass \`name\` for one function or \`package\` for one package, or omit both to check everything,
-           this conversation's session functions included. Use this after anything that
-           could move a contract a function was written against — a tool changing its parameters or result,
-           a plugin loading or unloading — since a defined function is compiled but NOT re-checked on
-           reload, so it keeps working until the moment it doesn't. Returns a row per function: \`total\` is
-           every finding, \`diagnostics\` the detailed ones (each with a \`rendered\` block to read and a
-           \`label\` such as \`TS2339\` or \`CAST-GATE\` to group on), and \`omitted\` the tally of any the
-           detail cap hid. Fix a failure by re-defining that function. A row also carries
-           \`definedUnchecked: true\` if that function was never type-checked when it was defined.
-           READ \`ok\` TOGETHER WITH \`checked\`, on the result and on each row: \`checked: false\` means
-           no type-checker could run here, so \`ok: true\` says only that nothing was examined.
-  list   — Show the functions and packages you've defined, with their source, and this conversation's
-           session functions (\`sessionFunctions\`). \`definedUnchecked: true\` marks one that
-           was registered without a type-check (it was defined with \`noTypeCheck\`, or no checker was
-           available) — run \`check\` on it, since a bypass hides errors that are still there.
-  types  — Return TypeScript declarations (a .d.ts) of what the available tools' calls resolve to, so you
-           can compose against real return types. Node only; \`available: false\` with an empty dts where
-           type info can't be derived (e.g. the browser) — fall back to inferring shapes and testing.
-  remove — Delete a defined function (\`name\`, global or this conversation's) and its tool, or a whole
-           package (\`package\`) and every tool it exports.
+HOW THE PARAMETERS RELATE
+  definition  the BODY for execute; a FUNCTION for define; MODULE source for package.
+  scope       define only — 'global' (default) or 'session'. A package is always global.
+  name        the function or package to act on, for remove / check; the PACKAGE name for package. NOT
+              for define — a defined tool takes its name from its own source.
+  package     a selector for check and remove, NOT the define action (that is action: 'package').
+  There are no other parameters: an execute takes no arguments, so it declares no parameters, and a
+define takes its inputs from the parameter list written into its own signature.
 
-Functions use method-shorthand syntax — NOT arrow functions:
+WHAT A BODY IS
+A bare BODY — statements, not a module and not a function. It is compile-checked against the live tool
+types before it runs (node; skip with \`noTypeCheck\`), and it runs as an async function, so \`await\` works
+throughout. There is no \`this\`, and nothing to export.
+Three names are injected — use them directly, and do NOT declare them as parameters or \`const\`/\`let\`
+(a parameter of the same name is rejected, because it would shadow the injection):
+  tool           \`await tool.<tool_name>(params)\` — any registered tool, inheriting this call's context.
+  toolInContext  \`await toolInContext({ provider }).<tool_name>(params)\` — one call under an override.
+  context        \`{ callId, sessionId, provider?, workdir?, signal, progress(pct, message?) }\` — the call
+                 you are running under. \`context.sessionId\` is THIS conversation; pass \`context.signal\`
+                 to any \`fetch\` so a long run stays cancellable; \`context.progress\` draws a progress bar
+                 for the person waiting, costs you no context and is never sent back to you.
+Every \`tool\` call MUST be awaited — the whole body runs as an async function, so a nested call, including
+a function calling itself, must be awaited too. Return a JSON-serialisable value; that becomes the result the model sees. Each tool
+call is echoed to stdout, so the run is observable.
 
-  define (definition):
-    count_plugins(check: string): string {
-      const p = await tool.plugin({ action: 'list' });
-      const n = p.loaded.filter(pl => pl.name.includes(check)).length;
-      return n + ' plugins match "' + check + '"';
-    }
-  → registers tool "count_plugins" taking { check: string }.
+WHERE A BODY RUNS
+By default a body is a plain async function inside matbot's own process: nothing bounds how long it runs,
+every global is in scope, and an import reaches the platform's own loader with nobody asked. Checks and
+limits come from a \`FunctionRunner\` — the service an installation registers to compile and run every
+body — which may bound its running time, withhold globals, restrict what it may import, and route each
+import through a permission prompt. The \`types\` action states which of these are in force HERE, and a
+body is type-checked against exactly that: what is not reachable does not type-check, so do not guess,
+and do not reach for \`noTypeCheck\` to get past it.
 
-  define (definition) using the injected \`context\` — no sessionId parameter needed, it knows where it is:
-    turn_count(): number {
-      const s = await tool.session_action({ action: 'get', sessionId: context.sessionId });
-      return s.messages.length;
-    }
-  → registers tool "turn_count" taking {}.
+MODULES (node only). A body may reach the platform through a dynamic import —
+\`const fs = await import('node:fs/promises')\`. Import by NAME only — a node builtin or a package already
+installed; a path or a URL fails the check. Ask for the narrowest thing that does the job: where imports
+are gated, the user is asked the first time, naming your function and the module. A body is not a module,
+so there is no \`require\`, \`module\`, \`exports\`, \`__dirname\`, \`__filename\` or \`import.meta\`; any
+global a runner withholds as well is listed by \`types\`, and using one fails the check rather than the
+first call.
 
-  lambda (definition + params):
-    definition: (args: { names: string[] }): string[] { return args.names.map(n => n.toUpperCase()); }
-    params:     { "names": ["a", "b"] }
+SCOPE — WHO ASKED FOR THE FUNCTION DECIDES IT
+  'global' (default) — the user asked for a tool ("make me a tool that calculates Fibonacci numbers"). It
+     is saved, survives restart, and is a tool in every conversation, over HTTP and to the tool presenter.
+  'session' — you want a function of your own while working something out: one you will call again, or a
+     helper two of them share. Only THIS conversation has it — call it directly from your next round,
+     or as \`await tool.<name>(…)\` from your other functions, type-checked like any tool. It is stored in
+     the conversation itself, so it survives a restart and follows the conversation through a fork, cut or
+     compact.
+A global tool in every conversation's list is a cost to every conversation, so do not make one the user did
+not ask for. A global function cannot call a session one — it would fail in every other conversation. To
+promote a session function, define it again with scope 'global' (it replaces the session one).
 
-  package (name + definition):
-    name:       Presence
-    definition:
-      interface Report { home: boolean; room?: string }
-      async function report(): Promise<Report> { … one private helper, shared below … }
-      // Whether Mat is at home, in one word.
-      export async function where(args: {}): Promise<string> { return (await report()).home ? 'home' : 'out'; }
-      // The room Mat was last seen in.
-      export async function room(args: {}): Promise<string> { return (await report()).room ?? 'unknown'; }
-  → registers tools "Presence__where" and "Presence__room"; \`report\` is not a tool.`;
+PACKAGES
+Several tools plus the private helpers they share, as one TypeScript module. Every \`export\` becomes a tool
+named \`<package>__<function>\`, called as \`await tool.<package>__<function>(params)\`. Everything not
+exported (helpers, types, constants) stays private and is never registered. Use a package instead of
+defining a helper as a tool of its own: every tool is one entry in one shared list the model chooses from,
+so a helper registered as a tool competes with the tools that use it.
+A PACKAGE IS NOT A MODULE INSTANCE, and it has NO STATE. Its whole top level is evaluated afresh on EVERY
+call, so nothing there persists between calls and nothing there runs once; two calls to \`<package>__inc\`
+share nothing. ONLY these may appear at the top level: \`function\`, \`async function\`, \`export function\`,
+\`export async function\`, \`const\` (for fixed values), \`interface\` and \`type\`. Anything else is REFUSED —
+including \`let\`/\`var\`, \`class\`, \`enum\`, \`declare\`, a top-level \`import\` statement (a dynamic
+\`await import('node:…')\` inside a function body is fine), a bare statement (\`n++\`, \`await tool.x(...)\`)
+and a top-level \`await\` (\`const cfg = await ...\`). Re-defining a package replaces the whole group, so a
+function no longer exported stops being a tool; \`remove\` with \`package\` deletes the group.
+
+CHECK
+Re-runs define's type-check over source already defined, registering and persisting nothing. The tool
+types are LIVE, so a tool that changes its contract can invalidate a function that was sound when it was
+defined — and nothing else would notice, because a defined function is compiled, never re-checked, on
+reload. Pass \`name\` for one function or \`package\` for one package; omit both to check everything, this
+conversation's session functions included. One row per function: \`total\` is every finding, \`diagnostics\`
+the detail — each with a \`rendered\` block to read and a \`label\` to group on, either a tsc code such as
+\`TS2339\` or a structural rule (\`CAST-GATE\`, \`ENV-GATE\`, \`SHADOWED\`, \`PARSE\`) — and \`omitted\` the tally
+of any the detail cap hid. A row carrying \`definedUnchecked: true\` was registered without a type-check.
+READ \`ok\` TOGETHER WITH \`checked\`, on the result and on each row: \`checked: false\` means no type-checker
+could run here, so \`ok: true\` says only that nothing was examined. Fix a failure by re-defining.
+In \`list\`, a row carrying \`checkedElsewhere: true\` DID pass, but in a different environment from this
+one — what a body may import, or whether an import is gated at all, has changed since. Nothing is
+re-checked on load, so \`check\` it: a \`check\` row is always the verdict reached here and now, and a
+pass records this environment, which clears the flag. There is no need to redefine a function to clear it.
+
+TWO DEFINITION SHAPES — and neither is an arrow function
+  execute — the BODY alone, between braces. There is no function head, so there is nothing to declare and
+     no \`=>\` to write.
+  define / package — source in METHOD syntax: \`name(params): ReturnType { body }\`. Not \`(args) => { … }\`,
+     which is rejected as invalid TypeScript and is the commonest first attempt, because the surrounding
+     vocabulary suggests a function expression. Not the \`function\` keyword either, though a leading \`async\`
+     or \`function\` is tolerated and stripped.
+A \`define\`'s tool NAME is the method name in the source — there is no \`name\` parameter on \`define\`
+(\`list\`, \`remove\` and \`check\` take one, to address a function that already exists). Asked for "a tool
+called X", write \`X(params): Result { … }\`.
+\`define\` must declare a return type: it becomes the tool's result contract — what other bodies are checked
+against — so state it exactly. The body is async here too, so \`Promise<T>\` and \`T\` mean the same thing:
+write whichever reads better, and \`await\` freely inside either. An \`execute\` needs no return type: its
+result is stringified on its way back, and nothing else is ever checked against it.
+
+  execute — { const files = await tool.workspace_action({ action: 'list', prefix: 'charts' });
+              return files.length; }
+
+  define — count_plugins(check: string): string {
+             const p = await tool.plugin({ action: 'list' });
+             const n = p.loaded.filter(pl => pl.name.includes(check)).length;
+             return n + ' plugins match "' + check + '"';
+           }
+           → registers tool "count_plugins" taking { check: string }.
+
+  define, reading the injected context — turn_count(): number {
+             const s = await tool.session_action({ action: 'get', sessionId: context.sessionId });
+             return s.messages.length;
+           }
+           → registers tool "turn_count" taking {}.
+
+  package — name: Presence
+            definition:
+              interface Report { home: boolean; room?: string }
+              async function report(): Promise<Report> { … one private helper, shared below … }
+              // Whether Mat is at home, in one word.
+              export async function where(args: {}): Promise<string> { return (await report()).home ? 'home' : 'out'; }
+              // The room Mat was last seen in.
+              export async function room(args: {}): Promise<string> { return (await report()).room ?? 'unknown'; }
+            → registers tools "Presence__where" and "Presence__room"; \`report\` is not a tool.
+
+Before composing, run \`{ action: 'types' }\` to fetch the declarations of what the available tools' calls
+resolve to — write \`await tool.x(...)\` against those real result types instead of guessing shapes.`;
 
 const INPUT_SCHEMA: JSONSchema = {
   type: 'object',
   required: ['action'],
   properties: {
-    action:     { type: 'string', enum: ['define', 'lambda', 'package', 'check', 'list', 'types', 'remove'], description: 'define: persist a named function as a tool. lambda: run an anonymous function once. package: persist a TypeScript module whose exported functions become tools <package>__<function>. check: re-type-check already-defined functions/packages against the current tool types. types: get TypeScript declarations of tool return types. list / remove: manage defined functions and packages.' },
-    definition:  { type: 'string', description: 'define/lambda: the function source (method-shorthand TypeScript, no arrow). package: the module source — exported functions become tools, the rest is private. Stateless: only declarations at the top level (no let/var, statements or top-level await).' },
-    package:     { type: 'string', description: 'remove / check (optional): the package to delete or check.' },
-    scope:       { type: 'string', enum: ['global', 'session'], description: "define only (optional, default 'global'): 'global' when the user asked for the tool — saved, and a tool in every conversation; 'session' for a function you define yourself while working something out (a lambda you need again, a helper two lambdas share) — only this conversation sees it, callable from your next step." },
+    action:     { type: 'string', enum: ['define', 'execute', 'package', 'check', 'list', 'types', 'remove'], description: 'execute: run a bare body once, now. define: persist a named function as a tool. package: persist a TypeScript module whose exported functions become tools <package>__<function>. check: re-type-check already-defined functions and packages against the current tool types. types: get TypeScript declarations of what a body is graded against. list / remove: manage defined functions and packages.' },
+    definition:  { type: 'string', description: 'execute: the bare BODY — the statements between braces, e.g. `{ const xs = await tool.x({}); return xs.length; }`. No function head, no parameters, no `=>`. define: a named FUNCTION, in METHOD syntax — `name(params): ReturnType { body }`. There is NO `=>` form: arrow syntax (`(args) => { … }`) is rejected as invalid TypeScript and is the commonest first attempt, because the surrounding vocabulary suggests one. A leading `async` or `function` is tolerated and stripped; the return type is required. package: the MODULE source — its exported functions become tools and everything else stays private. Stateless: only declarations at the top level (no let/var, bare statements or top-level await).' },
+    package:     { type: 'string', description: 'check / remove (optional): the PACKAGE to check or delete — a selector, not the define action (for that, pass action: "package").' },
+    scope:       { type: 'string', enum: ['global', 'session'], description: "define only (optional, default 'global'): 'global' when the user asked for the function — saved, and a tool in every conversation; 'session' for a function of your own — only this conversation sees it, though it is stored in the conversation and so survives a restart, a fork, a cut and a compact. A package is always global." },
     description: { type: 'string', description: 'define only (optional): Describe the intent of the function from the context used to create it. Include a clause describing the use-cases for the function tool. Becomes the defined tool\'s description, and therefore it is important to make the description both specific in terms of intent and use-cases. Do not describe the mechanism or execution as this is already clear from the code.' },
-    params:      { type: 'object', description: 'lambda only: the single argument object passed to the function.' },
-    noTypeCheck: { type: 'boolean', description: 'define/lambda (optional, default false): skip the TypeScript type-check of the body against the live tool types. The check is a strong signal the composition is sound before it is registered/run — leave it on unless you must bypass a spurious error (e.g. composing a tool whose result type is `unknown`). A bypassed error does not go away: it is still there, and will surface later when something unrelated moves, so a function defined this way is marked `definedUnchecked` in `list` and `check` and should be checked again once the obstacle is gone. No effect where no type-checker is available (e.g. the browser) — a definition made there is marked the same way, being equally unverified.' },
-    name:       { type: 'string', description: 'package: the package name (an identifier, no "__"). remove: the defined function/tool name to delete. check (optional): the one function to check.' },
+    noTypeCheck: { type: 'boolean', description: 'execute / define / package (optional, default false): skip the TypeScript type-check of the body against the live tool types. The check is a strong signal the composition is sound before it is registered/run — leave it on unless you must bypass a spurious error (e.g. composing a tool whose result type is `unknown`). A bypassed error does not go away: it is still there, and will surface later when something unrelated moves, so a function defined this way is marked `definedUnchecked` in `list` and `check` and should be checked again once the obstacle is gone. No effect where no type-checker is available (e.g. the browser) — a definition made there is marked the same way, being equally unverified.' },
+    name:       { type: 'string', description: 'NOT for define — a defined tool is named by the method name in its own source. package: the package name (an identifier, no "__"). check / remove: the defined function or package to act on.' },
   },
 };
 
 /**
- * Always-injected system-prompt guidance: prefer ONE lambda over a round-per-call chain when a turn's
- * work is multi-stage. It belongs in the system prompt rather than in this tool's own description
- * because it is advice about *when to reach for the tool at all* — a model that never considers
- * `tool_function` never reads its description, and by the time it does the round-per-call turn is
- * already under way. Constant text, so it is a stable cache prefix (see the `contribute` hook note in
- * CLAUDE.md) rather than something rebuilt per turn.
+ * Always-injected system-prompt guidance: WHEN to reach for `tool_function` at all, as opposed to how to
+ * call it — that detail lives in the tool's own DESCRIPTION, which is read only once the tool is being
+ * considered. Deliberately broad and brief: this text is paid for in every conversation, whether the work
+ * suits one or not, and a long sales pitch biases a model towards a function on a case too weak to want
+ * one. It therefore covers the three lifetimes a body can have — anonymous `execute`, `scope: 'session'`,
+ * `scope: 'global'` — rather than the one-shot alone, and qualifies the platform
+ * access only a node body has. Constant text, so it is a stable cache prefix (see the `contribute` hook
+ * note in CLAUDE.md) rather than something rebuilt per turn.
  */
-const MULTI_STAGE_ADVICE =
-  "## tool_function { action: 'lambda' }\n\n" +
-  'Lambda functions allow you to run Javascript directly, which is often more efficient than shelling python ' +
-  'or bash, and works even if you have no shell tools available. You can call tools from lambda functions. ' +
-  'The test for lambda functions is whether you are REDUCING a result: (a) a tool ' +
-  'whose result is VERBOSE and you need a fraction of it — a count, a total, an aggregate, a summary, a ' +
-  'couple of fields; or (b) a LOOP or a CONDITIONAL — the same call over n items, read-each-and-decide, ' +
-  'retry-until, branch on what came back. There a lambda does the whole thing in one call and returns only ' +
-  'the answer, and the listings, rows and file bodies it read on the way are never sent to you. Run ' +
-  "`{ action: 'types' }` first and write `await tool.x(...)` against the real result types. " +
-  'DO NOT wrap a single tool call whose result you are not reducing. A lambda whose body is one ' +
-  '`await tool.x(params)` and a `return` of what came back is strictly WORSE than calling that tool: the ' +
-  'same result reaches you either way, and the wrapper cost you a types call and a round to write it. If ' +
-  'the body would not filter, count, aggregate, loop, or feed the result into a second call, it has ' +
-  'nothing to do — call the tool directly. ' +
-  "A lambda you will need again, or a helper two lambdas share, is `{ action: 'define', scope: 'session' }`: " +
-  'it is then a tool only in this conversation, callable by name from your next step and as ' +
-  '`await tool.<name>(…)` from your other functions — instead of a lambda written out twice.';
+const MULTI_STAGE_ADVICE = `## tool_function
+
+TypeScript functions that compose registered tools in one pass. Inside one, call any other tool as
+\`await tool.x(params)\` and return only what you need — so the listings, rows and file bodies it read on
+the way never reach the conversation.
+
+Reach for it when the work is a REDUCTION (a count, a total, an aggregate, a couple of fields out of a
+verbose result), a LOOP or a CONDITIONAL over n items, or a multi-step chain that would otherwise cost a
+round per step: the function does the whole thing in one call, with no LLM turn between the steps. A
+body can be anonymous and one-shot (\`execute\`), or named and saved — for this conversation only
+(\`scope: 'session'\`) or for every conversation (\`scope: 'global'\`, the default, for a tool the user asked
+for). On node a body may also import platform modules, with the user's permission — see MODULES.
+
+Do NOT wrap a single tool call whose result you are not reducing — call the tool directly.
+`;
 
 const errorEvent = (message: string): ToolEvent => ({ type: 'error', message });
 
@@ -813,32 +872,21 @@ function functionTool(machine: MatbotMachine, store: FunctionStore, packages: Pa
             } catch (e) { yield errorEvent(e instanceof Error ? e.message : String(e)); }
             return;
           }
-          case 'lambda': {
-            if (typeof act.definition !== 'string' || act.definition.trim() === '') { yield errorEvent('lambda requires a "definition" (an anonymous function).'); return; }
+          case 'execute': {
+            if (typeof act.definition !== 'string' || act.definition.trim() === '') { yield errorEvent('execute requires a "definition" — the body, between braces.'); return; }
             let fn: CompiledFn;
-            try { fn = await buildAsyncFn(machine, act.definition, ['args']); }
+            try { fn = await buildBodyFn(machine, act.definition); }
             catch (e) { yield errorEvent(e instanceof Error ? e.message : String(e)); return; }
-            // The lambda calling convention is ONE argument (the params object). Gate it structurally:
-            // the typecheck grades the function against its OWN signature, not the convention, so a
-            // multi-param head would typecheck and then silently run as (paramsObject, undefined, …).
-            let sig: ParsedSignature | undefined;
-            try { sig = parseSignature(act.definition); } catch { /* head unparseable — gates skipped */ }
-            if (sig !== undefined && sig.params.length > 1) {
-              yield errorEvent('lambda takes exactly ONE argument — the `params` object. Declare a single object parameter and read fields from it, e.g. (args: { a: number; b: number }): number { return args.a + args.b; }');
-              return;
-            }
-            if (sig !== undefined) {
-              try { assertNoInjectedClash(sig.params); }
-              catch (e) { yield errorEvent(e instanceof Error ? e.message : String(e)); return; }
-            }
             // Type-check the body against the live tool types before running (node only; opt out with
-            // noTypeCheck). Syntax was already gated by buildAsyncFn above.
+            // noTypeCheck). The snippet is the same wrap the runner compiles — an empty head around the
+            // author's own block — so what is graded is exactly what runs, and there is no signature to
+            // parse and therefore no head to get wrong.
             const index = machine.ToolTypeIndex;
-            if (index !== undefined && act.noTypeCheck !== true && sig !== undefined) {
-              const report = await index.check(checkSnippet(sig) + turnContracts(ctx.turnTools));
+            if (index !== undefined && act.noTypeCheck !== true) {
+              const report = await index.check(`async function __fn() ${act.definition}` + turnContracts(ctx.turnTools));
               if (!report.ok) { yield errorEvent(`type error(s) — fix and re-run, or pass noTypeCheck to bypass:\n${renderCheck(report)}`); return; }
             }
-            yield* runFunction(machine, ctx, fn, [act.params ?? {}], { tool: `${TOOL_NAME} lambda`, source: act.definition });
+            yield* runFunction(machine, ctx, fn, [], { tool: `${TOOL_NAME} execute`, source: act.definition, gateSubject: EXECUTE_SUBJECT });
             return;
           }
           case 'package': {
@@ -859,10 +907,16 @@ function functionTool(machine: MatbotMachine, store: FunctionStore, packages: Pa
             try {
               const mine = sessionFunctions(ctx.session);
               const own  = act.name !== undefined ? mine.get(act.name) : undefined;
+              const none = { results: [] as CheckResult[], restamps: [] as SessionFunctionMarker[] };
+              const session = act.package !== undefined ? none
+                : act.name !== undefined
+                  ? (own !== undefined && !await store.has(act.name) ? await sessions.check(ctx, [own]) : none)
+                  : await sessions.check(ctx, mine.values());
               const results = act.package !== undefined ? await packages.check(act.package)
                 : act.name !== undefined
-                  ? (own !== undefined && !await store.has(act.name) ? await sessions.check(ctx, [own]) : await store.check(act.name))
-                  : [...await store.check(), ...await packages.check(), ...await sessions.check(ctx, mine.values())];
+                  ? (session.results.length > 0 ? session.results : await store.check(act.name))
+                  : [...await store.check(), ...await packages.check(), ...session.results];
+              for (const m of session.restamps) yield sessionMarker(m);
               // `ok` is qualified by `checked` here exactly as it is on a row: where no type-checker can
               // run (the browser registers an index that supplies types but checks nothing), every row
               // comes back clean and a bare `ok: true` would report success for work nothing did.
@@ -874,9 +928,16 @@ function functionTool(machine: MatbotMachine, store: FunctionStore, packages: Pa
             } catch (e) { yield errorEvent(e instanceof Error ? e.message : String(e)); }
             return;
           }
-          case 'list':
-            yield { type: 'result', value: { functions: await store.list(), packages: await packages.list(), sessionFunctions: [...sessionFunctions(ctx.session).values()] } };
+          case 'list': {
+            // One reading for every row, so the three kinds are compared against the same environment.
+            const env = await machine.ToolTypeIndex?.environment?.();
+            yield { type: 'result', value: {
+              functions: await store.list(env),
+              packages:  await packages.list(env),
+              sessionFunctions: [...sessionFunctions(ctx.session).values()].map(r => sessionRow(r, env)),
+            } };
             return;
+          }
           case 'types': {
             const index = machine.ToolTypeIndex;
             if (index === undefined) {
@@ -923,7 +984,7 @@ export function createFunctionToolsPlugin(): MatbotPluginSpec {
   let lifecycle: AbortController | undefined;
   return {
     apiVersion: PLUGIN_API_VERSION,
-    manifest: { description: 'Author and run TypeScript functions that compose registered tools (`tool_function`: define/lambda/check/list/remove).' },
+    manifest: { description: 'Author and run TypeScript functions that compose registered tools (`tool_function`: execute/define/package/check/list/types/remove).' },
 
     async setup(services) {
       lifecycle = new AbortController();

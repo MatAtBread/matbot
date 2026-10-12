@@ -15,7 +15,7 @@ import { appendMessage, createMessage,
          getPluginNameForSpecifier, getRegisteredPlugins,
          installPrincipalCarrier, installUsageCarrier, usageByProvider, enterPrincipal, currentPrincipal,
          assembleMachine, preScanStorage,
-         isMissingSecretError, optionValue, optionLabel,
+         isMissingSecretError,
          CONFIRM_YES, CONFIRM_NO,
          wireDescription}            from '@matatbread/matbot-core';
 import type { Vault, SessionRunner, PromptFn, FormField } from '@matatbread/matbot-core';
@@ -24,7 +24,7 @@ import { systemPrincipal }                 from '@matatbread/matbot-core';
 import { createAlsPrincipalCarrier }       from './principal-als.js';
 import { createAlsUsageCarrier }           from './usage-als.js';
 import { EnvFileVault }                     from './env-vault.js';
-import { createVmFunctionRunner, FUNCTION_SYNC_LIMIT_MS } from './function-runner.js';
+import { answerSelect, renderSelect }        from './select.js';
 import { FilesystemStorageBackend }        from '@matatbread/matbot-storage-filesystem';
 import { createBuiltinTools, createProviderTool, classifySpecifier, materializeRemote, remoteDependencyNotes,
          findDuplicateSingletons, describeDuplicateSingleton, type MaterializedRemote } from '@matatbread/matbot-tool-plugin';
@@ -769,6 +769,7 @@ async function main(): Promise<void> {
   // ── Config loading ────────────────────────────────────────────────────────────
 
   let matbotConfig!: import('./config.js').MatbotConfig;
+  let retiredConfigKeys: string[] = [];
   let configPath: string;
 
   if (opts.config === '-') {
@@ -779,8 +780,9 @@ async function main(): Promise<void> {
       process.stdin.on('end',  () => resolve(Buffer.concat(chunks).toString('utf8')));
       process.stdin.on('error', reject);
     });
-    const { config, projectDir } = await loadConfigFromText(text, process.cwd());
+    const { config, projectDir, retired } = await loadConfigFromText(text, process.cwd());
     matbotConfig = config;
+    retiredConfigKeys = retired;
     configPath   = path.join(projectDir, 'matbot.yaml'); // virtual — used for plugin resolution
     process.chdir(projectDir);
     await loadDotEnv(projectDir);
@@ -794,7 +796,7 @@ async function main(): Promise<void> {
       : path.isAbsolute(opts.config) ? opts.config : path.resolve(userCwd, opts.config);
     process.chdir(path.dirname(configPath));
     await loadDotEnv(path.dirname(configPath));
-    let loadResult: { config: import('./config.js').MatbotConfig; projectDir: string } | null = null;
+    let loadResult: { config: import('./config.js').MatbotConfig; projectDir: string; retired: string[] } | null = null;
     try {
       loadResult = await loadConfig(configPath);
     } catch (err) {
@@ -803,6 +805,7 @@ async function main(): Promise<void> {
     }
     if (loadResult !== null) {
       matbotConfig = loadResult.config;
+      retiredConfigKeys = loadResult.retired;
       if (loadResult.projectDir !== path.dirname(configPath)) {
         process.chdir(loadResult.projectDir);
         configPath = path.join(loadResult.projectDir, 'matbot.yaml');
@@ -853,13 +856,21 @@ async function main(): Promise<void> {
   const resolvedPluginMods   = await resolvePluginSpecifiers(matbotConfig.plugins, configDir);
   const preScanned           = await preScanStorage([...resolvedProviderMods, ...resolvedPluginMods], dotData);
 
-  // Model-authored code shares the one event loop with every session and frontend, so a loop in a
-  // tool_function that never awaits would freeze the daemon. Seeded, like MediaStore, so a plugin may
-  // replace it and unregistering reverts here. `function_timeout_ms: 0` seeds none: bodies then run directly
-  // and unbounded — what a host with no runner does — which is kept reachable for testing.
-  const functionTimeoutMs = matbotConfig.functionTimeoutMs ?? FUNCTION_SYNC_LIMIT_MS;
-  const functionRunner = functionTimeoutMs > 0 ? createVmFunctionRunner(functionTimeoutMs) : undefined;
-  if (functionRunner === undefined) console.warn('[matbot] function_timeout_ms is 0: tool_function bodies run unbounded, and one that loops without awaiting will freeze this process.');
+  // What a `tool_function` body may reach, and for how long, is NOT this host's business: it is a
+  // `FunctionRunner`, which `@matatbread/matbot-function-runner-node` registers as an ordinary plugin.
+  // Absent, a body compiles with `new AsyncFunction` and runs unbounded, unshadowed and ungated — which
+  // is what matbot does without opinions, and what the declarations a body is written against then say.
+  //
+  // Keys this host used to read and no longer does. They are the runner's settings now, so an install
+  // that still carries them is told where they went rather than having them silently ignored — the same
+  // courtesy `__matbot_core__.overwriteToolsOnCollision` got when it moved to the gate policy. Found in
+  // the config TEXT by `loadConfig`, because core has no business declaring a field for a plugin's option.
+  if (retiredConfigKeys.length > 0) {
+    console.warn(`[matbot] ${retiredConfigKeys.join(', ')}: no longer read here. These are settings of`
+      + ' @matatbread/matbot-function-runner-node, authored under'
+      + ' `default_settings: { "@matatbread/matbot-function-runner-node": { … } }`. Add that plugin to'
+      + ' `plugins:` to bound a tool_function body, withhold host globals from it, and gate its imports.');
+  }
 
   const { services, makeRunner, loaded } = assembleMachine({
     // The same layout the filesystem storage plugin names: a directory per namespace under `.data`.
@@ -869,7 +880,6 @@ async function main(): Promise<void> {
     providers,
     gate:            defaultGate,
     defaultSettings: matbotConfig.defaultSettings,
-    ...(functionRunner !== undefined ? { seed: { FunctionRunner: functionRunner } } : {}),
     builtinTools:    createBuiltinTools(),
     version:         selfVersion(),
     host: machine => ({
@@ -1069,19 +1079,25 @@ async function main(): Promise<void> {
       const def = p.default;
       if (p.type === 'select' || p.type === 'confirm') {
         const opts = p.type === 'confirm' ? [CONFIRM_YES, CONFIRM_NO] : (p.options ?? []);
-        // Typed against the LABEL (it is what was shown), answered with the VALUE (it is what the
-        // caller branches on). For a bare-string option the two are the same, which is every option
-        // in the repo bar the permission gate's — so this is one indirection, not a new mode.
-        const hint = opts.map(o => {
-          const label = optionLabel(o);
-          return def !== undefined && optionValue(o).toLowerCase() === def.toLowerCase() ? label.toUpperCase() : label;
-        }).join('/');
-        const raw  = (await ask(`${p.label} [${hint}] `)).trim();
-        if (!raw) return def ?? '';
-        const picked = opts.find(o => optionLabel(o).toLowerCase().startsWith(raw.toLowerCase()));
-        // An unmatched answer falls back to the default rather than being returned verbatim: the caller
-        // is branching on a token it published, and prose it never offered can only be a miss.
-        return picked !== undefined ? optionValue(picked) : def ?? raw;
+        // Typed against what was SHOWN, answered with the VALUE (it is what the caller branches on). For
+        // a bare-string option the two are the same, which is every option in the repo bar the permission
+        // gate's — so this is one indirection, not a new mode. Rendering and resolving live together in
+        // `select.ts`, because the two must agree on the addressing scheme: prose labels that share a long
+        // prefix made the middle options of a gate prompt untypeable.
+        // Rendering and the answer's resolution are one module, because what was SHOWN is the only
+        // addressing scheme the reader has — `numbered` is passed back for exactly that reason.
+        const { lines, hint, numbered } = renderSelect(opts, def);
+        for (let attempt = 0; ; attempt++) {
+          if (lines.length > 0) for (const l of lines) process.stderr.write(`${l}\n`);
+          const raw = await ask(`${p.label} [${hint}] `);
+          const outcome = answerSelect(opts, raw, {
+            numbered, again: attempt > 0,
+            ...(def !== undefined        ? { def }             : {}),
+            ...(p.allowOther === true    ? { allowOther: true } : {}),
+          });
+          if ('answer' in outcome) return outcome.answer;
+          process.stderr.write(yellow(outcome.retry));
+        }
       }
       const suffix = def !== undefined ? ` [${def}] ` : ' ';
       return (await ask(`${p.label}${suffix}`)).trim() || def || '';

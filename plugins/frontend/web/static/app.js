@@ -49,6 +49,52 @@ function isScrollSuppressed() {
   return Date.now() < scrollSuppressUntil;
 }
 
+// ── Frame batching ────────────────────────────────────────────────────────────
+//
+// A streaming turn delivers hundreds of deltas, and each one wrote the DOM and then measured it —
+// a forced synchronous reflow apiece, with no paint in between (turnEvents drains its queue through
+// microtasks, so a whole SSE chunk's worth runs in one task). Keyed and last-write-wins, the same
+// shape as the machine's own scheduleAtEdge: poke it N times, it runs once per frame against the
+// latest closure. A single delta still renders on the very next frame, so there is no added latency
+// at low rates — which is what a debounce timer could not say.
+const framePending = new Map();   // key -> the work to run at the next frame
+let frameArmed = false;
+
+// `key` is whatever identifies the thing being written — a string for a singleton, but usually the
+// ELEMENT itself, which is the only key that is right when a turn makes several of them: two text
+// blocks either side of a tool call that lands inside one frame share a turn, and keying on the turn
+// let the second block's write evict the first's, leaving it permanently empty.
+function onNextFrame(key, fn) {
+  framePending.set(key, fn);
+  if (frameArmed) return;
+  frameArmed = true;
+  requestAnimationFrame(() => {
+    frameArmed = false;
+    // Snapshot: work a callback schedules belongs to the NEXT frame, not to this sweep.
+    const work = [...framePending.values()];
+    framePending.clear();
+    for (const w of work) {
+      try { w(); } catch (e) { console.error('frame work failed', e); }
+    }
+  });
+}
+
+// Height available to a message between the header and the composer. Cached because it changes when
+// the window or one of those two resizes — not per delta, which is what it used to be measured at,
+// for three layout reads each time. Invalidated by a ResizeObserver rather than at each site that
+// could grow the composer (the textarea autosizing, an attachment strip appearing, the settings
+// panel opening, a font-size change): that list is one a later feature omits with no error and no
+// symptom, just a fits-the-viewport test quietly answering about the wrong height.
+let availHeight = null;
+function invalidateViewportMetrics() { availHeight = null; }
+function availContentHeight() {
+  if (availHeight === null) {
+    availHeight = window.innerHeight - (chatHeaderEl?.offsetHeight ?? 0)
+                  - (inputAreaEl?.offsetHeight ?? 0);
+  }
+  return availHeight;
+}
+
 // Call this wrapper before any programmatic scroll so the scroll-listener can
 // distinguish user-initiated scrolls from our own.
 function programmaticScrollTo(fn) {
@@ -83,9 +129,7 @@ function isMessagesBottomVisible() {
   if (!textBlock) {
     return true;
   }
-  const h = window.innerHeight - (chatHeaderEl?.offsetHeight ?? 0)
-           - (document.getElementById('input-area')?.offsetHeight ?? 0);
-  const fits = textBlock.offsetHeight <= h;
+  const fits = textBlock.offsetHeight <= availContentHeight();
   const atBottom = messagesEl.scrollTop + messagesEl.clientHeight >= messagesEl.scrollHeight - 2;
   return fits || atBottom;
 }
@@ -128,11 +172,12 @@ let scrollDownBtn = null; // initialised in init()
 
 function updateScrollDownButton() {
   if (!scrollDownBtn) return;
-  if (isMessagesBottomVisible()) {
-    scrollDownBtn.style.display = 'none';
-  } else {
-    scrollDownBtn.style.display = 'flex';
-  }
+  // Measured at the frame, not at the call: every caller is a streaming delta or a scroll event,
+  // and both arrive faster than a paint. Reading layout and then writing a style inline made each
+  // one its own reflow.
+  onNextFrame('scroll-down-btn', () => {
+    scrollDownBtn.style.display = isMessagesBottomVisible() ? 'none' : 'flex';
+  });
 }
 
 
@@ -143,6 +188,7 @@ const messagesEl     = document.getElementById('messages');
 const sessionsBanner = document.getElementById('sessions-banner');
 const sessionListEl  = document.getElementById('session-list');
 const chatHeaderEl   = document.getElementById('chat-header');
+const inputAreaEl    = document.getElementById('input-area');
 const chatTitleEl    = document.getElementById('chat-title');
 const shareBtn       = document.getElementById('share-btn');
 const inputEl        = document.getElementById('input');
@@ -3430,6 +3476,10 @@ async function renderTurn(sid, traceId) {
   let textEl          = null;
   let textAccum       = '';
   let textElFinalised = false;
+  // "a .msg-text exists in this wrap" — what the scroll guards below ask. `textEl` cannot answer it
+  // (finalisation nulls the handle while the node stays), and a querySelector per delta was the
+  // question asked hundreds of times a turn.
+  let hasText         = false;
   let thinkingContent = null;
   let thinkingAccum   = '';
   let currentTool     = null;
@@ -3442,6 +3492,7 @@ async function renderTurn(sid, traceId) {
       textEl = document.createElement('div');
       textEl.className = 'msg-text md-body';
       turnWrap.appendChild(textEl);
+      hasText = true;
     }
     return textEl;
   }
@@ -3450,17 +3501,16 @@ async function renderTurn(sid, traceId) {
   // assistant message wrapper to the top of the messages viewport so
   // the user can read the output from the beginning.  Honours the
   // 10-second suppression window set by manual user scrolling.
-  function scrollToOutputStart() {
+  // `el` is passed rather than read from `textEl`, which a deferred frame may find already nulled
+  // by the next tool call's finalisation.
+  function scrollToOutputStart(el) {
     if (isScrollSuppressed()) return;
     programmaticScrollTo(() => {
       // While the text block fits within the viewport, scroll its bottom
       // into view so the user sees the message filling in from the bottom.
       // Once the content is taller than the container, stop scrolling so
       // the user can read from the top without it being pushed away.
-      const el = textEl;
-      const avail = window.innerHeight - (chatHeaderEl?.offsetHeight ?? 0)
-                    - (document.getElementById('input-area')?.offsetHeight ?? 0);
-      if (el && el.offsetHeight <= avail) {
+      if (el && el.offsetHeight <= availContentHeight()) {
         el.scrollIntoView({ block: 'end', behavior: 'instant' });
       }
       updateScrollDownButton();
@@ -3565,13 +3615,22 @@ async function renderTurn(sid, traceId) {
           break;
         }
 
-        case 'text-delta':
+        case 'text-delta': {
           removeLoading();
           if (textElFinalised) { textEl = null; textAccum = ''; textElFinalised = false; }
           textAccum += ev.delta;
-          getOrMakeTextEl().innerHTML = md(textAccum);
-          scrollToOutputStart();
+          // The element is created NOW, so it takes its place in the stream ahead of any tool block
+          // that follows; only the markdown render and the measurement wait for the frame. The text
+          // is captured rather than read at fire time — `tool:end` resets textAccum, and a frame
+          // landing after it would blank the message it was meant to complete.
+          const el       = getOrMakeTextEl();
+          const snapshot = textAccum;
+          onNextFrame(el, () => {
+            el.innerHTML = md(snapshot);
+            scrollToOutputStart(el);
+          });
           break;
+        }
 
         case 'thinking': {
           removeLoading();
@@ -3582,13 +3641,21 @@ async function renderTurn(sid, traceId) {
             thinkingContent = c;
           }
           thinkingAccum += ev.delta;
-          thinkingContent.textContent = thinkingAccum;
-            // If no text content yet, scroll to show the user processing is happening.
-            if (!turnWrap.querySelector('.msg-text') && !isScrollSuppressed()) {
-              programmaticScrollTo(() => {
-                turnWrap.scrollIntoView({ block: 'end', behavior: 'instant' });
-              });
-            }
+          const block   = thinkingContent;
+          const thought = thinkingAccum;
+          const wrap    = turnWrap;
+          onNextFrame(block, () => {
+            block.textContent = thought;
+            // If no text content yet, scroll to show the user processing is happening — bounded by
+            // the same fits-the-viewport test the text path uses. Past that the block is taller than
+            // the viewport, and chasing its bottom pushes away the words being read: the
+            // bottom-chasing this whole section exists to be rid of, reached through thinking.
+            if (hasText || isScrollSuppressed()) return;
+            if (wrap.offsetHeight > availContentHeight()) return;
+            programmaticScrollTo(() => {
+              wrap.scrollIntoView({ block: 'end', behavior: 'instant' });
+            });
+          });
           break;
         }
 
@@ -3599,7 +3666,7 @@ async function renderTurn(sid, traceId) {
           currentTool.open = true;
           turnWrap.appendChild(currentTool);
             // If no text content yet, scroll to show the user processing is happening.
-            if (!turnWrap.querySelector('.msg-text') && !isScrollSuppressed()) {
+            if (!hasText && !isScrollSuppressed()) {
               programmaticScrollTo(() => {
                 turnWrap.scrollIntoView({ block: 'end', behavior: 'instant' });
               });
@@ -3617,7 +3684,10 @@ async function renderTurn(sid, traceId) {
               currentTool.appendChild(outEl);
             }
             outEl.textContent += ev.chunk;
-            outEl.scrollTop = outEl.scrollHeight;
+            // Pinning the pane to its tail is a read-after-write, and a shell tool streams as fast
+            // as a provider does.
+            const pane = outEl;
+            onNextFrame(pane, () => { pane.scrollTop = pane.scrollHeight; });
           }
           break;
         }
@@ -3998,6 +4068,14 @@ inputEl.addEventListener('input', () => {
   inputEl.style.height = Math.min(inputEl.scrollHeight, 180) + 'px';
 });
 
+// innerHeight can change without either box resizing (a mobile URL bar), so both are watched.
+window.addEventListener('resize', invalidateViewportMetrics);
+if (typeof ResizeObserver !== 'undefined') {
+  const ro = new ResizeObserver(invalidateViewportMetrics);
+  if (chatHeaderEl) ro.observe(chatHeaderEl);
+  if (inputAreaEl)  ro.observe(inputAreaEl);
+}
+
 // ── Composer attachment bindings ──────────────────────────────────────────────
 // Three ways in, because each is the natural one for a different source: the button for a file you
 // have, drop for one on your desktop, paste for a screenshot that exists nowhere else.
@@ -4009,7 +4087,6 @@ if (attachBtn && attachInput) {
   });
 }
 
-const inputAreaEl = document.getElementById('input-area');
 if (inputAreaEl) {
   inputAreaEl.addEventListener('dragover', (e) => {
     if (composerReadOnly) return;

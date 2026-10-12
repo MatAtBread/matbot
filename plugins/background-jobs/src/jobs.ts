@@ -493,8 +493,10 @@ Both timed forms return an id: the handle for the background_job_action tool (li
 A one-shot deletes itself once it has run.
 
 HOW THE USER HEARS FROM A JOB. Nothing a job replies is shown to anyone. A job tells the user something by
-appending a message to a session (session_action append) — by default THIS conversation, or the one
-named in \`session\` — where they see it and can follow up with its context. It can also use other tools to, for
+appending a message to a session (session_action append). Where it lands is fixed when the job is
+created and stored on the job: by default the conversation the creating call is made from, or the one
+named in \`session\` — never whichever conversation a later reader happens to be in.
+The user sees it there, with the job's context, and can follow up. It can also use other tools to, for
 example, write workspace files or send emails, if its prompt asks for that. A job with nothing worth
 saying ends silently. If the user does not specify where they want the output, you should ask them for clarification.
 
@@ -513,7 +515,7 @@ time that has already passed is refused; a time that goes by while matbot is not
 \`interval\` is a duration like "30s", "5m", "1h", "24h". Omitting it — or passing "once" or null — is the
 run-now form, unless at is given. The job has the same tools and providers as this conversation.
 
-Do not wait for a job's result: tell the user it has started, and that it will report back here.`,
+Do not wait for a job's result: tell the user it has started, and which conversation it will report into.`,
   inputSchema: {
     type:       'object',
     required:   ['prompt'],
@@ -533,7 +535,7 @@ Do not wait for a job's result: tell the user it has started, and that it will r
       },
       session: {
         type:        'string',
-        description: 'Optional: the session id of the conversation the job reports to. Default: this conversation.',
+        description: 'Optional: the session id of the conversation the job reports to. Default: the conversation the creating call is made from — recorded on the job, so it does not follow a later reader.',
       },
       provider: {
         type:        'string',
@@ -723,7 +725,9 @@ forward when a run starts, so that no other matbot sharing this store runs the s
 the place to look when a job that should have reported did not.
 
 ACTIONS
-  list    — Show every job with its id, interval, next run time, and active state.
+  list    — Show every job with its id, interval, next run time, active state, and the conversation it
+            reports to (its \`session\`). Read that rather than assuming a job's output lands in the
+            conversation you happen to be in: it is fixed when the job is created.
   suspend — Pause a job (preserved, stops running until resumed).
   resume  — Resume a suspended job (runs nearly immediately, then on its interval).
   cancel  — Permanently delete a job. Prefer suspend for a temporary pause.

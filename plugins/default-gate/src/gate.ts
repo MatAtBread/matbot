@@ -1,4 +1,4 @@
-import type { FormField, PermissionGate, PluginSettings } from '@matatbread/matbot-plugin-api';
+import { permitted, refused, type FormField, type PermissionGate, type PluginSettings } from '@matatbread/matbot-plugin-api';
 
 /** The settings namespace standing answers live in, and what an installation keys `default_settings:`
  *  by. This package's own name, though it is seeded by the host rather than loaded as a plugin — the
@@ -44,9 +44,16 @@ function serialised<T>(work: () => Promise<T>): Promise<T> {
   return next;
 }
 
-/** Whether a standing answer covers this subject. */
-const allows = (answer: StandingAnswer | undefined, subject: string): boolean =>
-  answer === true || (answer !== undefined && answer.includes(subject));
+/**
+ * Whether a standing answer covers this act — the exact subject, or any broader subject the call site
+ * offered as a {@link PermissionRequest.standing} answer offered by the call site.
+ *
+ * Set membership over strings this policy never parses: the call site enumerates how its own subjects
+ * generalise, so `node:` admits `node:fs` here without this module knowing what a module specifier is,
+ * and a gate contributed by a plugin this build never saw generalises on the same terms.
+ */
+const allows = (answer: StandingAnswer | undefined, subject: string, standing: readonly { subject: string }[] = []): boolean =>
+  answer === true || (answer !== undefined && [subject, ...standing.map(o => o.subject)].some(s => answer.includes(s)));
 
 /**
  * The policy that reproduces matbot's historical behaviour, generalised from tool names to
@@ -75,11 +82,22 @@ export function createDefaultGate(settings: PluginSettings, previous?: Permissio
   // between the two writes left behind as an answer in force and invisible to both `get` and `clear`.
   return {
     async decide(req, ask) {
-      if (allows(await read(req.gate), req.subject)) return true;
+      const standing = req.standing ?? [];
+      // A standing answer is `configuration` whether it came from `default_settings:` or from a
+      // "always allow" a human gave earlier — settings reads are layered, so nothing here can tell
+      // the two apart, and a source that claimed `user` for a configured floor would be a lie half
+      // the time. What a reader needs is that this was decided in advance, not at this prompt.
+      if (allows(await read(req.gate), req.subject, standing)) return permitted('configuration');
 
       // Nothing stored and nobody to ask: the displaced gate answers, which for the host default means
       // `req.fallback` — today's non-interactive behaviour at each site, stated by the site itself.
-      if (ask === undefined) return previous?.decide(req, ask) ?? req.fallback;
+      // The predecessor's own source rides back out: it is the layer that answered, and rewriting it
+      // here would erase the one fact `source` carries.
+      if (ask === undefined) {
+        return previous !== undefined
+          ? previous.decide(req, ask)
+          : req.fallback ? permitted('fallback') : refused('fallback');
+      }
 
       // Each option carries a VALUE distinct from its label, and the answer is matched against the
       // value. A label is cosmetic — rendered, rewordable, localisable — so using it as the identity
@@ -89,23 +107,38 @@ export function createDefaultGate(settings: PluginSettings, previous?: Permissio
       // The per-subject "always" is listed BEFORE the blanket one so a CLI user typing "alw" lands on
       // the narrower choice. The default names a value, so a site whose non-interactive answer is
       // "proceed" (tools.overwrite) keeps proceeding for a frontend that can only answer with it.
-      const ALLOW_ONCE = 'allow', ALWAYS_SUBJECT = 'always-subject', ALWAYS_GATE = 'always-gate';
+      // One option per standing answer the call site offered, in the order it gave — narrowest first. The
+      // ordering is load-bearing beyond cosmetics: a frontend that resolves a typed prefix to the first
+      // matching option lands on the narrowest answer, which is why broader ones are never above it.
+      //
+      // The label is the call site's, rendered and never rewritten, exactly as `req.label` is. With none
+      // offered this falls back to naming the subject, which is right for a gate whose subject is already
+      // prose a human recognises (`@x/foo` for `plugin.add`) and is all a policy can honestly do.
+      const ALLOW_ONCE = 'allow', ALWAYS_GATE = 'always-gate';
+      const offers = standing.length > 0
+        ? standing
+        : [{ subject: req.subject, label: `Always allow "${req.subject}"` }];
+      const always = offers.map((o, i) => ({ value: `always-${i}`, label: o.label, subject: o.subject }));
       const field: FormField = {
         name:    'gate',
         label:   req.label,
         type:    'select',
         options: [
-          { value: 'deny',          label: 'Deny' },
-          { value: ALLOW_ONCE,      label: 'Allow' },
-          { value: ALWAYS_SUBJECT,  label: `Always allow "${req.subject}"` },
-          { value: ALWAYS_GATE,     label: `Always allow every ${req.gate}` },
+          { value: 'deny',      label: 'Deny' },
+          { value: ALLOW_ONCE,  label: 'Allow' },
+          ...always.map(({ value, label }) => ({ value, label })),
+          { value: ALWAYS_GATE, label: `Always allow every ${req.gate}` },
         ],
         default: req.fallback ? ALLOW_ONCE : 'deny',
       };
       const answer = (await ask(field)).trim().toLowerCase();
 
-      if (answer === ALWAYS_GATE) { await serialised(() => settings.set(req.gate, true)); return true; }
-      if (answer === ALWAYS_SUBJECT) {
+      if (answer === ALWAYS_GATE) { await serialised(() => settings.set(req.gate, true)); return permitted('user'); }
+      // Only a subject that was OFFERED can be stored: the remembered value is looked up in the options
+      // this prompt rendered, never taken from the answer text. A policy that stored an arbitrary string
+      // back would let a call site widen every other gate's memory by what it puts in one field.
+      const chosen = always.find(a => a.value === answer)?.subject;
+      if (chosen !== undefined) {
         await serialised(async () => {
           // Re-read INSIDE the queue: the list may have grown since this prompt was rendered (a
           // concurrent collision, answered first). Persist the list IN EFFECT plus this subject, never
@@ -113,14 +146,14 @@ export function createDefaultGate(settings: PluginSettings, previous?: Permissio
           // wins over the floor wholesale, so writing `[subject]` would silently start asking again
           // about everything the install had exempted.
           const current  = await read(req.gate);
-          const subjects = current === undefined || current === true ? [req.subject] : [...new Set([...current, req.subject])];
+          const subjects = current === undefined || current === true ? [chosen] : [...new Set([...current, chosen])];
           await settings.set(req.gate, subjects);
         });
-        return true;
+        return permitted('user');
       }
       // Deny, an answer a frontend resolved to no option, or anything unrecognised: permission is what
       // has to be given, so only the two allow answers grant it — and a plain Allow remembers nothing.
-      return answer === ALLOW_ONCE;
+      return answer === ALLOW_ONCE ? permitted('user') : refused('user');
     },
   };
 }

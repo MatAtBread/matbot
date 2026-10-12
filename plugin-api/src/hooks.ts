@@ -7,6 +7,12 @@ import { withUsageSite } from './usage-context.js';
 
 const HOOK_ERROR_CREATOR = 'matbot-hooks';
 
+// A turn tool is never registered, so `register` never stamps its plugin — and that stamp is what a
+// `ctx.gate` namespace is checked against. The hook that offered it IS stamped, so its tools take that,
+// and a `pluginName` the source wrote itself is dropped: the claim would otherwise be the plugin's own word.
+const ownedBy = (source: TurnToolSource, owner: string | undefined): TurnToolSource => async session =>
+  (await source(session)).map(({ pluginName: _, ...tool }) => owner !== undefined ? { ...tool, pluginName: owner } : tool);
+
 export class HookRegistry implements HookRegistrar {
   private readonly hooks = new Map<HookPoint, Hook[]>();
 
@@ -156,7 +162,7 @@ export class HookRegistry implements HookRegistrar {
       if (r.durable && r.durable.length) foldDurable(r.durable);
       if (r.markers && r.markers.length) appendMarkers(r.markers);
       if (r.deferred)                    deferred.push(r.deferred);
-      if (r.tools)                       tools.push(r.tools);
+      if (r.tools)                       tools.push(ownedBy(r.tools, hook.pluginName));
       if (r.abort) {
         const drained = this.drainFailureMarkers(session);
         return { session: drained.session, ephemeral, durable, markers: [...handlerMarkers, ...drained.markers], deferred, tools, abort: r.abort };

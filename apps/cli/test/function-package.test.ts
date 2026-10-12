@@ -274,9 +274,11 @@ test('a defined function or package runs under the runner current at each call, 
   // Defined tools are compiled once and stay registered, so a runner arriving later — a plugin listed after
   // function-tools, or loaded at runtime — must still reach them, and one withdrawn must not stay on.
   const tagging: FunctionRunner = {
-    compile(params, body) {
-      const fn = new Function(...params, body) as (...a: unknown[]) => Promise<unknown>;
-      return async (...a) => `bounded:${String(await fn(...a))}`;
+    // Handed a TypeScript EXPRESSION — self-contained, parameters and all — so erasing and evaluating it
+    // needs no wrapper of this runner's own.
+    compile(source) {
+      const fn = (new Function(`return ${stripTypeScriptTypes(source)};`) as () => (...a: unknown[]) => Promise<unknown>)();
+      return async (_importModule, ...a) => `bounded:${String(await fn(...a))}`;
     },
   };
   const { machine, teardown } = await boot([], new Map());

@@ -63,6 +63,9 @@ importers:
       '@matatbread/matbot-caching-tool-types':
         specifier: workspace:^
         version: link:../../plugins/caching-tool-types
+      '@matatbread/matbot-function-runner-node':
+        specifier: workspace:^
+        version: link:../../plugins/function-runner-node
       '@matatbread/matbot-function-tools':
         specifier: workspace:^
         version: link:../../plugins/function-tools
@@ -345,6 +348,19 @@ importers:
       typescript:
         specifier: 'catalog:'
         version: 6.0.3
+
+  plugins/function-runner-node:
+    dependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 22.19.19
+      typescript:
+        specifier: 'catalog:'
+        version: 6.0.3
+    devDependencies:
+      '@matatbread/matbot-plugin-api':
+        specifier: workspace:^
+        version: link:../../plugin-api
 
   plugins/function-tools:
     devDependencies:
@@ -670,6 +686,9 @@ importers:
 
   plugins/tool-types:
     dependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 22.19.19
       typescript:
         specifier: 'catalog:'
         version: 6.0.3
@@ -680,9 +699,6 @@ importers:
       '@matatbread/matbot-plugin-api':
         specifier: workspace:^
         version: link:../../plugin-api
-      '@types/node':
-        specifier: 'catalog:'
-        version: 22.19.19
 
   plugins/triggers:
     devDependencies:

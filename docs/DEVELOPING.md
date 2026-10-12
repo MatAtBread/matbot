@@ -722,30 +722,42 @@ installing code, rewriting config, connecting a remote party, replacing another 
 does not ask the user itself. It declares what it needs and lets the installation's policy decide:
 
 ```ts
-if (!await ctx.gate({
+const permit = await ctx.gate({
   gate:     'add',                       // the SUFFIX; the host qualifies it with your tool's name
   subject:  specifier,                   // what is acted on — the policy keys its memory on this
   label:    `Install plugin **"${specifier}"**?`,   // the prose naming the act; rendered verbatim
   fallback: false,                       // what happens with nobody to ask and no policy
-})) {
-  yield { type: 'result', value: { message: 'Cancelled.' } };
+});
+if (!permit.allowed) {
+  yield { type: 'result', value: { message: refusalMessage(permit) } };
   return;
 }
 ```
 
-Four rules, all of which follow from the seam rather than from taste:
+Five rules, all of which follow from the seam rather than from taste:
 
 - **The gate is the SUFFIX.** `ctx.gate({ gate: 'add' })` from a tool registered as `plugin` asks
   `plugin.add`. You cannot address another tool's gate, and a same-named tool in the other runtime
-  reaches the same id — which is the point: one policy answer covers both.
+  reaches the same id — which is the point: one policy answer covers both. If your tool's NAME is
+  built at run time, pass `namespace` with the request — the name of a fixed tool your plugin also
+  registers (a `function-tools` function asks under `tool_function`): otherwise each instance invents
+  a gate id nobody can configure and no remembered answer can generalise over. A namespace naming
+  another plugin's tool is refused.
 - **`fallback` is your call site's non-interactive answer**, not a preference. `false` for anything
   that installs, rewrites or connects. `true` only where proceeding with nobody present is the
   documented behaviour (core's `tools.overwrite` is the one such site in the repo).
 - **Gate only what is allow-or-not.** A gate is boolean by construction. Anything that *elicits a
   value* — a secret, an API key, a question for the user — is `ctx.prompt` and never a gate; this is
   what keeps authorization from needing routing rules.
-- **A refusal has one shape.** `false` is "not permitted", whether a human just said so or a stored
-  answer did. Yield your ordinary cancelled result; there is no denial error to catch.
+- **A refusal has one shape.** `allowed: false` is "not permitted", whether a human just said so or a
+  stored answer did. Yield your ordinary cancelled result; there is no denial error to catch.
+- **Report the `source`; never branch on it.** The decision is an object, so `if (!await ctx.gate(…))`
+  is always false — test `.allowed`. `source` names which test in the cascade answered (`user`,
+  `configuration`, `fallback`, or a layer name a replacement policy invented — the vocabulary is open),
+  and `refusalMessage(permit)` turns it into the sentence to hand back. Do that rather than writing
+  `Cancelled.`: a bare cancellation reads to a model as a malfunction, so it retries under another
+  spelling, hunts for the bug, or looks for a route around the gate. Pass your own words for the act
+  where you have them — `refusalMessage(permit, \`Import of '${spec}'\`)`.
 
 Adding a gate id is adding to a small documented vocabulary — list it in the default policy's README
 (and in GETTING-STARTED's table) so an installation can author an answer for it up front. An id no
@@ -759,8 +771,9 @@ order:
 const previous = services.PermissionGate;        // the CONCRETE gate you are displacing
 await services.register('PermissionGate', {
   async decide(req, ask) {
-    if (req.gate === 'plugin.add') return roster.allows(req.subject);
-    return previous.decide(req, ask);            // everything else keeps behaving as it did
+    // `source` names YOUR layer, in your own words: it is what the refusal reported to the caller says.
+    if (req.gate === 'plugin.add') return { allowed: roster.allows(req.subject), source: 'acme-roster' };
+    return previous.decide(req, ask);            // everything else keeps behaving as it did, SOURCE included
   },
 });
 ```
@@ -1315,7 +1328,7 @@ Store-backed index with optional Cloudflare BGE reranker.
 | `@matatbread/matbot-skills` | `skill_action`, `skills_config` | Cross-runtime skill CRUD (named markdown playbooks) |
 | `@matatbread/matbot-skills-node` | `skill_action` + file watch | Node specialization of `skills`: adds local `.md` import/watch |
 | `@matatbread/matbot-tool-skill-compiler` | `skill_compiler` | Compile procedural markdown skills into executable TypeScript tool plugins |
-| `@matatbread/matbot-function-tools` | `tool_function` | Author/run TypeScript functions that compose registered tools in one pass (define persists a named tool; lambda runs once) |
+| `@matatbread/matbot-function-tools` | `tool_function` | Author/run TypeScript functions that compose registered tools in one pass (define persists a named tool; execute runs a bare body once) |
 | `@matatbread/matbot-tool-router` | `ToolPresenter` (`tool_search`) | Serves a bounded per-turn tool window from a large library — pins + BM25-ranked tools + a `tool_search` entry point |
 | `@matatbread/matbot-tool-store` | `store_action` (+ `defineStore`) | Define and expose named persistent stores with generated CRUD tools |
 | `@matatbread/matbot-rumsfeld` | `contextual_search`, `find_fact` | Resolve unknown terms via the knowledge index (`contextual_search` returns a document; `find_fact` returns a precise answer) |
