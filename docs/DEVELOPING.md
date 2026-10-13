@@ -1313,6 +1313,8 @@ Store-backed index with optional Cloudflare BGE reranker.
 
 ## First-party plugins reference
 
+Each plugin is **Functional** (intended for real use as shipped) or an **Example** (a demonstration of how a feature *might* be implemented, typically with an obvious security hole or incomplete functionality — a template, not a drop-in). The Examples are `storage-profiles` (partitions a `Store` by `Principal` but has no login or auth, so any user can impersonate any other), `web-principal-user` (a template `WebPrincipalResolver`), `provider-chatjimmy` (non-streaming, text-only), `provider-customer-services` (a mock LLM), `provider-store-test` (a test/reference plugin) and `hook-logger` (diagnostic). `tool-background` is deprecated. The README's plugin table carries the same classification.
+
 | Package | Tools / Kind | Description |
 |---|---|---|
 | `@matatbread/matbot-tool-plugin` | `plugin`, `provider` · always loaded | Built-in: manage plugins (list/add/remove/reload/discover_local/store-key) and LLM provider profiles |
@@ -1335,6 +1337,7 @@ Store-backed index with optional Cloudflare BGE reranker.
 | `@matatbread/matbot-skills-node` | `skill_action` + file watch | Node specialization of `skills`: adds local `.md` import/watch |
 | `@matatbread/matbot-tool-skill-compiler` | `skill_compiler` | Compile procedural markdown skills into executable TypeScript tool plugins |
 | `@matatbread/matbot-function-tools` | `tool_function` | Author/run TypeScript functions that compose registered tools in one pass (define persists a named tool; execute runs a bare body once) |
+| `@matatbread/matbot-function-runner-node` | `FunctionRunner` service, `function_runner_config` · Node only · optional | Bounds a `tool_function` body's run time, withholds host globals and routes its `import(...)` through the permission gate; without it a body runs unbounded and ungated |
 | `@matatbread/matbot-tool-router` | `ToolPresenter` (`tool_search`) | Serves a bounded per-turn tool window from a large library — pins + BM25-ranked tools + a `tool_search` entry point |
 | `@matatbread/matbot-tool-store` | `store_action` (+ `defineStore`) | Define and expose named persistent stores with generated CRUD tools |
 | `@matatbread/matbot-rumsfeld` | `contextual_search`, `find_fact` | Resolve unknown terms via the knowledge index (`contextual_search` returns a document; `find_fact` returns a precise answer) |
@@ -1346,6 +1349,7 @@ Store-backed index with optional Cloudflare BGE reranker.
 | `@matatbread/matbot-caching-tool-types` | `ToolTypeIndex` service · Node only | `tool-types` with its build kept in plugin settings across restarts; load it instead of `tool-types` |
 | `@matatbread/matbot-tool-ts-validation` | `ToolCallValidator` service · Node only | Validates a tool call against its `ToolContract` params type (via `tool-types`). Defers to whatever validator it displaced when it has no opinion, so it composes with `json-validation` in either load order |
 | `@matatbread/matbot-hook-logger` | diagnostic hooks | Logs each hook channel firing |
+| `@matatbread/matbot-provider-store-test` | provider contribution · Example | Test/reference: contributes provider profiles from its own store and reverts them on unload |
 | `@matatbread/matbot-frontend-web` | frontend | Web UI with session management (HTTP+SSE on Node, in-process in the browser) |
 | `@matatbread/matbot-frontend-dom` | frontend | Minimal in-process browser chat (the `matbot-demo.html` demonstrator) |
 | `@matatbread/matbot-frontend-telegram` | frontend + tools | Telegram bot (`telegram_send`, `telegram_provider`, `telegram_open_door`) |

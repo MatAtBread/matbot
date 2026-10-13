@@ -114,49 +114,65 @@ skills, workspace files, and provider config all persist in browser storage acro
 
 ### Plugins
 
-All the plugins are optional - install and try out as you please. You can use them as is, or as templates for your own, bespoke implementations. Note that some, like `providers` are loaded indirectly when needed, and so you don't actually need to add them.
+All the plugins are optional - install and try out as you please. Note that some, like `providers` are loaded indirectly when needed, and so you don't actually need to add them.
 
-| Category | Plugin | What it does |
-|---|---|---|
-| **Tools** | `bash` | Run shell commands on the host |
-| | `docker-bash` | Run commands in a sandboxed Docker container |
-| | `http` | Make HTTP requests to any web API |
-| | `workspace` | Read/write files; browser build serves them as downloads |
-| | `mcp` | Connect stdio (local) MCP servers; `mcp-http` adds HTTP/SSE servers (browser + Node) |
-| | `sessions` | List, rename, and hide saved sessions (`session_action`) |
-| | `edit-session` | Cut, fork, split, and compact sessions to manage context window size |
-| | `ask-user` | Ask the user a question mid-turn (`ask_user`) |
-| | `whoami` | Report the current principal (`whoami`) |
-| | `function-tools` | Author & run TypeScript functions that compose other tools in one pass (`tool_function`) |
-| | `tool-store` | Define named persistent stores with generated CRUD tools (`store_action`) |
-| | `tool-router` | Serve the model a bounded per-turn window from a large tool library, with a `tool_search` entry point |
-| | `tool-types` | Node service: derives a typed `.d.ts` of tool results so tool-composing codegen (`function-tools`, `skill-compiler`) is type-checked |
-| **Hooks** | `json-validation` | Validate tool inputs against schema (a `toolcall` hook); LLM self-corrects on mismatch |
-| | `triggers` | Data-driven hooks: fire a tool or skill when an LLM classifier judges a stored condition matched |
-| | `hook-logger` | Diagnostic: log every hook-channel firing |
-| | `provenance` | Trace a claim back to the tool result or message it came from (`determine_provenance`) |
-| **Knowledge** | `rumsfeld` | Look up the knowledge index when the LLM encounters an unknown term |
-| | `persist-ki-bge` | Persistent knowledge index with optional BGE reranker |
-| | `skills` | Named markdown playbooks, injected on demand by a classifier |
-| | `skills-node` | Node specialization of `skills`: import & watch local `.md` skill files |
-| | `skill-compiler` | Compile a procedural skill into a hot-loadable TypeScript tool plugin (`skill_compiler`) |
-| | `cognition` | Inner-voice critique, persistent fact memory, and background Dream Time consolidation |
-| **Frontends** | `frontend/web` | HTTP + SSE web UI with session management |
-| | `frontend/dom` | Minimal in-process browser chat (the `matbot-demo.html` demonstrator) |
-| | `frontend/telegram` | Telegram bot frontend |
-| | `web-principal-user` | Set the web frontend's request principal to the host OS user — a template for multi-user auth |
-| **Providers** | `anthropic` | Anthropic Messages API (+ DeepSeek `/anthropic` compat) |
-| | `openai-compat` | OpenAI-compatible chat completions |
-| | `google` | Google Gemini (native `generateContent`) |
-| | `customer-services` | Free built-in demo LLM — no API key needed |
-| | `chatjimmy` | Hosted llama endpoint — non-streaming, text-only, keyless; a very low-latency comparison point |
-| **Storage** | `storage/filesystem` | Filesystem backend (Node; the CLI's default store) |
-| | `storage/sqlite` | SQLite backend (Node) |
-| | `storage/google-drive` | Google Drive backend (browser) |
-| | `storage/profiles` | Per-principal partitioning over the filesystem backend — a profile per user (`profile_action`, `share`) |
-| | `browser` | Browser-native storage: IndexedDB store, OPFS files, WebCrypto vault (+ the browser `plugin`/`provider` tools) |
-| | `files` | Node filesystem `FileStore` for MIME-typed blobs served by the web frontend |
-| **Background** | `background` | Detached background jobs and cron-style scheduling |
+Each plugin has a **Type**, the same classification the `plugin` tool's `list` action reports (`types`): what it contributes — `tools`, a `provider`, a `frontend`, a `storage` backend, `hooks`, or a **service** registered by name (`KnowledgeIndex`, `ToolCallValidator`, `ToolTypeIndex`, …).
+
+And a **Status**:
+
+- **Functional** — intended for real use as shipped.
+- **Example** — a demonstration of how a feature *might* be implemented, typically with an obvious security hole or incomplete functionality. Use it as a template for your own, not as-is where the gap matters. For instance `storage/profiles` shows how to partition a `Store` by `Principal`, but has no login or auth, so any user can impersonate any other (by design — the web UI has a selector for it).
+- **Deprecated** — kept for existing installs; use its replacement.
+
+| Type | Plugin | Status | What it does |
+|---|---|---|---|
+| **tools** | `bash` | Functional | Run shell commands on the host |
+| | `docker-bash` | Functional | Run commands in a sandboxed Docker container (replaces `bash`; `bash_config`) |
+| | `http` | Functional | Make HTTP requests to any web API |
+| | `workspace` | Functional | Read/write files; browser build serves them as downloads |
+| | `mcp` | Functional | Connect stdio (local) MCP servers; delegates HTTP/SSE servers to `mcp-http` (Node) |
+| | `mcp-http` | Functional | Connect HTTP/SSE MCP servers (`mcp_action`; Node + browser) |
+| | `sessions` | Functional | List, get, rename, and hide saved sessions (`session_action`) |
+| | `edit-session` | Functional | Cut, fork, split, and compact sessions to manage context window size |
+| | `ask-user` | Functional | Ask the user a question mid-turn (`ask_user`) |
+| | `whoami` | Functional | Report the current principal (`whoami`) |
+| | `tool-store` | Functional | Define named persistent stores with generated CRUD tools (`store_action`) |
+| | `provenance` | Functional | Trace a claim back to the tool result or message it came from (`determine_provenance`) |
+| | `rumsfeld` | Functional | Look up the knowledge index when the LLM encounters an unknown term (`contextual_search`, `find_fact`) |
+| | `cognition` | Functional | Inner-voice critique, persistent fact memory, and background Dream Time consolidation |
+| | `skills` | Functional | Named markdown playbooks, injected on demand by a classifier (`skill_action`; provides `SkillManager`) |
+| | `skills-node` | Functional | Node specialization of `skills`: import & watch local `.md` skill files |
+| | `skill-compiler` | Functional | Compile a procedural skill into a hot-loadable TypeScript tool plugin (`skill_compiler`; Node) |
+| | `background-jobs` | Functional | Run prompts as background jobs — now, at a time, or on an interval — that report by appending to a conversation; jobs run in-process |
+| | `background-jobs-node` | Functional | The same, each job in its own process (Node) |
+| | `background` | Deprecated | Superseded by `background-jobs`: detached background jobs and cron-style scheduling |
+| **tools + hooks** | `function-tools` | Functional | Author & run TypeScript functions that compose other tools in one pass (`tool_function`) |
+| | `triggers` | Functional | Data-driven hooks: fire a tool or skill when an LLM classifier judges a stored condition matched |
+| **hooks** | `hook-logger` | Example | Diagnostic: log every hook-channel firing |
+| **services** | `json-validation` | Functional | `ToolCallValidator`: validate tool inputs against their JSON Schema; the LLM self-corrects on mismatch |
+| | `ts-validation` | Functional | `ToolCallValidator`: validate tool inputs against the `ToolContract` params type (Node; needs `tool-types`) |
+| | `tool-types` | Functional | `ToolTypeIndex` (Node): derives a typed `.d.ts` of tool results so tool-composing codegen (`function-tools`, `skill-compiler`) is type-checked |
+| | `caching-tool-types` | Functional | `ToolTypeIndex` (Node): `tool-types` with its build kept in settings across restarts; load it instead of `tool-types` |
+| | `function-runner-node` | Functional | `FunctionRunner` (Node, optional): bounds a `tool_function` body's run time, withholds host globals, gates its `import(...)`. Without it a body runs unbounded and ungated |
+| | `tool-router` | Functional | `ToolPresenter`: serve the model a bounded per-turn window from a large tool library, with a `tool_search` entry point |
+| | `persist-ki-bge` | Functional | `KnowledgeIndex`: persistent, with optional BGE reranker |
+| | `web-principal-user` | Example | `WebPrincipalResolver`: the web frontend's fallback principal becomes the host OS user (`$USER`) — a template for a real resolver |
+| **frontend** | `frontend/web` | Functional | HTTP + SSE web UI with session management (Node); in-process in the browser |
+| | `frontend/dom` | Functional | Minimal in-process browser chat (the `matbot-demo.html` demonstrator) |
+| | `frontend/telegram` | Functional | Telegram bot frontend |
+| **provider** | `anthropic` | Functional | Anthropic Messages API (+ DeepSeek `/anthropic` compat) |
+| | `openai-compat` | Functional | OpenAI-compatible chat completions |
+| | `google` | Functional | Google Gemini (native `generateContent`) |
+| | `chatjimmy` | Example | Hosted llama endpoint — non-streaming, text-only, keyless; a very low-latency comparison point |
+| | `customer-services` | Example | Mock LLM: always helpful, never useful. No API key needed |
+| | `provider-store-test` | Example | Test/reference: contributes provider profiles from its own store and reverts them on unload |
+| **storage** | `storage/filesystem` | Functional | Filesystem backend (Node; the CLI's default store) |
+| | `storage/sqlite` | Functional | SQLite backend (Node) |
+| | `storage/google-drive` | Functional | Google Drive backend (browser) |
+| | `storage/profiles` | Example | Per-principal partitioning over the filesystem backend — a profile per user (`profile_action`, `share`). No login or auth: any user can impersonate any profile |
+| | `browser` | Functional | Browser-native storage: IndexedDB store, OPFS files, WebCrypto vault (+ the browser `plugin`/`provider` tools) |
+
+`files` (`@matatbread/matbot-files-node`) is not a plugin but a library: the Node filesystem `FileStore` the CLI and `storage/*` backends use for MIME-typed blobs served by the web frontend.
 
 The built-in `plugin` and `provider` tools (add/remove/reload plugins, manage LLM profiles) are always
 loaded — see [Core](#core) above. Note: plugins are scoped to a run-time; not all (eg `bash`) are
