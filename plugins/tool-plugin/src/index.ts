@@ -3,6 +3,10 @@ export { pluginTool }           from './tools/plugin.js';
 // Exported to be tested against the error a real unresolved import throws: it reads a MESSAGE, and the
 // one it must read is thrown in apps/cli's ts-hooks, which no compiler ties to this regex.
 export { missingPackageOf }     from './tools/plugin.js';
+// The `add` path's undo half: the name a bare npm specifier will install under, and the removal that
+// runs when matbot installs a package and then disowns it. Exported to be tested without driving a whole
+// machine through an install — `npmNameOf` is where the cases are (scope, range, alias, tarball).
+export { npmNameOf, uninstallAdded } from './tools/plugin.js';
 export { createProviderTool }   from './tools/provider.js';
 // `provider update`'s write half, split from the executor so the block round-trip can be driven directly
 // by a test — the executor's own half is a confirmation prompt over `applyProviderPatch` (plugin-api,

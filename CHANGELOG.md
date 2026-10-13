@@ -329,6 +329,21 @@ churn and less likely to affect a consumer who doesn't use them.
   answered as well — reload now makes the same install offer `add` does when a load fails on an
   unresolved import (one shared code path, one gate, `provision-deps`).
 
+  **A failed `add` no longer leaves the package behind.** The npm route installed with a package manager
+  and then, where it concluded that what arrived was not a usable plugin, kept the install: the package
+  stayed in the project's `dependencies`, its lockfile and its node_modules, under a range the package
+  manager chose rather than one anybody asked for (pnpm's release-age policy can land an older version
+  than `latest`). Worst at the duplicate-name guard, which returns before config is written, so
+  `plugin remove` — the one path that offers to uninstall — had no entry to address it by. The three
+  disowning paths (the duplicate-name guard, an incompatible runtime, a module that is not a plugin) now
+  take the install back out, and only ever a dependency the same call introduced: one the project already
+  declared is the user's, whatever matbot concludes about it as a plugin. It is deliberately not gated,
+  being the abort of an install approved seconds earlier rather than an act on a package someone may
+  want, and deliberately not run where the entry is left in config to retry (a missing secret, an
+  unresolved dependency) — there the plugin is installed and configured, merely not working yet. A bare
+  npm name's clash is also caught BEFORE the install now, that being the commonest collision and the one
+  case where the name is knowable without unpacking anything.
+
   **A failed reload is a no-op again, not an outage.** `reload` was `unload` then `load` with nothing
   around the load, so a failure left the plugin unloaded and its tools gone (`404` on its endpoints). A
   refresh now sets the previous copy aside rather than deleting it; on a failure it is restored and

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import http from 'node:http';
 import { materializeRemote, remoteDependencyNotes, missingPackageOf, restoreRemote, discardRestore,
-         planProvision, applyProvision } from '@matatbread/matbot-tool-plugin';
+         planProvision, applyProvision, npmNameOf, uninstallAdded } from '@matatbread/matbot-tool-plugin';
 
 // A remote plugin is fetched over HTTP and mirrored into `.plugins/`, and the mirrored tree IS the
 // cache. Two properties of that were absent while it was write-only: a warm boot re-downloaded every
@@ -406,6 +406,47 @@ test('a fetched plugin\'s dependencies install into its cache root and make it l
     assert.equal(mod.plugin.ms, 3600000, 'the dependency resolves from the cache root');
   } finally {
     await srv.stop();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// `plugin add` on the npm route installs with a package manager and then decides whether what arrived is
+// a plugin at all. Where it decides NO, the package used to stay: in `dependencies`, the lockfile and
+// node_modules, under a range the package manager chose rather than one anybody asked for — and in the
+// duplicate-name case config was never written, so `plugin remove` had no entry to offer the uninstall
+// against. The undo needs the dependency KEY, which is what these two produce.
+test('the name a bare npm specifier installs under is known before installing, where it can be', () => {
+  assert.equal(npmNameOf('left-pad'), 'left-pad');
+  assert.equal(npmNameOf('left-pad@^1.3.0'), 'left-pad');
+  assert.equal(npmNameOf('@matatbread/matbot-email'), '@matatbread/matbot-email', 'a scope is not a range');
+  assert.equal(npmNameOf('@matatbread/matbot-email@0.3.0'), '@matatbread/matbot-email');
+  assert.equal(npmNameOf('@scope/pkg@next'), '@scope/pkg');
+  // An alias installs under the key but IS the aliased package, so its canonical name is not knowable
+  // from the specifier — and a tarball or git URL carries its name inside the archive.
+  assert.equal(npmNameOf('mine@npm:theirs'), undefined);
+  assert.equal(npmNameOf('https://example.com/pkg-1.0.0.tgz'), undefined);
+  assert.equal(npmNameOf('git+ssh://git@github.com/o/r.git'), undefined);
+});
+
+test('a disowned install is taken back out of the manifest', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'matbot-add-undo-'));
+  try {
+    await writeFile(join(dir, 'package.json'),
+      JSON.stringify({ name: 'host-project', version: '1.0.0', dependencies: { 'left-pad': '^1.3.0' } }));
+
+    const events = [];
+    for await (const e of uninstallAdded({ pm: 'npm', name: 'left-pad' }, dir)) events.push(e);
+
+    const pkg = JSON.parse(await readFile(join(dir, 'package.json'), 'utf8')) as { dependencies?: object };
+    assert.deepEqual(pkg.dependencies ?? {}, {}, 'the package it installed is gone again');
+    assert.equal(events.some(e => e.type === 'stdout'), true, 'and it says so rather than silently');
+
+    // Nothing installed (a local or http route, or a dependency the project already declared) is nothing
+    // to undo: the manifest is not touched and no event is emitted.
+    const none = [];
+    for await (const e of uninstallAdded(undefined, dir)) none.push(e);
+    assert.deepEqual(none, []);
+  } finally {
     await rm(dir, { recursive: true, force: true });
   }
 });

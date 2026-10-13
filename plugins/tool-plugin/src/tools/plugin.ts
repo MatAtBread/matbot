@@ -359,6 +359,53 @@ function unresolvedDependencyOf(raw: string, specifier: string): string | undefi
   return name === asked ? undefined : `${name}@${version}`;
 }
 
+/**
+ * The package name a bare npm specifier will install under, where that is knowable WITHOUT installing
+ * it: a name with an optional registry range. Undefined for a tarball or git URL (the name is inside the
+ * archive) and for an alias (`x@npm:y`, where the canonical name is y's, not the dependency key x).
+ *
+ * It exists so the duplicate-name guard can refuse the commonest collision — the same package added
+ * twice under two specifiers — *before* a package manager writes anything, rather than installing it and
+ * then disowning it.
+ */
+export function npmNameOf(spec: string): string | undefined {
+  if (/^(?:https?:\/\/|git\+)/.test(spec)) return undefined;
+  const at = spec.lastIndexOf('@');
+  if (at <= 0) return spec;                           // bare, or a scope's leading `@`
+  const range = spec.slice(at + 1);
+  return range.startsWith('npm:') ? undefined : spec.slice(0, at);
+}
+
+/**
+ * Undo an install this call made, on the paths that then DISOWN the plugin.
+ *
+ * A plugin manager that installs a package and then refuses it must not leave it behind: it sits in the
+ * project's `dependencies`, its lockfile and its node_modules under a range nobody asked for, and in the
+ * duplicate-name case config was never written, so `plugin remove` — the one path that offers to
+ * uninstall — has no entry to address it by. The package manager also resolves the range itself (pnpm's
+ * release-age policy can land an older version than `latest`), so the residue pins a version the user
+ * never named.
+ *
+ * Deliberately NOT gated, unlike `plugin remove`'s `npm-uninstall`: that one acts on a package the user
+ * may still want, whereas this aborts an install they approved seconds ago, in the same call, that
+ * matbot has just concluded cannot work. And deliberately not run on the paths that leave the entry in
+ * config to retry (a missing secret, an unresolved dependency) — there the plugin is installed and
+ * configured, merely not working yet, and `plugin remove` can reach it.
+ */
+export async function* uninstallAdded(
+  installed: { pm: string; name: string } | undefined, projectDir: string,
+): AsyncGenerator<ToolEvent<ToolResultOf<'plugin'>>, void> {
+  if (installed === undefined) return;
+  try {
+    const out = await runCommand(installed.pm, ['remove', installed.name], projectDir);
+    yield { type: 'stdout', chunk: out || `Removed the "${installed.name}" package again.\n` };
+  } catch (e) {
+    yield { type: 'stderr', chunk:
+      `Could not remove the "${installed.name}" package again (${String(e)}) — it is still in ` +
+      `package.json, so remove it by hand.\n` };
+  }
+}
+
 // Turn a raw package-manager failure into an actionable message: name the intent and translate the
 // three signatures users actually hit (workspace-only source packages; a dependency resolved to a
 // version only this workspace has; registry 404s) instead of dumping the exit code and stderr alone.
@@ -660,6 +707,22 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
         return;
       }
 
+      // The duplicate-name guard below runs after the install, because for a tarball or git URL the name
+      // is only knowable once something has unpacked it. For a bare npm name it is knowable now, which is
+      // the commonest collision there is (the same package added under two specifiers) — so refuse it
+      // here, before a human is asked to approve an install that would be disowned on arrival.
+      if (classified.kind === 'npm') {
+        const name = npmNameOf(classified.spec);
+        const clash = name !== undefined ? getRegisteredPlugins().find(p => p.name === name) : undefined;
+        if (clash !== undefined) {
+          yield { type: 'error', message:
+            `A plugin named "${clash.name}" is already installed (from "${clash.specifier}"). ` +
+            `Remove it first, or — if this is the same package via a different specifier — drop one. ` +
+            `Nothing was installed, and nothing was added to ${path.basename(configPath)}.` };
+          return;
+        }
+      }
+
       // Pre-fetch verification for remote (raw-source) plugins: confirm the package.json declares
       // matbotRuntime including "node" BEFORE downloading or executing any code, so a stray URL
       // cannot be installed. (npm / tarball / git installs are verified after install by the
@@ -756,6 +819,11 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
       // a loadable specifier on restart — record the installed package name instead.
       let configSpecifier = specifier;
 
+      // What a disowning path below has to undo. Read back from the manifest rather than assumed from the
+      // specifier: the dependency key is what `pm remove` takes, and for a tarball or git URL it is the
+      // only place the installed name appears at all.
+      let installed: { pm: string; name: string } | undefined;
+
       if (classified.kind === 'npm') {
         const pm = await detectPackageManager(projectDir);
         yield { type: 'stdout', chunk: `Installing "${specifier}" with ${pm}...\n` };
@@ -767,12 +835,15 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
           yield { type: 'error', message: await describeInstallFailure(specifier, pm, projectDir, e) };
           return;
         }
+        const added = await addedDependencyName(projectDir, before);
+        const name  = added ?? npmNameOf(classified.spec);
+        // Only a dependency this call introduced may be undone. One the project already declared is the
+        // user's, whatever matbot then concludes about it as a plugin — `pm add` may have moved its range,
+        // but removing it outright would take a package they were using for their own reasons.
+        if (name !== undefined && !before.has(name)) installed = { pm, name };
         // A tarball or git URL is not a loadable specifier on restart, so record what the install
         // actually added instead. A plain registry name needs no translation — it already IS the name.
-        if (/^(?:https?:\/\/|git\+)/.test(classified.spec)) {
-          const installedName = await addedDependencyName(projectDir, before);
-          if (installedName !== undefined) configSpecifier = installedName;
-        }
+        if (/^(?:https?:\/\/|git\+)/.test(classified.spec) && added !== undefined) configSpecifier = added;
       }
 
       // A path is the least portable thing this could record: it is right only for this working copy,
@@ -798,6 +869,7 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
       if (pluginName !== undefined) {
         const clash = getRegisteredPlugins().find(p => p.name === pluginName);
         if (clash !== undefined) {
+          yield* uninstallAdded(installed, projectDir);
           yield { type: 'error', message:
             `A plugin named "${pluginName}" is already installed (from "${clash.specifier}"). ` +
             `Remove it first, or — if this is the same package via a different specifier — drop one. ` +
@@ -827,6 +899,7 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
         // are left in config to fix and retry.
         if (isIncompatibleRuntimeError(e)) {
           await removePlugin(configPath, configSpecifier);
+          yield* uninstallAdded(installed, projectDir);
           yield { type: 'error', message: e.message };
           return;
         }
@@ -835,6 +908,7 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
         // an LLM may try to act on by editing the library's source.
         if (isNotAPluginError(e)) {
           await removePlugin(configPath, configSpecifier);
+          yield* uninstallAdded(installed, projectDir);
           yield { type: 'error', message:
             `"${configSpecifier}" is not a matbot plugin — it exports no \`plugin\`, so it cannot be installed ` +
             `(it is most likely a library). Nothing was changed in ${path.basename(configPath)}.` };
