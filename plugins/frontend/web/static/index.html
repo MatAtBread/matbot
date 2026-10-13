@@ -1032,6 +1032,45 @@
     .message.user .md-body th, .message.user .md-body td { border-color: rgba(255,255,255,0.2); }
     .message.user .md-body hr { border-top-color: rgba(255,255,255,0.2); }
 
+    /* Editing a sent message, in the bubble itself (double-click). The textarea inherits the bubble's
+       dark ground rather than looking like the composer: what is being edited is this message, in
+       place. Sending cuts the turn and everything after it, which the note states. */
+    .message.user[data-msg-idx] { cursor: text; }
+    .message.user.editing { cursor: default; }
+    .bubble-editor { display: flex; flex-direction: column; gap: 8px; min-width: min(560px, 60vw); }
+    .bubble-edit-text {
+      width: 100%;
+      box-sizing: border-box;
+      min-height: 2.6em;
+      max-height: 320px;
+      resize: vertical;
+      font: inherit;
+      line-height: 1.6;
+      color: #fff;
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.25);
+      border-radius: 8px;
+      padding: 8px 10px;
+      outline: none;
+    }
+    .bubble-edit-text:focus { border-color: rgba(255,255,255,0.5); }
+    .bubble-edit-actions { display: flex; align-items: center; gap: 8px; }
+    .bubble-edit-note { flex: 1; font-size: 0.72em; color: rgba(255,255,255,0.55); line-height: 1.3; }
+    .bubble-edit-btn {
+      font: inherit;
+      font-size: 0.82em;
+      padding: 4px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+      color: #fff;
+      background: rgba(255,255,255,0.1);
+      border: 1px solid rgba(255,255,255,0.25);
+    }
+    .bubble-edit-btn:hover { background: rgba(255,255,255,0.2); }
+    .bubble-edit-btn.primary { background: #fff; color: #111; border-color: #fff; }
+    .bubble-edit-btn.primary:hover { background: #e5e7eb; }
+    .bubble-edit-btn:disabled { opacity: 0.5; cursor: default; }
+
     /* Queued (not-yet-running) submissions: a muted bubble with an egg-timer floating on its
        top-left corner — purely an indicator, so the bubble never changes size or shape. Applies
        both live (the 'queued' event) and on reload (the server's pending overlay), so the number
@@ -1086,7 +1125,7 @@
       align-self: flex-start;
       background: #0044ff08;
       border-radius: 8px 8px 8px 0px;
-      padding: 04px;
+      padding: 3px;
       border: 1px solid #ebf0ff;
     }
 
@@ -1457,7 +1496,7 @@
       background: #0f172a;
       border-radius: 6px;
       overflow: hidden;
-      margin: 4px 0 8px;
+      border-bottom: 1px solid #444444;
       font-family: 'SF Mono', 'Cascadia Code', ui-monospace, monospace;
       font-size: 0.86em;
       max-width: 100%;

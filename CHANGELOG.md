@@ -232,6 +232,14 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Optional
 
+- **`frontend/web`** — double-click a user bubble to edit what you sent and send it again. The bubble
+  swaps its rendered markdown for a textarea over the *stored* text (Ctrl/Cmd+Enter sends, Escape
+  cancels, as in the composer), then cuts the session at that message and submits the edited content as
+  a fresh turn — so everything after it goes, as the note in the editor says. Robo blocks are not
+  offered for editing and are not carried: a `contextual` trigger injects them afresh on the new turn,
+  and resending them would double them. Attachments go back by reference (`file-ref` survives the cut,
+  session media being scoped to the session rather than the message). The divider's **Resend** icon is
+  gone, that being the same operation without the edit.
 - **`frontend/web`** — a streaming turn writes the DOM once per animation frame instead of once per
   delta. Each delta used to write and then measure — a full `marked.parse` of the whole message plus
   `innerHTML`, then `offsetHeight`, `scrollIntoView` and `scrollTop` — which is a forced synchronous
