@@ -5,6 +5,17 @@ packages:
   - 'plugins/*/*'
   - 'apps/*'
 
+# pnpm >= 10 reads its own settings HERE, not from .npmrc, where these three lived and were silently
+# ignored (`pnpm config get link-workspace-packages` -> undefined). It went unnoticed because every
+# in-repo dependency uses the `workspace:` protocol, which links whatever this says — but a plugin
+# installed from the registry peer-depends on `@matatbread/matbot-plugin-api` by RANGE, and with
+# linking off pnpm takes the preferred version from the workspace copy and then fetches that exact
+# version from the registry, which has never published it. Hence `plugin add <npm name>` failing with
+# ERR_PNPM_NO_MATCHING_VERSION for a range the workspace satisfies.
+linkWorkspacePackages: true
+strictPeerDependencies: false
+shamefullyHoist: false
+
 catalog:
   typescript: ^6.0.3
   "@types/node": ^22.0.0

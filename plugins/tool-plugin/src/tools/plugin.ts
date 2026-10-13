@@ -1,4 +1,4 @@
-import type { Tool, ToolExecutor, ToolResultOf, ToolContext, MatbotPlugin, Runtime, PluginSource,
+import type { Tool, ToolExecutor, ToolEvent, ToolResultOf, ToolContext, MatbotPlugin, Runtime, PluginSource,
               PluginToolContract, DiscoveredPlugin } from '@matatbread/matbot-plugin-api';
 import { isIncompatibleRuntimeError, isNotAPluginError, refusalMessage } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins, getRegisteredTools, getRegisteredFrontendPlugins,
@@ -8,7 +8,8 @@ import { readFile, writeFile, access, readdir } from 'node:fs/promises';
 import { pathToFileURL, fileURLToPath }       from 'node:url';
 import { createRequire }                     from 'node:module';
 import path                                  from 'node:path';
-import { classifySpecifier, fetchRemoteManifest, canonicalLocalSpecifier, materializeRemote } from '../remote-cache.js';
+import { classifySpecifier, fetchRemoteManifest, canonicalLocalSpecifier, materializeRemote,
+         restoreRemote, discardRestore } from '../remote-cache.js';
 import { planProvision, applyProvision, discardProvision, runCommand, type ProvisionPlan } from '../provision.js';
 import { findDuplicateSingletons } from '../singletons.js';
 
@@ -221,7 +222,10 @@ async function scanCacheDir(dotPlugins: string, results: DiscoveryEntry[]): Prom
     }
 
     for (const entry of entries) {
-      if (!entry.isDirectory() || entry.name === 'node_modules') continue;
+      // A dot-directory in the cache is matbot's own bookkeeping, never a mirrored host: `.restore`
+      // holds the copy a refresh set aside, and the walk below would report it as a plugin served from
+      // a host called `.restore`.
+      if (!entry.isDirectory() || entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
       await walk(path.join(dir, entry.name));
     }
   };
@@ -339,15 +343,41 @@ async function addedDependencyName(projectDir: string, before: Set<string>): Pro
   return after.length === 1 ? after[0] : undefined;
 }
 
+const exists = async (p: string): Promise<boolean> => {
+  try { await access(p); return true; } catch { return false; }
+};
+
+// `name@version` a package manager reports as unresolvable, when it names a package OTHER than the one
+// being installed — so a dependency or peer whose RANGE resolved to a version no registry carries.
+function unresolvedDependencyOf(raw: string, specifier: string): string | undefined {
+  const m = raw.match(/No matching version found for ((?:@[^/\s]+\/)?[^@\s]+)@(\S+?)(?:[\s,]|$)/);
+  if (m === null) return undefined;
+  const [, name, version] = m;
+  if (name === undefined || version === undefined) return undefined;
+  // The specifier may carry its own range (`foo@^1`, `@scope/foo@1.2.3`); compare bare names.
+  const asked = specifier.replace(/^(@[^/]+\/)?([^@]+).*$/, '$1$2');
+  return name === asked ? undefined : `${name}@${version}`;
+}
+
 // Turn a raw package-manager failure into an actionable message: name the intent and translate the
-// two signatures users actually hit (workspace-only source packages; registry 404s) instead of
-// dumping the exit code and stderr alone.
-function describeInstallFailure(specifier: string, pm: string, e: unknown): string {
+// three signatures users actually hit (workspace-only source packages; a dependency resolved to a
+// version only this workspace has; registry 404s) instead of dumping the exit code and stderr alone.
+async function describeInstallFailure(specifier: string, pm: string, projectDir: string, e: unknown): Promise<string> {
   const raw = e instanceof Error ? e.message : String(e);
   let hint = '';
+  const unresolved = unresolvedDependencyOf(raw, specifier);
   if (/workspace:|catalog:/i.test(raw)) {
     hint = ' This looks like a workspace-internal source package (it uses the workspace:/catalog: protocol) ' +
            'and cannot be installed standalone — install the published package, or point at its raw source via a URL / github: specifier.';
+  } else if (unresolved !== undefined && await exists(path.join(projectDir, 'pnpm-workspace.yaml'))) {
+    // Not the asked-for package: a DEPENDENCY (usually the plugin-api peer) resolved to a version the
+    // registry does not carry, which is what happens when the version only exists in this workspace and
+    // the package manager is not linking workspace packages — so it goes to the registry for it instead.
+    // The registry advice below is actively wrong here: the name is right and the range is satisfiable.
+    hint = ` "${unresolved}" is a dependency of it, not the package asked for, and that version looks like ` +
+           `one only this workspace provides — so ${pm} went to the registry for a version only local source has. ` +
+           `Check that workspace linking is on (pnpm >= 10 reads \`linkWorkspacePackages\` from pnpm-workspace.yaml, ` +
+           `NOT from .npmrc, where it is silently ignored).`;
   } else if (/\b404\b|not found|No matching version/i.test(raw)) {
     hint = ' The package or version was not found in the configured registry (check the name, or the registry in your .npmrc).';
   }
@@ -408,6 +438,76 @@ function pluginTypes(p: MatbotPlugin, registeredToolPlugins: Set<string>): strin
 
   if (!t.length) t.push('extension');
   return [...new Set(t)];
+}
+
+// ── Provisioning a fetched plugin's dependencies ──────────────────────────────
+//
+// Offer to install them, rather than only naming them — into the plugin's OWN cached directory under
+// `.plugins/`, which is the same place the local route installs into and for the same reasons.
+//
+// NOT the project. `pnpm add` at a workspace root refuses outright (ERR_PNPM_ADDING_TO_ROOT, wanting
+// `-w`), and where it succeeds it writes a fetched plugin's dependencies into the user's own manifest
+// and lockfile — permanent, tracked, and nothing to do with their project. The cache directory has none
+// of that: it is matbot's to write, gitignored, per-plugin, and it sits EARLIER in the resolution
+// walk-up than the shared link farm, so what lands there is reachable from this plugin and invisible to
+// everything else. Not the farm itself either, which holds the host singletons and the plugin
+// self-links — an install there would prune them as extraneous.
+//
+// Reusing plan/apply rather than shelling out gets the rest for free: npm unconditionally (the cache dir
+// is not in anyone's workspace, so pnpm's walk-up problem cannot arise), the full transitive set in the
+// approval instead of just the direct names, and the host singletons linked afterwards. The approval is
+// still an out-of-band human one, so a fetched plugin cannot install anything by asserting that it needs
+// it.
+//
+// Every declared dependency is planned, not just the one that failed: activation stops at the FIRST
+// unresolved import, so one-at-a-time would be a prompt-and-retry cycle per package.
+//
+// Shared by `add` and `reload` because it is one situation reached at two moments — a refresh can bring
+// a dependency the fetched copy never had, and reload used to have no answer for that at all. The
+// outcome is returned rather than reported: the two callers are reporting different things (an install
+// that did not finish, a reload that did not take), and a tool frames itself.
+type DepProvision =
+  | { outcome: 'none' }                                  // nothing declared that npm would install
+  | { outcome: 'unresolved'; reason: string }            // npm could not say what it would install
+  | { outcome: 'declined' }
+  | { outcome: 'failed';    reason: string }             // the install itself failed
+  | { outcome: 'installed'; packages: number };
+
+async function* provisionRemoteDependencies(
+  ctx: ToolContext, specifier: string, projectDir: string,
+): AsyncGenerator<ToolEvent<ToolResultOf<'plugin'>>, DepProvision> {
+  let plan: ProvisionPlan;
+  try {
+    const m = await materializeRemote(specifier, path.join(projectDir, '.plugins'), projectDir);
+    plan = await planProvision(m.pkgRoot);
+  } catch (err) {
+    return { outcome: 'unresolved', reason: err instanceof Error ? err.message : String(err) };
+  }
+  if (plan.packages.length === 0) return { outcome: 'none' };
+
+  const offer = await ctx.gate({
+    gate:     'provision-deps',
+    subject:  specifier,
+    fallback: false,
+    label:
+      `**"${specifier}"** needs packages a source-fetch does not bring in (it copies a plugin's own ` +
+      `files, not its dependency graph). Install ${plan.packages.length} package(s) into its cache ` +
+      `directory?\n${plan.packages.map(pkg => `- ${pkg}`).join('\n')}`,
+  });
+  if (!offer.allowed) {
+    await discardProvision(plan);
+    return { outcome: 'declined' };
+  }
+
+  yield { type: 'stdout', chunk: `Installing ${plan.packages.length} package(s) with npm...\n` };
+  try {
+    const { linked, output } = await applyProvision(plan);
+    if (output) yield { type: 'stdout', chunk: output };
+    if (linked.length > 0) yield { type: 'stdout', chunk: `Linked the host's ${linked.join(', ')}.\n` };
+  } catch (err) {
+    return { outcome: 'failed', reason: err instanceof Error ? err.message : String(err) };
+  }
+  return { outcome: 'installed', packages: plan.packages.length };
 }
 
 // ── Input types ───────────────────────────────────────────────────────────────
@@ -664,7 +764,7 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
           const out = await runCommand(pm, ['add', ...await addFlags(pm, projectDir), specifier], projectDir);
           if (out) yield { type: 'stdout', chunk: out };
         } catch (e) {
-          yield { type: 'error', message: describeInstallFailure(specifier, pm, e) };
+          yield { type: 'error', message: await describeInstallFailure(specifier, pm, projectDir, e) };
           return;
         }
         // A tarball or git URL is not a loadable specifier on restart, so record what the install
@@ -747,79 +847,34 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
         // once the dependency is present), like any other fixable activation failure.
         const missing = classified.kind === 'http' ? missingPackageOf(e) : undefined;
         if (missing !== undefined) {
-          // Offer to install them, rather than only naming them — into the plugin's OWN cached
-          // directory under `.plugins/`, which is the same place the local route installs into and for
-          // the same reasons.
-          //
-          // NOT the project. `pnpm add` at a workspace root refuses outright (ERR_PNPM_ADDING_TO_ROOT,
-          // wanting `-w`), and where it succeeds it writes a fetched plugin's dependencies into the
-          // user's own manifest and lockfile — permanent, tracked, and nothing to do with their project.
-          // The cache directory has none of that: it is matbot's to write, gitignored, per-plugin, and
-          // it sits EARLIER in the resolution walk-up than the shared link farm, so what lands there is
-          // reachable from this plugin and invisible to everything else. Not the farm itself either,
-          // which holds the host singletons and the plugin self-links — an install there would prune
-          // them as extraneous.
-          //
-          // Reusing plan/apply rather than shelling out gets the rest for free: npm unconditionally (the
-          // cache dir is not in anyone's workspace, so pnpm's walk-up problem cannot arise), the full
-          // transitive set in the approval instead of just the direct names, and the host singletons
-          // linked afterwards. The approval is still an out-of-band human one, so a fetched plugin
-          // cannot install anything by asserting that it needs it.
-          //
-          // Every declared dependency is planned, not just the one that failed: activation stops at the
-          // FIRST unresolved import, so one-at-a-time would be a prompt-and-retry cycle per package.
-          const m = await materializeRemote(specifier, path.join(projectDir, '.plugins'), projectDir);
-          let depPlan: ProvisionPlan | undefined;
-          try {
-            depPlan = await planProvision(m.pkgRoot);
-          } catch (err) {
-            yield { type: 'stdout', chunk:
-              `Could not resolve "${configSpecifier}"'s dependencies: ${err instanceof Error ? err.message : String(err)}\n` };
+          const dep = yield* provisionRemoteDependencies(ctx, specifier, projectDir);
+          if (dep.outcome === 'unresolved') {
+            yield { type: 'stdout', chunk: `Could not resolve "${configSpecifier}"'s dependencies: ${dep.reason}\n` };
           }
-
-          if (depPlan !== undefined && depPlan.packages.length > 0) {
-            const offer = await ctx.gate({
-              gate:     'provision-deps',
-              subject:  configSpecifier,
-              fallback: false,
-              label:
-                `**"${configSpecifier}"** was fetched, but it needs packages a source-fetch does not bring in ` +
-                `(it copies a plugin's own files, not its dependency graph). Install ${depPlan.packages.length} ` +
-                `package(s) into its cache directory?\n${depPlan.packages.map(pkg => `- ${pkg}`).join('\n')}`,
-            });
-
-            if (!offer.allowed) {
-              await discardProvision(depPlan);
-            } else {
-              yield { type: 'stdout', chunk: `Installing ${depPlan.packages.length} package(s) with npm...\n` };
-              try {
-                const { linked, output } = await applyProvision(depPlan);
-                if (output) yield { type: 'stdout', chunk: output };
-                if (linked.length > 0) yield { type: 'stdout', chunk: `Linked the host's ${linked.join(', ')}.\n` };
-              } catch (err) {
-                yield { type: 'result', value: { message:
-                  `Could not install the dependencies of "${configSpecifier}": ${err instanceof Error ? err.message : String(err)}. ` +
-                  `It has been left in ${path.basename(configPath)} and activates once they are present.` } };
-                return;
-              }
-              // Retried in process: the files are already cached, so this is a resolution retry and not a
-              // second fetch. A failure here is reported as-is — what was asked for is now installed, so
-              // whatever remains is a different problem and guessing at it would mislead.
-              yield { type: 'stdout', chunk: `Activating "${configSpecifier}"...\n` };
-              try {
-                const loaded  = await ctx.loadPlugin(configSpecifier);
-                const welcome = await loaded.installationMessage?.();
-                yield { type: 'result', value: {
-                  message: `"${configSpecifier}" installed and is now active (${depPlan.packages.length} dependency package(s) installed).`,
-                  ...(welcome !== undefined ? { installationMessage: welcome } : {}),
-                } };
-              } catch (err) {
-                yield { type: 'result', value: { message:
-                  `Installed its dependencies, but "${configSpecifier}" still did not activate: ${String(err)}. ` +
-                  `It has been left in ${path.basename(configPath)}.` } };
-              }
-              return;
+          if (dep.outcome === 'failed') {
+            yield { type: 'result', value: { message:
+              `Could not install the dependencies of "${configSpecifier}": ${dep.reason}. ` +
+              `It has been left in ${path.basename(configPath)} and activates once they are present.` } };
+            return;
+          }
+          if (dep.outcome === 'installed') {
+            // Retried in process: the files are already cached, so this is a resolution retry and not a
+            // second fetch. A failure here is reported as-is — what was asked for is now installed, so
+            // whatever remains is a different problem and guessing at it would mislead.
+            yield { type: 'stdout', chunk: `Activating "${configSpecifier}"...\n` };
+            try {
+              const loaded  = await ctx.loadPlugin(configSpecifier);
+              const welcome = await loaded.installationMessage?.();
+              yield { type: 'result', value: {
+                message: `"${configSpecifier}" installed and is now active (${dep.packages} dependency package(s) installed).`,
+                ...(welcome !== undefined ? { installationMessage: welcome } : {}),
+              } };
+            } catch (err) {
+              yield { type: 'result', value: { message:
+                `Installed its dependencies, but "${configSpecifier}" still did not activate: ${String(err)}. ` +
+                `It has been left in ${path.basename(configPath)}.` } };
             }
+            return;
           }
 
           const fromNpm = missing.startsWith('@matatbread/')
@@ -930,12 +985,62 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
       // upstream source" — the cross-source analog of how a local reload always reflects on-disk edits.
       // Pass refresh:false to re-run setup() against the cached copy (e.g. to reset state, or offline).
       const { refresh = true } = input as { refresh?: boolean };
-      const reloaded = await ctx.loadPlugin(entry, refresh);
-      const result = await reloaded.installationMessage?.() || `"${entry}" reloaded successfully.`;
+      const dotPlugins = path.join(projectDir, '.plugins');
+      // Only a fetched plugin has a refresh to undo: a local reload reflects on-disk edits and an npm one
+      // re-imports node_modules, neither of which this path writes to or evicts.
+      const refreshed = refresh && (await classifySpecifier(entry, projectDir)).kind === 'http';
 
-      if (result !== null) {
-        yield { type: 'result', value: { message: result } };
+      // Two attempts at most, and the second never refreshes: the files are already cached, so it is a
+      // resolution retry and not a second fetch — and a second eviction would discard the copy set aside
+      // for the rollback below.
+      let failure: unknown;
+      let installed = 0;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const reloaded = await ctx.loadPlugin(entry, attempt === 0 && refresh);
+          if (refreshed) await discardRestore(entry, dotPlugins);
+          const extra  = installed > 0 ? ` (${installed} dependency package(s) installed)` : '';
+          const result = await reloaded.installationMessage?.() || `"${entry}" reloaded successfully${extra}.`;
+          if (result !== null) {
+            yield { type: 'result', value: { message: result } };
+          }
+          return;
+        } catch (e) {
+          failure = e;
+          // A refreshed source can declare a dependency the cached copy never had, and a raw fetch brings
+          // none: the same offer `add` makes, since this is the same situation reached later.
+          if (attempt > 0 || !refreshed || missingPackageOf(e) === undefined) break;
+          const dep = yield* provisionRemoteDependencies(ctx, entry, projectDir);
+          if (dep.outcome === 'failed') {
+            yield { type: 'stderr', chunk: `Could not install its dependencies: ${dep.reason}\n` };
+          }
+          if (dep.outcome !== 'installed') break;
+          installed = dep.packages;
+        }
       }
+
+      // A refresh replaces the cached source, so by now the copy that WAS working is no longer what is on
+      // disk — without putting it back, a failed reload is an outage and not a no-op: the plugin stays
+      // unloaded and its tools are simply gone.
+      if (refreshed && await restoreRemote(entry, dotPlugins)) {
+        try {
+          await ctx.loadPlugin(entry);
+          yield { type: 'result', value: { message:
+            `"${entry}" did not reload: ${String(failure)}. The previously cached copy has been restored and is ` +
+            `active again, so nothing was lost — fix the cause upstream and reload again.` } };
+        } catch (err) {
+          yield { type: 'error', message:
+            `"${entry}" did not reload: ${String(failure)}. The previously cached copy was restored but did not ` +
+            `load either (${String(err)}), so the plugin is not running.` };
+        }
+        return;
+      }
+
+      // Nothing to put back on the other routes: a local plugin's source is whatever is on disk and an
+      // npm one's is in node_modules, both untouched here — so the fix is theirs and a reload picks it up.
+      yield { type: 'error', message: wasLoaded
+        ? `"${entry}" did not reload, and is no longer loaded: ${String(failure)}.`
+        : `"${entry}" did not load: ${String(failure)}.` };
     }
   },
 };

@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, readFile, realpath } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, readFile, writeFile, realpath, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import http from 'node:http';
-import { materializeRemote, remoteDependencyNotes, missingPackageOf,
+import { materializeRemote, remoteDependencyNotes, missingPackageOf, restoreRemote, discardRestore,
          planProvision, applyProvision } from '@matatbread/matbot-tool-plugin';
 
 // A remote plugin is fetched over HTTP and mirrored into `.plugins/`, and the mirrored tree IS the
@@ -112,6 +112,78 @@ test('only a refresh reaches upstream, and it re-reads the manifest too', async 
     assert.equal(await readFile(refreshed.entry, 'utf8'), files['/a/moved.ts']);
   } finally {
     await srv.stop();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// A fetched plugin's dependencies are installed into its OWN cache directory (`plugin add` does it there
+// for the reasons provision.ts states), which is the same subtree a refresh evicts. Deleting it whole made
+// `reload` structurally impossible for every http plugin with a dependency: the fetch reload performs was
+// the very thing that removed what add had installed, so the reloaded copy could never resolve its imports.
+// The subtree has two owners, and only the fetched half is the refresh's to drop.
+test('a refresh drops the fetched source and keeps what was installed into it', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'matbot-remote-provisioned-'));
+  const dotPlugins = join(dir, '.plugins');
+  const files = { ...FILES };
+  const srv = await serve(files);
+  try {
+    const spec = `${srv.origin}/a/`;
+    const first = await materializeRemote(spec, dotPlugins, dir);
+
+    // What an install leaves behind, without running one.
+    await mkdir(join(first.pkgRoot, 'node_modules', 'left-pad'), { recursive: true });
+    await writeFile(join(first.pkgRoot, 'node_modules', 'left-pad', 'index.js'), 'export default 1;\n');
+    await writeFile(join(first.pkgRoot, 'package-lock.json'), '{"lockfileVersion":3}');
+
+    files['/a/index.ts'] = `export const changed = true;\n${FILES['/a/index.ts'] ?? ''}`;
+    const refreshed = await materializeRemote(spec, dotPlugins, dir, /* forceRefresh */ true);
+
+    assert.match(await readFile(refreshed.entry, 'utf8'), /^export const changed/, 'the source did come from upstream');
+    assert.equal(await readFile(join(refreshed.pkgRoot, 'node_modules', 'left-pad', 'index.js'), 'utf8'),
+      'export default 1;\n', 'the installed dependency survived the refresh');
+    assert.equal(await readFile(join(refreshed.pkgRoot, 'package-lock.json'), 'utf8'), '{"lockfileVersion":3}');
+  } finally {
+    await srv.stop();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// A refresh replaces the cached source, so once it has run, the copy that WAS working is no longer on
+// disk: a reload whose load then fails is an outage rather than a no-op, and the only way back is a copy
+// set aside before the fetch. `discardRestore` is the other half — the success path, after which there is
+// nothing to go back to.
+test('a refresh sets the previous copy aside, and a restore puts it back', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'matbot-remote-restore-'));
+  const dotPlugins = join(dir, '.plugins');
+  const files = { ...FILES };
+  const srv = await serve(files);
+  try {
+    const spec = `${srv.origin}/a/`;
+    const first = await materializeRemote(spec, dotPlugins, dir);
+    const working = await readFile(first.entry, 'utf8');
+    await mkdir(join(first.pkgRoot, 'node_modules', 'left-pad'), { recursive: true });
+
+    files['/a/index.ts'] = `throw new Error('broken upstream');\n`;
+    const refreshed = await materializeRemote(spec, dotPlugins, dir, /* forceRefresh */ true);
+    assert.match(await readFile(refreshed.entry, 'utf8'), /broken upstream/);
+
+    assert.equal(await restoreRemote(spec, dotPlugins), true);
+    assert.equal(await readFile(first.entry, 'utf8'), working, 'the copy that was working is back');
+    // The provisioning is whatever is installed now — it is not rolled back with the source.
+    await access(join(first.pkgRoot, 'node_modules', 'left-pad'));
+
+    // Nothing set aside any more: a second restore has nothing to say, and reports so rather than throwing.
+    assert.equal(await restoreRemote(spec, dotPlugins), false);
+
+    // And the warm cache is the restored copy: the memo must not still answer with the refreshed manifest.
+    await srv.stop();
+    const offline = await materializeRemote(spec, dotPlugins, dir);
+    assert.equal(await readFile(offline.entry, 'utf8'), working);
+
+    await discardRestore(spec, dotPlugins);
+    assert.equal(await restoreRemote(spec, dotPlugins), false);
+  } finally {
+    await srv.stop().catch(() => {});
     await rm(dir, { recursive: true, force: true });
   }
 });

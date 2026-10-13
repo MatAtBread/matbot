@@ -14,7 +14,7 @@
 // (e.g. mounted read-only into docker-bash) so cached plugin code cannot be tampered with by the
 // model. Do not move this under `.data/`.
 
-import { writeFile, readFile, readdir, mkdir, access, stat, realpath, symlink, rm } from 'node:fs/promises';
+import { writeFile, readFile, readdir, mkdir, access, stat, realpath, rename, symlink, rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import process from 'node:process';
@@ -397,27 +397,107 @@ async function fetchModule(url: string, dotPlugins: string): Promise<{ finalUrl:
 }
 
 /**
- * Drop a remote plugin's cached state so the next materialize re-downloads it. Clears the in-memory
- * manifest memo (so a moved entry / changed `files` / renamed package is re-read), then removes the
- * cached package subtree under `.plugins/<host>/<path…>` and the plugin's `node_modules/<name>`
- * self-link. The manifest is re-fetched here to learn the subtree root and name; that fetch repopulates
- * the memo, so the subsequent `fetchRemoteManifest` in materialize hits it (one network round-trip).
- * Best-effort removal — an absent subtree/link is not an error.
+ * The two things in a cached subtree that matbot put there rather than fetched: a plugin's dependencies,
+ * installed into its own cache directory by `plugin add` (see provision.ts), and the lockfile they were
+ * installed from.
+ */
+const PROVISIONED = ['node_modules', 'package-lock.json'];
+
+/** Where a refresh sets the previous copy aside: the cache path it came from, mirrored under a
+ *  dot-directory. The path is the record of where to put it back, and the leading dot keeps it out of
+ *  the cache scan, which reconstructs a URL from the path and would read a set-aside copy as a plugin
+ *  served from a host called `.restore`. */
+const setAsidePath = (pkgRoot: string, dotPlugins: string): string =>
+  path.join(dotPlugins, '.restore', path.relative(dotPlugins, pkgRoot));
+
+/** `rename` onto a path that may already hold something, where an absent source is not an error. */
+async function moveOver(from: string, to: string): Promise<boolean> {
+  try { await stat(from); } catch { return false; }
+  await rm(to, { recursive: true, force: true });
+  await mkdir(path.dirname(to), { recursive: true });
+  await rename(from, to);
+  return true;
+}
+
+/**
+ * Drop a remote plugin's cached SOURCE so the next materialize re-downloads it. Clears the in-memory
+ * manifest memo (so a moved entry / changed `files` / renamed package is re-read), sets the cached
+ * package subtree under `.plugins/<host>/<path…>` aside, and removes the plugin's `node_modules/<name>`
+ * self-link (materialize writes it again). The manifest is re-fetched here to learn the subtree root and
+ * name; that fetch repopulates the memo, so the subsequent `fetchRemoteManifest` in materialize hits it
+ * (one network round-trip). Best-effort — an absent subtree/link is not an error.
  *
  * It must be a `live` fetch: reading the mirrored manifest would repopulate the memo with the copy
  * about to be deleted, and materialize would then crawl the OLD entry — which is exactly the case
  * (a moved entry, a renamed package) this function exists to catch.
+ *
+ * The subtree has TWO OWNERS and this used to delete it as one: the mirrored upstream source, which a
+ * refresh exists to drop, and the dependencies `plugin add` installed into it, which a fetch has nothing
+ * to say about. Removing both made `reload` structurally impossible for every http plugin with a
+ * dependency — the fetch reload performs was the very thing that evicted what add had installed — so the
+ * provisioned half is moved back into the fresh directory here.
+ *
+ * Set aside rather than removed, because after a refresh the copy that WAS working is no longer on disk,
+ * and a reload whose load then fails has to be able to put it back (`restoreRemote`).
  */
 async function evictRemote(spec: string, dotPlugins: string): Promise<void> {
   manifestCache.delete(spec);
   const manifest = await fetchRemoteManifest(spec, dotPlugins, /* live */ true);
   const pkgRoot = path.dirname(urlToCachePath(manifest.pkgUrl, dotPlugins));
-  await rm(pkgRoot, { recursive: true, force: true });
+
+  const aside = setAsidePath(pkgRoot, dotPlugins);
+  if (await moveOver(pkgRoot, aside)) {
+    await mkdir(pkgRoot, { recursive: true });
+    for (const own of PROVISIONED) await moveOver(path.join(aside, own), path.join(pkgRoot, own));
+  }
 
   const name = manifest.pkg['name'];
   if (typeof name === 'string' && !HOST_SINGLETONS.has(name)) {
     await rm(path.join(dotPlugins, 'node_modules', name), { force: true });
   }
+}
+
+/** The cached package root for a specifier, from the MIRRORED manifest (the memo answers in the process
+ *  that just refreshed; a cold one reads the copy materialize wrote). Undefined when nothing is cached. */
+async function cachedPkgRoot(spec: string, dotPlugins: string): Promise<string | undefined> {
+  try {
+    const manifest = await fetchRemoteManifest(spec, dotPlugins);
+    return path.dirname(urlToCachePath(manifest.pkgUrl, dotPlugins));
+  } catch { return undefined; }
+}
+
+/**
+ * Put back the copy the last refresh set aside, so a reload whose load failed is a no-op rather than an
+ * outage. Returns whether there was one.
+ *
+ * The provisioning stays whatever is installed NOW: a re-provision may have run `npm ci` against the
+ * refreshed manifest, and a set that satisfies the new source satisfies the old one too — except for a
+ * dependency the new version dropped, which is a re-install away and not worth a second backup.
+ *
+ * The memo is cleared because it holds the refreshed manifest, and what is on disk is now the previous
+ * one — a moved entry would otherwise be resolved against the copy that no longer provides it.
+ */
+export async function restoreRemote(spec: string, dotPlugins: string): Promise<boolean> {
+  const pkgRoot = await cachedPkgRoot(spec, dotPlugins);
+  if (pkgRoot === undefined) return false;
+  const aside = setAsidePath(pkgRoot, dotPlugins);
+  try { await stat(aside); } catch { return false; }
+
+  for (const own of PROVISIONED) await moveOver(path.join(pkgRoot, own), path.join(aside, own));
+  await rm(pkgRoot, { recursive: true, force: true });
+  await mkdir(path.dirname(pkgRoot), { recursive: true });
+  await rename(aside, pkgRoot);
+  manifestCache.delete(spec);
+  return true;
+}
+
+/** Drop the set-aside copy once the refreshed one has loaded. A left-behind one is harmless — the next
+ *  refresh replaces it — so this never throws. */
+export async function discardRestore(spec: string, dotPlugins: string): Promise<void> {
+  const pkgRoot = await cachedPkgRoot(spec, dotPlugins);
+  if (pkgRoot === undefined) return;
+  try { await rm(setAsidePath(pkgRoot, dotPlugins), { recursive: true, force: true }); }
+  catch { /* a reload that worked must not fail over housekeeping */ }
 }
 
 /**

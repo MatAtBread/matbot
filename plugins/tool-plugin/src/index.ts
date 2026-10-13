@@ -10,6 +10,9 @@ export { createProviderTool }   from './tools/provider.js';
 export { writeProviderBlock } from './tools/provider.js';
 export { classifySpecifier, canonicalLocalSpecifier, fetchRemoteManifest, materializeRemote, remoteDependencyNotes,
          hostOwnPackageDir } from './remote-cache.js';
+// A refresh sets the previous cached copy aside rather than deleting it, so a reload whose load fails can
+// put the working one back. The `plugin` tool drives the pair; the tests drive them directly.
+export { restoreRemote, discardRestore } from './remote-cache.js';
 export type { Classified, RemoteManifest, MaterializedRemote } from './remote-cache.js';
 // Provisioning a local plugin's dependencies: the `plugin` tool drives it, and its tests drive it directly
 // — the plan/apply split exists so a caller can fold the resolved set into an approval it already asks for.

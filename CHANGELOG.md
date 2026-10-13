@@ -306,6 +306,34 @@ churn and less likely to affect a consumer who doesn't use them.
   unmatched answer now says so and re-asks once, an empty line is still the default, and one matching
   nothing is returned verbatim where the field allows free text (`allowOther`), as the web frontend does.
 
+- **`tool-plugin` / repo** — `plugin add` and `plugin reload` all three fixed from a live install
+  (issue #90).
+
+  **A workspace-provided peer no longer fails the install.** `plugin add <npm name>` of a plugin
+  peer-depending on `@matatbread/matbot-plugin-api` died with `ERR_PNPM_NO_MATCHING_VERSION` for a
+  version nothing pins and no registry carries — the one this workspace provides. pnpm >= 10 reads its
+  own settings from `pnpm-workspace.yaml`, not `.npmrc`, where this repo's `link-workspace-packages=true`
+  had been silently ignored since (`pnpm config get link-workspace-packages` → `undefined`); with linking
+  off, pnpm takes the preferred version for the range from the local copy and then goes to the registry
+  for it. It went unnoticed because every in-repo dependency uses the `workspace:` protocol, which links
+  regardless. The three settings move to `pnpm-workspace.yaml` (zero lockfile churn, measured) and
+  `engines.pnpm` goes to `>=10`. `describeInstallFailure` now recognises the shape — an unresolvable
+  package that is a *dependency* of the one asked for, in a pnpm workspace — and names the setting,
+  instead of advising a registry check that is wrong here: the name is right and the range is satisfiable.
+
+  **A refresh no longer evicts what `add` installed.** A fetched plugin's dependencies are installed into
+  its own `.plugins/` cache directory, which is the same subtree `reload` evicts to re-download source —
+  so reload was structurally impossible for every http plugin with a dependency, the fetch being the very
+  thing that removed them. The subtree has two owners, and only the fetched half is the refresh's to
+  drop: `node_modules` and `package-lock.json` are kept. A refreshed manifest declaring something NEW is
+  answered as well — reload now makes the same install offer `add` does when a load fails on an
+  unresolved import (one shared code path, one gate, `provision-deps`).
+
+  **A failed reload is a no-op again, not an outage.** `reload` was `unload` then `load` with nothing
+  around the load, so a failure left the plugin unloaded and its tools gone (`404` on its endpoints). A
+  refresh now sets the previous copy aside rather than deleting it; on a failure it is restored and
+  re-loaded, and the result says which happened. Its provisioning is not rolled back with it.
+
 - **`background-jobs` / `sessions`** — a job's reporting conversation is stated where the model reads
   it. Both tools described the append target as "this conversation" or "a default", which a model
   reads as the conversation it is in when it looks: it told the user a job would "report back here"
