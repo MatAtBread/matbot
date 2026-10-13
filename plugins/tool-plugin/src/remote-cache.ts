@@ -19,6 +19,7 @@ import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import process from 'node:process';
 import path from 'node:path';
+import { urlToCachePath, verbatimCachePath, cachedModulePath, candidatesFor, storeModule } from './cache-layout.js';
 
 // ── Specifier classification ────────────────────────────────────────────────────
 
@@ -270,7 +271,9 @@ async function fetchText(url: string): Promise<{ ok: boolean; status: number; te
  * upstream, and it evicts the subtree first, so these reads miss and the network answers.
  */
 async function readMirrored(url: string, dotPlugins: string): Promise<string | undefined> {
-  try { return await readFile(urlToCachePath(url, dotPlugins), 'utf8'); }
+  const cached = cachedModulePath(url, dotPlugins);
+  if (cached === undefined) return undefined;
+  try { return await readFile(cached, 'utf8'); }
   catch { return undefined; }
 }
 
@@ -356,38 +359,17 @@ async function findEntryManifest(entryUrl: string, dotPlugins: string, live: boo
 
 // ── Materialisation (fetch the module graph onto disk) ───────────────────────────
 
-// Where a MODULE lives: a path with no module extension is given `.mjs`, so that `https://esm.sh/ms@2.1.3`
-// does not take, as a file, the name its own children (`/ms@2.1.3/es2022/…`) need as a directory. A
-// manifest ends `.json` and is therefore where its URL says, which is what lets the same function place it.
-//
-// The module hook maps with this rule too and holds the reasoning (apps/cli/remote-loader.js); it cannot
-// import it from here and this cannot import it from there, so keep the two in sync — the entry written
-// here is the file the hook resolves that plugin's relative imports from.
-const MODULE_EXT = /\.(?:ts|mts|cts|js|mjs|cjs|json|wasm)$/;
-
-function urlToCachePath(url: string, dotPlugins: string): string {
-  const u = new URL(url);
-  const pathname = decodeURIComponent(u.pathname);
-  const leaf = MODULE_EXT.test(pathname) ? '' : pathname.endsWith('/') ? 'index.mjs' : '.mjs';
-  return path.join(dotPlugins, u.host, pathname + leaf);
-}
-
 // Where an ASSET lives: exactly where its URL says, whatever it is called. A plugin reads one off the disk
 // by its own name (`new URL('./static/index.html', import.meta.url)`), so nothing may be appended to it.
-function assetCachePath(url: string, dotPlugins: string): string {
-  const u = new URL(url);
-  return path.join(dotPlugins, u.host, decodeURIComponent(u.pathname));
-}
+// A MODULE is placed by `urlToCachePath` — and so is a manifest, which ends `.json` and is therefore where
+// its URL says too.
+const assetCachePath = verbatimCachePath;
 
 // matbot source imports siblings with explicit `.js` extensions (verbatimModuleSyntax); the raw
 // file on disk is `.ts`. Mirror the web bundle: fetch the `.js`, fall back to `.ts`, and write the
 // content at the `.ts` path so the ts-hooks `.js`→`.ts` resolve remap finds it at load time.
 async function fetchModule(url: string, dotPlugins: string): Promise<{ finalUrl: string; content: string }> {
-  const candidates: string[] = [url];
-  const bare = (url.split('?')[0]) ?? url;
-  if (bare.endsWith('.js'))        candidates.push(url.slice(0, -3) + '.ts');
-  else if (bare.endsWith('.mjs'))  candidates.push(url.slice(0, -4) + '.mts');
-  else if (!CODE_EXT.test(bare))   candidates.push(url + '.ts', url.replace(/\/?$/, '/') + 'index.ts');
+  const candidates = candidatesFor(url);
 
   // Every candidate is tried on disk BEFORE any is tried on the network, because the two orders
   // disagree: the `.js` name is the preferred URL but the `.ts` name is what gets mirrored, so
@@ -545,7 +527,7 @@ export async function materializeRemote(spec: string, dotPlugins: string, resolv
   const manifest = await fetchRemoteManifest(spec, dotPlugins);
 
   const pkgPath = urlToCachePath(manifest.pkgUrl, dotPlugins);
-  await writeCached(pkgPath, JSON.stringify(manifest.pkg, null, 2));
+  await writeCached(pkgPath, JSON.stringify(manifest.pkg, null, 2), manifest.pkgUrl, dotPlugins);
 
   await recordOrigin(dotPlugins, manifest.pkgUrl);
 
@@ -563,7 +545,7 @@ export async function materializeRemote(spec: string, dotPlugins: string, resolv
 
   const { finalUrl, content } = await fetchModule(manifest.entryUrl, dotPlugins);
   const entry = urlToCachePath(finalUrl, dotPlugins);
-  await writeCached(entry, content);
+  await writeCached(entry, content, finalUrl, dotPlugins);
 
   await fetchDeclaredFiles(manifest.pkg, manifest.pkgUrl, dotPlugins);
 
@@ -761,8 +743,10 @@ function hostPackageDir(req: NodeRequire, name: string): string | undefined {
   }
 }
 
-async function writeCached(localPath: string, content: string): Promise<void> {
-  try { await access(localPath); return; } catch { /* not cached yet */ }
-  await mkdir(path.dirname(localPath), { recursive: true });
-  await writeFile(localPath, content, 'utf8');
+// Never overwrites: the mirrored tree is the cache, and a refresh evicts rather than rewrites. "Already
+// there" means a FILE — a directory of that name is some other URL's children, which `storeModule` reports
+// as the collision it is instead of this returning it as though it were the module.
+async function writeCached(localPath: string, content: string, url: string, dotPlugins: string): Promise<void> {
+  if ((await stat(localPath).catch(() => undefined))?.isFile()) return;
+  await storeModule(localPath, content, url, dotPlugins);
 }

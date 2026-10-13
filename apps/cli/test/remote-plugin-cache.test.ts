@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import http from 'node:http';
 import { materializeRemote, remoteDependencyNotes, missingPackageOf, restoreRemote, discardRestore,
-         planProvision, applyProvision, npmNameOf, uninstallAdded } from '@matatbread/matbot-tool-plugin';
+         planProvision, applyProvision, npmNameOf, readDependencyNames, addedDependencyName,
+         uninstallAdded } from '@matatbread/matbot-tool-plugin';
 
 // A remote plugin is fetched over HTTP and mirrored into `.plugins/`, and the mirrored tree IS the
 // cache. Two properties of that were absent while it was write-only: a warm boot re-downloaded every
@@ -228,12 +229,44 @@ test('an entry with no extension is cached as a module, and a declared asset und
   });
   try {
     const m = await materializeRemote(`${srv.origin}/x/`, dotPlugins, dir);
-    assert.equal(m.entry, join(m.pkgRoot, 'entry.mjs'), 'beside the directory `entry/…` would need');
+    assert.equal(m.entry, join(m.pkgRoot, 'entry_.mjs'), 'beside the directory `entry/…` would need');
     assert.equal(await readFile(join(m.pkgRoot, 'notes.v2'), 'utf8'), 'an asset\n');
 
     srv.log.length = 0;
     assert.equal((await materializeRemote(`${srv.origin}/x/package.json`, dotPlugins, dir)).entry, m.entry);
     assert.deepEqual(srv.log, [], 'and found there again, warm');
+  } finally {
+    await srv.stop();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// The entry and the manifest are written here rather than by the hook, and went through a write of their
+// own that knew neither of the two things the hook's did. So an upgraded cache kept failing on the file the
+// earlier layout left where this plugin's directory belongs, and a directory already standing at the
+// entry's path was returned AS the entry, to fail later as an unexplained directory import.
+test('materialising moves an earlier layout\'s module out of the way, and names a collision it cannot', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'matbot-remote-cache-'));
+  const dotPlugins = join(dir, '.plugins');
+  const srv = await serve({
+    '/foo@1/package.json': JSON.stringify({ name: '@fixture/matbot-remote-foo', matbotRuntime: ['node'], exports: './index.ts' }),
+    '/foo@1/index.ts': `export const plugin = { apiVersion: '0.4' };\n`,
+    '/y/package.json': JSON.stringify({ name: '@fixture/matbot-remote-y', matbotRuntime: ['node'], exports: './main.js' }),
+    '/y/main.js': `export const plugin = { apiVersion: '0.4' };\n`,
+  });
+  try {
+    const hostDir = join(dotPlugins, new URL(srv.origin).host);
+    await mkdir(hostDir, { recursive: true });
+    await writeFile(join(hostDir, 'foo@1'), 'export default "the bare import";\n');
+    const m = await materializeRemote(`${srv.origin}/foo@1/`, dotPlugins, dir);
+    assert.equal(m.entry, join(hostDir, 'foo@1', 'index.ts'));
+    assert.equal(await readFile(join(hostDir, 'foo@1_.mjs'), 'utf8'), 'export default "the bare import";\n');
+
+    await mkdir(join(hostDir, 'y', 'main.js'), { recursive: true });
+    await assert.rejects(
+      materializeRemote(`${srv.origin}/y/`, dotPlugins, dir),
+      (e: unknown) => e instanceof Error && /Cannot cache .*main\.js" in the plugin cache has to be both/.test(e.message),
+    );
   } finally {
     await srv.stop();
     await rm(dir, { recursive: true, force: true });
@@ -452,6 +485,48 @@ test('the name a bare npm specifier installs under is known before installing, w
   assert.equal(npmNameOf('mine@npm:theirs'), undefined);
   assert.equal(npmNameOf('https://example.com/pkg-1.0.0.tgz'), undefined);
   assert.equal(npmNameOf('git+ssh://git@github.com/o/r.git'), undefined);
+  // Every other spelling of "not a registry name" a package manager accepts. Each came back as a name
+  // while the rule listed what to exclude — `git`, from the first — and a name is what gets acted on.
+  for (const spec of ['git@github.com:o/r.git', 'user/repo', 'github:o/r', 'file:../x', 'ssh://git@host/o/r.git',
+                      'mine@github:o/r', 'mine@file:../x', 'mine@https://example.com/x.tgz', '']) {
+    assert.equal(npmNameOf(spec), undefined, spec);
+  }
+});
+
+// The undo acts on one piece of evidence: a key seen to arrive in a manifest that was read beforehand.
+// Both ways of having no such evidence used to read as "this call added it", and `pm remove` then deleted
+// a package that was the project's own.
+test('a dependency the project already declared, in any section, is not one an install added', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'matbot-add-undo-'));
+  try {
+    await writeFile(join(dir, 'package.json'), JSON.stringify({
+      name: 'host-project', dependencies: { a: '1' }, optionalDependencies: { b: '1' },
+      devDependencies: { typescript: '^5' }, peerDependencies: { zod: '^3' },
+    }));
+    const before = await readDependencyNames(dir);
+    assert.deepEqual([...before ?? []].sort(), ['a', 'b', 'typescript', 'zod']);
+
+    // What npm does to `add typescript` here: moves it from devDependencies into dependencies.
+    await writeFile(join(dir, 'package.json'), JSON.stringify({
+      name: 'host-project', dependencies: { a: '1', typescript: '^5.9.0' }, optionalDependencies: { b: '1' },
+      peerDependencies: { zod: '^3' },
+    }));
+    assert.equal(await addedDependencyName(dir, before as Set<string>), undefined);
+
+    await writeFile(join(dir, 'package.json'), JSON.stringify({ name: 'host-project', dependencies: { a: '1', 'left-pad': '^1.3.0' } }));
+    assert.equal(await addedDependencyName(dir, before as Set<string>), 'left-pad', 'and a new key is');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a project directory with no manifest has no known dependencies, which is not the same as none', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'matbot-add-undo-'));
+  try {
+    assert.equal(await readDependencyNames(dir), undefined);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('a disowned install is taken back out of the manifest', async () => {
@@ -461,7 +536,7 @@ test('a disowned install is taken back out of the manifest', async () => {
       JSON.stringify({ name: 'host-project', version: '1.0.0', dependencies: { 'left-pad': '^1.3.0' } }));
 
     const events = [];
-    for await (const e of uninstallAdded({ pm: 'npm', name: 'left-pad' }, dir)) events.push(e);
+    for await (const e of uninstallAdded('left-pad', dir)) events.push(e);
 
     const pkg = JSON.parse(await readFile(join(dir, 'package.json'), 'utf8')) as { dependencies?: object };
     assert.deepEqual(pkg.dependencies ?? {}, {}, 'the package it installed is gone again');

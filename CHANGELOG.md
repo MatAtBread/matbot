@@ -337,12 +337,17 @@ churn and less likely to affect a consumer who doesn't use them.
   `plugin remove` — the one path that offers to uninstall — had no entry to address it by. The three
   disowning paths (the duplicate-name guard, an incompatible runtime, a module that is not a plugin) now
   take the install back out, and only ever a dependency the same call introduced: one the project already
-  declared is the user's, whatever matbot concludes about it as a plugin. It is deliberately not gated,
+  declared is the user's, whatever matbot concludes about it as a plugin. "Introduced" means a key seen to
+  arrive in a `package.json` that was read beforehand, and nothing inferred — every dependency section
+  counts as already declared (a package manager treats a `devDependencies` entry as present), and a
+  project directory with no manifest of its own, whose install lands in whichever ancestor has one, is
+  never undone at all. It is deliberately not gated,
   being the abort of an install approved seconds earlier rather than an act on a package someone may
   want, and deliberately not run where the entry is left in config to retry (a missing secret, an
   unresolved dependency) — there the plugin is installed and configured, merely not working yet. A bare
   npm name's clash is also caught BEFORE the install now, that being the commonest collision and the one
-  case where the name is knowable without unpacking anything.
+  case where the name is knowable without unpacking anything — which a git remote, a `user/repo`
+  shorthand, a `file:` path and a non-registry alias are not, so none of them is read as a name.
 
   **A failed reload is a no-op again, not an outage.** `reload` was `unload` then `load` with nothing
   around the load, so a failure left the plugin unloaded and its tools gone (`404` on its endpoints). A
@@ -354,18 +359,20 @@ churn and less likely to affect a consumer who doesn't use them.
   `https://esm.sh/ms@2.1.3` re-exports `/ms@2.1.3/es2022/ms.mjs`. The cache mirrored each URL under its
   own path, so the first became the *file* `.plugins/esm.sh/ms@2.1.3` and the second's `mkdir` failed
   with `ENOTDIR` — the documented way to bring a third-party dependency on the http route crashed the
-  loader on the commonest shape of one. A path with no module extension is now cached with `.mjs`
-  appended, beside the directory rather than as it (`ms@2.1.3.mjs` next to `ms@2.1.3/`); it stays in the
-  directory its URL is in, so its own relative imports and `import.meta.url` are unchanged. A path that
-  has a module extension is cached where it was, and so are a plugin's declared `files`, which are read
-  off the disk by name. Both mappers agree on this — the module hook and `materializeRemote`, for an
-  entry with no extension.
+  loader on the commonest shape of one. A path with no module extension is now cached with `_.mjs`
+  appended, beside the directory rather than as it (`ms@2.1.3_.mjs` next to `ms@2.1.3/`); it stays in the
+  directory its URL is in, so its own relative imports and `import.meta.url` are unchanged. The suffix is
+  not a plain `.mjs` because two URLs must not share a file: `…/index` and `…/index.mjs` are different
+  modules, and the first is commonly a stub re-exporting the second. A path that has a module extension
+  is cached where it was, and so are a plugin's declared `files`, which are read off the disk by name.
+  The layout is stated once (`@matatbread/matbot-tool-plugin/cache-layout`), for the module hook and
+  `materializeRemote` alike, rather than as a copy in each.
 
-  The file a failed attempt left behind is removed when it is found standing where a directory belongs,
-  so an existing cache does not keep failing on its own residue. An extensionless module that *was*
-  cached and working (jsdelivr's `/+esm`) is fetched once more under its new name; the old copy is
-  inert. One collision remains, because nothing in a URL tells it from an ordinary file: a name with a
-  module extension that is also used as a directory (`https://esm.sh/chart.js` with
+  An existing cache keeps working. A module the earlier layout cached under its bare name is found where
+  it was left, so a warm boot still asks the network for nothing (jsdelivr's `/+esm`); and when one
+  stands where a directory now belongs it is moved to its new name rather than deleted, by the hook and
+  by `materializeRemote` both. One collision remains, because nothing in a URL tells it from an ordinary
+  file: a name with a module extension that is also used as a directory (`https://esm.sh/chart.js` with
   `https://esm.sh/chart.js/auto`). It now fails naming both halves instead of surfacing an errno — or,
   in the other order, handing Node a directory as a module. A pinned `chart.js@4.5.1` is unaffected.
 

@@ -95,7 +95,7 @@ test('a URL import whose module re-exports a child of its own path loads', { tim
 
     const mod = await import(pathToFileURL(join(hostDir, 'p', 'index.ts')).href);
     assert.equal(mod.ms(), '1m');
-    assert.ok(existsSync(join(hostDir, 'ms@2.1.3.mjs')), 'the module, beside…');
+    assert.ok(existsSync(join(hostDir, 'ms@2.1.3_.mjs')), 'the module, beside…');
     assert.ok(existsSync(join(hostDir, 'ms@2.1.3', 'es2022', 'ms.mjs')), '…the directory its child needs');
   } finally {
     await srv.stop();

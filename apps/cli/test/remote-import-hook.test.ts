@@ -111,7 +111,7 @@ test('a URL with no extension is cached beside the directory its children need, 
     try {
       const urls: Record<string, string> = {};
       for (const spec of order) urls[spec] = await resolveFetched(spec, parent) as string;
-      assert.match(urls['/ms@2.1.3'] as string, /[/\\]ms@2\.1\.3\.mjs$/);
+      assert.match(urls['/ms@2.1.3'] as string, /[/\\]ms@2\.1\.3_\.mjs$/);
       assert.match(urls['/ms@2.1.3/es2022/ms.mjs'] as string, /[/\\]ms@2\.1\.3[/\\]es2022[/\\]ms\.mjs$/);
       for (const spec of order) assert.equal(await readFile(new URL(urls[spec] as string), 'utf8'), files[spec as keyof typeof files]);
 
@@ -142,9 +142,10 @@ test('a relative import from an extensionless module resolves against that modul
   }
 });
 
-// A cache that met the failure above still holds its first half: the bare name, as a file. Nothing reads
-// it there any more, and left in place it would fail the same `mkdir` for ever.
-test('the file an earlier layout left where a directory belongs is cleared out of the way', async () => {
+// A cache that met the failure above still holds its first half: the bare name, as a file. Left in place it
+// would fail the same `mkdir` for ever. But it is a module, and may be the only copy of one that was
+// working — so it is moved to the name it has now rather than deleted, and is still there to be found.
+test('a module an earlier layout left where a directory belongs is moved aside, not lost', async () => {
   const srv = await serve({ '/ms@2.1.3/es2022/ms.mjs': 'export default () => "1m";\n' });
   const host = new URL(srv.origin).host;
   const { dotPlugins, parent, cleanup } = await cacheTree(host);
@@ -152,6 +153,66 @@ test('the file an earlier layout left where a directory belongs is cleared out o
     await writeFile(join(dotPlugins, host, 'ms@2.1.3'), 'export * from "/ms@2.1.3/es2022/ms.mjs";\n');
     const url = await resolveFetched('/ms@2.1.3/es2022/ms.mjs', parent) as string;
     assert.equal(await readFile(new URL(url), 'utf8'), 'export default () => "1m";\n');
+
+    srv.log.length = 0;
+    const moved = await resolveFetched('/ms@2.1.3', parent) as string;
+    assert.match(moved, /[/\\]ms@2\.1\.3_\.mjs$/);
+    assert.equal(await readFile(new URL(moved), 'utf8'), 'export * from "/ms@2.1.3/es2022/ms.mjs";\n');
+    assert.deepEqual(srv.log, [], 'what was cached is what is served — nothing was fetched again');
+  } finally {
+    await srv.stop();
+    await cleanup();
+  }
+});
+
+// The same module with nothing forcing it out of the way: jsdelivr's `/+esm`, cached under its bare name by
+// the layout before this one and never a directory. An upgrade must not turn it into a miss — the bytes
+// are on disk, and a boot with the CDN unreachable would otherwise lose the plugin that imports it.
+test('a module cached under its bare name by an earlier layout is still found, with no network', async () => {
+  const srv = await serve({});
+  const host = new URL(srv.origin).host;
+  const { dotPlugins, parent, cleanup } = await cacheTree(host);
+  try {
+    await mkdir(join(dotPlugins, host, 'npm', 'x@1'), { recursive: true });
+    await writeFile(join(dotPlugins, host, 'npm', 'x@1', '+esm'), 'export default 1;\n');
+    const url = await resolveFetched('/npm/x@1/+esm', parent) as string;
+    assert.equal(await readFile(new URL(url), 'utf8'), 'export default 1;\n');
+    assert.deepEqual(srv.log, []);
+  } finally {
+    await srv.stop();
+    await cleanup();
+  }
+});
+
+// Two URLs, two files. Given a plain `.mjs` the extensionless one shared a cache path with the URL that
+// really ends `.mjs`, so whichever came first was served for the other — and a stub re-exporting
+// `./index.mjs`, which is how a CDN wraps a build, imported itself.
+test('an extensionless URL and the same URL ending .mjs are cached apart, in either order', async () => {
+  const files = { '/pkg@1/index': 'export * from "./index.mjs";\n', '/pkg@1/index.mjs': 'export const real = 1;\n' };
+  for (const order of [['/pkg@1/index', '/pkg@1/index.mjs'], ['/pkg@1/index.mjs', '/pkg@1/index']]) {
+    const srv = await serve(files);
+    const { parent, cleanup } = await cacheTree(new URL(srv.origin).host);
+    try {
+      for (const spec of order) {
+        const url = await resolveFetched(spec, parent) as string;
+        assert.equal(await readFile(new URL(url), 'utf8'), files[spec as keyof typeof files]);
+      }
+    } finally {
+      await srv.stop();
+      await cleanup();
+    }
+  }
+});
+
+// Only an import with no extension is a question about which file was meant. `data.json` names itself: it
+// was treated as extensionless by one of three lists, and asked the origin for `data.json.ts` and
+// `data.json/index.ts` besides.
+test('a URL with a module extension other than .js names exactly one file', async () => {
+  const srv = await serve({});
+  const { parent, cleanup } = await cacheTree(new URL(srv.origin).host);
+  try {
+    await assert.rejects(resolveFetched('/p/data.json', parent) as Promise<string>);
+    assert.deepEqual(srv.log.map(r => r.path), ['/p/data.json']);
   } finally {
     await srv.stop();
     await cleanup();

@@ -324,22 +324,37 @@ async function addFlags(pm: string, dir: string): Promise<string[]> {
   try { await access(path.join(dir, 'pnpm-workspace.yaml')); return ['-w']; } catch { return []; }
 }
 
-// The dependency names recorded in the project package.json — used to discover what a pnpm/npm
-// install of a tarball/git URL actually added (a URL is not a loadable specifier on restart, but
-// the installed package name is). dependencies + optionalDependencies cover what `add` writes.
-async function readDependencyNames(projectDir: string): Promise<Set<string>> {
+const DEPENDENCY_SECTIONS = ['dependencies', 'optionalDependencies', 'devDependencies', 'peerDependencies'] as const;
+
+/**
+ * Every package name the project's package.json declares, or undefined when there is no manifest to read.
+ *
+ * EVERY section, because this is the "before" an install is compared against, and a package manager
+ * treats a name already in `devDependencies` as present: npm moves it into `dependencies`, pnpm leaves it
+ * where it is. Read from `dependencies` alone, the project's own `typescript` looked like something
+ * `plugin add typescript` had just introduced.
+ *
+ * And undefined rather than an empty set, because the two are different facts: nothing declared, versus
+ * nothing known. A project dir with no manifest of its own installs into whichever ancestor has one, and
+ * an empty "before" would make everything already declared THERE look newly added.
+ */
+export async function readDependencyNames(projectDir: string): Promise<Set<string> | undefined> {
   try {
-    const pkg = JSON.parse(await readFile(path.join(projectDir, 'package.json'), 'utf8')) as {
-      dependencies?: Record<string, string>; optionalDependencies?: Record<string, string>;
-    };
-    return new Set([...Object.keys(pkg.dependencies ?? {}), ...Object.keys(pkg.optionalDependencies ?? {})]);
+    const pkg = JSON.parse(await readFile(path.join(projectDir, 'package.json'), 'utf8')) as
+      Partial<Record<typeof DEPENDENCY_SECTIONS[number], Record<string, string>>>;
+    return new Set(DEPENDENCY_SECTIONS.flatMap(section => Object.keys(pkg[section] ?? {})));
   } catch {
-    return new Set();
+    return undefined;
   }
 }
 
-async function addedDependencyName(projectDir: string, before: Set<string>): Promise<string | undefined> {
-  const after = [...await readDependencyNames(projectDir)].filter(n => !before.has(n));
+/**
+ * The one dependency an install added to the manifest, where the manifest shows exactly that — the name
+ * to record for a tarball or git URL (a URL is not a loadable specifier on restart, but the installed
+ * package name is).
+ */
+export async function addedDependencyName(projectDir: string, before: Set<string>): Promise<string | undefined> {
+  const after = [...await readDependencyNames(projectDir) ?? []].filter(n => !before.has(n));
   return after.length === 1 ? after[0] : undefined;
 }
 
@@ -359,21 +374,47 @@ function unresolvedDependencyOf(raw: string, specifier: string): string | undefi
   return name === asked ? undefined : `${name}@${version}`;
 }
 
+// A registry package name: optionally scoped, and none of the characters a URL, a path or a git remote
+// is made of. Case-insensitive only because names predating the lowercase rule are still installable.
+const NPM_NAME = /^(?:@[a-z0-9~-][a-z0-9._~-]*\/)?[a-z0-9~-][a-z0-9._~-]*$/i;
+
 /**
  * The package name a bare npm specifier will install under, where that is knowable WITHOUT installing
- * it: a name with an optional registry range. Undefined for a tarball or git URL (the name is inside the
- * archive) and for an alias (`x@npm:y`, where the canonical name is y's, not the dependency key x).
+ * it: a name with an optional registry range. Undefined for everything else a package manager accepts —
+ * a tarball or git URL in any of its spellings (`git@host:o/r.git`, `user/repo`, `github:o/r`, `file:…`,
+ * `ssh://…`), where the name is inside what gets fetched, and an alias (`x@npm:y`, `x@github:o/r`), where
+ * the canonical name is the target's, not the dependency key x.
+ *
+ * Decided by what a name IS rather than by listing what is not one: every spelling the list forgot came
+ * back as a name (`git`, from `git@github.com:o/r.git`).
  *
  * It exists so the duplicate-name guard can refuse the commonest collision — the same package added
  * twice under two specifiers — *before* a package manager writes anything, rather than installing it and
  * then disowning it.
  */
 export function npmNameOf(spec: string): string | undefined {
-  if (/^(?:https?:\/\/|git\+)/.test(spec)) return undefined;
-  const at = spec.lastIndexOf('@');
-  if (at <= 0) return spec;                           // bare, or a scope's leading `@`
-  const range = spec.slice(at + 1);
-  return range.startsWith('npm:') ? undefined : spec.slice(0, at);
+  const at = spec.indexOf('@', 1);                    // past a scope's leading `@`
+  const name = at === -1 ? spec : spec.slice(0, at);
+  if (!NPM_NAME.test(name)) return undefined;
+  // A registry range or tag holds neither; a protocol (`npm:`, `file:`) or a remote (`host:o/r`) does.
+  return at !== -1 && /[:/]/.test(spec.slice(at + 1)) ? undefined : name;
+}
+
+// The one way a package is taken back out of the project, for the two callers that do it: `remove`, which
+// asks first, and the undo of an install `add` then disowned.
+async function uninstallPackage(name: string, projectDir: string): Promise<string> {
+  return runCommand(await detectPackageManager(projectDir), ['remove', name], projectDir);
+}
+
+// The registry forbids two loaded plugins sharing a name, and it is almost always the same package added
+// by two specifiers: a config error, not something to silently double-install. `untouched` says what the
+// refusal left alone, which differs by how far the caller had got.
+function nameClash(name: string | undefined, untouched: string): ToolEvent<ToolResultOf<'plugin'>> | undefined {
+  const clash = name !== undefined ? getRegisteredPlugins().find(p => p.name === name) : undefined;
+  if (clash === undefined) return undefined;
+  return { type: 'error', message:
+    `A plugin named "${clash.name}" is already installed (from "${clash.specifier}"). ` +
+    `Remove it first, or — if this is the same package via a different specifier — drop one. ${untouched}` };
 }
 
 /**
@@ -393,15 +434,15 @@ export function npmNameOf(spec: string): string | undefined {
  * configured, merely not working yet, and `plugin remove` can reach it.
  */
 export async function* uninstallAdded(
-  installed: { pm: string; name: string } | undefined, projectDir: string,
+  installed: string | undefined, projectDir: string,
 ): AsyncGenerator<ToolEvent<ToolResultOf<'plugin'>>, void> {
   if (installed === undefined) return;
   try {
-    const out = await runCommand(installed.pm, ['remove', installed.name], projectDir);
-    yield { type: 'stdout', chunk: out || `Removed the "${installed.name}" package again.\n` };
+    const out = await uninstallPackage(installed, projectDir);
+    yield { type: 'stdout', chunk: out || `Removed the "${installed}" package again.\n` };
   } catch (e) {
     yield { type: 'stderr', chunk:
-      `Could not remove the "${installed.name}" package again (${String(e)}) — it is still in ` +
+      `Could not remove the "${installed}" package again (${String(e)}) — it is still in ` +
       `package.json, so remove it by hand.\n` };
   }
 }
@@ -712,15 +753,9 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
       // the commonest collision there is (the same package added under two specifiers) — so refuse it
       // here, before a human is asked to approve an install that would be disowned on arrival.
       if (classified.kind === 'npm') {
-        const name = npmNameOf(classified.spec);
-        const clash = name !== undefined ? getRegisteredPlugins().find(p => p.name === name) : undefined;
-        if (clash !== undefined) {
-          yield { type: 'error', message:
-            `A plugin named "${clash.name}" is already installed (from "${clash.specifier}"). ` +
-            `Remove it first, or — if this is the same package via a different specifier — drop one. ` +
-            `Nothing was installed, and nothing was added to ${path.basename(configPath)}.` };
-          return;
-        }
+        const clash = nameClash(npmNameOf(classified.spec),
+          `Nothing was installed, and nothing was added to ${path.basename(configPath)}.`);
+        if (clash !== undefined) { yield clash; return; }
       }
 
       // Pre-fetch verification for remote (raw-source) plugins: confirm the package.json declares
@@ -819,10 +854,12 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
       // a loadable specifier on restart — record the installed package name instead.
       let configSpecifier = specifier;
 
-      // What a disowning path below has to undo. Read back from the manifest rather than assumed from the
-      // specifier: the dependency key is what `pm remove` takes, and for a tarball or git URL it is the
-      // only place the installed name appears at all.
-      let installed: { pm: string; name: string } | undefined;
+      // What a disowning path below has to undo: a dependency key SEEN to arrive in a manifest that was
+      // read beforehand, and nothing less. A name merely inferred from the specifier is a guess, and
+      // `pm remove` on a guess deletes a package that may have been the user's all along — one the project
+      // already declared (in any section) is theirs, whatever matbot then concludes about it as a plugin;
+      // `pm add` may have moved its range, but that is not a reason to take it away.
+      let installed: string | undefined;
 
       if (classified.kind === 'npm') {
         const pm = await detectPackageManager(projectDir);
@@ -835,12 +872,10 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
           yield { type: 'error', message: await describeInstallFailure(specifier, pm, projectDir, e) };
           return;
         }
-        const added = await addedDependencyName(projectDir, before);
-        const name  = added ?? npmNameOf(classified.spec);
-        // Only a dependency this call introduced may be undone. One the project already declared is the
-        // user's, whatever matbot then concludes about it as a plugin — `pm add` may have moved its range,
-        // but removing it outright would take a package they were using for their own reasons.
-        if (name !== undefined && !before.has(name)) installed = { pm, name };
+        const added = await addedDependencyName(projectDir, before ?? new Set());
+        // No manifest here beforehand means the install went wherever the package manager found one, and
+        // what it changed there was never read — so there is nothing this call can claim to have added.
+        if (before !== undefined) installed = added;
         // A tarball or git URL is not a loadable specifier on restart, so record what the install
         // actually added instead. A plain registry name needs no translation — it already IS the name.
         if (/^(?:https?:\/\/|git\+)/.test(classified.spec) && added !== undefined) configSpecifier = added;
@@ -861,21 +896,14 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
       }
 
       // Duplicate-name guard: a plugin's canonical package.json `name` is its identity (and the handle
-      // remove/reload address it by), and the registry forbids two loaded plugins sharing one. Reject a
-      // collision *before* writing config — otherwise the load below fails (the registry throw is
-      // swallowed by loadPlugins) and leaves a dangling matbot.yaml entry. Almost always the same
-      // package added by two specifiers: a config error, not something to silently double-install.
-      const pluginName = remoteName ?? localName ?? await nameFromSpecifier(configSpecifier, projectDir);
-      if (pluginName !== undefined) {
-        const clash = getRegisteredPlugins().find(p => p.name === pluginName);
-        if (clash !== undefined) {
-          yield* uninstallAdded(installed, projectDir);
-          yield { type: 'error', message:
-            `A plugin named "${pluginName}" is already installed (from "${clash.specifier}"). ` +
-            `Remove it first, or — if this is the same package via a different specifier — drop one. ` +
-            `Nothing was added to ${path.basename(configPath)}.` };
-          return;
-        }
+      // remove/reload address it by). Reject a collision *before* writing config — otherwise the load
+      // below fails (the registry throw is swallowed by loadPlugins) and leaves a dangling matbot.yaml entry.
+      const clash = nameClash(remoteName ?? localName ?? await nameFromSpecifier(configSpecifier, projectDir),
+        `Nothing was added to ${path.basename(configPath)}.`);
+      if (clash !== undefined) {
+        yield* uninstallAdded(installed, projectDir);
+        yield clash;
+        return;
       }
 
       await addPlugin(configPath, configSpecifier);
@@ -1011,12 +1039,11 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
       // recorded dependency. Local plugins are referenced in place and cached remote (http/github)
       // plugins live under .plugins/; neither was `pnpm add`-ed, so `pnpm remove` is a no-op at best.
       // Mirrors the add path, which only shells out for npm / tarball-or-git specifiers.
-      if (pkgName !== undefined && (await readDependencyNames(projectDir)).has(pkgName)
+      if (pkgName !== undefined && (await readDependencyNames(projectDir))?.has(pkgName) === true
           && (await ctx.gate({ gate: 'npm-uninstall', subject: pkgName, fallback: false,
                                label: `Also uninstall the npm package **"${pkgName}"**?` })).allowed) {
-        const pm = await detectPackageManager(projectDir);
         try {
-          const out = await runCommand(pm, ['remove', pkgName], projectDir);
+          const out = await uninstallPackage(pkgName, projectDir);
           if (out) yield { type: 'stdout', chunk: out };
         } catch (e) {
           yield { type: 'stderr', chunk: `Uninstall failed: ${String(e)}\n` };
