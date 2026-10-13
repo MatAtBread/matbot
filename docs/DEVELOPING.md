@@ -256,8 +256,14 @@ a sibling file behave normally, and the tree stays a real package the model can 
 **That tree is the cache.** A file already mirrored is read from disk and never re-fetched, so a restart
 makes no requests at all and works with no network. The trade is deliberate: a restart never picks up
 changed upstream source. `reload` with `refresh` (the default here) is the one path that does — it evicts
-the plugin's subtree, so the manifest and every file come from upstream, which is also how a moved entry
-or a renamed package is noticed.
+the plugin's cached source, so the manifest and every file come from upstream, which is also how a moved
+entry or a renamed package is noticed.
+
+**A refresh drops the fetched half of that subtree, not all of it.** Dependencies installed into the
+plugin's cache directory (below) stay, and a refreshed manifest declaring a new one makes the same install
+offer `add` does — the fetch used to remove them, which made `reload` impossible for any fetched plugin
+with a dependency. The evicted source is set aside rather than deleted, so a reload whose load then fails
+restores the copy that was working and loads that instead: a failed reload is a no-op, not an outage.
 
 **This route fetches one package; it installs no dependency graph.** A bare import means host-provided, so:
 

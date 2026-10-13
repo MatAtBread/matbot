@@ -2123,6 +2123,14 @@ function renderSessions(sessions) {
 function makeBubble(className, text, media) {
   const div = document.createElement('div');
   div.className = 'message ' + className;
+  // Editing is offered on the bubble itself rather than from the turn divider: the thing being changed
+  // is the text you are pointing at. The handler is attached unconditionally and refuses without a
+  // msgIdx — a parallel pane's bubble has no index in this session, and a live one has none until the
+  // turn commits (see the `done` back-fill).
+  if (className.startsWith('user')) div.addEventListener('dblclick', (e) => {
+    if (e.target.closest('a, button, img, audio, textarea, .bubble-media')) return;
+    void editUserTurn(div);
+  });
   if (media?.length) div.appendChild(makeMediaStrip(media));
   const inner = document.createElement('div');
   inner.className = 'md-body';
@@ -2445,6 +2453,7 @@ function appendUserBubble(text, msgIdx, pending, traceId, media) {
     messagesEl.appendChild(createMsgDivider(msgIdx));
   }
   const div = makeBubble('user' + (pending ? ' pending' : ''), text, media);
+  markEditable(div, msgIdx);
   if (traceId) div.dataset.trace = traceId;
   messagesEl.appendChild(div);
   scrollMessagesToBottom();
@@ -2489,6 +2498,7 @@ function appendUserTurn(content, msgIdx, traceId) {
   let last = null;
   for (const run of runs) {
     last = makeBubble(run.robo ? 'robo' : 'user', run.text, run.media);
+    if (!run.robo) markEditable(last, msgIdx);
     // Tag with the turn's traceId so a replayed `queued` for this still-running turn adopts the
     // existing bubble (renderTurn) instead of drawing a second one.
     if (traceId) last.dataset.trace = traceId;
@@ -2512,7 +2522,6 @@ function createMsgDivider(msgIdx) {
   for (const [icon, label, action, danger] of /** @type {[string, string, string, boolean][]} */ ([
     ['🔗', 'Copy link', 'copy-link', false],
     ['✂',  'Cut',             'cut',       true],
-    ['↻',  'Resend',          'resend',    true],
     ['⎇',  'Fork',            'fork',      false],
     ['🗜', 'Compact',   'compact',   true],
     ['📝', 'Summarise', 'summarise', true],
@@ -2576,8 +2585,6 @@ async function handleDividerAction(divider, action) {
       await callTool('session_edit', { action: 'cut', sessionId: currentSessionId, msgIndex: msgIdx });
       const session = await apiGetSession(currentSessionId);
       if (session) renderSession(session);
-    } else if (action === 'resend') {
-      await resendFrom(msgIdx);
     } else if (action === 'split') {
       if (!confirm('Split session at this point? Messages before will be moved to a new session.')) return;
       const result = await callTool('session_edit', { action: 'split', sessionId: currentSessionId, msgIndex: msgIdx });
@@ -2625,20 +2632,87 @@ async function handleDividerAction(divider, action) {
   }
 }
 
-// Cut the session at a user turn and submit that turn again — "try that again" without retyping it. Only
-// the human blocks are resent: robo blocks were injected by hooks (a `contextual` trigger) and will be
-// injected afresh by the new turn, so resending them would double them. A `file-ref` survives the cut —
-// session media is scoped to the session, not the message — so attachments go back by reference.
-async function resendFrom(msgIdx) {
-  if (sending) { alert('Wait for the running turn to finish (or stop it) before resending.'); return; }
+// A user bubble knows which stored message it came from, which is what makes it editable. Marked here
+// rather than in makeBubble because the index arrives from three places (a reload, a live submission's
+// divider index, the `done` back-fill) and the title is the only affordance the bubble has.
+function markEditable(bubble, msgIdx) {
+  if (msgIdx === undefined) return;
+  bubble.dataset.msgIdx = msgIdx;
+  bubble.title = 'Double-click to edit and resend';
+}
+
+// Edit a committed user turn in place and send it again. Replaces the rendered markdown with a plain
+// textarea over the stored text — the bubble shows `md()` output, so the source has to come from the
+// session, not the DOM. Only the human blocks are offered: robo blocks were injected by hooks (a
+// `contextual` trigger) and will be injected afresh by the new turn, so carrying them would double them.
+async function editUserTurn(bubble) {
+  if (bubble.querySelector('.bubble-editor')) return;
+  const msgIdx = bubble.dataset.msgIdx !== undefined ? parseInt(bubble.dataset.msgIdx) : undefined;
+  if (!currentSessionId || msgIdx === undefined) return;
+  if (sending) { alert('Wait for the running turn to finish (or stop it) before editing a message.'); return; }
   const session = await apiGetSession(currentSessionId);
   const msg = session?.messages[msgIdx];
-  const content = msg?.role === 'user'
+  const human = msg?.role === 'user'
     ? msg.content.filter(c => c.origin !== 'robo' && ((c.type === 'text' && c.text) || c.type === 'file-ref'))
     : [];
-  if (!content.length) { alert('There is no user message here to resend.'); return; }
-  if (!confirm('Delete this message and everything after it, then send it again?')) return;
-  await callTool('session_edit', { action: 'cut', sessionId: currentSessionId, msgIndex: msgIdx });
+  if (!human.length) { alert('There is no user message here to edit.'); return; }
+  const text  = human.filter(c => c.type === 'text').map(c => c.text).join('\n');
+  // A `file-ref` survives the cut — session media is scoped to the session, not the message — so
+  // attachments go back by reference, unedited.
+  const media = human.filter(c => c.type === 'file-ref');
+
+  const body = bubble.querySelector('.md-body');
+  const editor = document.createElement('div');
+  editor.className = 'bubble-editor';
+  const area = document.createElement('textarea');
+  area.className = 'bubble-edit-text';
+  area.value = text;
+  const actions = document.createElement('div');
+  actions.className = 'bubble-edit-actions';
+  const note = document.createElement('span');
+  note.className = 'bubble-edit-note';
+  note.textContent = 'Resending deletes this message and everything after it.';
+  const cancel = document.createElement('button');
+  cancel.type = 'button';
+  cancel.className = 'bubble-edit-btn';
+  cancel.textContent = 'Cancel';
+  const send = document.createElement('button');
+  send.type = 'button';
+  send.className = 'bubble-edit-btn primary';
+  send.textContent = 'Resend';
+  actions.append(note, cancel, send);
+  editor.append(area, actions);
+
+  const close = () => { editor.remove(); if (body) body.style.display = ''; bubble.classList.remove('editing'); };
+  cancel.addEventListener('click', close);
+  send.addEventListener('click', () => void resendEdited(msgIdx, area.value, media, send));
+  area.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); close(); }
+    // Same convention as the composer: plain Enter is a newline, Ctrl/Cmd+Enter sends.
+    else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); void resendEdited(msgIdx, area.value, media, send); }
+  });
+
+  if (body) body.style.display = 'none';
+  bubble.classList.add('editing');
+  bubble.appendChild(editor);
+  area.style.height = Math.min(area.scrollHeight || 0, 320) + 'px';
+  area.focus();
+  area.setSelectionRange(area.value.length, area.value.length);
+}
+
+// Cut the session at this turn and submit the edited content as a fresh one. renderSession redraws from
+// the cut session, which drops the editor with the bubble it was in.
+async function resendEdited(msgIdx, text, media, btn) {
+  const content = [...(text.trim() ? [{ type: 'text', text }] : []), ...media];
+  if (!content.length) { alert('Nothing to send — the message is empty.'); return; }
+  btn.disabled = true;
+  try {
+    await callTool('session_edit', { action: 'cut', sessionId: currentSessionId, msgIndex: msgIdx });
+  } catch (e) {
+    btn.disabled = false;
+    if (String(e).includes('404')) showEditSessionBanner(); else alert('edit failed: ' + e.message);
+    return;
+  }
   const cut = await apiGetSession(currentSessionId);
   if (cut) renderSession(cut);
   await submit(content, false);
@@ -2651,7 +2725,7 @@ function showEditSessionBanner() {
   banner.className = 'plugin-prompt-banner';
   banner.style.display = 'flex';
   const span = document.createElement('span');
-  span.textContent = 'edit-session plugin not loaded — Cut, Resend, Fork, Split, Compact and Summarise are unavailable.';
+  span.textContent = 'edit-session plugin not loaded — Cut, Fork, Split, Compact, Summarise and editing a sent message are unavailable.';
   banner.appendChild(span);
   const btn = document.createElement('button');
   btn.textContent = 'Install edit-session';
@@ -3963,6 +4037,20 @@ async function renderTurn(sid, traceId) {
               for (let j = 0; j < Math.min(unindexed.length, newIdxs.length); j++) {
                 unindexed[j].dataset.msgIdx = newIdxs[j];
               }
+            }
+            // The same back-fill for the user bubbles, which carry an index of their own so a
+            // double-click can edit them. Done independently of the dividers: the first turn of a
+            // session has a bubble and no divider, so the two lists do not line up.
+            const bubbles  = [...messagesEl.querySelectorAll('.message.user')];
+            const unindexB = bubbles.filter(b => b.dataset.msgIdx === undefined);
+            if (unindexB.length > 0) {
+              const indexedB = bubbles.filter(b => b.dataset.msgIdx !== undefined);
+              const lastB    = indexedB.length > 0 ? parseInt(indexedB[indexedB.length - 1].dataset.msgIdx) : -1;
+              const newB     = ev.session.messages
+                .map((m, i) => ({ m, i }))
+                .filter(({ m, i }) => m.role === 'user' && i > lastB)
+                .map(({ i }) => i);
+              for (let j = 0; j < Math.min(unindexB.length, newB.length); j++) markEditable(unindexB[j], newB[j]);
             }
           }
           break;

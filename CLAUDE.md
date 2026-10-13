@@ -236,7 +236,7 @@ All runtime state under `.data/` **next to `matbot.yaml`**, never in source:
 
 `.data/` is gitignored. Plugins may add subdirectories. Other storage providers (e.g. SQLite) differ.
 
-**`.plugins/`** — fetched remote-module cache, **separate** from `.data/`. `.data/` is LLM read-write runtime state; `.plugins/` is matbot-writes / LLM-reads-only (mounted read-only into docker-bash). Never relocate it. Gitignored. It holds remote *plugins* — and only those: a `tool_function` body cannot import a URL (see *Module access from a `tool_function`*). One cache, because a second fetch-and-materialise directory is the thing that drifts — and the contract is unchanged either way: matbot writes it, the model only reads it.
+**`.plugins/`** — fetched remote-module cache, **separate** from `.data/`. `.data/` is LLM read-write runtime state; `.plugins/` is matbot-writes / LLM-reads-only (mounted read-only into docker-bash). Never relocate it. Gitignored. It holds remote *plugins* — and only those: a `tool_function` body cannot import a URL (see *Module access from a `tool_function`*). One cache, because a second fetch-and-materialise directory is the thing that drifts — and the contract is unchanged either way: matbot writes it, the model only reads it. A dot-directory in there is matbot's own bookkeeping rather than a mirrored host (`.restore` holds the copy a refresh set aside, so a failed reload can put the working one back), which is why the cache scan skips them.
 
 ---
 
