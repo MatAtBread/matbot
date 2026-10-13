@@ -349,6 +349,26 @@ churn and less likely to affect a consumer who doesn't use them.
   refresh now sets the previous copy aside rather than deleting it; on a failure it is restored and
   re-loaded, and the result says which happened. Its provisioning is not rolled back with it.
 
+- **`cli` / `tool-plugin`** — a fetched plugin can import a bare CDN URL (issue #89). A URL may be a
+  module *and* the parent of others, which is how esm.sh, jsdelivr and unpkg all serve a bare package:
+  `https://esm.sh/ms@2.1.3` re-exports `/ms@2.1.3/es2022/ms.mjs`. The cache mirrored each URL under its
+  own path, so the first became the *file* `.plugins/esm.sh/ms@2.1.3` and the second's `mkdir` failed
+  with `ENOTDIR` — the documented way to bring a third-party dependency on the http route crashed the
+  loader on the commonest shape of one. A path with no module extension is now cached with `.mjs`
+  appended, beside the directory rather than as it (`ms@2.1.3.mjs` next to `ms@2.1.3/`); it stays in the
+  directory its URL is in, so its own relative imports and `import.meta.url` are unchanged. A path that
+  has a module extension is cached where it was, and so are a plugin's declared `files`, which are read
+  off the disk by name. Both mappers agree on this — the module hook and `materializeRemote`, for an
+  entry with no extension.
+
+  The file a failed attempt left behind is removed when it is found standing where a directory belongs,
+  so an existing cache does not keep failing on its own residue. An extensionless module that *was*
+  cached and working (jsdelivr's `/+esm`) is fetched once more under its new name; the old copy is
+  inert. One collision remains, because nothing in a URL tells it from an ordinary file: a name with a
+  module extension that is also used as a directory (`https://esm.sh/chart.js` with
+  `https://esm.sh/chart.js/auto`). It now fails naming both halves instead of surfacing an errno — or,
+  in the other order, handing Node a directory as a module. A pinned `chart.js@4.5.1` is unaffected.
+
 - **`background-jobs` / `sessions`** — a job's reporting conversation is stated where the model reads
   it. Both tools described the append target as "this conversation" or "a default", which a model
   reads as the conversation it is in when it looks: it told the user a job would "report back here"

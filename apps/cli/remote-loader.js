@@ -20,8 +20,8 @@
 // package's URL, lets docker-bash mount `projectRoot` read-only so the model can read what it fetched, and
 // lets a CommonJS dependency load at all. The URL is where a file CAME from; the path is what it IS.
 
-import { mkdir, writeFile } from 'node:fs/promises';
-import { existsSync, readFileSync } from 'node:fs';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { readFileSync, statSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Worker, MessageChannel, receiveMessageOnPort, isMainThread, workerData, parentPort } from 'node:worker_threads';
 import path from 'node:path';
@@ -88,10 +88,74 @@ export function cacheLocation(fileUrl) {
   };
 }
 
-/** Where a URL's bytes live once fetched — the same mapping `remote-cache.ts` mirrors with. */
+// What Node loads by extension. A path ending in one of these is mirrored under its own name.
+const MODULE_EXT = /\.(?:ts|mts|cts|js|mjs|cjs|json|wasm)$/;
+
+/**
+ * Where a URL's module lives once fetched — the same mapping `remote-cache.ts` mirrors with.
+ *
+ * A URL space lets one path be both a document and the prefix of others; a directory tree does not. And
+ * that is the shape every npm CDN serves a bare package in: `https://esm.sh/ms@2.1.3` is a module whose own
+ * imports live under `/ms@2.1.3/…`. Mirrored verbatim it took, as a FILE, the name its children need as a
+ * directory, and the second fetch died in `mkdir` with ENOTDIR.
+ *
+ * So a path with no module extension is given one: `ms@2.1.3.mjs`, beside `ms@2.1.3/`. Beside rather than
+ * an index inside, because the file then stays in the directory its URL is in — a relative import from it
+ * reconstructs the right URL with nothing to map back, and `import.meta.url` keeps the same neighbours.
+ * `.mjs` because a module reached by URL is an ES module, whatever its path says. It shares the name with a
+ * URL that really does end `.mjs`; a server offering both is offering one module, and one copy of it is
+ * the better outcome.
+ *
+ * A path that HAS a module extension stays where it is, because a plugin's own tree has to remain a real
+ * package on disk. That leaves the one case no rule over the URL alone can settle: a name that is a file
+ * by its extension and a directory by use (`https://esm.sh/chart.js` beside `https://esm.sh/chart.js/auto`),
+ * which nothing distinguishes from an `index.js`. `store` says so rather than surfacing the errno. A pinned
+ * `chart.js@4.5.1` has no extension, so it is unaffected.
+ */
 function urlToCachePath(url, dotPlugins) {
   const u = new URL(url);
-  return path.join(dotPlugins, u.host, decodeURIComponent(u.pathname));
+  const pathname = decodeURIComponent(u.pathname);
+  const leaf = MODULE_EXT.test(pathname) ? '' : pathname.endsWith('/') ? 'index.mjs' : '.mjs';
+  return path.join(dotPlugins, u.host, pathname + leaf);
+}
+
+const isFile = p => statSync(p, { throwIfNoEntry: false })?.isFile() ?? false;
+
+// The file standing where `p` needs a directory, if there is one. The nearest ancestor that exists settles
+// it: everything above a directory is a directory.
+function fileAbove(p, dotPlugins) {
+  for (let dir = path.dirname(p); dir.length > dotPlugins.length; dir = path.dirname(dir)) {
+    const found = statSync(dir, { throwIfNoEntry: false });
+    if (found !== undefined) return found.isDirectory() ? undefined : dir;
+  }
+  return undefined;
+}
+
+// Write a fetched module, for the two cases where the mapping above is not the whole answer.
+//
+// A file in the way under a name with no module extension is one this layout no longer writes: what a
+// cache from before it left behind (the half-fetched `ms@2.1.3` of the failure described above), and
+// nothing looks for it there now. It is removed, or the upgrade would keep failing on its own residue.
+// Anything else in the way is the collision the mapping cannot avoid, and is reported as that.
+async function store(p, body, url, dotPlugins) {
+  const write = async () => {
+    await mkdir(path.dirname(p), { recursive: true });
+    await writeFile(p, body, 'utf8');
+  };
+  try { return await write(); }
+  catch (e) {
+    const inTheWay = statSync(p, { throwIfNoEntry: false })?.isDirectory() ? p : fileAbove(p, dotPlugins);
+    if (inTheWay === undefined) throw e;
+    if (inTheWay !== p && !MODULE_EXT.test(inTheWay)) {
+      await rm(inTheWay, { force: true });
+      return write();
+    }
+    throw new Error(
+      `Cannot cache ${url}: "${path.relative(dotPlugins, inTheWay)}" in the plugin cache has to be both a ` +
+      `module and the directory of other modules, which a URL can be and a file tree cannot. Import one of ` +
+      `them by a URL that does not share the name — a pinned version ("pkg.js@1.2.3") is cached beside its ` +
+      `directory, not as it.`);
+  }
 }
 
 // matbot source imports siblings with an explicit `.js` extension (verbatimModuleSyntax) while the file
@@ -132,7 +196,9 @@ function candidatesOf(specifier, parent) {
 function onDisk({ dotPlugins, candidates }) {
   for (const candidate of candidates) {
     const p = urlToCachePath(candidate, dotPlugins);
-    if (existsSync(p)) return pathToFileURL(p).href;
+    // A file, specifically: a directory of that name holds some other URL's children, and handing Node its
+    // URL fails as a directory import, with nothing to say why.
+    if (isFile(p)) return pathToFileURL(p).href;
   }
   return undefined;
 }
@@ -162,8 +228,7 @@ export async function resolveFetched(specifier, parent) {
       continue;
     }
     const p = urlToCachePath(candidate, plan.dotPlugins);
-    await mkdir(path.dirname(p), { recursive: true });
-    await writeFile(p, body, 'utf8');
+    await store(p, body, candidate, plan.dotPlugins);
     await recordOrigin(plan.dotPlugins, candidate);
     return pathToFileURL(p).href;
   }

@@ -214,6 +214,32 @@ test('a declared file that cannot be fetched does not fail the materialise', asy
   }
 });
 
+// The module hook and this library each map a URL to a cache path, and neither can import the other's
+// (issue #89). The entry is where they meet: written here, and the file the hook resolves that plugin's
+// relative imports from. An asset is the other half — read off the disk by name, so it is never renamed.
+test('an entry with no extension is cached as a module, and a declared asset under its own name', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'matbot-remote-cache-'));
+  const dotPlugins = join(dir, '.plugins');
+  const srv = await serve({
+    '/x/package.json': JSON.stringify({ name: '@fixture/matbot-remote-x', matbotRuntime: ['node'], exports: './entry', files: ['notes.v2'] }),
+    '/x/entry': `export const plugin = { apiVersion: '0.4' };\n`,
+    '/x/entry/part.mjs': `export const part = 1;\n`,
+    '/x/notes.v2': 'an asset\n',
+  });
+  try {
+    const m = await materializeRemote(`${srv.origin}/x/`, dotPlugins, dir);
+    assert.equal(m.entry, join(m.pkgRoot, 'entry.mjs'), 'beside the directory `entry/…` would need');
+    assert.equal(await readFile(join(m.pkgRoot, 'notes.v2'), 'utf8'), 'an asset\n');
+
+    srv.log.length = 0;
+    assert.equal((await materializeRemote(`${srv.origin}/x/package.json`, dotPlugins, dir)).entry, m.entry);
+    assert.deepEqual(srv.log, [], 'and found there again, warm');
+  } finally {
+    await srv.stop();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('a declared dependency nothing satisfies is reported, named well enough to act on', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'matbot-remote-notes-'));
   const dotPlugins = join(dir, '.plugins');

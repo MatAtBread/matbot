@@ -97,6 +97,89 @@ test('a root-relative import resolves against the origin, not the filesystem roo
   }
 });
 
+// Issue #89. A URL may be a module AND the parent of others, and every npm CDN serves a bare package that
+// way: `https://esm.sh/ms@2.1.3` re-exports `/ms@2.1.3/es2022/ms.mjs`. Mirrored under its own name the
+// first took, as a file, the name the second needs as a directory, and `mkdir` failed with ENOTDIR.
+test('a URL with no extension is cached beside the directory its children need, in either order', async () => {
+  const files = {
+    '/ms@2.1.3': 'export { default } from "/ms@2.1.3/es2022/ms.mjs";\n',
+    '/ms@2.1.3/es2022/ms.mjs': 'export default () => "1m";\n',
+  };
+  for (const order of [['/ms@2.1.3', '/ms@2.1.3/es2022/ms.mjs'], ['/ms@2.1.3/es2022/ms.mjs', '/ms@2.1.3']]) {
+    const srv = await serve(files);
+    const { parent, cleanup } = await cacheTree(new URL(srv.origin).host);
+    try {
+      const urls: Record<string, string> = {};
+      for (const spec of order) urls[spec] = await resolveFetched(spec, parent) as string;
+      assert.match(urls['/ms@2.1.3'] as string, /[/\\]ms@2\.1\.3\.mjs$/);
+      assert.match(urls['/ms@2.1.3/es2022/ms.mjs'] as string, /[/\\]ms@2\.1\.3[/\\]es2022[/\\]ms\.mjs$/);
+      for (const spec of order) assert.equal(await readFile(new URL(urls[spec] as string), 'utf8'), files[spec as keyof typeof files]);
+
+      // Warm, the same answers and nothing asked — the read has to agree with the write about the name.
+      srv.log.length = 0;
+      for (const spec of order) assert.equal(await resolveFetched(spec, parent), urls[spec]);
+      assert.deepEqual(srv.log, []);
+    } finally {
+      await srv.stop();
+      await cleanup();
+    }
+  }
+});
+
+// The file is renamed, not moved: it stays in the directory its URL is in, so what it imports relatively
+// is still reconstructed from where it sits, with no mapping back from the name it was given.
+test('a relative import from an extensionless module resolves against that module\'s own URL', async () => {
+  const srv = await serve({ '/lib/tool': 'export * from "./part.mjs";\n', '/lib/part.mjs': 'export const part = 1;\n' });
+  const { parent, cleanup } = await cacheTree(new URL(srv.origin).host);
+  try {
+    const tool = await resolveFetched('/lib/tool', parent) as string;
+    const part = await resolveFetched('./part.mjs', tool) as string;
+    assert.match(part, /[/\\]lib[/\\]part\.mjs$/);
+    assert.deepEqual(srv.log.map(r => `${r.status} ${r.path}`), ['200 /lib/tool', '200 /lib/part.mjs']);
+  } finally {
+    await srv.stop();
+    await cleanup();
+  }
+});
+
+// A cache that met the failure above still holds its first half: the bare name, as a file. Nothing reads
+// it there any more, and left in place it would fail the same `mkdir` for ever.
+test('the file an earlier layout left where a directory belongs is cleared out of the way', async () => {
+  const srv = await serve({ '/ms@2.1.3/es2022/ms.mjs': 'export default () => "1m";\n' });
+  const host = new URL(srv.origin).host;
+  const { dotPlugins, parent, cleanup } = await cacheTree(host);
+  try {
+    await writeFile(join(dotPlugins, host, 'ms@2.1.3'), 'export * from "/ms@2.1.3/es2022/ms.mjs";\n');
+    const url = await resolveFetched('/ms@2.1.3/es2022/ms.mjs', parent) as string;
+    assert.equal(await readFile(new URL(url), 'utf8'), 'export default () => "1m";\n');
+  } finally {
+    await srv.stop();
+    await cleanup();
+  }
+});
+
+// What no rule over the URL alone can settle: a name that is a file by its extension and a directory by
+// use. Nothing tells `chart.js` the package from `index.js` the file, and a plugin's own `.js` and `.ts`
+// have to stay where they are. So it fails — as itself, in both orders, rather than as ENOTDIR one way
+// and a directory handed to Node as a module the other.
+test('a module-named URL that is also a directory fails saying so, not with an errno', async () => {
+  const files = { '/chart.js': 'export * from "/chart.js/auto";\n', '/chart.js/auto': 'export default 1;\n' };
+  for (const [first, second] of [['/chart.js', '/chart.js/auto'], ['/chart.js/auto', '/chart.js']] as const) {
+    const srv = await serve(files);
+    const { parent, cleanup } = await cacheTree(new URL(srv.origin).host);
+    try {
+      await resolveFetched(first, parent);
+      await assert.rejects(
+        resolveFetched(second, parent) as Promise<string>,
+        (e: unknown) => e instanceof Error && /Cannot cache .*"[^"]*chart\.js" in the plugin cache has to be both/.test(e.message),
+      );
+    } finally {
+      await srv.stop();
+      await cleanup();
+    }
+  }
+});
+
 // Dropped from both buckets by the lexer, then failed at load. A third-party dependency expressed as a URL
 // is the documented way to have one on this route, so it had to actually work.
 test('an absolute URL import is fetched, including from another host', async () => {

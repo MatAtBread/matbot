@@ -278,6 +278,11 @@ restores the copy that was working and loads that instead: a failed reload is a 
 
 - **Any source CDN, including the rewriting ones.** jsdelivr and unpkg serve source with bare imports
   intact; esm.sh rewrites them to root-relative paths. Both work — the second used to be silently dropped.
+- **Pin the version of a URL import.** A URL with no module extension is cached with `.mjs` appended —
+  `https://esm.sh/ms@2.1.3` becomes `.plugins/esm.sh/ms@2.1.3.mjs`, beside the `ms@2.1.3/` directory its
+  own imports land in. An unpinned package whose *name* ends in one (`https://esm.sh/chart.js`) is cached
+  as that file, so importing a subpath of it as well (`…/chart.js/auto`) fails: one name cannot be a file
+  and a directory. `chart.js@4.5.1` and `chart.js@4.5.1/auto` are fine.
 - **ESM only.** A CommonJS dependency reached by URL will not load. jsdelivr's default paths serve CJS for
   many packages; `/+esm` and esm.sh are the ESM forms.
 - **A tarball or git URL is not this route** — it takes npm, because something has to unpack it.

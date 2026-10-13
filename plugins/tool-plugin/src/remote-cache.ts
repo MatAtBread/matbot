@@ -356,7 +356,25 @@ async function findEntryManifest(entryUrl: string, dotPlugins: string, live: boo
 
 // ── Materialisation (fetch the module graph onto disk) ───────────────────────────
 
+// Where a MODULE lives: a path with no module extension is given `.mjs`, so that `https://esm.sh/ms@2.1.3`
+// does not take, as a file, the name its own children (`/ms@2.1.3/es2022/…`) need as a directory. A
+// manifest ends `.json` and is therefore where its URL says, which is what lets the same function place it.
+//
+// The module hook maps with this rule too and holds the reasoning (apps/cli/remote-loader.js); it cannot
+// import it from here and this cannot import it from there, so keep the two in sync — the entry written
+// here is the file the hook resolves that plugin's relative imports from.
+const MODULE_EXT = /\.(?:ts|mts|cts|js|mjs|cjs|json|wasm)$/;
+
 function urlToCachePath(url: string, dotPlugins: string): string {
+  const u = new URL(url);
+  const pathname = decodeURIComponent(u.pathname);
+  const leaf = MODULE_EXT.test(pathname) ? '' : pathname.endsWith('/') ? 'index.mjs' : '.mjs';
+  return path.join(dotPlugins, u.host, pathname + leaf);
+}
+
+// Where an ASSET lives: exactly where its URL says, whatever it is called. A plugin reads one off the disk
+// by its own name (`new URL('./static/index.html', import.meta.url)`), so nothing may be appended to it.
+function assetCachePath(url: string, dotPlugins: string): string {
   const u = new URL(url);
   return path.join(dotPlugins, u.host, decodeURIComponent(u.pathname));
 }
@@ -675,7 +693,7 @@ async function fetchDeclaredFiles(pkg: Record<string, unknown>, pkgUrl: string, 
     const last = rel.split('/').pop() ?? '';
     if (rel.includes('*') || !last.includes('.')) continue; // glob or directory entry — not fetchable here
     const url = new URL(rel, pkgUrl).href;
-    const cachePath = urlToCachePath(url, dotPlugins);
+    const cachePath = assetCachePath(url, dotPlugins);
     try { await access(cachePath); continue; } catch { /* not mirrored yet */ }
     // Best-effort includes the network being gone. An asset that never cached (a 404, an interrupted
     // first boot) is retried on every boot, so without this an offline boot dies on the retry — for a

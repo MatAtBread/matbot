@@ -78,6 +78,31 @@ test('a fetched plugin\'s imports are fetched on demand through the in-thread ho
   }
 });
 
+// Issue #89, end to end: a dependency written as a bare CDN URL, which answers with a module that
+// re-exports a file beneath its own path. The first was cached as the file `ms@2.1.3`, and the second then
+// needed that name as a directory.
+test('a URL import whose module re-exports a child of its own path loads', { timeout: 30_000 }, async () => {
+  const srv = await serve({
+    '/ms@2.1.3': `export { default } from "/ms@2.1.3/es2022/ms.mjs";\n`,
+    '/ms@2.1.3/es2022/ms.mjs': `export default () => '1m';\n`,
+  });
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'matbot-in-thread-fetch-')));
+  const hostDir = join(dir, '.plugins', new URL(srv.origin).host);
+  try {
+    mkdirSync(join(hostDir, 'p'), { recursive: true });
+    writeFileSync(join(hostDir, '.origin'), 'http:');
+    writeFileSync(join(hostDir, 'p', 'index.ts'), `export { default as ms } from '${srv.origin}/ms@2.1.3';\n`);
+
+    const mod = await import(pathToFileURL(join(hostDir, 'p', 'index.ts')).href);
+    assert.equal(mod.ms(), '1m');
+    assert.ok(existsSync(join(hostDir, 'ms@2.1.3.mjs')), 'the module, beside…');
+    assert.ok(existsSync(join(hostDir, 'ms@2.1.3', 'es2022', 'ms.mjs')), '…the directory its child needs');
+  } finally {
+    await srv.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a fetched plugin\'s import that nothing serves fails with the file that asked for it', { timeout: 30_000 }, async () => {
   const srv = await serve({});
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'matbot-in-thread-fetch-')));
