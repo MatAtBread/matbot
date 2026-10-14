@@ -365,6 +365,39 @@ churn and less likely to affect a consumer who doesn't use them.
   plugin declares are installed into its cache directory (0.4.20, above), the model was told to work
   around a dependency it could simply have approved; both now say what happens.
 
+- **`tool-plugin` / `cli`** — `plugin remove` takes back what `plugin add` created, and only that (issue
+  #98). Nothing recorded what an install created, so `remove` and the undo of a failed `add` both inferred
+  it from what they found, and a live add/reload/remove run across all four routes showed `remove` leaving
+  most of it behind: a github/http plugin's source and the full dependency tree installed into it, its
+  set-aside copy as empty directories, and its name link — so a removed plugin was still importable by
+  name. What a thing is decides who removes it:
+
+  - **matbot's own cache** — a fetched plugin's source, its installed dependencies, its set-aside copy and
+    its name link — is derivable from the config entry, so `remove` deletes it, unless another configured
+    plugin's files live in the same directory (two plugins from one repo). A removed plugin is therefore no
+    longer listed by `discover_local`, which lists what is cached.
+  - **the project's files** — a key `npm add` wrote into `package.json`, or the `node_modules` and lockfile
+    installing a local plugin's dependencies created in its directory — carry nothing saying who put them
+    there. So `add` (and `matbot install`) records what it created as it creates it, under
+    `.plugins/.installs/`, and `remove` offers back exactly that, through the existing `npm-uninstall` gate
+    and a new `remove-provisioned` one. It no longer reads `package.json` to decide, which was how it could
+    offer to uninstall a package the project declared itself. "Created" means a dependency key seen to
+    arrive in a manifest read beforehand, in no section of it — a package manager treats a
+    `devDependencies` entry as present, and npm moves it — and nothing at all when the project directory has
+    no manifest of its own.
+
+  An `add` that then disowns the plugin — a duplicate name, an incompatible runtime, not a plugin — takes
+  back everything it put anywhere, unasked: the npm package it introduced, the `node_modules` and lockfile it
+  created, and a fetched plugin's cache. It used to keep the install, and in the duplicate-name case config
+  was never written, so `remove` had nothing to offer the uninstall against. `add <npm name>@<version>` for
+  an npm plugin already installed is not a stray: the package manager has installed that version in place,
+  and the result says to reload it. A plugin's name link now follows whichever copy was materialised last;
+  it was first-writer-wins, so a plugin installed from github resolved by name to the copy an earlier http
+  install had left, and a link to a removed directory could never be replaced. And `plugin add npm:<spec>`,
+  the documented way to force the npm route, works: the `npm:` was passed to the package manager, which
+  reads it as an alias and refused every one; the config now records the package name it installed under,
+  as it already did for a tarball or git URL.
+
 - **`background-jobs` / `sessions`** — a job's reporting conversation is stated where the model reads
   it. Both tools described the append target as "this conversation" or "a default", which a model
   reads as the conversation it is in when it looks: it told the user a job would "report back here"

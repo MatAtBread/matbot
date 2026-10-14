@@ -265,6 +265,15 @@ offer `add` does — the fetch used to remove them, which made `reload` impossib
 with a dependency. The evicted source is set aside rather than deleted, so a reload whose load then fails
 restores the copy that was working and loads that instead: a failed reload is a no-op, not an outage.
 
+**Removing one takes its cache with it.** `plugin remove` deletes the plugin's source, the dependencies
+installed into it, a set-aside copy and its name link — all matbot's own, and derivable from the config
+entry — unless another configured plugin's files live in the same directory. So a removed plugin is no
+longer importable by name, and no longer listed by `discover_local`, which lists what is cached. What `add`
+changed in the *project* is a different matter: an npm package it installed, or the `node_modules` and
+lockfile a local plugin's dependency install created. Nothing there says who put it there, so `add` records
+what it created as it creates it (`.plugins/.installs/`), and `remove` offers back exactly that — a package
+the project already declared is never touched.
+
 **This route fetches one package's own files; its dependencies come one of three ways.** A bare import
 resolves from the plugin's cache directory, then the host, so:
 

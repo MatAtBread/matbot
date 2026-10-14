@@ -73,8 +73,10 @@ export interface ProvisionPlan {
   packages:    readonly string[];
   /** Declared ranges this route will not hand to a package manager; when non-empty, nothing is installed. */
   unsupported: readonly { name: string; range: string }[];
-  /** Whether the directory already had a lockfile, so a declined plan can leave no trace. */
-  hadLockfile: boolean;
+  /** Whether planning wrote the lockfile, which was not there before — so a declined plan can leave no trace. */
+  createdLockfile: boolean;
+  /** Whether the directory already had node_modules, which installing replaces — so a removal knows if it was ours. */
+  hadNodeModules: boolean;
 }
 
 const LOCKFILE = 'package-lock.json';
@@ -87,7 +89,8 @@ const LOCKFILE = 'package-lock.json';
  * means they will not be installed, and an approval list must describe what will actually happen.
  */
 export async function planProvision(dir: string): Promise<ProvisionPlan> {
-  const empty = { dir, packages: [], unsupported: [], hadLockfile: false };
+  const hadNodeModules = await exists(path.join(dir, 'node_modules'));
+  const empty = { dir, packages: [], unsupported: [], createdLockfile: false, hadNodeModules };
 
   let deps: Record<string, unknown>;
   try {
@@ -104,7 +107,7 @@ export async function planProvision(dir: string): Promise<ProvisionPlan> {
 
   const unsupported = entries.filter(([, range]) => !isRegistryRange(range)).map(([name, range]) => ({ name, range }));
   const hadLockfile = await exists(path.join(dir, LOCKFILE));
-  if (unsupported.length > 0) return { dir, packages: [], unsupported, hadLockfile };
+  if (unsupported.length > 0) return { dir, packages: [], unsupported, createdLockfile: false, hadNodeModules };
 
   await runCommand('npm', ['install', '--package-lock-only', ...NPM_FLAGS], dir);
 
@@ -120,7 +123,7 @@ export async function planProvision(dir: string): Promise<ProvisionPlan> {
     .map(([key, v]) => `${key.replace(/^(?:.*\/)?node_modules\//, '')}@${v.version ?? '?'}`)
     .sort();
 
-  return { dir, packages, unsupported, hadLockfile };
+  return { dir, packages, unsupported, createdLockfile: !hadLockfile, hadNodeModules };
 }
 
 /**
@@ -181,8 +184,17 @@ async function sameDir(linkPath: string, target: string): Promise<boolean> {
 
 /** Undo what planning wrote. A declined install must not leave a lockfile in someone's plugin. */
 export async function discardProvision(plan: ProvisionPlan): Promise<void> {
-  if (plan.hadLockfile || plan.packages.length === 0) return;
-  await rm(path.join(plan.dir, LOCKFILE), { force: true });
+  if (plan.createdLockfile) await rm(path.join(plan.dir, LOCKFILE), { force: true });
+}
+
+// Take back what an applied plan created, and only that: a lockfile or a node_modules the directory had
+// before is the author's. (`npm ci` replaced a node_modules that was there, so "had one" is all that can be
+// known — whatever was in it is not recoverable, and is not deleted either.)
+export async function removeProvisioned(created: { dir: string; lockfile: boolean; nodeModules: boolean }): Promise<string[]> {
+  const removed: string[] = [];
+  if (created.nodeModules) { await rm(path.join(created.dir, 'node_modules'), { recursive: true, force: true }); removed.push('node_modules'); }
+  if (created.lockfile)    { await rm(path.join(created.dir, LOCKFILE), { force: true }); removed.push(LOCKFILE); }
+  return removed;
 }
 
 async function exists(p: string): Promise<boolean> {

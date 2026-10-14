@@ -9,8 +9,10 @@ import { pathToFileURL, fileURLToPath }       from 'node:url';
 import { createRequire }                     from 'node:module';
 import path                                  from 'node:path';
 import { classifySpecifier, fetchRemoteManifest, canonicalLocalSpecifier, materializeRemote,
-         restoreRemote, discardRestore } from '../remote-cache.js';
-import { planProvision, applyProvision, discardProvision, runCommand, type ProvisionPlan } from '../provision.js';
+         restoreRemote, discardRestore, releaseRemote } from '../remote-cache.js';
+import { planProvision, applyProvision, discardProvision, removeProvisioned, runCommand, type ProvisionPlan } from '../provision.js';
+import { readInstallRecord, writeInstallRecord, dropInstallRecord, declaredDependencies, introducedDependency,
+         type InstallRecord } from '../install-record.js';
 import { findDuplicateSingletons } from '../singletons.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -324,23 +326,38 @@ async function addFlags(pm: string, dir: string): Promise<string[]> {
   try { await access(path.join(dir, 'pnpm-workspace.yaml')); return ['-w']; } catch { return []; }
 }
 
-// The dependency names recorded in the project package.json — used to discover what a pnpm/npm
-// install of a tarball/git URL actually added (a URL is not a loadable specifier on restart, but
-// the installed package name is). dependencies + optionalDependencies cover what `add` writes.
-async function readDependencyNames(projectDir: string): Promise<Set<string>> {
-  try {
-    const pkg = JSON.parse(await readFile(path.join(projectDir, 'package.json'), 'utf8')) as {
-      dependencies?: Record<string, string>; optionalDependencies?: Record<string, string>;
-    };
-    return new Set([...Object.keys(pkg.dependencies ?? {}), ...Object.keys(pkg.optionalDependencies ?? {})]);
-  } catch {
-    return new Set();
+// The configured specifiers, other than `except`, whose files are in the fetched-plugin cache — what
+// `releaseRemote` must not delete from under.
+async function otherRemotes(configPath: string, projectDir: string, except: string): Promise<string[]> {
+  const remotes: string[] = [];
+  for (const spec of await readPluginsList(configPath)) {
+    if (spec !== except && (await classifySpecifier(spec, projectDir)).kind === 'http') remotes.push(spec);
   }
+  return remotes;
 }
 
-async function addedDependencyName(projectDir: string, before: Set<string>): Promise<string | undefined> {
-  const after = [...await readDependencyNames(projectDir)].filter(n => !before.has(n));
-  return after.length === 1 ? after[0] : undefined;
+// Take back, unasked, what an `add` that then disowns the plugin changed in the project: it aborts an
+// install approved moments ago in the same call, rather than acting on something the user may still want.
+// Only what the call itself was seen to create (install-record.ts) — never a dependency the project
+// already declared, and never on the paths that keep the entry in config to retry (a missing secret, an
+// unresolved dependency), where the plugin is installed, merely not working yet, and `remove` can reach it.
+async function* takeBack(
+  created: Omit<InstallRecord, 'entry'>, projectDir: string,
+): AsyncGenerator<ToolEvent<ToolResultOf<'plugin'>>, void> {
+  if (created.dependency !== undefined) {
+    try {
+      const out = await runCommand(await detectPackageManager(projectDir), ['remove', created.dependency], projectDir);
+      yield { type: 'stdout', chunk: out || `Removed the "${created.dependency}" package again.\n` };
+    } catch (e) {
+      yield { type: 'stderr', chunk:
+        `Could not remove the "${created.dependency}" package again (${String(e)}) — it is still in ` +
+        `package.json, so remove it by hand.\n` };
+    }
+  }
+  if (created.provisioned !== undefined) {
+    const removed = await removeProvisioned(created.provisioned);
+    if (removed.length > 0) yield { type: 'stdout', chunk: `Removed the ${removed.join(' and ')} its install created.\n` };
+  }
 }
 
 const exists = async (p: string): Promise<boolean> => {
@@ -738,10 +755,17 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
         return;
       }
 
+      // What this call changes outside matbot's own cache, as it changes it: written to the install record
+      // once the entry is in config, and taken back if the plugin is then disowned.
+      const created: Omit<InstallRecord, 'entry'> = {};
+      const dotPlugins = path.join(projectDir, '.plugins');
+
+      if (plan !== undefined && plan.packages.length === 0) await discardProvision(plan);
       if (plan !== undefined && plan.packages.length > 0) {
         yield { type: 'stdout', chunk: `Installing ${plan.packages.length} dependency package(s) with npm...\n` };
         try {
           const { linked, output } = await applyProvision(plan);
+          created.provisioned = { dir: plan.dir, lockfile: plan.createdLockfile, nodeModules: !plan.hadNodeModules };
           if (output) yield { type: 'stdout', chunk: output };
           if (linked.length > 0) yield { type: 'stdout', chunk: `Linked the host's ${linked.join(', ')}.\n` };
         } catch (e) {
@@ -756,23 +780,30 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
       // a loadable specifier on restart — record the installed package name instead.
       let configSpecifier = specifier;
 
+      // Whether the project already declared what the package manager just installed: then a clash below
+      // is the same package at another version, installed over the one that is loaded, not a stray.
+      let replacedDeclared = false;
       if (classified.kind === 'npm') {
         const pm = await detectPackageManager(projectDir);
         yield { type: 'stdout', chunk: `Installing "${specifier}" with ${pm}...\n` };
-        const before = await readDependencyNames(projectDir);
+        const before = await declaredDependencies(projectDir);
         try {
-          const out = await runCommand(pm, ['add', ...await addFlags(pm, projectDir), specifier], projectDir);
+          // `classified.spec`, never `specifier`: the `npm:` that forces this route is matbot's, and a
+          // package manager reads `npm:x` as an alias with no name, which every one of them refuses.
+          const out = await runCommand(pm, ['add', ...await addFlags(pm, projectDir), classified.spec], projectDir);
           if (out) yield { type: 'stdout', chunk: out };
         } catch (e) {
           yield { type: 'error', message: await describeInstallFailure(specifier, pm, projectDir, e) };
           return;
         }
-        // A tarball or git URL is not a loadable specifier on restart, so record what the install
-        // actually added instead. A plain registry name needs no translation — it already IS the name.
-        if (/^(?:https?:\/\/|git\+)/.test(classified.spec)) {
-          const installedName = await addedDependencyName(projectDir, before);
-          if (installedName !== undefined) configSpecifier = installedName;
-        }
+        const dependency = introducedDependency(before, await declaredDependencies(projectDir));
+        if (dependency !== undefined) created.dependency = dependency;
+        replacedDeclared = before !== undefined && dependency === undefined;
+        // A tarball or git URL is not a loadable specifier on restart, and nor is anything forced with
+        // `npm:`, so record what the install actually added instead. A plain registry name needs no
+        // translation — it already IS the name.
+        const loadable = specifier === classified.spec && !/^(?:https?:\/\/|git\+)/.test(classified.spec);
+        if (!loadable && dependency !== undefined) configSpecifier = dependency;
       }
 
       // A path is the least portable thing this could record: it is right only for this working copy,
@@ -794,19 +825,43 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
       // collision *before* writing config — otherwise the load below fails (the registry throw is
       // swallowed by loadPlugins) and leaves a dangling matbot.yaml entry. Almost always the same
       // package added by two specifiers: a config error, not something to silently double-install.
+      //
+      // Checked after the install, not before, even for a bare npm name whose name is knowable up front:
+      // `add foo@2.0.0` with `foo` loaded is how an npm plugin's version is changed, and refusing it first
+      // left no way to do that short of removing the plugin.
       const pluginName = remoteName ?? localName ?? await nameFromSpecifier(configSpecifier, projectDir);
       if (pluginName !== undefined) {
         const clash = getRegisteredPlugins().find(p => p.name === pluginName);
         if (clash !== undefined) {
+          if (replacedDeclared) {
+            yield { type: 'result', value: { message:
+              `"${pluginName}" is already installed (from "${clash.specifier}"), and "${specifier}" has been ` +
+              `installed in its place in the project. Reload "${pluginName}" to run it; nothing was added to ` +
+              `${path.basename(configPath)}.` } };
+            return;
+          }
+          yield* takeBack(created, projectDir);
           yield { type: 'error', message:
             `A plugin named "${pluginName}" is already installed (from "${clash.specifier}"). ` +
             `Remove it first, or — if this is the same package via a different specifier — drop one. ` +
-            `Nothing was added to ${path.basename(configPath)}.` };
+            `Nothing was added to ${path.basename(configPath)}, and nothing this install changed was kept.` };
           return;
         }
       }
 
       await addPlugin(configPath, configSpecifier);
+      await writeInstallRecord(dotPlugins, { entry: configSpecifier, ...created });
+
+      // A plugin that turns out not to be one is disowned: out of config, and everything this call put
+      // anywhere taken back — the project's files, and a fetched plugin's cache.
+      const disown = async function* (): AsyncGenerator<ToolEvent<ToolResultOf<'plugin'>>, void> {
+        await removePlugin(configPath, configSpecifier);
+        yield* takeBack(created, projectDir);
+        await dropInstallRecord(dotPlugins, configSpecifier);
+        if (classified.kind === 'http') {
+          await releaseRemote(configSpecifier, dotPlugins, await otherRemotes(configPath, projectDir, configSpecifier));
+        }
+      };
 
       // For a remote specifier, loadPlugin materialises the module graph into .plugins/ first.
       yield { type: 'stdout', chunk: `Activating "${configSpecifier}"...\n` };
@@ -826,7 +881,7 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
         // carries an entry that can never activate. Other activation failures (e.g. a missing secret)
         // are left in config to fix and retry.
         if (isIncompatibleRuntimeError(e)) {
-          await removePlugin(configPath, configSpecifier);
+          yield* disown();
           yield { type: 'error', message: e.message };
           return;
         }
@@ -834,7 +889,7 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
         // the loader's `reason`, which reads as a code-fix instruction ("Expected: export const plugin")
         // an LLM may try to act on by editing the library's source.
         if (isNotAPluginError(e)) {
-          await removePlugin(configPath, configSpecifier);
+          yield* disown();
           yield { type: 'error', message:
             `"${configSpecifier}" is not a matbot plugin — it exports no \`plugin\`, so it cannot be installed ` +
             `(it is most likely a library). Nothing was changed in ${path.basename(configPath)}.` };
@@ -921,10 +976,11 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
       // that failure record, or it lingers in `plugin list` / the web UI as a ghost with no config entry.
       clearFailedPlugin(entry);
 
-      // Capture the canonical package name before deactivation drops it from the registry: it gates
-      // the uninstall offer below and is the correct handle for `pnpm remove` (the config entry may
-      // be a path or URL). Falls back to a disk walk for a configured-but-unloaded plugin.
+      // Capture the canonical package name before deactivation drops it from the registry: it names the
+      // package in what is said below. Falls back to a disk walk for a configured-but-unloaded plugin.
       const pkgName = getPluginNameForSpecifier(entry) ?? await nameFromSpecifier(entry, projectDir);
+      const dotPlugins = path.join(projectDir, '.plugins');
+      const record = await readInstallRecord(dotPlugins, entry);
 
       yield { type: 'stdout', chunk: `Deactivating "${entry}"...\n` };
       try {
@@ -933,21 +989,46 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
         yield { type: 'stderr', chunk: `Deactivation failed: ${String(e)}\n` };
       }
 
-      // Only offer to uninstall when the package manager actually installed it — i.e. its name is a
-      // recorded dependency. Local plugins are referenced in place and cached remote (http/github)
-      // plugins live under .plugins/; neither was `pnpm add`-ed, so `pnpm remove` is a no-op at best.
-      // Mirrors the add path, which only shells out for npm / tarball-or-git specifiers.
-      if (pkgName !== undefined && (await readDependencyNames(projectDir)).has(pkgName)
-          && (await ctx.gate({ gate: 'npm-uninstall', subject: pkgName, fallback: false,
-                               label: `Also uninstall the npm package **"${pkgName}"**?` })).allowed) {
-        const pm = await detectPackageManager(projectDir);
-        try {
-          const out = await runCommand(pm, ['remove', pkgName], projectDir);
-          if (out) yield { type: 'stdout', chunk: out };
-        } catch (e) {
-          yield { type: 'stderr', chunk: `Uninstall failed: ${String(e)}\n` };
+      // A fetched plugin's cache is matbot's own, and the plugin is gone: its source, the dependencies
+      // installed into it, a set-aside copy and its name link go with it, unasked. Left, the name link kept
+      // a removed plugin importable by name.
+      if ((await classifySpecifier(entry, projectDir)).kind === 'http'
+          && await releaseRemote(entry, dotPlugins, await otherRemotes(configPath, projectDir, entry))) {
+        yield { type: 'stdout', chunk: `Removed its cached copy and installed dependencies from .plugins/.\n` };
+      }
+
+      // What `add` changed in the PROJECT is offered back, and only what the install record says `add`
+      // created. Whether the project declares the package now is no evidence of who put it there: read that
+      // way, `remove` offered to uninstall a project's own peer dependency.
+      if (record?.dependency !== undefined) {
+        const offer = await ctx.gate({ gate: 'npm-uninstall', subject: record.dependency, fallback: false,
+                                       label: `Also uninstall the npm package **"${record.dependency}"** that adding the plugin installed?` });
+        if (offer.allowed) {
+          try {
+            const out = await runCommand(await detectPackageManager(projectDir), ['remove', record.dependency], projectDir);
+            if (out) yield { type: 'stdout', chunk: out };
+          } catch (e) {
+            yield { type: 'stderr', chunk: `Uninstall failed: ${String(e)}\n` };
+          }
+        }
+      } else if (pkgName !== undefined && (await declaredDependencies(projectDir))?.has(pkgName) === true) {
+        yield { type: 'stdout', chunk:
+          `"${pkgName}" stays in package.json: no record says \`plugin add\` installed it, so it is the project's ` +
+          `to remove (\`${await detectPackageManager(projectDir)} remove ${pkgName}\`).\n` };
+      }
+      if (record?.provisioned !== undefined) {
+        const what = [record.provisioned.nodeModules ? 'node_modules' : '', record.provisioned.lockfile ? 'package-lock.json' : '']
+          .filter(Boolean).join(' and ');
+        if (what !== '') {
+          const offer = await ctx.gate({ gate: 'remove-provisioned', subject: record.provisioned.dir, fallback: false,
+                                         label: `Also delete the ${what} that adding the plugin created in **${record.provisioned.dir}**?` });
+          if (offer.allowed) {
+            const removed = await removeProvisioned(record.provisioned);
+            yield { type: 'stdout', chunk: `Removed ${removed.join(' and ')} from ${record.provisioned.dir}.\n` };
+          }
         }
       }
+      await dropInstallRecord(dotPlugins, entry);
 
       yield { type: 'result', value: { message: `"${entry}" removed and deactivated.` } };
     }
@@ -1109,7 +1190,13 @@ export const pluginTool: Tool<ToolResultOf<'plugin'>> = {
     'For remove/reload, prefer the plugin\'s canonical package.json **name** (the stable identity shown ' +
     'as `name` by `list`) — the exact matbot.yaml entry also works, but the resolved `specifier` shown ' +
     'under `loaded` may be a file: URL and is NOT the handle. A plugin name is unique, so addressing by ' +
-    'name is unambiguous; `add` refuses a second plugin with a name already installed.',
+    'name is unambiguous; `add` refuses a second plugin with a name already installed — except that ' +
+    '`add <npm name>@<version>` for an npm plugin that is already installed installs that version in its ' +
+    'place, and a `reload` then runs it.\n\n' +
+    '`remove` deletes what a github/http plugin has in the .plugins cache (its source and the dependencies ' +
+    'installed into it). What `add` changed in the PROJECT — an npm package it installed, or the node_modules ' +
+    'and lockfile it created in a local plugin — is offered back, and only that: a package the project already ' +
+    'declared is left alone.',
   inputSchema: {
     type:       'object',
     required:   ['action'],
@@ -1117,7 +1204,7 @@ export const pluginTool: Tool<ToolResultOf<'plugin'>> = {
       action: {
         type:        'string',
         enum:        ['list', 'add', 'remove', 'reload', 'discover_local', 'store-key'],
-        description: 'list: show configured plugins. add: install and register a plugin. remove: deregister and optionally uninstall. reload: unload and re-import (picks up code changes without restarting; for a remote plugin re-downloads the latest upstream source by default — see refresh). discover_local: scan plugins and the .plugins cache for installable plugins (each result reports its source). store-key: supply a secret (e.g. an API key) that a plugin or provider reported missing — you provide only the key name; the value is entered out-of-band. Leaving that value blank removes the named key instead.',
+        description: 'list: show configured plugins. add: install and register a plugin. remove: deregister, delete a github/http plugin\'s cached copy, and offer back what add installed into the project. reload: unload and re-import (picks up code changes without restarting; for a remote plugin re-downloads the latest upstream source by default — see refresh). discover_local: scan plugins and the .plugins cache for installable plugins (each result reports its source). store-key: supply a secret (e.g. an API key) that a plugin or provider reported missing — you provide only the key name; the value is entered out-of-band. Leaving that value blank removes the named key instead.',
       },
       refresh: {
         type:        'boolean',

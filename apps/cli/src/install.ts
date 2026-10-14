@@ -4,6 +4,7 @@ import path                             from 'node:path';
 import process                          from 'node:process';
 import type { MatbotPlugin }            from '@matatbread/matbot-core';
 import { backfillPluginDescription }    from './plugin-description.js';
+import { declaredDependencies, introducedDependency, writeInstallRecord } from '@matatbread/matbot-tool-plugin';
 
 // ── Package manager detection ───────────────────────��─────────────────────────
 
@@ -74,10 +75,13 @@ export async function installPlugin(specifier: string, configPath: string): Prom
 
   // 1. Install via package manager (skip for local paths — already on disk)
   const isLocalPath = specifier.startsWith('./') || specifier.startsWith('../') || path.isAbsolute(specifier);
+  let dependency: string | undefined;
   if (!isLocalPath) {
     const pm = await detectPackageManager(projectDir);
     process.stderr.write(`\nInstalling "${specifier}" with ${pm}...\n`);
+    const before = await declaredDependencies(projectDir);
     await runCommand(pm, ['add', ...await addFlags(pm, projectDir), specifier], projectDir);
+    dependency = introducedDependency(before, await declaredDependencies(projectDir));
   }
 
   // 2. Inspect the plugin manifest
@@ -98,6 +102,8 @@ export async function installPlugin(specifier: string, configPath: string): Prom
   // 3. Update matbot.yaml
   await addToPluginsList(configPath, specifier);
   process.stderr.write(`Added "${specifier}" to plugins in ${path.basename(configPath)}\n`);
+  // The same record `plugin add` writes, so `plugin remove` can offer to take back what this installed.
+  if (dependency !== undefined) await writeInstallRecord(path.join(projectDir, '.plugins'), { entry: specifier, dependency });
 
   // Secrets a plugin needs are gathered lazily on first use: the plugin raises
   // MissingSecretError naming the key, and the model supplies it via `plugin store-key`.

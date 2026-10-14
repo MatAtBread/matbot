@@ -14,7 +14,7 @@
 // (e.g. mounted read-only into docker-bash) so cached plugin code cannot be tampered with by the
 // model. Do not move this under `.data/`.
 
-import { writeFile, readFile, readdir, mkdir, access, stat, realpath, rename, symlink, rm } from 'node:fs/promises';
+import { writeFile, readFile, readdir, mkdir, access, stat, realpath, rename, symlink, rm, rmdir, readlink, lstat } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import process from 'node:process';
@@ -482,6 +482,7 @@ export async function restoreRemote(spec: string, dotPlugins: string): Promise<b
   await rm(pkgRoot, { recursive: true, force: true });
   await mkdir(path.dirname(pkgRoot), { recursive: true });
   await rename(aside, pkgRoot);
+  await pruneEmpty(path.dirname(aside), dotPlugins);
   manifestCache.delete(spec);
   return true;
 }
@@ -491,8 +492,11 @@ export async function restoreRemote(spec: string, dotPlugins: string): Promise<b
 export async function discardRestore(spec: string, dotPlugins: string): Promise<void> {
   const pkgRoot = await cachedPkgRoot(spec, dotPlugins);
   if (pkgRoot === undefined) return;
-  try { await rm(setAsidePath(pkgRoot, dotPlugins), { recursive: true, force: true }); }
-  catch { /* a reload that worked must not fail over housekeeping */ }
+  const aside = setAsidePath(pkgRoot, dotPlugins);
+  try {
+    await rm(aside, { recursive: true, force: true });
+    await pruneEmpty(path.dirname(aside), dotPlugins);
+  } catch { /* a reload that worked must not fail over housekeeping */ }
 }
 
 /**
@@ -598,16 +602,69 @@ const HOST_SINGLETONS = new Set(['@matatbread/matbot-plugin-api', '@matatbread/m
 
 const LINK_TYPE = process.platform === 'win32' ? 'junction' : 'dir';
 
-/** Symlink `.plugins/node_modules/<pkg.name>` → the fetched plugin's cache dir. Idempotent; a name
- *  already linked (by an earlier self-registration or a host bridge) is left as-is — first writer wins. */
+// Where a link leads, as written — so a link whose target has since been removed still answers.
+async function linkTarget(linkPath: string): Promise<string | undefined> {
+  try { return path.resolve(path.dirname(linkPath), await readlink(linkPath)); }
+  catch { return undefined; }
+}
+
+// Symlink `.plugins/node_modules/<pkg.name>` → the fetched plugin's cache dir, so a sibling plugin can import
+// it by name. The plugin being materialised owns its name — the registry admits one plugin per name — so a
+// link leading anywhere else is replaced. It was first-writer-wins, which left a plugin installed from
+// github resolving, by name, to the copy an earlier http install of it had left, and a link to a removed
+// directory dangling for good: `access` follows the link, so a dangling one read as absent and the
+// re-link then failed on EEXIST. A real directory there is not a link this wrote, and is left alone.
 async function registerByName(pkg: Record<string, unknown>, pkgRoot: string, dotPlugins: string): Promise<void> {
   const name = pkg['name'];
   if (typeof name !== 'string' || HOST_SINGLETONS.has(name)) return;
   const linkPath = path.join(dotPlugins, 'node_modules', name);
-  try { await access(linkPath); return; } catch { /* not linked yet */ }
+  if (await linkTarget(linkPath) === pkgRoot) return;
+  const found = await lstat(linkPath).catch(() => undefined);
+  if (found !== undefined && !found.isSymbolicLink()) return;
   await mkdir(path.dirname(linkPath), { recursive: true });
+  await rm(linkPath, { force: true });
   try { await symlink(pkgRoot, linkPath, LINK_TYPE); }
   catch (e) { if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e; }
+}
+
+// Remove the directories that held `from` and are now empty, up to (not including) `stop`.
+async function pruneEmpty(from: string, stop: string): Promise<void> {
+  for (let dir = from; dir.startsWith(stop + path.sep); dir = path.dirname(dir)) {
+    try { await rmdir(dir); }
+    catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') return; }
+  }
+}
+
+const within = (inner: string, outer: string): boolean => inner === outer || inner.startsWith(outer + path.sep);
+
+// Remove what a fetched plugin has in the cache: its mirrored source with the dependencies installed into
+// it, the copy a refresh set aside, and its name link if the link is its own. All of it is derivable from
+// the specifier, which is why none of it is in an install record (install-record.ts).
+//
+// Not when another configured specifier's directory contains this one's or lies inside it — two plugins
+// from one repo, or two spellings of one — because deleting either would delete the other's files. Returns
+// whether it removed anything.
+export async function releaseRemote(spec: string, dotPlugins: string, others: readonly string[]): Promise<boolean> {
+  let manifest: RemoteManifest;
+  try { manifest = await fetchRemoteManifest(spec, dotPlugins); } catch { return false; }
+  const pkgRoot = path.dirname(mirrorPath(manifest.pkgUrl, dotPlugins));
+  for (const other of others) {
+    const theirs = await cachedPkgRoot(other, dotPlugins);
+    if (theirs !== undefined && (within(theirs, pkgRoot) || within(pkgRoot, theirs))) return false;
+  }
+
+  const name = manifest.pkg['name'];
+  if (typeof name === 'string' && !HOST_SINGLETONS.has(name)) {
+    const linkPath = path.join(dotPlugins, 'node_modules', name);
+    if (await linkTarget(linkPath) === pkgRoot) await rm(linkPath, { force: true });
+  }
+  const aside = setAsidePath(pkgRoot, dotPlugins);
+  await rm(pkgRoot, { recursive: true, force: true });
+  await rm(aside, { recursive: true, force: true });
+  await pruneEmpty(path.dirname(pkgRoot), path.join(dotPlugins, new URL(manifest.pkgUrl).host));
+  await pruneEmpty(path.dirname(aside), dotPlugins);
+  manifestCache.delete(spec);
+  return true;
 }
 
 /**

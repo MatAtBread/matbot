@@ -1,0 +1,6 @@
+---
+"@matatbread/matbot-cli": patch
+"@matatbread/matbot-tool-plugin": patch
+---
+
+`plugin remove` takes back what `plugin add` created, and only that (issue #98). A github/http plugin's cache — its source, the dependencies installed into it, its set-aside copy and its name link — is matbot's own and derivable from the config entry, so `remove` deletes it unless another configured plugin's files share the directory; a removed plugin is no longer importable by name, nor listed by `discover_local`. What an install changes in the project — an npm package, or the `node_modules` and lockfile a local plugin's dependency install creates — is recorded under `.plugins/.installs/` as it is created (by `plugin add` and `matbot install`), and `remove` offers back exactly that (`npm-uninstall`, and a new `remove-provisioned` gate), never a package the project declared itself. An `add` that disowns the plugin takes back everything it created, unasked; `add <name>@<version>` for an installed npm plugin installs that version in place and says to reload; the name link follows the copy materialised last instead of the first; and `plugin add npm:<spec>` no longer hands the package manager an `npm:` it reads as an alias.
