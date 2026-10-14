@@ -240,7 +240,7 @@ test('a declared dependency nothing satisfies is reported, named well enough to 
     assert.match(notes, /"@fixture\/matbot-remote-b".*plugins:/s);
     // An ordinary registry dependency says this route installs nothing.
     assert.match(notes, /"left-pad"/);
-    assert.match(notes, /installs no dependencies/);
+    assert.match(notes, /installed into its cache directory when it is added/);
     // A host singleton is not a finding: it resolves to the host's copy by construction.
     assert.equal(/matbot-plugin-api/.test(notes), false);
 

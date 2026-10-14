@@ -44,10 +44,12 @@ type Load = (spec: string) => Promise<unknown>;
 // A host that asks nobody: every gate is answered by `allow`, and every one asked is recorded.
 function run(configPath: string, load: Load, allow: (gate: string) => boolean = () => true) {
   const asked: string[] = [];
+  const labels: string[] = [];
   const ctx = {
     callId: 't', signal: new AbortController().signal, configPath, prompt: async () => undefined,
-    gate: async (req: { gate: string; subject: string }) => {
+    gate: async (req: { gate: string; subject: string; label: string }) => {
       asked.push(`${req.gate} ${req.subject}`);
+      labels.push(req.label);
       return { allowed: allow(req.gate), source: 'user' };
     },
     loadPlugin: load, unloadPlugin: async () => true,
@@ -57,7 +59,7 @@ function run(configPath: string, load: Load, allow: (gate: string) => boolean = 
     for await (const e of pluginTool.executor.execute(input, ctx)) events.push(e as ToolEvent);
     return events.map(e => 'chunk' in e ? e.chunk : 'message' in e ? e.message : JSON.stringify(e)).join('');
   };
-  return { asked, call };
+  return { asked, labels, call };
 }
 
 const configured = async (configPath: string) => (await readFile(configPath, 'utf8')).split('\n').filter(l => /^\s+-/.test(l));
@@ -261,6 +263,108 @@ test('an npm plugin that turns out not to load as one is taken back out, unasked
     assert.deepEqual(asked, ['add fixture-npm-broken']);
   } finally {
     await reg.stop();
+    await p.cleanup();
+  }
+});
+
+// A fetched plugin's dependencies are planned from its manifest alone — in a scratch directory, where the
+// project's .npmrc is not read, so the registry is named in the environment here.
+async function withRegistryEnv<T>(p: { dir: string }, fn: () => Promise<T>): Promise<T> {
+  const registryUrl = (await readFile(join(p.dir, '.npmrc'), 'utf8')).match(/^registry=(.*)$/m)?.[1] ?? '';
+  const saved = { registry: process.env['npm_config_registry'], audit: process.env['npm_config_audit'] };
+  process.env['npm_config_registry'] = registryUrl;
+  process.env['npm_config_audit'] = 'false';
+  try { return await fn(); }
+  finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[`npm_config_${k}`]; else process.env[`npm_config_${k}`] = v;
+    }
+  }
+}
+
+const DEPENDENT = {
+  '/d/package.json': JSON.stringify({ name: '@fixture/matbot-dependent', matbotRuntime: ['node'], exports: './index.ts',
+                                      dependencies: { 'fixture-dep': '^1.0.0' } }),
+  '/d/index.ts': `export const plugin = {};\n`,
+};
+
+test('a fetched plugin\'s dependencies are in the one approval, and installed before it is loaded', { timeout: 120_000 }, async () => {
+  const srv = await serve(DEPENDENT);
+  const p = await project();
+  const reg = await registry(p, { name: 'fixture-dep' });
+  try {
+    await withRegistryEnv(p, async () => {
+      const spec = `${srv.origin}/d/`;
+      const root = join(p.dotPlugins, new URL(srv.origin).host, 'd');
+      let loads = 0;
+      const { asked, labels, call } = run(p.configPath, async s => {
+        loads++;
+        assert.equal(await exists(join(root, 'node_modules', 'fixture-dep', 'package.json')), true, 'present at load');
+        await materializeRemote(s, p.dotPlugins, p.dir);
+        return {};
+      });
+      assert.match(await call({ action: 'add', specifier: spec }), /installed and is now active/);
+      assert.deepEqual(asked, [`add ${spec}`], 'one approval, no second offer');
+      assert.match(labels[0] ?? '', /into its cache directory:\n- fixture-dep@1\.0\.0/);
+      assert.equal(loads, 1);
+    });
+  } finally {
+    await reg.stop();
+    await srv.stop();
+    await p.cleanup();
+  }
+});
+
+test('declining a fetched plugin with dependencies fetches and installs nothing', { timeout: 120_000 }, async () => {
+  const srv = await serve(DEPENDENT);
+  const p = await project();
+  const reg = await registry(p, { name: 'fixture-dep' });
+  try {
+    await withRegistryEnv(p, async () => {
+      const { call } = run(p.configPath, async () => { throw new Error('must not load'); }, () => false);
+      await call({ action: 'add', specifier: `${srv.origin}/d/` });
+      assert.equal(await exists(join(p.dotPlugins, new URL(srv.origin).host)), false);
+      assert.deepEqual(await configured(p.configPath), []);
+    });
+  } finally {
+    await reg.stop();
+    await srv.stop();
+    await p.cleanup();
+  }
+});
+
+// A refresh can bring a dependency the cached copy never had. It is offered before the new copy is loaded;
+// declined, the new copy is never loaded and the working one is put back.
+test('a reload offers a new dependency before loading, and declined it restores the working copy', { timeout: 120_000 }, async () => {
+  const files: Record<string, string> = { ...REMOTE };
+  const srv = await serve(files);
+  const p = await project();
+  const reg = await registry(p, { name: 'fixture-dep' });
+  try {
+    await withRegistryEnv(p, async () => {
+      const spec = `${srv.origin}/p/`;
+      const root = join(p.dotPlugins, new URL(srv.origin).host, 'p');
+      const load = async (s: string) => { await materializeRemote(s, p.dotPlugins, p.dir); return {}; };
+      await run(p.configPath, load).call({ action: 'add', specifier: spec });
+      files['/p/package.json'] = JSON.stringify({ ...JSON.parse(REMOTE['/p/package.json']), dependencies: { 'fixture-dep': '^1.0.0' } });
+
+      const declined = run(p.configPath, load, gate => gate !== 'provision-deps');
+      assert.match(await declined.call({ action: 'reload', specifier: spec }), /were not installed[\s\S]*restored and is active again/);
+      assert.deepEqual(declined.asked, [`provision-deps ${spec}`]);
+      assert.equal(await exists(join(root, 'node_modules', 'fixture-dep')), false);
+
+      let loads = 0;
+      const accepted = run(p.configPath, async s => {
+        loads++;
+        assert.equal(await exists(join(root, 'node_modules', 'fixture-dep', 'package.json')), true, 'present at load');
+        return load(s);
+      });
+      assert.match(await accepted.call({ action: 'reload', specifier: spec }), /reloaded successfully \(1 dependency package/);
+      assert.equal(loads, 1);
+    });
+  } finally {
+    await reg.stop();
+    await srv.stop();
     await p.cleanup();
   }
 });

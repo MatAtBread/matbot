@@ -258,6 +258,15 @@ churn and less likely to affect a consumer who doesn't use them.
   continuous bottom-chasing was removed, which thinking reached around. The header/composer height
   behind that test is cached and invalidated by a `ResizeObserver` rather than at each site that
   could grow the composer, which is a list a later feature omits with no error and no symptom.
+- **`frontend/web`** — a session waiting on a question for the user shows a **red** dot in the sidebar
+  instead of the amber busy one, and goes back to amber (or idle) when the question is answered,
+  cancelled or the turn is aborted. The `session-busy` status event (and `statusEvents()` in both
+  transports) carries `prompting` beside `busy`, and it is replayed to a stream that connects while the
+  question is outstanding — the point being the conversation nobody is looking at, which is the one a
+  parked prompt was previously invisible from.
+- **`frontend/web`** — stopping a session in the in-process (browser bundle) transport cancels a parked
+  prompt, as the server does, instead of answering it with `''` — which the prompt turned into the
+  field's default, an answer nobody gave (and on `plugin store-key`, whose default is blank, a removal).
 
 - **`tool-types` / `cli`** — a `tool_function` body's imports are type-checked against the modules the
   installation permits. `ToolTypeIndex.check` scopes node's declarations with `paths`, one entry per
@@ -326,8 +335,13 @@ churn and less likely to affect a consumer who doesn't use them.
   so reload was structurally impossible for every http plugin with a dependency, the fetch being the very
   thing that removed them. The subtree has two owners, and only the fetched half is the refresh's to
   drop: `node_modules` and `package-lock.json` are kept. A refreshed manifest declaring something NEW is
-  answered as well — reload now makes the same install offer `add` does when a load fails on an
-  unresolved import (one shared code path, one gate, `provision-deps`).
+  answered as well, and before anything is loaded: `add` plans a fetched plugin's declared dependencies
+  from its manifest and lists them in the approval for the plugin itself, then installs them and loads it
+  once; `reload` fetches the refreshed copy, offers what it newly declares (`provision-deps`), and loads
+  it only if that went through — declined, the working copy is restored. Both used to load first, fail on
+  the first missing import (logged as an error with a stack), and only then ask and retry. The log note for
+  an unmet declared dependency, and the resolve error for a bare import, said this route "installs no
+  dependencies"; both now say how the plugin gets them.
 
   **A failed reload is a no-op again, not an outage.** `reload` was `unload` then `load` with nothing
   around the load, so a failure left the plugin unloaded and its tools gone (`404` on its endpoints). A

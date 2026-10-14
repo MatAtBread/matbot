@@ -169,9 +169,10 @@ function resolveAsHost(specifier, context, nextResolve, original, importer) {
     // the resolution actually happened, so there is no false positive to explain away, and the importer is
     // known. (`node:`-prefixed builtins never reach this path.)
     throw Object.assign(new Error(
-      `Cannot resolve "${specifier}" imported by ${importer}: a plugin fetched over http brings ` +
-      `its own files only, not a dependency graph, and a bare import means the host's copy — which does not ` +
-      `have this one. Install "${specifier}" alongside matbot, add it to \`plugins:\` if it is itself a ` +
-      `matbot plugin, or import it by URL.`), { code: 'ERR_MODULE_NOT_FOUND' });
+      `Cannot resolve "${specifier}" imported by ${importer}: a bare import from a plugin fetched over http ` +
+      `resolves from its cache directory, where what its package.json declares is installed, and then from the ` +
+      `host — and neither has this one. If the plugin declares it, \`plugin reload\` offers to install it; ` +
+      `otherwise install "${specifier}" alongside matbot, add it to \`plugins:\` if it is itself a matbot ` +
+      `plugin, or import it by URL.`), { code: 'ERR_MODULE_NOT_FOUND' });
   }
 }

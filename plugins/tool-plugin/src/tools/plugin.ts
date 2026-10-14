@@ -9,9 +9,11 @@ import { pathToFileURL, fileURLToPath }       from 'node:url';
 import { createRequire }                     from 'node:module';
 import path                                  from 'node:path';
 import { classifySpecifier, fetchRemoteManifest, canonicalLocalSpecifier, materializeRemote,
-         restoreRemote, discardRestore, releaseRemote } from '../remote-cache.js';
+         restoreRemote, discardRestore, releaseRemote, type RemoteManifest, type MaterializedRemote } from '../remote-cache.js';
+import { mirrorPath } from '../cache-layout.js';
 import { planProvision, applyProvision, discardProvision, removeProvisioned, localProvision, registryManifest,
-         runCommand, type ProvisionPlan } from '../provision.js';
+         planRemoteProvision, applyRemoteProvision, discardRemoteProvision, runCommand,
+         type ProvisionPlan } from '../provision.js';
 import { readInstallRecord, writeInstallRecord, dropInstallRecord, declaredDependencies, isPackageName,
          type InstallRecord } from '../install-record.js';
 import { findDuplicateSingletons } from '../singletons.js';
@@ -518,49 +520,51 @@ function pluginTypes(p: MatbotPlugin, registeredToolPlugins: Set<string>): strin
 // still an out-of-band human one, so a fetched plugin cannot install anything by asserting that it needs
 // it.
 //
-// Every declared dependency is planned, not just the one that failed: activation stops at the FIRST
-// unresolved import, so one-at-a-time would be a prompt-and-retry cycle per package.
-//
-// Shared by `add` and `reload` because it is one situation reached at two moments — a refresh can bring
-// a dependency the fetched copy never had, and reload used to have no answer for that at all. The
-// outcome is returned rather than reported: the two callers are reporting different things (an install
-// that did not finish, a reload that did not take), and a tool frames itself.
+// Every declared dependency is planned, and BEFORE the plugin is loaded: activation stops at the FIRST
+// unresolved import, so planning after a failed load was a load that was always going to fail, logged as an
+// error, then a second prompt and a retry. `add` folds the plan into the approval for the plugin itself;
+// `reload` asks with this, because a refresh can bring a dependency the cached copy never had and the
+// plugin's own approval was given long ago. The outcome is returned rather than reported: a tool frames
+// itself.
 type DepProvision =
-  | { outcome: 'none' }                                  // nothing declared that npm would install
+  | { outcome: 'none' }                                  // nothing declared that is not already present
   | { outcome: 'unresolved'; reason: string }            // npm could not say what it would install
   | { outcome: 'declined' }
   | { outcome: 'failed';    reason: string }             // the install itself failed
   | { outcome: 'installed'; packages: number };
 
 async function* provisionRemoteDependencies(
-  ctx: ToolContext, specifier: string, projectDir: string,
+  ctx: ToolContext, specifier: string, m: MaterializedRemote,
 ): AsyncGenerator<ToolEvent<ToolResultOf<'plugin'>>, DepProvision> {
-  let plan: ProvisionPlan;
+  let plan: ProvisionPlan | undefined;
   try {
-    const m = await materializeRemote(specifier, path.join(projectDir, '.plugins'), projectDir);
-    plan = await planProvision(m.pkgRoot);
+    const pkg = JSON.parse(await readFile(path.join(m.pkgRoot, 'package.json'), 'utf8')) as Record<string, unknown>;
+    plan = await planRemoteProvision(pkg, m.pkgRoot);
   } catch (err) {
     return { outcome: 'unresolved', reason: err instanceof Error ? err.message : String(err) };
   }
-  if (plan.packages.length === 0) return { outcome: 'none' };
+  if (plan === undefined) return { outcome: 'none' };
+  if (plan.packages.length === 0) {
+    await discardRemoteProvision(plan);
+    return { outcome: 'none' };
+  }
 
   const offer = await ctx.gate({
     gate:     'provision-deps',
     subject:  specifier,
     fallback: false,
     label:
-      `**"${specifier}"** needs packages a source-fetch does not bring in (it copies a plugin's own ` +
-      `files, not its dependency graph). Install ${plan.packages.length} package(s) into its cache ` +
-      `directory?\n${plan.packages.map(pkg => `- ${pkg}`).join('\n')}`,
+      `**"${specifier}"** now declares dependencies its cached copy does not have. Install ` +
+      `${plan.packages.length} package(s) into its cache directory?\n${plan.packages.map(pkg => `- ${pkg}`).join('\n')}`,
   });
   if (!offer.allowed) {
-    await discardProvision(plan);
+    await discardRemoteProvision(plan);
     return { outcome: 'declined' };
   }
 
   yield { type: 'stdout', chunk: `Installing ${plan.packages.length} package(s) with npm...\n` };
   try {
-    const { linked, output } = await applyProvision(plan);
+    const { linked, output } = await applyRemoteProvision(plan, m.pkgRoot);
     if (output) yield { type: 'stdout', chunk: output };
     if (linked.length > 0) yield { type: 'stdout', chunk: `Linked the host's ${linked.join(', ')}.\n` };
   } catch (err) {
@@ -726,6 +730,7 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
       let description: string | undefined;
       let pluginName: string | undefined;
       let configSpecifier = specifier;
+      let remoteManifest: RemoteManifest | undefined;
 
       // Pre-fetch verification for remote (raw-source) plugins: confirm the package.json declares
       // matbotRuntime including "node" BEFORE downloading or executing any code, so a stray URL
@@ -742,6 +747,7 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
           const d = manifest.pkg['description'];
           if (typeof d === 'string') description = d;
           if (typeof manifest.pkg['name'] === 'string') pluginName = manifest.pkg['name'];
+          remoteManifest = manifest;
         } catch (e) {
           yield { type: 'error', message: `Could not install "${specifier}": ${e instanceof Error ? e.message : String(e)}.` };
           return;
@@ -878,14 +884,38 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
         }
       }
 
+      // A fetched plugin brings its own files only, so what its package.json declares is installed into its
+      // cache directory — planned here, from the manifest alone, so the packages are in the same approval and
+      // the plugin is loaded once, with them present. (Planning after a load that failed on the first of them
+      // was a load that could never succeed, logged as an error, then a second prompt and a retry.)
+      let remotePlan: ProvisionPlan | undefined;
+      if (remoteManifest !== undefined) {
+        try {
+          const pkgRoot = path.dirname(mirrorPath(remoteManifest.pkgUrl, path.join(projectDir, '.plugins')));
+          remotePlan = await planRemoteProvision(remoteManifest.pkg, pkgRoot);
+        } catch (e) {
+          yield { type: 'error', message:
+            `Could not resolve the dependencies of "${specifier}": ${e instanceof Error ? e.message : String(e)}. ` +
+            `Nothing was changed.` };
+          return;
+        }
+        if (remotePlan !== undefined && remotePlan.unsupported.length > 0) {
+          const ranges = remotePlan.unsupported.map(u => `${u.name}@${u.range}`).join(', ');
+          yield { type: 'stdout', chunk:
+            `Not installing its dependencies (${ranges}): not registry ranges, so npm is not asked.\n` };
+        }
+      }
+
       // A gate rather than a `confirmed` input parameter: plugin installation is a privileged
       // operation. Breaking the LLM's execution chain and requiring an out-of-band human response
       // prevents prompt injection or a malicious plugin from auto-installing further plugins by simply
       // passing confirmed:true. The SUBJECT is the specifier as typed — at this point the plugin is not
       // loaded, so a policy remembering an answer keys on the spelling, and `@x/foo` and
       // `https://…/foo.ts` are deliberately different decisions.
-      const deps = plan !== undefined && plan.packages.length > 0
-        ? `\n\nIt will also install ${plan.packages.length} package(s) from npm:\n${plan.packages.map(p => `- ${p}`).join('\n')}`
+      const toInstall = plan ?? remotePlan;
+      const deps = toInstall !== undefined && toInstall.packages.length > 0
+        ? `\n\nIt will also install ${toInstall.packages.length} package(s) from npm` +
+          `${remotePlan !== undefined ? ' into its cache directory' : ''}:\n${toInstall.packages.map(p => `- ${p}`).join('\n')}`
         : '';
       const confirmed = await ctx.gate({
         gate:     'add',
@@ -895,6 +925,7 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
       });
       if (!confirmed.allowed) {
         if (plan !== undefined) await discardProvision(plan);
+        if (remotePlan !== undefined) await discardRemoteProvision(remotePlan);
         yield { type: 'result', value: { message: refusalMessage(confirmed) } };
         return;
       }
@@ -919,6 +950,25 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
           yield { type: 'error', message:
             `Could not install the dependencies of "${specifier}": ${e instanceof Error ? e.message : String(e)}. ` +
             `What the attempt wrote in ${plan.dir} was removed, and nothing was changed in ${path.basename(configPath)}.` };
+          return;
+        }
+      }
+
+      if (remotePlan !== undefined && remotePlan.packages.length === 0) await discardRemoteProvision(remotePlan);
+      if (remotePlan !== undefined && remotePlan.packages.length > 0) {
+        yield { type: 'stdout', chunk: `Fetching "${specifier}" and installing ${remotePlan.packages.length} dependency package(s) with npm...\n` };
+        try {
+          const m = await materializeRemote(specifier, dotPlugins, projectDir);
+          const { linked, output } = await applyRemoteProvision(remotePlan, m.pkgRoot);
+          if (output) yield { type: 'stdout', chunk: output };
+          if (linked.length > 0) yield { type: 'stdout', chunk: `Linked the host's ${linked.join(', ')}.\n` };
+        } catch (e) {
+          await discardRemoteProvision(remotePlan);
+          const released = await releaseRemote(specifier, dotPlugins, await otherRemotes(configPath, projectDir, specifier));
+          yield { type: 'error', message:
+            `Could not install the dependencies of "${specifier}": ${e instanceof Error ? e.message : String(e)}. ` +
+            `${released ? 'What was fetched was removed from the cache, and n' : 'N'}othing was changed in ` +
+            `${path.basename(configPath)}.` };
           return;
         }
       }
@@ -983,49 +1033,19 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
             `(it is most likely a library). Nothing was changed in ${path.basename(configPath)}.` };
           return;
         }
-        // A raw github/URL fetch installs ONE plugin's files, not its dependency graph. A plugin with a
-        // runtime dependency on another package therefore fails with that package unresolved. State the
-        // remedy plainly — install the dependency too — instead of surfacing the raw module-not-found,
-        // which makes the model hunt for npm name variations. The entry is LEFT in config (it activates
-        // once the dependency is present), like any other fixable activation failure.
+        // Everything its package.json declares as a registry dependency was installed before this load, so an
+        // import that resolves nowhere is one it never declared (or declared with a range npm is not asked
+        // about). State that plainly, rather than surface the raw module-not-found, which sends the model
+        // hunting for npm name variations. The entry is LEFT in config: it activates once the package is
+        // present, like any other fixable activation failure.
         const missing = classified.kind === 'http' ? missingPackageOf(e) : undefined;
         if (missing !== undefined) {
-          const dep = yield* provisionRemoteDependencies(ctx, specifier, projectDir);
-          if (dep.outcome === 'unresolved') {
-            yield { type: 'stdout', chunk: `Could not resolve "${configSpecifier}"'s dependencies: ${dep.reason}\n` };
-          }
-          if (dep.outcome === 'failed') {
-            yield { type: 'result', value: { message:
-              `Could not install the dependencies of "${configSpecifier}": ${dep.reason}. ` +
-              `It has been left in ${path.basename(configPath)} and activates once they are present.` } };
-            return;
-          }
-          if (dep.outcome === 'installed') {
-            // Retried in process: the files are already cached, so this is a resolution retry and not a
-            // second fetch. A failure here is reported as-is — what was asked for is now installed, so
-            // whatever remains is a different problem and guessing at it would mislead.
-            yield { type: 'stdout', chunk: `Activating "${configSpecifier}"...\n` };
-            try {
-              const loaded  = await ctx.loadPlugin(configSpecifier);
-              const welcome = await loaded.installationMessage?.();
-              yield { type: 'result', value: {
-                message: `"${configSpecifier}" installed and is now active (${dep.packages} dependency package(s) installed).`,
-                ...(welcome !== undefined ? { installationMessage: welcome } : {}),
-              } };
-            } catch (err) {
-              yield { type: 'result', value: { message:
-                `Installed its dependencies, but "${configSpecifier}" still did not activate: ${String(err)}. ` +
-                `It has been left in ${path.basename(configPath)}.` } };
-            }
-            return;
-          }
-
           const fromNpm = missing.startsWith('@matatbread/')
             ? `Installing it from npm is simplest — \`${missing}\` — because npm resolves ITS dependencies too.`
-            : `Install \`${missing}\` (e.g. from npm) so it is present.`;
+            : `Install \`${missing}\` (e.g. from npm) alongside matbot so it is present, or ask the plugin's author to declare it.`;
           yield { type: 'result', value: { message:
-            `"${configSpecifier}" was fetched, but it depends on "${missing}", which a raw github/URL fetch does ` +
-            `not bring in — source-fetch copies a plugin's own files, not its dependency graph. ${fromNpm} ` +
+            `"${configSpecifier}" was fetched, but it imports "${missing}", which nothing here provides: its ` +
+            `package.json does not declare it as a registry dependency, so it was not installed with it. ${fromNpm} ` +
             `Then "${configSpecifier}" activates (it has been left in ${path.basename(configPath)}). Do not retry ` +
             `name variations — the dependency is genuinely missing, not misnamed.` } };
           return;
@@ -1159,14 +1179,33 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
       // re-imports node_modules, neither of which this path writes to or evicts.
       const refreshed = refresh && (await classifySpecifier(entry, projectDir)).kind === 'http';
 
-      // Two attempts at most, and the second never refreshes: the files are already cached, so it is a
-      // resolution retry and not a second fetch — and a second eviction would discard the copy set aside
-      // for the rollback below.
+      // A refresh is fetched HERE, not inside the load, so that a dependency the new copy declares and the
+      // cached one never had is offered before anything is loaded — not after a load that was always going to
+      // fail on it. Declined or not installed, the new copy is not loaded at all, and the restore below puts
+      // the working one back.
       let failure: unknown;
       let installed = 0;
-      for (let attempt = 0; attempt < 2; attempt++) {
+      let ready = true;
+      if (refreshed) {
         try {
-          const reloaded = await ctx.loadPlugin(entry, attempt === 0 && refresh);
+          const m = await materializeRemote(entry, dotPlugins, projectDir, /* forceRefresh */ true);
+          const dep = yield* provisionRemoteDependencies(ctx, entry, m);
+          switch (dep.outcome) {
+            case 'installed':  installed = dep.packages; break;
+            case 'none':       break;
+            case 'declined':   ready = false; failure = new Error('the dependencies its new copy declares were not installed'); break;
+            case 'unresolved': ready = false; failure = new Error(`the dependencies its new copy declares could not be resolved: ${dep.reason}`); break;
+            case 'failed':     ready = false; failure = new Error(`the dependencies its new copy declares did not install: ${dep.reason}`); break;
+          }
+        } catch (e) {
+          ready = false;
+          failure = e;
+        }
+      }
+      if (ready) {
+        try {
+          // Already refreshed above when it was going to be; the load reads the cache.
+          const reloaded = await ctx.loadPlugin(entry, false);
           if (refreshed) await discardRestore(entry, dotPlugins);
           const extra  = installed > 0 ? ` (${installed} dependency package(s) installed)` : '';
           const result = await reloaded.installationMessage?.() || `"${entry}" reloaded successfully${extra}.`;
@@ -1176,15 +1215,6 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
           return;
         } catch (e) {
           failure = e;
-          // A refreshed source can declare a dependency the cached copy never had, and a raw fetch brings
-          // none: the same offer `add` makes, since this is the same situation reached later.
-          if (attempt > 0 || !refreshed || missingPackageOf(e) === undefined) break;
-          const dep = yield* provisionRemoteDependencies(ctx, entry, projectDir);
-          if (dep.outcome === 'failed') {
-            yield { type: 'stderr', chunk: `Could not install its dependencies: ${dep.reason}\n` };
-          }
-          if (dep.outcome !== 'installed') break;
-          installed = dep.packages;
         }
       }
 
@@ -1265,8 +1295,9 @@ export const pluginTool: Tool<ToolResultOf<'plugin'>> = {
     'refused, naming what is missing — tell the user, do not install into it yourself. A manifest using ' +
     'workspace:/catalog:/link:/file: ranges is left alone — those mean something already resolves it, which ' +
     'is true of any plugin inside this repo.\n' +
-    '  • HTTP/github fetches ONE package\'s files, then offers to INSTALL the `dependencies` its ' +
-    'package.json declares into its cache directory (npm, transitives included, listed in the approval). ' +
+    '  • HTTP/github fetches ONE package\'s files and INSTALLS the `dependencies` its package.json ' +
+    'declares into its cache directory (npm, transitives included, listed in the add approval; a reload ' +
+    'that brings a new one asks before loading it). ' +
     'Its relative, root-relative and absolute-URL imports are all fetched on demand, so a third-party ' +
     'dependency written as a URL ("https://esm.sh/ms@2.1.3") works too. A BARE import it does not declare ' +
     'means the host\'s own copy, so it must already be present. A URL import is fetched at exactly that URL, ' +

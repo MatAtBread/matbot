@@ -589,8 +589,9 @@ export async function remoteDependencyNotes(m: MaterializedRemote): Promise<stri
     if (hostPackageDir(req, name) !== undefined) continue;
     notes.push(LOOKS_LIKE_PLUGIN.test(name)
       ? `declares a dependency on "${name}", which is not present. That looks like a matbot plugin: add it to \`plugins:\` in matbot.yaml so it is fetched alongside this one.`
-      : `declares a dependency on "${name}", which resolves nowhere the host can see. This route fetches one package's own files and bridges ` +
-        `bare imports to packages already present — it installs no dependencies, so install "${name}" alongside matbot.`);
+      : `declares a dependency on "${name}", which is not installed. A fetched plugin's declared dependencies are installed ` +
+        `into its cache directory when it is added, and offered again by \`plugin reload\` (with refresh) — so reload it to ` +
+        `install "${name}", or install it alongside matbot.`);
   }
   return notes;
 }

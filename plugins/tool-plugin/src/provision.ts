@@ -23,7 +23,8 @@
 //     install, transitives included" without writing a single package to disk; the caller folds that list
 //     into the approval it was already asking for, and `npm ci` then installs exactly what was approved.
 
-import { readFile, rm, mkdir, symlink, access, realpath } from 'node:fs/promises';
+import { readFile, writeFile, copyFile, mkdtemp, rm, mkdir, symlink, access, realpath } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import process from 'node:process';
 import path from 'node:path';
@@ -198,6 +199,50 @@ async function linkHostSingletons(dir: string): Promise<readonly string[]> {
 /** Whether `linkPath` resolves to the same real directory as `target`. */
 async function sameDir(linkPath: string, target: string): Promise<boolean> {
   try { return await realpath(linkPath) === await realpath(target); } catch { return false; }
+}
+
+/**
+ * Plan a FETCHED plugin's declared dependencies before any of its code is on disk, so they are listed in the
+ * approval for the plugin itself rather than offered after a load that was always going to fail. Planned in
+ * a scratch directory holding only the manifest — the one npm will read once the plugin is materialised:
+ * the mirrored copy if there is one (a mirrored file is never overwritten), else `pkg`. Undefined when every
+ * declared dependency already resolves from where the plugin will run — what an earlier install put in its
+ * cache directory survives a refresh, so only a dependency the cached copy never had is offered again.
+ */
+export async function planRemoteProvision(pkg: Record<string, unknown>, pkgRoot: string): Promise<ProvisionPlan | undefined> {
+  const mirrored = await readFile(path.join(pkgRoot, 'package.json'), 'utf8').catch(() => undefined);
+  const manifest = mirrored ?? JSON.stringify(pkg, null, 2);
+  const deps = (JSON.parse(manifest) as { dependencies?: unknown }).dependencies;
+  const declared = deps !== null && typeof deps === 'object' ? Object.keys(deps) : [];
+  const unmet: string[] = [];
+  for (const name of declared) {
+    if (!HOST_SINGLETONS.includes(name) && !await reachable(name, pkgRoot)) unmet.push(name);
+  }
+  if (unmet.length === 0) return undefined;
+
+  const dir = await mkdtemp(path.join(tmpdir(), 'matbot-plan-'));
+  try {
+    await writeFile(path.join(dir, 'package.json'), manifest);
+    return await planProvision(dir);
+  } catch (e) {
+    await rm(dir, { recursive: true, force: true });
+    throw e;
+  }
+}
+
+/** Install a `planRemoteProvision` plan into the materialised plugin's cache directory: exactly the lockfile
+ *  that was approved, then the host singletons linked. The scratch directory goes either way. */
+export async function applyRemoteProvision(plan: ProvisionPlan, pkgRoot: string): Promise<{ linked: readonly string[]; output: string }> {
+  try {
+    await copyFile(path.join(plan.dir, LOCKFILE), path.join(pkgRoot, LOCKFILE));
+    return await applyProvision({ ...plan, dir: pkgRoot });
+  } finally {
+    await discardRemoteProvision(plan);
+  }
+}
+
+export async function discardRemoteProvision(plan: ProvisionPlan): Promise<void> {
+  await rm(plan.dir, { recursive: true, force: true });
 }
 
 /** Undo what planning wrote. A declined install must not leave a lockfile in someone's plugin. */

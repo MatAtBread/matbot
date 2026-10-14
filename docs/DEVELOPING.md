@@ -294,8 +294,9 @@ the project already declared is never touched.
 resolves from the plugin's cache directory, then the host, so:
 
 - a third-party dependency its `package.json` declares is **installed into its cache directory** with npm,
-  after an approval listing every package (transitives included) — `add` and a `reload` that finds a new
-  one both offer it. Declined, it is unmet, and the import that needs it fails naming itself;
+  planned from the manifest before anything is loaded — `add` lists every package (transitives included)
+  in the approval for the plugin itself, and a `reload` whose refreshed copy declares a new one offers it
+  before loading that copy; declined there, the working copy is restored;
 - a third-party dependency can instead be written as a **URL import**, fetched on demand and kept under
   its URL (below) — the one spelling that also works in the browser, where nothing can be installed;
 - a dependency on **another matbot plugin** is met by adding that plugin to `plugins:` too, and one
