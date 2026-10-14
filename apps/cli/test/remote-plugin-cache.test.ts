@@ -198,7 +198,8 @@ test('a declared file that cannot be fetched does not fail the materialise', asy
   const files: Record<string, string> = {
     '/c/package.json': JSON.stringify({
       name: '@fixture/matbot-remote-c', matbotRuntime: ['node'],
-      exports: { '.': './index.ts' }, files: ['never-served.json'],
+      // …nor one whose name could only be mirrored outside the cache: skipped with a warning like any other.
+      exports: { '.': './index.ts' }, files: ['never-served.json', 'assets/a%2Fb.png'],
     }),
     '/c/index.ts': `export const plugin = { apiVersion: '0.4' };\n`,
   };

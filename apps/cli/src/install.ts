@@ -4,7 +4,7 @@ import path                             from 'node:path';
 import process                          from 'node:process';
 import type { MatbotPlugin }            from '@matatbread/matbot-core';
 import { backfillPluginDescription }    from './plugin-description.js';
-import { declaredDependencies, introducedDependency, writeInstallRecord } from '@matatbread/matbot-tool-plugin';
+import { declaredDependencies, isPackageName, writeInstallRecord } from '@matatbread/matbot-tool-plugin';
 
 // ── Package manager detection ───────────────────────��─────────────────────────
 
@@ -77,11 +77,19 @@ export async function installPlugin(specifier: string, configPath: string): Prom
   const isLocalPath = specifier.startsWith('./') || specifier.startsWith('../') || path.isAbsolute(specifier);
   let dependency: string | undefined;
   if (!isLocalPath) {
-    const pm = await detectPackageManager(projectDir);
-    process.stderr.write(`\nInstalling "${specifier}" with ${pm}...\n`);
+    // `plugin add`'s rule: a plugin by its package name, so the key the package manager writes is that name and
+    // what is recorded is what was seen to change. A declared one is the project's, at the version it chose.
+    if (!isPackageName(specifier)) {
+      throw new Error(`"${specifier}" is not a package name. Install a version, a tarball or a git package with your ` +
+                      `package manager, then \`matbot install <its name>\`.`);
+    }
     const before = await declaredDependencies(projectDir);
-    await runCommand(pm, ['add', ...await addFlags(pm, projectDir), specifier], projectDir);
-    dependency = introducedDependency(before, await declaredDependencies(projectDir));
+    if (before?.has(specifier) !== true) {
+      const pm = await detectPackageManager(projectDir);
+      process.stderr.write(`\nInstalling "${specifier}" with ${pm}...\n`);
+      await runCommand(pm, ['add', ...await addFlags(pm, projectDir), specifier], projectDir);
+      if (before !== undefined && (await declaredDependencies(projectDir))?.has(specifier) === true) dependency = specifier;
+    }
   }
 
   // 2. Inspect the plugin manifest

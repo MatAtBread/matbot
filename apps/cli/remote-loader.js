@@ -31,7 +31,7 @@
 // the URL, which never has to be a path.
 
 import { mkdir, writeFile, rename } from 'node:fs/promises';
-import { readFileSync, writeFileSync, renameSync, copyFileSync, mkdirSync, statSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Worker, MessageChannel, receiveMessageOnPort, isMainThread, workerData, parentPort } from 'node:worker_threads';
@@ -61,9 +61,9 @@ const keyOf = url => createHash('sha256').update(url).digest('hex').slice(0, 32)
 const recordPath = (dotPlugins, url) => path.join(dotPlugins, URL_STORE, keyOf(url) + '.json');
 const bodyPath = (dotPlugins, url) => path.join(dotPlugins, URL_STORE, keyOf(url) + '.src');
 
-// Which cache each module that answered by URL lives in, so its own imports and its load find it. A module
-// is always resolved before anything it imports, in the process that loads it, so this is never asked about
-// a URL it has not been told.
+// Where each module that answered by URL lives — its cache, so its own imports resolve from there, and the
+// file holding its body, so its load finds it. A module is always resolved before anything it imports, in the
+// process that loads it, so this is never asked about a URL it has not been told.
 const homeOf = new Map();
 
 const isFile = p => statSync(p, { throwIfNoEntry: false })?.isFile() ?? false;
@@ -72,28 +72,50 @@ function storedUrl(url, dotPlugins) {
   let answered;
   try { answered = JSON.parse(readFileSync(recordPath(dotPlugins, url), 'utf8')).answered; }
   catch { return fromMirror(url, dotPlugins); }
-  return typeof answered === 'string' && isFile(bodyPath(dotPlugins, answered)) ? answered : undefined;
+  if (typeof answered !== 'string') return undefined;
+  const body = bodyPath(dotPlugins, answered);
+  return isFile(body) ? { url: answered, body } : undefined;
 }
 
 // A cache written before URL imports had their own store mirrored them, and an install that upgrades
-// offline would otherwise lose every plugin that has one. So the copy is taken once, on a miss. Copied, not
-// moved: the mirrored file stays whatever it was. Not for a URL with a query, which the mirror dropped — the
-// file there may be another query's module — and not for a redirect, which the mirror could not record, so
-// the copy answers for the URL it was saved under, as it always did.
+// offline would otherwise lose every plugin that has one. So a mirrored file answers for its URL from where
+// it is — nothing is copied or written, so a cache this process cannot write (a read-only image) answers
+// too. Not for a URL with a query, which the mirror dropped — the file there may be another query's module
+// — and not for a redirect, which the mirror could not record, so the file answers for the URL it was saved
+// under, as it always did. A plugin's own files are never reached here: `pluginPackageOf` refuses those first.
 function fromMirror(url, dotPlugins) {
   if (new URL(url).search !== '') return undefined;
   let file;
   try { file = mirroredFile(url, dotPlugins); } catch { return undefined; }
-  if (file === undefined) return undefined;
-  const body = bodyPath(dotPlugins, url);
-  const record = recordPath(dotPlugins, url);
-  mkdirSync(path.dirname(body), { recursive: true });
-  const bodyTmp = `${body}.${randomUUID()}.tmp`, recordTmp = `${record}.${randomUUID()}.tmp`;
-  copyFileSync(file, bodyTmp);
-  renameSync(bodyTmp, body);
-  writeFileSync(recordTmp, JSON.stringify({ asked: url, answered: url }), 'utf8');
-  renameSync(recordTmp, record);
-  return url;
+  return file === undefined ? undefined : { url, body: file };
+}
+
+// The fetched plugin package a URL falls inside, if any: the nearest directory from its mirrored path up to
+// its host's with a package.json, which in the mirror is a plugin's manifest. A plugin's own files are
+// `file:` modules, so the same file imported by URL would be a second copy of it — separate module state,
+// `instanceof` false across the two — and is refused, naming the import that does reach the one copy.
+function pluginPackageOf(url, dotPlugins) {
+  let file;
+  try { file = mirrorPath(url, dotPlugins); } catch { return undefined; }
+  const hostDir = path.join(dotPlugins, new URL(url).host);
+  for (let dir = path.dirname(file); dir.length >= hostDir.length; dir = path.dirname(dir)) {
+    if (isFile(path.join(dir, 'package.json'))) return dir;
+    if (dir === hostDir) break;
+  }
+  return undefined;
+}
+
+function refuseIfPluginFile(url, specifier, parent, dotPlugins) {
+  const pkgDir = pluginPackageOf(url, dotPlugins);
+  if (pkgDir === undefined) return;
+  let name;
+  try { name = JSON.parse(readFileSync(path.join(pkgDir, 'package.json'), 'utf8')).name; } catch { /* unnamed */ }
+  const which = typeof name === 'string' ? `the fetched plugin "${name}"` : `the fetched plugin in ${pkgDir}`;
+  throw Object.assign(new Error(
+    `Cannot import "${specifier}" by URL from ${parent}: it is a file of ${which}, which loads its own files from ` +
+    `the cache, so importing one by URL would load a second copy beside it. Import it by a relative path from ` +
+    `inside that plugin${typeof name === 'string' ? `, or by its package name ("${name}") from another` : ''}.`),
+    { code: 'ERR_INVALID_MODULE_SPECIFIER' });
 }
 
 async function writeAtomic(p, content) {
@@ -112,16 +134,15 @@ async function storeFetched(dotPlugins, asked, answered, body) {
 
 // For the load hook, which has nothing but the URL.
 export function loadStored(url) {
-  const dotPlugins = homeOf.get(url);
-  if (dotPlugins === undefined) return undefined;
-  return readFileSync(bodyPath(dotPlugins, url), 'utf8');
+  const home = homeOf.get(url);
+  return home === undefined ? undefined : readFileSync(home.body, 'utf8');
 }
 
 // A module that answered by URL has no directory for Node to walk up from, so its bare imports resolve as
 // though from the cache — reaching the host singletons and fetched plugins linked into
 // `.plugins/node_modules`, then the project's own `node_modules`: what a bare import from a mirrored file reaches.
 export function bareAnchor(parent) {
-  const dotPlugins = typeof parent === 'string' ? homeOf.get(parent) : undefined;
+  const dotPlugins = typeof parent === 'string' ? homeOf.get(parent)?.dotPlugins : undefined;
   return dotPlugins === undefined ? undefined : pathToFileURL(path.join(dotPlugins, URL_STORE, 'importer.js')).href;
 }
 
@@ -168,13 +189,18 @@ function planOf(specifier, parent) {
   // From a module that answered by URL, everything that is not bare is relative to that URL — as a browser
   // reads it, with no guessing at a `.ts` behind a `.js`.
   const home = typeof parent === 'string' ? homeOf.get(parent) : undefined;
-  if (home !== undefined) return { dotPlugins: home, url: new URL(specifier, parent).href };
+  if (home !== undefined) return urlPlan(new URL(specifier, parent).href, specifier, parent, home.dotPlugins);
 
   const at = cacheLocation(parent);
   if (at === undefined) return undefined;
   const target = new URL(specifier, `${schemeFor(at.hostDir)}//${at.host}/${at.rel}`).href;
-  return absolute ? { dotPlugins: at.dotPlugins, url: target }
+  return absolute ? urlPlan(target, specifier, parent, at.dotPlugins)
                   : { dotPlugins: at.dotPlugins, candidates: candidatesFor(target) };
+}
+
+function urlPlan(url, specifier, parent, dotPlugins) {
+  refuseIfPluginFile(url, specifier, parent, dotPlugins);
+  return { dotPlugins, url };
 }
 
 // Every candidate is checked on disk before any is fetched, for the same reason the mirrored tree is consulted
@@ -183,9 +209,10 @@ function planOf(specifier, parent) {
 // fail with no network at all. A warm boot therefore makes no requests, and an offline one works.
 function onDisk(plan) {
   if (plan.url !== undefined) {
-    const answered = storedUrl(plan.url, plan.dotPlugins);
-    if (answered !== undefined) homeOf.set(answered, plan.dotPlugins);
-    return answered;
+    const stored = storedUrl(plan.url, plan.dotPlugins);
+    if (stored === undefined) return undefined;
+    homeOf.set(stored.url, { dotPlugins: plan.dotPlugins, body: stored.body });
+    return stored.url;
   }
   for (const candidate of plan.candidates) {
     const p = mirroredFile(candidate, plan.dotPlugins);
@@ -214,7 +241,7 @@ async function fetchPlan(plan, specifier, parent) {
       // module load it once.
       const answered = res.url || candidate;
       await storeFetched(plan.dotPlugins, candidate, answered, body);
-      homeOf.set(answered, plan.dotPlugins);
+      homeOf.set(answered, { dotPlugins: plan.dotPlugins, body: bodyPath(plan.dotPlugins, answered) });
       return answered;
     }
     const p = mirrorPath(candidate, plan.dotPlugins);
@@ -227,8 +254,19 @@ async function fetchPlan(plan, specifier, parent) {
   const reason = unreachable !== undefined
     ? `could not be reached (${unreachable.message})`
     : `was not found at ${asked.join(' or ')}`;
-  throw Object.assign(new Error(`Cannot fetch "${specifier}" imported by ${parent}: it ${reason}.`),
+  throw Object.assign(new Error(`Cannot fetch "${specifier}" imported by ${parent}: it ${reason}.${urlHint(plan, unreachable)}`),
                       { code: 'ERR_MODULE_NOT_FOUND' });
+}
+
+// A plugin's own `./x.js` may be served as `x.ts`, so its imports try both. A module imported by URL is
+// fetched at exactly that URL, as a browser fetches it, so a miss says how to name the one that exists.
+function urlHint(plan, unreachable) {
+  if (plan.url === undefined || unreachable !== undefined) return '';
+  const u = new URL(plan.url);
+  if (!u.pathname.endsWith('.js')) return ' A module imported by URL is fetched at exactly that URL, as a browser fetches it.';
+  u.pathname = u.pathname.slice(0, -3) + '.ts';
+  return ` A module imported by URL is fetched at exactly that URL, as a browser fetches it — if its source is ` +
+         `TypeScript, import "${u.href}".`;
 }
 
 // The module's URL — `file:` for a plugin's own file, the URL that answered for one imported by URL — or
@@ -282,7 +320,7 @@ export function resolveFetchedSync(specifier, parent) {
   }
   const answer = receiveMessageOnPort(current.answers).message;
   if ('error' in answer) throw Object.assign(new Error(answer.error), { code: answer.code });
-  if (plan.url !== undefined) homeOf.set(answer.url, plan.dotPlugins);
+  if (plan.url !== undefined) homeOf.set(answer.url, { dotPlugins: plan.dotPlugins, body: bodyPath(plan.dotPlugins, answer.url) });
   return answer.url;
 }
 

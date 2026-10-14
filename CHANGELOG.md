@@ -349,8 +349,16 @@ churn and less likely to affect a consumer who doesn't use them.
   looked up from the cache, reaching what a mirrored file's reach. It is stored under `.plugins/.urls/`,
   keyed by a hash of the URL, so no URL can be a path that collides with another or decodes outside the
   cache — `chart.js` beside `chart.js/auto` is two modules. A warm boot still asks the network for
-  nothing, and a module the old mirror already held is copied into the store on first use, so an upgrade
-  does not need the network either.
+  nothing, and a module the old mirror already held is served from where it is, writing nothing, so an
+  upgrade needs neither the network nor a writable cache.
+
+  Two consequences of the URL being the identity, each refused with what to write instead rather than
+  resolved behind the importer's back. A URL import is fetched at exactly that URL, as the browser does:
+  the mirror used to try `x.ts` behind an absolute `…/x.js`, and a miss now names the `.ts` URL to import
+  (a plugin's own relative `./x.js` still finds `x.ts`). And a fetched plugin's own file is not imported
+  by its URL: its files load as `file:` modules, so the same file under its URL would be a second copy
+  with its own module state — the import is refused, naming the relative path or package name that
+  reaches the one copy.
 
   A plugin's own files are mirrored exactly as before: a package was a file tree before it was served, so
   the mirror is faithful there, and a Node-only plugin still reads its files through `import.meta.url`.
@@ -381,22 +389,38 @@ churn and less likely to affect a consumer who doesn't use them.
     there. So `add` (and `matbot install`) records what it created as it creates it, under
     `.plugins/.installs/`, and `remove` offers back exactly that, through the existing `npm-uninstall` gate
     and a new `remove-provisioned` one. It no longer reads `package.json` to decide, which was how it could
-    offer to uninstall a package the project declared itself. "Created" means a dependency key seen to
-    arrive in a manifest read beforehand, in no section of it — a package manager treats a
-    `devDependencies` entry as present, and npm moves it — and nothing at all when the project directory has
-    no manifest of its own.
+    offer to uninstall a package the project declared itself. "Created" means the plugin's own name arriving
+    in a manifest that declared it in no section beforehand. A package from an install made before this
+    release has no record, so `remove` names the command to uninstall it rather than offering to.
 
-  An `add` that then disowns the plugin — a duplicate name, an incompatible runtime, not a plugin — takes
-  back everything it put anywhere, unasked: the npm package it introduced, the `node_modules` and lockfile it
-  created, and a fetched plugin's cache. It used to keep the install, and in the duplicate-name case config
-  was never written, so `remove` had nothing to offer the uninstall against. `add <npm name>@<version>` for
-  an npm plugin already installed is not a stray: the package manager has installed that version in place,
-  and the result says to reload it. A plugin's name link now follows whichever copy was materialised last;
+  What `add` cannot carry through, or take back exactly, it now refuses before anything is asked or
+  written, saying what to do instead — rather than installing and then inferring what it had installed:
+
+  - **An npm plugin is installed by its package name only.** A `@<version>`, a tarball and a git URL are
+    refused: which copy a project carries is its own decision, made with its package manager, followed by
+    `plugin add <name>` — or `plugin reload <name>` for a version installed in place of a loaded one.
+    `add foo@2.0.0` used to write `foo@2.0.0` into `matbot.yaml`, which nothing could load.
+  - **An npm package is checked before it is installed**: its manifest — the installed copy's, else the
+    registry's via `npm view`, honouring the project's `.npmrc` — must declare `matbotRuntime` including
+    `node`, as a URL plugin's already had to. A library is refused rather than installed and removed.
+  - **The project's own install is the project's.** A package already installed is configured as it is, with
+    no package manager run (one used to rewrite its declared range); a declared but uninstalled one, or a
+    project with no `package.json` to record the install in, is refused.
+  - **A duplicate plugin name is refused before installing**, on every route.
+  - **A local plugin's dependencies are installed only on empty ground** — no `node_modules`, no lockfile.
+    `npm ci` deletes a `node_modules` first and planning rewrites a lockfile, so a directory the author has
+    installed into is used as it is when complete, and otherwise refused, naming what is missing. An install
+    that fails removes what it wrote.
+
+  So an `add` that disowns the plugin after installing it — an incompatible runtime, not a plugin when
+  loaded — takes back exactly what it created, unasked: the npm package it added, the `node_modules` and
+  lockfile it created, and a fetched plugin's cache. A fetched plugin's cache is also kept on `remove` when a
+  provider's `module:` lives in it. A plugin's name link now follows whichever copy was materialised last;
   it was first-writer-wins, so a plugin installed from github resolved by name to the copy an earlier http
-  install had left, and a link to a removed directory could never be replaced. And `plugin add npm:<spec>`,
+  install had left, and a link to a removed directory could never be replaced. And `plugin add npm:<name>`,
   the documented way to force the npm route, works: the `npm:` was passed to the package manager, which
-  reads it as an alias and refused every one; the config now records the package name it installed under,
-  as it already did for a tarball or git URL.
+  reads it as an alias and refused every one — and is refused when something local also answers to the
+  name, since the entry recorded is the name and a restart would load the local one instead.
 
 - **`background-jobs` / `sessions`** — a job's reporting conversation is stated where the model reads
   it. Both tools described the append target as "this conversation" or "a default", which a model

@@ -44,6 +44,34 @@ export function runCommand(cmd: string, args: string[], cwd: string): Promise<st
   });
 }
 
+/**
+ * The manifest the registry npm is configured for (the project's `.npmrc` included) would install for a bare
+ * `name` — its latest version — read without installing anything. npm whatever the project's package
+ * manager, because every one of them reads the same registry configuration and only npm's answer is plain
+ * JSON on stdout; stderr is kept apart, where npm writes its notices.
+ */
+export function registryManifest(name: string, cwd: string): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const out: string[] = [], err: string[] = [];
+    const child = spawn('npm', ['view', name, '--json'], { cwd, shell: process.platform === 'win32' });
+    child.stdout?.on('data', (d: Buffer) => out.push(d.toString()));
+    child.stderr?.on('data', (d: Buffer) => err.push(d.toString()));
+    child.on('error', reject);
+    child.on('close', code => {
+      let body: unknown;
+      try { body = JSON.parse(out.join('')); } catch { body = undefined; }
+      const error = (body as { error?: { code?: unknown; summary?: unknown } } | undefined)?.error;
+      if (code !== 0 || error !== undefined || body === null || typeof body !== 'object' || Array.isArray(body)) {
+        reject(new Error(error?.code === 'E404'
+          ? `there is no package "${name}" in the registry npm is configured for`
+          : `npm could not read "${name}" from the registry: ${typeof error?.summary === 'string' ? error.summary : (err.join('') || out.join('')).trim() || `exit code ${String(code)}`}`));
+        return;
+      }
+      resolve(body as Record<string, unknown>);
+    });
+  });
+}
+
 // The singletons the host owns. A plugin never gets its own copy: `plugin-api` keeps state on
 // `globalThis` and brand-checks its errors, so a duplicate is survivable rather than corrupting — but it
 // is still a different module object, and the point of linking is that there is nothing to survive.
@@ -92,17 +120,7 @@ export async function planProvision(dir: string): Promise<ProvisionPlan> {
   const hadNodeModules = await exists(path.join(dir, 'node_modules'));
   const empty = { dir, packages: [], unsupported: [], createdLockfile: false, hadNodeModules };
 
-  let deps: Record<string, unknown>;
-  try {
-    const pkg = JSON.parse(await readFile(path.join(dir, 'package.json'), 'utf8')) as { dependencies?: unknown };
-    const d = pkg.dependencies;
-    if (d === null || typeof d !== 'object') return empty;
-    deps = d as Record<string, unknown>;
-  } catch {
-    return empty;   // no manifest, or unreadable — not ours to fix here
-  }
-
-  const entries = Object.entries(deps).filter((e): e is [string, string] => typeof e[1] === 'string');
+  const entries = await declaredRanges(dir);
   if (entries.length === 0) return empty;
 
   const unsupported = entries.filter(([, range]) => !isRegistryRange(range)).map(([name, range]) => ({ name, range }));
@@ -195,6 +213,57 @@ export async function removeProvisioned(created: { dir: string; lockfile: boolea
   if (created.nodeModules) { await rm(path.join(created.dir, 'node_modules'), { recursive: true, force: true }); removed.push('node_modules'); }
   if (created.lockfile)    { await rm(path.join(created.dir, LOCKFILE), { force: true }); removed.push(LOCKFILE); }
   return removed;
+}
+
+async function declaredRanges(dir: string): Promise<[string, string][]> {
+  try {
+    const pkg = JSON.parse(await readFile(path.join(dir, 'package.json'), 'utf8')) as { dependencies?: unknown };
+    const d = pkg.dependencies;
+    if (d === null || typeof d !== 'object') return [];
+    return Object.entries(d as Record<string, unknown>).filter((e): e is [string, string] => typeof e[1] === 'string');
+  } catch {
+    return [];   // no manifest, or unreadable — not ours to fix here
+  }
+}
+
+/**
+ * Whether installing a LOCAL plugin's dependencies is matbot's to do: `provision` when the directory is empty
+ * ground, `ready` when the author's own install already has every one, otherwise the reason to give them.
+ *
+ * Empty ground means no `node_modules` and no lockfile, because `npm ci` deletes a `node_modules` before it
+ * installs and `--package-lock-only` rewrites a lockfile — neither is matbot's to replace in someone's
+ * plugin, and what provisioning creates on empty ground is exactly what it can take back. A manifest with a
+ * range that is not a registry one goes to `planProvision` regardless, which leaves it alone.
+ */
+export async function localProvision(dir: string): Promise<{ provision: boolean } | { refuse: string }> {
+  const entries = await declaredRanges(dir);
+  if (entries.length === 0 || entries.some(([, range]) => !isRegistryRange(range))) return { provision: entries.length > 0 };
+
+  if (await exists(path.join(dir, 'node_modules'))) {
+    // Found where Node will find it, an enclosing node_modules included: a workspace member's dependencies
+    // are hoisted to its root, and which copy that is was the author's install's decision.
+    const missing: string[] = [];
+    for (const [name] of entries) {
+      if (!await reachable(name, dir)) missing.push(name);
+    }
+    if (missing.length === 0) return { provision: false };
+    return { refuse:
+      `its node_modules does not have ${missing.join(', ')}. Its install is the author's, so install its ` +
+      `dependencies in "${dir}" (\`npm install --omit=peer\` — peers are the host's), then add it again` };
+  }
+  if (await exists(path.join(dir, LOCKFILE))) {
+    return { refuse:
+      `it has a ${LOCKFILE} but no node_modules. Install from that lockfile in "${dir}" ` +
+      `(\`npm ci --omit=peer\` — peers are the host's), then add it again` };
+  }
+  return { provision: true };
+}
+
+async function reachable(name: string, from: string): Promise<boolean> {
+  for (let dir = path.resolve(from); ; dir = path.dirname(dir)) {
+    if (await exists(path.join(dir, 'node_modules', name, 'package.json'))) return true;
+    if (path.dirname(dir) === dir) return false;
+  }
 }
 
 async function exists(p: string): Promise<boolean> {

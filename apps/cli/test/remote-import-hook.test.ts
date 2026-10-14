@@ -240,11 +240,49 @@ test('a URL import the mirror cached before is still found, with no network', as
     assert.equal(url, `${srv.origin}/npm/x@1/+esm`);
     assert.equal(loadStored(url), 'export default 1;\n');
     assert.deepEqual(srv.log, []);
+    // Served from where it is: an upgraded cache this process cannot write (a read-only image) answers too.
+    assert.equal(existsSync(join(dotPlugins, '.urls')), false);
 
     // Not for a query, which the mirror dropped: the file there may be another query's module.
     await assert.rejects(resolveFetched(`${srv.origin}/npm/x@1/+esm?dev`, parent) as Promise<string>);
   } finally {
     await srv.stop();
+    await cleanup();
+  }
+});
+
+// A plugin's own files load as `file:`; the same file imported by its URL would be a second copy of it, with
+// its own module state. Refused, naming the import that reaches the one copy — before anything is fetched.
+test('a file of a fetched plugin imported by URL is refused, naming the import that reaches it', async () => {
+  const srv = await serve({ '/p/index.ts': 'export const entry = 1;\n', '/p/lib/x.ts': 'export {};\n' });
+  const host = new URL(srv.origin).host;
+  const { dotPlugins, parent, cleanup } = await cacheTree(host);
+  try {
+    await writeFile(join(dotPlugins, host, 'p', 'package.json'), JSON.stringify({ name: '@fixture/p' }));
+    for (const url of [`${srv.origin}/p/index.ts`, `${srv.origin}/p/lib/x.ts`]) {
+      await assert.rejects(resolveFetched(url, parent) as Promise<string>,
+        (e: unknown) => e instanceof Error && /is a file of the fetched plugin "@fixture\/p"/.test(e.message)
+          && /by its package name \("@fixture\/p"\)/.test(e.message));
+    }
+    assert.deepEqual(srv.log, []);
+    assert.match(await resolveFetched(`${srv.origin}/elsewhere.mjs`, parent).catch((e: Error) => e.message) as string,
+      /was not found/, 'a URL outside the package is an ordinary URL import');
+  } finally {
+    await srv.stop();
+    await cleanup();
+  }
+});
+
+// Fetched at exactly its URL, as a browser fetches it — a plugin's own relative `./x.js` is the case that tries
+// `x.ts`. A miss says which URL to write instead.
+test('a URL import of a .js that is served as .ts says which URL to import', async () => {
+  const other = await serve({ '/lib/x.ts': 'export {};\n' });
+  const { parent, cleanup } = await cacheTree('plugins.example.com');
+  try {
+    await assert.rejects(resolveFetched(`${other.origin}/lib/x.js`, parent) as Promise<string>,
+      (e: unknown) => e instanceof Error && e.message.includes(`import "${other.origin}/lib/x.ts"`));
+  } finally {
+    await other.stop();
     await cleanup();
   }
 });

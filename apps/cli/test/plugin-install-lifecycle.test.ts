@@ -5,9 +5,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import http from 'node:http';
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { notAPluginError, type ToolContext, type ToolEvent } from '@matatbread/matbot-core';
-import { pluginTool, materializeRemote, releaseRemote, readInstallRecord, writeInstallRecord } from '@matatbread/matbot-tool-plugin';
+import { pluginTool, materializeRemote, releaseRemote, readInstallRecord, writeInstallRecord, localProvision } from '@matatbread/matbot-tool-plugin';
 
 const execFileP = promisify(execFile);
 
@@ -152,65 +153,233 @@ test('a cached plugin is not released from under another configured plugin\'s fi
   }
 });
 
-// The npm route, offline: a tarball packed from a fixture, installed by the real npm.
-async function tarball(dir: string, name: string): Promise<string> {
-  const src = join(dir, 'src-pkg');
-  await mkdir(src, { recursive: true });
-  await writeFile(join(src, 'package.json'), JSON.stringify({ name, version: '1.0.0', main: 'index.js' }));
-  await writeFile(join(src, 'index.js'), 'export const plugin = {};\n');
-  const { stdout } = await execFileP('npm', ['pack', '--pack-destination', dir], { cwd: src });
-  return join(dir, stdout.trim().split('\n').pop() as string);
-}
-
-test('an npm install is recorded, and remove offers back exactly that', { timeout: 120_000 }, async () => {
+// A provider's `module:` is materialised into the same cache, so removing the plugin must not delete it from
+// under the provider — including when both name the same specifier.
+test('a fetched plugin a provider also loads from keeps its cache on remove', async () => {
+  const srv = await serve(REMOTE);
   const p = await project();
   try {
-    const spec = `npm:${await tarball(p.dir, 'fixture-npm-plugin')}`;
-    const { asked, call } = run(p.configPath, async () => ({}));
+    const spec = `${srv.origin}/p/`;
+    const { call } = run(p.configPath, async s => { await materializeRemote(s, p.dotPlugins, p.dir); return {}; });
     await call({ action: 'add', specifier: spec });
-    assert.equal((await declared(p.dir))['dependencies']?.['fixture-npm-plugin'] !== undefined, true);
-    // Configured by the name it installed under: `npm:<tarball>` is not something a restart can load.
+    await writeFile(p.configPath, (await readFile(p.configPath, 'utf8')) + `providers:\n  demo:\n    module: "${spec}"\n`);
+    const out = await call({ action: 'remove', specifier: spec });
+    assert.doesNotMatch(out, /Removed its cached copy/);
+    assert.equal(await exists(join(p.dotPlugins, new URL(srv.origin).host, 'p', 'index.ts')), true);
+  } finally {
+    await srv.stop();
+    await p.cleanup();
+  }
+});
+
+// The npm route, offline: one package served by a registry of our own, which the project's .npmrc points npm
+// at — so `npm view` and `npm add` are the real ones, asking it.
+async function registry(p: { dir: string }, manifest: Record<string, unknown>, opts: { at?: string; tarball404?: boolean } = {}) {
+  const name = manifest['name'] as string;
+  const src = join(p.dir, `src-${name}`);
+  await mkdir(src, { recursive: true });
+  const pkg = { version: '1.0.0', main: 'index.js', ...manifest };
+  await writeFile(join(src, 'package.json'), JSON.stringify(pkg));
+  await writeFile(join(src, 'index.js'), 'export const plugin = {};\n');
+  const { stdout } = await execFileP('npm', ['pack', '--pack-destination', p.dir], { cwd: src });
+  const bytes = await readFile(join(p.dir, stdout.trim().split('\n').pop() as string));
+  await rm(src, { recursive: true, force: true });
+
+  let origin = '';
+  const server = http.createServer((req, res) => {
+    if (req.url === `/${name}`) {
+      // `npm pack` leaves the tarball in npm's content-addressed cache, so a missing one is advertised under a
+      // digest nothing has — otherwise the install would never ask for it.
+      const digested = opts.tarball404 === true ? Buffer.from(`absent ${origin}`) : bytes;
+      const version = { ...pkg, dist: {
+        tarball: `${origin}/${name}.tgz`,
+        shasum: createHash('sha1').update(digested).digest('hex'),
+        integrity: `sha512-${createHash('sha512').update(digested).digest('base64')}`,
+      } };
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ name, 'dist-tags': { latest: '1.0.0' }, versions: { '1.0.0': version } }));
+    } else if (req.url === `/${name}.tgz` && opts.tarball404 !== true) {
+      res.writeHead(200, { 'content-type': 'application/octet-stream' });
+      res.end(bytes);
+    } else {
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end('{"error":"Not found"}');
+    }
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', () => resolve()));
+  const addr = server.address();
+  origin = `http://127.0.0.1:${typeof addr === 'object' && addr !== null ? addr.port : 0}`;
+  await writeFile(join(opts.at ?? p.dir, '.npmrc'), `registry=${origin}/\naudit=false\nfund=false\nupdate-notifier=false\n`);
+  return { stop: () => new Promise<void>(d => server.close(() => d())) };
+}
+
+test('an npm plugin is checked before it is installed, recorded, and remove offers back exactly that', { timeout: 120_000 }, async () => {
+  const p = await project();
+  const reg = await registry(p, { name: 'fixture-npm-plugin', matbotRuntime: ['node'] });
+  try {
+    const { asked, call } = run(p.configPath, async () => ({}));
+    await call({ action: 'add', specifier: 'fixture-npm-plugin' });
+    assert.notEqual((await declared(p.dir))['dependencies']?.['fixture-npm-plugin'], undefined);
     assert.deepEqual(await configured(p.configPath), ['  - fixture-npm-plugin']);
     assert.equal((await readInstallRecord(p.dotPlugins, 'fixture-npm-plugin'))?.dependency, 'fixture-npm-plugin');
 
     await call({ action: 'remove', specifier: 'fixture-npm-plugin' });
-    assert.ok(asked.includes('npm-uninstall fixture-npm-plugin'));
+    assert.deepEqual(asked, ['add fixture-npm-plugin', 'remove fixture-npm-plugin', 'npm-uninstall fixture-npm-plugin']);
     assert.equal((await declared(p.dir))['dependencies']?.['fixture-npm-plugin'], undefined);
     assert.equal(await readInstallRecord(p.dotPlugins, 'fixture-npm-plugin'), undefined);
   } finally {
+    await reg.stop();
     await p.cleanup();
   }
 });
 
-test('an npm install that turns out not to be a plugin is taken back out, unasked', { timeout: 120_000 }, async () => {
+test('a package that is not a matbot plugin is refused before anything is asked or installed', { timeout: 120_000 }, async () => {
+  const p = await project();
+  const reg = await registry(p, { name: 'fixture-npm-library' });
+  try {
+    const { asked, call } = run(p.configPath, async () => ({}));
+    assert.match(await call({ action: 'add', specifier: 'fixture-npm-library' }), /no "matbotRuntime" field/);
+    assert.deepEqual(asked, []);
+    assert.equal((await declared(p.dir))['dependencies'], undefined);
+    assert.equal(await exists(join(p.dir, 'node_modules')), false);
+    assert.deepEqual(await configured(p.configPath), []);
+  } finally {
+    await reg.stop();
+    await p.cleanup();
+  }
+});
+
+test('an npm plugin that turns out not to load as one is taken back out, unasked', { timeout: 120_000 }, async () => {
+  const p = await project();
+  const reg = await registry(p, { name: 'fixture-npm-broken', matbotRuntime: ['node'] });
+  try {
+    const { asked, call } = run(p.configPath, async s => { throw notAPluginError(s, 'it exports no plugin'); });
+    assert.match(await call({ action: 'add', specifier: 'fixture-npm-broken' }), /is not a matbot plugin/);
+    assert.equal((await declared(p.dir))['dependencies']?.['fixture-npm-broken'], undefined);
+    assert.deepEqual(await configured(p.configPath), []);
+    assert.equal(await readInstallRecord(p.dotPlugins, 'fixture-npm-broken'), undefined);
+    assert.deepEqual(asked, ['add fixture-npm-broken']);
+  } finally {
+    await reg.stop();
+    await p.cleanup();
+  }
+});
+
+// Which copy of a package the project carries is the project's decision. Each of these used to install and
+// then guess what it had installed; the name it would load under could not be known until afterwards.
+test('a version, a tarball or a git URL is refused, saying how to install it instead', async () => {
   const p = await project();
   try {
-    const spec = `npm:${await tarball(p.dir, 'fixture-npm-library')}`;
-    const { asked, call } = run(p.configPath, async s => { throw notAPluginError(s, 'it exports no plugin'); });
-    assert.match(await call({ action: 'add', specifier: spec }), /is not a matbot plugin/);
-    assert.equal((await declared(p.dir))['dependencies']?.['fixture-npm-library'], undefined);
+    const { asked, call } = run(p.configPath, async () => ({}));
+    const versioned = await call({ action: 'add', specifier: 'fixture-npm-plugin@2.0.0' });
+    assert.match(versioned, /names a version/);
+    assert.match(versioned, /plugin reload fixture-npm-plugin/);
+    assert.match(await call({ action: 'add', specifier: 'npm:/tmp/fixture-1.0.0.tgz' }), /is not a package name/);
+    assert.match(await call({ action: 'add', specifier: 'https://example.com/fixture-1.0.0.tgz' }), /is not a package name/);
+    assert.match(await call({ action: 'add', specifier: 'git+https://example.com/fixture.git' }), /is not a package name/);
+    // `npm:` past a local package answering to the name: the entry recorded is the name, which would load that one.
+    await mkdir(join(p.dir, 'fixture-local'));
+    await writeFile(join(p.dir, 'fixture-local', 'package.json'), JSON.stringify({ name: 'fixture-local' }));
+    assert.match(await call({ action: 'add', specifier: 'npm:fixture-local' }), /also answers to that name/);
+    assert.deepEqual(asked, []);
     assert.deepEqual(await configured(p.configPath), []);
-    assert.equal(await readInstallRecord(p.dotPlugins, 'fixture-npm-library'), undefined);
-    assert.deepEqual(asked, [`add ${spec}`]);
   } finally {
     await p.cleanup();
   }
 });
 
-// npm moves an existing devDependency into `dependencies` on `add`. Read from `dependencies` alone, that was
-// a package the install had introduced, and `remove` offered to uninstall the project's own.
-test('a package the project already declared is not the install\'s, and remove leaves it', { timeout: 120_000 }, async () => {
-  const p = await project({ devDependencies: { 'fixture-npm-own': '^1.0.0' } });
+// npm moves an existing devDependency into `dependencies` on `add`, and rewrites a declared range to the latest.
+// Neither is the plugin tool's to do: the project's own install is configured as it stands.
+test('a plugin the project already has installed is configured as it is, and remove leaves it', async () => {
+  const p = await project({ devDependencies: { 'fixture-own': '^1.0.0' } });
   try {
-    const spec = `npm:${await tarball(p.dir, 'fixture-npm-own')}`;
+    await mkdir(join(p.dir, 'node_modules', 'fixture-own'), { recursive: true });
+    await writeFile(join(p.dir, 'node_modules', 'fixture-own', 'package.json'),
+      JSON.stringify({ name: 'fixture-own', version: '1.0.0', main: 'index.js', matbotRuntime: ['node'] }));
+    await writeFile(join(p.dir, 'node_modules', 'fixture-own', 'index.js'), 'export const plugin = {};\n');
+    const before = await readFile(join(p.dir, 'package.json'), 'utf8');
     const { asked, call } = run(p.configPath, async () => ({}));
-    await call({ action: 'add', specifier: spec });
-    assert.equal(await readInstallRecord(p.dotPlugins, spec), undefined);
-    await call({ action: 'remove', specifier: spec });
-    assert.equal(asked.some(a => a.startsWith('npm-uninstall')), false);
-    const pkg = await declared(p.dir);
-    assert.notEqual(pkg['dependencies']?.['fixture-npm-own'] ?? pkg['devDependencies']?.['fixture-npm-own'], undefined);
+    await call({ action: 'add', specifier: 'fixture-own' });
+    assert.deepEqual(await configured(p.configPath), ['  - fixture-own']);
+    assert.equal(await readInstallRecord(p.dotPlugins, 'fixture-own'), undefined);
+    assert.equal(await readFile(join(p.dir, 'package.json'), 'utf8'), before);
+
+    assert.match(await call({ action: 'remove', specifier: 'fixture-own' }), /stays in package\.json/);
+    assert.deepEqual(asked, ['add fixture-own', 'remove fixture-own']);
+    assert.equal(await readFile(join(p.dir, 'package.json'), 'utf8'), before);
   } finally {
+    await p.cleanup();
+  }
+});
+
+test('a declared package that is not installed, or a project with no package.json, is refused', async () => {
+  const p = await project({ dependencies: { 'fixture-unfetched': '^1.0.0' } });
+  try {
+    const { asked, call } = run(p.configPath, async () => ({}));
+    assert.match(await call({ action: 'add', specifier: 'fixture-unfetched' }), /already declares it, but it is not installed/);
+    await rm(join(p.dir, 'package.json'));
+    assert.match(await call({ action: 'add', specifier: 'fixture-anything' }), /no package\.json/);
+    assert.deepEqual(asked, []);
+    assert.deepEqual(await configured(p.configPath), []);
+  } finally {
+    await p.cleanup();
+  }
+});
+
+// `npm ci` deletes a node_modules before installing and `--package-lock-only` rewrites a lockfile; neither is
+// matbot's to do in an author's plugin, so an install the author started is theirs to finish.
+test('a local plugin with an install of its own that is incomplete is refused, and left as it is', async () => {
+  const p = await project();
+  try {
+    const local = join(p.dir, 'mine');
+    await mkdir(join(local, 'node_modules'), { recursive: true });
+    await writeFile(join(local, 'package.json'), JSON.stringify({ name: 'mine', exports: './index.js', dependencies: { 'fixture-dep': '^1.0.0' } }));
+    const { asked, call } = run(p.configPath, async () => ({}));
+    assert.match(await call({ action: 'add', specifier: './mine' }), /does not have fixture-dep/);
+
+    await rm(join(local, 'node_modules'), { recursive: true });
+    await writeFile(join(local, 'package-lock.json'), '{}');
+    assert.match(await call({ action: 'add', specifier: './mine' }), /has a package-lock\.json but no node_modules/);
+    assert.equal(await readFile(join(local, 'package-lock.json'), 'utf8'), '{}');
+    assert.deepEqual(asked, []);
+    assert.deepEqual(await configured(p.configPath), []);
+  } finally {
+    await p.cleanup();
+  }
+});
+
+// A workspace member's dependencies are hoisted to the root: met where Node finds them, or the refusal would
+// ask for an install that can never put them in the member's own node_modules.
+test('an author\'s install counts a dependency hoisted to an enclosing node_modules', async () => {
+  const p = await project();
+  try {
+    const local = join(p.dir, 'packages', 'mine');
+    await mkdir(join(local, 'node_modules'), { recursive: true });
+    await writeFile(join(local, 'package.json'), JSON.stringify({ name: 'mine', dependencies: { 'fixture-dep': '^1.0.0' } }));
+    assert.ok('refuse' in await localProvision(local));
+    await mkdir(join(p.dir, 'node_modules', 'fixture-dep'), { recursive: true });
+    await writeFile(join(p.dir, 'node_modules', 'fixture-dep', 'package.json'), JSON.stringify({ name: 'fixture-dep', version: '1.0.0' }));
+    assert.deepEqual(await localProvision(local), { provision: false });
+  } finally {
+    await p.cleanup();
+  }
+});
+
+test('a local plugin whose dependency install fails leaves nothing of it behind', { timeout: 120_000 }, async () => {
+  const p = await project();
+  const local = join(p.dir, 'mine');
+  await mkdir(local, { recursive: true });
+  await writeFile(join(local, 'package.json'), JSON.stringify({ name: 'mine', exports: './index.js', dependencies: { 'fixture-dep': '^1.0.0' } }));
+  const reg = await registry(p, { name: 'fixture-dep' }, { at: local, tarball404: true });
+  try {
+    const { asked, call } = run(p.configPath, async () => ({}));
+    assert.match(await call({ action: 'add', specifier: './mine' }), /What the attempt wrote in .* was removed/);
+    assert.deepEqual(asked, ['add ./mine']);
+    assert.equal(await exists(join(local, 'node_modules')), false);
+    assert.equal(await exists(join(local, 'package-lock.json')), false);
+    assert.deepEqual(await configured(p.configPath), []);
+  } finally {
+    await reg.stop();
     await p.cleanup();
   }
 });

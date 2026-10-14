@@ -65,9 +65,7 @@ export async function declaredDependencies(projectDir: string): Promise<Set<stri
   }
 }
 
-// The one key an install was SEEN to add, and nothing inferred: two new keys, or none, is no answer.
-export function introducedDependency(before: Set<string> | undefined, after: Set<string> | undefined): string | undefined {
-  if (before === undefined || after === undefined) return undefined;
-  const added = [...after].filter(name => !before.has(name));
-  return added.length === 1 ? added[0] : undefined;
-}
+// An install records a dependency only when it was handed a bare package name — the key a package manager
+// writes is then that name, so "declared now and not before" is an observation, not an inference. A version,
+// a tarball or a git URL is refused before anything is installed, by both `plugin add` and `matbot install`.
+export const isPackageName = (s: string): boolean => /^(?:@[a-z0-9~-][\w.~-]*\/)?[a-z0-9~-][\w.~-]*$/i.test(s);

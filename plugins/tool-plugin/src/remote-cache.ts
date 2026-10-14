@@ -710,8 +710,14 @@ async function fetchDeclaredFiles(pkg: Record<string, unknown>, pkgUrl: string, 
     const rel = raw.replace(/^\.?\//, '');
     const last = rel.split('/').pop() ?? '';
     if (rel.includes('*') || !last.includes('.')) continue; // glob or directory entry — not fetchable here
-    const url = new URL(rel, pkgUrl).href;
-    const cachePath = mirrorPath(url, dotPlugins);
+    let url: string, cachePath: string;
+    try {
+      url = new URL(rel, pkgUrl).href;
+      cachePath = mirrorPath(url, dotPlugins);
+    } catch (e) {
+      console.warn(`[matbot] declared file "${rel}" not fetched: ${e instanceof Error ? e.message : String(e)}`);
+      continue;
+    }
     try { await access(cachePath); continue; } catch { /* not mirrored yet */ }
     // Best-effort includes the network being gone. An asset that never cached (a 404, an interrupted
     // first boot) is retried on every boot, so without this an offline boot dies on the retry — for a
